@@ -154,6 +154,17 @@ const envSchema = z.object({
   JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(600),
   JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),
 
+  // ── Proactive Scan Cron (Stage C) ──
+  PROACTIVE_SCAN_ENABLED: booleanFromEnv.default(false),
+  PROACTIVE_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
+  PROACTIVE_SCAN_USAGE: z.string().default('judge'),
+  PROACTIVE_SCAN_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(900),
+  PROACTIVE_SCAN_MAX_CHATS_PER_TICK: z.coerce.number().int().positive().default(3),
+  PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
+  PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
+  PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
+  PROACTIVE_SCAN_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
+
   // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
   // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。
   TIMING_GATE_ENABLED: booleanFromEnv.default(false),
