@@ -38,6 +38,9 @@ vi.mock('../../../src/cron/idle.js', () => ({
 vi.mock('../../../src/cron/proactive-scan.js', () => ({
   runProactiveScan: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock('../../../src/cron/learner-scan.js', () => ({
+  runLearnerScan: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../../../src/cron/channel-sync.js', () => ({
   runChannelSync: vi.fn().mockResolvedValue(undefined),
 }));
@@ -49,6 +52,7 @@ vi.mock('../../../src/tracking/stats.js', () => ({
 // .env file on the host may have these enabled — explicitly disable here.
 process.env['PROACTIVE_SCAN_ENABLED'] = 'false';
 process.env['VERIFY_ENABLED'] = 'false';
+process.env['LEARNER_ENABLED'] = 'false';
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'

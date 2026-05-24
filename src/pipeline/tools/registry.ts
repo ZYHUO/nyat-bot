@@ -12,6 +12,7 @@ import { executeIpQuality } from './ip-quality.js';
 import { addTimer, listTimers, deleteTimer } from './timer.js';
 import { queryBotKnowledge } from './bot-knowledge.js';
 import { executePoll } from './poll.js';
+import { buildJargonTool } from './jargon-tool.js';
 import { env } from '../../env.js';
 import { loadSkills, type LoadedSkillEntry } from './skill-loader.js';
 
@@ -162,6 +163,12 @@ function buildSchemasAndTools(
     for (const [name, entry] of Object.entries(_skillsCache)) {
       register(name, entry.parameterSchema, entry.tool);
     }
+  }
+
+  // Jargon query tool (Stage D)
+  const jargonDef = buildJargonTool(chatId);
+  if (jargonDef) {
+    register(jargonDef.name, jargonDef.schema, jargonDef.tool);
   }
 
   return { tools, schemas };

@@ -12,6 +12,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { FormattedMessage, ReplyTier } from '../../shared/types.js';
 import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/config.js';
+import { env } from '../../env.js';
+import { getTopExpressions } from '../../learners/expression-learner.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -118,6 +120,15 @@ export function buildMessages(
 
   if (selfReflection) {
     userParts.push(`[自我反思·回复规律]\n${selfReflection}`);
+  }
+
+  // Expression injection (Stage D)
+  if (chatId !== undefined && env().EXPRESSION_INJECT_ENABLED) {
+    const exprs = getTopExpressions(chatId, env().EXPRESSION_INJECT_COUNT);
+    if (exprs.length > 0) {
+      const lines = exprs.map((e) => `- ${e.situation} → ${e.style}`).join('\n');
+      userParts.push(`[本群常用表达]\n${lines}`);
+    }
   }
 
   if (toolResults) {
