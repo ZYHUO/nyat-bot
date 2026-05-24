@@ -131,7 +131,10 @@ function tagsLine(item) {
 }
 
 function previewUrl(item) {
-  if (item.asset_status !== 'preview_ready') return null;
+  // Try to load thumbnail for any analyzed sticker — backend serves PNG preview
+  // if available, falls back to original webp otherwise. animated_tgs without
+  // preview returns 404 and the <img> onerror swap kicks in.
+  if (item.analysis_status !== 'ready' && item.asset_status === 'missing') return null;
   const fuid = encodeURIComponent(item.file_unique_id);
   const initData = encodeURIComponent(props.initData ?? '');
   return `/miniapp_api/sticker_preview/${fuid}?init_data=${initData}`;
