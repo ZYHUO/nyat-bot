@@ -71,6 +71,7 @@ import { parseMuteTimedRequest } from "./judge/rules.js";
 import { addWatch, removeWatch, listWatches, checkWatches } from "../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage, recordBotReply } from "../tracking/stats.js";
 import { applyMoodEvent } from "../tracking/mood.js";
+import { recordSelfReply } from "../tracking/self-history.js";
 import { startGame, playGame, stopGame, hasActiveGame } from "./games/manager.js";
 import { createGuessNumberGame } from "./games/guess-number.js";
 import { runTimingGate } from "./timing/gate.js";
@@ -657,6 +658,18 @@ async function generateAndSendReplies(args: {
       ).catch((err) => {
         logger.debug({ err, chatId: job.chatId }, "Outcome recording failed (non-critical)");
       });
+    }
+
+    // 11.5 Stage F: persist self-reply for self-history retrieval
+    // Records every sent reply (not only first) so multi-message replies are captured.
+    if (sentMessages.length > 0) {
+      for (const sent of sentMessages) {
+        try {
+          recordSelfReply(job.chatId, formatted.uid, formatted.messageId, sent.text);
+        } catch (err) {
+          logger.debug({ err, chatId: job.chatId }, "recordSelfReply failed (non-critical)");
+        }
+      }
     }
 
     const totalMs = Math.round(performance.now() - start);

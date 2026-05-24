@@ -15,6 +15,8 @@ import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/con
 import { env } from '../../env.js';
 import { getTopExpressions } from '../../learners/expression-learner.js';
 import { getChatMood, moodPromptHint } from '../../tracking/mood.js';
+import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
+import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -64,6 +66,32 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
       if (hint) styleLayer = `${styleLayer}\n\n${hint}`;
     } catch {
       /* mood injection is non-critical; ignore errors */
+    }
+  }
+  // Stage F: relationship narrative hint appended to style layer
+  if (chatId !== undefined && userId !== undefined && env().RELATIONSHIP_ENABLED) {
+    try {
+      const rel = getRelationship(chatId, userId);
+      const hint = relationshipPromptHint(rel);
+      if (hint) styleLayer = `${styleLayer}\n\n${hint}`;
+    } catch {
+      /* non-critical */
+    }
+  }
+  // Stage F: self-history hint appended to style layer
+  if (chatId !== undefined && userId !== undefined && env().SELF_HISTORY_ENABLED) {
+    try {
+      const e = env();
+      const replies = getRecentSelfReplies(
+        chatId,
+        userId,
+        e.SELF_HISTORY_INJECT_LIMIT,
+        e.SELF_HISTORY_WINDOW_DAYS,
+      );
+      const section = selfHistoryPromptSection(replies);
+      if (section) styleLayer = `${styleLayer}\n\n${section}`;
+    } catch {
+      /* non-critical */
     }
   }
   layers.push(styleLayer);

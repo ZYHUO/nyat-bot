@@ -7,6 +7,7 @@ import { logger } from '../shared/logger.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
 import { pruneReviewed } from '../allowlist/allowlist.js';
 import { cleanExpired } from '../tracking/topic-watch.js';
+import { pruneOldSelfReplies } from '../tracking/self-history.js';
 
 export interface CleanupDeps {
   redis: Redis;
@@ -36,6 +37,13 @@ export async function runCleanup(deps?: CleanupDeps): Promise<void> {
     cleanExpired();
   } catch (err) {
     logger.warn({ err }, 'Failed to clean expired topic watches');
+  }
+
+  // 7. Stage F: prune old self-replies (>60 days)
+  try {
+    pruneOldSelfReplies(60);
+  } catch (err) {
+    logger.warn({ err }, 'Failed to prune old self-replies');
   }
 
   logger.info('Cleanup job completed');

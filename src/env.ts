@@ -208,6 +208,16 @@ const envSchema = z.object({
   // |valence| < 该阈值时不注入 prompt（默认 calm 不打扰）
   MOOD_INJECT_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 
+  // ── Self-narrative (Stage F): bot 记得自己对每个用户说过什么 ──
+  SELF_HISTORY_ENABLED: booleanFromEnv.default(false),
+  SELF_HISTORY_INJECT_LIMIT: z.coerce.number().int().positive().default(5),
+  SELF_HISTORY_WINDOW_DAYS: z.coerce.number().int().positive().default(30),
+
+  // ── Relationship narrative (Stage F): 每对 (chat,user) 累计 affinity ──
+  RELATIONSHIP_ENABLED: booleanFromEnv.default(false),
+  // |affinity| < 该值时不注入 prompt（默认 一般 关系不打扰）
+  RELATIONSHIP_INJECT_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
+
   // Monitor
   MONITOR_TOKEN: z.string().default(''),
 

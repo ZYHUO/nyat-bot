@@ -8,6 +8,7 @@ import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 import type { ReplyOutcome } from './types.js';
 import { applyMoodEvent } from './mood.js';
+import { applyRelationshipEvent } from './relationship.js';
 
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
@@ -118,6 +119,13 @@ export async function checkOutcome(
           resolvedCount++;
           // Stage E: positive social signal lifts mood
           try { applyMoodEvent(chatId, 5, `outcome_positive_${signal}`); } catch { /* non-critical */ }
+          // Stage F: positive interaction strengthens relationship
+          try {
+            const triggerUid = entry.trigger_user_id as number | undefined;
+            if (typeof triggerUid === 'number' && triggerUid > 0) {
+              applyRelationshipEvent(chatId, triggerUid, 1, `positive:${signal}`);
+            }
+          } catch { /* non-critical */ }
           continue;
         }
 
@@ -132,6 +140,13 @@ export async function checkOutcome(
           resolvedCount++;
           // Stage E: being ignored dampens mood (small but cumulative)
           try { applyMoodEvent(chatId, -3, 'outcome_ignored'); } catch { /* non-critical */ }
+          // Stage F: being ignored mildly cools the relationship
+          try {
+            const triggerUid = entry.trigger_user_id as number | undefined;
+            if (typeof triggerUid === 'number' && triggerUid > 0) {
+              applyRelationshipEvent(chatId, triggerUid, -0.5, 'negative:ignored');
+            }
+          } catch { /* non-critical */ }
         } else {
           await redis.hset(key, field, JSON.stringify(entry));
           await redis.expire(key, PENDING_TTL);
