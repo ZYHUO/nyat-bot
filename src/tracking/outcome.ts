@@ -98,6 +98,9 @@ export async function checkOutcome(
       );
 
       let resolvedCount = 0;
+      // Collect all inserts to run atomically; Redis deletes are best-effort outside the tx
+      const toInsert: Parameters<typeof insert.run>[] = [];
+      const toDelete: string[] = [];
 
       for (const [field, json] of Object.entries(lockedPending)) {
         const entry = JSON.parse(json) as Record<string, unknown>;
@@ -109,9 +112,8 @@ export async function checkOutcome(
         if (isReplyToBot || isMentionTarget) {
           const outcome = 'positive';
           const signal = isReplyToBot ? 'user_replied' : 'user_mentioned_bot';
-          // Write SQLite first, then delete from Redis
-          insert.run(chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action);
-          await redis.hdel(key, field);
+          toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
+          toDelete.push(field);
           resolvedCount++;
           continue;
         }
@@ -122,13 +124,25 @@ export async function checkOutcome(
         if (msgsAfter >= OUTCOME_CHECK_WINDOW) {
           const outcome = 'negative';
           const signal = `ignored_${OUTCOME_CHECK_WINDOW}_msgs`;
-          insert.run(chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action);
-          await redis.hdel(key, field);
+          toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
+          toDelete.push(field);
           resolvedCount++;
         } else {
           await redis.hset(key, field, JSON.stringify(entry));
           await redis.expire(key, PENDING_TTL);
         }
+      }
+
+      // Run all SQLite inserts in a single transaction
+      if (toInsert.length > 0) {
+        db.transaction(() => {
+          for (const args of toInsert) insert.run(...args);
+        })();
+      }
+
+      // Redis deletes are cross-store — best-effort outside the transaction
+      for (const field of toDelete) {
+        await redis.hdel(key, field);
       }
 
     if (resolvedCount > 0) {
@@ -261,4 +275,11 @@ ${existing}
 
 function now(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+export function getReflection(chatId: number): string | null {
+  const row = getDb()
+    .prepare("SELECT reflection FROM reply_reflections WHERE chat_id = ?")
+    .get(chatId) as { reflection: string } | undefined;
+  return row?.reflection ?? null;
 }

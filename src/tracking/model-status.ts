@@ -35,7 +35,8 @@ function isLongCooldown(body: string): boolean {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     const error = (parsed.error ?? parsed) as Record<string, unknown>;
     if (error.code === 'model_cooldown') {
-      return (Number(error.reset_seconds) ?? 0) > 120;
+      const resetSeconds = Number(error.reset_seconds);
+      return Number.isFinite(resetSeconds) && resetSeconds > 120;
     }
   } catch {
     /* ignore */

@@ -43,44 +43,46 @@ export class BotInteractionTracker {
     if (!botUsername) return;
 
     try {
-      // Check bot count limit per group
-      const botCount = db
-        .prepare('SELECT COUNT(DISTINCT bot_username) as cnt FROM bot_interactions WHERE chat_id = ?')
-        .get(chatId) as { cnt: number } | undefined;
-
-      if ((botCount?.cnt ?? 0) >= MAX_BOTS_PER_GROUP) {
-        const exists = db
-          .prepare('SELECT 1 FROM bot_interactions WHERE chat_id = ? AND bot_username = ? LIMIT 1')
-          .get(chatId, botUsername);
-        if (!exists) return;
-      }
-
       const text = interaction.text.slice(0, TEXT_MAX_LENGTH);
 
-      db.prepare(
-        `INSERT INTO bot_interactions (chat_id, bot_username, ts, type, uid, text, mid, reply_to_mid)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        chatId,
-        botUsername,
-        interaction.ts,
-        interaction.type,
-        interaction.uid ?? null,
-        text,
-        interaction.mid,
-        interaction.replyToMid ?? null,
-      );
+      db.transaction(() => {
+        // Check bot count limit per group — atomic with the insert
+        const botCount = db
+          .prepare('SELECT COUNT(DISTINCT bot_username) as cnt FROM bot_interactions WHERE chat_id = ?')
+          .get(chatId) as { cnt: number } | undefined;
 
-      // Enforce FIFO: delete oldest if exceeds max
-      db.prepare(
-        `DELETE FROM bot_interactions
-         WHERE id IN (
-           SELECT id FROM bot_interactions
-           WHERE chat_id = ? AND bot_username = ?
-           ORDER BY id ASC
-           LIMIT MAX(0, (SELECT COUNT(*) FROM bot_interactions WHERE chat_id = ? AND bot_username = ?) - ?)
-         )`,
-      ).run(chatId, botUsername, chatId, botUsername, MAX_RAW_RECORDS);
+        if ((botCount?.cnt ?? 0) >= MAX_BOTS_PER_GROUP) {
+          const exists = db
+            .prepare('SELECT 1 FROM bot_interactions WHERE chat_id = ? AND bot_username = ? LIMIT 1')
+            .get(chatId, botUsername);
+          if (!exists) return;
+        }
+
+        db.prepare(
+          `INSERT INTO bot_interactions (chat_id, bot_username, ts, type, uid, text, mid, reply_to_mid)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          chatId,
+          botUsername,
+          interaction.ts,
+          interaction.type,
+          interaction.uid ?? null,
+          text,
+          interaction.mid,
+          interaction.replyToMid ?? null,
+        );
+
+        // Enforce FIFO: delete oldest if exceeds max
+        db.prepare(
+          `DELETE FROM bot_interactions
+           WHERE id IN (
+             SELECT id FROM bot_interactions
+             WHERE chat_id = ? AND bot_username = ?
+             ORDER BY id ASC
+             LIMIT MAX(0, (SELECT COUNT(*) FROM bot_interactions WHERE chat_id = ? AND bot_username = ?) - ?)
+           )`,
+        ).run(chatId, botUsername, chatId, botUsername, MAX_RAW_RECORDS);
+      })();
     } catch (err) {
       logger.warn({ err, chatId, botUsername }, 'BotInteractionTracker: record failed');
     }
