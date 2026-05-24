@@ -4,6 +4,7 @@ const AdminReviewPanel = defineAsyncComponent(() => import('./components/AdminRe
 const HealthStatusPanel = defineAsyncComponent(() => import('./components/HealthStatusPanel.vue'));
 const ModelStatusBar = defineAsyncComponent(() => import('./components/ModelStatusBar.vue'));
 const ModelRoutingPanel = defineAsyncComponent(() => import('./components/ModelRoutingPanel.vue'));
+const StickerKbPanel = defineAsyncComponent(() => import('./components/StickerKbPanel.vue'));
 import { normalizeGroupIdInput } from './lib/permissions';
 
 const API_URL = '/miniapp_api';
@@ -608,6 +609,8 @@ onUnmounted(() => {
             审核<span v-if="manualQueue.length" class="step-badge">{{ manualQueue.length }}</span>
           </button>
           <span class="step-arrow">›</span>
+          <button :class="['step', { active: activeTab === 'stickers' }]" @click="activeTab = 'stickers'">贴纸</button>
+          <span class="step-arrow">›</span>
           <button :class="['step', { active: activeTab === 'settings' }]" @click="activeTab = 'settings'">设置</button>
         </template>
       </nav>
@@ -724,6 +727,11 @@ onUnmounted(() => {
               @remove-group="(group) => runAdminAction(`remove:${group.chat_id}`, 'remove_group', { chat_id: group.chat_id }, '已从名单中移除该群。')"
               @check-group-permissions="checkGroupPermissions"
             />
+          </div>
+
+          <!-- ===== Tab: 贴纸 ===== -->
+          <div v-show="activeTab === 'stickers'" class="tab-panel">
+            <StickerKbPanel v-if="isMaster && activeTab === 'stickers'" :request="request" />
           </div>
 
           <!-- ===== Tab: 设置 ===== -->
