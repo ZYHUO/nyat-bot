@@ -24,6 +24,14 @@ export class AIError extends AppError {
   }
 }
 
+/** AI routing/configuration errors (missing labels, invalid usage routes) */
+export class AIConfigError extends AppError {
+  constructor(message: string) {
+    super(message, 'AI_CONFIG', 500);
+    this.name = 'AIConfigError';
+  }
+}
+
 /** Queue / BullMQ errors */
 export class QueueError extends AppError {
   public readonly queue: string;

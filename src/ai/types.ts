@@ -8,6 +8,9 @@ export interface AILabel {
   apiKeys: string[];
   model: string;
   stream?: boolean;
+  apiFormat?: 'openai' | 'claude';
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+  disableThinking?: boolean;
   capabilities?: { vision?: boolean; functionCalling?: boolean };
 }
 

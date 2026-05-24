@@ -17,8 +17,7 @@ export function getQueue(): Queue<MessageJobData> {
       defaultJobOptions: {
         removeOnComplete: { count: 1000 },
         removeOnFail: { count: 5000 },
-        attempts: 2,
-        backoff: { type: 'exponential', delay: 1000 },
+        attempts: 1,
       },
     });
     logger.info('BullMQ queue created');
@@ -28,10 +27,10 @@ export function getQueue(): Queue<MessageJobData> {
 
 export async function enqueue(data: MessageJobData): Promise<string | undefined> {
   const queue = getQueue();
-  const editSuffix = data.isEdit ? ':edit' : '';
+  const editSuffix = data.isEdit ? '-edit' : '';
   const jobId = data.messageId
-    ? `msg:${data.chatId}:${data.messageId}${editSuffix}`
-    : `msg:${data.chatId}:${Date.now()}`;
+    ? `msg-${data.chatId}-${data.messageId}${editSuffix}`
+    : `msg-${data.chatId}-${Date.now()}`;
 
   const job = await queue.add(data.type, data, { jobId });
   return job.id;

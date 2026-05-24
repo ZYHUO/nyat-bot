@@ -6,7 +6,7 @@ import type { RedisCache } from './redis-cache.js';
  * Reads check L1 first; on miss, check L2 and backfill L1.
  * Writes go to both layers.
  */
-export class TieredCache<V extends {}> {
+export class TieredCache<V extends NonNullable<unknown>> {
   constructor(
     private readonly l1: LRUCache<string, V>,
     private readonly l2: RedisCache,

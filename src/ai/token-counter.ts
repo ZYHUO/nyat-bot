@@ -26,11 +26,12 @@ export function countMessageTokens(
 ): number {
   let total = 0;
   for (const msg of messages) {
-    // Per OpenAI: each message adds ~4 tokens for role/formatting overhead
+    // OpenAI cookbook formula for o200k_base (gpt-4o): +4 tokens per message
+    // for role/separator overhead (<|im_start|>role\n…<|im_end|>\n).
     total += 4;
     total += countTokens(msg.content);
   }
-  // Final assistant priming
+  // +2 for the assistant turn priming tokens (<|im_start|>assistant\n)
   total += 2;
   return total;
 }

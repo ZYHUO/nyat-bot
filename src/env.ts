@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import 'dotenv/config';
 
+const booleanFromEnv = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off', ''].includes(normalized)) return false;
+  return value;
+}, z.boolean());
+
 const envSchema = z.object({
   // Telegram
   BOT_TOKEN: z.string().min(1, 'BOT_TOKEN is required'),
@@ -11,15 +19,6 @@ const envSchema = z.object({
 
   // SQLite
   SQLITE_PATH: z.string().default('./data/xxb.db'),
-
-  // AI
-  AI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
-  AI_API_KEY: z.string().min(1, 'AI_API_KEY is required'),
-  AI_MODEL_JUDGE: z.string().default('gpt-4o-mini'),
-  AI_MODEL_REPLY: z.string().default('gpt-4o-mini'),
-  AI_MODEL_REPLY_PRO: z.string().default('gpt-4o'),
-  AI_MODEL_VISION: z.string().default('gpt-4o'),
-  AI_MODEL_SUMMARIZE: z.string().default('gpt-4o-mini'),
 
   // Server
   PORT: z.coerce.number().int().positive().default(3000),
@@ -45,11 +44,13 @@ const envSchema = z.object({
   STREAMING_MIN_CHARS: z.coerce.number().int().nonnegative().default(50),
 
   // Tool System
+  SKILLS_DIR: z.string().default('./data/skills'),
   SEARXNG_URL: z.string().url().optional(),
   XAI_API_KEY: z.string().optional(),
   XAI_SEARCH_MODEL: z.string().default('grok-4-0709'),
   FETCH_GATEWAY_URL: z.string().optional(),
   FETCH_WORKER_URL: z.string().url().optional(),
+  NODESEEK_READER_URLS: z.string().optional(),
   WEB_FETCH_USER_AGENT: z.string().default('XXB-WebFetch/1.0'),
   IP_QUALITY_API_URL: z.string().url().optional(),
   TIMER_API_URL: z.string().url().optional(),
@@ -57,10 +58,18 @@ const envSchema = z.object({
   COMMON_API_KEY: z.string().optional(),
 
   // Tracking
-  OUTCOME_TRACKING_ENABLED: z.coerce.boolean().default(false),
+  OUTCOME_TRACKING_ENABLED: booleanFromEnv.default(false),
 
   // Business
   MASTER_UID: z.coerce.number().int().default(0),
+  MASTER_UID_EXTRA: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n > 0);
+    }),
   BOT_NICKNAMES: z
     .string()
     .default('xxb,啾咪囝')
@@ -68,19 +77,79 @@ const envSchema = z.object({
   CONTEXT_MAX_LENGTH: z.coerce.number().int().positive().default(600),
   JUDGE_WINDOW_SIZE: z.coerce.number().int().positive().default(10),
 
+  // Knowledge base (file-backed, PHP parity)
+  KNOWLEDGE_BASE_DIR: z.string().default('./data/knowledge'),
+  JUDGE_KNOWLEDGE_ENABLED: booleanFromEnv.default(false),
+  JUDGE_KNOWLEDGE_PERMANENT: booleanFromEnv.default(true),
+  JUDGE_KNOWLEDGE_GROUP: booleanFromEnv.default(true),
+
+  // Join verification
+  VERIFY_ENABLED: booleanFromEnv.default(false),
+  VERIFY_DEFAULT_TIMEOUT: z.coerce.number().int().default(300),
+  VERIFY_MAX_ATTEMPTS: z.coerce.number().int().default(3),
+
+  // Knowledge cron (cron_long_term.php parity)
+  KNOWLEDGE_CRON_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      try {
+        const j = JSON.parse(t) as unknown;
+        if (Array.isArray(j)) {
+          return j.map((x) => Number(x)).filter((n) => !Number.isNaN(n) && n !== 0);
+        }
+      } catch {
+        /* fall through */
+      }
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  KNOWLEDGE_CRON_SCHEDULE: z.string().default('30 * * * *'),
+  KNOWLEDGE_CRON_HASH_PATH: z.string().optional(),
+
+  // Channel source IDs — channel posts from these channels are ingested into ChromaDB as knowledge
+  CHANNEL_SOURCE_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+
+  // Public channel usernames to scrape (no admin needed, uses t.me/s/ web page)
+  CHANNEL_SOURCE_USERNAMES: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as string[];
+      return t.split(',').map((x) => x.trim().replace(/^@/, '')).filter(Boolean);
+    }),
+
+  // Persona override directory (per-user {uid}.md / .txt)
+  PERSONA_DIR: z.string().optional(),
+
   // Allowlist
-  ALLOWLIST_ENABLED: z.coerce.boolean().default(false),
+  ALLOWLIST_ENABLED: booleanFromEnv.default(false),
   ALLOWLIST_REDIS_PREFIX: z.string().default('xxb:mal:'),
-  ALLOWLIST_DEFAULT_ENABLE_AFTER_APPROVE: z.coerce.boolean().default(false),
+  ALLOWLIST_DEFAULT_ENABLE_AFTER_APPROVE: booleanFromEnv.default(false),
   ALLOWLIST_MAX_SUBMISSIONS_PER_DAY: z.coerce.number().int().default(20),
-  ALLOWLIST_AUTO_AI_REVIEW: z.coerce.boolean().default(true),
+  ALLOWLIST_AUTO_AI_REVIEW: booleanFromEnv.default(true),
   ALLOWLIST_AI_MESSAGE_LIMIT: z.coerce.number().int().default(100),
   ALLOWLIST_AI_CONTEXT_MAX_CHARS: z.coerce.number().int().default(24000),
-  ALLOWLIST_AI_AUTO_ENABLE: z.coerce.boolean().default(true),
+  ALLOWLIST_AI_AUTO_ENABLE: booleanFromEnv.default(true),
   ALLOWLIST_AI_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.85),
 
-  // AI - allowlist review model
-  AI_MODEL_ALLOWLIST_REVIEW: z.string().default('gpt-4o-mini'),
+  // Monitor
+  MONITOR_TOKEN: z.string().default(''),
 
   // Admin
   ADMIN_CORS_ORIGINS: z
@@ -107,4 +176,315 @@ export function env(): Env {
     _env = parseEnv();
   }
   return _env;
+}
+
+// ── AI Provider & Usage parsing from env ──────────────────
+
+export interface EnvProvider {
+  name: string;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  apiFormat?: 'openai' | 'claude';
+  stream?: boolean;
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+  disableThinking?: boolean;
+}
+
+export interface EnvUsage {
+  label: string;
+  backups: string[];
+  timeout?: number;
+  maxTokens?: number;
+  temperature?: number;
+}
+
+let _providers: Map<string, EnvProvider> | undefined;
+let _usages: Map<string, EnvUsage> | undefined;
+let _replyMaxLabels: string[] | undefined;
+
+function readBool(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === 'true';
+}
+
+function readNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function addProviderIfMissing(
+  providers: Map<string, EnvProvider>,
+  name: string,
+  config: {
+    endpoint?: string;
+    apiKey?: string;
+    model?: string;
+    apiFormat?: 'openai' | 'claude';
+    stream?: boolean;
+  },
+): void {
+  if (providers.has(name) || !config.endpoint || !config.model) return;
+  providers.set(name, {
+    name,
+    endpoint: config.endpoint,
+    apiKey: config.apiKey ?? '',
+    model: config.model,
+    apiFormat: config.apiFormat,
+    stream: config.stream,
+  });
+}
+
+function buildLegacyProviders(source: NodeJS.ProcessEnv, providers: Map<string, EnvProvider>): void {
+  const primaryEndpoint = source['AI_BASE_URL'];
+  const primaryKey = source['AI_API_KEY'];
+
+  addProviderIfMissing(providers, 'reply', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_REPLY'],
+  });
+  addProviderIfMissing(providers, 'reply_pro', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_REPLY_PRO'],
+  });
+  addProviderIfMissing(providers, 'vision', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_VISION'],
+  });
+  addProviderIfMissing(providers, 'judge', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_JUDGE'] ?? source['AI_MODEL_REPLY'],
+  });
+  addProviderIfMissing(providers, 'summarize', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_SUMMARIZE'] ?? source['AI_MODEL_REPLY'],
+  });
+  addProviderIfMissing(providers, 'allowlist_review', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_ALLOWLIST_REVIEW'] ?? source['AI_MODEL_REPLY'],
+  });
+  addProviderIfMissing(providers, 'path_reflection', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model:
+      source['AI_MODEL_PATH_REFLECTION']
+      ?? source['AI_MODEL_JUDGE']
+      ?? source['AI_MODEL_REPLY'],
+  });
+  addProviderIfMissing(providers, 'reply_splitter', {
+    endpoint: primaryEndpoint,
+    apiKey: primaryKey,
+    model: source['AI_MODEL_REPLY_SPLITTER'] ?? source['AI_MODEL_REPLY'],
+  });
+
+  const localEndpoint = source['LOCAL_AI_BASE_URL'];
+  const localKey = source['LOCAL_AI_API_KEY'];
+  addProviderIfMissing(providers, 'local_judge', {
+    endpoint: localEndpoint,
+    apiKey: localKey,
+    model: source['LOCAL_AI_MODEL_JUDGE'],
+  });
+  addProviderIfMissing(providers, 'local_summarize', {
+    endpoint: localEndpoint,
+    apiKey: localKey,
+    model: source['LOCAL_AI_MODEL_SUMMARIZE'],
+  });
+  addProviderIfMissing(providers, 'local_allowlist_review', {
+    endpoint: localEndpoint,
+    apiKey: localKey,
+    model: source['LOCAL_AI_MODEL_ALLOWLIST'] ?? source['LOCAL_AI_MODEL_ALLOWLIST_REVIEW'],
+  });
+  addProviderIfMissing(providers, 'local_path_reflection', {
+    endpoint: localEndpoint,
+    apiKey: localKey,
+    model: source['LOCAL_AI_MODEL_PATH_REFLECTION'] ?? source['LOCAL_AI_MODEL_JUDGE'],
+  });
+}
+
+function addUsageIfMissing(
+  usages: Map<string, EnvUsage>,
+  name: string,
+  config: EnvUsage | null,
+): void {
+  if (!config || usages.has(name)) return;
+  usages.set(name, config);
+}
+
+function buildLegacyUsageRouting(source: NodeJS.ProcessEnv, usages: Map<string, EnvUsage>): void {
+  const hasPrimary = !!(source['AI_BASE_URL'] && source['AI_MODEL_REPLY']);
+  if (!hasPrimary) return;
+
+  addUsageIfMissing(usages, 'reply', {
+    label: 'reply',
+    backups: source['AI_MODEL_REPLY_PRO'] ? ['reply_pro'] : [],
+  });
+  addUsageIfMissing(usages, 'reply_pro', {
+    label: source['AI_MODEL_REPLY_PRO'] ? 'reply_pro' : 'reply',
+    backups: source['AI_MODEL_REPLY'] ? ['reply'] : [],
+  });
+  addUsageIfMissing(usages, 'vision', {
+    label: source['AI_MODEL_VISION'] ? 'vision' : 'reply',
+    backups: [],
+  });
+  addUsageIfMissing(usages, 'judge', {
+    label: source['LOCAL_AI_MODEL_JUDGE'] ? 'local_judge' : 'judge',
+    backups: source['LOCAL_AI_MODEL_JUDGE'] ? ['judge'] : (source['AI_MODEL_REPLY'] ? ['reply'] : []),
+    timeout: 30_000,
+    maxTokens: 200,
+    temperature: 0,
+  });
+  addUsageIfMissing(usages, 'summarize', {
+    label: source['LOCAL_AI_MODEL_SUMMARIZE'] ? 'local_summarize' : 'summarize',
+    backups: source['LOCAL_AI_MODEL_SUMMARIZE'] ? ['summarize'] : (source['AI_MODEL_REPLY'] ? ['reply'] : []),
+    timeout: 120_000,
+  });
+  addUsageIfMissing(usages, 'allowlist_review', {
+    label: source['LOCAL_AI_MODEL_ALLOWLIST'] || source['LOCAL_AI_MODEL_ALLOWLIST_REVIEW']
+      ? 'local_allowlist_review'
+      : 'allowlist_review',
+    backups:
+      source['LOCAL_AI_MODEL_ALLOWLIST'] || source['LOCAL_AI_MODEL_ALLOWLIST_REVIEW']
+        ? ['allowlist_review']
+        : (source['AI_MODEL_REPLY'] ? ['reply'] : []),
+    timeout: 60_000,
+  });
+  addUsageIfMissing(usages, 'path_reflection', {
+    label: source['LOCAL_AI_MODEL_PATH_REFLECTION'] ? 'local_path_reflection' : 'path_reflection',
+    backups:
+      source['LOCAL_AI_MODEL_PATH_REFLECTION']
+        ? ['path_reflection']
+        : (source['AI_MODEL_JUDGE'] ? ['judge'] : (source['AI_MODEL_REPLY'] ? ['reply'] : [])),
+    timeout: 20_000,
+    maxTokens: 200,
+    temperature: 0,
+  });
+  addUsageIfMissing(usages, 'reply_splitter', {
+    label: source['AI_MODEL_REPLY_SPLITTER'] ? 'reply_splitter' : 'reply',
+    backups: source['AI_MODEL_REPLY'] ? ['reply'] : [],
+    timeout: 30_000,
+    maxTokens: 500,
+    temperature: 0,
+  });
+}
+
+/**
+ * Parse AI_PROVIDER_<NAME>_ENDPOINT/KEY/MODEL/FORMAT/STREAM from process.env.
+ * Provider names are lowercased from the env key.
+ * Also synthesizes legacy AI_BASE_URL / AI_MODEL_* routing so fresh setups and migrations keep working.
+ */
+export function getProviders(): Map<string, EnvProvider> {
+  if (_providers) return _providers;
+
+  const source = process.env;
+  const groups = new Map<string, Record<string, string>>();
+
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith('AI_PROVIDER_') || !value) continue;
+    const rest = key.slice('AI_PROVIDER_'.length);
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING'] as const;
+    let matchedField: string | undefined;
+    let providerName: string | undefined;
+    for (const f of fields) {
+      if (rest.endsWith(`_${f}`)) {
+        matchedField = f;
+        providerName = rest.slice(0, -(f.length + 1));
+        break;
+      }
+    }
+    if (!matchedField || !providerName) continue;
+    const name = providerName.toLowerCase();
+    if (!groups.has(name)) groups.set(name, {});
+    groups.get(name)![matchedField] = value;
+  }
+
+  _providers = new Map();
+  for (const [name, fields] of Array.from(groups.entries())) {
+    if (!fields['ENDPOINT'] || !fields['MODEL']) continue;
+    _providers.set(name, {
+      name,
+      endpoint: fields['ENDPOINT'],
+      apiKey: fields['KEY'] ?? '',
+      model: fields['MODEL'],
+      apiFormat: fields['FORMAT'] === 'claude' ? 'claude' : undefined,
+      stream: readBool(fields['STREAM']),
+      reasoningEffort: fields['REASONING'] as 'none' | 'low' | 'medium' | 'high' | undefined,
+      disableThinking: fields['THINKING'] === 'disabled',
+    });
+  }
+
+  buildLegacyProviders(source, _providers);
+  return _providers;
+}
+
+/**
+ * Parse AI_USAGE_<NAME>_LABEL/BACKUPS/TIMEOUT/MAX_TOKENS/TEMPERATURE from process.env.
+ * Usage names are lowercased (with underscores preserved for multi-word names like REPLY_PRO).
+ * Also synthesizes compatibility routing for legacy AI_MODEL_* envs when explicit AI_USAGE_* entries are absent.
+ */
+export function getUsageRouting(): Map<string, EnvUsage> {
+  if (_usages) return _usages;
+
+  const source = process.env;
+  const groups = new Map<string, Record<string, string>>();
+
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith('AI_USAGE_') || !value) continue;
+    const rest = key.slice('AI_USAGE_'.length);
+    const fields = ['LABEL', 'BACKUPS', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE'] as const;
+    let matchedField: string | undefined;
+    let usageName: string | undefined;
+    for (const f of fields) {
+      if (rest.endsWith(`_${f}`)) {
+        matchedField = f;
+        usageName = rest.slice(0, -(f.length + 1));
+        break;
+      }
+    }
+    if (!matchedField || !usageName) continue;
+    const name = usageName.toLowerCase();
+    if (!groups.has(name)) groups.set(name, {});
+    groups.get(name)![matchedField] = value;
+  }
+
+  _usages = new Map();
+  for (const [name, fields] of Array.from(groups.entries())) {
+    if (!fields['LABEL']) continue;
+    _usages.set(name, {
+      label: fields['LABEL'].toLowerCase(),
+      backups: fields['BACKUPS']
+        ? fields['BACKUPS'].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+        : [],
+      timeout: readNumber(fields['TIMEOUT']),
+      maxTokens: readNumber(fields['MAX_TOKENS']),
+      temperature: readNumber(fields['TEMPERATURE']),
+    });
+  }
+
+  buildLegacyUsageRouting(source, _usages);
+  return _usages;
+}
+
+/**
+ * Parse AI_USAGE_REPLY_MAX_LABELS (comma-separated provider names for rotating reply_max pool).
+ */
+export function getReplyMaxLabels(): string[] {
+  if (_replyMaxLabels) return _replyMaxLabels;
+  const raw = process.env['AI_USAGE_REPLY_MAX_LABELS'];
+  _replyMaxLabels = raw
+    ? raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+  return _replyMaxLabels;
+}
+
+export function _resetEnvRoutingCache(): void {
+  _providers = undefined;
+  _usages = undefined;
+  _replyMaxLabels = undefined;
 }
