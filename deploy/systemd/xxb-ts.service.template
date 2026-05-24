@@ -1,0 +1,21 @@
+[Unit]
+Description=xxb-ts Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__ENV_FILE__
+ExecStart=__NODE_BIN__ __ENTRYPOINT__
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,5 @@
 node_modules/
+miniapp-web/node_modules/
 dist/
 .env
 *.db

@@ -4,6 +4,7 @@ module.exports = {
     script: './dist/index.js',
     node_args: '--max-old-space-size=512',
     instances: 1,
+    exec_mode: 'fork',
     autorestart: true,
     max_memory_restart: '500M',
     env_production: {

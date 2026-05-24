@@ -23,6 +23,9 @@ if [ "${1:-}" = "--rollback" ]; then
     # 1. Set PHP webhook
     curl -s "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${PHP_WEBHOOK_URL}" | jq .
     # 2. Stop TS
+    if command -v systemctl &>/dev/null && systemctl list-unit-files | grep -q '^xxb-ts.service'; then
+        systemctl stop xxb-ts 2>/dev/null || true
+    fi
     if command -v pm2 &>/dev/null; then
         pm2 stop xxb-ts 2>/dev/null || true
     fi
@@ -49,7 +52,9 @@ npx tsx scripts/migrate-allowlist.ts
 
 # 3. Start TS
 echo "Step 3: Starting TS bot..."
-if [ -f docker-compose.yml ] && command -v docker &>/dev/null; then
+if command -v systemctl &>/dev/null && systemctl list-unit-files | grep -q '^xxb-ts.service'; then
+    systemctl restart xxb-ts
+elif [ -f docker-compose.yml ] && command -v docker &>/dev/null; then
     docker compose up -d
 else
     pm2 start ecosystem.config.cjs --env production
