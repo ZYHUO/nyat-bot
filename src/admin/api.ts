@@ -1,5 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { readFile } from 'node:fs/promises';
+import { resolve as resolvePath } from 'node:path';
 import type { Redis } from 'ioredis';
 import type { Bot } from 'grammy';
 import { logger } from '../shared/logger.js';
@@ -468,6 +470,41 @@ export function createAdminApi(deps: ApiDeps): Hono {
   api.get('/health', async (c) => {
     const health = await checkHealth(deps.redis);
     return c.json(health);
+  });
+
+  // Sticker preview PNG (master-only). Used by miniapp StickerKbPanel.
+  // Cached aggressively because preview content is immutable per file_unique_id.
+  api.get('/sticker_preview/:fuid', async (c) => {
+    const initData = c.req.query('init_data');
+    if (!initData) {
+      return c.json({ ok: false, error: 'forbidden' }, 403);
+    }
+    const user = validateInitData(initData, deps.env.BOT_TOKEN);
+    if (!user || !isMaster(user.id, deps.env.MASTER_UID)) {
+      return c.json({ ok: false, error: 'forbidden' }, 403);
+    }
+    const fuid = c.req.param('fuid');
+    if (!/^[a-zA-Z0-9_-]+$/.test(fuid) || fuid.length > 100) {
+      return c.json({ ok: false, error: 'invalid_fuid' }, 400);
+    }
+    // Project-local preview path (data/sticker_assets/preview/<fuid>.png).
+    // The sticker_items.preview_asset_path may point at a legacy PHP path on disk,
+    // but the same file is mirrored into data/sticker_assets/preview/ which is
+    // the canonical location for the TS port.
+    const baseDir = resolvePath(process.cwd(), 'data/sticker_assets/preview');
+    const filePath = resolvePath(baseDir, `${fuid}.png`);
+    if (!filePath.startsWith(baseDir)) {
+      return c.json({ ok: false, error: 'invalid_path' }, 400);
+    }
+    try {
+      const buf = await readFile(filePath);
+      return c.body(buf, 200, {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'private, max-age=86400',
+      });
+    } catch {
+      return c.json({ ok: false, error: 'not_found' }, 404);
+    }
   });
 
   api.get('/model_status', async (c) => {

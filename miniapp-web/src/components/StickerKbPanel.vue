@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 
 const props = defineProps({
   request: { type: Function, required: true },
+  initData: { type: String, default: '' },
 });
 
 const items = ref([]);
@@ -128,6 +129,13 @@ function tagsLine(item) {
   const tags = Array.isArray(item.emotion_tags) ? item.emotion_tags.slice(0, 4) : [];
   return tags.join(' / ');
 }
+
+function previewUrl(item) {
+  if (item.asset_status !== 'preview_ready') return null;
+  const fuid = encodeURIComponent(item.file_unique_id);
+  const initData = encodeURIComponent(props.initData ?? '');
+  return `/miniapp_api/sticker_preview/${fuid}?init_data=${initData}`;
+}
 </script>
 
 <template>
@@ -212,7 +220,21 @@ function tagsLine(item) {
           :key="item.file_unique_id"
           style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid var(--mac-divider, rgba(0,0,0,0.04))"
         >
-          <span style="font-size:24px;width:30px;text-align:center">{{ emojiOrPlaceholder(item) }}</span>
+          <div style="width:48px;height:48px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.04);border-radius:6px;flex-shrink:0">
+            <img
+              v-if="previewUrl(item)"
+              :src="previewUrl(item)"
+              :alt="item.emoji || item.file_unique_id"
+              style="max-width:48px;max-height:48px;object-fit:contain;display:block"
+              loading="lazy"
+              @error="$event.target.style.display='none'; $event.target.nextElementSibling && ($event.target.nextElementSibling.style.display='inline')"
+            />
+            <span
+              :style="previewUrl(item) ? 'display:none;font-size:24px' : 'font-size:24px'"
+            >
+              {{ emojiOrPlaceholder(item) }}
+            </span>
+          </div>
           <div style="flex:1;min-width:0">
             <div style="font-size:12px;font-family:monospace;color:var(--text-hint, #888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
               {{ item.file_unique_id }}
