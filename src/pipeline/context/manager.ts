@@ -9,6 +9,7 @@ import { logger } from '../../shared/logger.js';
 
 const CTX_PREFIX = 'xxb:ctx:';
 const MEMBERS_PREFIX = 'xxb:members:';
+const USER_GROUPS_PREFIX = 'xxb:user:groups:';
 const TRUNCATE_SIZE = 50;
 const MEMBERS_TTL = 30 * 86400; // 30 days
 const CTX_TTL = 7 * 86400; // 7 days rolling TTL
@@ -21,7 +22,7 @@ local len = redis.call('LLEN', key)
 local maxLen = tonumber(ARGV[2])
 local trimSize = tonumber(ARGV[3])
 if len > maxLen then
-  redis.call('LTRIM', key, len - trimSize, -1)
+  redis.call('LTRIM', key, len - maxLen, -1)
 end
 redis.call('EXPIRE', key, tonumber(ARGV[4]))
 return len
@@ -44,8 +45,14 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
     String(CTX_TTL),
   );
 
+  // Track active group chats for idle discovery (sorted set: score = last seen timestamp)
+  if (chatId < 0) {
+    const ts = Math.floor(Date.now() / 1000);
+    redis.zadd('xxb:active_groups', ts, String(chatId)).catch(() => {});
+  }
+
   // Track group member (skip bots and assistant messages)
-  if (message.uid && message.role === 'user' && !message.isBot) {
+  if (message.uid && message.role === 'user' && !message.isBot && !message.isAnonymous) {
     try {
       const memberKey = MEMBERS_PREFIX + chatId;
       const memberData = JSON.stringify({
@@ -56,27 +63,41 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
       });
       await redis.hset(memberKey, String(message.uid), memberData);
       await redis.expire(memberKey, MEMBERS_TTL);
+
+      // Reverse index: track which groups this user belongs to
+      if (chatId < 0) {
+        const userGroupsKey = USER_GROUPS_PREFIX + message.uid;
+        await redis.sadd(userGroupsKey, String(chatId));
+        await redis.expire(userGroupsKey, MEMBERS_TTL);
+      }
     } catch (err) {
       logger.debug({ err, chatId }, 'Member tracking failed (non-critical)');
     }
   }
 }
 
+function safeParseMessages(raw: string[]): FormattedMessage[] {
+  const result: FormattedMessage[] = [];
+  for (const r of raw) {
+    try {
+      result.push(JSON.parse(r) as FormattedMessage);
+    } catch {
+      logger.warn({ snippet: r.slice(0, 80) }, 'Corrupted context entry skipped');
+    }
+  }
+  return result;
+}
+
 export async function getRecent(chatId: number, count: number): Promise<FormattedMessage[]> {
   const redis = getRedis();
   const raw = await redis.lrange(ctxKey(chatId), -count, -1);
-  return raw.map((r) => JSON.parse(r) as FormattedMessage);
+  return safeParseMessages(raw);
 }
 
-/** Fetch a specific number of recent messages (for activity estimation, separate from judge window) */
-export async function getRecentCount(chatId: number, count: number): Promise<FormattedMessage[]> {
-  return getRecent(chatId, count);
-}
-
-export async function getAll(chatId: number): Promise<FormattedMessage[]> {
+export async function getAll(chatId: number, limit = 500): Promise<FormattedMessage[]> {
   const redis = getRedis();
-  const raw = await redis.lrange(ctxKey(chatId), 0, -1);
-  return raw.map((r) => JSON.parse(r) as FormattedMessage);
+  const raw = await redis.lrange(ctxKey(chatId), -limit, -1);
+  return safeParseMessages(raw);
 }
 
 export async function addAssistant(chatId: number, reply: { textContent: string; messageId: number }): Promise<void> {
@@ -114,4 +135,11 @@ export async function getGroupMembers(chatId: number): Promise<GroupMember[]> {
   // Sort by last seen (most recent first)
   members.sort((a, b) => b.lastSeen - a.lastSeen);
   return members;
+}
+
+/** Get all group chatIds a user has been seen in (reverse index) */
+export async function getUserGroups(uid: number): Promise<number[]> {
+  const redis = getRedis();
+  const raw = await redis.smembers(USER_GROUPS_PREFIX + uid);
+  return raw.map(Number).filter((n) => !Number.isNaN(n));
 }

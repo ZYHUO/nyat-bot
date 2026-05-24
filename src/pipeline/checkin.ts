@@ -14,6 +14,13 @@ export interface CheckinResult {
   fortune: string;         // 今日运势
   rank: number;            // today's checkin rank in this chat
   todayCheckins: number;   // how many people checked in today
+  milestone?: 7 | 30 | 100; // 连续签到里程碑
+}
+
+export interface CheckinStats {
+  todayRank: Array<{ rank: number; fullName: string; username: string; streak: number; totalCheckins: number }>;
+  allTimeRank: Array<{ rank: number; fullName: string; username: string; totalCheckins: number }>;
+  todayCount: number;
 }
 
 const FORTUNES = [
@@ -44,6 +51,28 @@ function getYesterdayDate(): string {
   return d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
 }
 
+// Single round-trip to fetch both the user's rank for today and the total
+// number of checkins today.
+function getRankAndTodayTotal(
+  db: ReturnType<typeof getDb>,
+  chatId: number,
+  uid: number,
+  today: string,
+): { rank: number; total: number } {
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN id <= (
+        SELECT id FROM checkins WHERE chat_id = ? AND uid = ? AND checkin_date = ?
+      ) THEN 1 ELSE 0 END) AS rank,
+      COUNT(*) AS total
+    FROM checkins
+    WHERE chat_id = ? AND checkin_date = ?
+  `).get(chatId, uid, today, chatId, today) as
+    | { rank: number | null; total: number }
+    | undefined;
+  return { rank: row?.rank ?? 0, total: row?.total ?? 0 };
+}
+
 export function doCheckin(
   chatId: number,
   uid: number,
@@ -54,6 +83,7 @@ export function doCheckin(
   const today = getTodayDate();
   const yesterday = getYesterdayDate();
 
+  return db.transaction(() => {
   // Check if already checked in today
   const existing = db.prepare(
     'SELECT streak, total_checkins, reward_coins, reward_exp, lucky_number, fortune FROM checkins WHERE chat_id = ? AND uid = ? AND checkin_date = ?',
@@ -68,13 +98,7 @@ export function doCheckin(
 
   if (existing) {
     // Already checked in, return existing data
-    const rank = (db.prepare(
-      'SELECT COUNT(*) as cnt FROM checkins WHERE chat_id = ? AND checkin_date = ? AND id <= (SELECT id FROM checkins WHERE chat_id = ? AND uid = ? AND checkin_date = ?)',
-    ).get(chatId, today, chatId, uid, today) as { cnt: number }).cnt;
-
-    const todayTotal = (db.prepare(
-      'SELECT COUNT(*) as cnt FROM checkins WHERE chat_id = ? AND checkin_date = ?',
-    ).get(chatId, today) as { cnt: number }).cnt;
+    const { rank, total: todayTotal } = getRankAndTodayTotal(db, chatId, uid, today);
 
     return {
       isNew: false,
@@ -109,11 +133,33 @@ export function doCheckin(
   const luckyNumber = Math.floor(Math.random() * 100) + 1;
   const fortune = FORTUNES[Math.floor(Math.random() * FORTUNES.length)]!;
 
-  // Insert
-  db.prepare(`
-    INSERT INTO checkins (chat_id, uid, username, full_name, checkin_date, streak, total_checkins, reward_coins, reward_exp, lucky_number, fortune)
+  // INSERT OR IGNORE: if a concurrent call already inserted, this is a no-op
+  const result = db.prepare(`
+    INSERT OR IGNORE INTO checkins (chat_id, uid, username, full_name, checkin_date, streak, total_checkins, reward_coins, reward_exp, lucky_number, fortune)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(chatId, uid, username, fullName, today, streak, totalCheckins, rewardCoins, rewardExp, luckyNumber, fortune);
+
+  if (result.changes === 0) {
+    // Another concurrent call inserted first — return their data
+    const existing2 = db.prepare(
+      'SELECT streak, total_checkins, reward_coins, reward_exp, lucky_number, fortune FROM checkins WHERE chat_id = ? AND uid = ? AND checkin_date = ?',
+    ).get(chatId, uid, today) as {
+      streak: number; total_checkins: number; reward_coins: number;
+      reward_exp: number; lucky_number: number; fortune: string;
+    };
+    const { rank: rank2, total: todayTotal2 } = getRankAndTodayTotal(db, chatId, uid, today);
+    return {
+      isNew: false,
+      streak: existing2.streak,
+      totalCheckins: existing2.total_checkins,
+      rewardCoins: existing2.reward_coins,
+      rewardExp: existing2.reward_exp,
+      luckyNumber: existing2.lucky_number,
+      fortune: existing2.fortune,
+      rank: rank2,
+      todayCheckins: todayTotal2,
+    };
+  }
 
   // Get rank
   const rank = (db.prepare(
@@ -130,5 +176,56 @@ export function doCheckin(
     fortune,
     rank,
     todayCheckins: rank,
+    milestone: ([100, 30, 7] as const).find(m => streak % m === 0 && streak > 0),
+  };
+  })();
+}
+
+export function getCheckinStats(chatId: number): CheckinStats {
+  const db = getDb();
+  const today = getTodayDate();
+
+  const todayRank = db.prepare(`
+    SELECT full_name, username, streak, total_checkins,
+      ROW_NUMBER() OVER (ORDER BY id ASC) as rank
+    FROM checkins
+    WHERE chat_id = ? AND checkin_date = ?
+    ORDER BY id ASC
+    LIMIT 10
+  `).all(chatId, today) as Array<{
+    rank: number; full_name: string; username: string; streak: number; total_checkins: number;
+  }>;
+
+  const allTimeRank = db.prepare(`
+    SELECT full_name, username, MAX(total_checkins) as total_checkins,
+      ROW_NUMBER() OVER (ORDER BY MAX(total_checkins) DESC) as rank
+    FROM checkins
+    WHERE chat_id = ?
+    GROUP BY uid
+    ORDER BY total_checkins DESC
+    LIMIT 10
+  `).all(chatId) as Array<{
+    rank: number; full_name: string; username: string; total_checkins: number;
+  }>;
+
+  const todayCount = (db.prepare(
+    'SELECT COUNT(*) as cnt FROM checkins WHERE chat_id = ? AND checkin_date = ?',
+  ).get(chatId, today) as { cnt: number }).cnt;
+
+  return {
+    todayRank: todayRank.map(r => ({
+      rank: Number(r.rank),
+      fullName: r.full_name,
+      username: r.username,
+      streak: r.streak,
+      totalCheckins: r.total_checkins,
+    })),
+    allTimeRank: allTimeRank.map(r => ({
+      rank: Number(r.rank),
+      fullName: r.full_name,
+      username: r.username,
+      totalCheckins: r.total_checkins,
+    })),
+    todayCount,
   };
 }

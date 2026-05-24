@@ -66,7 +66,7 @@ async function xaiSearch(query: string, apiKey: string, model: string): Promise<
     if (item.type === 'message' && item.content) {
       for (const block of item.content) {
         if (block.type === 'output_text' && block.text) {
-          return block.text;
+          return normalizeXaiSearchOutput(query, block.text);
         }
       }
     }
@@ -81,6 +81,7 @@ interface SearchResult {
   title: string;
   url: string;
   snippet: string;
+  published?: string;
 }
 
 async function ddgLiteSearch(query: string): Promise<string> {
@@ -125,20 +126,26 @@ function parseDdgLiteHtml(html: string): SearchResult[] {
   let m: RegExpExecArray | null;
 
   while ((m = linkPattern.exec(html)) !== null) {
+    const href = m[1];
+    const titleRaw = m[2];
+    if (href === undefined || titleRaw === undefined) continue;
     links.push({
-      url: m[1],
-      title: stripTags(m[2]).trim(),
+      url: href,
+      title: stripTags(titleRaw).trim(),
     });
   }
 
   const snippets: string[] = [];
   while ((m = snippetPattern.exec(html)) !== null) {
-    snippets.push(stripTags(m[1]).trim());
+    const sn = m[1];
+    snippets.push(sn === undefined ? '' : stripTags(sn).trim());
   }
 
   for (let i = 0; i < links.length; i++) {
-    const { url, title } = links[i];
-    const snippet = i < snippets.length ? snippets[i] : '';
+    const link = links[i];
+    if (!link) continue;
+    const { url, title } = link;
+    const snippet = (i < snippets.length ? snippets[i] : '') ?? '';
     if (title && url) {
       results.push({ title, url, snippet });
     }
@@ -178,4 +185,73 @@ async function searxngSearch(query: string, apiUrl: string): Promise<string> {
 
 function stripTags(html: string): string {
   return html.replace(/<[^>]*>/g, '');
+}
+
+function normalizeXaiSearchOutput(query: string, rawText: string): string {
+  const unwrapped = rawText
+    .replace(/^\s*<web_search>\s*/i, '')
+    .replace(/\s*<\/web_search>\s*$/i, '')
+    .trim();
+
+  const withoutHeader = unwrapped
+    .replace(new RegExp(`^Search results for\\s+"${escapeRegExp(query)}"\\s*:\\s*`, 'i'), '')
+    .replace(/^Search results for\s+["“][\s\S]*?["”]\s*:\s*/i, '')
+    .trim();
+
+  const parsed = parseNumberedSearchResults(withoutHeader);
+  if (parsed.length === 0) {
+    return `关于"${query}"的搜索结果：\n${withoutHeader}`;
+  }
+
+  let output = `关于"${query}"的搜索结果：\n`;
+  for (const item of parsed.slice(0, MAX_RESULTS)) {
+    output += `- ${item.title}\n`;
+    if (item.published) output += `  发布时间：${item.published}\n`;
+    if (item.snippet) output += `  ${item.snippet}\n`;
+    output += `  ${item.url}\n`;
+  }
+  return output;
+}
+
+function parseNumberedSearchResults(text: string): SearchResult[] {
+  const normalized = text.replace(/\r\n/g, '\n');
+  const blocks = normalized
+    .split(/\n(?=\d+\.\s+Title:\s*)/g)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  const results: SearchResult[] = [];
+  for (const block of blocks) {
+    const title = block.match(/^\d+\.\s+Title:\s*(.+)$/im)?.[1]
+      ?.replace(/^\*\*(.*)\*\*$/, '$1')
+      .trim();
+    const url = block.match(/^\s*URL:\s*(\S+)/im)?.[1]?.trim();
+    if (!title || !url) continue;
+
+    const published = block.match(/^\s*Published:\s*(.+)$/im)?.[1]?.trim();
+    const snippet = block
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) =>
+        line
+        && !/^\d+\.\s+Title:/i.test(line)
+        && !/^URL:/i.test(line)
+        && !/^Published:/i.test(line)
+      )
+      .join(' ')
+      .trim();
+
+    results.push({
+      title,
+      url,
+      snippet: snippet.replace(/^\*\*(.*)\*\*$/, '$1'),
+      published,
+    });
+  }
+
+  return results;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

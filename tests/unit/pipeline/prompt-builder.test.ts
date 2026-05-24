@@ -17,10 +17,14 @@ vi.mock('../../../src/shared/config.js', () => {
     loadPrompt: (relativePath: string, _dir: string) => {
       return promptFiles[relativePath] ?? '';
     },
+    loadCachedPrompt: (relativePath: string) => {
+      return promptFiles[relativePath] ?? '';
+    },
     getConfig: () => ({
       promptsDir: '/mock/prompts',
       migrationsDir: '/mock/migrations',
     }),
+    _resetPromptCache: () => {},
   };
 });
 
@@ -30,8 +34,8 @@ describe('Prompt Builder', () => {
   });
 
   describe('buildSystemPrompt', () => {
-    it('builds correct 5-layer prompt for REPLY', () => {
-      const prompt = buildSystemPrompt('REPLY');
+    it('builds correct 5-layer prompt for normal tier', () => {
+      const prompt = buildSystemPrompt('normal');
       expect(prompt).toContain('# L1 Identity');
       expect(prompt).toContain('# L2 Safety');
       expect(prompt).toContain('# L3 — 输出契约');
@@ -40,8 +44,8 @@ describe('Prompt Builder', () => {
       expect(prompt).not.toContain('Reply Pro Task');
     });
 
-    it('builds correct 5-layer prompt for REPLY_PRO', () => {
-      const prompt = buildSystemPrompt('REPLY_PRO');
+    it('builds correct 5-layer prompt for pro tier', () => {
+      const prompt = buildSystemPrompt('pro');
       expect(prompt).toContain('# L1 Identity');
       expect(prompt).toContain('# L2 Safety');
       expect(prompt).toContain('# L3 — 输出契约');
@@ -51,13 +55,13 @@ describe('Prompt Builder', () => {
     });
 
     it('includes JSON schema in contract layer', () => {
-      const prompt = buildSystemPrompt('REPLY');
+      const prompt = buildSystemPrompt('normal');
       expect(prompt).toContain('"type":"object"');
       expect(prompt).toContain('"replyContent"');
     });
 
     it('uses section separators between layers', () => {
-      const prompt = buildSystemPrompt('REPLY');
+      const prompt = buildSystemPrompt('normal');
       expect(prompt).toContain('---');
     });
   });
@@ -118,6 +122,28 @@ describe('Prompt Builder', () => {
       };
       const messages = buildMessages('sys', 'ctx', captionMsg);
       expect(messages[1]!.content).toContain('A nice photo');
+    });
+
+    it('marks anonymous senders but still treats them as replyable current messages', () => {
+      const anonMsg: FormattedMessage = {
+        ...latestMessage,
+        uid: -1001,
+        username: '',
+        fullName: 'Test Group',
+        isAnonymous: true,
+        anonymousType: 'admin',
+      };
+      const messages = buildMessages('sys', 'ctx', anonMsg);
+      expect(messages[1]!.content).toContain('发送者: Test Group[匿名管理员]');
+      expect(messages[1]!.content).toContain('[CURRENT_MESSAGE_TO_REPLY]');
+    });
+
+    it('includes strict multi-reply instruction when explicit count is requested', () => {
+      const messages = buildMessages('sys', 'ctx', latestMessage, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, {
+        exactReplyCount: 2,
+      });
+      expect(messages[1]!.content).toContain('[REPLY_COUNT_REQUIREMENT]');
+      expect(messages[1]!.content).toContain('必须输出恰好 2 条消息');
     });
   });
 });

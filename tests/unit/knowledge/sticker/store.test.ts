@@ -26,6 +26,11 @@ const {
   setRawAssetPath,
   getReadyStickersByIntent,
   getSamples,
+  recordStickerSent,
+  lookupSentSticker,
+  recordStickerDislike,
+  getStickerScore,
+  cleanupOldSentLog,
 } = await import('../../../../src/knowledge/sticker/store.js');
 
 function initSchema(db: Database.Database): void {
@@ -35,6 +40,12 @@ function initSchema(db: Database.Database): void {
     'utf-8',
   );
   db.exec(migrationSql);
+  // Apply feedback migration (user_score, sent_log, ratings)
+  const feedbackSql = readFileSync(
+    resolve(process.cwd(), 'migrations/0006_sticker_feedback.sql'),
+    'utf-8',
+  );
+  db.exec(feedbackSql);
 }
 
 function makeMeta(overrides: Record<string, unknown> = {}) {
@@ -267,6 +278,7 @@ describe('StickerStore', () => {
       const result = getReadyStickersByIntent('cute');
       expect(result.length).toBe(1);
       expect(result[0]!.fileId).toBe('fid_xyz');
+      expect(result[0]!.fileUniqueId).toBe('fuid_abc123');
       expect(result[0]!.score).toBeGreaterThan(0);
     });
 
@@ -314,6 +326,116 @@ describe('StickerStore', () => {
     it('should return empty for non-existent sticker', () => {
       const samples = getSamples('nonexistent');
       expect(samples).toEqual([]);
+    });
+  });
+
+  describe('getReadyStickersByIntent — user_score filtering', () => {
+    it('should exclude stickers with user_score <= 0.1', () => {
+      recordStickerUsage(makeMeta(), makeSample());
+      storeAnalysisResult('fuid_abc123', {
+        emotionTags: ['cute'],
+        personaFit: true,
+      });
+
+      // Decay score below threshold: 1.0 * 0.5^4 = 0.0625
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+
+      const result = getReadyStickersByIntent('cute');
+      expect(result).toEqual([]);
+    });
+
+    it('should weight score by user_score', () => {
+      recordStickerUsage(makeMeta(), makeSample());
+      storeAnalysisResult('fuid_abc123', {
+        emotionTags: ['cute'],
+        personaFit: true,
+      });
+
+      const before = getReadyStickersByIntent('cute');
+      expect(before.length).toBe(1);
+      const scoreBefore = before[0]!.score;
+
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+
+      const after = getReadyStickersByIntent('cute');
+      expect(after.length).toBe(1);
+      expect(after[0]!.score).toBeCloseTo(scoreBefore * 0.5, 5);
+    });
+  });
+
+  describe('recordStickerSent / lookupSentSticker', () => {
+    it('should record and look up a sent sticker', () => {
+      recordStickerSent(-1001234, 500, 'fuid_abc123', 'fid_xyz', 'cute');
+
+      const result = lookupSentSticker(-1001234, 500);
+      expect(result).not.toBeNull();
+      expect(result!.fileUniqueId).toBe('fuid_abc123');
+      expect(result!.fileId).toBe('fid_xyz');
+      expect(result!.intent).toBe('cute');
+    });
+
+    it('should return null for unknown message', () => {
+      expect(lookupSentSticker(-1001234, 999)).toBeNull();
+    });
+
+    it('should overwrite on duplicate chat+message', () => {
+      recordStickerSent(-1001234, 500, 'fuid_1', 'fid_1');
+      recordStickerSent(-1001234, 500, 'fuid_2', 'fid_2');
+
+      const result = lookupSentSticker(-1001234, 500);
+      expect(result!.fileUniqueId).toBe('fuid_2');
+    });
+  });
+
+  describe('recordStickerDislike / getStickerScore', () => {
+    it('should decay user_score by 0.5 each dislike', () => {
+      recordStickerUsage(makeMeta(), makeSample());
+
+      expect(getStickerScore('fuid_abc123')).toBeCloseTo(1.0);
+
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+      expect(getStickerScore('fuid_abc123')).toBeCloseTo(0.5);
+
+      recordStickerDislike('fuid_abc123', -1001234, 42);
+      expect(getStickerScore('fuid_abc123')).toBeCloseTo(0.25);
+    });
+
+    it('should set persona_fit=false when score drops below 0.1', () => {
+      recordStickerUsage(makeMeta(), makeSample());
+
+      // 4 dislikes: 1.0 → 0.5 → 0.25 → 0.125 → 0.0625
+      for (let i = 0; i < 4; i++) {
+        recordStickerDislike('fuid_abc123', -1001234, 42);
+      }
+
+      const item = getItem('fuid_abc123');
+      expect(item!.personaFit).toBe(false);
+      expect(getStickerScore('fuid_abc123')).toBeLessThanOrEqual(0.1);
+    });
+
+    it('should return 1.0 for non-existent sticker', () => {
+      expect(getStickerScore('nonexistent')).toBeCloseTo(1.0);
+    });
+  });
+
+  describe('cleanupOldSentLog', () => {
+    it('should delete entries older than maxAgeSec', () => {
+      // Insert a record with an old timestamp by manipulating DB directly
+      testDb.prepare(`
+        INSERT INTO sticker_sent_log (chat_id, message_id, file_unique_id, file_id, sent_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(-1001234, 500, 'fuid_abc123', 'fid_xyz', Math.floor(Date.now() / 1000) - 100000);
+
+      recordStickerSent(-1001234, 501, 'fuid_abc123', 'fid_xyz');
+
+      const deleted = cleanupOldSentLog(86400);
+      expect(deleted).toBe(1);
+
+      expect(lookupSentSticker(-1001234, 500)).toBeNull();
+      expect(lookupSentSticker(-1001234, 501)).not.toBeNull();
     });
   });
 });

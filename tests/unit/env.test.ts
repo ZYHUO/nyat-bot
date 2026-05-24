@@ -4,13 +4,11 @@ import { parseEnv } from '../../src/env.js';
 describe('parseEnv', () => {
   const validEnv = {
     BOT_TOKEN: 'test-token-123',
-    AI_API_KEY: 'sk-test-key',
   };
 
   it('parses minimal valid env with defaults', () => {
     const env = parseEnv(validEnv);
     expect(env.BOT_TOKEN).toBe('test-token-123');
-    expect(env.AI_API_KEY).toBe('sk-test-key');
     expect(env.PORT).toBe(3000);
     expect(env.NODE_ENV).toBe('development');
     expect(env.LOG_LEVEL).toBe('info');
@@ -21,11 +19,7 @@ describe('parseEnv', () => {
   });
 
   it('throws on missing BOT_TOKEN', () => {
-    expect(() => parseEnv({ AI_API_KEY: 'sk-test' })).toThrow();
-  });
-
-  it('throws on missing AI_API_KEY', () => {
-    expect(() => parseEnv({ BOT_TOKEN: 'tok' })).toThrow();
+    expect(() => parseEnv({})).toThrow();
   });
 
   it('coerces numeric values', () => {
@@ -38,6 +32,21 @@ describe('parseEnv', () => {
     expect(env.PORT).toBe(8080);
     expect(env.MASTER_UID).toBe(12345);
     expect(env.CONTEXT_MAX_LENGTH).toBe(200);
+  });
+
+  it('parses boolean env strings literally', () => {
+    const env = parseEnv({
+      ...validEnv,
+      VERIFY_ENABLED: 'false',
+      ALLOWLIST_ENABLED: '0',
+      ALLOWLIST_AUTO_AI_REVIEW: 'true',
+      JUDGE_KNOWLEDGE_GROUP: '1',
+    });
+
+    expect(env.VERIFY_ENABLED).toBe(false);
+    expect(env.ALLOWLIST_ENABLED).toBe(false);
+    expect(env.ALLOWLIST_AUTO_AI_REVIEW).toBe(true);
+    expect(env.JUDGE_KNOWLEDGE_GROUP).toBe(true);
   });
 
   it('splits BOT_NICKNAMES by comma', () => {

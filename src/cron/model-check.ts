@@ -1,10 +1,9 @@
 // ────────────────────────────────────────
 // Model health status check — ping AI endpoints
-// Port of PHP cron_model_status.php
 // ────────────────────────────────────────
 
-import { env } from '../env.js';
 import { getRedis } from '../db/redis.js';
+import { getLabels, getUsage } from '../ai/labels.js';
 import { classifyModelStatus } from '../tracking/model-status.js';
 import { saveModelStatusSnapshot } from '../admin/model-status.js';
 import type { ModelStatusSnapshot } from '../admin/model-status.js';
@@ -18,39 +17,52 @@ function toSnapshotStatus(s: string): 'ok' | 'error' | 'timeout' | 'slow' {
 }
 
 export async function runModelCheck(): Promise<void> {
-  const e = env();
   const redis = getRedis();
 
-  const models: Array<{ label: string; role: string }> = [
-    { label: e.AI_MODEL_REPLY, role: 'main' },
-    { label: e.AI_MODEL_REPLY_PRO, role: 'pro' },
-    { label: e.AI_MODEL_JUDGE, role: 'judge' },
-    { label: e.AI_MODEL_ALLOWLIST_REVIEW, role: 'review' },
-  ];
+  // Check the primary label for all active usages
+  const usageNames = ['reply', 'reply_pro', 'judge', 'vision', 'planner', 'summarize', 'allowlist_review'] as const;
+  const checked = new Set<string>();
 
   const snapshot: ModelStatusSnapshot = {
     ts: Math.floor(Date.now() / 1000),
     models: {},
   };
 
-  for (const m of models) {
+  for (const usageName of usageNames) {
+    let usage;
+    try { usage = getUsage(usageName); } catch { continue; }
+    const labelName = usage.label;
+    if (checked.has(labelName)) continue;
+    checked.add(labelName);
+
+    const label = getLabels().get(labelName);
+    if (!label) continue;
+
     const start = Date.now();
     let httpCode = 0;
     let error = '';
     let responseBody = '';
 
     try {
-      const res = await fetch(`${e.AI_BASE_URL}/chat/completions`, {
+      const isClaude = label.apiFormat === 'claude';
+      const endpoint = isClaude
+        ? `${label.endpoint}/messages`
+        : `${label.endpoint}/chat/completions`;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (isClaude) {
+        headers['x-api-key'] = label.apiKeys[0] ?? '';
+        headers['anthropic-version'] = '2023-06-01';
+      } else {
+        headers['Authorization'] = `Bearer ${label.apiKeys[0] ?? ''}`;
+      }
+      const body = isClaude
+        ? { model: label.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }
+        : { model: label.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 };
+
+      const res = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${e.AI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: m.label,
-          messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 1,
-        }),
+        headers,
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(20_000),
       });
       httpCode = res.status;
@@ -64,12 +76,17 @@ export async function runModelCheck(): Promise<void> {
     const latency = Date.now() - start;
     const result = classifyModelStatus(httpCode, error, latency, responseBody);
 
-    snapshot.models[m.label] = {
-      role: m.role,
-      model: m.label,
-      status: toSnapshotStatus(result.status),
-      latency_ms: latency,
-    };
+    // Key by "model (usage)" to differentiate same model used for different usages
+    const displayKey = `${label.model}`;
+    // If same model is used for multiple usages, keep the first one (already checked)
+    if (!snapshot.models[displayKey]) {
+      snapshot.models[displayKey] = {
+        role: usageName,
+        model: label.model,
+        status: toSnapshotStatus(result.status),
+        latency_ms: latency,
+      };
+    }
   }
 
   await saveModelStatusSnapshot(redis, snapshot);
