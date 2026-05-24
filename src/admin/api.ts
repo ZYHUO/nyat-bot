@@ -487,19 +487,29 @@ export function createAdminApi(deps: ApiDeps): Hono {
     if (!/^[a-zA-Z0-9_-]+$/.test(fuid) || fuid.length > 100) {
       return c.json({ ok: false, error: 'invalid_fuid' }, 400);
     }
-    // Project-local preview path (data/sticker_assets/preview/<fuid>.png).
-    // The sticker_items.preview_asset_path may point at a legacy PHP path on disk,
-    // but the same file is mirrored into data/sticker_assets/preview/ which is
-    // the canonical location for the TS port.
-    const baseDir = resolvePath(process.cwd(), 'data/sticker_assets/preview');
-    const filePath = resolvePath(baseDir, `${fuid}.png`);
-    if (!filePath.startsWith(baseDir)) {
+    // Resolution order:
+    //   1. Preview PNG generated for video_webm / animated_tgs
+    //   2. Original static_webp (browser-native, no conversion needed)
+    // Both directories are validated to be inside data/sticker_assets/.
+    const previewDir = resolvePath(process.cwd(), 'data/sticker_assets/preview');
+    const rawDir = resolvePath(process.cwd(), 'data/sticker_assets/raw');
+    const previewPng = resolvePath(previewDir, `${fuid}.png`);
+    const rawWebp = resolvePath(rawDir, fuid, 'original.webp');
+    if (!previewPng.startsWith(previewDir) || !rawWebp.startsWith(rawDir)) {
       return c.json({ ok: false, error: 'invalid_path' }, 400);
     }
+    // Try PNG first
     try {
-      const buf = await readFile(filePath);
+      const buf = await readFile(previewPng);
       return c.body(buf, 200, {
         'Content-Type': 'image/png',
+        'Cache-Control': 'private, max-age=86400',
+      });
+    } catch { /* fall through to webp */ }
+    try {
+      const buf = await readFile(rawWebp);
+      return c.body(buf, 200, {
+        'Content-Type': 'image/webp',
         'Cache-Control': 'private, max-age=86400',
       });
     } catch {
