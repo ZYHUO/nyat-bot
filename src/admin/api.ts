@@ -5,7 +5,7 @@ import type { Bot } from 'grammy';
 import { logger } from '../shared/logger.js';
 import { validateInitData, isMaster } from './auth.js';
 import type { TelegramUser } from './auth.js';
-import type { AllowlistConfig } from '../allowlist/types.js';
+import type { AllowlistConfig, GroupRecord, PendingRequest } from '../allowlist/types.js';
 import * as allowlist from '../allowlist/allowlist.js';
 import * as aiReview from '../allowlist/ai-review.js';
 import * as notify from '../allowlist/notify.js';
@@ -14,6 +14,26 @@ import * as modelStatus from './model-status.js';
 import * as botPermission from './bot-permission.js';
 import { checkHealth } from './health.js';
 import type { Env } from '../env.js';
+import * as stickerStore from '../knowledge/sticker/store.js';
+import * as verifyStore from '../verification/store.js';
+import { getDb } from '../db/sqlite.js';
+
+type AdminGroupRecord = GroupRecord & {
+  chat_username?: string;
+  verify_enabled?: boolean;
+};
+
+function hasTitle(chat: unknown): chat is { title?: string; username?: string } {
+  return typeof chat === 'object' && chat !== null && 'title' in chat;
+}
+
+async function tryGetChat(bot: Bot, chatId: number): Promise<unknown> {
+  const idsToTry = chatId > 0 ? [Number(`-100${chatId}`), chatId] : [chatId];
+  for (const id of idsToTry) {
+    try { return await bot.api.getChat(id); } catch { /* try next */ }
+  }
+  return null;
+}
 
 interface ApiDeps {
   redis: Redis;
@@ -37,6 +57,7 @@ async function handleBootstrap(
     return {
       ok: true,
       is_master: false,
+      managed_enabled: deps.config.enabled,
       user: { id: user.id, first_name: user.first_name, username: user.username },
       ...myData,
     };
@@ -45,29 +66,38 @@ async function handleBootstrap(
   const pending = await allowlist.listPending(deps.redis, deps.config);
   const groups = await allowlist.listGroups(deps.redis, deps.config);
   const manualQueue = await allowlist.listManualQueue(deps.redis, deps.config);
-  const override = await runtimeConfig.loadOverride(deps.redis);
 
-  const modelRouting = runtimeConfig.buildModelRoutingAdminView(
-    {
-      AI_MODEL_REPLY: deps.env.AI_MODEL_REPLY,
-      AI_MODEL_REPLY_PRO: deps.env.AI_MODEL_REPLY_PRO,
-      AI_MODEL_JUDGE: deps.env.AI_MODEL_JUDGE,
-      AI_MODEL_ALLOWLIST_REVIEW: deps.env.AI_MODEL_ALLOWLIST_REVIEW,
-    },
-    override,
-  );
-
-  // Strip API keys from providers before sending to client
-  if (modelRouting.providers && typeof modelRouting.providers === 'object') {
-    const sanitized = modelRouting.providers as Record<string, Record<string, unknown>>;
-    for (const label of Object.keys(sanitized)) {
-      const entry = sanitized[label];
-      if (entry) {
-        delete entry.api_key;
-        delete entry.api_keys;
-      }
+  // Hydrate chat titles (bootstrap). Both record types share `chat_id`; the
+  // mutated extras (`title` / `chat_title` / `chat_username`) are tracked on
+  // the intersection so the loop is type-safe in place.
+  type Hydratable = (PendingRequest | GroupRecord) & {
+    title?: string;
+    chat_title?: string;
+    chat_username?: string;
+  };
+  for (const item of [...pending, ...groups] as Hydratable[]) {
+    const cid = item.chat_id;
+    if (!cid) continue;
+    const idsToTry = cid > 0 ? [Number(`-100${cid}`), cid] : [cid];
+    for (const tryId of idsToTry) {
+      try {
+        const chat = await deps.bot.api.getChat(tryId);
+        if ('title' in chat && chat.title) { item.title = chat.title; item.chat_title = chat.title; }
+        if ('username' in chat && chat.username) { item.chat_username = `@${chat.username}`; }
+        break;
+      } catch { /* best-effort */ }
     }
   }
+  const override = await runtimeConfig.loadOverride(deps.redis);
+
+  // Hydrate verify settings for groups
+  const db = getDb();
+  for (const group of groups as AdminGroupRecord[]) {
+    const settings = verifyStore.getVerifySettings(db, group.chat_id);
+    group.verify_enabled = settings?.enabled ?? false;
+  }
+
+  const modelRouting = runtimeConfig.buildModelRoutingAdminView();
 
   const stickerPolicy = runtimeConfig.buildStickerPolicyAdminView(override);
 
@@ -78,6 +108,8 @@ async function handleBootstrap(
     manual_queue: manualQueue,
     model_routing: modelRouting,
     sticker_policy: stickerPolicy,
+    managed_enabled: deps.config.enabled,
+    verify_enabled: deps.env.VERIFY_ENABLED,
     is_master: master,
     user: { id: user.id, first_name: user.first_name, username: user.username },
   };
@@ -112,6 +144,9 @@ async function handleSubmit(
       .runAiReview(deps.redis, deps.config, result.request_id, {
         aiCall: deps.aiCall,
         getRecentContext: deps.getRecentContext,
+        getChat: async (cid: number) => {
+          return tryGetChat(deps.bot, cid);
+        },
       })
       .catch((err: unknown) => logger.warn({ err, chatId }, 'Auto AI review failed'));
   }
@@ -149,14 +184,15 @@ async function handleList(deps: ApiDeps): Promise<Record<string, unknown>> {
   const manualQueue = await allowlist.listManualQueue(deps.redis, deps.config);
 
   // Hydrate chat titles
-  for (const group of groups) {
-    try {
-      if (group.chat_id) {
-        const chat = await deps.bot.api.getChat(group.chat_id);
-        group.title = 'title' in chat ? (chat.title ?? `Chat ${group.chat_id}`) : `Chat ${group.chat_id}`;
+  for (const group of groups as AdminGroupRecord[]) {
+    if (group.chat_id) {
+      const chat = await tryGetChat(deps.bot, group.chat_id);
+      if (hasTitle(chat)) {
+        group.title = chat.title ?? `Chat ${group.chat_id}`;
+        if ('username' in chat && chat.username) {
+          group.chat_username = `@${chat.username}`;
+        }
       }
-    } catch {
-      // title hydration is best-effort
     }
   }
 
@@ -211,6 +247,9 @@ async function handleAiReview(
   const result = await aiReview.runAiReview(deps.redis, deps.config, requestId, {
     aiCall: deps.aiCall,
     getRecentContext: deps.getRecentContext,
+    getChat: async (cid: number) => {
+      return tryGetChat(deps.bot, cid);
+    },
   });
   return result;
 }
@@ -247,66 +286,15 @@ async function handleRemoveGroup(
   return { ok };
 }
 
-async function handleModelRoutingGet(deps: ApiDeps): Promise<Record<string, unknown>> {
-  const override = await runtimeConfig.loadOverride(deps.redis);
-  const view = runtimeConfig.buildModelRoutingAdminView(
-    {
-      AI_MODEL_REPLY: deps.env.AI_MODEL_REPLY,
-      AI_MODEL_REPLY_PRO: deps.env.AI_MODEL_REPLY_PRO,
-      AI_MODEL_JUDGE: deps.env.AI_MODEL_JUDGE,
-      AI_MODEL_ALLOWLIST_REVIEW: deps.env.AI_MODEL_ALLOWLIST_REVIEW,
-    },
-    override,
-  );
-
-  // Strip API keys from providers before sending to client
-  if (view.providers && typeof view.providers === 'object') {
-    const sanitized = view.providers as Record<string, Record<string, unknown>>;
-    for (const label of Object.keys(sanitized)) {
-      const entry = sanitized[label];
-      if (entry) {
-        delete entry.api_key;
-        delete entry.api_keys;
-      }
-    }
-  }
-
+async function handleModelRoutingGet(): Promise<Record<string, unknown>> {
+  const view = runtimeConfig.buildModelRoutingAdminView();
   return { ok: true, ...view };
-}
-
-async function handleModelRoutingSave(
-  deps: ApiDeps,
-  body: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const override = (await runtimeConfig.loadOverride(deps.redis)) ?? {};
-  override.usage = body.usage as typeof override.usage;
-  await runtimeConfig.saveOverride(deps.redis, override);
-  logger.info('Model routing override saved via admin');
-  return { ok: true };
-}
-
-async function handleProviderUpsert(
-  deps: ApiDeps,
-  body: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const label = String(body.label ?? '');
-  const provider = body.provider as runtimeConfig.ProviderOverride | undefined;
-  if (!label || !provider?.endpoint || !provider?.model) {
-    return { ok: false, error: 'invalid_provider_params' };
-  }
-
-  const override = (await runtimeConfig.loadOverride(deps.redis)) ?? {};
-  if (!override.providers) override.providers = {};
-  override.providers[label] = provider;
-  await runtimeConfig.saveOverride(deps.redis, override);
-  logger.info({ label }, 'Provider upserted via admin');
-  return { ok: true };
 }
 
 async function handleProviderValidate(
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const provider = body.provider as runtimeConfig.ProviderOverride | undefined;
+  const provider = body.provider as runtimeConfig.ProviderValidateInput | undefined;
   if (!provider?.endpoint || !provider?.model) {
     return { ok: false, error: 'invalid_provider_params' };
   }
@@ -332,6 +320,134 @@ async function handleStickerPolicySave(
   await runtimeConfig.saveOverride(deps.redis, override);
   logger.info('Sticker policy override saved via admin');
   return { ok: true };
+}
+
+async function handleStickerKbList(): Promise<Record<string, unknown>> {
+  const raw = stickerStore.listStickerKbIndex();
+  const items: Array<Record<string, unknown>> = [];
+  for (const row of raw) {
+    const item: Record<string, unknown> = {
+      file_unique_id: row.file_unique_id,
+      latest_file_id: row.latest_file_id,
+      set_name: row.set_name,
+      emoji: row.emoji,
+      sticker_format: row.sticker_format,
+      usage_count: row.usage_count,
+      analysis_status: row.analysis_status,
+      asset_status: row.asset_status,
+    };
+    if (row.analysis_status === 'ready') {
+      const full = stickerStore.getItem(row.file_unique_id);
+      item['persona_fit'] = full?.personaFit ?? null;
+      item['emotion_tags'] = full?.emotionTags ?? [];
+      item['mood_map'] = full?.moodMap ?? {};
+    } else {
+      item['persona_fit'] = null;
+      item['emotion_tags'] = [];
+      item['mood_map'] = {};
+    }
+    items.push(item);
+  }
+  return { ok: true, items };
+}
+
+async function handleStickerKbUpdate(
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const fuid = typeof body['file_unique_id'] === 'string' ? body['file_unique_id'].trim() : '';
+  if (
+    fuid === '' ||
+    fuid.length > 100 ||
+    !/^[a-zA-Z0-9_-]+$/.test(fuid)
+  ) {
+    return { ok: false, error: 'missing_file_unique_id' };
+  }
+
+  if (!stickerStore.getItem(fuid)) {
+    return { ok: false, error: 'sticker_not_found' };
+  }
+
+  if (body['requeue']) {
+    const ok = stickerStore.requeueStickerAnalysis(fuid);
+    if (!ok) {
+      return { ok: false, error: 'sticker_not_found' };
+    }
+    return { ok: true, action: 'requeued' };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'persona_fit')) {
+    const raw = body['persona_fit'];
+    const newFit = raw === null ? null : Boolean(raw);
+    const ok = stickerStore.setStickerPersonaFit(fuid, newFit);
+    if (!ok) {
+      return { ok: false, error: 'sticker_not_found' };
+    }
+    return { ok: true, action: 'persona_fit_updated', persona_fit: newFit };
+  }
+
+  return { ok: false, error: 'no_action_specified' };
+}
+
+// ── Verify handlers ──────────────────────────────────────────────
+
+async function handleVerifyGetSettings(
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const chatId = Number(body.chat_id ?? 0);
+  if (!chatId) return { ok: false, error: 'missing_chat_id' };
+
+  const db = getDb();
+  const settings = verifyStore.getVerifySettings(db, chatId);
+  return {
+    ok: true,
+    settings: settings ?? {
+      chat_id: chatId,
+      enabled: false,
+      timeout_seconds: 300,
+      max_attempts: 3,
+      kick_on_fail: false,
+    },
+  };
+}
+
+async function handleVerifySetEnabled(
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const chatId = Number(body.chat_id ?? 0);
+  const enabled = Boolean(body.enabled);
+  if (!chatId) return { ok: false, error: 'missing_chat_id' };
+
+  const db = getDb();
+  verifyStore.setVerifyEnabled(db, chatId, enabled);
+  return { ok: true };
+}
+
+async function handleVerifySetConfig(
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const chatId = Number(body.chat_id ?? 0);
+  if (!chatId) return { ok: false, error: 'missing_chat_id' };
+
+  const config: Record<string, unknown> = {};
+  if (body.timeout_seconds !== undefined) config.timeout_seconds = Number(body.timeout_seconds);
+  if (body.max_attempts !== undefined) config.max_attempts = Number(body.max_attempts);
+  if (body.kick_on_fail !== undefined) config.kick_on_fail = Boolean(body.kick_on_fail);
+
+  const db = getDb();
+  verifyStore.setVerifyConfig(db, chatId, config as Parameters<typeof verifyStore.setVerifyConfig>[2]);
+  return { ok: true };
+}
+
+async function handleVerifyStats(
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const chatId = Number(body.chat_id ?? 0);
+  if (!chatId) return { ok: false, error: 'missing_chat_id' };
+
+  const db = getDb();
+  const since = Math.floor(Date.now() / 1000) - 7 * 24 * 3600; // last 7 days
+  const stats = verifyStore.getRecentStats(db, chatId, since);
+  return { ok: true, stats };
 }
 
 // ── Create Hono API ────────────────────────────────────────────────
@@ -419,13 +535,7 @@ export function createAdminApi(deps: ApiDeps): Hono {
           return c.json(await handleRemoveGroup(deps, body));
         case 'model_routing_get':
           if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
-          return c.json(await handleModelRoutingGet(deps));
-        case 'model_routing_save':
-          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
-          return c.json(await handleModelRoutingSave(deps, body));
-        case 'provider_upsert':
-          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
-          return c.json(await handleProviderUpsert(deps, body));
+          return c.json(await handleModelRoutingGet());
         case 'provider_validate':
           if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
           return c.json(await handleProviderValidate(body));
@@ -435,6 +545,31 @@ export function createAdminApi(deps: ApiDeps): Hono {
         case 'sticker_policy_save':
           if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
           return c.json(await handleStickerPolicySave(deps, body));
+        case 'sticker_kb_list':
+          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
+          return c.json(await handleStickerKbList());
+        case 'sticker_kb_update': {
+          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
+          const skRes = await handleStickerKbUpdate(body);
+          if (!skRes.ok) {
+            const err = String(skRes['error'] ?? '');
+            if (err === 'sticker_not_found') return c.json(skRes, 404);
+            if (err === 'missing_file_unique_id' || err === 'no_action_specified') {
+              return c.json(skRes, 400);
+            }
+          }
+          return c.json(skRes);
+        }
+        case 'verify_get_settings':
+          return c.json(await handleVerifyGetSettings(body));
+        case 'verify_set_enabled':
+          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
+          return c.json(await handleVerifySetEnabled(body));
+        case 'verify_set_config':
+          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
+          return c.json(await handleVerifySetConfig(body));
+        case 'verify_stats':
+          return c.json(await handleVerifyStats(body));
         default:
           return c.json({ ok: false, error: 'unknown_action' }, 400);
       }

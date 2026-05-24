@@ -20,11 +20,10 @@ export async function getBotPermissions(
     const member = await bot.api.getChatMember(chatId, botInfo.id);
 
     const admin = member.status === 'administrator' ? member : null;
+    const restricted = member.status === 'restricted' ? member : null;
     return {
       status: member.status,
-      can_send_messages:
-        member.status !== 'restricted' ||
-        (member as unknown as Record<string, boolean>).can_send_messages !== false,
+      can_send_messages: restricted ? restricted.can_send_messages !== false : true,
       can_delete_messages: !!admin?.can_delete_messages,
       can_pin_messages: !!admin?.can_pin_messages,
       can_manage_chat: !!admin?.can_manage_chat,

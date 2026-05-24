@@ -1,13 +1,17 @@
 import { createHmac, timingSafeEqual } from 'crypto';
+import { z } from 'zod';
 import { logger } from '../shared/logger.js';
+import { env } from '../env.js';
 
-export interface TelegramUser {
-  id: number;
-  first_name: string;
-  last_name?: string;
-  username?: string;
-  language_code?: string;
-}
+const telegramUserSchema = z.object({
+  id: z.number().int().positive(),
+  first_name: z.string(),
+  last_name: z.string().optional(),
+  username: z.string().optional(),
+  language_code: z.string().optional(),
+});
+
+export type TelegramUser = z.infer<typeof telegramUserSchema>;
 
 /**
  * Validate Telegram WebApp initData using HMAC-SHA256.
@@ -31,17 +35,23 @@ export function validateInitData(initData: string, botToken: string): TelegramUs
     const hashBuf = Buffer.from(hash, 'hex');
     if (computedBuf.length !== hashBuf.length || !timingSafeEqual(computedBuf, hashBuf)) return null;
 
-    // Check auth_date freshness (5 min window)
+    // Check auth_date freshness (24h window — Telegram's recommended production limit)
     const authDate = params.get('auth_date');
-    if (authDate) {
-      const age = Math.floor(Date.now() / 1000) - parseInt(authDate, 10);
-      if (age > 300) return null;
-    }
+    if (!authDate) return null; // auth_date 必须存在
+    const authTs = parseInt(authDate, 10);
+    if (!Number.isFinite(authTs)) return null;
+    const age = Math.floor(Date.now() / 1000) - authTs;
+    if (age > 86400) return null;
 
-    // Parse user
+    // Parse and validate user
     const userJson = params.get('user');
     if (!userJson) return null;
-    return JSON.parse(userJson) as TelegramUser;
+    const parsed = telegramUserSchema.safeParse(JSON.parse(userJson));
+    if (!parsed.success) {
+      logger.warn({ issues: parsed.error.issues }, 'validateInitData: user payload schema invalid');
+      return null;
+    }
+    return parsed.data;
   } catch (err) {
     logger.warn({ err }, 'validateInitData failed');
     return null;
@@ -49,5 +59,6 @@ export function validateInitData(initData: string, botToken: string): TelegramUs
 }
 
 export function isMaster(userId: number, masterUid: number): boolean {
-  return userId === masterUid && masterUid > 0;
+  const extra = new Set(env().MASTER_UID_EXTRA);
+  return (masterUid > 0 && userId === masterUid) || extra.has(userId);
 }

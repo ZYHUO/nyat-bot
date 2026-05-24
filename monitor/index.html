@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>群聊监控</title>
+<style>
+:root{
+  --bg-main:#0e1621;
+  --bg-sidebar:#17212b;
+  --bg-sidebar-hover:#202b36;
+  --bg-sidebar-active:#2b5278;
+  --bg-header:#17212b;
+  --bg-bubble-in:#182533;
+  --bg-bubble-out:#2b5278;
+  --fg:#f5f5f5;
+  --fg-secondary:#aaaaaa;
+  --fg-time:rgba(255,255,255,.45);
+  --accent:#8774e1;
+  --accent-green:#4fae4e;
+  --border:#0e1621;
+  --bubble-radius:12px;
+  --bubble-max-width:480px;
+  --sidebar-width:320px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-main);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;font-size:14px;height:100vh;overflow:hidden}
+
+/* Auth */
+#auth{display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg-main);animation:fadeIn .3s}
+.auth-card{background:var(--bg-sidebar);border-radius:12px;padding:40px 32px;display:flex;flex-direction:column;align-items:center;gap:20px;width:360px;max-width:90vw;box-shadow:0 2px 40px rgba(0,0,0,.3)}
+.auth-card h2{color:var(--fg);font-size:20px;font-weight:500}
+.auth-card input{width:100%;padding:14px 16px;background:transparent;border:2px solid #3f4e5e;border-radius:12px;color:var(--fg);font-size:16px;outline:none;transition:border-color .2s}
+.auth-card input:focus{border-color:var(--accent)}
+.auth-card button{width:100%;padding:14px;background:var(--accent);border:none;border-radius:12px;color:#fff;font-weight:600;font-size:16px;cursor:pointer;transition:opacity .15s,transform .1s}
+.auth-card button:active{opacity:.85;transform:scale(.98)}
+.auth-card .error{color:#e53935;font-size:13px;min-height:18px}
+
+/* Layout */
+#main-app{display:none;height:100vh;animation:fadeIn .3s}
+.layout{display:flex;height:100%}
+
+/* Sidebar */
+.sidebar{width:var(--sidebar-width);background:var(--bg-sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;transition:transform .25s ease,opacity .25s ease}
+.sidebar-top{display:flex;align-items:center;padding:8px 8px 8px 16px;gap:8px;height:56px}
+.sidebar-hamburger{width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--fg-secondary);cursor:pointer;border-radius:50%;flex-shrink:0;transition:background .15s}
+.sidebar-hamburger:hover{background:var(--bg-sidebar-hover)}
+.sidebar-search-wrap{flex:1;position:relative}
+.sidebar-search-wrap svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:var(--fg-secondary);pointer-events:none}
+.sidebar-search-wrap input{width:100%;padding:9px 14px 9px 40px;background:#242f3d;border:1.5px solid transparent;border-radius:22px;color:var(--fg);font-size:14px;outline:none;transition:border-color .2s,background .2s}
+.sidebar-search-wrap input:focus{background:#242f3d;border-color:var(--accent)}
+.sidebar-search-wrap input::placeholder{color:var(--fg-secondary)}
+
+/* Sidebar tabs */
+.sidebar-tabs{display:flex;padding:0 8px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sidebar-tab{flex:1;text-align:center;padding:12px 0;cursor:pointer;font-size:14px;font-weight:500;color:var(--fg-secondary);border-bottom:2px solid transparent;transition:color .2s,border-color .2s}
+.sidebar-tab:hover{color:var(--fg)}
+.sidebar-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* Chat list */
+.chat-list{flex:1;overflow-y:auto;padding:8px}
+.chat-item{display:flex;padding:9px 12px;cursor:pointer;transition:background .15s;gap:12px;align-items:center;border-radius:10px;position:relative;margin-bottom:1px}
+.chat-item:hover{background:var(--bg-sidebar-hover)}
+.chat-item.active{background:var(--bg-sidebar-active)}
+.chat-item-body{flex:1;min-width:0}
+.chat-item-top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
+.chat-item-title{font-weight:500;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
+.chat-item-time{font-size:12px;color:var(--fg-secondary);flex-shrink:0;margin-left:8px}
+.chat-item-preview{font-size:14px;color:var(--fg-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3}
+.chat-item-badge{position:absolute;right:12px;bottom:12px;min-width:22px;height:22px;border-radius:11px;background:var(--accent);color:#fff;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;padding:0 6px}
+
+/* Skeleton */
+.skeleton-item{display:flex;padding:9px 12px;gap:12px;align-items:center;border-radius:10px}
+.skeleton-circle{width:54px;height:54px;border-radius:50%;background:#242f3d;animation:pulse 1.4s ease-in-out infinite}
+.skeleton-lines{flex:1;display:flex;flex-direction:column;gap:10px}
+.skeleton-line{height:12px;background:#242f3d;border-radius:6px;animation:pulse 1.4s ease-in-out infinite}
+.skeleton-line.short{width:55%}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:.7}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideIn{from{transform:translateX(30px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes msgSlideUp{from{transform:translateY(12px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* Right panel */
+.right-panel{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
+.right-panel.animate-in{animation:slideIn .25s ease}
+.msg-header{padding:0 16px;background:var(--bg-header);border-bottom:1px solid rgba(255,255,255,.04);flex-shrink:0;height:56px;display:flex;align-items:center;justify-content:space-between}
+.msg-header-left{display:flex;align-items:center;gap:12px;min-width:0}
+.msg-header-info{min-width:0}
+.msg-header-title{font-weight:500;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg-header-sub{font-size:13px;color:var(--fg-secondary);margin-top:1px}
+.msg-header-right{display:flex;gap:4px;flex-shrink:0}
+.msg-header-btn{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:50%;cursor:pointer;color:var(--fg-secondary);transition:background .15s}
+.msg-header-btn:hover{background:var(--bg-sidebar-hover)}
+
+/* Message area - TG pattern background */
+.msg-area{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:2px;background-color:#0e1621;background-image:url("data:image/svg+xml,%3Csvg width='200' height='200' xmlns='http://www.w3.org/2000/svg'%3E%3Cdefs%3E%3Cpattern id='p' width='40' height='40' patternUnits='userSpaceOnUse'%3E%3Ccircle cx='20' cy='20' r='1' fill='%23ffffff' opacity='0.03'/%3E%3Ccircle cx='5' cy='5' r='0.5' fill='%23ffffff' opacity='0.02'/%3E%3Ccircle cx='35' cy='12' r='0.7' fill='%23ffffff' opacity='0.025'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='200' height='200' fill='url(%23p)'/%3E%3C/svg%3E")}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--fg-secondary);gap:12px}
+.empty-state-logo{font-size:72px;opacity:.6}
+.empty-state-text{font-size:15px;opacity:.7}
+
+/* Spinner */
+.spinner-wrap{display:flex;align-items:center;justify-content:center;height:100%}
+.spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.1);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Messages */
+.msg-wrapper{display:flex;flex-direction:column;max-width:var(--bubble-max-width);animation:msgSlideUp .2s ease}
+.msg-wrapper.user{align-self:flex-start}
+.msg-wrapper.bot{align-self:flex-end;align-items:flex-end}
+.msg-name{font-size:13px;font-weight:600;margin-bottom:2px;padding-left:4px}
+.msg-bubble{padding:7px 12px 8px;font-size:14px;line-height:1.5;word-break:break-word;position:relative;display:inline-block;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.msg-wrapper.user .msg-bubble{background:var(--bg-bubble-in);border-radius:4px var(--bubble-radius) var(--bubble-radius) var(--bubble-radius)}
+.msg-wrapper.bot .msg-bubble{background:var(--bg-bubble-out);border-radius:var(--bubble-radius) 4px var(--bubble-radius) var(--bubble-radius)}
+
+/* Bubble tails */
+.msg-bubble.tail-user::before{content:'';position:absolute;top:0;left:-8px;width:0;height:0;border-style:solid;border-width:0 8px 8px 0;border-color:transparent var(--bg-bubble-in) transparent transparent}
+.msg-bubble.tail-bot::before{content:'';position:absolute;top:0;right:-8px;width:0;height:0;border-style:solid;border-width:8px 8px 0 0;border-color:var(--bg-bubble-out) transparent transparent transparent}
+
+/* Inline time */
+.msg-inline-time{font-size:11px;color:var(--fg-time);float:right;margin-left:10px;margin-top:6px;line-height:1.4}
+.msg-text{white-space:pre-wrap}
+.msg-text a{color:#6ab2f2;text-decoration:none}
+.msg-text a:hover{text-decoration:underline}
+
+/* Date separator */
+.date-sep{align-self:center;font-size:14px;color:rgba(255,255,255,.7);padding:5px 14px;margin:10px 0;background:rgba(0,0,0,.35);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-radius:18px;font-weight:400}
+
+/* System message */
+.msg-system{align-self:center;font-size:13px;color:var(--fg-secondary);font-style:italic;padding:4px 0}
+
+/* Msg row with avatar */
+.msg-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:2px}
+.msg-row.bot{flex-direction:row-reverse}
+.msg-row.gap-top{margin-top:10px}
+.msg-avatar-placeholder{width:34px;flex-shrink:0}
+
+/* Scroll to bottom */
+.scroll-bottom-btn{position:absolute;bottom:20px;right:20px;width:44px;height:44px;border-radius:50%;background:var(--bg-sidebar);border:none;color:var(--fg);display:none;align-items:center;justify-content:center;cursor:pointer;z-index:5;font-size:18px;box-shadow:0 2px 12px rgba(0,0,0,.5);transition:transform .2s}
+.scroll-bottom-btn:hover{transform:scale(1.05)}
+.scroll-bottom-btn.visible{display:flex}
+.scroll-bottom-badge{position:absolute;top:-6px;right:-4px;min-width:20px;height:20px;border-radius:10px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 5px}
+
+/* Avatar - gradient backgrounds */
+.avatar{width:54px;height:54px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:21px;font-weight:500;color:#fff;flex-shrink:0;letter-spacing:-.5px}
+.avatar-sm{width:34px;height:34px;font-size:14px}
+.avatar-bot{background:linear-gradient(135deg,#8b5cf6,#6366f1)}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.25)}
+
+/* Mobile */
+@media(max-width:600px){
+  .sidebar{width:100%;position:absolute;inset:0;z-index:10}
+  .sidebar.hidden{display:none}
+  .right-panel.hidden{display:none}
+  .right-panel{width:100%}
+  .mobile-back{display:flex!important}
+  .msg-wrapper{max-width:85%}
+  .msg-area{padding:10px}
+}
+@media(min-width:601px){
+  .mobile-back{display:none!important}
+}
+</style>
+</head>
+<body>
+
+<div id="auth">
+  <div class="auth-card">
+    <h2>Telegram Monitor</h2>
+    <input id="token-input" type="password" placeholder="输入访问密码" autofocus>
+    <button onclick="doAuth()">登录</button>
+    <div class="error" id="auth-error"></div>
+  </div>
+</div>
+
+<div id="main-app">
+  <div class="layout">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-hamburger">☰</div>
+        <div class="sidebar-search-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input id="search-input" placeholder="搜索" oninput="filterChats()">
+        </div>
+      </div>
+      <div class="sidebar-tabs">
+        <div class="sidebar-tab active" id="tab-groups" onclick="switchTab('groups')">群组</div>
+        <div class="sidebar-tab" id="tab-dms" onclick="switchTab('dms')">私信</div>
+      </div>
+      <div class="chat-list" id="chat-list"></div>
+    </div>
+    <div class="right-panel" id="right-panel">
+      <div class="msg-header" id="msg-header" style="display:none">
+        <div class="msg-header-left">
+          <div class="msg-header-btn mobile-back" onclick="goBack()" style="display:none">←</div>
+          <div class="msg-header-info">
+            <div class="msg-header-title" id="header-title"></div>
+            <div class="msg-header-sub" id="header-sub"></div>
+          </div>
+        </div>
+        <div class="msg-header-right">
+          <div class="msg-header-btn"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></div>
+          <div class="msg-header-btn">⋮</div>
+        </div>
+      </div>
+      <div class="msg-area" id="msg-area">
+        <div class="empty-state"><div class="empty-state-logo">💬</div><div class="empty-state-text">选择一个聊天开始查看</div></div>
+      </div>
+      <div class="scroll-bottom-btn" id="scroll-btn" onclick="scrollToBottom()">↓</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API='/monitor/api';
+const AVATAR_GRADIENTS=[
+  'linear-gradient(135deg,#e17076,#f0a68c)',
+  'linear-gradient(135deg,#eda86c,#f6c87a)',
+  'linear-gradient(135deg,#a695e7,#c4b5fd)',
+  'linear-gradient(135deg,#7bc862,#a3e635)',
+  'linear-gradient(135deg,#6ec9cb,#67e8f9)',
+  'linear-gradient(135deg,#65aadd,#7dd3fc)',
+  'linear-gradient(135deg,#ee7aae,#f9a8d4)',
+  'linear-gradient(135deg,#e17076,#fb923c)'
+];
+const NAME_COLORS=['#fc5c65','#fd9644','#a55eea','#26de81','#2bcbba','#45aaf2','#ee7aae','#4b7bec'];
+
+let TOKEN=localStorage.getItem('monitor_token')||'';
+let currentChat=null,pollAbort=null,pollTotal=0;
+let allChats=[],groupChats=[],dmChats=[],activeTab='groups',newMsgCount=0;
+
+function avatarGradient(id){return AVATAR_GRADIENTS[Math.abs(id)%AVATAR_GRADIENTS.length]}
+function nameColor(uid){return NAME_COLORS[Math.abs(uid||0)%NAME_COLORS.length]}
+function avatarLetter(name){return(name||'?').charAt(0).toUpperCase()}
+function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
+function apiUrl(path){return API+path+(path.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN)}
+function linkify(t){return esc(t).replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')}
+
+function formatSmartTime(ts){
+  const now=new Date(),d=new Date(ts*1000);
+  const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
+  const msgDay=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+  if(msgDay.getTime()===today.getTime())return d.toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'});
+  if(msgDay.getTime()===yesterday.getTime())return'昨天';
+  return(d.getMonth()+1)+'/'+d.getDate();
+}
+function formatTime(ts){return new Date(ts*1000).toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})}
+function formatDate(ts){
+  const now=new Date(),d=new Date(ts*1000);
+  const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
+  const msgDay=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+  if(msgDay.getTime()===today.getTime())return'今天';
+  if(msgDay.getTime()===yesterday.getTime())return'昨天';
+  return(d.getMonth()+1)+'月'+d.getDate()+'日';
+}
+function dayKey(ts){const d=new Date(ts*1000);return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
+
+function makeAvatar(letter,gradient,cls){
+  const el=document.createElement('div');
+  el.className='avatar'+(cls?' '+cls:'');
+  if(gradient) el.style.background=gradient;
+  el.textContent=letter;
+  return el;
+}
+
+function isAtBottom(){const a=document.getElementById('msg-area');return a.scrollHeight-a.scrollTop-a.clientHeight<80}
+function scrollToBottom(){const a=document.getElementById('msg-area');a.scrollTop=a.scrollHeight;newMsgCount=0;updateScrollBtn()}
+function updateScrollBtn(){
+  const btn=document.getElementById('scroll-btn'),atB=isAtBottom();
+  btn.classList.toggle('visible',!atB);
+  const badge=btn.querySelector('.scroll-bottom-badge');
+  if(badge)badge.remove();
+  if(newMsgCount>0&&!atB){const b=document.createElement('div');b.className='scroll-bottom-badge';b.textContent=newMsgCount;btn.appendChild(b)}
+}
+
+document.addEventListener('DOMContentLoaded',()=>{
+  document.getElementById('msg-area').addEventListener('scroll',()=>{if(isAtBottom())newMsgCount=0;updateScrollBtn()});
+});
+
+// Auth
+document.getElementById('token-input').addEventListener('keydown',e=>{if(e.key==='Enter')doAuth()});
+async function doAuth(){
+  const input=document.getElementById('token-input').value.trim();
+  if(input)TOKEN=input;
+  if(!TOKEN)return;
+  try{
+    const r=await fetch(apiUrl('/chats'));
+    if(!r.ok){document.getElementById('auth-error').textContent='密码错误';return}
+    localStorage.setItem('monitor_token',TOKEN);
+    document.getElementById('auth').style.display='none';
+    document.getElementById('main-app').style.display='block';
+    loadChats();
+  }catch(e){document.getElementById('auth-error').textContent='连接失败'}
+}
+if(TOKEN)doAuth();
+
+// Tabs
+function switchTab(tab){
+  activeTab=tab;
+  document.getElementById('tab-groups').className='sidebar-tab'+(tab==='groups'?' active':'');
+  document.getElementById('tab-dms').className='sidebar-tab'+(tab==='dms'?' active':'');
+  filterChats();
+}
+
+// Chats
+async function loadChats(){
+  const r=await fetch(apiUrl('/chats'));
+  const d=await r.json();
+  allChats=d.chats||[];
+  groupChats=allChats.filter(c=>c.chatId<0);
+  dmChats=allChats.filter(c=>c.chatId>0);
+  filterChats();
+}
+
+function getVisibleChats(){return activeTab==='groups'?groupChats:dmChats}
+
+function renderChats(chats){
+  const list=document.getElementById('chat-list');
+  list.innerHTML='';
+  for(const c of chats){
+    const el=document.createElement('div');
+    el.className='chat-item'+(currentChat===c.chatId?' active':'');
+    const time=c.lastMessage?formatSmartTime(c.lastMessage.timestamp):'';
+    const preview=c.lastMessage?((c.lastMessage.fullName||'')+': '+(c.lastMessage.textContent||'[媒体]')).slice(0,50):'';
+    const letter=avatarLetter(c.title);
+    const grad=avatarGradient(c.chatId);
+    const msgCount=c.messageCount||0;
+    const badgeHtml=msgCount>0&&c.chatId!==currentChat?`<div class="chat-item-badge">${msgCount>99?'99+':msgCount}</div>`:'';
+    el.innerHTML=`<div class="avatar" style="background:${grad}">${esc(letter)}</div><div class="chat-item-body"><div class="chat-item-top"><span class="chat-item-title">${esc(c.title)}</span><span class="chat-item-time">${time}</span></div><div class="chat-item-preview">${esc(preview)}</div></div>${badgeHtml}`;
+    el.onclick=()=>selectChat(c.chatId,c.title,c.memberCount);
+    list.appendChild(el);
+  }
+}
+
+function filterChats(){
+  const q=document.getElementById('search-input').value.trim().toLowerCase();
+  const base=getVisibleChats();
+  renderChats(q?base.filter(c=>c.title.toLowerCase().includes(q)):base);
+}
+
+function selectChat(chatId,title,memberCount){
+  currentChat=chatId;
+  document.getElementById('header-title').textContent=title;
+  document.getElementById('header-sub').textContent=memberCount?memberCount+' 位成员':'';
+  document.getElementById('msg-header').style.display='';
+  newMsgCount=0;
+  filterChats();
+  const rp=document.getElementById('right-panel');
+  rp.classList.add('animate-in');
+  setTimeout(()=>rp.classList.remove('animate-in'),300);
+  if(window.innerWidth<=600){
+    document.getElementById('sidebar').classList.add('hidden');
+    document.getElementById('right-panel').classList.remove('hidden');
+  }
+  loadMessages(chatId);
+}
+
+function goBack(){
+  document.getElementById('sidebar').classList.remove('hidden');
+  document.getElementById('right-panel').classList.add('hidden');
+}
+
+// Messages
+async function loadMessages(chatId){
+  if(pollAbort){pollAbort.abort();pollAbort=null}
+  const area=document.getElementById('msg-area');
+  area.innerHTML='<div class="spinner-wrap"><div class="spinner"></div></div>';
+  const r=await fetch(apiUrl('/messages?chat_id='+chatId+'&limit=50'));
+  const d=await r.json();
+  renderMessages(d.messages||[]);
+  pollTotal=(d.messages||[]).length;
+  startPoll(chatId);
+}
+
+function renderMessages(messages){
+  const area=document.getElementById('msg-area');
+  area.innerHTML='';
+  let lastDay=null,lastUid=null;
+  for(const m of messages){
+    const day=dayKey(m.timestamp);
+    if(day!==lastDay){lastDay=day;lastUid=null;const sep=document.createElement('div');sep.className='date-sep';sep.textContent=formatDate(m.timestamp);area.appendChild(sep)}
+    area.appendChild(createMsg(m,lastUid));
+    lastUid=m.role==='system'?null:(m.uid||m.role);
+  }
+  area.scrollTop=area.scrollHeight;
+}
+
+function createMsg(m,lastUid){
+  if(m.role==='system'){const el=document.createElement('div');el.className='msg-system';el.textContent=m.textContent;return el}
+  const isBot=m.role==='assistant';
+  const uid=m.uid||m.role;
+  const showAvatar=uid!==lastUid;
+  const isNewGroup=uid!==lastUid;
+
+  const row=document.createElement('div');
+  row.className='msg-row'+(isBot?' bot':'')+(isNewGroup?' gap-top':'');
+
+  if(showAvatar){
+    if(isBot){row.appendChild(makeAvatar('🐱','','avatar-sm avatar-bot'))}
+    else{const name=m.fullName||m.username||'User';row.appendChild(makeAvatar(avatarLetter(name),avatarGradient(m.uid||0),'avatar-sm'))}
+  }else{const ph=document.createElement('div');ph.className='msg-avatar-placeholder';row.appendChild(ph)}
+
+  const wrapper=document.createElement('div');
+  wrapper.className='msg-wrapper '+(isBot?'bot':'user');
+
+  if(showAvatar&&!isBot){const n=document.createElement('div');n.className='msg-name';n.style.color=nameColor(m.uid);n.textContent=m.fullName||m.username||'User';wrapper.appendChild(n)}
+  else if(showAvatar&&isBot){const n=document.createElement('div');n.className='msg-name';n.style.color='#a78bfa';n.textContent='啾咪囝';wrapper.appendChild(n)}
+
+  const bubble=document.createElement('div');
+  bubble.className='msg-bubble';
+  if(showAvatar)bubble.classList.add(isBot?'tail-bot':'tail-user');
+
+  if(m.isForwarded){const fwd=document.createElement('div');fwd.style.cssText='font-size:12px;color:var(--accent);margin-bottom:4px;font-style:italic';fwd.textContent='转发自 '+(m.forwardFrom||'未知');bubble.appendChild(fwd)}
+
+  if(m.replyTo&&m.replyTo.textSnippet){const rb=document.createElement('div');rb.style.cssText='border-left:2px solid var(--accent);padding:2px 8px;margin-bottom:6px;font-size:12px;border-radius:2px';rb.innerHTML='<div style="color:var(--accent);font-weight:600">'+esc(m.replyTo.fullName||'')+'</div><div style="color:var(--fg-secondary)">'+esc(m.replyTo.textSnippet)+'</div>';bubble.appendChild(rb)}
+
+  const timeSpan='<span class="msg-inline-time">'+formatTime(m.timestamp)+'</span>';
+
+  if(m.sticker){
+    const fileId=m.sticker.fileId;
+    bubble.style.background='transparent';bubble.style.padding='4px';bubble.style.boxShadow='none';
+    bubble.classList.remove('tail-user','tail-bot');
+    if(fileId){const img=document.createElement('img');img.src=apiUrl('/file?file_id='+encodeURIComponent(fileId));img.style.cssText='width:128px;height:128px;object-fit:contain';img.onerror=function(){this.replaceWith(Object.assign(document.createElement('div'),{textContent:m.sticker.emoji||'🎨',style:'font-size:64px'}))};bubble.appendChild(img)}
+    else{bubble.innerHTML+='<div style="font-size:64px">'+esc(m.sticker.emoji||'🎨')+'</div>'}
+  }else if(m.imageFileId){
+    const img=document.createElement('img');
+    img.src=apiUrl('/file?file_id='+encodeURIComponent(m.imageFileId));
+    img.style.cssText='max-width:300px;border-radius:8px;cursor:pointer;display:block';
+    img.onclick=function(){const o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;z-index:999;cursor:pointer';const fi=document.createElement('img');fi.src=this.src;fi.style.cssText='max-width:95vw;max-height:95vh;object-fit:contain';o.appendChild(fi);o.onclick=()=>o.remove();document.body.appendChild(o)};
+    img.onerror=function(){this.replaceWith(Object.assign(document.createElement('div'),{innerHTML:'🖼️ <span style="color:var(--fg-secondary)">图片加载失败</span>',style:'display:flex;align-items:center;gap:6px'}))};
+    bubble.appendChild(img);
+    if(m.textContent){const txt=document.createElement('div');txt.className='msg-text';txt.innerHTML=linkify(m.textContent)+timeSpan;txt.style.marginTop='6px';bubble.appendChild(txt)}else{bubble.insertAdjacentHTML('beforeend',timeSpan)}
+  }else if(m.voiceFileId||m.audioFileId){
+    const vb=document.createElement('div');vb.style.cssText='display:flex;align-items:center;gap:10px';
+    vb.innerHTML='<div style="width:36px;height:36px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-size:16px;margin-left:2px">▶</span></div><div style="display:flex;gap:2px;align-items:center;height:24px">'+Array.from({length:20},()=>'<div style="width:3px;height:'+(4+Math.random()*16)+'px;background:var(--fg-secondary);border-radius:2px;opacity:.6"></div>').join('')+'</div>';
+    bubble.appendChild(vb);
+    if(m.textContent){const txt=document.createElement('div');txt.className='msg-text';txt.innerHTML=linkify(m.textContent)+timeSpan;txt.style.marginTop='6px';bubble.appendChild(txt)}else{bubble.insertAdjacentHTML('beforeend',timeSpan)}
+  }else if(m.documentFileId||m.documentFileName){
+    const a=document.createElement('a');
+    a.href=m.documentFileId?apiUrl('/file?file_id='+encodeURIComponent(m.documentFileId)):'#';
+    a.target='_blank';a.style.cssText='display:flex;align-items:center;gap:10px;padding:4px 0;text-decoration:none;color:inherit';
+    a.innerHTML='<div style="width:44px;height:44px;border-radius:10px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">📄</div><div><div style="font-size:14px;font-weight:500">'+esc(m.documentFileName||'文件')+'</div>'+(m.documentMimeType?'<div style="font-size:12px;color:var(--fg-secondary);margin-top:2px">'+esc(m.documentMimeType)+'</div>':'')+'</div>';
+    bubble.appendChild(a);
+    if(m.textContent){const txt=document.createElement('div');txt.className='msg-text';txt.innerHTML=linkify(m.textContent)+timeSpan;txt.style.marginTop='6px';bubble.appendChild(txt)}else{bubble.insertAdjacentHTML('beforeend',timeSpan)}
+  }else if(m.videoFileId||m.videoNoteFileId){
+    const vb=document.createElement('div');vb.style.cssText='display:flex;align-items:center;justify-content:center;width:220px;height:130px;background:rgba(0,0,0,.4);border-radius:10px;position:relative';
+    vb.innerHTML='<div style="width:48px;height:48px;border-radius:50%;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center"><span style="font-size:22px;margin-left:3px">▶</span></div>';
+    bubble.appendChild(vb);
+    if(m.textContent){const txt=document.createElement('div');txt.className='msg-text';txt.innerHTML=linkify(m.textContent)+timeSpan;txt.style.marginTop='6px';bubble.appendChild(txt)}else{bubble.insertAdjacentHTML('beforeend',timeSpan)}
+  }else{
+    bubble.innerHTML='<span class="msg-text">'+linkify(m.textContent||'')+'</span>'+timeSpan;
+  }
+  wrapper.appendChild(bubble);
+  row.appendChild(wrapper);
+  return row;
+}
+
+// Poll
+async function startPoll(chatId){
+  const ctrl=new AbortController();pollAbort=ctrl;
+  while(currentChat===chatId&&!ctrl.signal.aborted){
+    try{
+      const r=await fetch(apiUrl('/poll?chat_id='+chatId+'&after='+pollTotal),{signal:ctrl.signal});
+      const d=await r.json();
+      if(d.messages&&d.messages.length>0){
+        const area=document.getElementById('msg-area'),atB=isAtBottom();
+        for(const m of d.messages)area.appendChild(createMsg(m,null));
+        pollTotal=d.total||(pollTotal+d.messages.length);
+        if(atB)area.scrollTop=area.scrollHeight;
+        else{newMsgCount+=d.messages.length;updateScrollBtn()}
+        loadChats();
+      }
+    }catch(e){if(e.name==='AbortError')return;await new Promise(r=>setTimeout(r,3000))}
+  }
+}
+
+setInterval(()=>{if(TOKEN&&document.getElementById('main-app').style.display!=='none')loadChats()},30000);
+</script>
+</body>
+</html>
