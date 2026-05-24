@@ -4,23 +4,34 @@
 
 import { z } from 'zod';
 import { logger } from '../../shared/logger.js';
+import { ALLOWED_INTENTS } from '../../knowledge/sticker/types.js';
+import type { StickerIntent } from '../../knowledge/sticker/types.js';
 
-const STICKER_INTENTS = [
-  'cute', 'comfort', 'tease', 'happy', 'sleepy',
-  'curious', 'playful', 'confused', 'shy', 'sad',
-  'smug', 'annoyed', 'dramatic', 'cozy', 'love',
-] as const;
+const STICKER_INTENTS = new Set<StickerIntent>(ALLOWED_INTENTS);
+
+/** Normalize stickerIntent: accept string or string[], return string[] | undefined */
+function normalizeStickerIntent(raw: unknown): string[] | undefined {
+  if (!raw) return undefined;
+  const arr = Array.isArray(raw) ? raw : [raw];
+  const valid = arr
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter((v): v is StickerIntent => STICKER_INTENTS.has(v as StickerIntent))
+    .slice(0, 3);
+  return valid.length > 0 ? valid : undefined;
+}
 
 const replyOutputSchema = z.object({
   replyContent: z.string().min(1),
   targetMessageId: z.number().int(),
-  stickerIntent: z.enum(STICKER_INTENTS).optional(),
+  stickerIntent: z.union([z.string(), z.array(z.string())]).optional(),
 });
 
 export interface ParsedReply {
   replyContent: string;
   targetMessageId: number;
-  stickerIntent?: (typeof STICKER_INTENTS)[number];
+  stickerIntent?: string[];
+  handoffToSplitter?: boolean;
+  replyQuote?: boolean;
 }
 
 /**
@@ -46,12 +57,61 @@ function stripResidualCdata(text: string): string {
 }
 
 /**
+ * Fix unescaped quotes inside replyContent/reply_content/content field values.
+ * AI sometimes outputs: "replyContent": "text with "quotes" inside"
+ * which breaks JSON parsing.
+ */
+function fixUnescapedQuotesInContent(jsonStr: string): string {
+  // Match content field start
+  const match = jsonStr.match(/"(replyContent|reply_content|content)"\s*:\s*"/);
+  if (!match || match.index === undefined) return jsonStr;
+
+  const startIdx = match.index + match[0].length;
+  let endIdx = startIdx;
+  let escaped = false;
+
+  // Find the real closing quote by looking for " followed by , or }
+  for (let i = startIdx; i < jsonStr.length; i++) {
+    const char = jsonStr[i];
+
+    if (char === '"' && !escaped) {
+      // Check if next non-whitespace char is , or }
+      const next = jsonStr.slice(i + 1).match(/^\s*([,}])/);
+      if (next) {
+        endIdx = i;
+        break;
+      }
+    }
+
+    escaped = (char === '\\' && !escaped);
+  }
+
+  if (endIdx === startIdx) return jsonStr;
+
+  // Extract the value and escape internal quotes
+  const value = jsonStr.substring(startIdx, endIdx);
+  const fixedValue = value.replace(/(?<!\\)"/g, '\\"');
+
+  return jsonStr.substring(0, startIdx) + fixedValue + jsonStr.substring(endIdx);
+}
+
+/**
  * Try to parse raw AI response as JSON.
+ * Includes pre-processing to fix common AI output issues.
  */
 function tryJsonParse(raw: string): Record<string, unknown> | null {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
+    // Try to fix unescaped quotes in content fields
+    const fixed = fixUnescapedQuotesInContent(raw);
+    if (fixed !== raw) {
+      try {
+        return JSON.parse(fixed) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    }
     return null;
   }
 }
@@ -242,7 +302,7 @@ function validateAndReturn(
   const normalized: Record<string, unknown> = {
     replyContent: data['replyContent'] ?? data['reply_content'] ?? data['content'],
     targetMessageId: data['targetMessageId'] ?? data['target_message_id'] ?? fallbackMessageId,
-    stickerIntent: data['stickerIntent'] ?? data['sticker_intent'],
+    stickerIntent: normalizeStickerIntent(data['stickerIntent'] ?? data['sticker_intent']),
   };
 
   // Ensure targetMessageId is a number
@@ -255,7 +315,20 @@ function validateAndReturn(
 
   const parsed = replyOutputSchema.safeParse(normalized);
   if (parsed.success) {
-    return truncateReply(parsed.data);
+    const { stickerIntent, ...rest } = parsed.data;
+    const result: ParsedReply = truncateReply({
+      ...rest,
+      stickerIntent: stickerIntent
+        ? (Array.isArray(stickerIntent) ? stickerIntent : [stickerIntent])
+        : undefined,
+    });
+    if (data['handoffToSplitter'] === true) {
+      result.handoffToSplitter = true;
+    }
+    if (data['replyQuote'] === false) {
+      result.replyQuote = false;
+    }
+    return result;
   }
 
   logger.debug({ errors: parsed.error.issues }, 'Zod validation failed for parsed data');

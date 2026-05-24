@@ -2,7 +2,16 @@
 // L0 本地规则引擎 (0-5ms)
 // ────────────────────────────────────────
 
-import type { FormattedMessage, JudgeResult, JudgeAction } from '../../shared/types.js';
+import { resolveReplyPath, resolveReplyTier } from "../../shared/types.js";
+import type {
+  FormattedMessage,
+  JudgeResult,
+  JudgeAction,
+} from "../../shared/types.js";
+import {
+  looksLikeExternalLookupRequest,
+  looksLikeFollowupLookupRequest,
+} from "../path-patterns.js";
 
 export interface RuleContext {
   message: FormattedMessage;
@@ -15,13 +24,39 @@ export interface RuleContext {
   lastBotReplyIndex: number; // how many messages ago bot last replied (-1 = never)
 }
 
-const WHITELISTED_COMMANDS = new Set(['/checkin', '/help', '/status']);
+const WHITELISTED_COMMANDS = new Set([
+  "/checkin",
+  "/help",
+  "/status",
+  "/stats",
+  "/muteme",
+  "/unmuteme",
+  "/watch",
+  "/unwatch",
+  "/watches",
+  "/game",
+]);
 
-function makeResult(action: JudgeAction, rule: string): JudgeResult {
-  return { action, level: 'L0_RULE', rule, latencyMs: 0 };
+function makeResult(
+  action: JudgeAction,
+  rule: string,
+  opts?: { replyPath?: "direct" | "planned"; skipPathResolution?: boolean },
+): JudgeResult {
+  return {
+    action,
+    replyPath: opts?.skipPathResolution ? undefined : resolveReplyPath(action, opts?.replyPath),
+    replyTier: resolveReplyTier(action),
+    level: "L0_RULE",
+    rule,
+    latencyMs: 0,
+  };
 }
 
-function isMentioningSelf(text: string, botUsername: string, botNicknames: string[]): boolean {
+function isMentioningSelf(
+  text: string,
+  botUsername: string,
+  botNicknames: string[],
+): boolean {
   const lower = text.toLowerCase();
   if (lower.includes(`@${botUsername.toLowerCase()}`)) return true;
   for (const nick of botNicknames) {
@@ -38,19 +73,127 @@ function getCommandName(text: string, botUsername: string): string | null {
   const match = text.match(/^\/(\w+)(?:@(\w+))?/);
   if (!match?.[1]) return null;
   // If @suffix is present, only handle if it targets our bot
-  if (match[2] && match[2].toLowerCase() !== botUsername.toLowerCase()) return null;
+  if (match[2] && match[2].toLowerCase() !== botUsername.toLowerCase())
+    return null;
   return `/${match[1]}`;
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripLeadingBotAddress(
+  text: string,
+  botUsername: string,
+  botNicknames: string[],
+): string {
+  let remaining = text.trim();
+  const candidates = [`@${botUsername}`, ...botNicknames.filter(Boolean)].sort(
+    (a, b) => b.length - a.length,
+  );
+
+  for (const candidate of candidates) {
+    const pattern = new RegExp(
+      `^${escapeRegex(candidate)}(?:[\\s,，:：!！。．、~～-]+)?`,
+      "i",
+    );
+    if (pattern.test(remaining)) {
+      remaining = remaining.replace(pattern, "").trim();
+      break;
+    }
+  }
+
+  return remaining;
+}
+
+const STICKER_DISLIKE_PATTERN =
+  /不喜欢|换一个|丑|难看|什么鬼|别发(?:贴纸|表情|这个|这种)|不要.*?(?:贴纸|表情)|不好看|恶心|太丑|好丑|不可爱|不合适|发错/;
+
+const REMEMBER_PATTERN =
+  /帮[我俺]?记(?:住|一下|下来?)|记(?:住|下来?)(?:一下)?[：:，,]|keep\s+in\s+mind|记得(?:一下)?[：:，,]/i;
+
+const VIEW_PREFS_PATTERN =
+  /(?:你|帮我?)记(?:住|得)了(?:什么|哪些|啥)|(?:我的|我让你记的)(?:偏好|备忘)|我让你记的/i;
+const FORGET_PATTERN = /忘(?:掉|了|记)?[：:，,\s]*\S|别记了|不用记了|forget/i;
+
+// 轻度禁言：只接受短句、直接命令式表达，避免“提到关键词”误触发
+const MUTE_SOFT_PATTERN =
+  /^(?:你\s*)?(?:闭嘴|住嘴|shut\s*up|stop\s*talking|不(?:许|准|要)\s*(?:说话|开口|出声)|别\s*(?:说话|出声)(?:我|了)?)\s*[!！。．,.，~～]*$/i;
+
+// 强度禁言：同样要求明确命令式表达
+const MUTE_HARD_PATTERN =
+  /^(?:你\s*)?(?:不(?:许|准|要)\s*(?:回复|回答)(?:我|任何)|别\s*(?:回复|回答)(?:我|任何)(?:消息|话)?|完全不(?:要|许)\s*理我|stop\s*replying)\s*[!！。．,.，~～]*$/i;
+
+// 定时禁言：「闭嘴 30 分钟」「安静 1 小时」等
+const MUTE_TIMED_PATTERN =
+  /(?:闭嘴|安静|别说话|别出声|shut\s*up|quiet)\s*(\d+)\s*(分钟|小时|min(?:utes?)?|h(?:ours?)?)/i;
+
+// 解除禁言：可以说话了 / 解禁 等
+const UNMUTE_PATTERN =
+  /(?:可以|能|准)(?:说话|回复|回答|开口)了?|解除?禁言|解禁|you\s*can\s*(?:talk|speak|reply)\s*now/i;
+
+export function looksLikeMuteSoftRequest(text: string): boolean {
+  return MUTE_SOFT_PATTERN.test(text) && !MUTE_HARD_PATTERN.test(text);
+}
+
+export function looksLikeMuteHardRequest(text: string): boolean {
+  return MUTE_HARD_PATTERN.test(text);
+}
+
+export function looksLikeUnmuteRequest(text: string): boolean {
+  return UNMUTE_PATTERN.test(text);
+}
+
+/** Returns duration in ms if text is a timed mute request, otherwise null. */
+export function parseMuteTimedRequest(text: string): number | null {
+  const m = MUTE_TIMED_PATTERN.exec(text);
+  if (!m) return null;
+  const n = parseInt(m[1]!, 10);
+  const unit = m[2]!.toLowerCase();
+  const isHour = unit.startsWith('小时') || unit.startsWith('h');
+  return n * (isHour ? 3600_000 : 60_000);
+}
+
+export function looksLikeRememberRequest(text: string): boolean {
+  return REMEMBER_PATTERN.test(text);
+}
+
+export function looksLikeViewPrefsRequest(text: string): boolean {
+  return VIEW_PREFS_PATTERN.test(text);
+}
+
+export function looksLikeForgetRequest(text: string): boolean {
+  return FORGET_PATTERN.test(text);
+}
+
+export function looksLikeStickerDislike(text: string): boolean {
+  return STICKER_DISLIKE_PATTERN.test(text);
+}
+
 export function evaluateRules(ctx: RuleContext): JudgeResult | null {
-  const { message: msg, botUid, botUsername, botNicknames, groupActivity, lastBotReplyIndex } = ctx;
-  const text = msg.textContent || msg.captionContent || '';
+  const {
+    message: msg,
+    botUid,
+    botUsername,
+    botNicknames,
+    groupActivity,
+    lastBotReplyIndex,
+  } = ctx;
+  const text = msg.textContent || msg.captionContent || "";
+  // Recent message texts for context-aware URL detection (last 3 non-bot messages)
+  const recentTexts = ctx.recentMessages
+    .slice(-3)
+    .map((m) => m.textContent || m.captionContent || "")
+    .filter(Boolean);
 
   // 1. Bot message — check if humans are present before engaging
   if (msg.isBot && msg.uid !== botUid) {
     // Only consider replying if bot mentions us or replies to us
-    if (!isMentioningSelf(text, botUsername, botNicknames) && !isReplyToSelf(msg, botUid)) {
-      return makeResult('IGNORE', 'bot_message');
+    if (
+      !isMentioningSelf(text, botUsername, botNicknames) &&
+      !isReplyToSelf(msg, botUid)
+    ) {
+      return makeResult("IGNORE", "bot_message");
     }
 
     // Check if any human has spoken recently — if so, disengage from bot chat
@@ -59,7 +202,7 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     let consecutiveBotMsgs = 0;
     for (let i = ctx.recentMessages.length - 1; i >= 0; i--) {
       const m = ctx.recentMessages[i]!;
-      if (!m.isBot && m.role !== 'assistant' && m.uid !== botUid) {
+      if (!m.isBot && m.role !== "assistant" && m.uid !== botUid) {
         humanSeenSinceLastBotExchange = true;
         break;
       }
@@ -68,62 +211,154 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
 
     // If a human has sent a message recently, stop engaging with bots
     if (humanSeenSinceLastBotExchange) {
-      return makeResult('IGNORE', 'bot_human_present');
+      return makeResult("IGNORE", "bot_human_present");
     }
 
     // No human present — use decay to prevent infinite bot-to-bot loops
     // Much stricter: 1 reply max, then stop
     if (consecutiveBotMsgs >= 2) {
-      return makeResult('IGNORE', 'bot_fatigue');
+      return makeResult("IGNORE", "bot_fatigue");
     }
-    return makeResult('REPLY', 'bot_mentions_self');
+    return makeResult("REPLY", "bot_mentions_self");
   }
 
   // 2. Reply to self → REPLY
   if (isReplyToSelf(msg, botUid)) {
-    return makeResult('REPLY', 'reply_to_self');
+    if (ctx.chatId < 0 && looksLikeMuteHardRequest(text)) {
+      return makeResult("REPLY", "mute_hard_request");
+    }
+    if (ctx.chatId < 0 && looksLikeMuteSoftRequest(text)) {
+      return makeResult("REPLY", "mute_soft_request");
+    }
+    if (ctx.chatId < 0 && parseMuteTimedRequest(text) !== null) {
+      return makeResult("REPLY", "mute_timed_request");
+    }
+    if (ctx.chatId < 0 && looksLikeUnmuteRequest(text)) {
+      return makeResult("REPLY", "unmute_request");
+    }
+    if (looksLikeStickerDislike(text)) {
+      return makeResult("REPLY", "sticker_dislike");
+    }
+    if (looksLikeRememberRequest(text)) {
+      return makeResult("REPLY", "remember_request");
+    }
+    if (looksLikeViewPrefsRequest(text)) {
+      return makeResult("REPLY", "view_prefs_request");
+    }
+    if (looksLikeForgetRequest(text)) {
+      return makeResult("REPLY", "forget_request");
+    }
+    if (looksLikeFollowupLookupRequest(msg, botUid)) {
+      return makeResult("REPLY", "reply_to_self_followup_lookup", {
+        replyPath: "planned",
+      });
+    }
+    if (looksLikeExternalLookupRequest(text, recentTexts)) {
+      return makeResult("REPLY", "reply_to_self_lookup", {
+        replyPath: "planned",
+      });
+    }
+    return makeResult("REPLY", "reply_to_self", { skipPathResolution: true });
   }
 
   // 3. Slash commands — only if directed at us (no @suffix, or @our_bot)
   const cmd = getCommandName(text, botUsername);
   if (cmd) {
-    if (WHITELISTED_COMMANDS.has(cmd)) {
-      return makeResult('REPLY', 'whitelisted_command');
+    if (cmd === "/muteme") {
+      return makeResult("REPLY", "self_mute_request");
     }
-    return makeResult('IGNORE', 'unknown_command');
+    if (cmd === "/unmuteme") {
+      return makeResult("REPLY", "self_unmute_request");
+    }
+    if (WHITELISTED_COMMANDS.has(cmd)) {
+      return makeResult("REPLY", "whitelisted_command");
+    }
+    return makeResult("IGNORE", "unknown_command");
   }
 
   // 4. Direct @self or nickname mention → REPLY
   if (isMentioningSelf(text, botUsername, botNicknames)) {
-    return makeResult('REPLY', 'mention_self');
+    const addressedText = stripLeadingBotAddress(
+      text,
+      botUsername,
+      botNicknames,
+    );
+    if (ctx.chatId < 0 && looksLikeMuteHardRequest(addressedText)) {
+      return makeResult("REPLY", "mute_hard_request");
+    }
+    if (ctx.chatId < 0 && looksLikeMuteSoftRequest(addressedText)) {
+      return makeResult("REPLY", "mute_soft_request");
+    }
+    if (ctx.chatId < 0 && parseMuteTimedRequest(addressedText) !== null) {
+      return makeResult("REPLY", "mute_timed_request");
+    }
+    if (ctx.chatId < 0 && looksLikeUnmuteRequest(addressedText)) {
+      return makeResult("REPLY", "unmute_request");
+    }
+    if (looksLikeRememberRequest(text)) {
+      return makeResult("REPLY", "remember_request");
+    }
+    if (looksLikeViewPrefsRequest(text)) {
+      return makeResult("REPLY", "view_prefs_request");
+    }
+    if (looksLikeForgetRequest(text)) {
+      return makeResult("REPLY", "forget_request");
+    }
+    if (looksLikeExternalLookupRequest(text, recentTexts)) {
+      return makeResult("REPLY", "mention_self_lookup", {
+        replyPath: "planned",
+      });
+    }
+    return makeResult("REPLY", "mention_self", { skipPathResolution: true });
   }
 
   // 5. Forwarded message → IGNORE
   if (msg.isForwarded) {
-    return makeResult('IGNORE', 'forwarded');
+    return makeResult("IGNORE", "forwarded");
+  }
+
+  // 5.1 Unmute fallback — even without @bot, let unmute through so muted users can escape
+  if (looksLikeUnmuteRequest(text)) {
+    return makeResult("REPLY", "unmute_request");
   }
 
   // 5.5 Private chat → always REPLY (chatId > 0 = private)
   if (ctx.chatId > 0) {
-    return makeResult('REPLY', 'private_chat');
+    // Check remember request in DM (normally only checked in reply_to_self/mention_self branches)
+    if (looksLikeRememberRequest(text)) {
+      return makeResult("REPLY", "remember_request");
+    }
+    if (looksLikeViewPrefsRequest(text)) {
+      return makeResult("REPLY", "view_prefs_request");
+    }
+    if (looksLikeForgetRequest(text)) {
+      return makeResult("REPLY", "forget_request");
+    }
+    return makeResult("REPLY", "private_chat", { skipPathResolution: true });
   }
 
-  // 6. Hot chat (5min ≥ 20 msgs) AND not mentioned → IGNORE
-  if (groupActivity.messagesLast5Min >= 20) {
-    return makeResult('IGNORE', 'hot_chat');
+  // 6. Hot chat — 概率降级而非直接沉默
+  // 20-40条/5min：60% 概率跳过；>40条：100% 跳过
+  if (groupActivity.messagesLast5Min >= 10) {
+    const skip =
+      groupActivity.messagesLast5Min >= 25 ? true : Math.random() < 0.7;
+    if (skip) return makeResult("IGNORE", "hot_chat");
   }
 
   // 7. Recent reply (last bot reply within 5 messages) AND not mentioned → IGNORE
-  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 5) {
-    return makeResult('IGNORE', 'recent_reply');
+  // lastBotReplyIndex = 0 means bot was the last message; < 10 means within the last 10 messages.
+  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 10) {
+    return makeResult("IGNORE", "recent_reply");
   }
 
   // 8. @others → IGNORE
   const atOtherMatch = text.match(/@(\w+)/g);
   if (atOtherMatch) {
-    const mentionsOther = atOtherMatch.some((m) => m.toLowerCase() !== `@${botUsername.toLowerCase()}`);
+    const mentionsOther = atOtherMatch.some(
+      (m) => m.toLowerCase() !== `@${botUsername.toLowerCase()}`,
+    );
     if (mentionsOther) {
-      return makeResult('IGNORE', 'at_others');
+      return makeResult("IGNORE", "at_others");
     }
   }
 

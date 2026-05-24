@@ -1,4 +1,6 @@
+import { timingSafeEqual } from 'node:crypto';
 import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { logger } from './shared/logger.js';
 import { env } from './env.js';
@@ -10,10 +12,21 @@ import { startWorker, closeWorker } from './queue/worker.js';
 import { closeQueue } from './queue/producer.js';
 import { freeEncoder } from './ai/token-counter.js';
 import { createAllowlistMiddleware } from './bot/middleware/allowlist.js';
-import { registerMemberHandler } from './bot/handlers/member.js';import { createAdminApi } from './admin/api.js';
+import { registerMemberHandler } from './bot/handlers/member.js';
+import { registerMessageHandler } from './bot/handlers/message.js';
+import { createAdminApi } from './admin/api.js';
+import { createMonitorApi } from './admin/monitor.js';
 import { startCronJobs, stopCronJobs } from './cron/scheduler.js';
 import { initBotTracker } from './tracking/interaction.js';
+import { isMemoryAvailable } from './memory/chroma.js';
+import { callAllowlistReviewModel } from './allowlist/ai-call.js';
 import type { AllowlistConfig } from './allowlist/types.js';
+import { getStartupOwnership } from './startup/ownership.js';
+import {
+  shouldRegisterBotCommands,
+  shouldWarmMemory,
+} from './startup/side-effects.js';
+import { preloadSkills } from './pipeline/tools/registry.js';
 
 async function main(): Promise<void> {
   logger.info('xxb-ts starting…');
@@ -21,6 +34,9 @@ async function main(): Promise<void> {
   // 1. Validate env
   const config = env();
   logger.info({ nodeEnv: config.NODE_ENV }, 'Environment validated');
+
+  // 1.5 Preload external skills
+  void preloadSkills();
 
   // 2. Connect Redis
   const redis = getRedis();
@@ -58,24 +74,77 @@ async function main(): Promise<void> {
   // 7. Register member handler
   registerMemberHandler(bot, allowlistConfig);
 
-  // 8. Start BullMQ worker
-  startWorker();
+  // 7.1 Register join verification handler
+  if (config.VERIFY_ENABLED) {
+    const { registerJoinVerifyHandler } = await import('./bot/handlers/join-verify.js');
+    registerJoinVerifyHandler(bot, {
+      aiCall: callAllowlistReviewModel,
+      masterUid: config.MASTER_UID,
+    });
+    logger.info('Join verification handler registered');
+  }
 
-  // 9. Start bot (webhook or polling)
-  if (config.WEBHOOK_URL) {
-    const secretPath = config.WEBHOOK_SECRET ?? '';
-    await bot.api.setWebhook(`${config.WEBHOOK_URL}/${secretPath}`);
-    logger.info({ url: config.WEBHOOK_URL }, 'Webhook set');
+  // 7.5 Register message handler (AFTER allowlist middleware so it takes effect)
+  registerMessageHandler(bot);
+
+  const ownership = getStartupOwnership();
+
+  // 8. Start BullMQ worker
+  if (ownership.worker) {
+    startWorker();
   } else {
+    logger.info({ ownership }, 'Skipping worker startup in non-owner process');
+  }
+
+  // 9. Start bot ingress only on the elected owner
+  if (ownership.botIngress && config.WEBHOOK_URL) {
+    const webhookUrl = `${config.WEBHOOK_URL}/webhook`;
+    const secretToken = config.WEBHOOK_SECRET ?? undefined;
+    // Retry once on 429 (Telegram rate-limits setWebhook during rapid restarts)
+    try {
+      await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
+    } catch (err: unknown) {
+      const retryAfter =
+        err instanceof Error && 'parameters' in err
+          ? ((err as Record<string, unknown>).parameters as Record<string, number> | undefined)?.retry_after
+          : undefined;
+      const delay = ((retryAfter ?? 1) + 1) * 1000;
+      logger.warn({ delay }, 'setWebhook 429, retrying after delay');
+      await new Promise((r) => setTimeout(r, delay));
+      await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
+    }
+    logger.info({ url: config.WEBHOOK_URL }, 'Webhook set');
+  } else if (ownership.botIngress) {
     // Polling mode
     void bot.start({
       onStart: () => logger.info('Bot started (polling)'),
     });
+  } else {
+    logger.info({ ownership }, 'Skipping bot ingress startup in non-owner process');
+  }
+
+  // 9.5 Register bot commands menu only on the bot ingress owner
+  if (shouldRegisterBotCommands(ownership)) {
+    bot.api.setMyCommands([
+      { command: 'checkin', description: '每日签到' },
+      { command: 'stats', description: '群聊统计' },
+      { command: 'watch', description: '追踪话题 /watch 关键词' },
+      { command: 'unwatch', description: '取消追踪 /unwatch 关键词' },
+      { command: 'watches', description: '查看追踪列表' },
+      { command: 'game', description: '小游戏 /game guess' },
+      { command: 'muteme', description: '让bot不回复我' },
+      { command: 'unmuteme', description: '恢复bot回复' },
+      { command: 'help', description: '帮助' },
+    ]).catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
+  } else {
+    logger.info({ ownership }, 'Skipping bot command registration in non-owner process');
   }
 
   // 10. Start Hono HTTP server (health check + admin API)
   const app = new Hono();
   app.get('/health', (c) => c.json({ status: 'ok', uptime: process.uptime() }));
+  app.get('/miniapp', (c) => c.redirect('/miniapp/'));
+  app.use('/miniapp/*', serveStatic({ root: './' }));
 
   // Mount admin API at /miniapp_api
   const adminApi = createAdminApi({
@@ -83,28 +152,58 @@ async function main(): Promise<void> {
     bot,
     config: allowlistConfig,
     env: config,
-    aiCall: async (_systemPrompt: string, _userMessage: string) => {
-      // AI call stub — will be wired to real AI client
-      return null;
-    },
+    aiCall: callAllowlistReviewModel,
   });
   app.route('/miniapp_api', adminApi);
 
+  // Mount monitor API and static files
+  const monitorApi = createMonitorApi({ redis, bot, env: config });
+  app.route('/monitor/api', monitorApi);
+  app.use('/monitor/*', serveStatic({ root: './' }));
+
   if (config.WEBHOOK_URL && config.WEBHOOK_SECRET) {
     // Webhook endpoint for Telegram
-    app.post(`/${config.WEBHOOK_SECRET}`, async (c) => {
-      const update = await c.req.json();
-      await bot.handleUpdate(update);
+    app.post('/webhook', async (c) => {
+      const incoming = Buffer.from(c.req.header('X-Telegram-Bot-Api-Secret-Token') ?? '');
+      const expected = Buffer.from(config.WEBHOOK_SECRET ?? '');
+      if (incoming.length !== expected.length || !timingSafeEqual(incoming, expected)) {
+        return c.json({ ok: false }, 403);
+      }
+      try {
+        const update = await c.req.json();
+        await bot.handleUpdate(update);
+      } catch (err) {
+        logger.error({ err }, 'Error handling webhook update');
+      }
       return c.json({ ok: true });
     });
   }
 
-  const server = serve({ fetch: app.fetch, port: config.PORT, hostname: config.HOST }, (info) => {
-    logger.info({ port: info.port }, 'HTTP server listening');
-  });
+  const server = ownership.http
+    ? serve({ fetch: app.fetch, port: config.PORT, hostname: config.HOST }, (info) => {
+      logger.info({ port: info.port }, 'HTTP server listening');
+    })
+    : null;
+
+  if (!ownership.http) {
+    logger.info({ ownership }, 'Skipping HTTP server startup in non-owner process');
+  }
 
   // 12. Start cron jobs
-  startCronJobs({ cleanupDeps: { redis, allowlistConfig } });
+  if (ownership.cron) {
+    startCronJobs({ cleanupDeps: { redis, allowlistConfig } });
+  } else {
+    logger.info({ ownership }, 'Skipping cron startup in non-owner process');
+  }
+
+  // 12.1 Warm up ChromaDB + embedder (fire-and-forget) only on processes that use memory-dependent paths
+  if (shouldWarmMemory(ownership)) {
+    isMemoryAvailable().then((ok) => {
+      logger.info({ ok }, 'Memory availability check');
+    }).catch(() => { /* non-critical */ });
+  } else {
+    logger.info({ ownership }, 'Skipping memory warmup in non-owner process');
+  }
 
   // 13. Graceful shutdown
   let shuttingDown = false;
@@ -122,7 +221,12 @@ async function main(): Promise<void> {
     forceTimer.unref();
 
     try {
-      server.close();
+      server?.close();
+      // Flush user-profile write buffers before closing DB
+      try {
+        const { _flushAllBuffers } = await import('./tracking/user-profile.js');
+        _flushAllBuffers();
+      } catch { /* non-critical */ }
       // Close worker FIRST — waits for in-progress jobs to finish
       // (they still need bot for sendMessage). Then stop bot.
       await closeWorker();

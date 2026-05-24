@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import { getBot } from '../bot.js';
+import { toMarkdownV2 } from './markdown.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RETRIES = 3;
@@ -70,17 +71,32 @@ export async function sendMessage(
 ): Promise<number> {
   return withRetry(async () => {
     const bot = getBot();
+    const md = toMarkdownV2(text);
+    const replyParams = replyToId ? { message_id: replyToId } : undefined;
+
+    // Try MarkdownV2 first, fallback to plain text
     try {
-      const result = await bot.api.sendMessage(chatId, text, {
-        reply_parameters: replyToId ? { message_id: replyToId } : undefined,
+      const result = await bot.api.sendMessage(chatId, md, {
+        parse_mode: 'MarkdownV2',
+        reply_parameters: replyParams,
       });
       return result.message_id;
     } catch (err) {
-      // If reply target is invalid/deleted, retry without reply_to (matching PHP behavior)
       const msg = err instanceof Error ? err.message : String(err);
+      // If reply target invalid, retry without reply_to
       if (replyToId && (msg.includes('replied message not found') || msg.includes('message to be replied not found'))) {
-        logger.warn({ chatId, replyToId }, 'Reply target not found, sending without reply');
-        const result = await bot.api.sendMessage(chatId, text);
+        try {
+          const result = await bot.api.sendMessage(chatId, md, { parse_mode: 'MarkdownV2' });
+          return result.message_id;
+        } catch {
+          const result = await bot.api.sendMessage(chatId, text);
+          return result.message_id;
+        }
+      }
+      // If markdown parse error, fallback to plain text
+      if (msg.includes("can't parse entities") || msg.includes('parse')) {
+        logger.debug({ chatId }, 'MarkdownV2 parse failed, falling back to plain text');
+        const result = await bot.api.sendMessage(chatId, text, { reply_parameters: replyParams });
         return result.message_id;
       }
       throw err;
@@ -98,7 +114,11 @@ export async function editMessage(
 ): Promise<void> {
   await withRetry(async () => {
     const bot = getBot();
-    await bot.api.editMessageText(chatId, messageId, text);
+    try {
+      await bot.api.editMessageText(chatId, messageId, toMarkdownV2(text), { parse_mode: 'MarkdownV2' });
+    } catch {
+      await bot.api.editMessageText(chatId, messageId, text);
+    }
   }, 'editMessage');
 }
 
@@ -117,8 +137,16 @@ export async function sendSticker(
 }
 
 /**
- * Send a chat action (e.g., 'typing').
+ * Delete a message. Fails silently if already deleted or not found.
  */
+export async function deleteMessage(chatId: number, messageId: number): Promise<void> {
+  try {
+    const bot = getBot();
+    await bot.api.deleteMessage(chatId, messageId);
+  } catch (err) {
+    logger.warn({ chatId, messageId, err }, 'deleteMessage failed (non-critical)');
+  }
+}
 export async function sendChatAction(
   chatId: number,
   action: 'typing' | 'upload_photo' | 'record_voice',

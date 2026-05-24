@@ -1,4 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../../src/ai/labels.js', () => ({
+  getLabels: () => new Map([
+    ['main', { endpoint: 'https://main.example/v1', model: 'main-model', apiFormat: 'openai', stream: false }],
+    ['reply', { endpoint: 'https://reply.example/v1', model: 'reply-model', apiFormat: 'openai', stream: false }],
+  ]),
+  getUsage: (name: string) => ({
+    label: name === 'reply' ? 'reply' : 'main',
+    backups: name === 'allowlist_review' ? ['reply'] : [],
+    timeout: name === 'path_reflection' ? 20_000 : 60_000,
+    ...(name === 'path_reflection' ? { maxTokens: 200, temperature: 0 } : {}),
+  }),
+}));
+
+vi.mock('../../../src/env.js', () => ({
+  getUsageRouting: () => new Map([
+    ['reply', { label: 'reply', backups: ['main'], timeout: 60_000 }],
+    ['allowlist_review', { label: 'main', backups: ['reply'], timeout: 60_000 }],
+  ]),
+}));
+
 import {
   loadOverride,
   saveOverride,
@@ -33,17 +54,14 @@ describe('loadOverride', () => {
 
   it('returns parsed override', async () => {
     const override: RuntimeOverride = {
-      providers: {
-        custom: { endpoint: 'https://api.example.com/v1', model: 'gpt-4' },
-      },
-      usage: { reply: { label: 'custom' } },
+      sticker_policy: { enabled: false, mode: 'off', send_position: 'before' },
+      reply_quote: false,
     };
     redis._store.set('xxb:admin:model_routing:override', JSON.stringify(override));
 
     const result = await loadOverride(redis as never);
     expect(result).not.toBeNull();
-    expect(result!.providers!['custom']!.model).toBe('gpt-4');
-    expect(result!.usage!.reply!.label).toBe('custom');
+    expect(result).toEqual(override);
   });
 
   it('returns null for invalid JSON', async () => {
@@ -69,35 +87,13 @@ describe('saveOverride', () => {
 });
 
 describe('buildModelRoutingAdminView', () => {
-  const envConfig = {
-    AI_MODEL_REPLY: 'gpt-4o-mini',
-    AI_MODEL_REPLY_PRO: 'gpt-4o',
-    AI_MODEL_JUDGE: 'gpt-4o-mini',
-    AI_MODEL_ALLOWLIST_REVIEW: 'gpt-4o-mini',
-  };
+  it('returns env-backed providers and effective routing', () => {
+    const view = buildModelRoutingAdminView();
 
-  it('includes defaults and override', () => {
-    const override: RuntimeOverride = {
-      providers: { p1: { endpoint: 'https://a.com/v1', model: 'm1' } },
-      usage: { reply: { label: 'p1' } },
-    };
-
-    const view = buildModelRoutingAdminView(envConfig, override);
-    expect(view.defaults).toEqual({
-      reply: 'gpt-4o-mini',
-      reply_pro: 'gpt-4o',
-      judge: 'gpt-4o-mini',
-      allowlist_review: 'gpt-4o-mini',
-    });
-    expect(view.has_override).toBe(true);
-    expect(view.providers).toEqual(override.providers);
-  });
-
-  it('returns has_override=false when no override', () => {
-    const view = buildModelRoutingAdminView(envConfig, null);
-    expect(view.has_override).toBe(false);
-    expect(view.override).toBeNull();
-    expect(view.providers).toEqual({});
+    expect(view.source).toBe('env');
+    expect((view.providers as Record<string, { model: string }>)['reply']!.model).toBeTruthy();
+    expect((view.usage_routing as Record<string, string>)['reply']).toBeTruthy();
+    expect((view.effective as Record<string, { label: string }>)['reply']!.label).toBeTruthy();
   });
 });
 

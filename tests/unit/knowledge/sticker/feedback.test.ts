@@ -30,6 +30,11 @@ function initSchema(db: Database.Database): void {
     'utf-8',
   );
   db.exec(migrationSql);
+  const feedbackSql = readFileSync(
+    resolve(process.cwd(), 'migrations/0006_sticker_feedback.sql'),
+    'utf-8',
+  );
+  db.exec(feedbackSql);
 }
 
 function seedReadySticker(
@@ -92,7 +97,7 @@ describe('StickerFeedback', () => {
 
     it('should return null for invalid intents', () => {
       expect(normalizeIntent('unknown_intent')).toBeNull();
-      expect(normalizeIntent('angry')).toBeNull();
+      expect(normalizeIntent('totally_fake_intent_xyz')).toBeNull();
       expect(normalizeIntent('')).toBeNull();
     });
 

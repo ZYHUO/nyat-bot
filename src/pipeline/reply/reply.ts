@@ -2,20 +2,97 @@
 // Reply Orchestrator — generate reply via AI
 // ────────────────────────────────────────
 
-import type { FormattedMessage, RetrievedContext, ReplyOutput } from '../../shared/types.js';
+import { resolveReplyPath, resolveReplyTier } from '../../shared/types.js';
+import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath, ReplyTier } from '../../shared/types.js';
 import type { JudgeAction } from '../../shared/types.js';
+import { callWithFallback } from '../../ai/fallback.js';
+import { AIError } from '../../shared/errors.js';
 import { buildSystemPrompt, buildMessages } from './prompt-builder.js';
 import { slimContextForAI } from '../context/slim.js';
-import { compressContext } from '../context/compressor.js';
-import { getKnowledge } from '../../knowledge/manager.js';
-import { generateWithTools } from '../tools/executor.js';
+import { searchKnowledge } from '../../knowledge/manager.js';
+import { getToolNames } from '../tools/registry.js';
 import { parseReplyResponse } from './parser.js';
 import { getRecent, getGroupMembers } from '../context/manager.js';
-import { doCheckin } from '../checkin.js';
+import { doCheckin, getCheckinStats } from '../checkin.js';
 import { getBotTracker } from '../../tracking/interaction.js';
+import { getUserProfilePrompt, getUserPreferences } from '../../tracking/user-profile.js';
+import { getReflection } from '../../tracking/outcome.js';
+import { planReply } from '../planner/planner.js';
+import { executeToolPlan, formatToolResultsForPrompt } from '../planner/executor.js';
+import { countTokens } from '../../ai/token-counter.js';
 import { logger } from '../../shared/logger.js';
+import { loadCachedPrompt } from '../../shared/config.js';
+import { getCachedRoster, setCachedRoster } from './member-cache.js';
 
 const MAX_DUPLICATE_RETRIES = 1;
+const MAX_MULTI_REPLY_RETRIES = 1;
+const MAX_TOOL_ARTIFACT_RETRIES = 1;
+const REPLY_SPLITTER_CHAR_THRESHOLD = 150; // Increased from 100 to reduce unnecessary splits
+const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
+  normal: 48_000,
+  pro: 72_000,
+  max: 100_000,
+};
+
+async function generateReplyModelOutput(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  usage: string,
+  opts?: { temperatureOverride?: number },
+) {
+  const result = await callWithFallback({
+    usage,
+    messages,
+    temperature: opts?.temperatureOverride,
+  });
+
+  // Strip thinking blocks from models that emit them (e.g. gemini thinking tags)
+  const content = result.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  return {
+    ...result,
+    content,
+    toolsUsed: [] as string[],
+  };
+}
+
+function containsToolArtifact(text: string): boolean {
+  return /<\/?web_search>/i.test(text)
+    || /^\s*Search results for\s+["“]/im.test(text)
+    || /^\s*\d+\.\s+Title:\s+/im.test(text)
+    || /^\s*\[TOOL_RESULTS\]/im.test(text)
+    || /(^|\n)\s*tool:\s*[A-Z_]+/m.test(text);
+}
+
+function appendToolArtifactRetryInstruction(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+  return messages.map((message, index) => {
+    if (index !== messages.length - 1 || message.role !== 'user') return message;
+    return {
+      ...message,
+      content: [
+        message.content,
+        '[RETRY_INSTRUCTION]',
+        '上一次输出泄露了工具原始结果。必须把 [TOOL_RESULTS] 综合成自然语言回复，并严格输出 reply JSON；禁止原样复制 <web_search>、Search results、Title/URL 列表或 [TOOL_RESULTS] 标记。',
+      ].join('\n\n'),
+    };
+  });
+}
+
+function detectExactReplyCountRequest(message: FormattedMessage): number | undefined {
+  const text = (message.textContent || message.captionContent || '').trim();
+  if (!text) return undefined;
+
+  if (/(发我两条|发两条|两条消息|两句|一人一条|分别回|各发一条)/i.test(text)) {
+    return 2;
+  }
+
+  if (/(发我三条|发三条|三条消息|三句)/i.test(text)) {
+    return 3;
+  }
+
+  return undefined;
+}
 
 /** Normalize text for duplicate comparison (matching PHP behavior) */
 function normalizeForDuplicateCheck(text: string): string {
@@ -30,10 +107,11 @@ function normalizeForDuplicateCheck(text: string): string {
  * Check if reply is a duplicate of recent assistant messages.
  */
 async function isDuplicateReply(chatId: number, replyContent: string): Promise<boolean> {
+  if (replyContent.length < 20) return false; // short replies are never considered duplicates
   const recent = await getRecent(chatId, 10);
   const recentAssistant = recent
     .filter((m) => m.role === 'assistant')
-    .slice(-3);
+    .slice(-5); // Increased from 3 to 5 for better duplicate detection
 
   const normalized = normalizeForDuplicateCheck(replyContent);
   return recentAssistant.some((m) => normalizeForDuplicateCheck(m.textContent) === normalized);
@@ -48,61 +126,122 @@ export async function generateReply(
   action: JudgeAction,
   chatId: number,
   botUid: number,
-): Promise<ReplyOutput[]> {
+  replyPath?: ReplyPath,
+  replyTier?: ReplyTier,
+): Promise<{ replies: ReplyOutput[]; toolsUsed: string[]; toolExecutionFailed: boolean }> {
   const start = performance.now();
-  const replyAction = action === 'REPLY_PRO' ? 'REPLY_PRO' : 'REPLY';
+  const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
+  const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
 
   // 1. Build system prompt (5-layer)
-  const systemPrompt = buildSystemPrompt(action);
+  const systemPrompt = buildSystemPrompt(effectiveReplyTier, message.uid);
 
   // 2. Compress and format context
-  const compressed = compressContext(retrievedContext.merged, message, botUid);
-  const contextStr = slimContextForAI(compressed, message, botUid);
+  const contextStr = slimContextForAI(retrievedContext.merged, message, botUid);
+  const budget = REPLY_CONTEXT_BUDGET[effectiveReplyTier];
+  // Fast path: for CJK-heavy content, use ~2 chars/token heuristic
+  // Skip expensive tokenizer call if clearly over budget
+  const contextTokens = contextStr.length > budget * 2 ? budget : countTokens(contextStr);
+  const remainingContextBudget = Math.max(0, budget - contextTokens);
 
-  // 3. Load knowledge
-  const knowledge = getKnowledge(chatId) || undefined;
+  // 3. Load knowledge (keyword-scoped like PHP searchKnowledge; empty query → full KB)
+  const queryText = (message.textContent || message.captionContent || '').trim();
+  let knowledge: string | undefined;
+  if (remainingContextBudget > 0) {
+    const kb = searchKnowledge(chatId, queryText, 5);
+    if (kb) {
+      const knowledgeTokens = countTokens(kb);
+      if (knowledgeTokens <= remainingContextBudget) {
+        knowledge = kb;
+        logger.debug({
+          chatId,
+          contextTokens,
+          knowledgeTokens,
+          remainingBudget: remainingContextBudget - knowledgeTokens,
+          budgetUsage: Math.round(((contextTokens + knowledgeTokens) / budget) * 100),
+        }, 'Context budget allocation');
+      } else {
+        logger.debug({
+          chatId,
+          knowledgeTokens,
+          remainingBudget: remainingContextBudget,
+        }, 'Knowledge truncated due to budget');
+      }
+    }
+  }
 
   // 3.5 Checkin data injection — minimal real data, AI creates the rest
+  // 频道/匿名身份不能签到（uid 是群/频道 ID，不是真实用户）
   let checkinData: string | undefined;
   const msgText = message.textContent || '';
-  if (/^\/checkin(?:@\w+)?$/i.test(msgText.trim())) {
+  if (!message.isAnonymous && /^\/checkin(?:@\w+)?$/i.test(msgText.trim())) {
     try {
       const result = doCheckin(chatId, message.uid, message.username, message.fullName);
-      checkinData = result.isNew
+      let checkinStr = result.isNew
         ? `[签到系统] 签到成功！连续${result.streak}天，累计${result.totalCheckins}次，今日第${result.rank}个。请自由发挥奖励、运势等有趣内容。`
         : `[签到系统] 今天已经签过了！连续${result.streak}天，累计${result.totalCheckins}次，今日第${result.rank}个。提醒TA别重复签。`;
-      logger.debug({ chatId, uid: message.uid, isNew: result.isNew, streak: result.streak }, 'Checkin data injected');
+      if (result.milestone) {
+        checkinStr += `\n[里程碑] 连续签到达到${result.milestone}天！请给予特别庆祝和丰厚奖励！`;
+      }
+      checkinData = checkinStr;
+      logger.debug({ chatId, uid: message.uid, isNew: result.isNew, streak: result.streak, milestone: result.milestone }, 'Checkin data injected');
     } catch (err) {
       logger.error({ err, chatId }, 'Checkin failed');
     }
   }
 
-  // 3.6 Build group member roster
-  let memberRoster: string | undefined;
-  if (chatId < 0) { // only for group chats
+  // /stats 排行榜注入
+  if (/^\/stats(?:@\w+)?$/i.test(msgText.trim())) {
     try {
-      const members = await getGroupMembers(chatId);
-      if (members.length > 0) {
-        memberRoster = members
-          .slice(0, 50) // cap at 50 members to save tokens
-          .map(m => {
-            const tag = m.username ? `@${m.username}` : `uid:${m.uid}`;
-            return `${tag} = ${m.fullName}`;
-          })
-          .join('\n');
-      }
+      const stats = getCheckinStats(chatId);
+      const todayList = stats.todayRank.map(r =>
+        `${r.rank}. ${r.fullName}（连签${r.streak}天）`,
+      ).join('\n') || '今天还没人签到';
+      const allTimeList = stats.allTimeRank.map(r =>
+        `${r.rank}. ${r.fullName} ${r.totalCheckins}次`,
+      ).join('\n') || '暂无数据';
+      checkinData = `[签到排行榜] 今日已签到${stats.todayCount}人\n今日签到顺序：\n${todayList}\n\n历史总签到排行：\n${allTimeList}\n请用可爱的方式展示这个排行榜。`;
+      logger.debug({ chatId }, 'Stats data injected');
     } catch (err) {
-      logger.debug({ err, chatId }, 'Failed to fetch member roster (non-critical)');
+      logger.error({ err, chatId }, 'Stats failed');
     }
   }
 
-  // 3.7 Inject bot knowledge (digests about other bots in the group)
+  const useRichContext = effectiveReplyPath === 'planned' || effectiveReplyTier === 'pro' || effectiveReplyTier === 'max';
+  const exactReplyCount = detectExactReplyCountRequest(message);
+
+  // 3.6-3.9 Fetch rich context in parallel where possible
+  const memberRosterPromise = (useRichContext && chatId < 0)
+    ? (async () => {
+      // Check cache first
+      const cached = getCachedRoster(chatId);
+      if (cached) return cached;
+
+      try {
+        const members = await getGroupMembers(chatId);
+        if (members.length === 0) return undefined;
+        const roster = members.slice(0, 50).map(m => {
+          const tag = m.username ? `@${m.username}` : `uid:${m.uid}`;
+          return `${tag} = ${m.fullName}`;
+        }).join('\n');
+
+        // Cache for 5 minutes
+        setCachedRoster(chatId, roster);
+        return roster;
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Failed to fetch member roster (non-critical)');
+        return undefined;
+      }
+    })()
+    : Promise.resolve(undefined);
+
+  // Bot knowledge, user profile, preferences, self-reflection are all sync — compute directly
   let botKnowledge: string | undefined;
-  if (chatId < 0) {
+  if (useRichContext && chatId < 0) {
     try {
       const tracker = getBotTracker();
       if (tracker) {
-        const contextForBotScan = compressed.map(m => ({
+        const contextForBotScan = retrievedContext.merged.map(m => ({
           isBot: m.isBot,
           botUsername: m.isBot ? m.username : undefined,
         }));
@@ -114,43 +253,232 @@ export async function generateReply(
     }
   }
 
+  let userProfile: string | undefined;
+  if ((useRichContext || chatId > 0) && !message.isBot && !message.isAnonymous) {
+    try {
+      userProfile = getUserProfilePrompt(chatId, message.uid) ?? undefined;
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Failed to fetch user profile (non-critical)');
+    }
+  }
+
+  let userPreferences: string | undefined;
+  if (!message.isBot && !message.isAnonymous) {
+    try {
+      userPreferences = getUserPreferences(chatId, message.uid) ?? undefined;
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Failed to fetch user preferences (non-critical)');
+    }
+  }
+
+  let selfReflection: string | undefined;
+  if (useRichContext) {
+    try {
+      selfReflection = getReflection(chatId) ?? undefined;
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Failed to fetch self-reflection (non-critical)');
+    }
+  }
+
+  // Await the only truly async fetch
+  const memberRoster = await memberRosterPromise;
+
   // 4. Build messages array
-  const messages = buildMessages(systemPrompt, contextStr, message, knowledge, checkinData, memberRoster, botKnowledge);
+  let toolResultsBlock: string | undefined;
+  const usage = effectiveReplyTier === 'max' ? 'reply_max'
+    : effectiveReplyTier === 'pro' ? 'reply_pro'
+    : 'reply';
+  let toolsUsed: string[] = [];
+  let toolExecutionFailed = false;
 
-  // 5. Call AI (with tool support via Vercel AI SDK)
-  const usage = replyAction === 'REPLY_PRO' ? 'reply_pro' : 'reply';
+  if (effectiveReplyPath === 'planned') {
+    const availableTools = getToolNames(chatId, message.uid);
+    const plan = await planReply({
+      usage,
+      messageText: queryText,
+      context: contextStr,
+      knowledge,
+      availableTools,
+    });
 
-  let result = await generateWithTools(messages, chatId, message.uid, usage);
+    if (plan.needTools && plan.steps.length > 0) {
+      let attempt = 0;
+      while (attempt <= 1) {
+        try {
+          const executedSteps = await executeToolPlan(plan, { chatId, userId: message.uid });
+          toolsUsed = executedSteps.map((step) => step.tool);
+          toolResultsBlock = formatToolResultsForPrompt(executedSteps);
+          break;
+        } catch (err) {
+          attempt++;
+          if (attempt > 1) {
+            toolExecutionFailed = true;
+            logger.warn({ err, chatId, plan }, 'Tool plan execution failed after retry');
+          } else {
+            logger.warn({ err, chatId }, 'Tool plan execution failed, retrying once');
+          }
+        }
+      }
+      if (toolExecutionFailed) {
+        return {
+          replies: [{
+            replyContent: '喵呜，本喵查了一下但没查到相关信息，稍后再试试吧~',
+            targetMessageId: message.messageId,
+          }],
+          toolsUsed: [],
+          toolExecutionFailed: true,
+        };
+      }
+    }
+  }
+
+  const messages = buildMessages(
+    systemPrompt,
+    contextStr,
+    message,
+    knowledge,
+    checkinData,
+    memberRoster,
+    botKnowledge,
+    userProfile,
+    userPreferences,
+    selfReflection,
+    toolResultsBlock,
+    exactReplyCount ? { exactReplyCount } : undefined,
+    chatId,
+  );
+
+  // 5. Call AI final writer (direct or planned both use no-tools final synthesis)
+  let result: Awaited<ReturnType<typeof generateReplyModelOutput>>;
+  try {
+    result = await generateReplyModelOutput(messages, usage);
+    result.toolsUsed = toolsUsed;
+  } catch (err) {
+    // Handle content safety rejection gracefully
+    if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
+      logger.warn({
+        chatId,
+        err: err.message,
+        model: err.model,
+        provider: err.provider,
+        messageLength: message.textContent?.length ?? 0,
+        contextLength: contextStr.length,
+      }, 'Reply rejected by content safety filter');
+      return {
+        replies: [{
+          replyContent: '唔……这个话题本喵不太方便聊呢',
+          targetMessageId: message.messageId,
+        }],
+        toolsUsed: [],
+        toolExecutionFailed: false,
+      };
+    }
+    throw err;
+  }
 
   // 6. Parse response (now returns array)
   let parsedReplies = parseReplyResponse(result.content, message.messageId);
+
+  if (parsedReplies.some((reply) => containsToolArtifact(reply.replyContent))) {
+    logger.warn({ chatId }, 'Tool artifact detected in final reply draft, regenerating');
+    for (let i = 0; i < MAX_TOOL_ARTIFACT_RETRIES; i++) {
+      result = await generateReplyModelOutput(appendToolArtifactRetryInstruction(messages), usage, {
+        temperatureOverride: 0,
+      });
+      result.toolsUsed = toolsUsed;
+      parsedReplies = parseReplyResponse(result.content, message.messageId);
+      if (!parsedReplies.some((reply) => containsToolArtifact(reply.replyContent))) break;
+    }
+  }
 
   // 7. Duplicate detection — check first reply only (the main content)
   if (parsedReplies[0] && await isDuplicateReply(chatId, parsedReplies[0].replyContent)) {
     logger.info({ chatId }, 'Duplicate reply detected, regenerating');
     for (let i = 0; i < MAX_DUPLICATE_RETRIES; i++) {
-      result = await generateWithTools(messages, chatId, message.uid, usage, {
-        temperatureOverride: 1.2,
+      result = await generateReplyModelOutput(messages, usage, {
+        temperatureOverride: 1.0,
       });
+      result.toolsUsed = toolsUsed;
       parsedReplies = parseReplyResponse(result.content, message.messageId);
       if (!parsedReplies[0] || !(await isDuplicateReply(chatId, parsedReplies[0].replyContent))) break;
+    }
+  }
+
+  const hasHandoff = parsedReplies.length === 1 && parsedReplies[0]!.handoffToSplitter === true;
+
+  if (exactReplyCount && parsedReplies.length !== exactReplyCount && !hasHandoff) {
+    logger.info({ chatId, exactReplyCount, actualReplyCount: parsedReplies.length }, 'Explicit multi-reply request not satisfied, regenerating');
+    for (let i = 0; i < MAX_MULTI_REPLY_RETRIES; i++) {
+      result = await generateReplyModelOutput(messages, usage, {
+        temperatureOverride: 1.0,
+      });
+      result.toolsUsed = toolsUsed;
+      parsedReplies = parseReplyResponse(result.content, message.messageId);
+      if (parsedReplies.length === exactReplyCount) break;
+    }
+  }
+
+
+  // 8. Reply splitter — split long single replies or handoff multi-target drafts
+  const needsSplit =
+    parsedReplies.length === 1 &&
+    (parsedReplies[0]!.replyContent.length > REPLY_SPLITTER_CHAR_THRESHOLD ||
+      parsedReplies[0]!.handoffToSplitter === true);
+
+  if (needsSplit) {
+    try {
+      const splitterSystem = loadCachedPrompt('task/reply-splitter.md');
+
+      // Build user message with target context
+      const primaryTargetId = parsedReplies[0]!.targetMessageId;
+      const secondaryTargetId = message.replyTo?.messageId;
+      let userContent = `原始回复:\n${parsedReplies[0]!.replyContent}\n\n主目标消息ID: ${primaryTargetId}`;
+      if (secondaryTargetId) {
+        userContent += `\n次目标消息ID: ${secondaryTargetId}`;
+      }
+
+      const splitterMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+        { role: 'system', content: splitterSystem },
+        { role: 'user', content: userContent },
+      ];
+
+      const splitterResult = await callWithFallback({
+        usage: 'reply_splitter',
+        messages: splitterMessages,
+      });
+
+      const splitParsed = parseReplyResponse(splitterResult.content, message.messageId);
+      if (splitParsed.length > 1) {
+        parsedReplies = splitParsed;
+        logger.debug({ count: splitParsed.length }, 'Reply splitter produced multiple messages');
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Reply splitter failed, keeping original reply');
     }
   }
 
   const latencyMs = Math.round(performance.now() - start);
   logger.info({
     chatId,
-    action: replyAction,
+    action,
+    replyPath: effectiveReplyPath,
+    replyTier: effectiveReplyTier,
     model: result.model,
     tokens: result.tokenUsage.total,
     latencyMs,
+    toolsUsed: result.toolsUsed,
     replyCount: parsedReplies.length,
     replyLength: parsedReplies.map(r => r.replyContent.length),
   }, `Reply generated (${parsedReplies.length} message(s))`);
 
-  return parsedReplies.map(p => ({
-    replyContent: p.replyContent,
-    targetMessageId: p.targetMessageId,
-    stickerIntent: p.stickerIntent,
-  }));
+  return {
+    replies: parsedReplies.map(p => ({
+      replyContent: p.replyContent,
+      targetMessageId: p.targetMessageId,
+      stickerIntent: p.stickerIntent,
+      replyQuote: p.replyQuote,
+    })),
+    toolsUsed: result.toolsUsed,
+    toolExecutionFailed,
+  };
 }

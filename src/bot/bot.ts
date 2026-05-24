@@ -1,7 +1,6 @@
 import { Bot } from 'grammy';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { registerMessageHandler } from './handlers/message.js';
 
 let _bot: Bot | undefined;
 let _botUid = 0;
@@ -14,8 +13,6 @@ export async function createBot(): Promise<Bot> {
     await _bot.init();
     _botUid = _bot.botInfo.id;
     logger.info({ botUid: _botUid, username: _bot.botInfo.username }, 'Bot identity fetched');
-
-    registerMessageHandler(_bot);
 
     _bot.catch((err) => {
       logger.error({ err: err.error }, 'Bot error');

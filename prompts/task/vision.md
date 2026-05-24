@@ -13,3 +13,8 @@ Describe this image in detail, focusing on key objects, people, and actions.
 - 如果是表情包/梗图，描述其含义和情绪。
 - 如果是群聊截图，概括对话内容。
 - 简洁客观，不要加个人评论。
+
+## 重要：Sticker 描述规则
+- 描述 Sticker 时，**完全忽略** Sticker 附带的 emoji 标注，只根据图片画面内容本身描述。
+- 不要把 emoji 当作描述依据，emoji 标签可能不准确。
+- 直接描述你看到的视觉内容（角色、动作、表情、场景）。

@@ -6,11 +6,12 @@
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { buildToolSet } from './registry.js';
-import { getLabel, getUsage } from '../../ai/labels.js';
+import { getUsage, getLabel } from '../../ai/labels.js';
 import { logger } from '../../shared/logger.js';
 import type { AICallResult } from '../../ai/types.js';
 
 const MAX_TOOL_STEPS = 3;
+const TOOL_TIMEOUT_MS = 30_000;
 
 export async function generateWithTools(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
@@ -24,9 +25,10 @@ export async function generateWithTools(
   const label = getLabel(usageConfig.label);
   const tools = buildToolSet(chatId, userId);
 
+  const apiKey = label.apiKeys[Math.floor(Math.random() * label.apiKeys.length)];
   const provider = createOpenAI({
     baseURL: label.endpoint,
-    apiKey: label.apiKeys[0],
+    apiKey,
   });
 
   const result = await generateText({
@@ -36,7 +38,7 @@ export async function generateWithTools(
     maxSteps: MAX_TOOL_STEPS,
     maxTokens: usageConfig.maxTokens,
     temperature: opts?.temperatureOverride ?? usageConfig.temperature,
-    abortSignal: usageConfig.timeout ? AbortSignal.timeout(usageConfig.timeout) : undefined,
+    abortSignal: AbortSignal.timeout(usageConfig.timeout ?? TOOL_TIMEOUT_MS),
   });
 
   const latencyMs = Math.round(performance.now() - start);

@@ -39,9 +39,13 @@
 **基础设施**
 - 📦 **BullMQ 消息队列** — Redis 支撑的高并发处理（可配置并发数）
 - 🗃️ **双存储** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）
-- 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，运行时配置管理
-- ⏰ **Cron 定时任务** — 模型健康检查、日报生成、数据清理
-- 🔐 **安全防护** — SSRF 防护、速率限制、Redis Lua 原子操作、去重锁
+- 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，macOS 窗口风格 UI，运行时配置管理
+- ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、数据清理（并发保护）
+- 🔐 **安全防护** — SSRF 防护、webhook constant-time 验证、速率限制、Redis Lua 原子操作、去重锁
+- 📡 **频道消息源** — 自动抓取公开 Telegram 频道内容存入 ChromaDB，无需管理员权限
+- 🌐 **Cloudflare 绕过** — CF_FETCH skill 自动三级降级（直连 → Playwright+Xvfb → DrissionPage）
+- 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
+- 🎨 **359 个贴纸意图** — AI 自主选择贴纸，覆盖情绪/社交/群聊/猫娘等场景
 
 ### 🏗️ 架构
 
@@ -156,6 +160,12 @@ cp .env.example .env
 # 编辑 .env，填入你的 Bot Token 和 AI API 配置
 ```
 
+#### 从 PHP 版 (xxb) 迁移数据
+
+- **群组知识库**：将 PHP `paths.knowledge_base` 目录下各 `{chatId}.md` 复制到本项目的 `KNOWLEDGE_BASE_DIR`（默认 `./data/knowledge`）。全局永久知识仍使用 `prompts/knowledge/permanent.md`（与 PHP 的 `permanent_knowledge.md` 可手工合并或择一维护）。
+- **双写禁忌**：若 TS 与 PHP 暂时共用同一知识库目录，只应在一侧启用 **定时知识库同步**（`KNOWLEDGE_CRON_CHAT_IDS` + cron）；避免两侧同时跑 `cron_long_term` 与本项目的 `knowledge-sync`。
+- **人设**：可选将 PHP `persona_path/{userId}.txt` 复制为 `prompts/persona/{userId}.txt` 或 `.md`（或通过 `PERSONA_DIR` 指向原目录）。
+
 #### 开发
 
 ```bash
@@ -172,12 +182,33 @@ npm run lint       # ESLint 检查
 docker compose up -d    # 启动 Redis + Bot
 ```
 
+#### systemd 部署
+
+```bash
+npm run build
+npm run build:miniapp
+sudo ./scripts/install-systemd.sh
+sudo systemctl restart xxb-ts
+sudo systemctl status xxb-ts
+```
+
+常用命令：
+
+```bash
+sudo systemctl restart xxb-ts
+sudo systemctl stop xxb-ts
+sudo systemctl status xxb-ts
+journalctl -u xxb-ts -f
+```
+
 #### PM2 部署
 
 ```bash
 npm run build
 pm2 start ecosystem.config.cjs --env production
 ```
+
+PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 systemd。
 
 ### ⚙️ 配置
 
@@ -214,12 +245,13 @@ Prompt 文件热缓存，修改后重启即生效，无需重新构建。
 ### 🔐 安全特性
 
 - **Telegram WebApp HMAC-SHA256 认证** — constant-time 比较防时序攻击
-- **SSRF 防护** — 私有 IP / DNS 重绑定检查
+- **SSRF 防护** — 私有 IP / DNS 重绑定检查，skill HTTP 调用同样受保护
 - **路径遍历防护** — fileUniqueId 正则校验
 - **Redis Lua 原子操作** — 速率限制 + 上下文修剪无竞态
 - **NX 去重锁** — 提交 + 结果双重去重
 - **API Key 剥离** — 前端响应永远不暴露密钥
 - **响应体限制** — web-fetch 工具 512KB 上限防内存溢出
+- **Skill 安全沙箱** — script 类型禁用（RCE 防护），HTTP skill 内置 SSRF 过滤，名称白名单校验
 
 ### 🔧 工具系统
 
@@ -234,6 +266,28 @@ Bot 可在回复时调用以下工具：
 | `SET_TIMER` | 设置定时提醒 |
 | `LIST_TIMERS` | 列出当前定时器 |
 | `DELETE_TIMER` | 删除定时器 |
+
+### 🔌 Skill 插件系统
+
+在 `data/skills/` 目录下放置 JSON 文件即可添加自定义工具，无需修改源码：
+
+```json
+{
+  "name": "WEATHER",
+  "description": "查询指定城市的天气信息",
+  "parameters": {
+    "city": { "type": "string", "description": "城市名称" }
+  },
+  "execute": {
+    "type": "http",
+    "url": "https://wttr.in/{{city}}?format=j1",
+    "method": "GET",
+    "resultPath": "current_condition.0"
+  }
+}
+```
+
+支持 `type: "http"`（HTTP 请求，内置 SSRF 防护）。详见 `data/skills/README.md`。
 
 ---
 

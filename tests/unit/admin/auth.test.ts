@@ -1,8 +1,13 @@
-import { describe, it, expect } from 'vitest';
 import { createHmac } from 'crypto';
-import { validateInitData, isMaster } from '../../../src/admin/auth.js';
+import { describe, expect, it, vi } from 'vitest';
 
-const BOT_TOKEN = 'test-bot-token:AABBCC';
+vi.mock('../../../src/env.js', () => ({
+  env: () => ({ MASTER_UID_EXTRA: [222, 333] }),
+}));
+
+const { validateInitData, isMaster } = await import('../../../src/admin/auth.js');
+
+const BOT_TOKEN = 'test-b...BBCC';
 
 function buildInitData(
   user: Record<string, unknown>,
@@ -17,8 +22,7 @@ function buildInitData(
     user: userJson,
     ...overrides,
   };
-  // Remove 'hash' from overrides if present — we'll compute it
-  delete params['hash'];
+  delete params.hash;
 
   const entries = Object.entries(params).sort(([a], [b]) => a.localeCompare(b));
   const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
@@ -50,7 +54,7 @@ describe('validateInitData', () => {
   });
 
   it('returns null for expired auth_date', () => {
-    const expired = String(Math.floor(Date.now() / 1000) - 600); // 10 min ago
+    const expired = String(Math.floor(Date.now() / 1000) - 90_000);
     const initData = buildInitData(testUser, { auth_date: expired });
     expect(validateInitData(initData, BOT_TOKEN)).toBeNull();
   });
@@ -65,15 +69,15 @@ describe('validateInitData', () => {
 });
 
 describe('isMaster', () => {
-  it('returns true for matching UID', () => {
+  it('allows the primary master UID', () => {
     expect(isMaster(12345, 12345)).toBe(true);
   });
 
-  it('returns false for mismatched UID', () => {
-    expect(isMaster(12345, 99999)).toBe(false);
+  it('allows extra master UIDs even when MASTER_UID is unset', () => {
+    expect(isMaster(222, 0)).toBe(true);
   });
 
-  it('returns false when masterUid is 0', () => {
-    expect(isMaster(12345, 0)).toBe(false);
+  it('rejects users outside the configured master list', () => {
+    expect(isMaster(444, 12345)).toBe(false);
   });
 });

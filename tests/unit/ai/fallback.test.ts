@@ -6,17 +6,21 @@ import { parseJudgeAction } from '../../../src/pipeline/judge/micro.js';
 
 describe('parseJudgeAction', () => {
   it('parses valid JSON response', () => {
-    const result = parseJudgeAction('{"action": "REPLY", "confidence": 0.9, "reasoning": "asked a question"}');
+    const result = parseJudgeAction('{"action": "REPLY", "replyPath": "planned", "replyTier": "pro", "confidence": 0.9, "reasoning": "asked a question"}');
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+    expect(result!.replyTier).toBe('pro');
     expect(result!.confidence).toBe(0.9);
     expect(result!.reasoning).toBe('asked a question');
   });
 
-  it('parses REPLY_PRO', () => {
+  it('maps legacy REPLY_PRO to REPLY + planned + pro', () => {
     const result = parseJudgeAction('{"action": "REPLY_PRO", "confidence": 0.85}');
     expect(result).not.toBeNull();
-    expect(result!.action).toBe('REPLY_PRO');
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+    expect(result!.replyTier).toBe('pro');
   });
 
   it('parses IGNORE', () => {
@@ -44,7 +48,7 @@ describe('parseJudgeAction', () => {
   });
 
   it('extracts action from messy JSON', () => {
-    const result = parseJudgeAction('Sure, here is my decision:\n{"action": "REPLY"}\nLet me explain...');
+    const result = parseJudgeAction('Sure, here is my decision:\n{"action": "REPLY", "replyTier": "normal"}\nLet me explain...');
     // This won't parse as JSON directly, but regex should catch it
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
@@ -57,10 +61,12 @@ describe('parseJudgeAction', () => {
     expect(result!.confidence).toBe(0.3);
   });
 
-  it('prefers REPLY_PRO over REPLY in keyword extraction', () => {
+  it('maps REPLY_PRO keyword extraction to planned pro reply', () => {
     const result = parseJudgeAction('This deserves a REPLY_PRO response');
     expect(result).not.toBeNull();
-    expect(result!.action).toBe('REPLY_PRO');
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+    expect(result!.replyTier).toBe('pro');
   });
 
   it('returns null for completely unparseable response', () => {
@@ -71,13 +77,32 @@ describe('parseJudgeAction', () => {
   it('defaults confidence to 0.5 when not provided in JSON', () => {
     const result = parseJudgeAction('{"action": "REPLY"}');
     expect(result).not.toBeNull();
+    expect(result!.replyPath).toBe('direct');
+    expect(result!.replyTier).toBe('normal');
     expect(result!.confidence).toBe(0.5);
   });
 
   it('handles lowercase action values', () => {
-    const result = parseJudgeAction('{"action": "reply"}');
+    const result = parseJudgeAction('{"action": "reply", "replyTier": "pro"}');
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('direct');
+    expect(result!.replyTier).toBe('pro');
+  });
+
+  it('falls back to default reply path when replyPath is invalid', () => {
+    const result = parseJudgeAction('{"action": "REPLY_PRO", "replyPath": "unknown"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+    expect(result!.replyTier).toBe('pro');
+  });
+
+  it('defaults replyTier to normal for REPLY when omitted', () => {
+    const result = parseJudgeAction('{"action": "REPLY", "replyPath": "direct"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyTier).toBe('normal');
   });
 });
 
