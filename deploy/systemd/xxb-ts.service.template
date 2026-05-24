@@ -9,6 +9,7 @@ User=root
 Group=root
 WorkingDirectory=__WORKDIR__
 EnvironmentFile=__ENV_FILE__
+Environment=TZ=Asia/Shanghai
 ExecStart=__NODE_BIN__ __ENTRYPOINT__
 Restart=always
 RestartSec=5
