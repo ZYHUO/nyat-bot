@@ -11,6 +11,7 @@ import { runCleanup, type CleanupDeps } from './cleanup.js';
 import { runKnowledgeSync } from './knowledge-sync.js';
 import { runUserProfileSync } from '../tracking/user-profile.js';
 import { runIdleCheck } from './idle.js';
+import { runProactiveScan } from './proactive-scan.js';
 import { runChannelSync } from './channel-sync.js';
 import { flushDailyStats } from '../tracking/stats.js';
 import { logger } from '../shared/logger.js';
@@ -82,6 +83,13 @@ export function startCronJobs(deps?: CronDeps): void {
   tasks.push(schedule('*/5 * * * *', () => {
     void safeRun('idle-check', runIdleCheck);
   }));
+
+  // Proactive scan — periodic chat-aware engagement (Stage C)
+  if (env().PROACTIVE_SCAN_ENABLED) {
+    tasks.push(schedule(`*/${env().PROACTIVE_SCAN_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('proactive-scan', runProactiveScan);
+    }));
+  }
 
   // Channel source scraping — every 30 minutes, fetch public channel posts into ChromaDB
   tasks.push(schedule('*/30 * * * *', () => {

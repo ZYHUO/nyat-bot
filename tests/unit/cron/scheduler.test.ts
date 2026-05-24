@@ -35,6 +35,9 @@ vi.mock('../../../src/tracking/user-profile.js', () => ({
 vi.mock('../../../src/cron/idle.js', () => ({
   runIdleCheck: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock('../../../src/cron/proactive-scan.js', () => ({
+  runProactiveScan: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../../../src/cron/channel-sync.js', () => ({
   runChannelSync: vi.fn().mockResolvedValue(undefined),
 }));
