@@ -12,6 +12,7 @@ import {
   looksLikeExternalLookupRequest,
   looksLikeFollowupLookupRequest,
 } from "../path-patterns.js";
+import { env } from "../../env.js";
 
 export interface RuleContext {
   message: FormattedMessage;
@@ -22,6 +23,10 @@ export interface RuleContext {
   chatId: number;
   groupActivity: { messagesLast5Min: number; messagesLast1Hour: number };
   lastBotReplyIndex: number; // how many messages ago bot last replied (-1 = never)
+  /** Epoch ms of last bot reply in this chat (from timing state-store). */
+  lastBotReplyAt?: number;
+  /** Count of recent non-bot human messages (pre-computed by judge.ts). */
+  recentHumanMsgCount?: number;
 }
 
 const WHITELISTED_COMMANDS = new Set([
@@ -342,7 +347,21 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   if (groupActivity.messagesLast5Min >= 10) {
     const skip =
       groupActivity.messagesLast5Min >= 25 ? true : Math.random() < 0.7;
-    if (skip) return makeResult("IGNORE", "hot_chat");
+    if (skip) {
+      // Proactive engagement: when enabled, occasionally let hot_chat fall through to L1/L2
+      const e = env();
+      if (e.JUDGE_PROACTIVE_ENABLED) {
+        const intervalOk =
+          !ctx.lastBotReplyAt ||
+          (Date.now() - ctx.lastBotReplyAt) >= e.JUDGE_PROACTIVE_MIN_INTERVAL_SEC * 1000;
+        const enoughHumans =
+          (ctx.recentHumanMsgCount ?? 0) >= e.JUDGE_PROACTIVE_MIN_RECENT_MSGS;
+        if (Math.random() < e.JUDGE_PROACTIVE_RATE && intervalOk && enoughHumans) {
+          return null; // fallthrough to L1/L2
+        }
+      }
+      return makeResult('IGNORE', 'hot_chat');
+    }
   }
 
   // 7. Recent reply (last bot reply within 5 messages) AND not mentioned → IGNORE

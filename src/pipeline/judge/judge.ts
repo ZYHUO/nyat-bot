@@ -9,6 +9,7 @@ import { microJudge } from "./micro.js";
 import { logger } from "../../shared/logger.js";
 import { env } from "../../env.js";
 import { getKnowledge } from "../../knowledge/manager.js";
+import { getChatState } from "../timing/chat-runtime.js";
 
 export interface JudgeInput {
   message: FormattedMessage;
@@ -47,6 +48,19 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
   const totalStart = performance.now();
 
   // ── L0: Local rules (0-5ms) ──
+  const e = env();
+
+  // Pre-compute proactive engagement context (async, before sync evaluateRules)
+  let lastBotReplyAt: number | undefined;
+  let recentHumanMsgCount: number | undefined;
+  if (e.JUDGE_PROACTIVE_ENABLED) {
+    const timingState = await getChatState(input.chatId);
+    lastBotReplyAt = timingState.lastBotReplyAt;
+    recentHumanMsgCount = input.recentMessages.filter(
+      (m) => !m.isBot && m.uid !== input.botUid && m.role !== 'assistant',
+    ).length;
+  }
+
   const ruleCtx: RuleContext = {
     message: input.message,
     recentMessages: input.recentMessages,
@@ -59,6 +73,8 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
       input.recentMessages,
       input.botUid,
     ),
+    lastBotReplyAt,
+    recentHumanMsgCount,
   };
 
   const l0Start = performance.now();
@@ -78,7 +94,6 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     return l0Result;
   }
 
-  const e = env();
   let knowledgeForJudge = "";
   if (e.JUDGE_KNOWLEDGE_ENABLED) {
     knowledgeForJudge = getKnowledge(input.chatId, {

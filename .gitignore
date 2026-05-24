@@ -10,3 +10,5 @@ coverage/
 .turbo/
 .tsup/
 *.tsbuildinfo
+.env.bak*
+_find_group*.mjs
