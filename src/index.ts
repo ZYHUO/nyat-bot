@@ -227,6 +227,11 @@ async function main(): Promise<void> {
         const { _flushAllBuffers } = await import('./tracking/user-profile.js');
         _flushAllBuffers();
       } catch { /* non-critical */ }
+      // Phase 1: flush timing-gate debounce buffers so messages aren't lost
+      try {
+        const { flushAllBuffers } = await import('./pipeline/timing/debounce.js');
+        await flushAllBuffers();
+      } catch { /* non-critical */ }
       // Close worker FIRST — waits for in-progress jobs to finish
       // (they still need bot for sendMessage). Then stop bot.
       await closeWorker();

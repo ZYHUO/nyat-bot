@@ -148,6 +148,25 @@ const envSchema = z.object({
   ALLOWLIST_AI_AUTO_ENABLE: booleanFromEnv.default(true),
   ALLOWLIST_AI_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.85),
 
+  // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
+  // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。
+  TIMING_GATE_ENABLED: booleanFromEnv.default(false),
+  // 阶段 1：消息去抖窗口（毫秒）。0 = 关闭去抖。
+  // 同一 chat 内，新消息会重置定时器；超过 MAX_BUFFER_MS 强制 flush 防止饥饿。
+  TIMING_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(2000),
+  TIMING_DEBOUNCE_MAX_BUFFER_MS: z.coerce.number().int().nonnegative().default(8000),
+  // 阶段 2：ChatRuntime 状态过期时间（秒）。超过则视作 STOP 默认状态。
+  TIMING_STATE_TTL_SEC: z.coerce.number().int().positive().default(86400),
+  // 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。
+  TIMING_GATE_USAGE: z.string().default('judge'),
+  TIMING_GATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
+  TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),
+  TIMING_WAIT_MIN_SEC: z.coerce.number().int().positive().default(5),
+  // 阶段 4：gate 选 wait/no_action 后，下次再调 gate 的冷却时间（秒）。
+  // 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。
+  TIMING_GATE_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(15),
+
   // Monitor
   MONITOR_TOKEN: z.string().default(''),
 

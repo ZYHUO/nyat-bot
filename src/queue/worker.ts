@@ -8,18 +8,31 @@ import { QUEUE_NAME } from "./jobs.js";
 import type { MessageJobData } from "./jobs.js";
 import { getRedis } from "../db/redis.js";
 import { processPipeline } from "../pipeline/pipeline.js";
+import { handleWaitResume } from "../pipeline/timing/chat-runtime.js";
 import { logger } from "../shared/logger.js";
 import { env } from "../env.js";
 
 let _worker: Worker<MessageJobData> | undefined;
 
 async function processMessage(job: Job<MessageJobData>): Promise<void> {
+  // Phase 4: wait-resume jobs are routed to chat-runtime, not the regular pipeline
+  if (job.data.type === 'wait_resume') {
+    await handleWaitResume({
+      chatId: job.data.chatId,
+      waitResume: job.data.waitResume,
+    });
+    return;
+  }
+
   await processPipeline({
     type: job.data.type,
     chatId: job.data.chatId,
     messageId: job.data.messageId,
     update: job.data.update,
     enqueuedAt: job.data.enqueuedAt,
+    coalesce: job.data.coalesce,
+    skipReply: job.data.skipReply,
+    waitResume: job.data.waitResume,
   });
 }
 

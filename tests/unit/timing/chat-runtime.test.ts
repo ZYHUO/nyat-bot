@@ -1,0 +1,192 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// Mock Redis with an in-memory hash store
+const store = new Map<string, Record<string, string>>();
+
+const redisMock = {
+  hgetall: vi.fn(async (k: string) => store.get(k) ?? {}),
+  hset: vi.fn(async (k: string, ...args: string[]) => {
+    const h = store.get(k) ?? {};
+    for (let i = 0; i < args.length; i += 2) {
+      h[args[i]!] = args[i + 1]!;
+    }
+    store.set(k, h);
+    return 'OK';
+  }),
+  hdel: vi.fn(async (k: string, ...fields: string[]) => {
+    const h = store.get(k);
+    if (!h) return 0;
+    let n = 0;
+    for (const f of fields) if (delete h[f]) n++;
+    return n;
+  }),
+  expire: vi.fn(async () => 1),
+  del: vi.fn(async (k: string) => {
+    return store.delete(k) ? 1 : 0;
+  }),
+  pipeline: () => {
+    const ops: Array<() => Promise<unknown>> = [];
+    const p: Record<string, unknown> = {
+      hset: (...args: string[]) => {
+        ops.push(() => redisMock.hset(args[0]!, ...args.slice(1)));
+        return p;
+      },
+      hdel: (...args: string[]) => {
+        ops.push(() => redisMock.hdel(args[0]!, ...args.slice(1)));
+        return p;
+      },
+      expire: (k: string, ttl: number) => {
+        ops.push(() => redisMock.expire(k, ttl));
+        return p;
+      },
+      exec: async () => {
+        for (const op of ops) await op();
+        return [];
+      },
+    };
+    return p;
+  },
+};
+
+vi.mock('../../../src/db/redis.js', () => ({
+  getRedis: () => redisMock,
+}));
+
+vi.mock('../../../src/shared/logger.js', () => ({
+  logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+const enqueueWaitResumeMock = vi.fn(async () => 'wait-job-id');
+
+vi.mock('../../../src/queue/producer.js', () => ({
+  enqueue: vi.fn(),
+  enqueueWaitResume: (chatId: number, sec: number, anchor?: number) =>
+    enqueueWaitResumeMock(chatId, sec, anchor),
+}));
+
+const envValues: Record<string, unknown> = {
+  TIMING_GATE_ENABLED: true,
+  TIMING_STATE_TTL_SEC: 86400,
+  TIMING_GATE_COOLDOWN_SEC: 15,
+  TIMING_WAIT_MIN_SEC: 5,
+  TIMING_WAIT_MAX_SEC: 120,
+};
+vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
+
+describe('chat-runtime state machine', () => {
+  let runtime: typeof import('../../../src/pipeline/timing/chat-runtime.js');
+
+  beforeEach(async () => {
+    store.clear();
+    vi.resetModules();
+    enqueueWaitResumeMock.mockClear();
+    envValues['TIMING_GATE_ENABLED'] = true;
+    runtime = await import('../../../src/pipeline/timing/chat-runtime.js');
+  });
+
+  it('default state for unknown chat is RUNNING', async () => {
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('RUNNING');
+  });
+
+  it('feature flag off → always RUNNING and no Redis writes', async () => {
+    envValues['TIMING_GATE_ENABLED'] = false;
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('RUNNING');
+
+    await runtime.transitionToWait(-100, 30);
+    expect(store.size).toBe(0);
+    expect(enqueueWaitResumeMock).not.toHaveBeenCalled();
+  });
+
+  it('transitionToStop persists STOP', async () => {
+    await runtime.transitionToStop(-100);
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('STOP');
+    expect(s.lastGateAction).toBe('no_action');
+  });
+
+  it('transitionToWait clamps below WAIT_MIN_SEC', async () => {
+    await runtime.transitionToWait(-100, 1, 555);
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('WAIT');
+    expect(s.waitAnchorMid).toBe(555);
+    // Wait timer scheduled with min sec
+    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 5, 555);
+  });
+
+  it('transitionToWait clamps above WAIT_MAX_SEC', async () => {
+    await runtime.transitionToWait(-100, 99999);
+    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 120, undefined);
+  });
+
+  it('expired WAIT auto-resolves to RUNNING on read', async () => {
+    await runtime.transitionToWait(-100, 5);
+    // Manually fast-forward waitUntil into the past
+    const k = `xxb:timing:state:${-100}`;
+    const h = store.get(k)!;
+    h['waitUntil'] = String(Date.now() - 1000);
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('RUNNING');
+  });
+
+  it('transitionToRunning clears WAIT fields', async () => {
+    await runtime.transitionToWait(-100, 30, 1);
+    await runtime.transitionToRunning(-100);
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('RUNNING');
+    expect(s.waitUntil).toBeUndefined();
+    expect(s.waitAnchorMid).toBeUndefined();
+  });
+
+  it('isInGateCooldown after wait/no_action within window', async () => {
+    await runtime.transitionToStop(-100);
+    expect(await runtime.isInGateCooldown(-100)).toBe(true);
+  });
+
+  it('isInGateCooldown false outside window', async () => {
+    await runtime.transitionToStop(-100);
+    const k = `xxb:timing:state:${-100}`;
+    const h = store.get(k)!;
+    h['lastGateAt'] = String(Date.now() - 30_000); // 30s ago, > 15s cooldown
+    expect(await runtime.isInGateCooldown(-100)).toBe(false);
+  });
+
+  it('isInGateCooldown false after continue', async () => {
+    await runtime.recordGateContinue(-100);
+    expect(await runtime.isInGateCooldown(-100)).toBe(false);
+  });
+
+  it('handleWaitResume transitions WAIT → RUNNING', async () => {
+    await runtime.transitionToWait(-100, 5);
+    const before = await runtime.getChatState(-100);
+    expect(before.state).toBe('WAIT');
+
+    await runtime.handleWaitResume({
+      chatId: -100,
+      waitResume: { scheduledAt: Date.now(), waitSec: 5, anchorMessageId: 1 },
+    });
+
+    const after = await runtime.getChatState(-100);
+    expect(after.state).toBe('RUNNING');
+  });
+
+  it('handleWaitResume drops stale resume when state already RUNNING', async () => {
+    await runtime.transitionToRunning(-100);
+    await runtime.handleWaitResume({
+      chatId: -100,
+      waitResume: { scheduledAt: Date.now(), waitSec: 5 },
+    });
+    const s = await runtime.getChatState(-100);
+    expect(s.state).toBe('RUNNING');
+  });
+
+  it('isChatSuppressed returns true for WAIT and STOP', async () => {
+    await runtime.transitionToWait(-100, 30);
+    expect(await runtime.isChatSuppressed(-100)).toBe(true);
+    await runtime.transitionToStop(-100);
+    expect(await runtime.isChatSuppressed(-100)).toBe(true);
+    await runtime.transitionToRunning(-100);
+    expect(await runtime.isChatSuppressed(-100)).toBe(false);
+  });
+});

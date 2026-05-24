@@ -3,6 +3,11 @@ import { logger } from '../../shared/logger.js';
 import { isDuplicate } from '../middleware/dedup.js';
 import { isRateLimited } from '../middleware/rate-limit.js';
 import { enqueue } from '../../queue/producer.js';
+import { enqueueWithDebounce, flushBuffer } from '../../pipeline/timing/debounce.js';
+import { looksLikeDirectInteraction } from '../../pipeline/timing/direct-interaction.js';
+import { getChatState, transitionToRunning } from '../../pipeline/timing/chat-runtime.js';
+import { env } from '../../env.js';
+import { getBotUid } from '../bot.js';
 
 async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
@@ -45,15 +50,70 @@ async function handleUpdate(ctx: Context): Promise<void> {
     'Message received',
   );
 
-  // Enqueue for processing
-  await enqueue({
-    type: 'message',
+  const e = env();
+  const baseData = {
+    type: 'message' as const,
     chatId,
     messageId,
     isEdit,
     update: ctx.update,
     enqueuedAt: Date.now(),
-  });
+  };
+
+  // ── Timing-gate aware enqueue path ──
+  if (e.TIMING_GATE_ENABLED && !isEdit) {
+    const isDirect = looksLikeDirectInteraction(ctx.update, {
+      botUid: getBotUid(),
+      botUsername: e.BOT_USERNAME,
+      botNicknames: e.BOT_NICKNAMES,
+    });
+
+    let chatState;
+    try {
+      chatState = await getChatState(chatId);
+    } catch (err) {
+      logger.warn({ err, chatId }, 'getChatState failed, treating as RUNNING');
+      chatState = { state: 'RUNNING' as const };
+    }
+
+    // Wake-up: direct interaction during WAIT/STOP forces back to RUNNING.
+    // Also flush any pending debounce buffer so older messages are processed.
+    if (
+      isDirect &&
+      (chatState.state === 'WAIT' || chatState.state === 'STOP')
+    ) {
+      try {
+        await transitionToRunning(chatId);
+      } catch (err) {
+        logger.warn({ err, chatId }, 'Wake-up transitionToRunning failed');
+      }
+      await flushBuffer(chatId, 'direct_interaction');
+      await enqueue(baseData);
+      return;
+    }
+
+    // Suppressed: chat in WAIT/STOP and message is not a wake-up.
+    // Enqueue tracking-only — pipeline will store context but skip judge/reply.
+    if (chatState.state === 'WAIT' || chatState.state === 'STOP') {
+      await enqueue({ ...baseData, skipReply: true });
+      return;
+    }
+
+    // RUNNING + direct interaction: bypass debounce, immediate enqueue
+    if (isDirect) {
+      await enqueueWithDebounce(baseData, { bypassDebounce: true });
+      return;
+    }
+
+    // RUNNING + passive message: route through debounce buffer
+    if (e.TIMING_DEBOUNCE_MS > 0) {
+      await enqueueWithDebounce(baseData);
+      return;
+    }
+  }
+
+  // Default path (timing disabled, or edits): enqueue immediately
+  await enqueue(baseData);
 }
 
 export function registerMessageHandler(bot: Bot): void {

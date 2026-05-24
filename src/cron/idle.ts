@@ -11,6 +11,7 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { isGroupAllowed } from '../allowlist/allowlist.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
+import { getChatState } from '../pipeline/timing/chat-runtime.js';
 
 const IDLE_THRESHOLD_SEC = 60 * 60;  // 60 minutes of silence
 const TRIGGER_PROBABILITY = 0.10;    // 10% chance to fire when idle
@@ -72,6 +73,18 @@ export async function runIdleCheck(): Promise<void> {
 
   for (const chatId of jitteredChats) {
     try {
+      // Skip chats explicitly in WAIT/STOP — bot decided to stay silent.
+      // Phase 4: idle proactive messages must not violate the chat-runtime contract.
+      try {
+        const ts = await getChatState(chatId);
+        if (ts.state === 'WAIT' || ts.state === 'STOP') {
+          logger.debug({ chatId, timingState: ts.state }, 'Idle check: chat in WAIT/STOP, skipping');
+          continue;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId }, 'getChatState in idle failed, proceeding (non-critical)');
+      }
+
       // Skip chats not in allowlist
       if (e.ALLOWLIST_ENABLED !== false) {
         const allowlistConfig: AllowlistConfig = {

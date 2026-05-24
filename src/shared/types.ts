@@ -94,9 +94,23 @@ export interface UpdateLike {
 }
 
 export interface ChatJob {
-  type: 'message' | 'allowlist_review';
+  type: 'message' | 'allowlist_review' | 'wait_resume';
   chatId: number;
   messageId?: number;
   update: UpdateLike;
   enqueuedAt: number;
+  /** Phase 1: debounce coalesce metadata. Non-last-in-batch jobs skip judge/reply. */
+  coalesce?: {
+    batchSize: number;
+    isLastInBatch: boolean;
+    flushReason: 'window' | 'hard' | 'force' | 'direct_interaction';
+  };
+  /** Phase 4: tracking-only flag (chat in STOP/WAIT and not a direct interaction) */
+  skipReply?: boolean;
+  /** Phase 4: wait-resume metadata (only set when type='wait_resume'). */
+  waitResume?: {
+    scheduledAt: number;
+    waitSec: number;
+    anchorMessageId?: number;
+  };
 }
