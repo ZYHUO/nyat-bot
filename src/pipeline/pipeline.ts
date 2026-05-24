@@ -72,6 +72,14 @@ import { addWatch, removeWatch, listWatches, checkWatches } from "../tracking/to
 import { recordMessage as recordStatMessage, recordBotReply } from "../tracking/stats.js";
 import { startGame, playGame, stopGame, hasActiveGame } from "./games/manager.js";
 import { createGuessNumberGame } from "./games/guess-number.js";
+import { runTimingGate } from "./timing/gate.js";
+import {
+  transitionToWait,
+  transitionToStop,
+  transitionToRunning,
+  recordGateContinue,
+} from "./timing/chat-runtime.js";
+import { loadCachedPrompt } from "../shared/config.js";
 
 const sender = new StreamingSender();
 const _recentStickerIds = new Set<string>();
@@ -857,6 +865,28 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }
     }
 
+    // 3.95 Phase 1/4: tracking-only paths skip judge/reply.
+    //   - coalesce.isLastInBatch=false → debounce batch non-final message
+    //   - skipReply=true              → chat in STOP/WAIT, this message is
+    //                                   not a wake-up, just bookkeeping
+    if (
+      (job.coalesce && !job.coalesce.isLastInBatch) ||
+      job.skipReply
+    ) {
+      const totalMs = Math.round(performance.now() - start);
+      logger.debug(
+        {
+          chatId: job.chatId,
+          messageId: formatted.messageId,
+          batchSize: job.coalesce?.batchSize,
+          skipReply: job.skipReply,
+          totalMs,
+        },
+        "Pipeline complete (tracking only — judge skipped)",
+      );
+      return;
+    }
+
     // 4. Judge (L0 → L1 → L2)
     const t3 = performance.now();
     const recentMessages = await getRecent(job.chatId, e.JUDGE_WINDOW_SIZE);
@@ -946,6 +976,57 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         logger.debug({ chatId: job.chatId, uid: formatted.uid }, "Pipeline: user soft-muted bot, skipping proactive reply");
         return;
       }
+    }
+
+    // 5.46 Phase 3: Timing Gate — LLM-based rhythm control
+    // Runs only when TIMING_GATE_ENABLED. Direct interactions, max-tier
+    // replies, and cooldown all short-circuit to 'continue' inside runTimingGate().
+    if (e.TIMING_GATE_ENABLED) {
+      const isDirect = !!(
+        judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)
+      );
+      const tg = performance.now();
+      let botPersona = '';
+      try { botPersona = loadCachedPrompt('identity/persona.md'); } catch { /* non-fatal */ }
+      const gateDecision = await runTimingGate({
+        chatId: job.chatId,
+        message: formatted,
+        recentMessages,
+        judgeResult,
+        botUid,
+        botName: e.BOT_USERNAME,
+        botPersona,
+        isDirectInteraction: isDirect,
+      });
+      timings["timing_gate"] = Math.round(performance.now() - tg);
+
+      if (gateDecision.action === 'wait') {
+        await transitionToWait(
+          job.chatId,
+          gateDecision.waitSec ?? e.TIMING_WAIT_MIN_SEC,
+          formatted.messageId,
+        );
+        const totalMs = Math.round(performance.now() - start);
+        logger.info(
+          { chatId: job.chatId, totalMs, waitSec: gateDecision.waitSec, reason: gateDecision.reason, timings },
+          "Pipeline complete (gate=wait, no reply)",
+        );
+        return;
+      }
+
+      if (gateDecision.action === 'no_action') {
+        await transitionToStop(job.chatId);
+        const totalMs = Math.round(performance.now() - start);
+        logger.info(
+          { chatId: job.chatId, totalMs, reason: gateDecision.reason, timings },
+          "Pipeline complete (gate=no_action, no reply)",
+        );
+        return;
+      }
+
+      // continue → record + transition (no-op if already RUNNING) and fall through
+      await recordGateContinue(job.chatId);
+      await transitionToRunning(job.chatId);
     }
 
     // 5.5-5.7 Post-mute-gate intercepts
