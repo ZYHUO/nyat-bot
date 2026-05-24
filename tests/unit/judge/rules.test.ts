@@ -3,6 +3,18 @@ import { evaluateRules } from "../../../src/pipeline/judge/rules.js";
 import type { RuleContext } from "../../../src/pipeline/judge/rules.js";
 import type { FormattedMessage } from "../../../src/shared/types.js";
 
+vi.mock("../../../src/env.js", () => {
+  const envValues: Record<string, unknown> = {
+    JUDGE_PROACTIVE_ENABLED: false,
+    JUDGE_PROACTIVE_RATE: 0.05,
+    JUDGE_PROACTIVE_MIN_INTERVAL_SEC: 600,
+    JUDGE_PROACTIVE_MIN_RECENT_MSGS: 3,
+  };
+  return { env: () => envValues, _testEnvValues: envValues };
+});
+
+const { _testEnvValues: envValues } = await import("../../../src/env.js") as unknown as { _testEnvValues: Record<string, unknown> };
+
 function makeMsg(overrides: Partial<FormattedMessage> = {}): FormattedMessage {
   return {
     role: "user",
@@ -384,5 +396,80 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.level).toBe("L0_RULE");
+  });
+});
+
+describe("L0 Rules — Proactive Engagement (Stage B)", () => {
+  function hotCtx(overrides: Partial<RuleContext> = {}): RuleContext {
+    return makeCtx({
+      message: makeMsg({ textContent: "大家在聊什么" }),
+      groupActivity: { messagesLast5Min: 30, messagesLast1Hour: 100 },
+      lastBotReplyIndex: -1,
+      lastBotReplyAt: undefined,
+      recentHumanMsgCount: 5,
+      ...overrides,
+    });
+  }
+
+  it("proactive disabled: hot_chat still IGNOREs", () => {
+    envValues['JUDGE_PROACTIVE_ENABLED'] = false;
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
+    const result = evaluateRules(hotCtx());
+    randomSpy.mockRestore();
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("hot_chat");
+  });
+
+  it("proactive enabled but recent bot reply: IGNORE", () => {
+    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
+    // First random() < 0.7 → skip=true; second random() < 0.05 → proactive RNG passes
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
+    const result = evaluateRules(hotCtx({
+      lastBotReplyAt: Date.now() - 60_000, // 1 min ago (< 600s)
+    }));
+    randomSpy.mockRestore();
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("hot_chat");
+  });
+
+  it("proactive enabled, no recent reply, but RNG > rate: IGNORE", () => {
+    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
+    // First random() for skip: 0.5 < 0.7 → skip=true
+    // Second random() for proactive: 0.5 > 0.05 → fails
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const result = evaluateRules(hotCtx({
+      lastBotReplyAt: Date.now() - 700_000, // > 600s
+    }));
+    randomSpy.mockRestore();
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("hot_chat");
+  });
+
+  it("proactive enabled, all conditions met: returns null (fallthrough to L1)", () => {
+    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
+    // Both random() calls return 0.01: skip=true (0.01 < 0.7), proactive=true (0.01 < 0.05)
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
+    const result = evaluateRules(hotCtx({
+      lastBotReplyAt: Date.now() - 700_000, // > 600s
+      recentHumanMsgCount: 5,
+    }));
+    randomSpy.mockRestore();
+    expect(result).toBeNull();
+  });
+
+  it("proactive enabled but not enough human messages: IGNORE", () => {
+    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
+    const result = evaluateRules(hotCtx({
+      lastBotReplyAt: Date.now() - 700_000,
+      recentHumanMsgCount: 1, // < 3
+    }));
+    randomSpy.mockRestore();
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("hot_chat");
   });
 });

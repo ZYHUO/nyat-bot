@@ -148,6 +148,12 @@ const envSchema = z.object({
   ALLOWLIST_AI_AUTO_ENABLE: booleanFromEnv.default(true),
   ALLOWLIST_AI_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.85),
 
+  // ── Proactive Engagement (Stage B) ──
+  JUDGE_PROACTIVE_ENABLED: booleanFromEnv.default(false),
+  JUDGE_PROACTIVE_RATE: z.coerce.number().min(0).max(1).default(0.05),
+  JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(600),
+  JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),
+
   // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
   // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。
   TIMING_GATE_ENABLED: booleanFromEnv.default(false),
