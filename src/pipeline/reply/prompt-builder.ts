@@ -14,6 +14,7 @@ import type { FormattedMessage, ReplyTier } from '../../shared/types.js';
 import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { getTopExpressions } from '../../learners/expression-learner.js';
+import { getChatMood, moodPromptHint } from '../../tracking/mood.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -37,8 +38,9 @@ function loadPersonaForUser(userId: number | undefined): string {
 /**
  * Build the 5-layer system prompt.
  * @param userId — optional; loads prompts/persona/{userId}.md|.txt when present (PHP PersonaManager parity).
+ * @param chatId — optional; used for per-chat mood injection (Stage E).
  */
-export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: number): string {
+export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: number, chatId?: number): string {
   const layers: string[] = [];
 
   // L1: Identity
@@ -53,7 +55,18 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
   layers.push(contractExplanation);
 
   // L4: Style
-  layers.push(loadCachedPrompt('style/tone.md'));
+  let styleLayer = loadCachedPrompt('style/tone.md');
+  // Stage E: mood drift hint appended to style layer
+  if (chatId !== undefined && env().MOOD_INJECT_ENABLED) {
+    try {
+      const mood = getChatMood(chatId);
+      const hint = moodPromptHint(mood);
+      if (hint) styleLayer = `${styleLayer}\n\n${hint}`;
+    } catch {
+      /* mood injection is non-critical; ignore errors */
+    }
+  }
+  layers.push(styleLayer);
 
   // L5: Task
   const taskFile = replyTier === 'max' ? 'task/reply-max.md'

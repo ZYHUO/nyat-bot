@@ -70,6 +70,7 @@ import { logger } from "../shared/logger.js";
 import { parseMuteTimedRequest } from "./judge/rules.js";
 import { addWatch, removeWatch, listWatches, checkWatches } from "../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage, recordBotReply } from "../tracking/stats.js";
+import { applyMoodEvent } from "../tracking/mood.js";
 import { startGame, playGame, stopGame, hasActiveGame } from "./games/manager.js";
 import { createGuessNumberGame } from "./games/guess-number.js";
 import { runTimingGate } from "./timing/gate.js";
@@ -225,6 +226,7 @@ async function tryMuteCommandIntercepts(
 
   if (rule === "mute_hard_request") {
     muteUser(chatId, formatted.uid, 2);
+    applyMoodEvent(chatId, -20, "mute_hard_request");
     await sender.sendDirect(chatId, "好的，本喵完全闭嘴喵~", formatted.messageId);
     logger.info({ chatId, uid: formatted.uid, level: 2 }, "User hard-muted bot");
     return true;
@@ -232,6 +234,7 @@ async function tryMuteCommandIntercepts(
 
   if (rule === "mute_soft_request") {
     muteUser(chatId, formatted.uid, 1, { temporary: true });
+    applyMoodEvent(chatId, -8, "mute_soft_request");
     await sender.sendDirect(chatId, "好的，本喵不会主动找你说话了喵~", formatted.messageId);
     logger.info({ chatId, uid: formatted.uid, level: 1 }, "User soft-muted bot");
     return true;
@@ -242,6 +245,7 @@ async function tryMuteCommandIntercepts(
     const durationMs = parseMuteTimedRequest(text);
     if (durationMs && durationMs > 0) {
       muteUser(chatId, formatted.uid, 1, { temporary: true, durationMs });
+      applyMoodEvent(chatId, -8, "mute_timed_request");
       const minutes = Math.round(durationMs / 60_000);
       await sender.sendDirect(chatId, `好的，本喵安静 ${minutes} 分钟喵~`, formatted.messageId);
       logger.info({ chatId, uid: formatted.uid, durationMs }, "User timed-muted bot");
@@ -252,6 +256,7 @@ async function tryMuteCommandIntercepts(
 
   if (rule === "unmute_request") {
     unmuteUser(chatId, formatted.uid);
+    applyMoodEvent(chatId, 5, "unmute_request");
     await sender.sendDirect(chatId, "嗯！本喵又可以说话啦喵~", formatted.messageId);
     logger.info({ chatId, uid: formatted.uid }, "User unmuted bot");
     return true;
@@ -259,6 +264,7 @@ async function tryMuteCommandIntercepts(
 
   if (rule === "self_mute_request") {
     muteUser(chatId, formatted.uid, 2);
+    applyMoodEvent(chatId, -15, "self_mute_request");
     await sender.sendDirect(chatId, "好的，以后本喵不回复你的消息了喵~（发 /unmuteme 取消）", formatted.messageId);
     logger.info({ chatId, uid: formatted.uid }, "User self-muted (level 2)");
     return true;
@@ -266,6 +272,7 @@ async function tryMuteCommandIntercepts(
 
   if (rule === "self_unmute_request") {
     unmuteUser(chatId, formatted.uid);
+    applyMoodEvent(chatId, 5, "self_unmute_request");
     await sender.sendDirect(chatId, "好的，本喵又会回复你的消息了喵~", formatted.messageId);
     logger.info({ chatId, uid: formatted.uid }, "User self-unmuted");
     return true;

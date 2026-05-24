@@ -198,6 +198,16 @@ const envSchema = z.object({
   JARGON_INFERENCE_THRESHOLDS: z.string().default('4,8,25,100'),
   JARGON_QUERY_ENABLED: booleanFromEnv.default(false),
 
+  // ── Mood drift (Stage E) ──
+  // Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。
+  MOOD_ENABLED: booleanFromEnv.default(false),
+  // 每小时衰减比例 (0..1)。0.3 = 1 小时后保留 70% 强度
+  MOOD_DECAY_RATE_PER_HOUR: z.coerce.number().min(0).max(1).default(0.3),
+  // 是否把 mood hint 注入 reply prompt
+  MOOD_INJECT_ENABLED: booleanFromEnv.default(false),
+  // |valence| < 该阈值时不注入 prompt（默认 calm 不打扰）
+  MOOD_INJECT_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
+
   // Monitor
   MONITOR_TOKEN: z.string().default(''),
 

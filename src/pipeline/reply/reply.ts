@@ -134,7 +134,7 @@ export async function generateReply(
   const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
 
   // 1. Build system prompt (5-layer)
-  const systemPrompt = buildSystemPrompt(effectiveReplyTier, message.uid);
+  const systemPrompt = buildSystemPrompt(effectiveReplyTier, message.uid, chatId);
 
   // 2. Compress and format context
   const contextStr = slimContextForAI(retrievedContext.merged, message, botUid);
