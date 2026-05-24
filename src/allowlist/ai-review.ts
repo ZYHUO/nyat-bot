@@ -16,7 +16,8 @@ const AI_REVIEW_SYSTEM_PROMPT = `你是 Telegram 机器人群组的审核助手�
 - decision: 只能是 APPROVE 或 REJECT
 - confidence: 0.0-1.0 之间的浮点数
 - 仅在确信群正常、无违规时输出 APPROVE
-- 拒绝场景：涉黄赌毒、广告诈骗、黑灰产、刷屏、仇恨言论等`;
+- 拒绝场景：涉黄赌毒、广告诈骗、黑灰产、刷屏、仇恨言论等
+- 如果 telegram_getchat 为 null 且 recent_group_messages_from_bot_context 为空字符串，说明无法获取群组数据，应输出 {"decision":"REJECT","confidence":0.2,"reason":"无法获取群组数据，建议人工审核"}`;
 
 export { AI_REVIEW_SYSTEM_PROMPT };
 
@@ -56,7 +57,7 @@ export async function runAiReview(
       systemPrompt: string,
       userMessage: string,
     ) => Promise<string | null>;
-    getChat?: (chatId: number) => Promise<Record<string, unknown> | null>;
+    getChat?: (chatId: number) => Promise<unknown>;
     getRecentContext?: (
       chatId: number,
       limit: number,
@@ -75,8 +76,8 @@ export async function runAiReview(
 
   const request = JSON.parse(raw) as PendingRequest;
 
-  // Gather context
-  let chatInfo: Record<string, unknown> | null = null;
+  // Gather context (chatInfo is whatever Telegram returns; just JSON-stringified below)
+  let chatInfo: unknown = null;
   if (deps.getChat) {
     try {
       chatInfo = await deps.getChat(request.chat_id);

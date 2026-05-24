@@ -19,7 +19,12 @@ export async function isGroupAllowed(
   chatId: number,
 ): Promise<boolean> {
   if (!config.enabled) return true;
-  const raw = await redis.hget(`${config.redisPrefix}groups`, String(chatId));
+  // Try exact chatId first, then try without -100 prefix (miniapp may store short form)
+  let raw = await redis.hget(`${config.redisPrefix}groups`, String(chatId));
+  if (!raw && chatId < -1000000000000) {
+    const shortId = String(chatId).replace(/^-100/, '');
+    raw = await redis.hget(`${config.redisPrefix}groups`, shortId);
+  }
   if (!raw) return false;
   try {
     const record = JSON.parse(raw) as GroupRecord;
