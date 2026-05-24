@@ -45,6 +45,11 @@ vi.mock('../../../src/tracking/stats.js', () => ({
   flushDailyStats: vi.fn(),
 }));
 
+// Ensure deterministic env BEFORE scheduler module is imported (env() caches once).
+// .env file on the host may have these enabled — explicitly disable here.
+process.env['PROACTIVE_SCAN_ENABLED'] = 'false';
+process.env['VERIFY_ENABLED'] = 'false';
+
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'
 );

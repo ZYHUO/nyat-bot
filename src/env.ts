@@ -164,6 +164,8 @@ const envSchema = z.object({
   PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
   PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
   PROACTIVE_SCAN_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
+  // shouldChimeIn LLM call timeout (ms). Default 10s — should accommodate fallback chains.
+  PROACTIVE_SCAN_CHIME_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
 
   // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
   // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。

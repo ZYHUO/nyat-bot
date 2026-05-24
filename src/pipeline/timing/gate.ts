@@ -48,6 +48,12 @@ export interface GateInput {
   botPersona: string;
   /** True when pipeline already determined this is a direct interaction. */
   isDirectInteraction: boolean;
+  /**
+   * True when called from proactive-scan cron (bot wants to chime in
+   * unprompted). Adjusts gate prompt to be less restrictive about
+   * "no one @ed me, so I shouldn't talk".
+   */
+  proactiveMode?: boolean;
 }
 
 const VALID_ACTIONS = new Set<GateAction>(['continue', 'wait', 'no_action']);
@@ -195,11 +201,15 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   try {
     systemPrompt = loadCachedPrompt('task/timing-gate.md');
     if (!systemPrompt) throw new Error('timing-gate prompt not found');
+    const modeBlock = input.proactiveMode
+      ? `## 当前模式：主动评估（proactive）\n你不是被用户 @ 或回复。这是 bot 自己看到群里在聊有趣话题，想主动插一句。\n\n判断标准（与默认模式不同，请重点遵守这条）：\n- **不要**因为"没人@bot"就 no_action。麦麦本身就是群里普通成员，闲聊不需要被点名。\n- **该 wait** 的情况：用户 A 和用户 B 正在密集来回（最近 30 秒内连续互动），插进去会打断他们。\n- **该 no_action** 的情况：群里在讨论非常严肃 / 敏感话题（如争吵、负面情绪宣泄）、或最近一条消息是 bot 自己刚发的。\n- **可以 continue** 的情况：群里在闲聊 / 玩梗 / 分享 / 提问，并且没有用户 A↔B 正在密集对话；这种情况下你想加入就加入，自然得像群友。\n- 倾向 continue。后面还有回复生成的最后一道把关，不会乱说话。`
+      : '';
     systemPrompt = systemPrompt
       .replace(/\{bot_name\}/g, input.botName)
       .replace(/\{bot_persona\}/g, input.botPersona || `${input.botName} 是群聊里的成员`)
       .replace(/\{wait_min_sec\}/g, String(e.TIMING_WAIT_MIN_SEC))
-      .replace(/\{wait_max_sec\}/g, String(e.TIMING_WAIT_MAX_SEC));
+      .replace(/\{wait_max_sec\}/g, String(e.TIMING_WAIT_MAX_SEC))
+      .replace(/\{mode_block\}/g, modeBlock);
   } catch (err) {
     logger.warn({ err }, 'gate prompt load failed, fail-open continue');
     return makeShortCircuit('continue', 'prompt_load_failed', start);
