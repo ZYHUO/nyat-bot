@@ -119,7 +119,12 @@ const REMEMBER_PATTERN =
 
 const VIEW_PREFS_PATTERN =
   /(?:你|帮我?)记(?:住|得)了(?:什么|哪些|啥)|(?:我的|我让你记的)(?:偏好|备忘)|我让你记的/i;
-const FORGET_PATTERN = /忘(?:掉|了|记)?[：:，,\s]*\S|别记了|不用记了|forget/i;
+// 忘记偏好：要求"指令性"结构（帮我忘 / 忘掉:xxx / 别记了 等），
+// 避免被自然语言里"忘掉你没脑子"等抱怨/感叹误触发。
+const FORGET_PATTERN =
+  /帮[我俺]?忘(?:掉|了|记)|忘(?:掉|了|记)(?:一下)?[：:，,]|^忘(?:掉|了|记)\s+[\u4e00-\u9fff\w]/i;
+const FORGET_LITERAL_PATTERN =
+  /^(?:别记了|不用记了|forget(?:\s+about\s+\S|:\s*\S))/i;
 
 // 轻度禁言：只接受短句、直接命令式表达，避免“提到关键词”误触发
 const MUTE_SOFT_PATTERN =
@@ -168,7 +173,7 @@ export function looksLikeViewPrefsRequest(text: string): boolean {
 }
 
 export function looksLikeForgetRequest(text: string): boolean {
-  return FORGET_PATTERN.test(text);
+  return FORGET_PATTERN.test(text) || FORGET_LITERAL_PATTERN.test(text.trim());
 }
 
 export function looksLikeStickerDislike(text: string): boolean {
