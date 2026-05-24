@@ -198,6 +198,15 @@ const envSchema = z.object({
   JARGON_INFERENCE_THRESHOLDS: z.string().default('4,8,25,100'),
   JARGON_QUERY_ENABLED: booleanFromEnv.default(false),
 
+  // ── Idle proactive cron (group has been silent → poke) ──
+  // Bot 在群沉默超过 N 秒后，以 P 概率主动发一句活跃群聊。
+  // 同一群两次主动开口的最小间隔（默认 24h，一天最多 1 次）
+  IDLE_PROACTIVE_INTERVAL_SEC: z.coerce.number().int().positive().default(86400),
+  IDLE_THRESHOLD_SEC: z.coerce.number().int().positive().default(3600),
+  IDLE_TRIGGER_PROBABILITY: z.coerce.number().min(0).max(1).default(0.1),
+  IDLE_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
+  IDLE_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
+
   // ── Mood drift (Stage E) ──
   // Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。
   MOOD_ENABLED: booleanFromEnv.default(false),

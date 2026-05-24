@@ -13,25 +13,20 @@ import { isGroupAllowed } from '../allowlist/allowlist.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
 import { getChatState } from '../pipeline/timing/chat-runtime.js';
 
-const IDLE_THRESHOLD_SEC = 60 * 60;  // 60 minutes of silence
-const TRIGGER_PROBABILITY = 0.10;    // 10% chance to fire when idle
-const HOUR_START = 10;               // 10:00 Beijing
-const HOUR_END = 23;                 // 23:00 Beijing
+const ACTIVE_GROUPS_MAX_AGE = 30 * 86400; // prune groups unseen for 30 days
 const LAST_POKE_PREFIX = 'xxb:last_poke:';
-const MIN_PROACTIVE_INTERVAL = 3 * 60 * 60; // at least 3 hours between proactive pokes per chat
 
 const sender = new StreamingSender();
 
 function isWithinActiveHours(): boolean {
+  const e = env();
   const now = new Date();
   const hour = parseInt(
     now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }),
     10,
   );
-  return hour >= HOUR_START && hour < HOUR_END;
+  return hour >= e.IDLE_HOUR_START && hour < e.IDLE_HOUR_END;
 }
-
-const ACTIVE_GROUPS_MAX_AGE = 30 * 86400; // prune groups unseen for 30 days
 
 /** Discover active group chat IDs from the xxb:active_groups sorted set. */
 async function discoverActiveGroupChats(): Promise<number[]> {
@@ -105,7 +100,7 @@ export async function runIdleCheck(): Promise<void> {
       // Check if we sent a proactive message recently in this chat (Redis-persisted)
       const lastPokeRaw = await redis.get(LAST_POKE_PREFIX + chatId);
       const lastPoke = lastPokeRaw ? parseInt(lastPokeRaw, 10) : 0;
-      if (now - lastPoke < MIN_PROACTIVE_INTERVAL) continue;
+      if (now - lastPoke < e.IDLE_PROACTIVE_INTERVAL_SEC) continue;
 
       // Get recent messages to check silence
       const recent = await getRecent(chatId, 20);
@@ -114,10 +109,10 @@ export async function runIdleCheck(): Promise<void> {
       const lastMsg = recent[recent.length - 1]!;
       const silenceSec = now - lastMsg.timestamp;
 
-      if (silenceSec < IDLE_THRESHOLD_SEC) continue;
+      if (silenceSec < e.IDLE_THRESHOLD_SEC) continue;
 
-      // Roll the dice — only trigger TRIGGER_PROBABILITY fraction of the time
-      if (Math.random() > TRIGGER_PROBABILITY) continue;
+      // Roll the dice — only trigger IDLE_TRIGGER_PROBABILITY fraction of the time
+      if (Math.random() > e.IDLE_TRIGGER_PROBABILITY) continue;
 
       logger.info({ chatId, silenceSec }, 'Idle check: generating proactive message');
 
@@ -133,7 +128,7 @@ export async function runIdleCheck(): Promise<void> {
         messages: [
           {
             role: 'system',
-            content: `你是${e.BOT_USERNAME}，一只活泼可爱的猫娘群友。群聊已经沉默超过60分钟了，请自然地发起一个话题或者说一句有趣的话来带动气氛。
+            content: `你是${e.BOT_USERNAME}，一只活泼可爱的猫娘群友。群聊已经沉默超过${Math.floor(e.IDLE_THRESHOLD_SEC / 60)}分钟了，请自然地发起一个话题或者说一句有趣的话来带动气氛。
 要求：
 - 短句，不超过30字
 - 自然、随意，像真实群友主动说话
@@ -154,7 +149,7 @@ export async function runIdleCheck(): Promise<void> {
       if (!text || text.length < 2) continue;
 
       await sender.sendDirect(chatId, text);
-      await redis.set(LAST_POKE_PREFIX + chatId, String(now), 'EX', MIN_PROACTIVE_INTERVAL * 2);
+      await redis.set(LAST_POKE_PREFIX + chatId, String(now), 'EX', e.IDLE_PROACTIVE_INTERVAL_SEC * 2);
 
       logger.info({ chatId, text, silenceSec }, 'Idle proactive message sent');
     } catch (err) {
