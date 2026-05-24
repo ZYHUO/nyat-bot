@@ -473,3 +473,31 @@ describe("L0 Rules — Proactive Engagement (Stage B)", () => {
     expect(result!.rule).toBe("hot_chat");
   });
 });
+
+describe("looksLikeForgetRequest pattern", () => {
+  it("matches explicit forget commands", async () => {
+    const { looksLikeForgetRequest } = await import("../../../src/pipeline/judge/rules.js");
+    expect(looksLikeForgetRequest("帮我忘掉那个")).toBe(true);
+    expect(looksLikeForgetRequest("帮俺忘了")).toBe(true);
+    expect(looksLikeForgetRequest("忘掉:我喜欢猫")).toBe(true);
+    expect(looksLikeForgetRequest("忘掉：我说错了")).toBe(true);
+    expect(looksLikeForgetRequest("忘了，刚才那个")).toBe(true);
+    expect(looksLikeForgetRequest("忘记，xxx")).toBe(true);
+    expect(looksLikeForgetRequest("忘掉 我之前说的")).toBe(true);
+    expect(looksLikeForgetRequest("别记了")).toBe(true);
+    expect(looksLikeForgetRequest("不用记了")).toBe(true);
+    expect(looksLikeForgetRequest("forget: foo")).toBe(true);
+    expect(looksLikeForgetRequest("forget about that")).toBe(true);
+  });
+
+  it("does NOT match casual complaints / declarative usage", async () => {
+    const { looksLikeForgetRequest } = await import("../../../src/pipeline/judge/rules.js");
+    // 这是 user 实际报告的误判：用户在抱怨 bot，不是要求忘记记忆
+    expect(looksLikeForgetRequest("忘掉你没脑子")).toBe(false);
+    expect(looksLikeForgetRequest("我忘记了")).toBe(false);
+    expect(looksLikeForgetRequest("他忘了那件事")).toBe(false);
+    expect(looksLikeForgetRequest("忘性大的人")).toBe(false);
+    expect(looksLikeForgetRequest("forget 单词怎么背")).toBe(false);
+    expect(looksLikeForgetRequest("说不定他忘记了呢")).toBe(false);
+  });
+});
