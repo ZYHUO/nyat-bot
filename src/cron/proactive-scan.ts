@@ -86,7 +86,9 @@ export async function shouldChimeIn(
         maxTokens: 150,
         temperature: 0,
       }),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('chime_timeout')), 5000)),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('chime_timeout')), e.PROACTIVE_SCAN_CHIME_TIMEOUT_MS),
+      ),
     ]);
 
     const raw = result.content.trim();
@@ -150,7 +152,10 @@ async function generateProactiveReply(
 export async function runProactiveScan(): Promise<void> {
   const e = env();
   if (!e.PROACTIVE_SCAN_ENABLED) return;
-  if (!isWithinActiveHours(e.PROACTIVE_SCAN_HOUR_START, e.PROACTIVE_SCAN_HOUR_END)) return;
+  if (!isWithinActiveHours(e.PROACTIVE_SCAN_HOUR_START, e.PROACTIVE_SCAN_HOUR_END)) {
+    logger.debug('Proactive scan: outside active hours, skipping');
+    return;
+  }
 
   let allChats: number[];
   try {
@@ -160,9 +165,16 @@ export async function runProactiveScan(): Promise<void> {
     return;
   }
 
-  if (allChats.length === 0) return;
+  if (allChats.length === 0) {
+    logger.info('Proactive scan: no active group chats found');
+    return;
+  }
 
   const candidates = pickCandidates(allChats, e.PROACTIVE_SCAN_MAX_CHATS_PER_TICK);
+  logger.info(
+    { totalChats: allChats.length, candidates },
+    'Proactive scan: tick start',
+  );
   const now = Math.floor(Date.now() / 1000);
   const redis = getRedis();
 
@@ -182,30 +194,49 @@ export async function runProactiveScan(): Promise<void> {
           aiApproveConfidenceThreshold: e.ALLOWLIST_AI_CONFIDENCE_THRESHOLD,
         };
         const allowed = await isGroupAllowed(redis, allowlistConfig, chatId);
-        if (!allowed) continue;
+        if (!allowed) {
+          logger.info({ chatId }, 'Proactive scan: skip — not allowlisted');
+          continue;
+        }
       }
 
       // 2. timing state — must be RUNNING
       const ts = await getChatState(chatId);
-      if (ts.state !== 'RUNNING') continue;
+      if (ts.state !== 'RUNNING') {
+        logger.info({ chatId, state: ts.state }, 'Proactive scan: skip — chat not RUNNING');
+        continue;
+      }
 
       // 3. throttle: last proactive or last bot reply
       const lastProactiveAt = await redis.get(PROACTIVE_LAST_PREFIX + chatId);
-      if (lastProactiveAt && now - parseInt(lastProactiveAt, 10) < e.PROACTIVE_SCAN_MIN_INTERVAL_SEC) continue;
-      if (ts.lastBotReplyAt && Date.now() - ts.lastBotReplyAt < e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 1000) continue;
+      if (lastProactiveAt && now - parseInt(lastProactiveAt, 10) < e.PROACTIVE_SCAN_MIN_INTERVAL_SEC) {
+        logger.info({ chatId, lastProactiveAgo: now - parseInt(lastProactiveAt, 10) }, 'Proactive scan: skip — proactive throttle');
+        continue;
+      }
+      if (ts.lastBotReplyAt && Date.now() - ts.lastBotReplyAt < e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 1000) {
+        logger.info({ chatId, lastReplyAgoMs: Date.now() - ts.lastBotReplyAt }, 'Proactive scan: skip — recent bot reply');
+        continue;
+      }
 
       // 4. recent messages + human count filter
       const recent = await getRecent(chatId, e.PROACTIVE_SCAN_RECENT_MSG_COUNT);
       const humanCount = recent.filter((m) => !m.isBot && m.role !== 'assistant').length;
-      if (humanCount < e.PROACTIVE_SCAN_MIN_HUMAN_MSGS) continue;
+      if (humanCount < e.PROACTIVE_SCAN_MIN_HUMAN_MSGS) {
+        logger.info({ chatId, humanCount, min: e.PROACTIVE_SCAN_MIN_HUMAN_MSGS }, 'Proactive scan: skip — not enough humans');
+        continue;
+      }
 
       // 5. LLM: should I chime in?
       const verdict = await shouldChimeIn(chatId, recent, e);
+      logger.info({ chatId, verdict }, 'Proactive scan: chime verdict');
       if (!verdict.join) continue;
 
       // 6. timing gate (isDirectInteraction=false → gate truly evaluates)
       const lastUser = recent.findLast((m) => !m.isBot && m.role !== 'assistant');
-      if (!lastUser) continue;
+      if (!lastUser) {
+        logger.info({ chatId }, 'Proactive scan: skip — no last user message');
+        continue;
+      }
 
       const gateDecision = await runTimingGate({
         chatId,
@@ -216,16 +247,20 @@ export async function runProactiveScan(): Promise<void> {
         botName: e.BOT_USERNAME,
         botPersona: loadCachedPrompt('identity/persona.md').slice(0, 800),
         isDirectInteraction: false,
+        proactiveMode: true,
       });
 
       if (gateDecision.action !== 'continue') {
-        logger.info({ chatId, action: gateDecision.action }, 'Proactive scan: gate suppressed');
+        logger.info({ chatId, action: gateDecision.action, reason: gateDecision.reason }, 'Proactive scan: gate suppressed');
         continue;
       }
 
       // 7. generate + send
       const text = await generateProactiveReply(chatId, recent, verdict.topic, e);
-      if (!text) continue;
+      if (!text) {
+        logger.info({ chatId }, 'Proactive scan: skip — empty reply');
+        continue;
+      }
 
       await sender.sendDirect(chatId, text);
       await redis.set(PROACTIVE_LAST_PREFIX + chatId, String(now), 'EX', e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 2);
