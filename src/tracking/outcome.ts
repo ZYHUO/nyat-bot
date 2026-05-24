@@ -7,6 +7,7 @@ import { getRedis } from '../db/redis.js';
 import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 import type { ReplyOutcome } from './types.js';
+import { applyMoodEvent } from './mood.js';
 
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
@@ -115,6 +116,8 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
+          // Stage E: positive social signal lifts mood
+          try { applyMoodEvent(chatId, 5, `outcome_positive_${signal}`); } catch { /* non-critical */ }
           continue;
         }
 
@@ -127,6 +130,8 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
+          // Stage E: being ignored dampens mood (small but cumulative)
+          try { applyMoodEvent(chatId, -3, 'outcome_ignored'); } catch { /* non-critical */ }
         } else {
           await redis.hset(key, field, JSON.stringify(entry));
           await redis.expire(key, PENDING_TTL);

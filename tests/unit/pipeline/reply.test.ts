@@ -165,7 +165,7 @@ describe('generateReply', () => {
       usage: 'reply',
       messages: mockBuildMessages.mock.results[0]!.value,
     }));
-    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('normal', 1001);
+    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('normal', 1001, 123);
     expect(mockCompressContext).not.toHaveBeenCalled();
     expect(mockPlanReply).not.toHaveBeenCalled();
     expect(mockExecuteToolPlan).not.toHaveBeenCalled();
@@ -263,7 +263,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
     expect(mockCallWithFallback).toHaveBeenCalledWith(expect.objectContaining({
       usage: 'reply',
     }));
-    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('normal', 1001);
+    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('normal', 1001, 123);
     expect(mockPlanReply).not.toHaveBeenCalled();
   });
 
@@ -274,7 +274,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
     expect(mockCallWithFallback).toHaveBeenCalledWith(expect.objectContaining({
       usage: 'reply_pro',
     }));
-    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('pro', 1001);
+    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('pro', 1001, 123);
     expect(mockPlanReply).not.toHaveBeenCalled();
   });
 
