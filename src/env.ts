@@ -186,6 +186,18 @@ const envSchema = z.object({
   // 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。
   TIMING_GATE_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(15),
 
+  // ── Learner (Expression + Jargon, Stage D) ──
+  LEARNER_ENABLED: booleanFromEnv.default(false),
+  LEARNER_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(60),
+  LEARNER_SCAN_USAGE: z.string().default('judge'),
+  LEARNER_BATCH_SIZE: z.coerce.number().int().positive().default(80),
+  LEARNER_MIN_NEW_MSGS: z.coerce.number().int().positive().default(30),
+  LEARNER_MAX_CHATS_PER_TICK: z.coerce.number().int().positive().default(3),
+  EXPRESSION_INJECT_ENABLED: booleanFromEnv.default(false),
+  EXPRESSION_INJECT_COUNT: z.coerce.number().int().positive().default(5),
+  JARGON_INFERENCE_THRESHOLDS: z.string().default('4,8,25,100'),
+  JARGON_QUERY_ENABLED: booleanFromEnv.default(false),
+
   // Monitor
   MONITOR_TOKEN: z.string().default(''),
 

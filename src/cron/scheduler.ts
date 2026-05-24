@@ -12,6 +12,7 @@ import { runKnowledgeSync } from './knowledge-sync.js';
 import { runUserProfileSync } from '../tracking/user-profile.js';
 import { runIdleCheck } from './idle.js';
 import { runProactiveScan } from './proactive-scan.js';
+import { runLearnerScan } from './learner-scan.js';
 import { runChannelSync } from './channel-sync.js';
 import { flushDailyStats } from '../tracking/stats.js';
 import { logger } from '../shared/logger.js';
@@ -88,6 +89,13 @@ export function startCronJobs(deps?: CronDeps): void {
   if (env().PROACTIVE_SCAN_ENABLED) {
     tasks.push(schedule(`*/${env().PROACTIVE_SCAN_INTERVAL_MIN} * * * *`, () => {
       void safeRun('proactive-scan', runProactiveScan);
+    }));
+  }
+
+  // Learner scan — expression + jargon extraction (Stage D)
+  if (env().LEARNER_ENABLED) {
+    tasks.push(schedule(`*/${env().LEARNER_SCAN_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('learner-scan', runLearnerScan);
     }));
   }
 
