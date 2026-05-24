@@ -731,7 +731,11 @@ onUnmounted(() => {
 
           <!-- ===== Tab: 贴纸 ===== -->
           <div v-show="activeTab === 'stickers'" class="tab-panel">
-            <StickerKbPanel v-if="isMaster && activeTab === 'stickers'" :request="request" />
+            <StickerKbPanel
+              v-if="isMaster && activeTab === 'stickers'"
+              :request="request"
+              :init-data="tg?.initData ?? ''"
+            />
           </div>
 
           <!-- ===== Tab: 设置 ===== -->
