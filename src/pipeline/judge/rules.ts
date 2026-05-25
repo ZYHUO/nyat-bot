@@ -196,7 +196,7 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     .map((m) => m.textContent || m.captionContent || "")
     .filter(Boolean);
 
-  // 1. Bot message — check if humans are present before engaging
+  // 1. Bot message — allow bot-to-bot conversations with round limits
   if (msg.isBot && msg.uid !== botUid) {
     // Only consider replying if bot mentions us or replies to us
     if (
@@ -206,27 +206,20 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
       return makeResult("IGNORE", "bot_message");
     }
 
-    // Check if any human has spoken recently — if so, disengage from bot chat
-    // Look through recent messages for any human activity
-    let humanSeenSinceLastBotExchange = false;
+    // Count consecutive bot messages (both bots) in recent history
+    // Each "round" = 2 messages (1 from other bot + 1 from us), so 20 = 10 rounds
     let consecutiveBotMsgs = 0;
     for (let i = ctx.recentMessages.length - 1; i >= 0; i--) {
       const m = ctx.recentMessages[i]!;
-      if (!m.isBot && m.role !== "assistant" && m.uid !== botUid) {
-        humanSeenSinceLastBotExchange = true;
+      if (m.isBot || m.role === "assistant") {
+        consecutiveBotMsgs++;
+      } else {
         break;
       }
-      consecutiveBotMsgs++;
     }
 
-    // If a human has sent a message recently, stop engaging with bots
-    if (humanSeenSinceLastBotExchange) {
-      return makeResult("IGNORE", "bot_human_present");
-    }
-
-    // No human present — use decay to prevent infinite bot-to-bot loops
-    // Much stricter: 1 reply max, then stop
-    if (consecutiveBotMsgs >= 2) {
+    // Max 10 rounds (20 consecutive bot messages) — prompt will encourage natural wind-down around round 8-9
+    if (consecutiveBotMsgs >= 20) {
       return makeResult("IGNORE", "bot_fatigue");
     }
     return makeResult("REPLY", "bot_mentions_self");
@@ -348,10 +341,12 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   }
 
   // 6. Hot chat — 概率降级而非直接沉默
-  // 20-40条/5min：60% 概率跳过；>40条：100% 跳过
-  if (groupActivity.messagesLast5Min >= 10) {
+  // 15-29条/5min：60% 概率跳过；≥30条：90% 跳过；≥50条：100% 跳过
+  if (groupActivity.messagesLast5Min >= 15) {
     const skip =
-      groupActivity.messagesLast5Min >= 25 ? true : Math.random() < 0.7;
+      groupActivity.messagesLast5Min >= 50 ? true :
+      groupActivity.messagesLast5Min >= 30 ? Math.random() < 0.9 :
+      Math.random() < 0.6;
     if (skip) {
       // Proactive engagement: when enabled, occasionally let hot_chat fall through to L1/L2
       const e = env();
@@ -370,8 +365,8 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   }
 
   // 7. Recent reply (last bot reply within 5 messages) AND not mentioned → IGNORE
-  // lastBotReplyIndex = 0 means bot was the last message; < 10 means within the last 10 messages.
-  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 10) {
+  // lastBotReplyIndex = 0 means bot was the last message; < 5 means within the last 5 messages.
+  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 5) {
     return makeResult("IGNORE", "recent_reply");
   }
 

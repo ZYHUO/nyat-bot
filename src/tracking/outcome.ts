@@ -62,7 +62,8 @@ export async function checkOutcome(
   try {
     const pending = await redis.hgetall(key);
     if (!Object.keys(pending).length) return { needsReflection: false };
-    if (currentMessage.isBot) return { needsReflection: false };
+    // Allow bot-to-bot interactions to affect outcome tracking
+    // (previously we skipped all bot messages here)
 
     const currentReplyTo = currentMessage.replyTo?.messageId ?? 0;
     const currentText = currentMessage.textContent ?? '';
