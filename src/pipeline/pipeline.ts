@@ -510,18 +510,20 @@ async function generateAndSendReplies(args: {
         }
       : undefined;
     const humanizerConfig: Partial<HumanizerConfig> | undefined = override?.humanizer
-      ? {
-          typoEnabled: override.humanizer.typo_enabled,
-          typoRate: override.humanizer.typo_rate,
-          typoCorrectionRate: override.humanizer.typo_correction_rate,
-          readDelayEnabled: override.humanizer.read_delay_enabled,
-          readDelayBase: override.humanizer.read_delay_base,
-          ackPrefixEnabled: override.humanizer.ack_prefix_enabled,
-          deleteResendEnabled: override.humanizer.delete_resend_enabled,
-          deleteResendRate: override.humanizer.delete_resend_rate,
-          jitterEnabled: override.humanizer.jitter_enabled,
-          jitterFactor: override.humanizer.jitter_factor,
-        }
+      ? Object.fromEntries(
+          Object.entries({
+            typoEnabled: override.humanizer.typo_enabled,
+            typoRate: override.humanizer.typo_rate,
+            typoCorrectionRate: override.humanizer.typo_correction_rate,
+            readDelayEnabled: override.humanizer.read_delay_enabled,
+            readDelayBase: override.humanizer.read_delay_base,
+            ackPrefixEnabled: override.humanizer.ack_prefix_enabled,
+            deleteResendEnabled: override.humanizer.delete_resend_enabled,
+            deleteResendRate: override.humanizer.delete_resend_rate,
+            jitterEnabled: override.humanizer.jitter_enabled,
+            jitterFactor: override.humanizer.jitter_factor,
+          }).filter(([, v]) => v !== undefined)
+        ) as Partial<HumanizerConfig>
       : undefined;
 
     // 7. 4-way context retrieval
@@ -555,20 +557,19 @@ async function generateAndSendReplies(args: {
       return;
     }
 
-    // 9. Send all replies to Telegram
+// 9. Send all replies to Telegram
     const t6 = performance.now();
     const sentMessages: Array<{ messageId: number; text: string }> = [];
 
     // ── Humanizer: read delay ──
-    // Delete placeholder before read delay (user sees the placeholder disappear = bot "read" it)
-    if (maxPlaceholderMsgId) {
-      await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
-      maxPlaceholderMsgId = undefined;
-    }
+    // Note: don't delete placeholder here — let it be edited into the first reply
+    // in the send loop. Only delete if no placeholder exists (sentiment was "thinking").
 
     const incomingLength = formatted.textContent?.length ?? 0;
     const readDelay = calculateReadDelay(incomingLength, humanizerConfig);
     if (readDelay > 0) {
+      // Show typing during read delay so user sees bot is "processing"
+      await sendChatAction(job.chatId, 'typing');
       logger.debug({ chatId: job.chatId, readDelay, incomingLength }, 'Humanizer: read delay');
       await new Promise((resolve) => setTimeout(resolve, readDelay * 1000));
     }
@@ -705,8 +706,6 @@ async function generateAndSendReplies(args: {
                 recordStickerSent(job.chatId, stickerMsgId, stickerFileUniqueId, stickerFileId, stickerIntent);
               }
             }
-
-            sentMessages.push({ messageId: sent.messageId, text: reply.replyContent });
           }
         } else if (stickerFileId) {
           const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {

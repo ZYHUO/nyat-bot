@@ -324,7 +324,7 @@ export function decideDeleteResend(
  */
 export function applyJitter(delay: number, jitterFactor: number): number {
   const variation = delay * jitterFactor;
-  return delay + (Math.random() * 2 - 1) * variation;
+  return Math.max(0, delay + (Math.random() * 2 - 1) * variation);
 }
 
 // ─── Combined Humanizer Pipeline ───
