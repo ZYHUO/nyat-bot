@@ -32,6 +32,8 @@ export interface ParsedReply {
   stickerIntent?: string[];
   handoffToSplitter?: boolean;
   replyQuote?: boolean;
+  /** True if this segment was inserted by the humanizer as a filler (e.g. "我想想") — skip typo/afterthought/delete-resend */
+  isInterjection?: boolean;
 }
 
 /**
