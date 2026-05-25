@@ -150,8 +150,8 @@ const envSchema = z.object({
 
   // ── Proactive Engagement (Stage B) ──
   JUDGE_PROACTIVE_ENABLED: booleanFromEnv.default(false),
-  JUDGE_PROACTIVE_RATE: z.coerce.number().min(0).max(1).default(0.05),
-  JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(600),
+  JUDGE_PROACTIVE_RATE: z.coerce.number().min(0).max(1).default(0.25),
+  JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
   JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),
 
   // ── Proactive Scan Cron (Stage C) ──
