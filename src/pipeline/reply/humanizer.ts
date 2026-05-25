@@ -13,7 +13,7 @@ export interface HumanizerConfig {
   typoEnabled: boolean;
   /** Probability a character gets typoed (0-1) */
   typoRate: number;
-  /** Probability of sending a correction message after typo (vs just sending correct) */
+  /** Probability of correcting a typo via edit (0-1). 1.0 = always correct, 0 = never correct */
   typoCorrectionRate: number;
   /** Delay before correction message (seconds) */
   typoCorrectionDelay: number;
@@ -81,7 +81,7 @@ export interface HumanizerConfig {
 const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   typoEnabled: true,
   typoRate: 0.3,
-  typoCorrectionRate: 0.5,
+  typoCorrectionRate: 1.0,
   typoCorrectionDelay: 1.5,
 
   readDelayEnabled: true,

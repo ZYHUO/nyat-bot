@@ -347,12 +347,14 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   }
 
   // 6. Hot chat — 概率降级而非直接沉默
-  // 15-29条/5min：60% 概率跳过；≥30条：90% 跳过；≥50条：100% 跳过
-  if (groupActivity.messagesLast5Min >= 15) {
+  // 25-39条/5min：30% 跳过；≥40条：70% 跳过；≥60条：100% 跳过
+  // Lowered thresholds vs before to allow bot to participate in active but not
+  // overwhelming conversations
+  if (groupActivity.messagesLast5Min >= 25) {
     const skip =
-      groupActivity.messagesLast5Min >= 50 ? true :
-      groupActivity.messagesLast5Min >= 30 ? Math.random() < 0.9 :
-      Math.random() < 0.6;
+      groupActivity.messagesLast5Min >= 60 ? true :
+      groupActivity.messagesLast5Min >= 40 ? Math.random() < 0.7 :
+      Math.random() < 0.3;
     if (skip) {
       // Proactive engagement: when enabled, occasionally let hot_chat fall through to L1/L2
       const e = env();
@@ -370,9 +372,12 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     }
   }
 
-  // 7. Recent reply (last bot reply within 5 messages) AND not mentioned → IGNORE
-  // lastBotReplyIndex = 0 means bot was the last message; < 5 means within the last 5 messages.
-  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 5) {
+  // 7. Recent reply — cooldown to prevent bot from dominating conversation
+  // lastBotReplyIndex = 0 means bot was the last message
+  // Threshold of 2: bot only needs to wait 2 other messages before chiming in again.
+  // This allows the bot to be a natural participant rather than only speaking
+  // once and vanishing for the rest of the conversation.
+  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 2) {
     return makeResult("IGNORE", "recent_reply");
   }
 
