@@ -13,7 +13,7 @@ export interface HumanizerConfig {
   typoEnabled: boolean;
   /** Probability a character gets typoed (0-1) */
   typoRate: number;
-  /** Probability of correcting a typo via edit (0-1). 1.0 = always correct, 0 = never correct */
+  /** Probability of correcting a typo (0-1). 1.0 = always correct. Correction mode is 50/50: edit original vs append in next message */
   typoCorrectionRate: number;
   /** Delay before correction message (seconds) */
   typoCorrectionDelay: number;
@@ -208,8 +208,10 @@ export interface TypoResult {
   typoedText: string;
   /** The original text before typo (for edit-based correction) */
   originalText: string;
-  /** If a correction should be sent, this is the corrected word; otherwise null */
-  correction: string | null;
+  /** Correction mode: 'edit' = edit original message, 'append' = send correct word in next segment, null = no correction */
+  correction: 'edit' | 'append' | null;
+  /** The correct character/word to append (used when correction='append') */
+  correctChar: string | null;
   /** Index of the typo in the text, or -1 if no typo */
   typoIndex: number;
 }
@@ -224,7 +226,7 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
   if (!cfg.typoEnabled || Math.random() > cfg.typoRate) {
     // typoRate is per-character but we check per-message with amplified probability
     // so if rate=0.03, each message has ~30% chance of at least one typo for avg 10-char msg
-    return { typoedText: text, originalText: text, correction: null, typoIndex: -1 };
+    return { typoedText: text, originalText: text, correction: null, correctChar: null, typoIndex: -1 };
   }
 
   // Find all candidate positions
@@ -237,7 +239,7 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
   }
 
   if (candidates.length === 0) {
-    return { typoedText: text, originalText: text, correction: null, typoIndex: -1 };
+    return { typoedText: text, originalText: text, correction: null, correctChar: null, typoIndex: -1 };
   }
 
   // Pick one random position
@@ -248,15 +250,22 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
 
   let typoedText = text.slice(0, typoIdx) + replacement + text.slice(typoIdx + 1);
 
-  // Decide whether to send correction
-  let correction: string | null = null;
+  // Decide correction mode: 50% edit original message, 50% append correct char in next segment
+  // "edit" = fix the typo by editing the original message
+  // "append" = don't fix, just send the correct character in the next reply (like a human too lazy to edit)
+  let correction: 'edit' | 'append' | null = null;
+  let correctChar: string | null = null;
   if (Math.random() < cfg.typoCorrectionRate) {
-    // Send correct version as correction
-    correction = originalChar;
+    if (Math.random() < 0.5) {
+      correction = 'edit';
+    } else {
+      correction = 'append';
+      correctChar = originalChar;
+    }
   }
 
   logger.debug({ originalChar, replacement, correction: correction ?? 'none' }, 'Typo injected');
-  return { typoedText, originalText: text, correction, typoIndex: typoIdx };
+  return { typoedText, originalText: text, correction, correctChar, typoIndex: typoIdx };
 }
 
 // ─── Read Delay ───

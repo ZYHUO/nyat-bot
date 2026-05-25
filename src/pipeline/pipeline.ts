@@ -733,8 +733,8 @@ async function generateAndSendReplies(args: {
         if (!isStickerOnly && !skipTextSend) {
           if (replyIdx === 0 && maxPlaceholderMsgId) {
             await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText).catch(() => {});
-            // ── Humanizer: typo correction via edit (placeholder path) ──
-            if (typoResult && typoResult.correction) {
+            // ── Humanizer: typo correction (placeholder path) ──
+            if (typoResult && typoResult.correction === 'edit') {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
               await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
@@ -742,6 +742,17 @@ async function generateAndSendReplies(args: {
               logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
             }
             sentMessages.push({ messageId: maxPlaceholderMsgId, text: typoResult ? typoResult.originalText : effectiveText });
+            // ── Humanizer: typo append (placeholder path — send correct char as follow-up) ──
+            if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
+              const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+              await sendChatAction(job.chatId, 'typing');
+              await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
+              const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
+              if (appendSent.messageId) {
+                sentMessages.push({ messageId: appendSent.messageId, text: typoResult.correctChar });
+              }
+              logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append (placeholder)');
+            }
           } else {
             const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
 
@@ -765,12 +776,24 @@ async function generateAndSendReplies(args: {
             }
 
             // ── Humanizer: typo correction via edit ──
-            if (typoResult && typoResult.correction && currentMessageId) {
+            if (typoResult && typoResult.correction === 'edit' && currentMessageId) {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
               await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
               await editMessage(job.chatId, currentMessageId, typoResult.originalText).catch(() => {});
               logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
+            }
+
+            // ── Humanizer: typo append (send correct char as follow-up) ──
+            if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
+              const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+              await sendChatAction(job.chatId, 'typing');
+              await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
+              const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
+              if (appendSent.messageId) {
+                sentMessages.push({ messageId: appendSent.messageId, text: typoResult.correctChar });
+              }
+              logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append');
             }
 
             // ── Humanizer: afterthought edit (skip for interjections) ──
