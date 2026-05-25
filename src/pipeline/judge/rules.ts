@@ -206,20 +206,23 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
       return makeResult("IGNORE", "bot_message");
     }
 
-    // Count consecutive bot messages (both bots) in recent history
-    // Each "round" = 2 messages (1 from other bot + 1 from us), so 20 = 10 rounds
-    let consecutiveBotMsgs = 0;
+    // Count our own recent replies to estimate bot-to-bot rounds
+    // Only count our messages (role=assistant) as "rounds participated"
+    let ourRecentReplies = 0;
     for (let i = ctx.recentMessages.length - 1; i >= 0; i--) {
       const m = ctx.recentMessages[i]!;
-      if (m.isBot || m.role === "assistant") {
-        consecutiveBotMsgs++;
+      if (m.role === "assistant") {
+        ourRecentReplies++;
+      } else if (m.isBot) {
+        // Other bot message — keep counting if interleaved
+        continue;
       } else {
         break;
       }
     }
 
-    // Max 10 rounds (20 consecutive bot messages) — prompt will encourage natural wind-down around round 8-9
-    if (consecutiveBotMsgs >= 20) {
+    // Max 10 rounds of our replies in a bot-to-bot streak
+    if (ourRecentReplies >= 10) {
       return makeResult("IGNORE", "bot_fatigue");
     }
     return makeResult("REPLY", "bot_mentions_self");

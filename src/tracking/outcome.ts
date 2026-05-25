@@ -118,15 +118,16 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
-          // Stage E: positive social signal lifts mood
-          try { applyMoodEvent(chatId, 5, `outcome_positive_${signal}`); } catch { /* non-critical */ }
-          // Stage F: positive interaction strengthens relationship
-          try {
-            const triggerUid = entry.trigger_user_id as number | undefined;
-            if (typeof triggerUid === 'number' && triggerUid > 0) {
-              applyRelationshipEvent(chatId, triggerUid, 1, `positive:${signal}`);
-            }
-          } catch { /* non-critical */ }
+          // Stage E/F: only apply mood/relationship effects for human interactions, not bot-to-bot
+          if (!currentMessage.isBot) {
+            try { applyMoodEvent(chatId, 5, `outcome_positive_${signal}`); } catch { /* non-critical */ }
+            try {
+              const triggerUid = entry.trigger_user_id as number | undefined;
+              if (typeof triggerUid === 'number' && triggerUid > 0) {
+                applyRelationshipEvent(chatId, triggerUid, 1, `positive:${signal}`);
+              }
+            } catch { /* non-critical */ }
+          }
           continue;
         }
 
@@ -139,15 +140,16 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
-          // Stage E: being ignored dampens mood (small but cumulative)
-          try { applyMoodEvent(chatId, -3, 'outcome_ignored'); } catch { /* non-critical */ }
-          // Stage F: being ignored mildly cools the relationship
-          try {
-            const triggerUid = entry.trigger_user_id as number | undefined;
-            if (typeof triggerUid === 'number' && triggerUid > 0) {
-              applyRelationshipEvent(chatId, triggerUid, -0.5, 'negative:ignored');
-            }
-          } catch { /* non-critical */ }
+          // Stage E/F: only apply mood/relationship effects for human interactions, not bot-to-bot
+          if (!currentMessage.isBot) {
+            try { applyMoodEvent(chatId, -3, 'outcome_ignored'); } catch { /* non-critical */ }
+            try {
+              const triggerUid = entry.trigger_user_id as number | undefined;
+              if (typeof triggerUid === 'number' && triggerUid > 0) {
+                applyRelationshipEvent(chatId, triggerUid, -0.5, 'negative:ignored');
+              }
+            } catch { /* non-critical */ }
+          }
         } else {
           await redis.hset(key, field, JSON.stringify(entry));
           await redis.expire(key, PENDING_TTL);
