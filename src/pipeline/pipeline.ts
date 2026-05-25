@@ -670,7 +670,14 @@ async function generateAndSendReplies(args: {
         if (!isStickerOnly) {
           if (replyIdx === 0 && maxPlaceholderMsgId) {
             await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText).catch(() => {});
-            sentMessages.push({ messageId: maxPlaceholderMsgId, text: effectiveText });
+            // ── Humanizer: typo correction via edit (placeholder path) ──
+            if (typoResult && typoResult.correction) {
+              const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+              await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
+              await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText).catch(() => {});
+              logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
+            }
+            sentMessages.push({ messageId: maxPlaceholderMsgId, text: typoResult ? typoResult.originalText : effectiveText });
           } else {
             const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
 
@@ -685,16 +692,18 @@ async function generateAndSendReplies(args: {
               sentMessages.push({ messageId: resent.messageId, text: deleteResend.modifiedText });
               logger.debug({ chatId: job.chatId, original: effectiveText, modified: deleteResend.modifiedText }, 'Humanizer: delete-and-resend');
             } else {
-              sentMessages.push({ messageId: sent.messageId, text: effectiveText });
+              sentMessages.push({ messageId: sent.messageId, text: typoResult ? typoResult.originalText : effectiveText });
             }
 
-            // ── Humanizer: typo correction message ──
-            if (typoResult && typoResult.correction) {
+            // ── Humanizer: typo correction via edit ──
+            if (typoResult && typoResult.correction && sent.messageId) {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-              await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-              await sender.sendDirect(job.chatId, typoResult.correction + '*', undefined).catch(() => {});
-              logger.debug({ chatId: job.chatId, correction: typoResult.correction }, 'Humanizer: typo correction sent');
+              // Edit the typoed message to show the correct version (simulates human "fix typo" behavior)
+              await editMessage(job.chatId, sent.messageId, typoResult.originalText).catch(() => {
+                // Edit might fail (message too old, no perms, etc.) — that's fine
+              });
+              logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
             }
 
             if (stickerFileId && stickerPolicy.sendPosition === "after") {

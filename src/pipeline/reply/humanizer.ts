@@ -140,6 +140,8 @@ function shouldSkipTypo(char: string, text: string, idx: number): boolean {
 export interface TypoResult {
   /** The text with typos injected */
   typoedText: string;
+  /** The original text before typo (for edit-based correction) */
+  originalText: string;
   /** If a correction should be sent, this is the corrected word; otherwise null */
   correction: string | null;
   /** Index of the typo in the text, or -1 if no typo */
@@ -156,7 +158,7 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
   if (!cfg.typoEnabled || Math.random() > cfg.typoRate * 10) {
     // typoRate is per-character but we check per-message with amplified probability
     // so if rate=0.03, each message has ~30% chance of at least one typo for avg 10-char msg
-    return { typoedText: text, correction: null, typoIndex: -1 };
+    return { typoedText: text, originalText: text, correction: null, typoIndex: -1 };
   }
 
   // Find all candidate positions
@@ -169,7 +171,7 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
   }
 
   if (candidates.length === 0) {
-    return { typoedText: text, correction: null, typoIndex: -1 };
+    return { typoedText: text, originalText: text, correction: null, typoIndex: -1 };
   }
 
   // Pick one random position
@@ -188,7 +190,7 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
   }
 
   logger.debug({ originalChar, replacement, correction: correction ?? 'none' }, 'Typo injected');
-  return { typoedText, correction, typoIndex: typoIdx };
+  return { typoedText, originalText: text, correction, typoIndex: typoIdx };
 }
 
 // ─── Read Delay ───
