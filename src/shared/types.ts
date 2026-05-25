@@ -71,6 +71,8 @@ export interface ReplyOutput {
   /** Up to 3 sticker intents in priority order */
   stickerIntent?: string[];
   replyQuote?: boolean;
+  /** True if this segment was inserted by the humanizer as a filler — skip typo/afterthought/delete-resend */
+  isInterjection?: boolean;
 }
 
 export interface RetrievedContext {

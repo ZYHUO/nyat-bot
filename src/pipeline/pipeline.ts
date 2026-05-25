@@ -614,6 +614,7 @@ async function generateAndSendReplies(args: {
         targetMessageId: replies[0]!.targetMessageId,
         replyQuote: false,
         stickerIntent: [],
+        isInterjection: true,
       });
       logger.debug({ chatId: job.chatId, text: thinkingResult.text }, 'Humanizer: thinking interjection inserted');
     }
@@ -634,14 +635,19 @@ async function generateAndSendReplies(args: {
         await new Promise((resolve) => setTimeout(resolve, (ackPrefix.delay ?? 1.5) * 1000));
       }
 
+      // ── Humanizer: skip humanizer effects for interjection segments ──
+      const isInterjection = reply.isInterjection === true;
+
       // ── Humanizer: typo injection ──
       const humanizedText = reply.replyContent;
-      const typoResult = replyIdx === 0 && humanizedText.length >= 4
+      const typoResult = !isInterjection && replyIdx === 0 && humanizedText.length >= 4
         ? (() => { const r = injectTypo(humanizedText, humanizerConfig); return r.typoIndex >= 0 ? r : null; })()
         : null;
 
-      // ── Humanizer: delete-and-resend ──
-      const deleteResend = decideDeleteResend(replyIdx, replies.length, humanizedText, humanizerConfig);
+      // ── Humanizer: delete-and-resend (skip for interjections) ──
+      const deleteResend = isInterjection
+        ? { shouldDeleteResend: false, deleteDelay: 0, modifiedText: humanizedText }
+        : decideDeleteResend(replyIdx, replies.length, humanizedText, humanizerConfig);
 
       // ── MaiBot-style typing delay between segmented messages ──
       // First message uses the placeholder or sends immediately;
@@ -694,8 +700,10 @@ async function generateAndSendReplies(args: {
 
         const isStickerOnly = reply.replyContent.trim() === '[sticker]' && stickerFileId;
 
-        // ── Humanizer: sticker-only short reply ──
-        const stickerOnlyResult = decideEmojiReply(reply.replyContent.length, humanizerConfig);
+        // ── Humanizer: sticker-only short reply (skip for interjections) ──
+        const stickerOnlyResult = !isInterjection
+          ? decideEmojiReply(reply.replyContent.length, humanizerConfig)
+          : { shouldReplace: false, intent: '' };
         let stickerOnlyFileId: string | undefined;
         let stickerOnlyFileUniqueId: string | undefined;
 
@@ -734,6 +742,8 @@ async function generateAndSendReplies(args: {
             const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
 
             // ── Humanizer: delete-and-resend ──
+            let currentMessageId: number | undefined = sent.messageId;
+            let currentBaseText = typoResult ? typoResult.originalText : effectiveText;
             if (deleteResend.shouldDeleteResend && sent.messageId) {
               await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, deleteResend.deleteDelay * 1000));
@@ -744,22 +754,24 @@ async function generateAndSendReplies(args: {
               const resent = await sender.sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
               sentMessages.push({ messageId: resent.messageId, text: deleteResend.modifiedText });
               logger.debug({ chatId: job.chatId, original: effectiveText, modified: deleteResend.modifiedText }, 'Humanizer: delete-and-resend');
+              currentMessageId = resent.messageId;
+              currentBaseText = deleteResend.modifiedText;
             } else {
-              sentMessages.push({ messageId: sent.messageId, text: typoResult ? typoResult.originalText : effectiveText });
+              sentMessages.push({ messageId: sent.messageId, text: currentBaseText });
             }
 
             // ── Humanizer: typo correction via edit ──
-            if (typoResult && typoResult.correction && sent.messageId) {
+            if (typoResult && typoResult.correction && currentMessageId) {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
               await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-              await editMessage(job.chatId, sent.messageId, typoResult.originalText).catch(() => {});
+              await editMessage(job.chatId, currentMessageId, typoResult.originalText).catch(() => {});
               logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
             }
 
-            // ── Humanizer: afterthought edit (casual minor tweak after sending) ──
-            if (sent.messageId) {
-              const afterthought = decideAfterthoughtEdit(effectiveText, humanizerConfig);
+            // ── Humanizer: afterthought edit (skip for interjections) ──
+            if (!isInterjection && currentMessageId) {
+              const afterthought = decideAfterthoughtEdit(currentBaseText, humanizerConfig);
               if (afterthought.shouldEdit) {
                 const afterthoughtDelay = humanizerConfig?.afterthoughtEditDelay ?? DEFAULT_HUMANIZER_CONFIG.afterthoughtEditDelay;
                 const afterthoughtDelayJittered = humanizerConfig?.jitterEnabled !== false
@@ -767,7 +779,7 @@ async function generateAndSendReplies(args: {
                   : afterthoughtDelay;
                 await sendChatAction(job.chatId, 'typing');
                 await new Promise((resolve) => setTimeout(resolve, afterthoughtDelayJittered * 1000));
-                await editMessage(job.chatId, sent.messageId, afterthought.editedText).catch(() => {});
+                await editMessage(job.chatId, currentMessageId, afterthought.editedText).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, edited: afterthought.editedText }, 'Humanizer: afterthought edit');
               }
             }

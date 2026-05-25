@@ -80,7 +80,7 @@ export interface HumanizerConfig {
 
 const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   typoEnabled: true,
-  typoRate: 0.03,
+  typoRate: 0.3,
   typoCorrectionRate: 0.5,
   typoCorrectionDelay: 1.5,
 
@@ -221,7 +221,7 @@ export interface TypoResult {
 export function injectTypo(text: string, config?: Partial<HumanizerConfig>): TypoResult {
   const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
 
-  if (!cfg.typoEnabled || Math.random() > cfg.typoRate * 10) {
+  if (!cfg.typoEnabled || Math.random() > cfg.typoRate) {
     // typoRate is per-character but we check per-message with amplified probability
     // so if rate=0.03, each message has ~30% chance of at least one typo for avg 10-char msg
     return { typoedText: text, originalText: text, correction: null, typoIndex: -1 };
@@ -377,10 +377,16 @@ export function decideDeleteResend(
     ? applyJitter(cfg.deleteResendDeleteDelay, cfg.jitterFactor)
     : cfg.deleteResendDeleteDelay;
 
+  const modified = tweakText(text);
+  // If tweakText didn't actually change anything, skip delete-resend (no-op)
+  if (modified === text) {
+    return { shouldDeleteResend: false, deleteDelay: 0, modifiedText: text };
+  }
+
   return {
     shouldDeleteResend: true,
     deleteDelay,
-    modifiedText: tweakText(text),
+    modifiedText: modified,
   };
 }
 
