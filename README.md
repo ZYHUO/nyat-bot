@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🐱 xxb-ts 啾咪囝
+# 🐱 NyatBot
 
-**Telegram AI 群聊喵娘机器人 — TypeScript**
+**Telegram AI 群聊喵娘机器人 — 拟人回复引擎**
 
 一只会思考、会回嘴、还会跟群友互动的 AI 群聊机器人。
 
@@ -167,8 +167,8 @@ scripts/                  # 迁移 + 部署脚本
 #### 安装
 
 ```bash
-git clone https://github.com/ZYHUO/xxb-ts.git
-cd xxb-ts
+git clone https://github.com/ZYHUO/nyat-bot.git
+cd nyat-bot
 npm install
 cp .env.example .env
 # 编辑 .env，填入你的 Bot Token 和 AI API 配置
@@ -309,7 +309,7 @@ Bot 可在回复时调用以下工具：
 
 ### Overview
 
-xxb-ts (啾咪囝) is a Telegram group chat AI bot written in TypeScript. It acts as an opinionated, cat-girl-themed group member that can:
+xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts as an opinionated, cat-girl-themed group member that can:
 
 - **Intelligently decide** when to reply using a 3-level judge pipeline (local rules → micro AI → full AI)
 - **Reply to multiple people** in a single trigger using JSON array output format
@@ -331,8 +331,8 @@ xxb-ts (啾咪囝) is a Telegram group chat AI bot written in TypeScript. It act
 ### Quick Start
 
 ```bash
-git clone https://github.com/ZYHUO/xxb-ts.git
-cd xxb-ts
+git clone https://github.com/ZYHUO/nyat-bot.git
+cd nyat-bot
 npm install
 cp .env.example .env
 # Edit .env with your Bot Token and AI API credentials

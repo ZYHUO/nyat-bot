@@ -1,7 +1,7 @@
 {
-  "name": "xxb-ts",
-  "version": "0.1.0",
-  "description": "啾咪囝 Telegram AI 群聊喵娘机器人 — TypeScript 重写",
+  "name": "nyat-bot",
+  "version": "0.2.0",
+  "description": "NyatBot — Telegram AI 群聊喵娘机器人，拟人回复引擎",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
