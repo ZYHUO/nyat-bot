@@ -694,28 +694,31 @@ async function generateAndSendReplies(args: {
 
         const isStickerOnly = reply.replyContent.trim() === '[sticker]' && stickerFileId;
 
-        // ── Humanizer: emoji-only short reply ──
-        const emojiResult = decideEmojiReply(reply.replyContent.length, humanizerConfig);
-        let emojiSkipSticker = false;
-        let emojiReplyToId: number | undefined = replyToId;
+        // ── Humanizer: sticker-only short reply ──
+        const stickerOnlyResult = decideEmojiReply(reply.replyContent.length, humanizerConfig);
+        let stickerOnlyFileId: string | undefined;
+        let stickerOnlyFileUniqueId: string | undefined;
 
-        // Use typo text if available, otherwise original (or emoji if replacing)
-        let effectiveText: string;
-        if (emojiResult.shouldReplace) {
-          effectiveText = emojiResult.emoji;
-          emojiSkipSticker = true;
-          emojiReplyToId = undefined; // emoji-only messages don't quote-reply
-        } else {
-          effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
+        // If sticker-only replacement triggered, try to find a sticker by intent
+        if (stickerOnlyResult.shouldReplace && stickerPolicy.enabled && stickerPolicy.mode !== 'off') {
+          const stickerCandidates = getReadyStickersByIntent([stickerOnlyResult.intent]);
+          if (stickerCandidates.length > 0) {
+            stickerCandidates.sort((a, b) => b.score - a.score);
+            const fresh = stickerCandidates.filter((c) => !_recentStickerIds.has(c.fileUniqueId));
+            const pool = (fresh.length > 0 ? fresh : stickerCandidates).slice(0, 5);
+            const picked = pool[Math.floor(Math.random() * pool.length)]!;
+            _trackRecentSticker(picked.fileUniqueId);
+            stickerOnlyFileId = picked.fileId;
+            stickerOnlyFileUniqueId = picked.fileUniqueId;
+          }
         }
 
-        // If emoji replaced this message, skip sticker
-        if (emojiSkipSticker) {
-          stickerFileId = undefined;
-          stickerFileUniqueId = undefined;
-        }
+        // Use typo text if available, otherwise original
+        let effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
+        // If sticker-only replacement resolved a sticker, skip text send
+        const skipTextSend = stickerOnlyFileId !== undefined && stickerOnlyResult.shouldReplace;
 
-        if (!isStickerOnly) {
+        if (!isStickerOnly && !skipTextSend) {
           if (replyIdx === 0 && maxPlaceholderMsgId) {
             await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText).catch(() => {});
             // ── Humanizer: typo correction via edit (placeholder path) ──
@@ -728,7 +731,7 @@ async function generateAndSendReplies(args: {
             }
             sentMessages.push({ messageId: maxPlaceholderMsgId, text: typoResult ? typoResult.originalText : effectiveText });
           } else {
-            const sent = await sender.sendDirect(job.chatId, effectiveText, emojiReplyToId);
+            const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
 
             // ── Humanizer: delete-and-resend ──
             if (deleteResend.shouldDeleteResend && sent.messageId) {
@@ -750,15 +753,12 @@ async function generateAndSendReplies(args: {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
               await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-              // Edit the typoed message to show the correct version (simulates human "fix typo" behavior)
-              await editMessage(job.chatId, sent.messageId, typoResult.originalText).catch(() => {
-                // Edit might fail (message too old, no perms, etc.) — that's fine
-              });
+              await editMessage(job.chatId, sent.messageId, typoResult.originalText).catch(() => {});
               logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
             }
 
             // ── Humanizer: afterthought edit (casual minor tweak after sending) ──
-            if (!emojiResult.shouldReplace && sent.messageId) {
+            if (sent.messageId) {
               const afterthought = decideAfterthoughtEdit(effectiveText, humanizerConfig);
               if (afterthought.shouldEdit) {
                 const afterthoughtDelay = humanizerConfig?.afterthoughtEditDelay ?? DEFAULT_HUMANIZER_CONFIG.afterthoughtEditDelay;
@@ -781,6 +781,22 @@ async function generateAndSendReplies(args: {
                 recordStickerSent(job.chatId, stickerMsgId, stickerFileUniqueId, stickerFileId, stickerIntent);
               }
             }
+          }
+        } else if (skipTextSend && stickerOnlyFileId) {
+          // ── Humanizer: sticker-only short reply (replaces text with sticker) ──
+          // Delete placeholder if this was the first reply
+          if (replyIdx === 0 && maxPlaceholderMsgId) {
+            await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+          }
+          const stickerMsgId = await sendSticker(job.chatId, stickerOnlyFileId).catch((err) => {
+            logger.warn({ err, chatId: job.chatId }, "Sticker-only reply send failed");
+            return undefined;
+          });
+          if (stickerMsgId && stickerOnlyFileUniqueId) {
+            recordStickerSent(job.chatId, stickerMsgId, stickerOnlyFileUniqueId, stickerOnlyFileId, stickerOnlyResult.intent);
+          }
+          if (stickerMsgId) {
+            sentMessages.push({ messageId: stickerMsgId, text: '[sticker]' });
           }
         } else if (stickerFileId) {
           const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {
