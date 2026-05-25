@@ -208,6 +208,8 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
 
     // Count our own recent replies to estimate bot-to-bot rounds
     // Only count our messages (role=assistant) as "rounds participated"
+    // Note: addAssistant() runs after sending, so the latest reply may not yet be in recentMessages.
+    // Using threshold 8 (not 10) to compensate for 1-2 round delay.
     let ourRecentReplies = 0;
     for (let i = ctx.recentMessages.length - 1; i >= 0; i--) {
       const m = ctx.recentMessages[i]!;
@@ -221,8 +223,9 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
       }
     }
 
-    // Max 10 rounds of our replies in a bot-to-bot streak
-    if (ourRecentReplies >= 10) {
+    // Max 8 rounds of our replies (net effective max ~10 with write delay)
+    // Prompt encourages natural wind-down at round 6-7
+    if (ourRecentReplies >= 8) {
       return makeResult("IGNORE", "bot_fatigue");
     }
     return makeResult("REPLY", "bot_mentions_self");
