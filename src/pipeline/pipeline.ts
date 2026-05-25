@@ -693,8 +693,12 @@ async function generateAndSendReplies(args: {
           }
         }
 
+        // Only the first *actually sent text* message should quote-reply.
+        // If a previous segment was a sticker-only replacement, this is visually the first
+        // text the user sees in this burst, but it's still part of a continuous reply — no quote.
+        const hasSentTextAlready = sentMessages.some((s) => s.text !== '[sticker]');
         const replyToId =
-          !replyQuoteEnabled || reply.replyQuote === false || (allSameTarget && replyIdx > 0)
+          !replyQuoteEnabled || reply.replyQuote === false || hasSentTextAlready
             ? undefined
             : reply.targetMessageId;
 
