@@ -29,6 +29,18 @@
 - 🎯 **多模型路由** — Judge / Reply / Reply Pro / Vision / Summarize 分配不同模型
 - 🏎️ **Hedged Request** — 主模型超时自动发备用请求，谁快用谁（可关闭省 token）
 
+**拟人回复（Humanizer V2）**
+- ✍️ **错别字 + 编辑纠正** — 30% 概率注入错别字，1.5s 后 editMessage 静默修正
+- ⏱️ **阅读延迟** — 根据用户输入长度计算 0.8-5s 延迟，模拟真人"阅读中"
+- 👋 **确认前缀** — 25% 概率先发"嗯"/"…"，1.5s 后再发主回复
+- 🔄 **撤回重发** — 3% 概率删掉中间/末尾段，微调用词后重发
+- 🎭 **贴纸短回复** — ≤15 字回复 15% 概率替换为纯贴纸（按意图匹配表情贴纸池）
+- 💭 **思考插入** — 长回复 10% 概率在第 1-2 段间插入"我想想"/"等下"
+- 📝 **回看修改** — 5% 概率发完 2-5s 后 edit 微调（加 emoji/语气词/删标点）
+- ⌨️ **打字指示对齐** — 所有延迟前触发 typing，>5s 延迟在 4.5s 重触发
+- 🎲 **随机抖动** — 所有时间延迟 ±20% 随机偏移，避免机械感
+- 🔀 **分段回复** — 代码驱动的智能断句（标点保护、颜文字保护、概率合并），替代 LLM 分段节省一次调用
+
 **群组功能**
 - 👥 **群成员花名册** — 自动追踪所有群成员的 username ↔ 显示名，注入 AI 上下文
 - 🤖 **Bot 交互知识库** — 记录群里其他 bot 的行为，AI 自动生成摘要，回复时注入知识
@@ -108,6 +120,8 @@ src/
 │   ├── context/          #   上下文管理 + 压缩 + 4路检索
 │   ├── judge/            #   三级判断 (规则 + micro + full AI)
 │   ├── reply/            #   回复生成 + 解析 + prompt构建
+│   │   ├── segmenter.ts  #     代码驱动的智能断句
+│   │   └── humanizer.ts  #     拟人化模块 (错别字/延迟/撤回/贴纸/修改...)
 │   └── tools/            #   工具系统 (7种工具)
 ├── queue/                # BullMQ 队列
 ├── shared/               # 类型 + 日志 (pino) + 配置
@@ -153,7 +167,7 @@ scripts/                  # 迁移 + 部署脚本
 #### 安装
 
 ```bash
-git clone https://github.com/zhongyang001-tech/xxb-ts.git
+git clone https://github.com/ZYHUO/xxb-ts.git
 cd xxb-ts
 npm install
 cp .env.example .env
@@ -304,6 +318,7 @@ xxb-ts (啾咪囝) is a Telegram group chat AI bot written in TypeScript. It act
 - **Track group members** with username ↔ display name mapping, injected into AI context
 - **Learn about other bots** by recording their interactions and auto-generating knowledge digests
 - **Handle concurrency** via BullMQ job queue backed by Redis
+- **Humanize replies** — typo injection + edit correction, read delay, ack prefix, delete-resend, sticker-only short replies, thinking interjections, afterthought edits, typing indicator alignment, random jitter, smart segmentation
 
 ### Key Design Decisions
 
@@ -316,7 +331,7 @@ xxb-ts (啾咪囝) is a Telegram group chat AI bot written in TypeScript. It act
 ### Quick Start
 
 ```bash
-git clone https://github.com/zhongyang001-tech/xxb-ts.git
+git clone https://github.com/ZYHUO/xxb-ts.git
 cd xxb-ts
 npm install
 cp .env.example .env
