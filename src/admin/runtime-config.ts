@@ -35,6 +35,26 @@ export interface RuntimeOverride {
     send_position: 'before' | 'after';
   };
   reply_quote?: boolean; // true = always quote (default), false = never attach reply_to
+  reply_segmentation?: {
+    enabled?: boolean;
+    max_length?: number;
+    max_sentence_num?: number;
+    default_reply?: string;
+    typing_chinese_time?: number;
+    typing_english_time?: number;
+  };
+  humanizer?: {
+    typo_enabled?: boolean;
+    typo_rate?: number;
+    typo_correction_rate?: number;
+    read_delay_enabled?: boolean;
+    read_delay_base?: number;
+    ack_prefix_enabled?: boolean;
+    delete_resend_enabled?: boolean;
+    delete_resend_rate?: number;
+    jitter_enabled?: boolean;
+    jitter_factor?: number;
+  };
 }
 
 export async function loadOverride(redis: Redis): Promise<RuntimeOverride | null> {
@@ -46,6 +66,8 @@ export async function loadOverride(redis: Redis): Promise<RuntimeOverride | null
     const result: RuntimeOverride = {};
     if (parsed['sticker_policy']) result.sticker_policy = parsed['sticker_policy'] as RuntimeOverride['sticker_policy'];
     if (parsed['reply_quote'] !== undefined) result.reply_quote = parsed['reply_quote'] as boolean;
+    if (parsed['reply_segmentation']) result.reply_segmentation = parsed['reply_segmentation'] as RuntimeOverride['reply_segmentation'];
+    if (parsed['humanizer']) result.humanizer = parsed['humanizer'] as RuntimeOverride['humanizer'];
     return result;
   } catch {
     logger.warn('Failed to parse runtime override from Redis');

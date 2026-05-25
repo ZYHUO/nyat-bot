@@ -1,0 +1,401 @@
+// ────────────────────────────────────────
+// Humanizer — MaiBot-style human simulation effects
+// Typo injection, read delay, acknowledgment prefix,
+// delete-and-resend, typing jitter
+// ────────────────────────────────────────
+
+import { logger } from '../../shared/logger.js';
+
+// ─── Configuration ───
+
+export interface HumanizerConfig {
+  /** Enable typo injection */
+  typoEnabled: boolean;
+  /** Probability a character gets typoed (0-1) */
+  typoRate: number;
+  /** Probability of sending a correction message after typo (vs just sending correct) */
+  typoCorrectionRate: number;
+  /** Delay before correction message (seconds) */
+  typoCorrectionDelay: number;
+
+  /** Enable read simulation delay */
+  readDelayEnabled: boolean;
+  /** Base delay in seconds before starting to "type" after receiving a message */
+  readDelayBase: number;
+  /** Additional seconds per character of the incoming message */
+  readDelayPerChar: number;
+  /** Max read delay (seconds) */
+  readDelayMax: number;
+
+  /** Enable short acknowledgment prefix for long replies */
+  ackPrefixEnabled: boolean;
+  /** Probability of sending an acknowledgment prefix before a long reply */
+  ackPrefixRate: number;
+  /** Minimum reply length (chars) to trigger acknowledgment prefix */
+  ackPrefixMinLength: number;
+  /** Pool of acknowledgment prefixes to randomly pick from */
+  ackPrefixPool: string[];
+  /** Delay between ack prefix and main reply (seconds) */
+  ackPrefixDelay: number;
+
+  /** Enable delete-and-resend */
+  deleteResendEnabled: boolean;
+  /** Probability of deleting and resending a message (0-1) */
+  deleteResendRate: number;
+  /** Delay before deleting (seconds) — gives user time to see original */
+  deleteResendDeleteDelay: number;
+
+  /** Enable typing delay jitter */
+  jitterEnabled: boolean;
+  /** Jitter factor: actual delay = calculated * (1 ± jitterFactor) */
+  jitterFactor: number;
+}
+
+const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
+  typoEnabled: true,
+  typoRate: 0.03,
+  typoCorrectionRate: 0.5,
+  typoCorrectionDelay: 1.5,
+
+  readDelayEnabled: true,
+  readDelayBase: 0.8,
+  readDelayPerChar: 0.04,
+  readDelayMax: 5.0,
+
+  ackPrefixEnabled: true,
+  ackPrefixRate: 0.25,
+  ackPrefixMinLength: 30,
+  ackPrefixPool: ['嗯', '嗯嗯', '..', '...', '啊', '哦'],
+  ackPrefixDelay: 1.5,
+
+  deleteResendEnabled: true,
+  deleteResendRate: 0.03,
+  deleteResendDeleteDelay: 2.0,
+
+  jitterEnabled: true,
+  jitterFactor: 0.2,
+};
+
+// ─── Typo Generator ───
+// Simplified Chinese typo injection using common confusion pairs
+// (No pinyin library needed — uses pre-built character substitution tables)
+
+/** Common visual/sound-alike character substitutions for Chinese typing */
+const TYPO_PAIRS: Array<[string, string]> = [
+  // Sound-alike (pinyin confusion)
+  ['的', '得'], ['得', '的'], ['的', '地'], ['地', '的'],
+  ['在', '再'], ['再', '在'],
+  ['了', '乐'], ['做', '作'], ['作', '做'],
+  ['到', '道'], ['道', '到'],
+  ['使', '是'], ['是', '使'],
+  ['因', '应'], ['应', '因'],
+  ['很', '跟'], ['跟', '很'],
+  ['那', '哪'], ['哪', '那'],
+  ['没', '美'], ['和', '何'],
+  ['会', '回'], ['回', '会'],
+  ['对', '队'], ['队', '对'],
+  ['过', '各'], ['各', '过'],
+  ['说', '硕'], ['生', '声'],
+  ['想', '向'], ['向', '想'],
+  ['去', '趣'], ['来', '莱'],
+  ['他', '她'], ['她', '他'],
+  ['嘛', '吗'], ['吗', '嘛'],
+  ['吧', '把'], ['把', '吧'],
+  ['还', '孩'], ['就', '旧'],
+  ['人', '认'], ['认', '人'],
+  ['这', '着'], ['着', '这'],
+  ['有', '又'], ['又', '有'],
+  ['也', '业'], ['都', '读'],
+  ['能', '年'], ['年', '能'],
+  ['我', '握'], ['你', '泥'],
+  ['不', '步'], ['好', '号'],
+  // Common keyboard typos (adjacent keys)
+  ['一', '以'], ['以', '一'],
+  ['个', '各'], ['大', '打'],
+  ['上', '伤'], ['下', '吓'],
+  ['中', '种'], ['种', '中'],
+];
+
+const TYPO_MAP = new Map<string, string[]>();
+for (const [a, b] of TYPO_PAIRS) {
+  if (!TYPO_MAP.has(a)) TYPO_MAP.set(a, []);
+  TYPO_MAP.get(a)!.push(b);
+}
+
+/** Characters that should never be typoed (structural, short, or punctuation) */
+function shouldSkipTypo(char: string, text: string, idx: number): boolean {
+  // Never typo first or last char
+  if (idx === 0 || idx === text.length - 1) return true;
+  // Never typo non-CJK
+  const code = char.charCodeAt(0);
+  if (code < 0x4e00 || code > 0x9fff) return true;
+  // Never typo if neighbors are punctuation
+  const prevCode = text[idx - 1]!.charCodeAt(0);
+  const nextCode = text[idx + 1]!.charCodeAt(0);
+  if (prevCode < 0x4e00 || prevCode > 0x9fff) return true;
+  if (nextCode < 0x4e00 || nextCode > 0x9fff) return true;
+  return false;
+}
+
+export interface TypoResult {
+  /** The text with typos injected */
+  typoedText: string;
+  /** If a correction should be sent, this is the corrected word; otherwise null */
+  correction: string | null;
+  /** Index of the typo in the text, or -1 if no typo */
+  typoIndex: number;
+}
+
+/**
+ * Inject a single typo into text with a given probability.
+ * Returns the typoed text and optionally a correction.
+ */
+export function injectTypo(text: string, config?: Partial<HumanizerConfig>): TypoResult {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (!cfg.typoEnabled || Math.random() > cfg.typoRate * 10) {
+    // typoRate is per-character but we check per-message with amplified probability
+    // so if rate=0.03, each message has ~30% chance of at least one typo for avg 10-char msg
+    return { typoedText: text, correction: null, typoIndex: -1 };
+  }
+
+  // Find all candidate positions
+  const candidates: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (shouldSkipTypo(char, text, i)) continue;
+    if (!TYPO_MAP.has(char)) continue;
+    candidates.push(i);
+  }
+
+  if (candidates.length === 0) {
+    return { typoedText: text, correction: null, typoIndex: -1 };
+  }
+
+  // Pick one random position
+  const typoIdx = candidates[Math.floor(Math.random() * candidates.length)]!;
+  const originalChar = text[typoIdx]!;
+  const replacements = TYPO_MAP.get(originalChar)!;
+  const replacement = replacements[Math.floor(Math.random() * replacements.length)]!;
+
+  let typoedText = text.slice(0, typoIdx) + replacement + text.slice(typoIdx + 1);
+
+  // Decide whether to send correction
+  let correction: string | null = null;
+  if (Math.random() < cfg.typoCorrectionRate) {
+    // Send correct version as correction
+    correction = originalChar;
+  }
+
+  logger.debug({ originalChar, replacement, correction: correction ?? 'none' }, 'Typo injected');
+  return { typoedText, correction, typoIndex: typoIdx };
+}
+
+// ─── Read Delay ───
+
+/**
+ * Calculate the read delay (seconds) based on the incoming message length.
+ * Simulates the time a human would take to read before starting to type.
+ */
+export function calculateReadDelay(incomingMessageLength: number, config?: Partial<HumanizerConfig>): number {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (!cfg.readDelayEnabled) return 0;
+
+  let delay = cfg.readDelayBase + incomingMessageLength * cfg.readDelayPerChar;
+  delay = Math.min(delay, cfg.readDelayMax);
+
+  if (cfg.jitterEnabled) {
+    delay = applyJitter(delay, cfg.jitterFactor);
+  }
+
+  return delay;
+}
+
+// ─── Acknowledgment Prefix ───
+
+export interface AckPrefixResult {
+  /** Whether to send a prefix */
+  shouldSend: boolean;
+  /** The prefix text, or null */
+  prefix: string | null;
+  /** Delay after prefix before main reply (seconds) */
+  delay: number;
+}
+
+/**
+ * Decide whether to send a short acknowledgment prefix before a long reply.
+ */
+export function decideAckPrefix(replyLength: number, config?: Partial<HumanizerConfig>): AckPrefixResult {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (!cfg.ackPrefixEnabled) {
+    return { shouldSend: false, prefix: null, delay: 0 };
+  }
+
+  if (replyLength < cfg.ackPrefixMinLength) {
+    return { shouldSend: false, prefix: null, delay: 0 };
+  }
+
+  if (Math.random() > cfg.ackPrefixRate) {
+    return { shouldSend: false, prefix: null, delay: 0 };
+  }
+
+  const prefix = cfg.ackPrefixPool[Math.floor(Math.random() * cfg.ackPrefixPool.length)]!;
+  const delay = cfg.jitterEnabled ? applyJitter(cfg.ackPrefixDelay, cfg.jitterFactor) : cfg.ackPrefixDelay;
+
+  return { shouldSend: true, prefix, delay };
+}
+
+// ─── Delete & Resend ───
+
+export interface DeleteResendResult {
+  /** Whether to delete-and-resend this message */
+  shouldDeleteResend: boolean;
+  /** Delay before deleting (seconds) */
+  deleteDelay: number;
+  /** The modified text (slightly different from original) */
+  modifiedText: string;
+}
+
+/** Small text tweaks for delete-and-resend */
+function tweakText(text: string): string {
+  const tweaks: Array<() => string> = [
+    // Add trailing punctuation
+    () => {
+      const last = text[text.length - 1];
+      if (last && !/[。！？!?.，,]/.test(last)) return text + '。';
+      // Remove trailing period/comma
+      return text.replace(/[。，]$/, '');
+    },
+    // Remove a comma somewhere
+    () => {
+      const commaIdx = text.indexOf('，');
+      if (commaIdx > 0) return text.slice(0, commaIdx) + text.slice(commaIdx + 1);
+      return text;
+    },
+    // Add a particle
+    () => {
+      const particles = ['啊', '呢', '呀', '吧', '哦', '哈'];
+      const p = particles[Math.floor(Math.random() * particles.length)]!;
+      return text + p;
+    },
+  ];
+  return tweaks[Math.floor(Math.random() * tweaks.length)]!();
+}
+
+/**
+ * Decide whether to delete-and-resend a message.
+ * Only applies to non-first messages (segments after the first).
+ */
+export function decideDeleteResend(
+  segmentIndex: number,
+  totalSegments: number,
+  text: string,
+  config?: Partial<HumanizerConfig>,
+): DeleteResendResult {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (!cfg.deleteResendEnabled) {
+    return { shouldDeleteResend: false, deleteDelay: 0, modifiedText: text };
+  }
+
+  // Only middle/last segments, and only with some probability
+  if (segmentIndex === 0 || Math.random() > cfg.deleteResendRate) {
+    return { shouldDeleteResend: false, deleteDelay: 0, modifiedText: text };
+  }
+
+  const deleteDelay = cfg.jitterEnabled
+    ? applyJitter(cfg.deleteResendDeleteDelay, cfg.jitterFactor)
+    : cfg.deleteResendDeleteDelay;
+
+  return {
+    shouldDeleteResend: true,
+    deleteDelay,
+    modifiedText: tweakText(text),
+  };
+}
+
+// ─── Jitter ───
+
+/**
+ * Apply ±jitterFactor random variation to a delay value.
+ * E.g., jitter(2.0, 0.2) → random between 1.6 and 2.4
+ */
+export function applyJitter(delay: number, jitterFactor: number): number {
+  const variation = delay * jitterFactor;
+  return delay + (Math.random() * 2 - 1) * variation;
+}
+
+// ─── Combined Humanizer Pipeline ───
+
+export interface HumanizerResult {
+  /** All segments ready for sending, including correction messages */
+  segments: Array<{
+    text: string;
+    /** Whether this is a correction message (e.g., "想*" or "→想") */
+    isCorrection: boolean;
+  }>;
+  /** Read delay before first message (seconds) */
+  readDelay: number;
+  /** Whether an ack prefix should be sent before first message */
+  ackPrefix: AckPrefixResult;
+}
+
+/**
+ * Full humanizer pipeline for a reply.
+ * Takes the segmented reply texts and applies all humanization effects.
+ *
+ * @param segments Array of segment texts from segmentReply()
+ * @param incomingMessageLength Character count of the message being replied to
+ * @param config Optional config override
+ */
+export function humanizeReply(
+  segments: string[],
+  incomingMessageLength: number,
+  config?: Partial<HumanizerConfig>,
+): HumanizerResult {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  // 1. Read delay
+  const readDelay = calculateReadDelay(incomingMessageLength, cfg);
+
+  // 2. Ack prefix
+  const totalLength = segments.reduce((sum, s) => sum + s.length, 0);
+  const ackPrefix = decideAckPrefix(totalLength, cfg);
+
+  // 3. Process each segment
+  const result: HumanizerResult['segments'] = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i]!;
+
+    // 3a. Typo injection — only on first 1-2 segments, not on very short ones
+    if (segment.length >= 4 && i < 2) {
+      const typoResult = injectTypo(segment, cfg);
+      if (typoResult.typoIndex >= 0) {
+        // Send typoed version
+        result.push({ text: typoResult.typoedText, isCorrection: false });
+
+        // If correction needed, add correction as separate message
+        if (typoResult.correction) {
+          result.push({
+            text: `${typoResult.correction}*`,
+            isCorrection: true,
+          });
+        }
+        continue;
+      }
+    }
+
+    // 3b. No typo — send as-is
+    result.push({ text: segment, isCorrection: false });
+  }
+
+  return { segments: result, readDelay, ackPrefix };
+}
+
+// ─── Re-export config defaults for external use ───
+
+export { DEFAULT_HUMANIZER_CONFIG };
+export type PartialHumanizerConfig = Partial<HumanizerConfig>;

@@ -12,6 +12,7 @@ import { slimContextForAI } from '../context/slim.js';
 import { searchKnowledge } from '../../knowledge/manager.js';
 import { getToolNames } from '../tools/registry.js';
 import { parseReplyResponse } from './parser.js';
+import { segmentReply, type SegmenterConfig } from './segmenter.js';
 import { getRecent, getGroupMembers } from '../context/manager.js';
 import { doCheckin, getCheckinStats } from '../checkin.js';
 import { getBotTracker } from '../../tracking/interaction.js';
@@ -21,13 +22,12 @@ import { planReply } from '../planner/planner.js';
 import { executeToolPlan, formatToolResultsForPrompt } from '../planner/executor.js';
 import { countTokens } from '../../ai/token-counter.js';
 import { logger } from '../../shared/logger.js';
-import { loadCachedPrompt } from '../../shared/config.js';
 import { getCachedRoster, setCachedRoster } from './member-cache.js';
 
 const MAX_DUPLICATE_RETRIES = 1;
 const MAX_MULTI_REPLY_RETRIES = 1;
 const MAX_TOOL_ARTIFACT_RETRIES = 1;
-const REPLY_SPLITTER_CHAR_THRESHOLD = 150; // Increased from 100 to reduce unnecessary splits
+const REPLY_SPLITTER_CHAR_THRESHOLD = 20; // Minimum length to trigger code-based segmentation
 const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
   normal: 48_000,
   pro: 72_000,
@@ -128,6 +128,7 @@ export async function generateReply(
   botUid: number,
   replyPath?: ReplyPath,
   replyTier?: ReplyTier,
+  segmenterConfig?: Partial<SegmenterConfig>,
 ): Promise<{ replies: ReplyOutput[]; toolsUsed: string[]; toolExecutionFailed: boolean }> {
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
@@ -419,41 +420,27 @@ export async function generateReply(
   }
 
 
-  // 8. Reply splitter — split long single replies or handoff multi-target drafts
-  const needsSplit =
+  // 8. Code-based reply segmentation — MaiBot-style natural splitting
+  // Only apply segmenter to single replies that are either:
+  //   a) Long enough to warrant splitting (> threshold), or
+  //   b) Explicitly handed off by the AI
+  const needsSegment =
     parsedReplies.length === 1 &&
     (parsedReplies[0]!.replyContent.length > REPLY_SPLITTER_CHAR_THRESHOLD ||
       parsedReplies[0]!.handoffToSplitter === true);
 
-  if (needsSplit) {
-    try {
-      const splitterSystem = loadCachedPrompt('task/reply-splitter.md');
+  if (needsSegment) {
+    const primaryTargetId = parsedReplies[0]!.targetMessageId;
+    const { segments } = segmentReply(parsedReplies[0]!.replyContent, segmenterConfig);
 
-      // Build user message with target context
-      const primaryTargetId = parsedReplies[0]!.targetMessageId;
-      const secondaryTargetId = message.replyTo?.messageId;
-      let userContent = `原始回复:\n${parsedReplies[0]!.replyContent}\n\n主目标消息ID: ${primaryTargetId}`;
-      if (secondaryTargetId) {
-        userContent += `\n次目标消息ID: ${secondaryTargetId}`;
-      }
-
-      const splitterMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: splitterSystem },
-        { role: 'user', content: userContent },
-      ];
-
-      const splitterResult = await callWithFallback({
-        usage: 'reply_splitter',
-        messages: splitterMessages,
-      });
-
-      const splitParsed = parseReplyResponse(splitterResult.content, message.messageId);
-      if (splitParsed.length > 1) {
-        parsedReplies = splitParsed;
-        logger.debug({ count: splitParsed.length }, 'Reply splitter produced multiple messages');
-      }
-    } catch (err) {
-      logger.warn({ err }, 'Reply splitter failed, keeping original reply');
+    if (segments.length > 1) {
+      parsedReplies = segments.map((seg, idx) => ({
+        replyContent: seg,
+        targetMessageId: primaryTargetId,
+        // Only first segment gets quote-reply; the rest go without
+        replyQuote: idx === 0 ? parsedReplies[0]!.replyQuote : false,
+      }));
+      logger.debug({ count: segments.length }, 'Code segmenter split reply into multiple messages');
     }
   }
 
