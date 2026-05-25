@@ -112,15 +112,13 @@ function isCJK(char: string): boolean {
  * Get the ratio of Western (Latin) characters in text.
  */
 function getWesternRatio(text: string): number {
-  let alnum = 0;
   let western = 0;
+  let total = 0;
   for (const char of text) {
-    if (char.match(/[a-zA-Z0-9]/)) {
-      alnum++;
-      if (char.match(/[a-zA-Z0-9]/)) western++;
-    }
+    total++;
+    if (/[a-zA-Z]/.test(char)) western++;
   }
-  return alnum > 0 ? western / alnum : 0;
+  return total > 0 ? western / total : 0;
 }
 
 // ─── Quote-pair tracking ───
