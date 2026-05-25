@@ -10,6 +10,17 @@ import { judge } from "./judge/judge.js";
 import { describeImage, describeStickerCached } from "./vision.js";
 import { retrieveContext } from "./context/retriever.js";
 import { generateReply } from "./reply/reply.js";
+import { calculateTypingDelay, type SegmenterConfig } from "./reply/segmenter.js";
+import {
+  calculateReadDelay,
+  decideAckPrefix,
+  decideDeleteResend,
+  injectTypo,
+  applyJitter,
+  DEFAULT_HUMANIZER_CONFIG,
+  type HumanizerConfig,
+  type PartialHumanizerConfig,
+} from "./reply/humanizer.js";
 import { applyChatPathPolicy, reflectChatPathPolicy } from "./path-policy.js";
 import { StreamingSender } from "../bot/sender/streaming.js";
 import {
@@ -486,6 +497,33 @@ async function generateAndSendReplies(args: {
     // 6b. Send typing indicator
     await sendChatAction(job.chatId, "typing");
 
+    // Pre-load runtime override for segmenter config (needed before generateReply)
+    const override = await loadOverrideCached(getRedis()).catch(() => null);
+    const segmenterConfig: Partial<SegmenterConfig> | undefined = override?.reply_segmentation
+      ? {
+          enabled: override.reply_segmentation.enabled,
+          maxLength: override.reply_segmentation.max_length,
+          maxSentenceNum: override.reply_segmentation.max_sentence_num,
+          defaultReply: override.reply_segmentation.default_reply,
+          typingChineseTime: override.reply_segmentation.typing_chinese_time,
+          typingEnglishTime: override.reply_segmentation.typing_english_time,
+        }
+      : undefined;
+    const humanizerConfig: Partial<HumanizerConfig> | undefined = override?.humanizer
+      ? {
+          typoEnabled: override.humanizer.typo_enabled,
+          typoRate: override.humanizer.typo_rate,
+          typoCorrectionRate: override.humanizer.typo_correction_rate,
+          readDelayEnabled: override.humanizer.read_delay_enabled,
+          readDelayBase: override.humanizer.read_delay_base,
+          ackPrefixEnabled: override.humanizer.ack_prefix_enabled,
+          deleteResendEnabled: override.humanizer.delete_resend_enabled,
+          deleteResendRate: override.humanizer.delete_resend_rate,
+          jitterEnabled: override.humanizer.jitter_enabled,
+          jitterFactor: override.humanizer.jitter_factor,
+        }
+      : undefined;
+
     // 7. 4-way context retrieval
     const t4 = performance.now();
     const retrievalMode = effectiveReplyPath === "planned" ? "planned" : "direct";
@@ -497,6 +535,7 @@ async function generateAndSendReplies(args: {
     const replyResult = await generateReply(
       formatted, retrievedContext, judgeResult.action,
       job.chatId, botUid, effectiveReplyPath, effectiveReplyTier,
+      segmenterConfig,
     );
     const replies = replyResult.replies;
     timings["reply"] = Math.round(performance.now() - t5);
@@ -520,7 +559,24 @@ async function generateAndSendReplies(args: {
     const t6 = performance.now();
     const sentMessages: Array<{ messageId: number; text: string }> = [];
 
-    const override = await loadOverrideCached(getRedis()).catch(() => null);
+    // ── Humanizer: read delay ──
+    // Delete placeholder before read delay (user sees the placeholder disappear = bot "read" it)
+    if (maxPlaceholderMsgId) {
+      await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+      maxPlaceholderMsgId = undefined;
+    }
+
+    const incomingLength = formatted.textContent?.length ?? 0;
+    const readDelay = calculateReadDelay(incomingLength, humanizerConfig);
+    if (readDelay > 0) {
+      logger.debug({ chatId: job.chatId, readDelay, incomingLength }, 'Humanizer: read delay');
+      await new Promise((resolve) => setTimeout(resolve, readDelay * 1000));
+    }
+
+    // ── Humanizer: ack prefix ──
+    const totalReplyLength = replies.reduce((sum, r) => sum + (r.replyContent?.length ?? 0), 0);
+    const ackPrefix = decideAckPrefix(totalReplyLength, humanizerConfig);
+
     const stickerPolicy = {
       enabled: override?.sticker_policy?.enabled ?? true,
       mode: override?.sticker_policy?.mode ?? "ai",
@@ -534,6 +590,39 @@ async function generateAndSendReplies(args: {
 
     for (let replyIdx = 0; replyIdx < replies.length; replyIdx++) {
       const reply = replies[replyIdx]!;
+
+      // ── Humanizer: ack prefix (send before first reply) ──
+      if (replyIdx === 0 && ackPrefix.shouldSend && ackPrefix.prefix) {
+        await sendChatAction(job.chatId, 'typing');
+        const ackDelay = humanizerConfig?.jitterEnabled !== false
+          ? applyJitter(1.0, humanizerConfig?.jitterFactor ?? 0.2)
+          : 1.0;
+        await new Promise((resolve) => setTimeout(resolve, ackDelay * 1000));
+        await sender.sendDirect(job.chatId, ackPrefix.prefix, reply.targetMessageId).catch(() => {});
+        // Pause between prefix and main content
+        await sendChatAction(job.chatId, 'typing');
+        await new Promise((resolve) => setTimeout(resolve, (ackPrefix.delay ?? 1.5) * 1000));
+      }
+
+      // ── Humanizer: typo injection ──
+      const humanizedText = reply.replyContent;
+      const typoResult = replyIdx === 0 && humanizedText.length >= 4
+        ? (() => { const r = injectTypo(humanizedText, humanizerConfig); return r.typoIndex >= 0 ? r : null; })()
+        : null;
+
+      // ── Humanizer: delete-and-resend ──
+      const deleteResend = decideDeleteResend(replyIdx, replies.length, humanizedText, humanizerConfig);
+
+      // ── MaiBot-style typing delay between segmented messages ──
+      // First message uses the placeholder or sends immediately;
+      // subsequent messages simulate human typing rhythm.
+      if (replyIdx > 0) {
+        const prevText = replies[replyIdx - 1]!.replyContent;
+        const delay = calculateTypingDelay(prevText, segmenterConfig);
+        await sendChatAction(job.chatId, 'typing');
+        await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+      }
+
       try {
         let stickerFileId: string | undefined;
         let stickerFileUniqueId: string | undefined;
@@ -574,13 +663,38 @@ async function generateAndSendReplies(args: {
             : reply.targetMessageId;
 
         const isStickerOnly = reply.replyContent.trim() === '[sticker]' && stickerFileId;
+        // Use typo text if available, otherwise original
+        const effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
 
         if (!isStickerOnly) {
           if (replyIdx === 0 && maxPlaceholderMsgId) {
-            await editMessage(job.chatId, maxPlaceholderMsgId, reply.replyContent).catch(() => {});
-            sentMessages.push({ messageId: maxPlaceholderMsgId, text: reply.replyContent });
+            await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText).catch(() => {});
+            sentMessages.push({ messageId: maxPlaceholderMsgId, text: effectiveText });
           } else {
-            const sent = await sender.sendDirect(job.chatId, reply.replyContent, replyToId);
+            const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
+
+            // ── Humanizer: delete-and-resend ──
+            if (deleteResend.shouldDeleteResend && sent.messageId) {
+              await new Promise((resolve) => setTimeout(resolve, deleteResend.deleteDelay * 1000));
+              await deleteMessage(job.chatId, sent.messageId).catch(() => {});
+              await sendChatAction(job.chatId, 'typing');
+              const resendDelay = calculateTypingDelay(deleteResend.modifiedText, segmenterConfig);
+              await new Promise((resolve) => setTimeout(resolve, resendDelay * 1000));
+              const resent = await sender.sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
+              sentMessages.push({ messageId: resent.messageId, text: deleteResend.modifiedText });
+              logger.debug({ chatId: job.chatId, original: effectiveText, modified: deleteResend.modifiedText }, 'Humanizer: delete-and-resend');
+            } else {
+              sentMessages.push({ messageId: sent.messageId, text: effectiveText });
+            }
+
+            // ── Humanizer: typo correction message ──
+            if (typoResult && typoResult.correction) {
+              const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+              await sendChatAction(job.chatId, 'typing');
+              await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
+              await sender.sendDirect(job.chatId, typoResult.correction + '*', undefined).catch(() => {});
+              logger.debug({ chatId: job.chatId, correction: typoResult.correction }, 'Humanizer: typo correction sent');
+            }
 
             if (stickerFileId && stickerPolicy.sendPosition === "after") {
               const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {
