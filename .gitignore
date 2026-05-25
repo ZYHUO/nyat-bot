@@ -12,3 +12,4 @@ coverage/
 *.tsbuildinfo
 .env.bak*
 _find_group*.mjs
+backups/
