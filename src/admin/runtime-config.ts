@@ -54,6 +54,16 @@ export interface RuntimeOverride {
     delete_resend_rate?: number;
     jitter_enabled?: boolean;
     jitter_factor?: number;
+    emoji_reply_enabled?: boolean;
+    emoji_reply_rate?: number;
+    emoji_reply_max_length?: number;
+    thinking_interjection_enabled?: boolean;
+    thinking_interjection_rate?: number;
+    thinking_interjection_min_total_length?: number;
+    thinking_interjection_min_segments?: number;
+    afterthought_edit_enabled?: boolean;
+    afterthought_edit_rate?: number;
+    afterthought_edit_delay?: number;
   };
 }
 
