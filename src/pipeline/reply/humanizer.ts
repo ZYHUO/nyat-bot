@@ -397,33 +397,47 @@ export function applyJitter(delay: number, jitterFactor: number): number {
 
 // (humanizeReply and HumanizerResult removed — pipeline calls individual functions directly)
 
-// ─── Emoji-Only Short Replies ───
+// ─── Sticker-Only Short Replies ───
 
-export interface EmojiReplyResult {
-  /** Whether to replace the reply with a pure emoji */
+export interface StickerOnlyReplyResult {
+  /** Whether to replace the reply with a sticker-only message */
   shouldReplace: boolean;
-  /** The emoji to send instead */
-  emoji: string;
+  /** Sticker intent to search for (e.g. 'positive', 'acknowledgment') */
+  intent: string;
 }
 
+/** Common intents for short sticker replies mimicking human behavior */
+const STICKER_REPLY_INTENTS = [
+  'positive', 'acknowledgment', 'agreement', 'happy',
+  'thinking', 'surprise', 'neutral',
+];
+
 /**
- * Decide whether to replace a short reply with a pure emoji.
- * Only applies to short replies (≤ maxLength chars).
+ * Decide whether to replace a short reply with a sticker-only message.
+ * Returns a sticker intent to search for; the pipeline will resolve the actual sticker.
  */
-export function decideEmojiReply(replyLength: number, config?: Partial<HumanizerConfig>): EmojiReplyResult {
+export function decideStickerOnlyReply(replyLength: number, config?: Partial<HumanizerConfig>): StickerOnlyReplyResult {
   const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
 
   if (!cfg.emojiReplyEnabled || replyLength > cfg.emojiReplyMaxLength) {
-    return { shouldReplace: false, emoji: '' };
+    return { shouldReplace: false, intent: '' };
   }
 
   if (Math.random() > cfg.emojiReplyRate) {
-    return { shouldReplace: false, emoji: '' };
+    return { shouldReplace: false, intent: '' };
   }
 
-  const emoji = cfg.emojiPool[Math.floor(Math.random() * cfg.emojiPool.length)]!;
-  logger.debug({ emoji, replyLength }, 'Humanizer: emoji-only reply selected');
-  return { shouldReplace: true, emoji };
+  const intent = STICKER_REPLY_INTENTS[Math.floor(Math.random() * STICKER_REPLY_INTENTS.length)]!;
+  logger.debug({ intent, replyLength }, 'Humanizer: sticker-only reply selected');
+  return { shouldReplace: true, intent };
+}
+
+/**
+ * @deprecated Use decideStickerOnlyReply instead.
+ * Kept for backwards compatibility with runtime config.
+ */
+export function decideEmojiReply(replyLength: number, config?: Partial<HumanizerConfig>): StickerOnlyReplyResult {
+  return decideStickerOnlyReply(replyLength, config);
 }
 
 // ─── Thinking Interjection ───
