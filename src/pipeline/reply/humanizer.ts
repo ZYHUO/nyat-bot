@@ -49,6 +49,33 @@ export interface HumanizerConfig {
   jitterEnabled: boolean;
   /** Jitter factor: actual delay = calculated * (1 ± jitterFactor) */
   jitterFactor: number;
+
+  /** Enable emoji-only short replies */
+  emojiReplyEnabled: boolean;
+  /** Probability of replacing a short reply with an emoji (0-1) */
+  emojiReplyRate: number;
+  /** Maximum reply length (chars) to consider for emoji replacement */
+  emojiReplyMaxLength: number;
+  /** Pool of emojis for short replies */
+  emojiPool: string[];
+
+  /** Enable "thinking" interjection segments */
+  thinkingInterjectionEnabled: boolean;
+  /** Probability of inserting a thinking interjection (0-1) */
+  thinkingInterjectionRate: number;
+  /** Minimum total reply length (chars) to trigger thinking interjection */
+  thinkingInterjectionMinTotalLength: number;
+  /** Minimum number of segments to trigger thinking interjection */
+  thinkingInterjectionMinSegments: number;
+  /** Pool of "thinking" interjection texts */
+  thinkingPool: string[];
+
+  /** Enable casual afterthought edit */
+  afterthoughtEditEnabled: boolean;
+  /** Probability of editing a sent message with a minor tweak (0-1) */
+  afterthoughtEditRate: number;
+  /** Delay after sending before applying afterthought edit (seconds) */
+  afterthoughtEditDelay: number;
 }
 
 const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
@@ -70,10 +97,25 @@ const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
 
   deleteResendEnabled: true,
   deleteResendRate: 0.03,
-  deleteResendDeleteDelay: 2.0,
+  deleteResendDeleteDelay: 1.5,
 
   jitterEnabled: true,
   jitterFactor: 0.2,
+
+  emojiReplyEnabled: true,
+  emojiReplyRate: 0.15,
+  emojiReplyMaxLength: 15,
+  emojiPool: ['👌', '😂', '🙏', '👍', '❤️', '😊', '🤔', '😅', '😍', '🥺', '💪', '🎉', '👀', '💀', '🫡', '🙃'],
+
+  thinkingInterjectionEnabled: true,
+  thinkingInterjectionRate: 0.10,
+  thinkingInterjectionMinTotalLength: 80,
+  thinkingInterjectionMinSegments: 3,
+  thinkingPool: ['我想想', '等下', '嗯...', '让我看看', '怎么说呢'],
+
+  afterthoughtEditEnabled: true,
+  afterthoughtEditRate: 0.05,
+  afterthoughtEditDelay: 3.0,
 };
 
 // ─── Typo Generator ───
@@ -129,11 +171,35 @@ function shouldSkipTypo(char: string, text: string, idx: number): boolean {
   // Never typo non-CJK
   const code = char.charCodeAt(0);
   if (code < 0x4e00 || code > 0x9fff) return true;
-  // Never typo if neighbors are punctuation
-  const prevCode = text[idx - 1]!.charCodeAt(0);
-  const nextCode = text[idx + 1]!.charCodeAt(0);
-  if (prevCode < 0x4e00 || prevCode > 0x9fff) return true;
-  if (nextCode < 0x4e00 || nextCode > 0x9fff) return true;
+
+  // Check neighbors: skip if neighbor is emoji, punctuation, or whitespace
+  const isSkipNeighbor = (c: string): boolean => {
+    const cp = c.codePointAt(0)!;
+    // Emoji ranges
+    if (cp >= 0x1F600 && cp <= 0x1F64F) return true; // Emoticons
+    if (cp >= 0x1F300 && cp <= 0x1F5FF) return true; // Misc Symbols
+    if (cp >= 0x1F680 && cp <= 0x1F6FF) return true; // Transport
+    if (cp >= 0x1F900 && cp <= 0x1F9FF) return true; // Supplemental
+    if (cp >= 0x2600 && cp <= 0x26FF) return true;    // Misc symbols
+    if (cp >= 0x2700 && cp <= 0x27BF) return true;    // Dingbats
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return true;    // Variation selectors
+    if (cp >= 0x1FA00 && cp <= 0x1FAFF) return true;  // Symbols extended
+    // CJK punctuation
+    if (cp >= 0x3000 && cp <= 0x303F) return true;
+    // Fullwidth forms (punctuation)
+    if (cp >= 0xFF00 && cp <= 0xFFEF) return true;
+    // ASCII punctuation
+    if (/[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E]/.test(c)) return true;
+    // General punctuation (… etc)
+    if (cp >= 0x2000 && cp <= 0x206F) return true;
+    // Whitespace
+    if (/\s/.test(c)) return true;
+    return false;
+  };
+
+  const prevChar = text[idx - 1]!;
+  const nextChar = text[idx + 1]!;
+  if (isSkipNeighbor(prevChar) || isSkipNeighbor(nextChar)) return true;
   return false;
 }
 
@@ -329,72 +395,161 @@ export function applyJitter(delay: number, jitterFactor: number): number {
   return Math.max(0, delay + (Math.random() * 2 - 1) * variation);
 }
 
-// ─── Combined Humanizer Pipeline ───
+// (humanizeReply and HumanizerResult removed — pipeline calls individual functions directly)
 
-export interface HumanizerResult {
-  /** All segments ready for sending, including correction messages */
-  segments: Array<{
-    text: string;
-    /** Whether this is a correction message (e.g., "想*" or "→想") */
-    isCorrection: boolean;
-  }>;
-  /** Read delay before first message (seconds) */
-  readDelay: number;
-  /** Whether an ack prefix should be sent before first message */
-  ackPrefix: AckPrefixResult;
+// ─── Emoji-Only Short Replies ───
+
+export interface EmojiReplyResult {
+  /** Whether to replace the reply with a pure emoji */
+  shouldReplace: boolean;
+  /** The emoji to send instead */
+  emoji: string;
 }
 
 /**
- * Full humanizer pipeline for a reply.
- * Takes the segmented reply texts and applies all humanization effects.
- *
- * @param segments Array of segment texts from segmentReply()
- * @param incomingMessageLength Character count of the message being replied to
- * @param config Optional config override
+ * Decide whether to replace a short reply with a pure emoji.
+ * Only applies to short replies (≤ maxLength chars).
  */
-export function humanizeReply(
-  segments: string[],
-  incomingMessageLength: number,
-  config?: Partial<HumanizerConfig>,
-): HumanizerResult {
+export function decideEmojiReply(replyLength: number, config?: Partial<HumanizerConfig>): EmojiReplyResult {
   const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
 
-  // 1. Read delay
-  const readDelay = calculateReadDelay(incomingMessageLength, cfg);
-
-  // 2. Ack prefix
-  const totalLength = segments.reduce((sum, s) => sum + s.length, 0);
-  const ackPrefix = decideAckPrefix(totalLength, cfg);
-
-  // 3. Process each segment
-  const result: HumanizerResult['segments'] = [];
-
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i]!;
-
-    // 3a. Typo injection — only on first 1-2 segments, not on very short ones
-    if (segment.length >= 4 && i < 2) {
-      const typoResult = injectTypo(segment, cfg);
-      if (typoResult.typoIndex >= 0) {
-        // Send typoed version
-        result.push({ text: typoResult.typoedText, isCorrection: false });
-
-        // If correction needed, add correction as separate message
-        if (typoResult.correction) {
-          result.push({
-            text: `${typoResult.correction}*`,
-            isCorrection: true,
-          });
-        }
-        continue;
-      }
-    }
-
-    // 3b. No typo — send as-is
-    result.push({ text: segment, isCorrection: false });
+  if (!cfg.emojiReplyEnabled || replyLength > cfg.emojiReplyMaxLength) {
+    return { shouldReplace: false, emoji: '' };
   }
 
-  return { segments: result, readDelay, ackPrefix };
+  if (Math.random() > cfg.emojiReplyRate) {
+    return { shouldReplace: false, emoji: '' };
+  }
+
+  const emoji = cfg.emojiPool[Math.floor(Math.random() * cfg.emojiPool.length)]!;
+  logger.debug({ emoji, replyLength }, 'Humanizer: emoji-only reply selected');
+  return { shouldReplace: true, emoji };
+}
+
+// ─── Thinking Interjection ───
+
+export interface ThinkingResult {
+  /** Whether to insert a thinking interjection */
+  shouldInsert: boolean;
+  /** The interjection text */
+  text: string;
+}
+
+/**
+ * Decide whether to insert a "thinking" interjection between
+ * the first and second reply segments.
+ */
+export function decideThinkingInterjection(
+  totalLength: number,
+  segmentCount: number,
+  config?: Partial<HumanizerConfig>,
+): ThinkingResult {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (!cfg.thinkingInterjectionEnabled) {
+    return { shouldInsert: false, text: '' };
+  }
+
+  if (totalLength < cfg.thinkingInterjectionMinTotalLength) {
+    return { shouldInsert: false, text: '' };
+  }
+
+  if (segmentCount < cfg.thinkingInterjectionMinSegments) {
+    return { shouldInsert: false, text: '' };
+  }
+
+  if (Math.random() > cfg.thinkingInterjectionRate) {
+    return { shouldInsert: false, text: '' };
+  }
+
+  const text = cfg.thinkingPool[Math.floor(Math.random() * cfg.thinkingPool.length)]!;
+  logger.debug({ text, totalLength, segmentCount }, 'Humanizer: thinking interjection selected');
+  return { shouldInsert: true, text };
+}
+
+// ─── Afterthought Edit ───
+
+export interface AfterthoughtResult {
+  /** Whether to apply an afterthought edit */
+  shouldEdit: boolean;
+  /** The edited text */
+  editedText: string;
+}
+
+/** Casual text tweaks for afterthought edits */
+function casualTweak(text: string): string {
+  const r = Math.random();
+  const last = text[text.length - 1];
+
+  // Add trailing emoji — 35%
+  if (r < 0.35) {
+    const emojis = ['😂', '👍', '🤣', '✨', '💕'];
+    return text + emojis[Math.floor(Math.random() * emojis.length)]!;
+  }
+
+  // Add trailing particle — 25%
+  if (r < 0.60) {
+    const particles = ['啊', '呢', '呀', '哦'];
+    return text + particles[Math.floor(Math.random() * particles.length)]!;
+  }
+
+  // Remove trailing period/comma — 20%
+  if (r < 0.80) {
+    if (last && /[。，！？]/.test(last)) {
+      return text.slice(0, -1);
+    }
+    return text;
+  }
+
+  // Add trailing period if none — 15%
+  if (r < 0.95) {
+    if (last && !/[。！？!?.，,…]/.test(last)) {
+      return text + '。';
+    }
+    return text;
+  }
+
+  // Swap a common word (5%)
+  const swaps: Array<[string, string]> = [
+    ['真的', '真'],
+    ['非常', '特别'],
+    ['这个', '这'],
+  ];
+  for (const [from, to] of swaps) {
+    if (text.includes(from)) {
+      return text.replace(from, to);
+    }
+  }
+  return text;
+}
+
+/**
+ * Decide whether to edit a sent message with a casual afterthought tweak.
+ * Only applies to messages ≥ 4 chars.
+ */
+export function decideAfterthoughtEdit(text: string, config?: Partial<HumanizerConfig>): AfterthoughtResult {
+  const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (!cfg.afterthoughtEditEnabled) {
+    return { shouldEdit: false, editedText: text };
+  }
+
+  if (text.length < 4) {
+    return { shouldEdit: false, editedText: text };
+  }
+
+  if (Math.random() > cfg.afterthoughtEditRate) {
+    return { shouldEdit: false, editedText: text };
+  }
+
+  const editedText = casualTweak(text);
+  // If the tweak didn't actually change anything, skip the edit
+  if (editedText === text) {
+    return { shouldEdit: false, editedText: text };
+  }
+
+  logger.debug({ original: text, edited: editedText }, 'Humanizer: afterthought edit selected');
+  return { shouldEdit: true, editedText };
 }
 
 // ─── Re-export config defaults for external use ───

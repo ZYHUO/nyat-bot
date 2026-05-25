@@ -15,6 +15,9 @@ import {
   calculateReadDelay,
   decideAckPrefix,
   decideDeleteResend,
+  decideEmojiReply,
+  decideThinkingInterjection,
+  decideAfterthoughtEdit,
   injectTypo,
   applyJitter,
   DEFAULT_HUMANIZER_CONFIG,
@@ -522,6 +525,16 @@ async function generateAndSendReplies(args: {
             deleteResendRate: override.humanizer.delete_resend_rate,
             jitterEnabled: override.humanizer.jitter_enabled,
             jitterFactor: override.humanizer.jitter_factor,
+            emojiReplyEnabled: override.humanizer.emoji_reply_enabled,
+            emojiReplyRate: override.humanizer.emoji_reply_rate,
+            emojiReplyMaxLength: override.humanizer.emoji_reply_max_length,
+            thinkingInterjectionEnabled: override.humanizer.thinking_interjection_enabled,
+            thinkingInterjectionRate: override.humanizer.thinking_interjection_rate,
+            thinkingInterjectionMinTotalLength: override.humanizer.thinking_interjection_min_total_length,
+            thinkingInterjectionMinSegments: override.humanizer.thinking_interjection_min_segments,
+            afterthoughtEditEnabled: override.humanizer.afterthought_edit_enabled,
+            afterthoughtEditRate: override.humanizer.afterthought_edit_rate,
+            afterthoughtEditDelay: override.humanizer.afterthought_edit_delay,
           }).filter(([, v]) => v !== undefined)
         ) as Partial<HumanizerConfig>
       : undefined;
@@ -570,8 +583,11 @@ async function generateAndSendReplies(args: {
     if (readDelay > 0) {
       // Show typing during read delay so user sees bot is "processing"
       await sendChatAction(job.chatId, 'typing');
+      // Re-fire typing if delay > 5s (Telegram indicator expires after 5s)
+      const reFireTimer = readDelay > 5 ? setTimeout(() => sendChatAction(job.chatId, 'typing').catch(() => {}), 4500) : null;
       logger.debug({ chatId: job.chatId, readDelay, incomingLength }, 'Humanizer: read delay');
       await new Promise((resolve) => setTimeout(resolve, readDelay * 1000));
+      if (reFireTimer) clearTimeout(reFireTimer);
     }
 
     // ── Humanizer: ack prefix ──
@@ -588,6 +604,19 @@ async function generateAndSendReplies(args: {
     const allSameTarget =
       replies.length > 1 &&
       replies.every((r) => r.targetMessageId === replies[0]!.targetMessageId);
+
+    // ── Humanizer: thinking interjection (insert between 1st and 2nd segments) ──
+    const thinkingResult = decideThinkingInterjection(totalReplyLength, replies.length, humanizerConfig);
+    if (thinkingResult.shouldInsert && replies.length >= 2) {
+      const insertIdx = 1;
+      replies.splice(insertIdx, 0, {
+        replyContent: thinkingResult.text,
+        targetMessageId: replies[0]!.targetMessageId,
+        replyQuote: false,
+        stickerIntent: [],
+      });
+      logger.debug({ chatId: job.chatId, text: thinkingResult.text }, 'Humanizer: thinking interjection inserted');
+    }
 
     for (let replyIdx = 0; replyIdx < replies.length; replyIdx++) {
       const reply = replies[replyIdx]!;
@@ -664,8 +693,27 @@ async function generateAndSendReplies(args: {
             : reply.targetMessageId;
 
         const isStickerOnly = reply.replyContent.trim() === '[sticker]' && stickerFileId;
-        // Use typo text if available, otherwise original
-        const effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
+
+        // ── Humanizer: emoji-only short reply ──
+        const emojiResult = decideEmojiReply(reply.replyContent.length, humanizerConfig);
+        let emojiSkipSticker = false;
+        let emojiReplyToId: number | undefined = replyToId;
+
+        // Use typo text if available, otherwise original (or emoji if replacing)
+        let effectiveText: string;
+        if (emojiResult.shouldReplace) {
+          effectiveText = emojiResult.emoji;
+          emojiSkipSticker = true;
+          emojiReplyToId = undefined; // emoji-only messages don't quote-reply
+        } else {
+          effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
+        }
+
+        // If emoji replaced this message, skip sticker
+        if (emojiSkipSticker) {
+          stickerFileId = undefined;
+          stickerFileUniqueId = undefined;
+        }
 
         if (!isStickerOnly) {
           if (replyIdx === 0 && maxPlaceholderMsgId) {
@@ -673,20 +721,22 @@ async function generateAndSendReplies(args: {
             // ── Humanizer: typo correction via edit (placeholder path) ──
             if (typoResult && typoResult.correction) {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+              await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
               await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText).catch(() => {});
               logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
             }
             sentMessages.push({ messageId: maxPlaceholderMsgId, text: typoResult ? typoResult.originalText : effectiveText });
           } else {
-            const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
+            const sent = await sender.sendDirect(job.chatId, effectiveText, emojiReplyToId);
 
             // ── Humanizer: delete-and-resend ──
             if (deleteResend.shouldDeleteResend && sent.messageId) {
+              await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, deleteResend.deleteDelay * 1000));
               await deleteMessage(job.chatId, sent.messageId).catch(() => {});
               await sendChatAction(job.chatId, 'typing');
-              const resendDelay = calculateTypingDelay(deleteResend.modifiedText, segmenterConfig);
+              const resendDelay = Math.min(calculateTypingDelay(deleteResend.modifiedText, segmenterConfig), 1.5);
               await new Promise((resolve) => setTimeout(resolve, resendDelay * 1000));
               const resent = await sender.sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
               sentMessages.push({ messageId: resent.messageId, text: deleteResend.modifiedText });
@@ -698,12 +748,28 @@ async function generateAndSendReplies(args: {
             // ── Humanizer: typo correction via edit ──
             if (typoResult && typoResult.correction && sent.messageId) {
               const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+              await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
               // Edit the typoed message to show the correct version (simulates human "fix typo" behavior)
               await editMessage(job.chatId, sent.messageId, typoResult.originalText).catch(() => {
                 // Edit might fail (message too old, no perms, etc.) — that's fine
               });
               logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
+            }
+
+            // ── Humanizer: afterthought edit (casual minor tweak after sending) ──
+            if (!emojiResult.shouldReplace && sent.messageId) {
+              const afterthought = decideAfterthoughtEdit(effectiveText, humanizerConfig);
+              if (afterthought.shouldEdit) {
+                const afterthoughtDelay = humanizerConfig?.afterthoughtEditDelay ?? DEFAULT_HUMANIZER_CONFIG.afterthoughtEditDelay;
+                const afterthoughtDelayJittered = humanizerConfig?.jitterEnabled !== false
+                  ? applyJitter(afterthoughtDelay, humanizerConfig?.jitterFactor ?? 0.2)
+                  : afterthoughtDelay;
+                await sendChatAction(job.chatId, 'typing');
+                await new Promise((resolve) => setTimeout(resolve, afterthoughtDelayJittered * 1000));
+                await editMessage(job.chatId, sent.messageId, afterthought.editedText).catch(() => {});
+                logger.debug({ chatId: job.chatId, original: effectiveText, edited: afterthought.editedText }, 'Humanizer: afterthought edit');
+              }
             }
 
             if (stickerFileId && stickerPolicy.sendPosition === "after") {
