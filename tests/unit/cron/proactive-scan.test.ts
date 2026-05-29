@@ -116,8 +116,11 @@ describe('ProactiveScan', () => {
     vi.clearAllMocks();
     // Reset env to enabled defaults
     envValues.PROACTIVE_SCAN_ENABLED = true;
+    // All-day window [0,24) so active-hours never gates these tests by wall-clock.
+    // (isWithinActiveHours uses real Asia/Shanghai hour; [0,23) excludes hour 23
+    // and made the positive-send tests flaky at 15:00 UTC.)
     envValues.PROACTIVE_SCAN_HOUR_START = 0;
-    envValues.PROACTIVE_SCAN_HOUR_END = 23;
+    envValues.PROACTIVE_SCAN_HOUR_END = 24;
     // Default mocks
     mockCallWithFallback.mockResolvedValue({
       content: '{"join": true, "topic": "技术讨论", "reason": "有趣"}',

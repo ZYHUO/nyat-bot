@@ -621,6 +621,11 @@ async function generateAndSendReplies(args: {
 // 9. Send all replies to Telegram
     const t6 = performance.now();
     const sentMessages: Array<{ messageId: number; text: string }> = [];
+    // Targets already quote-replied in this burst. A multi-target reply (e.g.
+    // [{reply to requester}, {reply to someone else}]) must quote EACH distinct
+    // target; only repeat bubbles to an ALREADY-quoted target drop the quote
+    // (so segmented replies to the same message don't quote it N times).
+    const quotedTargets = new Set<number>();
 
     // ── Humanizer: read delay ──
     // Note: don't delete placeholder here — let it be edited into the first reply
@@ -744,14 +749,18 @@ async function generateAndSendReplies(args: {
           }
         }
 
-        // Only the first *actually sent text* message should quote-reply.
-        // If a previous segment was a sticker-only replacement, this is visually the first
-        // text the user sees in this burst, but it's still part of a continuous reply — no quote.
-        const hasSentTextAlready = sentMessages.some((s) => s.text !== '[sticker]');
+        // Quote-reply the target UNLESS this exact target was already quoted in this
+        // burst. Segments of one reply share a target → only the first quotes it.
+        // A multi-target reply keeps a separate quote per distinct target, so a reply
+        // aimed at someone other than the requester actually points at THEM.
+        const targetAlreadyQuoted =
+          reply.targetMessageId > 0 && quotedTargets.has(reply.targetMessageId);
         const replyToId =
-          !replyQuoteEnabled || reply.replyQuote === false || hasSentTextAlready
+          !replyQuoteEnabled || reply.replyQuote === false || reply.targetMessageId <= 0 || targetAlreadyQuoted
             ? undefined
             : reply.targetMessageId;
+        // quotedTargets is updated at the actual text-send site below, so sticker-only
+        // bubbles don't falsely mark a target as already-quoted.
 
         const isStickerOnly = reply.replyContent.trim() === '[sticker]' && stickerFileId;
 
@@ -832,6 +841,8 @@ async function generateAndSendReplies(args: {
             }
           } else {
             const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
+            // Mark this target quoted only after a real text reply went out with the quote.
+            if (replyToId !== undefined) quotedTargets.add(replyToId);
 
             // ── Humanizer: delete-and-resend ──
             let currentMessageId: number | undefined = sent.messageId;

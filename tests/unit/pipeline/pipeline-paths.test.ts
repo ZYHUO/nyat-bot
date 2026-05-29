@@ -542,4 +542,36 @@ describe("processPipeline path branching", () => {
       "Pipeline complete",
     );
   });
+
+  it("quote-replies each DISTINCT target in a multi-target reply", async () => {
+    // Bug: a reply aimed at someone other than the requester must quote THAT
+    // person's message, not get its quote dropped just because an earlier bubble
+    // already sent text. Reply 1 → #42 (requester), reply 2 → #99 (other person).
+    mockJudge.mockResolvedValue({
+      action: "REPLY",
+      replyPath: "direct",
+      replyTier: "normal",
+      level: "L1_MICRO",
+      latencyMs: 12,
+    });
+    mockGenerateReply.mockResolvedValue({
+      replies: [
+        { replyContent: "ok let me", targetMessageId: 42 },
+        { replyContent: "hey you", targetMessageId: 99 },
+      ],
+      toolsUsed: [],
+      toolExecutionFailed: false,
+    });
+    sendDirect
+      .mockResolvedValueOnce({ messageId: 1001 })
+      .mockResolvedValueOnce({ messageId: 1002 })
+      .mockResolvedValue({ messageId: 1003 });
+
+    await processPipeline(makeJob());
+
+    // The 3rd positional arg of sendDirect is replyToId. Each distinct target
+    // must appear — pre-fix, #99 was dropped (sent with undefined).
+    const replyTargets = sendDirect.mock.calls.map((c: unknown[]) => c[2]);
+    expect(replyTargets).toEqual(expect.arrayContaining([42, 99]));
+  });
 });
