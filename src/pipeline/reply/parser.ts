@@ -241,6 +241,16 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
     if (validated) return validated;
   }
 
+  // 2.5 Try extracting JSON object from text (e.g. "json\n{...}" or "Response:\n{...}")
+  const jsonExtractMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (jsonExtractMatch) {
+    const extracted = tryJsonParse(jsonExtractMatch[0]);
+    if (extracted && !Array.isArray(extracted)) {
+      const validated = validateAndReturn(extracted, fallbackMessageId);
+      if (validated) return validated;
+    }
+  }
+
   // 3. Try XML parse
   const xmlResult = tryXmlParse(trimmed);
   if (xmlResult) {

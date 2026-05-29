@@ -40,6 +40,8 @@ const WHITELISTED_COMMANDS = new Set([
   "/unwatch",
   "/watches",
   "/game",
+  "/feature",
+  "/setdefault",
 ]);
 
 function makeResult(

@@ -12,10 +12,12 @@ export function buildChallengeKeyboard(
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
 
-  for (const option of challenge.options) {
-    // Encode answer as index to keep callback_data short
-    const idx = challenge.options.indexOf(option);
-    kb.text(option, `verify:a:${chatId}:${idx}`).row();
+  for (let i = 0; i < challenge.options.length; i++) {
+    const option = challenge.options[i]!;
+    kb.text(option, `verify:a:${chatId}:${i}`);
+    if (i < challenge.options.length - 1) {
+      kb.row();
+    }
   }
 
   return kb;

@@ -22,7 +22,6 @@ import {
   applyJitter,
   DEFAULT_HUMANIZER_CONFIG,
   type HumanizerConfig,
-  type PartialHumanizerConfig,
 } from "./reply/humanizer.js";
 import { applyChatPathPolicy, reflectChatPathPolicy } from "./path-policy.js";
 import { StreamingSender } from "../bot/sender/streaming.js";
@@ -61,6 +60,7 @@ import {
   getStickerScore,
 } from "../knowledge/sticker/store.js";
 import { loadOverrideCached } from "../admin/runtime-config.js";
+import { isMaster } from "../admin/auth.js";
 import { getRedis } from "../db/redis.js";
 import { callWithFallback } from "../ai/fallback.js";
 import { detectDmIntentWithAI } from "./dm-relay/detector.js";
@@ -349,6 +349,34 @@ async function tryPreMuteIntercepts(
       await sender.sendDirect(chatId, "可用游戏：/game guess（猜数字）", formatted.messageId);
       return true;
     }
+
+    // /feature — group feature toggles (group only)
+    if (cmd === "/feature" && chatId < 0) {
+      const { handleFeatureCommand } = await import("./dm-relay/feature-gate.js");
+      const isMasterUser = isMaster(formatted.uid, env().MASTER_UID);
+      const reply = await handleFeatureCommand(chatId, formatted.uid, arg, isMasterUser);
+      await sender.sendDirect(chatId, reply, formatted.messageId);
+      return true;
+    }
+
+    // /help — list all DM features
+    if (cmd === "/help") {
+      const { buildHelpText } = await import("../bot/handlers/help.js");
+      await sender.sendDirect(chatId, buildHelpText(), formatted.messageId);
+      return true;
+    }
+
+    // /setdefault — set default group for DM features (DM only)
+    if (cmd === "/setdefault" && chatId > 0) {
+      const { handleDmRelay } = await import("./dm-relay/relay.js");
+      const idxArg = arg.trim();
+      const idx = idxArg ? parseInt(idxArg, 10) : undefined;
+      await handleDmRelay(chatId, formatted, {
+        type: "set_default_group",
+        groupIndex: idx !== undefined && !isNaN(idx) ? idx : undefined,
+      });
+      return true;
+    }
   }
 
   // Consent reply detection (group, replying to bot's consent question)
@@ -436,14 +464,20 @@ async function tryPostMuteIntercepts(
     }
   }
 
-  // DM relay intercept (private chat only)
+  // DM relay intercept (private chat only) — always run AI intent detection
   if (chatId > 0 && judgeResult.rule === "private_chat") {
     const text = formatted.textContent || "";
-    const maybeRelay = /群|看看|瞅瞅|瞄|告诉|传话|转告|转达|发给|传给|带话|送给|转发|@/.test(text);
-    if (maybeRelay) {
+    if (text.trim()) {
       await sendChatAction(chatId, "typing");
       const intent = await detectDmIntentWithAI(text, e.BOT_USERNAME);
       if (intent.type !== "normal_chat") {
+        // Flag to suppress post-action rerun on the same user message
+        try {
+          const { markIntentHandled } = await import("./dm-relay/post-action.js");
+          await markIntentHandled(formatted.uid, text);
+        } catch (err) {
+          logger.debug({ err }, "markIntentHandled failed (non-critical)");
+        }
         try {
           await handleDmRelay(chatId, formatted, intent);
         } catch (err) {
@@ -512,7 +546,7 @@ async function generateAndSendReplies(args: {
           typingEnglishTime: override.reply_segmentation.typing_english_time,
         }
       : undefined;
-    const humanizerConfig: Partial<HumanizerConfig> | undefined = override?.humanizer
+    const baseHumanizerConfig: Partial<HumanizerConfig> | undefined = override?.humanizer
       ? Object.fromEntries(
           Object.entries({
             typoEnabled: override.humanizer.typo_enabled,
@@ -538,6 +572,20 @@ async function generateAndSendReplies(args: {
           }).filter(([, v]) => v !== undefined)
         ) as Partial<HumanizerConfig>
       : undefined;
+
+    // #4 ASI self-tune: per-chat humanizer override (set by asi-scoring when the
+    // rolling uncanny-risk EMA crosses thresholds). Shallow-merge over the
+    // computed config so dialed-down rates win. Null-safe: no override → unchanged.
+    let humanizerConfig: Partial<HumanizerConfig> | undefined = baseHumanizerConfig;
+    try {
+      const chatOverrideRaw = await getRedis().get(`xxb:humanizer:override:${job.chatId}`);
+      if (chatOverrideRaw) {
+        const chatOverride = JSON.parse(chatOverrideRaw) as Partial<HumanizerConfig>;
+        humanizerConfig = { ...(baseHumanizerConfig ?? {}), ...chatOverride };
+      }
+    } catch (err) {
+      logger.debug({ err, chatId: job.chatId }, "Humanizer per-chat override fetch failed (non-critical)");
+    }
 
     // 7. 4-way context retrieval
     const t4 = performance.now();
@@ -577,9 +625,11 @@ async function generateAndSendReplies(args: {
     // ── Humanizer: read delay ──
     // Note: don't delete placeholder here — let it be edited into the first reply
     // in the send loop. Only delete if no placeholder exists (sentiment was "thinking").
+    // Skip for DM — users expect instant response in private chat.
 
     const incomingLength = formatted.textContent?.length ?? 0;
-    const readDelay = calculateReadDelay(incomingLength, humanizerConfig);
+    const isDmChat = job.chatId > 0;
+    const readDelay = isDmChat ? 0 : calculateReadDelay(incomingLength, humanizerConfig);
     if (readDelay > 0) {
       // Show typing during read delay so user sees bot is "processing"
       await sendChatAction(job.chatId, 'typing');
@@ -601,12 +651,11 @@ async function generateAndSendReplies(args: {
     };
     const replyQuoteEnabled = override?.reply_quote !== false;
 
-    const allSameTarget =
-      replies.length > 1 &&
-      replies.every((r) => r.targetMessageId === replies[0]!.targetMessageId);
-
     // ── Humanizer: thinking interjection (insert between 1st and 2nd segments) ──
-    const thinkingResult = decideThinkingInterjection(totalReplyLength, replies.length, humanizerConfig);
+    // Skip for DM — users expect instant response in private chat
+    const thinkingResult = isDmChat
+      ? { shouldInsert: false, text: '' }
+      : decideThinkingInterjection(totalReplyLength, replies.length, humanizerConfig);
     if (thinkingResult.shouldInsert && replies.length >= 2) {
       const insertIdx = 1;
       replies.splice(insertIdx, 0, {
@@ -623,7 +672,8 @@ async function generateAndSendReplies(args: {
       const reply = replies[replyIdx]!;
 
       // ── Humanizer: ack prefix (send before first reply) ──
-      if (replyIdx === 0 && ackPrefix.shouldSend && ackPrefix.prefix) {
+      // Skip for DM — users expect instant response in private chat
+      if (replyIdx === 0 && !isDmChat && ackPrefix.shouldSend && ackPrefix.prefix) {
         await sendChatAction(job.chatId, 'typing');
         const ackDelay = humanizerConfig?.jitterEnabled !== false
           ? applyJitter(1.0, humanizerConfig?.jitterFactor ?? 0.2)
@@ -639,13 +689,14 @@ async function generateAndSendReplies(args: {
       const isInterjection = reply.isInterjection === true;
 
       // ── Humanizer: typo injection ──
+      // Skip for DM — users expect instant, clean response in private chat
       const humanizedText = reply.replyContent;
-      const typoResult = !isInterjection && replyIdx === 0 && humanizedText.length >= 4
+      const typoResult = !isDmChat && !isInterjection && replyIdx === 0 && humanizedText.length >= 4
         ? (() => { const r = injectTypo(humanizedText, humanizerConfig); return r.typoIndex >= 0 ? r : null; })()
         : null;
 
-      // ── Humanizer: delete-and-resend (skip for interjections) ──
-      const deleteResend = isInterjection
+      // ── Humanizer: delete-and-resend (skip for interjections and DM) ──
+      const deleteResend = isDmChat || isInterjection
         ? { shouldDeleteResend: false, deleteDelay: 0, modifiedText: humanizedText }
         : decideDeleteResend(replyIdx, replies.length, humanizedText, humanizerConfig);
 
@@ -703,6 +754,32 @@ async function generateAndSendReplies(args: {
             : reply.targetMessageId;
 
         const isStickerOnly = reply.replyContent.trim() === '[sticker]' && stickerFileId;
+
+        // If AI wanted to send a sticker-only reply but no matching sticker was found,
+        // fall back to an emoji based on stickerIntent instead of sending literal "[sticker]"
+        if (reply.replyContent.trim() === '[sticker]' && !stickerFileId) {
+          const INTENT_EMOJI: Record<string, string> = {
+            happy: '😊', laughing: '😂', giggling: '🤭', grinning: '😄', beaming: '😁',
+            cheerful: '😊', joyful: '🥳', excited: '🤩', cute: '🥰', content: '😌',
+            sad: '😢', crying: '😭', sobbing: '😭', heartbroken: '💔', gloomy: '😔',
+            angry: '😤', rage: '🤬', grumpy: '😾', fuming: '😡',
+            surprised: '😲', shocked: '😱', astonished: '🤯', speechless: '😶',
+            scared: '😨', terrified: '😱', nervous: '😰', anxious: '😟',
+            shy: '😳', embarrassed: '😅', confused: '🤔', bored: '🥱',
+            proud: '😤', grateful: '🙏', jealous: '😒', guilty: '😣',
+            greeting: '👋', farewell: '👋', thanking: '🙏', apologizing: '🙏',
+            encouraging: '💪', congratulating: '🎉', comforting: '🫂', cheering_up: '💪',
+            agreeing: '👍', disagreeing: '🙅', facepalm: '🤦', eyeroll: '🙄',
+            thumbs_up: '👍', thumbs_down: '👎', clapping: '👏', nodding: '😊',
+            love: '❤️', wink: '😉', thinking: '🤔',
+            sleepy: '😴', cool: '😎', fire: '🔥',
+            roasting: '🔥', flirting: '😏', begging: '🥺', persuading: '🙏',
+          };
+          const intent = reply.stickerIntent?.[0] ?? '';
+          const emoji = INTENT_EMOJI[intent] ?? '😊';
+          reply.replyContent = emoji;
+          logger.debug({ chatId: job.chatId, stickerIntent: intent, emoji }, 'AI wanted sticker but none found, falling back to emoji');
+        }
 
         // ── Humanizer: sticker-only short reply (skip for interjections) ──
         const stickerOnlyResult = !isInterjection
@@ -796,8 +873,8 @@ async function generateAndSendReplies(args: {
               logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append');
             }
 
-            // ── Humanizer: afterthought edit (skip for interjections) ──
-            if (!isInterjection && currentMessageId) {
+            // ── Humanizer: afterthought edit (skip for interjections and DM) ──
+            if (!isDmChat && !isInterjection && currentMessageId) {
               const afterthought = decideAfterthoughtEdit(currentBaseText, humanizerConfig);
               if (afterthought.shouldEdit) {
                 const afterthoughtDelay = humanizerConfig?.afterthoughtEditDelay ?? DEFAULT_HUMANIZER_CONFIG.afterthoughtEditDelay;
@@ -892,6 +969,23 @@ async function generateAndSendReplies(args: {
     timings["saveAssistant"] = Math.round(performance.now() - t7);
     await releaseHeldChatLock();
 
+    // 10.5 Post-reply action hook (DM only) — detect if bot promised an action
+    if (job.chatId > 0 && sentMessages.length > 0) {
+      const userText = formatted.textContent || '';
+      const botText = sentMessages.map(s => s.text).join('\n');
+      import('./dm-relay/post-action.js').then(({ executePostAction }) => {
+        executePostAction(job.chatId, formatted.uid, userText, botText).then((confirmMsg) => {
+          if (confirmMsg) {
+            sendMessage(job.chatId, confirmMsg).catch((err) => {
+              logger.debug({ err }, 'Post-action confirmation send failed');
+            });
+          }
+        }).catch((err) => {
+          logger.debug({ err }, 'Post-action hook failed (non-critical)');
+        });
+      }).catch(() => {});
+    }
+
     // 11. Record reply outcome for FIRST reply (primary)
     if (e.OUTCOME_TRACKING_ENABLED && sentMessages.length > 0) {
       const first = sentMessages[0]!;
@@ -976,6 +1070,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       logger.debug({ chatId: job.chatId }, "Skipping non-formattable update");
       return;
     }
+
+    // Skip bot's own messages — prevents self-reply loops
+    if (formatted.uid === getBotUid()) {
+      logger.debug({ chatId: job.chatId, messageId: formatted.messageId }, "Skipping own message");
+      return;
+    }
     timings["format"] = Math.round(performance.now() - t0);
 
     // 1.5 Channel source ingestion — store and return, no reply
@@ -1016,6 +1116,56 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     const e = env();
     const botUid = getBotUid();
 
+    // 3.34 First-DM onboarding (fire-and-forget) — once per user, then continue
+    if (job.chatId > 0 && !formatted.isBot) {
+      const redis = getRedis();
+      const onboardKey = `xxb:dm:onboarded:${formatted.uid}`;
+      redis.set(onboardKey, '1', 'NX').then(async (set) => {
+        if (set === null) return; // already onboarded
+        const { buildOnboardingText } = await import('../bot/handlers/help.js');
+        await sender.sendDirect(job.chatId, buildOnboardingText(), formatted.messageId).catch(() => {});
+      }).catch((err) => logger.debug({ err }, 'Onboarding check failed (non-critical)'));
+    }
+
+    // 3.35 DM pending confide intercept (before judge, DM only) —
+    // when user said "树洞" earlier and we asked for content, treat the next
+    // DM message as that content and dispatch via doConfide.
+    if (job.chatId > 0) {
+      const { hasPendingConfide, clearPendingConfide, doConfide } = await import('./dm-relay/handlers/confide.js');
+      if (await hasPendingConfide(formatted.uid)) {
+        const text = (formatted.textContent || "").trim();
+        if (text) {
+          await clearPendingConfide(formatted.uid);
+          const { resolveGroup } = await import('./dm-relay/group-resolver.js');
+          const result = await resolveGroup(formatted.uid);
+          if (result.ok) {
+            try {
+              await doConfide(
+                { uid: formatted.uid, chatId: job.chatId, messageId: formatted.messageId },
+                sender,
+                text,
+                result.group.chatId,
+              );
+            } catch (err) {
+              logger.error({ err, chatId: job.chatId }, "Pending confide handler failed");
+              await sender.sendDirect(job.chatId, "处理失败了喵，稍后再试~", formatted.messageId);
+            }
+          } else if (result.reason === 'multiple_groups') {
+            const { savePendingGroupSelection } = await import('./dm-relay/group-resolver.js');
+            await savePendingGroupSelection(formatted.uid, {
+              intent: 'confide',
+              groups: result.groups,
+              content: text,
+            });
+            await sender.sendDirect(job.chatId, result.reply, formatted.messageId);
+          } else {
+            await sender.sendDirect(job.chatId, result.reply, formatted.messageId);
+          }
+          return;
+        }
+      }
+    }
+
     // 3.4 DM pending group selection intercept (before judge, DM only)
     if (job.chatId > 0) {
       const trimmedText = (formatted.textContent || "").trim();
@@ -1023,7 +1173,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       if (!isNaN(num) && num > 0 && trimmedText === String(num)) {
         const pending = await getPendingGroupSelection(formatted.uid);
         if (pending && num <= pending.groups.length) {
-          await clearPendingGroupSelection(formatted.uid);
           const selectedGroup = pending.groups[num - 1]!;
           logger.info({ uid: formatted.uid, selectedGroup: selectedGroup.title, intent: pending.intent }, "Pending group selection resolved");
           try {
@@ -1032,6 +1181,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
             logger.error({ err, chatId: job.chatId }, "Pending group selection handler failed");
             await sender.sendDirect(job.chatId, "处理失败了喵，稍后再试~", formatted.messageId);
           }
+          // Clear AFTER handler completes (handlers may re-read state)
+          await clearPendingGroupSelection(formatted.uid);
           return;
         }
       }
@@ -1069,6 +1220,45 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           sendMessage(uid, `📢 有人聊到了你追踪的话题喵~`).catch(() => {});
         }
       } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Topic watch check failed'); }
+    }
+
+    // 3.53 Relay queue on_speak trigger (fire-and-forget)
+    if (job.chatId < 0 && !formatted.isBot && formatted.uid) {
+      try {
+        const { getPendingRelayForTarget, deliverRelay, setRelayStatus } = await import('./dm-relay/relay-queue.js');
+        const { recheckDeliverySafety } = await import('./dm-relay/safety.js');
+        const pendingRelays = getPendingRelayForTarget(formatted.uid, job.chatId);
+        for (const relay of pendingRelays) {
+          try {
+            // Atomic: only deliver if still pending (prevents duplicate delivery)
+            const delivered = deliverRelay(relay.id);
+            if (!delivered) continue;
+            // Re-check safety: sender may have been banned or left the group during the hold
+            if (!(await recheckDeliverySafety(relay.sender_id, job.chatId))) {
+              setRelayStatus(relay.id, 'cancelled');
+              logger.info({ relayId: relay.id, senderUid: relay.sender_id }, 'On-speak relay dropped: sender no longer eligible');
+              continue;
+            }
+            const relayText = `${formatted.fullName}，有人让本喵转告你：${relay.content}`;
+            await sendMessage(job.chatId, relayText);
+            // Notify sender
+            try {
+              await sendMessage(relay.sender_id, `✅ 你的捎话已送达 ${formatted.fullName} 喵~`);
+            } catch { /* sender may have blocked bot */ }
+            logger.info({ relayId: relay.id, targetUid: formatted.uid, groupChatId: job.chatId }, 'On-speak relay delivered');
+          } catch (err) {
+            logger.error({ err, relayId: relay.id }, 'Failed to deliver on-speak relay');
+          }
+        }
+      } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Relay on_speak check failed'); }
+    }
+
+    // 3.54 Profile notification hook (fire-and-forget)
+    if (job.chatId < 0 && !formatted.isBot && formatted.uid) {
+      try {
+        const { checkProfileNotifications } = await import('./dm-relay/handlers/profile.js');
+        await checkProfileNotifications(job.chatId, formatted);
+      } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Profile notification check failed'); }
     }
 
     // 3.6 Bot interaction tracking
@@ -1149,6 +1339,11 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       );
       return;
     }
+
+    // Release lock before judge — judge is the expensive part (LLM call with
+    // retries/timeouts). Holding the lock here blocks all other messages for
+    // this chat. The lock will be re-acquired before sending (line ~559).
+    await releaseHeldChatLock();
 
     // 4. Judge (L0 → L1 → L2)
     const t3 = performance.now();

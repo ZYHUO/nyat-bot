@@ -333,14 +333,22 @@ export function registerJoinVerifyHandler(
 
     // ── Admin actions ──
     if (parsed.action === 'admin_pass' || parsed.action === 'admin_fail') {
-      // Only master can use admin actions
-      if (userId !== deps.masterUid) {
+      // Master or group admin can use admin actions
+      const targetUserId = Number(parsed.value);
+      const chatId = parsed.chatId;
+
+      let isAuthorized = userId === deps.masterUid;
+      if (!isAuthorized) {
+        try {
+          const member = await bot.api.getChatMember(chatId, userId);
+          isAuthorized = member.status === 'administrator' || member.status === 'creator';
+        } catch { /* ignore — will fail below */ }
+      }
+      if (!isAuthorized) {
         await ctx.answerCallbackQuery({ text: '无权限', show_alert: true });
         return;
       }
 
-      const targetUserId = Number(parsed.value);
-      const chatId = parsed.chatId;
       const record = store.getPendingRecord(db, chatId, targetUserId);
 
       if (!record) {

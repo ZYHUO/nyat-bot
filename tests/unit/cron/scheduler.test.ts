@@ -75,8 +75,11 @@ describe('CronScheduler', () => {
   it('should register cron jobs on start', () => {
     startCronJobs();
 
-    // model-check, daily-report, cleanup, knowledge-sync, user-profile-sync, idle-check, channel-sync
-    expect(mockSchedule).toHaveBeenCalledTimes(8);
+    // VERIFY/PROACTIVE/LEARNER disabled in this env. Unconditional jobs:
+    // model-check, daily-report, cleanup, scheduled-messages, relay-expiry,
+    // scheduled-relays, note-guess-game, knowledge-sync, user-profile-sync,
+    // idle-check, channel-sync, stats-flush = 12
+    expect(mockSchedule).toHaveBeenCalledTimes(12);
     expect(isStarted()).toBe(true);
   });
 
@@ -84,14 +87,14 @@ describe('CronScheduler', () => {
     startCronJobs();
     startCronJobs(); // second call should be no-op
 
-    expect(mockSchedule).toHaveBeenCalledTimes(8);
+    expect(mockSchedule).toHaveBeenCalledTimes(12);
   });
 
   it('should stop all jobs on stopCronJobs', () => {
     startCronJobs();
     stopCronJobs();
 
-    expect(mockStop).toHaveBeenCalledTimes(8);
+    expect(mockStop).toHaveBeenCalledTimes(12);
     expect(isStarted()).toBe(false);
   });
 

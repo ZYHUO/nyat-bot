@@ -339,8 +339,9 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("forwarded");
   });
 
-  it("hot chat (5min ≥ 20 msgs) → IGNORE", () => {
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+  it("hot chat (5min ≥ 25 msgs) → IGNORE", () => {
+    // 25 msgs falls in the <40 band → skip = Math.random() < 0.3, so mock below 0.3
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.1);
     const ctx = makeCtx({
       groupActivity: { messagesLast5Min: 25, messagesLast1Hour: 100 },
     });
@@ -362,8 +363,8 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("mention_self");
   });
 
-  it("recent reply (within 5 messages) → IGNORE", () => {
-    const ctx = makeCtx({ lastBotReplyIndex: 3 });
+  it("recent reply (within 2 messages) → IGNORE", () => {
+    const ctx = makeCtx({ lastBotReplyIndex: 1 });
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("IGNORE");
@@ -436,9 +437,10 @@ describe("L0 Rules — Proactive Engagement (Stage B)", () => {
 
   it("proactive enabled, no recent reply, but RNG > rate: IGNORE", () => {
     envValues['JUDGE_PROACTIVE_ENABLED'] = true;
-    // First random() for skip: 0.5 < 0.7 → skip=true
-    // Second random() for proactive: 0.5 > 0.05 → fails
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    // 30 msgs → skip band is Math.random() < 0.3
+    // First random() for skip: 0.2 < 0.3 → skip=true
+    // Second random() for proactive: 0.2 > 0.05 → proactive declines → IGNORE
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.2);
     const result = evaluateRules(hotCtx({
       lastBotReplyAt: Date.now() - 700_000, // > 600s
     }));

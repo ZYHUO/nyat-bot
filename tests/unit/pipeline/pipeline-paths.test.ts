@@ -41,15 +41,17 @@ const mockApplyChatPathPolicy = vi.fn();
 const mockReflectChatPathPolicy = vi.fn();
 const mockAcquireChatLock = vi.fn();
 
-const { mockLogger, sendDirect } = vi.hoisted(() => ({
-  mockLogger: {
+const { mockLogger, sendDirect } = vi.hoisted(() => {
+  const logger: Record<string, unknown> = {
     info: vi.fn(),
     debug: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-  },
-  sendDirect: vi.fn(),
-}));
+  };
+  // child() returns the same mock so chained loggers track the same spies
+  logger['child'] = () => logger;
+  return { mockLogger: logger, sendDirect: vi.fn() };
+});
 
 vi.mock("../../../src/pipeline/formatter.js", () => ({
   formatMessage: (...args: unknown[]) => mockFormatMessage(...args),
@@ -305,6 +307,7 @@ describe("processPipeline path branching", () => {
       9999,
       "direct",
       "normal",
+      undefined,
     );
   });
 
@@ -333,6 +336,7 @@ describe("processPipeline path branching", () => {
       9999,
       "direct",
       "normal",
+      undefined,
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -438,6 +442,7 @@ describe("processPipeline path branching", () => {
       9999,
       "planned",
       "pro",
+      undefined,
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -494,6 +499,7 @@ describe("processPipeline path branching", () => {
       9999,
       "planned",
       "normal",
+      undefined,
     );
   });
 

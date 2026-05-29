@@ -20,6 +20,12 @@
 import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { decayValence } from './mood.js';
+
+// Per-hour exponential decay applied to stored affinity on read (read-side only,
+// never written back). magnitude *= (1 - rate)^hoursSinceLastInteraction.
+// 0.002/hr ⇒ ~half-life ~14.4 天 (ln(0.5)/ln(0.998) ≈ 346h)，即两周左右减半。
+const RELATIONSHIP_DECAY_RATE = 0.002; // per-hour, tunable — ~halves in ~2 weeks
 
 export type RelBucket = '亲近' | '熟人' | '一般' | '反感';
 
@@ -55,19 +61,29 @@ export function getRelationship(chatId: number, uid: number): RelState {
     const db = getDb();
     const row = db
       .prepare(
-        `SELECT affinity, interaction_count, last_summary
+        `SELECT affinity, interaction_count, last_interaction_at, last_summary
          FROM chat_relationships WHERE chat_id = ? AND uid = ?`,
       )
       .get(chatId, uid) as
-      | { affinity: number; interaction_count: number; last_summary: string }
+      | {
+          affinity: number;
+          interaction_count: number;
+          last_interaction_at: number;
+          last_summary: string;
+        }
       | undefined;
     if (!row) {
       return { affinity: 0, count: 0, bucket: '一般', lastSummary: '' };
     }
+    // Apply time-decay toward 0 on read. last_interaction_at is unix seconds.
+    // Decayed value is NOT persisted — fresh interactions re-anchor via applyRelationshipEvent.
+    const now = Math.floor(Date.now() / 1000);
+    const hoursElapsed = Math.max(0, (now - row.last_interaction_at) / 3600);
+    const decayed = decayValence(row.affinity, hoursElapsed, RELATIONSHIP_DECAY_RATE);
     return {
-      affinity: row.affinity,
+      affinity: decayed,
       count: row.interaction_count,
-      bucket: affinityBucket(row.affinity),
+      bucket: affinityBucket(decayed),
       lastSummary: row.last_summary ?? '',
     };
   } catch (err) {

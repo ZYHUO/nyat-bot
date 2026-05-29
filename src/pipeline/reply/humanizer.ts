@@ -80,7 +80,7 @@ export interface HumanizerConfig {
 
 const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   typoEnabled: true,
-  typoRate: 0.3,
+  typoRate: 0.1,
   typoCorrectionRate: 1.0,
   typoCorrectionDelay: 1.5,
 
@@ -367,7 +367,7 @@ function tweakText(text: string): string {
  */
 export function decideDeleteResend(
   segmentIndex: number,
-  totalSegments: number,
+  _totalSegments: number,
   text: string,
   config?: Partial<HumanizerConfig>,
 ): DeleteResendResult {

@@ -14,11 +14,13 @@ const k = (c: number, u: number) => `${c}|${u}`;
 
 const mockDb = {
   prepare: (sql: string) => {
-    if (sql.startsWith('SELECT affinity, interaction_count, last_summary')) {
+    if (sql.startsWith('SELECT affinity, interaction_count, last_interaction_at, last_summary')) {
       return {
         get: (chatId: number, uid: number) => {
           const r = store.get(k(chatId, uid));
-          return r ? { affinity: r.affinity, interaction_count: r.interaction_count, last_summary: r.last_summary } : undefined;
+          return r
+            ? { affinity: r.affinity, interaction_count: r.interaction_count, last_interaction_at: r.last_interaction_at, last_summary: r.last_summary }
+            : undefined;
         },
       };
     }
@@ -139,7 +141,7 @@ describe('relationship', () => {
   it('applyRelationshipEvent persists initial event', () => {
     mod.applyRelationshipEvent(-100, 1001, 5, 'first');
     const s = mod.getRelationship(-100, 1001);
-    expect(s.affinity).toBe(5);
+    expect(s.affinity).toBeCloseTo(5, 3); // decay-on-read: ~exact at 0 elapsed
     expect(s.count).toBe(1);
     expect(s.lastSummary).toBe('first');
   });
@@ -149,15 +151,15 @@ describe('relationship', () => {
     mod.applyRelationshipEvent(-100, 1001, 5);
     mod.applyRelationshipEvent(-100, 1001, -3);
     const s = mod.getRelationship(-100, 1001);
-    expect(s.affinity).toBeCloseTo(12, 5);
+    expect(s.affinity).toBeCloseTo(12, 3);
     expect(s.count).toBe(3);
   });
 
   it('clamps affinity to [-100, 100]', () => {
     mod.applyRelationshipEvent(-100, 1001, 200);
-    expect(mod.getRelationship(-100, 1001).affinity).toBe(100);
+    expect(mod.getRelationship(-100, 1001).affinity).toBeCloseTo(100, 3);
     mod.applyRelationshipEvent(-100, 1001, -500);
-    expect(mod.getRelationship(-100, 1001).affinity).toBe(-100);
+    expect(mod.getRelationship(-100, 1001).affinity).toBeCloseTo(-100, 3);
   });
 
   it('updates summary only when provided', () => {

@@ -3,6 +3,7 @@
 // Port of PHP StickerKnowledgeService (file-based → SQLite)
 // ────────────────────────────────────────
 
+import leven from 'fast-levenshtein';
 import { getDb } from '../../db/sqlite.js';
 import { logger } from '../../shared/logger.js';
 import type {
@@ -18,6 +19,11 @@ import type { StickerIntent } from './types.js';
 
 const MAX_SAMPLES_PER_STICKER = 50;
 const MAX_SAMPLES_PER_CHAT = 10;
+
+const STICKER_TOPN = 10; // tunable — cap candidates before weighted-random selection
+const RELAXED_USER_SCORE_FLOOR = 0.01; // tunable — relaxed second-pass keeps lightly-disliked stickers
+const FUZZY_SIM_THRESHOLD = 0.7; // tunable — min normalized edit-distance similarity for a fuzzy intent match
+const FUZZY_MATCH_SCORE = 1; // tunable — score awarded when only a fuzzy (no exact/synonym) match exists
 
 function safeJsonParse<T>(value: string | null | undefined, fallback: T | null): T | null {
   if (!value) return fallback;
@@ -307,27 +313,19 @@ export function setRawAssetPath(fileUniqueId: string, rawPath: string): boolean 
   return result.changes > 0;
 }
 
-export function getReadyStickersByIntent(
-  intent: string | string[],
+interface ReadyStickerRow {
+  file_unique_id: string;
+  latest_file_id: string;
+  emotion_tags: string | null;
+  mood_map: string | null;
+  user_score: number;
+}
+
+function scoreReadyRows(
+  rows: ReadyStickerRow[],
+  intents: string[],
 ): Array<{ fileId: string; fileUniqueId: string; score: number }> {
-  const rows = getDb().prepare(`
-    SELECT file_unique_id, latest_file_id, emotion_tags, mood_map, user_score
-    FROM sticker_items
-    WHERE analysis_status = 'ready'
-      AND (persona_fit IS NULL OR persona_fit != 0)
-      AND latest_file_id IS NOT NULL
-      AND user_score > 0.1
-  `).all() as Array<{
-    file_unique_id: string;
-    latest_file_id: string;
-    emotion_tags: string | null;
-    mood_map: string | null;
-    user_score: number;
-  }>;
-
-  const intents = Array.isArray(intent) ? intent : [intent];
   const candidates: Array<{ fileId: string; fileUniqueId: string; score: number }> = [];
-
   for (const row of rows) {
     const emotionTags = safeJsonParse<string[]>(row.emotion_tags, null) ?? [];
     const moodMap = safeJsonParse<Record<string, number>>(row.mood_map, null) ?? {};
@@ -341,6 +339,44 @@ export function getReadyStickersByIntent(
         score: intentScore * userScore,
       });
     }
+  }
+  return candidates;
+}
+
+export function getReadyStickersByIntent(
+  intent: string | string[],
+): Array<{ fileId: string; fileUniqueId: string; score: number }> {
+  const intents = Array.isArray(intent) ? intent : [intent];
+
+  const rows = getDb().prepare(`
+    SELECT file_unique_id, latest_file_id, emotion_tags, mood_map, user_score
+    FROM sticker_items
+    WHERE analysis_status = 'ready'
+      AND (persona_fit IS NULL OR persona_fit != 0)
+      AND latest_file_id IS NOT NULL
+      AND user_score > 0.1
+  `).all() as ReadyStickerRow[];
+
+  // #6: score → sort DESC → cap to top N. Weighted-random downstream only sees this slice.
+  let candidates = scoreReadyRows(rows, intents)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, STICKER_TOPN);
+
+  // Relaxed second pass: nothing cleared the strict floor, so look at lightly-disliked
+  // stickers (user_score > 0.01) before giving up entirely.
+  if (candidates.length === 0) {
+    const relaxedRows = getDb().prepare(`
+      SELECT file_unique_id, latest_file_id, emotion_tags, mood_map, user_score
+      FROM sticker_items
+      WHERE analysis_status = 'ready'
+        AND (persona_fit IS NULL OR persona_fit != 0)
+        AND latest_file_id IS NOT NULL
+        AND user_score > ?
+    `).all(RELAXED_USER_SCORE_FLOOR) as ReadyStickerRow[];
+
+    candidates = scoreReadyRows(relaxedRows, intents)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, STICKER_TOPN);
   }
 
   return candidates;
@@ -368,7 +404,29 @@ export function incrementUsageCount(fileUniqueId: string): void {
 
 // ── Internal scoring (port of PHP scoreIntentMatch) ──
 
-function scoreIntentMatch(
+/** Normalized Levenshtein similarity in [0,1]: 1 - dist / max(len). */
+function fuzzySimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  const dist = leven.get(a, b);
+  return 1 - dist / maxLen;
+}
+
+/**
+ * Score how well an intent matches a sticker's emotion tags / mood map.
+ * Exported for unit testing of the pure scoring logic.
+ *
+ * Pass 1 (exact / substring synonym, unchanged):
+ *   - tag === synonym               → +3
+ *   - tag/synonym substring overlap → +1
+ *   - mood key matches synonym      → +2
+ * Pass 2 (#7 fuzzy fallback) runs ONLY when pass 1 found nothing: awards a small
+ * score when normalized edit-distance similarity between the intent (or one of its
+ * synonyms) and an emotion tag is >= FUZZY_SIM_THRESHOLD (e.g. "happily" ~ "happy").
+ */
+export function scoreIntentMatch(
   intent: string,
   emotionTags: string[],
   moodMap: Record<string, number>,
@@ -393,6 +451,22 @@ function scoreIntentMatch(
     for (const syn of synonyms) {
       if (keyLower === syn || keyLower.includes(syn)) {
         score += 2;
+      }
+    }
+  }
+
+  // #7: only fall back to fuzzy matching when no exact/synonym match was found.
+  if (score === 0) {
+    const intentLower = intent.toLowerCase();
+    const probes = [intentLower, ...synonyms.map((s) => s.toLowerCase())];
+    for (const tag of emotionTags) {
+      if (typeof tag !== 'string') continue;
+      const tagLower = tag.toLowerCase();
+      for (const probe of probes) {
+        if (fuzzySimilarity(probe, tagLower) >= FUZZY_SIM_THRESHOLD) {
+          score += FUZZY_MATCH_SCORE;
+          break; // one fuzzy hit per tag is enough
+        }
       }
     }
   }

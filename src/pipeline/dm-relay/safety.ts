@@ -114,6 +114,17 @@ function isDuplicate(targetUid: number, groupChatId: number, content: string): b
   return rows.some((r) => normalizeForDedup(r.content) === normalized);
 }
 
+/**
+ * Lightweight re-check before delivering a previously-queued relay.
+ * Verifies the sender isn't banned and is still a group member.
+ * Skips the AI spam check (already run at enqueue) to avoid cost on every delivery.
+ * Returns true if delivery should proceed.
+ */
+export async function recheckDeliverySafety(senderUid: number, groupChatId: number): Promise<boolean> {
+  if (isBanned(senderUid)) return false;
+  return verifyMembership(groupChatId, senderUid);
+}
+
 /** Run full safety pipeline. Short-circuits on first failure. */
 export async function runSafetyChecks(
   senderUid: number,

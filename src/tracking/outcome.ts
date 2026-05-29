@@ -9,11 +9,13 @@ import { logger } from '../shared/logger.js';
 import type { ReplyOutcome } from './types.js';
 import { applyMoodEvent } from './mood.js';
 import { applyRelationshipEvent } from './relationship.js';
+import { NEGATIVE_PATTERNS, REPAIR_PATTERNS, POSITIVE_PATTERNS, countMatches } from './behavior-patterns.js';
+import { scoreReplyQuality, ASI_ENABLED, ASI_SAMPLE_RATE } from './asi-scoring.js';
 
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
 const PENDING_TTL = 3600;
-const REFLECTION_THRESHOLD = 20;
+const REFLECTION_THRESHOLD = 15;
 const REFLECTION_INTERVAL = 86400;
 const MAX_OUTCOMES = 100;
 const REFLECTION_MAX_CHARS = 500;
@@ -104,8 +106,102 @@ export async function checkOutcome(
       // Collect all inserts to run atomically; Redis deletes are best-effort outside the tx
       const toInsert: Parameters<typeof insert.run>[] = [];
       const toDelete: string[] = [];
+      // Rows that received an explicit followup — eligible for async ASI scoring.
+      // Captured after the insert transaction so we have stable rowids.
+      const scoreCandidates: Array<{
+        insertIdx: number;
+        triggerText: string;
+        replyText: string;
+        signal: string;
+      }> = [];
+
+      // ── #1 Deterministic explicit-reaction scan (runs before the window logic) ──
+      // If the current message replies to a pending bot reply (or directly follows
+      // one) and contains an explicit negative/repair/positive cue, finalize that
+      // pending reply immediately with a stronger signal + larger delta.
+      const negHits = countMatches(currentText, NEGATIVE_PATTERNS);
+      const repairHits = countMatches(currentText, REPAIR_PATTERNS);
+      const posHits = countMatches(currentText, POSITIVE_PATTERNS);
+      let explicitField: string | null = null;
+      if (negHits > 0 || repairHits > 0 || posHits > 0) {
+        // Prefer the directly-replied-to pending reply; else attribute to the
+        // most recent pending bot reply (message directly follows it).
+        if (currentReplyTo > 0) {
+          for (const [field, json] of Object.entries(lockedPending)) {
+            const entry = JSON.parse(json) as Record<string, unknown>;
+            if ((entry.bot_message_id as number) === currentReplyTo) {
+              explicitField = field;
+              break;
+            }
+          }
+        }
+        if (explicitField === null) {
+          let highest = -1;
+          for (const [field, json] of Object.entries(lockedPending)) {
+            const entry = JSON.parse(json) as Record<string, unknown>;
+            if ((entry.bot_message_id as number) > highest) {
+              highest = entry.bot_message_id as number;
+              explicitField = field;
+            }
+          }
+        }
+      }
+
+      const explicitResolved = new Set<string>();
+      if (explicitField !== null) {
+        const json = lockedPending[explicitField];
+        if (json) {
+          const entry = JSON.parse(json) as Record<string, unknown>;
+          // Repair takes precedence over a bare negative; positive only when no negative cue.
+          let outcome: 'positive' | 'negative';
+          let signal: string;
+          let moodDelta: number;
+          let relDelta: number;
+          if (repairHits > 0) {
+            outcome = 'negative';
+            signal = 'repair_loop';
+            moodDelta = -8;
+            relDelta = -1.5;
+          } else if (negHits > 0) {
+            outcome = 'negative';
+            signal = 'explicit_negative';
+            moodDelta = -8;
+            relDelta = -1.5;
+          } else {
+            outcome = 'positive';
+            signal = 'explicit_positive';
+            moodDelta = 5;
+            relDelta = 1;
+          }
+
+          const insertIdx = toInsert.length;
+          toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
+          toDelete.push(explicitField);
+          explicitResolved.add(explicitField);
+          resolvedCount++;
+          // An explicit reaction is a followup — score it.
+          scoreCandidates.push({
+            insertIdx,
+            triggerText: String(entry.trigger_text ?? ''),
+            replyText: String(entry.reply_text ?? ''),
+            signal,
+          });
+          if (!currentMessage.isBot) {
+            try { applyMoodEvent(chatId, moodDelta, `outcome_${signal}`); } catch { /* non-critical */ }
+            try {
+              const triggerUid = entry.trigger_user_id as number | undefined;
+              if (typeof triggerUid === 'number' && triggerUid > 0) {
+                applyRelationshipEvent(chatId, triggerUid, relDelta, `${outcome}:${signal}`);
+              }
+            } catch { /* non-critical */ }
+          }
+        }
+      }
 
       for (const [field, json] of Object.entries(lockedPending)) {
+        // Already finalized by the explicit-reaction scan above.
+        if (explicitResolved.has(field)) continue;
+
         const entry = JSON.parse(json) as Record<string, unknown>;
         const botMsgId = entry.bot_message_id as number;
 
@@ -115,9 +211,17 @@ export async function checkOutcome(
         if (isReplyToBot || isMentionTarget) {
           const outcome = 'positive';
           const signal = isReplyToBot ? 'user_replied' : 'user_mentioned_bot';
+          const insertIdx = toInsert.length;
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
+          // A reply/mention is a followup — score it.
+          scoreCandidates.push({
+            insertIdx,
+            triggerText: String(entry.trigger_text ?? ''),
+            replyText: String(entry.reply_text ?? ''),
+            signal,
+          });
           // Stage E/F: only apply mood/relationship effects for human interactions, not bot-to-bot
           if (!currentMessage.isBot) {
             try { applyMoodEvent(chatId, 5, `outcome_positive_${signal}`); } catch { /* non-critical */ }
@@ -156,11 +260,33 @@ export async function checkOutcome(
         }
       }
 
-      // Run all SQLite inserts in a single transaction
+      // Run all SQLite inserts in a single transaction, capturing rowids in order.
+      const insertedRowIds: number[] = [];
       if (toInsert.length > 0) {
         db.transaction(() => {
-          for (const args of toInsert) insert.run(...args);
+          for (const args of toInsert) {
+            const info = insert.run(...args);
+            insertedRowIds.push(Number(info.lastInsertRowid));
+          }
         })();
+      }
+
+      // #2: fire-and-forget ASI scoring for rows that got a followup.
+      if (ASI_ENABLED) {
+        for (const c of scoreCandidates) {
+          const rowId = insertedRowIds[c.insertIdx];
+          if (rowId === undefined) continue;
+          if (Math.random() > ASI_SAMPLE_RATE) continue;
+          void scoreReplyQuality({
+            chatId,
+            rowId,
+            triggerText: c.triggerText,
+            replyText: c.replyText,
+            signal: c.signal,
+          }).catch((err) => {
+            logger.debug({ err, chatId, rowId }, 'ASI scoreReplyQuality failed (non-critical)');
+          });
+        }
       }
 
       // Redis deletes are cross-store — best-effort outside the transaction

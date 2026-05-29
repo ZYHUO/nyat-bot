@@ -17,6 +17,7 @@ import { getTopExpressions } from '../../learners/expression-learner.js';
 import { getChatMood, moodPromptHint } from '../../tracking/mood.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
+import { buildProfileInjection } from '../../tracking/user-profile.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -204,8 +205,19 @@ export function buildMessages(
   if (latestMessage.senderTag) {
     currentMsgBlock += `\n用户Tag: ${latestMessage.senderTag}`;
   }
-  if (userProfile) {
-    currentMsgBlock += `\n用户画像: ${userProfile}`;
+  // Structured multi-section profile (#3): prefer the composed section block;
+  // fall back to the legacy single profile_prompt string when no sections exist.
+  let profileInjection: string | undefined;
+  if (chatId !== undefined && !latestMessage.isAnonymous) {
+    try {
+      profileInjection = buildProfileInjection(chatId, latestMessage.uid) ?? undefined;
+    } catch {
+      /* non-critical; fall back to legacy below */
+    }
+  }
+  const profileText = profileInjection ?? userProfile;
+  if (profileText) {
+    currentMsgBlock += `\n用户画像:\n${profileText}`;
   }
   if (userPreferences) {
     currentMsgBlock += `\n用户偏好记录:\n${userPreferences}`;

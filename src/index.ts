@@ -22,6 +22,7 @@ import { isMemoryAvailable } from './memory/chroma.js';
 import { callAllowlistReviewModel } from './allowlist/ai-call.js';
 import type { AllowlistConfig } from './allowlist/types.js';
 import { getStartupOwnership } from './startup/ownership.js';
+import { getIngressMode, installPollHeartbeat, startIngressWatchdog } from './ingress/failover.js';
 import {
   shouldRegisterBotCommands,
   shouldWarmMemory,
@@ -96,29 +97,50 @@ async function main(): Promise<void> {
     logger.info({ ownership }, 'Skipping worker startup in non-owner process');
   }
 
-  // 9. Start bot ingress only on the elected owner
-  if (ownership.botIngress && config.WEBHOOK_URL) {
-    const webhookUrl = `${config.WEBHOOK_URL}/webhook`;
-    const secretToken = config.WEBHOOK_SECRET ?? undefined;
-    // Retry once on 429 (Telegram rate-limits setWebhook during rapid restarts)
-    try {
-      await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
-    } catch (err: unknown) {
-      const retryAfter =
-        err instanceof Error && 'parameters' in err
-          ? ((err as Record<string, unknown>).parameters as Record<string, number> | undefined)?.retry_after
-          : undefined;
-      const delay = ((retryAfter ?? 1) + 1) * 1000;
-      logger.warn({ delay }, 'setWebhook 429, retrying after delay');
-      await new Promise((r) => setTimeout(r, delay));
-      await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
+  // 9. Start bot ingress only on the elected owner.
+  // Preferred transport is long polling (no inbound port needed); webhook is the
+  // automatic failover target. The active mode is chosen from a Redis flag that
+  // the failover watchdog flips when polling stalls / recovers.
+  if (ownership.botIngress) {
+    const ingressMode = await getIngressMode(redis);
+    const canWebhook = !!(config.WEBHOOK_URL && config.WEBHOOK_SECRET);
+
+    if (ingressMode === 'webhook' && canWebhook) {
+      // ── Webhook mode (failover) ──
+      const webhookUrl = `${config.WEBHOOK_URL}/webhook`;
+      const secretToken = config.WEBHOOK_SECRET ?? undefined;
+      try {
+        await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
+      } catch (err: unknown) {
+        const retryAfter =
+          err instanceof Error && 'parameters' in err
+            ? ((err as Record<string, unknown>).parameters as Record<string, number> | undefined)?.retry_after
+            : undefined;
+        const delay = ((retryAfter ?? 1) + 1) * 1000;
+        logger.warn({ delay }, 'setWebhook 429, retrying after delay');
+        await new Promise((r) => setTimeout(r, delay));
+        await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
+      }
+      logger.info({ url: config.WEBHOOK_URL }, 'Webhook set (failover mode)');
+      startIngressWatchdog(redis, 'webhook');
+    } else {
+      // ── Polling mode (preferred / default) ──
+      if (ingressMode === 'webhook' && !canWebhook) {
+        logger.warn('Ingress flag=webhook but WEBHOOK_URL/SECRET missing — falling back to polling');
+      }
+      // Clear any previously-registered webhook first, or getUpdates returns 409 Conflict.
+      try {
+        await bot.api.deleteWebhook();
+        logger.info('Cleared webhook registration for polling mode');
+      } catch (err) {
+        logger.warn({ err }, 'deleteWebhook before polling failed (continuing)');
+      }
+      installPollHeartbeat(bot, redis);
+      void bot.start({
+        onStart: () => logger.info('Bot started (polling)'),
+      });
+      startIngressWatchdog(redis, 'polling');
     }
-    logger.info({ url: config.WEBHOOK_URL }, 'Webhook set');
-  } else if (ownership.botIngress) {
-    // Polling mode
-    void bot.start({
-      onStart: () => logger.info('Bot started (polling)'),
-    });
   } else {
     logger.info({ ownership }, 'Skipping bot ingress startup in non-owner process');
   }
@@ -134,6 +156,8 @@ async function main(): Promise<void> {
       { command: 'game', description: '小游戏 /game guess' },
       { command: 'muteme', description: '让bot不回复我' },
       { command: 'unmuteme', description: '恢复bot回复' },
+      { command: 'feature', description: '群功能开关 /feature note off（群管）' },
+      { command: 'setdefault', description: '设置私聊默认群 /setdefault' },
       { command: 'help', description: '帮助' },
     ]).catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
   } else {

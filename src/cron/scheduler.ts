@@ -63,6 +63,42 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // Scheduled messages execution — every minute
+  tasks.push(schedule('* * * * *', () => {
+    void safeRun('scheduled-messages', async () => {
+      const { executeScheduledMessages } = await import('../pipeline/dm-relay/handlers/schedule.js');
+      await executeScheduledMessages();
+    });
+  }));
+
+  // Relay queue expiry — every 5 minutes
+  tasks.push(schedule('*/5 * * * *', () => {
+    void safeRun('relay-expiry', async () => {
+      const { expireOldRelays } = await import('../pipeline/dm-relay/relay-queue.js');
+      const count = expireOldRelays();
+      if (count > 0) logger.info({ count }, 'Expired relay queue items');
+    });
+  }));
+
+  // Scheduled relays — every minute, deliver due time-based relays
+  tasks.push(schedule('* * * * *', () => {
+    void safeRun('scheduled-relays', async () => {
+      const { executeDueScheduledRelays } = await import('../pipeline/dm-relay/relay-queue.js');
+      const count = await executeDueScheduledRelays();
+      if (count > 0) logger.info({ count }, 'Delivered scheduled relays');
+    });
+  }));
+
+  // Anonymous note guess game — hourly hint drip + 24h close
+  tasks.push(schedule('17 * * * *', () => {
+    void safeRun('note-guess-game', async () => {
+      const { revealDueHints, closeExpiredNotes } = await import('../pipeline/dm-relay/handlers/note.js');
+      const hinted = await revealDueHints();
+      const closed = await closeExpiredNotes();
+      if (hinted > 0 || closed > 0) logger.info({ hinted, closed }, 'Note guess-game tick');
+    });
+  }));
+
   // Knowledge base sync — configurable (PHP cron_long_term.php); only runs when chat IDs set
   const ks = env().KNOWLEDGE_CRON_SCHEDULE;
   if (validate(ks)) {

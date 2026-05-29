@@ -11,8 +11,17 @@ import type { FormattedMessage, RetrievedContext } from '../../shared/types.js';
 import { getRecent, getAll } from './manager.js';
 import { countTokens } from '../../ai/token-counter.js';
 import { slimContextForAI, slimSingleMessage } from './slim.js';
-import { searchMemory } from '../../memory/chroma.js';
+import { searchMemory, type ScoredMessage } from '../../memory/chroma.js';
 import { logger } from '../../shared/logger.js';
+
+// ── Semantic relevance gating (percentile threshold) ─────────
+// Semantic candidates whose relevance falls below the 75th-percentile of the
+// batch are dropped before merging — keep only the strongest matches. Guarded so
+// we never starve context: at least MIN_RESULTS survive, and MIN_SCORE is a hard
+// floor no candidate clears below regardless of percentile.
+const PERCENTILE = 0.75; // tunable — keep candidates at/above this percentile of relevance
+const MIN_RESULTS = 3; // tunable — never drop below this many candidates
+const MIN_SCORE = 0.3; // tunable — hard floor; candidates strictly below this are always dropped
 
 export interface RetrieverConfig {
   mode: 'direct' | 'planned';
@@ -40,16 +49,91 @@ async function retrieveRecent(chatId: number, count: number): Promise<FormattedM
   return [...recent].sort((a, b) => a.timestamp - b.timestamp);
 }
 
+export interface PercentileOptions {
+  /** Keep candidates at or above this percentile of the batch's scores (0..1). */
+  pct: number;
+  /** Never let the surviving set fall below this many candidates. */
+  minResults: number;
+  /** Hard floor: candidates strictly below this score are always dropped. */
+  minScore: number;
+}
+
+/**
+ * Drop low-relevance candidates by a percentile threshold, defensively.
+ *
+ * Pure: given items and a score accessor, returns a filtered (order-preserved)
+ * subset. Behaviour:
+ *  - Candidates with no score (getScore → undefined/NaN) are treated as
+ *    unscoreable and pass through unfiltered — keeps the filter a no-op when the
+ *    memory layer can't surface scores.
+ *  - Among scoreable items, compute the `pct` percentile of their scores and keep
+ *    those at/above it. If fewer than `minResults` survive, fall back to the top
+ *    `minResults` by score.
+ *  - The `minScore` floor is applied last and unconditionally: anything strictly
+ *    below it is dropped even if it would otherwise be a top result.
+ */
+export function filterByPercentile<T>(
+  items: readonly T[],
+  getScore: (item: T) => number | undefined,
+  opts: PercentileOptions,
+): T[] {
+  if (items.length === 0) return [];
+
+  const scored: { item: T; score: number }[] = [];
+  const unscored: T[] = [];
+  for (const item of items) {
+    const s = getScore(item);
+    if (typeof s === 'number' && Number.isFinite(s)) {
+      scored.push({ item, score: s });
+    } else {
+      unscored.push(item);
+    }
+  }
+
+  // No usable scores → no-op (return everything, original order).
+  if (scored.length === 0) return [...items];
+
+  // Percentile threshold over the batch's scores.
+  const sortedScores = scored.map((s) => s.score).sort((a, b) => a - b);
+  const idx = Math.min(
+    sortedScores.length - 1,
+    Math.max(0, Math.ceil(opts.pct * sortedScores.length) - 1),
+  );
+  const threshold = sortedScores[idx]!;
+
+  let kept = scored.filter((s) => s.score >= threshold);
+
+  // Don't starve context: fall back to the top minResults by score.
+  if (kept.length < opts.minResults) {
+    kept = [...scored]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, opts.minResults);
+  }
+
+  // Hard floor, applied unconditionally and last.
+  kept = kept.filter((s) => s.score >= opts.minScore);
+
+  const keptSet = new Set(kept.map((s) => s.item));
+  // Preserve original ordering; unscoreable items always pass through.
+  return items.filter((item) => keptSet.has(item) || unscored.includes(item));
+}
+
 /**
  * Path 2: Semantic search — long-term memory via ChromaDB.
  * Hard 500ms timeout, returns [] on failure or timeout.
+ * Applies a percentile relevance gate before the results reach the merge step.
  */
 async function retrieveSemantic(
   chatId: number,
   query: string,
   topK: number,
 ): Promise<FormattedMessage[]> {
-  return searchMemory(chatId, query, topK, 500);
+  const raw: ScoredMessage[] = await searchMemory(chatId, query, topK, 500);
+  return filterByPercentile(raw, (m) => m.score, {
+    pct: PERCENTILE,
+    minResults: MIN_RESULTS,
+    minScore: MIN_SCORE,
+  });
 }
 
 /**

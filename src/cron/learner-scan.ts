@@ -12,6 +12,7 @@ import { loadCachedPrompt } from '../shared/config.js';
 import { parseLearnerOutput, upsertExpressions } from '../learners/expression-learner.js';
 import { upsertJargons, getJargonsForInference } from '../learners/jargon-miner.js';
 import { inferAndPersist } from '../learners/jargon-explainer.js';
+import { acquireLearnerSlot, releaseLearnerSlot } from '../learners/learner-gate.js';
 import type { FormattedMessage } from '../shared/types.js';
 
 const ACTIVE_GROUPS_MAX_AGE = 30 * 86400;
@@ -118,6 +119,11 @@ export async function runLearnerScan(): Promise<void> {
     : allChats.sort(() => Math.random() - 0.5).slice(0, e.LEARNER_MAX_CHATS_PER_TICK);
 
   for (const chatId of candidates) {
+    const slot = await acquireLearnerSlot(chatId);
+    if (!slot.ok) {
+      logger.debug({ chatId, reason: slot.reason, active: slot.active }, 'learner-scan: skip — gate not acquired');
+      continue;
+    }
     try {
       const state = getScanState(chatId);
       const recent = await getRecent(chatId, e.LEARNER_BATCH_SIZE);
@@ -136,6 +142,8 @@ export async function runLearnerScan(): Promise<void> {
       updateScanState(chatId, maxMsgId);
     } catch (err) {
       logger.warn({ err, chatId }, 'learner-scan: chat failed');
+    } finally {
+      await releaseLearnerSlot(chatId);
     }
   }
 }

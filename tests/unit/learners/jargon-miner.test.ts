@@ -45,7 +45,9 @@ describe('getJargonsForInference', () => {
     mockAll.mockReturnValueOnce(fakeRows);
     const result = getJargonsForInference(-1001, [4, 8, 25]);
     expect(result).toEqual(fakeRows);
-    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining("status = 'pending'"));
+    // #8: query now allows re-inferring already-'inferred' jargons (refinement),
+    // excluding only manually-locked 'confirmed' ones.
+    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining("status != 'confirmed'"));
   });
 
   it('returns empty array when thresholds is empty', () => {

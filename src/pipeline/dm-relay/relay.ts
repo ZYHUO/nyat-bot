@@ -5,7 +5,9 @@
 import type { FormattedMessage } from '../../shared/types.js';
 import type { DmIntent } from './detector.js';
 import { isPronounTarget } from './detector.js';
-import { resolveGroup, savePendingGroupSelection } from './group-resolver.js';
+import { resolveGroup, savePendingGroupSelection, resolveGroupByHint, listUserGroups } from './group-resolver.js';
+import { setDefaultGroup } from '../../tracking/user-profile.js';
+import { checkFeatureGate } from './feature-gate.js';
 import type { ResolvedGroup } from './group-resolver.js';
 import { resolveTarget, resolveTargetByPronoun } from './target-resolver.js';
 import { runSafetyChecks } from './safety.js';
@@ -19,6 +21,12 @@ import { getDb } from '../../db/sqlite.js';
 import { isMaster } from '../../admin/auth.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { getPendingRelayForSender, cancelRelay, enqueueRelay } from './relay-queue.js';
+import { handleScheduleMessage, handleListScheduled, handleCancelScheduled } from './handlers/schedule.js';
+import { handleNoteStart, handleNotePendingGroup, handleNoteStats, handleNoteGuess, handleNoteReveal } from './handlers/note.js';
+import { handleSetProfile, handleSetProfileTags, handleViewProfile, handleListProfiles, handleProfileNotify } from './handlers/profile.js';
+import { handleConfide, doConfide } from './handlers/confide.js';
+import { handleFate } from './handlers/fate.js';
 
 const sender = new StreamingSender();
 
@@ -64,6 +72,12 @@ async function handleViewGroup(
       return;
     }
     group = result.group;
+  }
+
+  const gate = await checkFeatureGate(group.chatId, 'view_group');
+  if (gate) {
+    await sender.sendDirect(dmChatId, gate, formatted.messageId);
+    return;
   }
 
   // Fetch recent group context
@@ -147,6 +161,9 @@ async function handleRelayMessage(
   targetHandle: string,
   content: string,
   preResolvedGroup?: ResolvedGroup,
+  groupHint?: string,
+  mode: 'immediate' | 'on_speak' | 'scheduled' = 'immediate',
+  scheduledAt?: number,
 ): Promise<void> {
   await sendChatAction(dmChatId, 'typing');
 
@@ -165,22 +182,36 @@ async function handleRelayMessage(
   if (preResolvedGroup) {
     group = preResolvedGroup;
   } else {
-    // 1. Resolve group
-    const groupResult = await resolveGroup(formatted.uid);
-    if (!groupResult.ok) {
-      // Save pending state for group number follow-up
-      if (groupResult.reason === 'multiple_groups') {
-        await savePendingGroupSelection(formatted.uid, {
-          intent: 'relay_message',
-          groups: groupResult.groups,
-          targetHandle,
-          content,
-        });
-      }
-      await sender.sendDirect(dmChatId, groupResult.reply, formatted.messageId);
-      return;
+    // 1a. Try group hint first (fuzzy title match)
+    let hinted: ResolvedGroup | null = null;
+    if (groupHint) {
+      hinted = await resolveGroupByHint(formatted.uid, groupHint);
     }
-    group = groupResult.group;
+    if (hinted) {
+      group = hinted;
+    } else {
+      // 1b. Resolve group (default-group → single-group → multiple-prompt)
+      const groupResult = await resolveGroup(formatted.uid);
+      if (!groupResult.ok) {
+        if (groupResult.reason === 'multiple_groups') {
+          await savePendingGroupSelection(formatted.uid, {
+            intent: 'relay_message',
+            groups: groupResult.groups,
+            targetHandle,
+            content,
+          });
+        }
+        await sender.sendDirect(dmChatId, groupResult.reply, formatted.messageId);
+        return;
+      }
+      group = groupResult.group;
+    }
+  }
+
+  const gate = await checkFeatureGate(group.chatId, 'relay');
+  if (gate) {
+    await sender.sendDirect(dmChatId, gate, formatted.messageId);
+    return;
   }
 
   // 2. Resolve target user
@@ -246,7 +277,39 @@ async function handleRelayMessage(
     return;
   }
 
-  // consent === 'approved' — send the relay
+  // consent === 'approved'
+
+  // 5. Deferred modes — enqueue instead of sending now
+  if (mode === 'on_speak' || mode === 'scheduled') {
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = mode === 'on_speak'
+      ? now + 7 * 86400                       // on_speak: hold for 7 days
+      : (scheduledAt ?? now) + 86400;         // scheduled: keep 1 day past fire time
+    const id = enqueueRelay({
+      sender_id: formatted.uid,
+      target_id: target.uid,
+      group_id: group.chatId,
+      content,
+      trigger_mode: mode,
+      scheduled_at: mode === 'scheduled' ? (scheduledAt ?? null) : null,
+      expires_at: expiresAt,
+    });
+    if (id < 0) {
+      await sender.sendDirect(dmChatId, '你的待发送捎话太多了喵（上限10条），先处理一些再来~', formatted.messageId);
+      return;
+    }
+    const targetName = target.username ? `@${target.username}` : target.fullName;
+    if (mode === 'on_speak') {
+      await sender.sendDirect(dmChatId, `📥 已存档喵~ 等 ${targetName} 下次在「${group.title}」发言，本喵就转告 TA（编号 #${id}，7天内有效）`, formatted.messageId);
+    } else {
+      const when = new Date((scheduledAt ?? now) * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+      await sender.sendDirect(dmChatId, `⏰ 已安排在 ${when} 转告 ${targetName}（编号 #${id}）`, formatted.messageId);
+    }
+    logger.info({ senderUid: formatted.uid, targetUid: target.uid, groupChatId: group.chatId, mode, relayId: id }, 'Relay enqueued');
+    return;
+  }
+
+  // 6. Immediate — send the relay now
   const mention = target.username ? `@${target.username}` : target.fullName;
   const relayText = `${mention} ${formatted.fullName}想对你说：${content}`;
 
@@ -267,16 +330,181 @@ async function handleRelayMessage(
   }
 }
 
+/** Handle relay cancel — cancel a pending relay by ID */
+async function handleRelayCancel(
+  dmChatId: number,
+  formatted: FormattedMessage,
+  relayId: number,
+): Promise<void> {
+  const cancelled = cancelRelay(relayId, formatted.uid);
+  if (cancelled) {
+    await sender.sendDirect(dmChatId, `✅ 已取消捎话 #${relayId} 喵~`, formatted.messageId);
+  } else {
+    await sender.sendDirect(dmChatId, `找不到编号 #${relayId} 的待发送捎话喵~\n\n查看你的捎话：说"我的捎话"`, formatted.messageId);
+  }
+}
+
+/** Handle relay list — show pending relays from sender */
+async function handleRelayList(
+  dmChatId: number,
+  formatted: FormattedMessage,
+): Promise<void> {
+  const relays = getPendingRelayForSender(formatted.uid);
+  if (relays.length === 0) {
+    await sender.sendDirect(dmChatId, '你还没有待发送的捎话喵~\n\n发一个试试：\n"告诉张三 今晚开黑"', formatted.messageId);
+    return;
+  }
+
+  const lines = relays.map((r, i) => {
+    const mode = r.trigger_mode === 'immediate' ? '⚡立即' : r.trigger_mode === 'scheduled' ? '⏰定时' : '🗣等发言';
+    const expires = new Date(r.expires_at * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    return `${i + 1}. #${r.id} | ${mode} → 目标${r.target_id}\n   「${r.content}」\n   过期：${expires}`;
+  });
+
+  await sender.sendDirect(
+    dmChatId,
+    `📨 你的待发送捎话：\n\n${lines.join('\n\n')}\n\n取消请说 "取消捎话 #编号"`,
+    formatted.messageId,
+  );
+}
+
+/** Handle "默认群 [序号]" — set the user's preferred default group */
+async function handleSetDefaultGroup(
+  dmChatId: number,
+  formatted: FormattedMessage,
+  groupIndex?: number,
+): Promise<void> {
+  const groups = await listUserGroups(formatted.uid);
+
+  if (groups.length === 0) {
+    await sender.sendDirect(dmChatId, '本喵还没在任何群里见过你喵~ 先在群里冒个泡吧！', formatted.messageId);
+    return;
+  }
+
+  if (groups.length === 1) {
+    setDefaultGroup(formatted.uid, groups[0]!.chatId);
+    await sender.sendDirect(dmChatId, `你只在「${groups[0]!.title}」一个群，已设为默认啦喵~`, formatted.messageId);
+    return;
+  }
+
+  // Index provided → set directly
+  if (groupIndex !== undefined) {
+    if (groupIndex < 1 || groupIndex > groups.length) {
+      await sender.sendDirect(dmChatId, `序号超范围了喵~ 请在 1-${groups.length} 之间选~`, formatted.messageId);
+      return;
+    }
+    const picked = groups[groupIndex - 1]!;
+    setDefaultGroup(formatted.uid, picked.chatId);
+    await sender.sendDirect(dmChatId, `✅ 已把「${picked.title}」设为默认群喵~ 以后私聊功能默认用这个群啦`, formatted.messageId);
+    return;
+  }
+
+  // No index → list groups and wait for a number
+  await savePendingGroupSelection(formatted.uid, { intent: 'set_default_group', groups });
+  const list = groups.map((g, i) => `${i + 1}. ${g.title}`).join('\n');
+  await sender.sendDirect(
+    dmChatId,
+    `想把哪个群设为默认喵？回复序号：\n${list}`,
+    formatted.messageId,
+  );
+}
+
 /** Main entry point for DM relay — dispatches based on intent */
 export async function handleDmRelay(
   dmChatId: number,
   formatted: FormattedMessage,
-  intent: DmIntent & { type: 'view_group' | 'relay_message' },
+  intent: DmIntent,
 ): Promise<void> {
-  if (intent.type === 'view_group') {
-    await handleViewGroup(dmChatId, formatted);
-  } else {
-    await handleRelayMessage(dmChatId, formatted, intent.targetHandle, intent.content);
+  switch (intent.type) {
+    case 'view_group':
+      await handleViewGroup(dmChatId, formatted);
+      break;
+    case 'relay_message':
+      await handleRelayMessage(dmChatId, formatted, intent.targetHandle, intent.content, undefined, intent.groupHint, intent.mode ?? 'immediate', intent.scheduledAt);
+      break;
+    case 'relay_cancel':
+      await handleRelayCancel(dmChatId, formatted, intent.relayId);
+      break;
+    case 'relay_list':
+      await handleRelayList(dmChatId, formatted);
+      break;
+    case 'schedule':
+      await handleScheduleMessage(dmChatId, formatted, intent.content);
+      break;
+    case 'schedule_cancel':
+      await handleCancelScheduled(dmChatId, formatted, intent.scheduleId);
+      break;
+    case 'my_schedules':
+      await handleListScheduled(dmChatId, formatted);
+      break;
+    case 'note':
+      await handleNoteStart(dmChatId, formatted, intent.content, intent.targetHandle);
+      break;
+    case 'note_stats':
+      await handleNoteStats(dmChatId, formatted);
+      break;
+    case 'note_guess':
+      await handleNoteGuess(dmChatId, formatted, intent.noteId, intent.guessedHandle);
+      break;
+    case 'note_reveal':
+      await handleNoteReveal(dmChatId, formatted, intent.noteId);
+      break;
+    case 'set_profile':
+      await handleSetProfile(dmChatId, formatted, intent.targetHandle, intent.notes);
+      break;
+    case 'set_profile_tags':
+      await handleSetProfileTags(dmChatId, formatted, intent.targetHandle, intent.tags);
+      break;
+    case 'view_profile':
+      await handleViewProfile(dmChatId, formatted, intent.targetHandle);
+      break;
+    case 'list_profiles':
+      await handleListProfiles(dmChatId, formatted);
+      break;
+    case 'profile_notify':
+      await handleProfileNotify(dmChatId, formatted, intent.targetHandle, intent.enabled);
+      break;
+    case 'fate':
+      await handleFate({ uid: formatted.uid, chatId: dmChatId, messageId: formatted.messageId }, sender);
+      break;
+    case 'set_default_group':
+      await handleSetDefaultGroup(dmChatId, formatted, intent.groupIndex);
+      break;
+    case 'confide': {
+      const confideResult = await handleConfide(
+        { uid: formatted.uid, chatId: dmChatId, messageId: formatted.messageId },
+        sender,
+        intent.content,
+      );
+      if (confideResult.pendingGroupSelection) {
+        const result = await resolveGroup(formatted.uid);
+        if (result.ok) {
+          await doConfide(
+            { uid: formatted.uid, chatId: dmChatId, messageId: formatted.messageId },
+            sender,
+            confideResult.pendingGroupSelection.content,
+            result.group.chatId,
+          );
+        } else if (result.reason === 'multiple_groups') {
+          await savePendingGroupSelection(formatted.uid, {
+            intent: 'confide',
+            groups: result.groups,
+            content: confideResult.pendingGroupSelection.content,
+          });
+          await sender.sendDirect(dmChatId, result.reply, formatted.messageId);
+        } else {
+          await sender.sendDirect(dmChatId, result.reply, formatted.messageId);
+        }
+      }
+      break;
+    }
+    case 'normal_chat':
+      break; // not a DM feature — handled elsewhere
+    default: {
+      // Exhaustiveness guard: a new DmIntent without a case fails to compile here.
+      const _exhaustive: never = intent;
+      logger.warn({ intentType: (_exhaustive as DmIntent).type }, 'Unhandled DM intent type');
+    }
   }
 }
 
@@ -285,13 +513,32 @@ export async function handlePendingGroupSelection(
   dmChatId: number,
   formatted: FormattedMessage,
   selectedGroup: ResolvedGroup,
-  intent: 'view_group' | 'relay_message',
+  intent: 'view_group' | 'relay_message' | 'note' | 'confide' | 'set_default_group',
   targetHandle?: string,
   content?: string,
 ): Promise<void> {
-  if (intent === 'view_group') {
-    await handleViewGroup(dmChatId, formatted, selectedGroup);
-  } else if (targetHandle && content) {
-    await handleRelayMessage(dmChatId, formatted, targetHandle, content, selectedGroup);
+  switch (intent) {
+    case 'view_group':
+      await handleViewGroup(dmChatId, formatted, selectedGroup);
+      break;
+    case 'set_default_group':
+      setDefaultGroup(formatted.uid, selectedGroup.chatId);
+      await sender.sendDirect(dmChatId, `✅ 已把「${selectedGroup.title}」设为默认群喵~ 以后私聊功能默认用这个群啦`, formatted.messageId);
+      break;
+    case 'note':
+      await handleNotePendingGroup(dmChatId, formatted, selectedGroup);
+      break;
+    case 'confide':
+      await doConfide(
+        { uid: formatted.uid, chatId: dmChatId, messageId: formatted.messageId },
+        sender,
+        content || '',
+        selectedGroup.chatId,
+      );
+      break;
+    default:
+      if (targetHandle && content) {
+        await handleRelayMessage(dmChatId, formatted, targetHandle, content, selectedGroup);
+      }
   }
 }

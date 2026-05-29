@@ -6,6 +6,7 @@ import { getUserGroups } from '../context/manager.js';
 import { getBot } from '../../bot/bot.js';
 import { getRedis } from '../../db/redis.js';
 import { logger } from '../../shared/logger.js';
+import { getDefaultGroup } from '../../tracking/user-profile.js';
 
 const GROUP_TITLE_CACHE_PREFIX = 'xxb:group:title:';
 const GROUP_TITLE_TTL = 3600; // 1 hour
@@ -58,7 +59,14 @@ export async function resolveGroup(uid: number): Promise<GroupResolveResult> {
     return { ok: true, group: { chatId: groupIds[0]!, title } };
   }
 
-  // Multiple groups — list them
+  // Multiple groups — try the user's preferred default group first
+  const defaultGroup = getDefaultGroup(uid);
+  if (defaultGroup !== null && groupIds.includes(defaultGroup)) {
+    const title = await getGroupTitle(defaultGroup);
+    return { ok: true, group: { chatId: defaultGroup, title } };
+  }
+
+  // No (valid) default — list them and ask
   const groups: ResolvedGroup[] = [];
   for (const gid of groupIds) {
     const title = await getGroupTitle(gid);
@@ -69,7 +77,7 @@ export async function resolveGroup(uid: number): Promise<GroupResolveResult> {
   return {
     ok: false,
     reason: 'multiple_groups',
-    reply: `你在多个群里喵，请指定群序号：\n${list}\n\n回复数字就行~`,
+    reply: `你在多个群里喵，请指定群序号：\n${list}\n\n回复数字就行~\n（想固定一个群？说"默认群 序号"）`,
     groups,
   };
 }
@@ -77,9 +85,9 @@ export async function resolveGroup(uid: number): Promise<GroupResolveResult> {
 // ── Pending group selection state ────────────────────────────────
 
 interface PendingGroupState {
-  intent: 'view_group' | 'relay_message';
+  intent: 'view_group' | 'relay_message' | 'note' | 'confide' | 'set_default_group';
   groups: ResolvedGroup[];
-  /** relay_message fields (only if intent === 'relay_message') */
+  /** Optional fields used by relay_message, note, and confide intents */
   targetHandle?: string;
   content?: string;
 }
@@ -103,4 +111,36 @@ export async function getPendingGroupSelection(uid: number): Promise<PendingGrou
 export async function clearPendingGroupSelection(uid: number): Promise<void> {
   const redis = getRedis();
   await redis.del(PENDING_GROUP_PREFIX + uid);
+}
+
+/** List all of the user's groups as {chatId, title}, in stable getUserGroups order. */
+export async function listUserGroups(uid: number): Promise<ResolvedGroup[]> {
+  const groupIds = await getUserGroups(uid);
+  const groups: ResolvedGroup[] = [];
+  for (const gid of groupIds) {
+    const title = await getGroupTitle(gid);
+    groups.push({ chatId: gid, title });
+  }
+  return groups;
+}
+
+/**
+ * Try to resolve a group by fuzzy-matching a hint (substring/case-insensitive) against
+ * the user's groups' titles. Returns null if no unique match.
+ */
+export async function resolveGroupByHint(uid: number, hint: string): Promise<ResolvedGroup | null> {
+  if (!hint.trim()) return null;
+  const groupIds = await getUserGroups(uid);
+  if (groupIds.length === 0) return null;
+
+  const groups: ResolvedGroup[] = [];
+  for (const gid of groupIds) {
+    const title = await getGroupTitle(gid);
+    groups.push({ chatId: gid, title });
+  }
+
+  const needle = hint.toLowerCase().trim();
+  const matches = groups.filter((g) => g.title.toLowerCase().includes(needle));
+  if (matches.length === 1) return matches[0]!;
+  return null;
 }

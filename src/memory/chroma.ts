@@ -11,6 +11,14 @@ import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
 
+/**
+ * A semantic-search result carrying its relevance score (0..1, higher = closer).
+ * Score is derived from the cosine distance Chroma returns (relevance = 1 - distance,
+ * clamped). Optional so callers that don't need it can ignore it; undefined when the
+ * memory layer can't surface a distance.
+ */
+export type ScoredMessage = FormattedMessage & { score?: number };
+
 const CHROMA_HOST = process.env['CHROMA_HOST'] ?? 'localhost';
 const CHROMA_PORT = parseInt(process.env['CHROMA_PORT'] ?? '8400', 10);
 const COLLECTION_NAME = 'xxb_group_history';
@@ -152,13 +160,13 @@ export async function searchMemory(
   query: string,
   topK = 8,
   timeoutMs = 500,
-): Promise<FormattedMessage[]> {
+): Promise<ScoredMessage[]> {
   if (!query.trim()) return [];
 
   try {
     const result = await Promise.race([
       _searchMemoryInner(chatId, query, topK),
-      new Promise<FormattedMessage[]>((resolve) =>
+      new Promise<ScoredMessage[]>((resolve) =>
         setTimeout(() => resolve([]), timeoutMs)
       ),
     ]);
@@ -173,7 +181,7 @@ async function _searchMemoryInner(
   chatId: number,
   query: string,
   topK: number,
-): Promise<FormattedMessage[]> {
+): Promise<ScoredMessage[]> {
   const [embed, col] = await Promise.all([getEmbedder(), getCollection()]);
   const [vector] = await embed([query]);
   if (!vector) return [];
@@ -186,12 +194,20 @@ async function _searchMemoryInner(
 
   const docs = res.documents?.[0] ?? [];
   const metas = res.metadatas?.[0] ?? [];
+  const distances = res.distances?.[0] ?? [];
 
-  const messages: FormattedMessage[] = [];
+  const messages: ScoredMessage[] = [];
   for (let i = 0; i < docs.length; i++) {
     const doc = docs[i];
     const meta = metas[i] as Record<string, unknown> | null;
     if (!doc || !meta) continue;
+
+    // Collection uses cosine space → distance ∈ [0,2]; relevance = 1 - distance,
+    // clamped to [0,1]. Leave score undefined if Chroma didn't return a distance.
+    const dist = distances[i];
+    const score = typeof dist === 'number'
+      ? Math.max(0, Math.min(1, 1 - dist))
+      : undefined;
 
     messages.push({
       role: (meta['role'] as 'user' | 'assistant') ?? 'user',
@@ -202,6 +218,7 @@ async function _searchMemoryInner(
       messageId: meta['messageId'] as number ?? 0,
       textContent: doc,
       isForwarded: false,
+      score,
     });
   }
 

@@ -17,6 +17,7 @@ const mockGetUserPreferences = vi.fn();
 const mockGetReflection = vi.fn();
 const mockPlanReply = vi.fn();
 const mockExecuteToolPlan = vi.fn();
+const mockSegmentReply = vi.fn();
 
 vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({
   buildSystemPrompt: (...args: unknown[]) => mockBuildSystemPrompt(...args),
@@ -78,6 +79,10 @@ vi.mock('../../../src/pipeline/planner/executor.js', () => ({
 vi.mock('../../../src/pipeline/tools/registry.js', () => ({
   getToolNames: () => ['SEARCH', 'FETCH'],
   buildToolSet: () => ({ SEARCH: {}, FETCH: {} }),
+}));
+
+vi.mock('../../../src/pipeline/reply/segmenter.js', () => ({
+  segmentReply: (...args: unknown[]) => mockSegmentReply(...args),
 }));
 
 vi.mock('../../../src/shared/config.js', () => ({
@@ -155,6 +160,8 @@ describe('generateReply', () => {
       label: 'reply',
       latencyMs: 12,
     });
+    // Default: segmenter returns a single segment (no split) unless a test overrides
+    mockSegmentReply.mockImplementation((text: string) => ({ segments: [text], originalText: text }));
   });
 
   it('uses direct execution without tools when replyPath is direct', async () => {
@@ -346,86 +353,42 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
     ]);
   });
 
-  it('routes long single replies through reply_splitter after final drafting', async () => {
+  it('splits long single replies via the local code segmenter (no extra AI call)', async () => {
     const longReply = '这是一条很长很长的回复'.repeat(20);
-    mockCallWithFallback.mockImplementation(async ({ usage }: { usage: string }) => {
-      if (usage === 'reply_splitter') {
-        return {
-          content: JSON.stringify([
-            { replyContent: '第一段短句', targetMessageId: 42 },
-            { replyContent: '第二段短句', targetMessageId: 42 },
-          ]),
-          tokenUsage: { prompt: 10, completion: 5, total: 15 },
-          model: 'splitter-model',
-          label: 'reply_splitter',
-          latencyMs: 15,
-        };
-      }
-
-      return {
-        content: longReply,
-        tokenUsage: { prompt: 10, completion: 5, total: 15 },
-        model: 'reply-model',
-        label: 'reply',
-        latencyMs: 12,
-      };
+    mockCallWithFallback.mockResolvedValue({
+      content: longReply,
+      tokenUsage: { prompt: 10, completion: 5, total: 15 },
+      model: 'reply-model',
+      label: 'reply',
+      latencyMs: 12,
     });
-    mockParseReplyResponse.mockImplementation((content: string, fallbackId: number) => {
-      if (content.startsWith('[')) {
-        return [
-          { replyContent: '第一段短句', targetMessageId: fallbackId },
-          { replyContent: '第二段短句', targetMessageId: fallbackId },
-        ];
-      }
-
-      return [{ replyContent: content, targetMessageId: fallbackId }];
-    });
+    mockParseReplyResponse.mockImplementation((content: string, fallbackId: number) => (
+      [{ replyContent: content, targetMessageId: fallbackId }]
+    ));
+    // Local segmenter splits the long reply into two messages
+    mockSegmentReply.mockReturnValue({ segments: ['第一段短句', '第二段短句'], originalText: longReply });
 
     const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
 
-    expect(mockCallWithFallback).toHaveBeenCalledTimes(2);
-    expect(mockCallWithFallback).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      usage: 'reply_splitter',
-    }));
+    // Only ONE AI call — segmentation is now local code, not a second model call
+    expect(mockCallWithFallback).toHaveBeenCalledTimes(1);
+    expect(mockSegmentReply).toHaveBeenCalledWith(longReply, undefined);
+    // All segments keep the primary target id; only the first quote-replies
     expect(result.replies).toEqual([
       { replyContent: '第一段短句', targetMessageId: 42 },
-      { replyContent: '第二段短句', targetMessageId: 42 },
+      { replyContent: '第二段短句', targetMessageId: 42, replyQuote: false },
     ]);
   });
 
-  it('lets main reply hand off short multi-target drafts to reply_splitter', async () => {
-    mockCallWithFallback.mockImplementation(async ({ usage, messages }: { usage: string; messages: Array<{ role: string; content: string }> }) => {
-      if (usage === 'reply_splitter') {
-        expect(messages[1]!.content).toContain('主目标消息ID: 42');
-        expect(messages[1]!.content).toContain('次目标消息ID: 24');
-        return {
-          content: JSON.stringify([
-            { replyContent: '收到啦主人', targetMessageId: 42 },
-            { replyContent: '不听也有你一份', targetMessageId: 24 },
-          ]),
-          tokenUsage: { prompt: 10, completion: 5, total: 15 },
-          model: 'splitter-model',
-          label: 'reply_splitter',
-          latencyMs: 15,
-        };
-      }
-
-      return {
-        content: '{"replyContent":"给主人：收到啦。给不听：也有你的份。","targetMessageId":42,"handoffToSplitter":true}',
-        tokenUsage: { prompt: 10, completion: 5, total: 15 },
-        model: 'reply-model',
-        label: 'reply',
-        latencyMs: 12,
-      };
+  it('segments an AI handoff draft locally (handoffToSplitter → code segmenter)', async () => {
+    mockCallWithFallback.mockResolvedValue({
+      content: '{"replyContent":"给主人：收到啦。给不听：也有你的份。","targetMessageId":42,"handoffToSplitter":true}',
+      tokenUsage: { prompt: 10, completion: 5, total: 15 },
+      model: 'reply-model',
+      label: 'reply',
+      latencyMs: 12,
     });
     mockParseReplyResponse.mockImplementation((content: string, fallbackId: number) => {
-      if (content.startsWith('[')) {
-        return [
-          { replyContent: '收到啦主人', targetMessageId: fallbackId },
-          { replyContent: '不听也有你一份', targetMessageId: 24 },
-        ];
-      }
-
       if (content.includes('handoffToSplitter')) {
         return [{
           replyContent: '给主人：收到啦。给不听：也有你的份。',
@@ -433,8 +396,11 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
           handoffToSplitter: true,
         }];
       }
-
       return [{ replyContent: content, targetMessageId: fallbackId }];
+    });
+    mockSegmentReply.mockReturnValue({
+      segments: ['收到啦主人', '不听也有你一份'],
+      originalText: '给主人：收到啦。给不听：也有你的份。',
     });
 
     const result = await generateReply(
@@ -450,13 +416,14 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
       'normal',
     );
 
-    expect(mockCallWithFallback).toHaveBeenCalledTimes(2);
-    expect(mockCallWithFallback).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      usage: 'reply_splitter',
-    }));
+    // Handoff triggers local segmentation, not a second AI call.
+    // NOTE: the local segmenter routes every segment to the PRIMARY target (42);
+    // per-segment target routing (the old AI splitter behavior) is no longer supported.
+    expect(mockCallWithFallback).toHaveBeenCalledTimes(1);
+    expect(mockSegmentReply).toHaveBeenCalled();
     expect(result.replies).toEqual([
       { replyContent: '收到啦主人', targetMessageId: 42 },
-      { replyContent: '不听也有你一份', targetMessageId: 24 },
+      { replyContent: '不听也有你一份', targetMessageId: 42, replyQuote: false },
     ]);
   });
 });
