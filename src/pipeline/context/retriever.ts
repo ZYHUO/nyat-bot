@@ -14,14 +14,16 @@ import { slimContextForAI, slimSingleMessage } from './slim.js';
 import { searchMemory, type ScoredMessage } from '../../memory/chroma.js';
 import { logger } from '../../shared/logger.js';
 
-// ── Semantic relevance gating (percentile threshold) ─────────
-// Semantic candidates whose relevance falls below the 75th-percentile of the
-// batch are dropped before merging — keep only the strongest matches. Guarded so
-// we never starve context: at least MIN_RESULTS survive, and MIN_SCORE is a hard
-// floor no candidate clears below regardless of percentile.
-const PERCENTILE = 0.75; // tunable — keep candidates at/above this percentile of relevance
+// ── Semantic relevance gating ────────────────────────────────
+// This is a RECALL-favoring bot (it must remember facts/people), so we keep
+// every semantic hit above a modest relevance floor and let topK + the merge
+// token-budget cap the volume. The old aggressive 75th-percentile gate (keep
+// only the top quartile) silently dropped moderately-relevant facts — e.g. a
+// person's 外号 buried among chit-chat — and is disabled here (PERCENTILE=0 ⇒
+// the percentile step is a no-op; MIN_SCORE is the real gate that drops junk).
+const PERCENTILE = 0.0; // tunable — 0 disables percentile gating (keep-all-above-floor)
 const MIN_RESULTS = 3; // tunable — never drop below this many candidates
-const MIN_SCORE = 0.3; // tunable — hard floor; candidates strictly below this are always dropped
+const MIN_SCORE = 0.2; // tunable — hard floor; only clearly-irrelevant hits are dropped
 
 export interface RetrieverConfig {
   mode: 'direct' | 'planned';

@@ -1124,6 +1124,13 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       logger.debug({ err, chatId: job.chatId }, "Memory write failed (non-critical)");
     });
 
+    // 3.1b Capture person aliases / 外号 from group messages (deterministic, sync, cheap)
+    if (job.chatId < 0 && !formatted.isBot) {
+      import("../knowledge/person-aliases.js")
+        .then(({ captureAliases }) => captureAliases(job.chatId, formatted))
+        .catch((err) => logger.debug({ err, chatId: job.chatId }, "captureAliases failed (non-critical)"));
+    }
+
     const e = env();
     const botUid = getBotUid();
 

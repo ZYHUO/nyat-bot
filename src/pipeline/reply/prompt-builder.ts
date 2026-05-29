@@ -18,6 +18,7 @@ import { getChatMood, moodPromptHint } from '../../tracking/mood.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildProfileInjection } from '../../tracking/user-profile.js';
+import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -171,6 +172,14 @@ export function buildMessages(
       const lines = exprs.map((e) => `- ${e.situation} → ${e.style}`).join('\n');
       userParts.push(`[本群常用表达]\n${lines}`);
     }
+  }
+
+  // Person aliases / 外号 injection (group chats) — compact durable memory of nicknames
+  if (chatId !== undefined && chatId < 0) {
+    try {
+      const aliasBlock = buildAliasInjection(chatId);
+      if (aliasBlock) userParts.push(`[群友外号]\n${aliasBlock}`);
+    } catch { /* non-critical */ }
   }
 
   if (toolResults) {
