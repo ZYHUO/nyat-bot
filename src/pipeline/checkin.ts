@@ -3,19 +3,23 @@
 // ────────────────────────────────────────
 
 import { getDb } from '../db/sqlite.js';
-import { creditCoins } from './gacha/gacha.js';
+import { unlockCard } from './gacha/gacha.js';
+import { RARITY_META } from './gacha/cards.js';
 
 export interface CheckinResult {
   isNew: boolean;          // true if this is today's first checkin
   streak: number;          // consecutive days
   totalCheckins: number;   // all-time total
-  rewardCoins: number;     // 喵币
+  rewardCoins: number;     // 喵币（纯叙事数字，无消费经济）
   rewardExp: number;       // 经验值
   luckyNumber: number;     // 幸运数字 1-100
   fortune: string;         // 今日运势
   rank: number;            // today's checkin rank in this chat
   todayCheckins: number;   // how many people checked in today
   milestone?: 7 | 30 | 100; // 连续签到里程碑
+  unlockedCard?: {         // 今天免费解锁的猫娘卡（收集向，非抽卡）
+    name: string; emoji: string; rarity: string; star: string; isNew: boolean;
+  };
 }
 
 export interface CheckinStats {
@@ -140,10 +144,16 @@ export function doCheckin(
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(chatId, uid, username, fullName, today, streak, totalCheckins, rewardCoins, rewardExp, luckyNumber, fortune);
 
+  let unlockedCard: CheckinResult['unlockedCard'];
   if (result.changes !== 0) {
-    // First check-in of the day — credit the spendable gacha wallet
-    try { creditCoins(chatId, uid, rewardCoins); }
-    catch { /* gacha wallet credit is non-critical */ }
+    // First check-in of the day — freely unlock one collectible 猫娘 card (no cost)
+    try {
+      const u = unlockCard(chatId, uid);
+      unlockedCard = {
+        name: u.card.name, emoji: u.card.emoji, rarity: RARITY_META[u.card.rarity].label,
+        star: RARITY_META[u.card.rarity].star, isNew: u.isNew,
+      };
+    } catch { /* card unlock is non-critical */ }
   }
 
   if (result.changes === 0) {
@@ -184,6 +194,7 @@ export function doCheckin(
     rank,
     todayCheckins: rank,
     milestone: ([100, 30, 7] as const).find(m => streak % m === 0 && streak > 0),
+    unlockedCard,
   };
   })();
 }

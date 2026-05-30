@@ -158,10 +158,8 @@ async function main(): Promise<void> {
       { command: 'unmuteme', description: '恢复bot回复' },
       { command: 'feature', description: '群功能开关 /feature note off（群管）' },
       { command: 'setdefault', description: '设置私聊默认群 /setdefault' },
-      { command: 'roll', description: '抽卡 /roll（猫娘卡池，喵币抽）' },
-      { command: 'cards', description: '我的卡册' },
-      { command: 'wish', description: '心愿单 /wish add 卡名 · holders 找持有人' },
-      { command: 'coins', description: '查喵币余额' },
+      { command: 'cards', description: '我的猫娘图鉴（签到/活跃免费解锁）' },
+      { command: 'wish', description: '心愿单 /wish add 卡名 · holders 找群友换卡' },
       { command: 'help', description: '帮助' },
     ]).catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
   } else {

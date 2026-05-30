@@ -3,7 +3,6 @@
 // ────────────────────────────────
 
 import { getDb } from '../../../db/sqlite.js';
-import { getRedis } from '../../../db/redis.js';
 import { sendMessage, sendChatAction } from '../../../bot/sender/telegram.js';
 import { StreamingSender } from '../../../bot/sender/streaming.js';
 import { logger } from '../../../shared/logger.js';
@@ -552,15 +551,15 @@ export async function handleNoteReveal(
  */
 export async function revealDueHints(): Promise<number> {
   const db = getDb();
-  const redis = getRedis();
   const now = Math.floor(Date.now() / 1000);
 
-  // Notes still in the guessing window with hints generated
+  // Notes still in the guessing window with hints generated. hint_level tracks
+  // the highest level already posted (durable in SQLite — survives Redis loss).
   const rows = db.prepare(`
-    SELECT id, group_id, hints, published_at FROM anonymous_notes
+    SELECT id, group_id, hints, published_at, hint_level FROM anonymous_notes
     WHERE status = 'published' AND hints IS NOT NULL AND published_at IS NOT NULL
-      AND published_at > ?
-  `).all(now - GUESS_WINDOW_SEC) as Array<{ id: number; group_id: number; hints: string; published_at: number }>;
+      AND published_at > ? AND hint_level < 3
+  `).all(now - GUESS_WINDOW_SEC) as Array<{ id: number; group_id: number; hints: string; published_at: number; hint_level: number }>;
 
   let revealed = 0;
   for (const row of rows) {
@@ -568,22 +567,25 @@ export async function revealDueHints(): Promise<number> {
     try { hints = JSON.parse(row.hints) as string[]; } catch { continue; }
     if (!Array.isArray(hints) || hints.length === 0) continue;
 
+    // Drip one level per tick, in order: level 2 at >=6h, level 3 at >=18h.
+    const nextLevel = row.hint_level + 1; // 2, then 3
+    if (nextLevel > 3) continue;
+    const threshold = nextLevel === 2 ? 6 * 3600 : 18 * 3600;
     const age = now - row.published_at;
-    // level 2 at >=6h, level 3 at >=18h (hints[1], hints[2])
-    const due: number[] = [];
-    if (age >= 6 * 3600 && hints[1]) due.push(2);
-    if (age >= 18 * 3600 && hints[2]) due.push(3);
+    if (age < threshold || !hints[nextLevel - 1]) continue;
 
-    for (const level of due) {
-      const key = `xxb:note:hint:${row.id}:${level}`;
-      try {
-        const set = await redis.set(key, '1', 'EX', GUESS_WINDOW_SEC, 'NX');
-        if (set === null) continue; // already revealed
-        await sendMessage(row.group_id, `🔍 纸条 #${row.id} 的新提示：${hints[level - 1]}`);
-        revealed++;
-      } catch (err) {
-        logger.debug({ err, noteId: row.id, level }, 'Hint reveal failed');
-      }
+    // Atomic claim: only one tick/process wins this CAS, and it persists —
+    // no re-post even if Redis is flushed or the service restarts.
+    const claimed = db.prepare(
+      'UPDATE anonymous_notes SET hint_level = ? WHERE id = ? AND hint_level = ?',
+    ).run(nextLevel, row.id, row.hint_level);
+    if (claimed.changes === 0) continue; // already revealed by a concurrent run
+
+    try {
+      await sendMessage(row.group_id, `🔍 纸条 #${row.id} 的新提示：${hints[nextLevel - 1]}`);
+      revealed++;
+    } catch (err) {
+      logger.debug({ err, noteId: row.id, level: nextLevel }, 'Hint reveal failed');
     }
   }
   return revealed;

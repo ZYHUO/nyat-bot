@@ -7,15 +7,15 @@ let testDb: Database.Database;
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
 
 const {
-  pickRarity, creditCoins, getBalance, rollGacha, getCollection, recycleDupes,
-  addWish, getWishlist, wishHolders, wishWanted, ROLL_COST,
+  pickRarity, unlockCard, getCollection,
+  addWish, getWishlist, wishHolders, wishWanted, PITY_SR,
 } = await import('../../../src/pipeline/gacha/gacha.js');
 
 function initSchema(db: Database.Database): void {
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/0032_gacha.sql'), 'utf-8'));
 }
 
-describe('gacha', () => {
+describe('collectible cards', () => {
   beforeEach(() => { testDb = new Database(':memory:'); initSchema(testDb); });
   afterEach(() => testDb.close());
 
@@ -32,47 +32,35 @@ describe('gacha', () => {
     });
   });
 
-  describe('wallet + roll', () => {
-    it('credits and spends coins', () => {
-      creditCoins(-100, 1, 200);
-      expect(getBalance(-100, 1)).toBe(200);
-      const r = rollGacha(-100, 1, 1, () => 0.5);
-      expect(r.ok).toBe(true);
-      expect(r.spent).toBe(ROLL_COST);
-      expect(getBalance(-100, 1)).toBe(200 - ROLL_COST);
+  describe('unlockCard (free, no economy)', () => {
+    it('adds an unlocked card to the collection and flags new', () => {
+      const r = unlockCard(-100, 1, () => 0.5);
+      expect(r.card).toBeTruthy();
+      expect(r.isNew).toBe(true);
+      expect(r.count).toBe(1);
       expect(getCollection(-100, 1)).toHaveLength(1);
     });
-    it('rejects when broke', () => {
-      const r = rollGacha(-100, 1, 1);
-      expect(r.ok).toBe(false);
-      expect(r.results).toHaveLength(0);
+    it('second copy of the same card is not new and bumps count', () => {
+      // constant rng → same rarity bucket + same card index
+      const first = unlockCard(-100, 1, () => 0);  // 0 → UR, index 0 in UR pool
+      const second = unlockCard(-100, 1, () => 0);
+      expect(first.card.id).toBe(second.card.id);
+      expect(second.isNew).toBe(false);
+      expect(second.count).toBe(2);
     });
-    it('multi-roll accumulates collection', () => {
-      creditCoins(-100, 1, 1000);
-      const r = rollGacha(-100, 1, 10, () => 0.5);
-      expect(r.results).toHaveLength(10);
-      expect(r.spent).toBe(ROLL_COST * 10);
-    });
-  });
-
-  describe('recycle dupes', () => {
-    it('converts duplicate copies to coins, keeps one', () => {
-      // force the same card 3 times via a constant rng
-      creditCoins(-100, 1, 1000);
-      rollGacha(-100, 1, 3, () => 0.5);
-      const before = getCollection(-100, 1);
-      const dupCard = before.find((e) => e.count > 1);
-      if (dupCard) {
-        const { recycled } = recycleDupes(-100, 1);
-        expect(recycled).toBeGreaterThan(0);
-        expect(getCollection(-100, 1).every((e) => e.count === 1)).toBe(true);
+    it('soft pity guarantees a rare within PITY_SR unlocks', () => {
+      // Always roll the commonest (N) — pity must force SR+ on the PITY_SR-th unlock
+      let sawRare = false;
+      for (let i = 0; i < PITY_SR; i++) {
+        const r = unlockCard(-100, 2, () => 0.999);
+        if (['SR', 'SSR', 'UR'].includes(r.card.rarity)) sawRare = true;
       }
+      expect(sawRare).toBe(true);
     });
   });
 
-  describe('wishlist peer matching (the novel loop)', () => {
+  describe('wishlist peer matching (the social loop)', () => {
     it('wishHolders finds other users who own a wished card', () => {
-      // user 2 owns 'maid'
       testDb.prepare("INSERT INTO gacha_collection (chat_id, uid, card_id, count, first_at) VALUES (-100, 2, 'maid', 1, 0)").run();
       addWish(-100, 1, 'maid');
       const m = wishHolders(-100, 1);

@@ -298,6 +298,100 @@ async function tryMuteCommandIntercepts(
 
 // ── Extracted helper 3: Pre-mute-gate intercepts ────────────────────
 
+// Judge rules that mean "the bot was addressed" in a group — the gate for
+// natural-language command invocation (DMs are always eligible).
+const ADDRESSED_RULES = new Set([
+  "mention_self",
+  "mention_self_lookup",
+  "reply_to_self",
+  "reply_to_self_lookup",
+  "reply_to_self_followup_lookup",
+]);
+
+/**
+ * Dispatch a known command (slash or NL-resolved) to its handler.
+ * Returns true if it handled the message. Shared by the slash-command path and
+ * the natural-language router so both stay in lockstep.
+ */
+async function dispatchCommand(
+  chatId: number,
+  formatted: FormattedMessage,
+  cmd: string,
+  arg: string,
+): Promise<boolean> {
+  if (cmd === "/watch" && arg && chatId < 0) {
+    addWatch(chatId, formatted.uid, arg);
+    await sender.sendDirect(chatId, `好的，有人聊到「${arg}」本喵会叫你喵~`, formatted.messageId);
+    return true;
+  }
+  if (cmd === "/unwatch" && arg) {
+    const ok = removeWatch(chatId, formatted.uid, arg);
+    await sender.sendDirect(chatId, ok ? `已取消追踪「${arg}」喵~` : `没有找到这个追踪喵~`, formatted.messageId);
+    return true;
+  }
+  if (cmd === "/watches") {
+    const watches = listWatches(chatId, formatted.uid);
+    const reply = watches.length > 0 ? `你的追踪列表：\n${watches.map(w => `- ${w}`).join('\n')}` : '你还没有追踪任何话题喵~';
+    await sender.sendDirect(chatId, reply, formatted.messageId);
+    return true;
+  }
+  if (cmd === "/game" && chatId < 0) {
+    if (arg === "stop") {
+      const msg = stopGame(chatId);
+      await sender.sendDirect(chatId, msg ?? "没有进行中的游戏喵~", formatted.messageId);
+      return true;
+    }
+    if (arg === "guess" || arg === "猜数字") {
+      const game = createGuessNumberGame();
+      const msg = startGame(chatId, game, undefined, (cid, text2) => sender.sendDirect(cid, text2));
+      await sender.sendDirect(chatId, `${msg}\n本喵想了一个 1-100 的数字，来猜猜看~`, formatted.messageId);
+      return true;
+    }
+    const { partyGame } = await import("./games/party.js");
+    const party = partyGame(arg);
+    if (party) { await sender.sendDirect(chatId, party, formatted.messageId); return true; }
+    await sender.sendDirect(chatId, "可用游戏：/game guess（猜数字）· tod（真心话）· dare（大冒险）· wyr（二选一）· nhie（我从未）", formatted.messageId);
+    return true;
+  }
+
+  // Collectible 猫娘 cards — /cards 图鉴 + /wish 换卡 (group only, no economy)
+  if (chatId < 0 && (cmd === "/cards" || cmd === "/wish") && !formatted.isAnonymous) {
+    const { handleGachaCommand } = await import("./gacha/commands.js");
+    const reply = await handleGachaCommand(chatId, formatted.uid, cmd, arg);
+    if (reply) { await sender.sendDirect(chatId, reply, formatted.messageId); return true; }
+  }
+
+  // /feature — group feature toggles (group only)
+  if (cmd === "/feature" && chatId < 0) {
+    const { handleFeatureCommand } = await import("./dm-relay/feature-gate.js");
+    const isMasterUser = isMaster(formatted.uid, env().MASTER_UID);
+    const reply = await handleFeatureCommand(chatId, formatted.uid, arg, isMasterUser);
+    await sender.sendDirect(chatId, reply, formatted.messageId);
+    return true;
+  }
+
+  // /help — list all features
+  if (cmd === "/help") {
+    const { buildHelpText } = await import("../bot/handlers/help.js");
+    await sender.sendDirect(chatId, buildHelpText(), formatted.messageId);
+    return true;
+  }
+
+  // /setdefault — set default group for DM features (DM only)
+  if (cmd === "/setdefault" && chatId > 0) {
+    const { handleDmRelay } = await import("./dm-relay/relay.js");
+    const idxArg = arg.trim();
+    const idx = idxArg ? parseInt(idxArg, 10) : undefined;
+    await handleDmRelay(chatId, formatted, {
+      type: "set_default_group",
+      groupIndex: idx !== undefined && !isNaN(idx) ? idx : undefined,
+    });
+    return true;
+  }
+
+  return false;
+}
+
 async function tryPreMuteIntercepts(
   chatId: number,
   formatted: FormattedMessage,
@@ -312,80 +406,34 @@ async function tryPreMuteIntercepts(
     }
   }
 
-  // Watch/Unwatch/Watches/Game commands
+  // Slash commands → dispatch
   if (judgeResult.rule === "whitelisted_command" && !formatted.isAnonymous) {
     const text = (formatted.textContent || "").trim();
-    const cmd = text.split(/[\s@]/)[0]?.toLowerCase();
+    const cmd = text.split(/[\s@]/)[0]?.toLowerCase() ?? "";
     const arg = text.replace(/^\/\w+(?:@\w+)?\s*/, "").trim();
+    if (await dispatchCommand(chatId, formatted, cmd, arg)) return true;
+  }
 
-    if (cmd === "/watch" && arg && chatId < 0) {
-      addWatch(chatId, formatted.uid, arg);
-      await sender.sendDirect(chatId, `好的，有人聊到「${arg}」本喵会叫你喵~`, formatted.messageId);
-      return true;
-    }
-    if (cmd === "/unwatch" && arg) {
-      const ok = removeWatch(chatId, formatted.uid, arg);
-      await sender.sendDirect(chatId, ok ? `已取消追踪「${arg}」喵~` : `没有找到这个追踪喵~`, formatted.messageId);
-      return true;
-    }
-    if (cmd === "/watches") {
-      const watches = listWatches(chatId, formatted.uid);
-      const reply = watches.length > 0 ? `你的追踪列表：\n${watches.map(w => `- ${w}`).join('\n')}` : '你还没有追踪任何话题喵~';
-      await sender.sendDirect(chatId, reply, formatted.messageId);
-      return true;
-    }
-    if (cmd === "/game" && chatId < 0) {
-      if (arg === "stop") {
-        const msg = stopGame(chatId);
-        await sender.sendDirect(chatId, msg ?? "没有进行中的游戏喵~", formatted.messageId);
-        return true;
+  // Natural-language command invocation. DM: any clear intent executes. Group:
+  // only when the bot is addressed (mention / reply-to-bot), per the addressing rule.
+  if (!formatted.isAnonymous && judgeResult.rule !== "whitelisted_command") {
+    const addressed = chatId > 0 || ADDRESSED_RULES.has(judgeResult.rule ?? "");
+    if (addressed) {
+      const { detectCommandIntent } = await import("./nl-commands.js");
+      const intent = detectCommandIntent(formatted.textContent || "");
+      if (intent) {
+        if (intent.kind === "llm") {
+          // /checkin & /stats are group-only and rendered by the reply LLM.
+          if (chatId > 0) {
+            await sender.sendDirect(chatId, "签到和统计只在群里有效喵~", formatted.messageId);
+            return true;
+          }
+          // Rewrite to the canonical slash so the reply-side data injection fires.
+          formatted.textContent = intent.cmd;
+        } else if (await dispatchCommand(chatId, formatted, intent.cmd, intent.arg)) {
+          return true;
+        }
       }
-      if (arg === "guess" || arg === "猜数字") {
-        const game = createGuessNumberGame();
-        const msg = startGame(chatId, game, undefined, (cid, text2) => sender.sendDirect(cid, text2));
-        await sender.sendDirect(chatId, `${msg}\n本喵想了一个 1-100 的数字，来猜猜看~`, formatted.messageId);
-        return true;
-      }
-      const { partyGame } = await import("./games/party.js");
-      const party = partyGame(arg);
-      if (party) { await sender.sendDirect(chatId, party, formatted.messageId); return true; }
-      await sender.sendDirect(chatId, "可用游戏：/game guess（猜数字）· tod（真心话）· dare（大冒险）· wyr（二选一）· nhie（我从未）", formatted.messageId);
-      return true;
-    }
-
-    // Gacha / 抽卡 — collectible cards (group only)
-    if (chatId < 0 && (cmd === "/roll" || cmd === "/cards" || cmd === "/wish" || cmd === "/recycle" || cmd === "/coins") && !formatted.isAnonymous) {
-      const { handleGachaCommand } = await import("./gacha/commands.js");
-      const reply = await handleGachaCommand(chatId, formatted.uid, cmd!, arg);
-      if (reply) { await sender.sendDirect(chatId, reply, formatted.messageId); return true; }
-    }
-
-    // /feature — group feature toggles (group only)
-    if (cmd === "/feature" && chatId < 0) {
-      const { handleFeatureCommand } = await import("./dm-relay/feature-gate.js");
-      const isMasterUser = isMaster(formatted.uid, env().MASTER_UID);
-      const reply = await handleFeatureCommand(chatId, formatted.uid, arg, isMasterUser);
-      await sender.sendDirect(chatId, reply, formatted.messageId);
-      return true;
-    }
-
-    // /help — list all DM features
-    if (cmd === "/help") {
-      const { buildHelpText } = await import("../bot/handlers/help.js");
-      await sender.sendDirect(chatId, buildHelpText(), formatted.messageId);
-      return true;
-    }
-
-    // /setdefault — set default group for DM features (DM only)
-    if (cmd === "/setdefault" && chatId > 0) {
-      const { handleDmRelay } = await import("./dm-relay/relay.js");
-      const idxArg = arg.trim();
-      const idx = idxArg ? parseInt(idxArg, 10) : undefined;
-      await handleDmRelay(chatId, formatted, {
-        type: "set_default_group",
-        groupIndex: idx !== undefined && !isNaN(idx) ? idx : undefined,
-      });
-      return true;
     }
   }
 

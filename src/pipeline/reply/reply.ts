@@ -184,6 +184,10 @@ export async function generateReply(
       if (result.milestone) {
         checkinStr += `\n[里程碑] 连续签到达到${result.milestone}天！请给予特别庆祝和丰厚奖励！`;
       }
+      if (result.isNew && result.unlockedCard) {
+        const c = result.unlockedCard;
+        checkinStr += `\n[猫娘卡] 今天还免费遇到了一只猫娘卡：${c.emoji}${c.star}「${c.name}」（${c.rarity}）${c.isNew ? '，是TA图鉴里的新卡！' : '（重复啦，可以拿去跟群友换）'}。请自然地把这只猫娘卡一起报给TA，可爱地提一句（别说"抽到"，是遇到/解锁），并提示可以 /cards 看图鉴。`;
+      }
       checkinData = checkinStr;
       logger.debug({ chatId, uid: message.uid, isNew: result.isNew, streak: result.streak, milestone: result.milestone }, 'Checkin data injected');
     } catch (err) {

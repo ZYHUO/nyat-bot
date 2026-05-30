@@ -1,13 +1,13 @@
 // ────────────────────────────────────────
-// Gacha command handler — /roll /cards /wish /recycle /coins
-// Returns a reply string. Group chats only (per-chat collections).
+// Collectible-card command handler — /cards (图鉴) + /wish (心愿单换卡).
+// No rolling, no currency: cards are unlocked freely by签到/活跃. The loop is
+// collect + trade dupes with群友. Returns a reply string. Group chats only.
 // ────────────────────────────────────────
 
 import { getGroupMembers } from '../context/manager.js';
-import { RARITY_META, resolveCard, renderCard } from './cards.js';
+import { RARITY_META, resolveCard } from './cards.js';
 import {
-  ROLL_COST, getBalance, rollGacha, getCollection, recycleDupes,
-  addWish, removeWish, getWishlist, wishHolders, wishWanted,
+  getCollection, addWish, removeWish, getWishlist, wishHolders, wishWanted,
 } from './gacha.js';
 
 async function nameMap(chatId: number, uids: number[]): Promise<Map<number, string>> {
@@ -24,33 +24,14 @@ export async function handleGachaCommand(chatId: number, uid: number, cmd: strin
   const a = arg.trim();
 
   switch (cmd) {
-    case '/coins':
-    case '/喵币':
-      return `💰 你有 ${getBalance(chatId, uid)} 喵币（每次签到能领，抽一次 ${ROLL_COST}）`;
-
-    case '/roll':
-    case '/抽卡': {
-      const n = Math.max(1, Math.min(10, parseInt(a, 10) || 1));
-      const r = rollGacha(chatId, uid, n);
-      if (!r.ok) return `😿 ${r.reason}`;
-      const lines = r.results.map((o) => `${o.isNew ? '🆕 ' : ''}${renderCard(o.card)}`);
-      return `🎴 抽卡 ×${n}（花费 ${r.spent} 喵币）：\n${lines.join('\n')}\n\n余额：${r.balance} 喵币`;
-    }
-
     case '/cards':
-    case '/卡册': {
+    case '/卡册':
+    case '/图鉴': {
       const coll = getCollection(chatId, uid);
-      if (coll.length === 0) return '你还没有任何卡喵~ 发 /roll 抽一张试试！';
+      if (coll.length === 0) return '你还没有遇到过猫娘卡喵~ 每天签到、多冒泡就会慢慢遇到不同的猫猫！';
       const total = coll.reduce((s, e) => s + e.count, 0);
       const lines = coll.map((e) => `${e.card.emoji} ${RARITY_META[e.card.rarity].star} ${e.card.name}${e.count > 1 ? ` ×${e.count}` : ''}`);
-      return `🗂️ 你的卡册（${coll.length}/${total}）：\n${lines.join('\n')}\n\n重复卡可以 /recycle 回收成喵币`;
-    }
-
-    case '/recycle':
-    case '/回收': {
-      const { gained, recycled } = recycleDupes(chatId, uid);
-      if (recycled === 0) return '没有重复的卡可以回收喵~';
-      return `♻️ 回收了 ${recycled} 张重复卡，换得 ${gained} 喵币！余额：${getBalance(chatId, uid)}`;
+      return `🗂️ 你的猫娘图鉴（${coll.length} 种 / ${total} 张）：\n${lines.join('\n')}\n\n重复的可以 /wish 跟群友换你缺的~`;
     }
 
     case '/wish':
@@ -61,7 +42,7 @@ export async function handleGachaCommand(chatId: number, uid: number, cmd: strin
         const card = resolveCard(target);
         if (!card) return `没找到这张卡喵~ 用 /cards 看看卡名`;
         addWish(chatId, uid, card.id);
-        return `⭐ 已把「${card.name}」加进心愿单~ 用 /wish holders 看谁有`;
+        return `⭐ 已把「${card.name}」加进心愿单~ 用 /wish holders 看群里谁有`;
       }
       if (sub === 'rm' || sub === 'del' || sub === '删') {
         const card = resolveCard(target);
@@ -73,7 +54,7 @@ export async function handleGachaCommand(chatId: number, uid: number, cmd: strin
         if (matches.length === 0) return '你的心愿单暂时没人持有，或心愿单是空的喵~';
         const names = await nameMap(chatId, matches.flatMap((m) => m.holders));
         const lines = matches.map((m) => `${m.card.emoji} ${m.card.name} ← ${m.holders.slice(0, 5).map((u) => names.get(u)).join('、')}`);
-        return `🔍 想要的卡，谁手上有：\n${lines.join('\n')}\n\n去找他们换吧~`;
+        return `🔍 想要的卡，群里谁手上有：\n${lines.join('\n')}\n\n去找他们换吧~`;
       }
       if (sub === 'wanted' || sub === '谁要') {
         const matches = wishWanted(chatId, uid);
