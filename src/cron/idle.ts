@@ -5,6 +5,7 @@
 
 import { getRedis } from '../db/redis.js';
 import { getRecent } from '../pipeline/context/manager.js';
+import { runRewardGate } from '../pipeline/reward/reward-model.js';
 import { StreamingSender } from '../bot/sender/streaming.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
@@ -147,6 +148,13 @@ export async function runIdleCheck(): Promise<void> {
 
       const text = result.content.trim().replace(/^["「『]|["」』]$/g, '');
       if (!text || text.length < 2) continue;
+
+      // Reward gate — skip the poke if it doesn't fit the moment
+      const reward = await runRewardGate(chatId, recent, text, 'idle');
+      if (!reward.accept) {
+        logger.info({ chatId, reasoning: reward.reasoning }, 'Idle proactive: reward gate rejected');
+        continue;
+      }
 
       await sender.sendDirect(chatId, text);
       await redis.set(LAST_POKE_PREFIX + chatId, String(now), 'EX', e.IDLE_PROACTIVE_INTERVAL_SEC * 2);

@@ -99,6 +99,15 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // Behavioral role tagging — every 2h during active hours (8:00–22:00 CST-ish)
+  tasks.push(schedule('23 8-22/2 * * *', () => {
+    void safeRun('behavioral-roles', async () => {
+      const { runRoleAnalysis } = await import('../tracking/behavioral-roles.js');
+      const n = await runRoleAnalysis();
+      if (n > 0) logger.info({ chats: n }, 'Behavioral roles tick');
+    });
+  }));
+
   // Knowledge base sync — configurable (PHP cron_long_term.php); only runs when chat IDs set
   const ks = env().KNOWLEDGE_CRON_SCHEDULE;
   if (validate(ks)) {

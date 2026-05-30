@@ -5,6 +5,7 @@
 
 import { getRedis } from '../db/redis.js';
 import { getRecent } from '../pipeline/context/manager.js';
+import { runRewardGate } from '../pipeline/reward/reward-model.js';
 import { StreamingSender } from '../bot/sender/streaming.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
@@ -255,13 +256,21 @@ export async function runProactiveScan(): Promise<void> {
         continue;
       }
 
-      // 7. generate + send
+      // 7. generate
       const text = await generateProactiveReply(chatId, recent, verdict.topic, e);
       if (!text) {
         logger.info({ chatId }, 'Proactive scan: skip — empty reply');
         continue;
       }
 
+      // 7b. reward gate — content-aware "does this actually fit right now?" check
+      const reward = await runRewardGate(chatId, recent, text, 'proactive');
+      if (!reward.accept) {
+        logger.info({ chatId, reasoning: reward.reasoning }, 'Proactive scan: reward gate rejected');
+        continue;
+      }
+
+      // 8. send
       await sender.sendDirect(chatId, text);
       await redis.set(PROACTIVE_LAST_PREFIX + chatId, String(now), 'EX', e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 2);
       logger.info({ chatId, text: text.slice(0, 80) }, 'Proactive message sent');

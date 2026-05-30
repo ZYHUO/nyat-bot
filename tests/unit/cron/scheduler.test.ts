@@ -78,8 +78,8 @@ describe('CronScheduler', () => {
     // VERIFY/PROACTIVE/LEARNER disabled in this env. Unconditional jobs:
     // model-check, daily-report, cleanup, scheduled-messages, relay-expiry,
     // scheduled-relays, note-guess-game, knowledge-sync, user-profile-sync,
-    // idle-check, channel-sync, stats-flush = 12
-    expect(mockSchedule).toHaveBeenCalledTimes(12);
+    // idle-check, channel-sync, stats-flush, behavioral-roles = 13
+    expect(mockSchedule).toHaveBeenCalledTimes(13);
     expect(isStarted()).toBe(true);
   });
 
@@ -87,14 +87,14 @@ describe('CronScheduler', () => {
     startCronJobs();
     startCronJobs(); // second call should be no-op
 
-    expect(mockSchedule).toHaveBeenCalledTimes(12);
+    expect(mockSchedule).toHaveBeenCalledTimes(13);
   });
 
   it('should stop all jobs on stopCronJobs', () => {
     startCronJobs();
     stopCronJobs();
 
-    expect(mockStop).toHaveBeenCalledTimes(12);
+    expect(mockStop).toHaveBeenCalledTimes(13);
     expect(isStarted()).toBe(false);
   });
 
