@@ -6,6 +6,7 @@
 import { getRedis } from '../db/redis.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { runRewardGate } from '../pipeline/reward/reward-model.js';
+import { proactiveWillingness, markBotSpoke } from '../tracking/social-needs.js';
 import { StreamingSender } from '../bot/sender/streaming.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
@@ -227,6 +228,15 @@ export async function runProactiveScan(): Promise<void> {
         continue;
       }
 
+      // 4b. State-conditioned willingness (loneliness × mood × crowd closeness) —
+      // chime in more when it's been quiet + people are friendly, less right after
+      // talking / in a bad mood / among a chilly crowd. Cheap pre-filter before the LLM.
+      const willingness = await proactiveWillingness(chatId, recent);
+      if (Math.random() > willingness) {
+        logger.info({ chatId, willingness: +willingness.toFixed(2) }, 'Proactive scan: low willingness, skip');
+        continue;
+      }
+
       // 5. LLM: should I chime in?
       const verdict = await shouldChimeIn(chatId, recent, e);
       logger.info({ chatId, verdict }, 'Proactive scan: chime verdict');
@@ -272,6 +282,7 @@ export async function runProactiveScan(): Promise<void> {
 
       // 8. send
       await sender.sendDirect(chatId, text);
+      await markBotSpoke(chatId);
       await redis.set(PROACTIVE_LAST_PREFIX + chatId, String(now), 'EX', e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 2);
       logger.info({ chatId, text: text.slice(0, 80) }, 'Proactive message sent');
     } catch (err) {

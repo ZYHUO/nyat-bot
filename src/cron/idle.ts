@@ -6,6 +6,7 @@
 import { getRedis } from '../db/redis.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { runRewardGate } from '../pipeline/reward/reward-model.js';
+import { proactiveWillingness, markBotSpoke } from '../tracking/social-needs.js';
 import { StreamingSender } from '../bot/sender/streaming.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
@@ -112,8 +113,10 @@ export async function runIdleCheck(): Promise<void> {
 
       if (silenceSec < e.IDLE_THRESHOLD_SEC) continue;
 
-      // Roll the dice — only trigger IDLE_TRIGGER_PROBABILITY fraction of the time
-      if (Math.random() > e.IDLE_TRIGGER_PROBABILITY) continue;
+      // Roll the dice — base probability scaled by state-conditioned willingness
+      // (mood × crowd closeness; loneliness is already high after a long silence).
+      const willingness = await proactiveWillingness(chatId, recent);
+      if (Math.random() > e.IDLE_TRIGGER_PROBABILITY * willingness) continue;
 
       logger.info({ chatId, silenceSec }, 'Idle check: generating proactive message');
 
@@ -157,6 +160,7 @@ export async function runIdleCheck(): Promise<void> {
       }
 
       await sender.sendDirect(chatId, text);
+      await markBotSpoke(chatId);
       await redis.set(LAST_POKE_PREFIX + chatId, String(now), 'EX', e.IDLE_PROACTIVE_INTERVAL_SEC * 2);
 
       logger.info({ chatId, text, silenceSec }, 'Idle proactive message sent');

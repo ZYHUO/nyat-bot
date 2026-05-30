@@ -108,6 +108,15 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // Memory "dream" — nightly forgetting of old, never-recalled memories
+  tasks.push(schedule('41 4 * * *', () => {
+    void safeRun('memory-dream', async () => {
+      const { runMemoryDream } = await import('./memory-dream.js');
+      const forgotten = await runMemoryDream();
+      if (forgotten > 0) logger.info({ forgotten }, 'Memory dream tick');
+    });
+  }));
+
   // Knowledge base sync — configurable (PHP cron_long_term.php); only runs when chat IDs set
   const ks = env().KNOWLEDGE_CRON_SCHEDULE;
   if (validate(ks)) {

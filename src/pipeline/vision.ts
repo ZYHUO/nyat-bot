@@ -6,6 +6,7 @@ import { getBot } from '../bot/bot.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { loadPrompt, getConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { getDb } from '../db/sqlite.js';
 import { getStickerDescription, storeAnalysisResult } from '../knowledge/sticker/store.js';
 
 /**
@@ -85,6 +86,44 @@ export async function describeImage(fileId: string): Promise<string> {
     logger.warn({ fileId, err }, 'Vision failed, returning placeholder');
     return '[图片]';
   }
+}
+
+/** Read a cached image description by file_unique_id. */
+export function getImageDescription(fileUniqueId: string): string | null {
+  try {
+    const row = getDb().prepare(
+      'SELECT description FROM image_descriptions WHERE file_unique_id = ?',
+    ).get(fileUniqueId) as { description: string } | undefined;
+    return row?.description ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function saveImageDescription(fileUniqueId: string, description: string): void {
+  getDb().prepare(
+    'INSERT OR REPLACE INTO image_descriptions (file_unique_id, description, created_at) VALUES (?, ?, unixepoch())',
+  ).run(fileUniqueId, description);
+}
+
+/**
+ * Describe an image with a SQLite cache keyed by file_unique_id (stable across
+ * links). Reposted/forwarded images reuse their description instead of being
+ * re-downloaded and re-VLM'd. Falls back to a plain describe when no unique id.
+ */
+export async function describeImageCached(fileId: string, fileUniqueId?: string): Promise<string> {
+  if (!fileUniqueId) return describeImage(fileId);
+  const cached = getImageDescription(fileUniqueId);
+  if (cached) {
+    logger.debug({ fileUniqueId }, 'Image description cache hit');
+    return cached;
+  }
+  const description = await describeImage(fileId);
+  if (description && description !== '[图片]') {
+    try { saveImageDescription(fileUniqueId, description); }
+    catch (err) { logger.warn({ err, fileUniqueId }, 'Failed to cache image description'); }
+  }
+  return description;
 }
 
 /**

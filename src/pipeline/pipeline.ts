@@ -7,7 +7,7 @@ import { resolveReplyPath, resolveReplyTier } from "../shared/types.js";
 import { formatMessage } from "./formatter.js";
 import { addMessage, getRecent, addAssistant } from "./context/manager.js";
 import { judge } from "./judge/judge.js";
-import { describeImage, describeStickerCached } from "./vision.js";
+import { describeImage, describeImageCached, describeStickerCached } from "./vision.js";
 import { retrieveContext } from "./context/retriever.js";
 import { generateReply } from "./reply/reply.js";
 import { calculateTypingDelay, type SegmenterConfig } from "./reply/segmenter.js";
@@ -175,7 +175,7 @@ async function processMedia(formatted: FormattedMessage): Promise<void> {
   if (hasMedia) {
     await Promise.all([
       formatted.imageFileId
-        ? describeImage(formatted.imageFileId)
+        ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId)
             .then((d) => { if (d) formatted.imageDescriptions = [d]; })
             .catch((err) => logger.warn({ err }, "Vision failed, continuing"))
         : Promise.resolve(),
@@ -969,6 +969,13 @@ async function generateAndSendReplies(args: {
     }).catch((err) => {
       logger.debug({ err, chatId: job.chatId }, "Path policy reflection failed (non-critical)");
     });
+
+    // Reset the loneliness clock — the bot just spoke in this chat (social-needs)
+    if (job.chatId < 0 && sentMessages.length > 0) {
+      import("../tracking/social-needs.js")
+        .then(({ markBotSpoke }) => markBotSpoke(job.chatId))
+        .catch(() => {});
+    }
 
     // 10. Save ALL sent assistant messages to context (parallel)
     const t7 = performance.now();

@@ -131,11 +131,30 @@ async function retrieveSemantic(
   topK: number,
 ): Promise<FormattedMessage[]> {
   const raw: ScoredMessage[] = await searchMemory(chatId, query, topK, 500);
-  return filterByPercentile(raw, (m) => m.score, {
+
+  // Importance ranking boost: memories recalled often before rank higher now.
+  let getScore = (m: ScoredMessage): number | undefined => m.score;
+  try {
+    const { getRefCounts, REFERENCE_BOOST } = await import('../../memory/importance.js');
+    const refs = getRefCounts(raw.map((m) => `${chatId}_${m.messageId}`));
+    getScore = (m) => (typeof m.score === 'number'
+      ? m.score * (1 + REFERENCE_BOOST * Math.log1p(refs.get(`${chatId}_${m.messageId}`) ?? 0))
+      : m.score);
+  } catch { /* boost is best-effort */ }
+
+  const kept = filterByPercentile(raw, getScore, {
     pct: PERCENTILE,
     minResults: MIN_RESULTS,
     minScore: MIN_SCORE,
   });
+
+  // Record that these memories were actually recalled (feeds importance + forgetting).
+  if (kept.length > 0) {
+    import('../../memory/importance.js')
+      .then(({ recordMemoryReferenced }) => recordMemoryReferenced(kept.map((m) => `${chatId}_${m.messageId}`)))
+      .catch(() => {});
+  }
+  return kept;
 }
 
 /**

@@ -23,6 +23,7 @@ export interface FormattedMessage {
   isForwarded: boolean;
   forwardFrom?: string;
   imageFileId?: string;
+  imageFileUniqueId?: string;
   imageDescriptions?: string[];
   audioFileId?: string;
   voiceFileId?: string;

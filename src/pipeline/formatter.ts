@@ -126,6 +126,12 @@ function getLargestPhoto(photos: TgPhotoSize[]): string | undefined {
   return sorted[0]?.file_id;
 }
 
+function getLargestPhotoUnique(photos: TgPhotoSize[]): string | undefined {
+  if (photos.length === 0) return undefined;
+  const sorted = [...photos].sort((a, b) => (b.width * b.height) - (a.width * a.height));
+  return sorted[0]?.file_unique_id;
+}
+
 export function formatMessage(update: UpdateLike): FormattedMessage | null {
   const candidate =
     update.message ??
@@ -202,6 +208,7 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
 
   if (msg.photo && msg.photo.length > 0) {
     formatted.imageFileId = getLargestPhoto(msg.photo);
+    formatted.imageFileUniqueId = getLargestPhotoUnique(msg.photo);
   }
 
   if (msg.audio) {

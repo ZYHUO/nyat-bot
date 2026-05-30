@@ -103,6 +103,13 @@ function makeMessages(count: number, isBot = false): FormattedMessage[] {
 }
 
 const mockGetRecent = vi.fn().mockResolvedValue(makeMessages(10));
+vi.mock('../../../src/tracking/social-needs.js', () => ({
+  proactiveWillingness: vi.fn().mockResolvedValue(1), // deterministic: always willing in tests
+  markBotSpoke: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../../src/pipeline/reward/reward-model.js', () => ({
+  runRewardGate: vi.fn().mockResolvedValue({ accept: true, reasoning: 'test' }),
+}));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getRecent: (...args: unknown[]) => mockGetRecent(...args),
 }));

@@ -132,8 +132,9 @@ export async function memorizeMessage(
     const [vector] = await embed([text]);
     if (!vector) return;
 
+    const chromaId = `${chatId}_${msg.messageId}`;
     await col.upsert({
-      ids: [`${chatId}_${msg.messageId}`],
+      ids: [chromaId],
       embeddings: [vector],
       documents: [text],
       metadatas: [{
@@ -146,6 +147,11 @@ export async function memorizeMessage(
         role: msg.role,
       }],
     });
+    // Importance sidecar — track creation for later scoring / forgetting
+    try {
+      const { recordMemoryCreated } = await import('./importance.js');
+      recordMemoryCreated(chromaId, chatId, msg.timestamp);
+    } catch { /* non-critical */ }
   } catch (err) {
     logger.warn({ err, chatId, messageId: msg.messageId }, 'Memory write failed (non-critical)');
   }
@@ -223,6 +229,19 @@ async function _searchMemoryInner(
   }
 
   return messages;
+}
+
+/** Delete memory entries by id (used by the forgetting / consolidation cron). */
+export async function deleteMemories(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  try {
+    const col = await getCollection();
+    await col.delete({ ids });
+    return ids.length;
+  } catch (err) {
+    logger.warn({ err, count: ids.length }, 'deleteMemories failed (non-critical)');
+    return 0;
+  }
 }
 
 export async function isMemoryAvailable(): Promise<boolean> {
