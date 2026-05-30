@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import { getDb } from '../db/sqlite.js';
+import { creditCoins } from './gacha/gacha.js';
 
 export interface CheckinResult {
   isNew: boolean;          // true if this is today's first checkin
@@ -138,6 +139,12 @@ export function doCheckin(
     INSERT OR IGNORE INTO checkins (chat_id, uid, username, full_name, checkin_date, streak, total_checkins, reward_coins, reward_exp, lucky_number, fortune)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(chatId, uid, username, fullName, today, streak, totalCheckins, rewardCoins, rewardExp, luckyNumber, fortune);
+
+  if (result.changes !== 0) {
+    // First check-in of the day — credit the spendable gacha wallet
+    try { creditCoins(chatId, uid, rewardCoins); }
+    catch { /* gacha wallet credit is non-critical */ }
+  }
 
   if (result.changes === 0) {
     // Another concurrent call inserted first — return their data

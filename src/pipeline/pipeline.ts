@@ -346,8 +346,18 @@ async function tryPreMuteIntercepts(
         await sender.sendDirect(chatId, `${msg}\n本喵想了一个 1-100 的数字，来猜猜看~`, formatted.messageId);
         return true;
       }
-      await sender.sendDirect(chatId, "可用游戏：/game guess（猜数字）", formatted.messageId);
+      const { partyGame } = await import("./games/party.js");
+      const party = partyGame(arg);
+      if (party) { await sender.sendDirect(chatId, party, formatted.messageId); return true; }
+      await sender.sendDirect(chatId, "可用游戏：/game guess（猜数字）· tod（真心话）· dare（大冒险）· wyr（二选一）· nhie（我从未）", formatted.messageId);
       return true;
+    }
+
+    // Gacha / 抽卡 — collectible cards (group only)
+    if (chatId < 0 && (cmd === "/roll" || cmd === "/cards" || cmd === "/wish" || cmd === "/recycle" || cmd === "/coins") && !formatted.isAnonymous) {
+      const { handleGachaCommand } = await import("./gacha/commands.js");
+      const reply = await handleGachaCommand(chatId, formatted.uid, cmd!, arg);
+      if (reply) { await sender.sendDirect(chatId, reply, formatted.messageId); return true; }
     }
 
     // /feature — group feature toggles (group only)

@@ -541,7 +541,7 @@ describe("processPipeline path branching", () => {
       }),
       "Pipeline complete",
     );
-  });
+  }, 15000); // real humanizer delays — generous timeout to avoid suite-load flakiness
 
   it("quote-replies each DISTINCT target in a multi-target reply", async () => {
     // Bug: a reply aimed at someone other than the requester must quote THAT
@@ -573,5 +573,5 @@ describe("processPipeline path branching", () => {
     // must appear — pre-fix, #99 was dropped (sent with undefined).
     const replyTargets = sendDirect.mock.calls.map((c: unknown[]) => c[2]);
     expect(replyTargets).toEqual(expect.arrayContaining([42, 99]));
-  });
+  }, 15000); // real humanizer delays — generous timeout to avoid suite-load flakiness
 });

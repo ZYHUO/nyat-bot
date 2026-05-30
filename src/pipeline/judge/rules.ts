@@ -42,6 +42,11 @@ const WHITELISTED_COMMANDS = new Set([
   "/game",
   "/feature",
   "/setdefault",
+  "/roll",
+  "/cards",
+  "/wish",
+  "/recycle",
+  "/coins",
 ]);
 
 function makeResult(
