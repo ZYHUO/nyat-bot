@@ -117,6 +117,15 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // Expression learning gate — hourly auto-review of pending learned patterns
+  tasks.push(schedule('51 * * * *', () => {
+    void safeRun('expression-gate', async () => {
+      const { runExpressionGate } = await import('../learners/expression-gate.js');
+      const n = await runExpressionGate();
+      if (n > 0) logger.info({ reviewed: n }, 'Expression gate tick');
+    });
+  }));
+
   // Knowledge base sync — configurable (PHP cron_long_term.php); only runs when chat IDs set
   const ks = env().KNOWLEDGE_CRON_SCHEDULE;
   if (validate(ks)) {

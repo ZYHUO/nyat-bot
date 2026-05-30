@@ -258,12 +258,33 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
     if (validated) return validated;
   }
 
+  // 3.5 Salvage — the model attempted JSON but it didn't fully parse (truncated /
+  // broken). Extract the replyContent string so the user never sees raw/broken JSON.
+  const salvaged = salvageReplyContent(trimmed);
+  if (salvaged) {
+    logger.debug('Salvaged replyContent from malformed JSON');
+    return truncateReply({ replyContent: salvaged, targetMessageId: fallbackMessageId });
+  }
+
   // 4. Plain text fallback — treat entire response as reply content
   logger.debug('Using plain text fallback for AI response');
   return truncateReply({
     replyContent: normalizeWhitespace(trimmed),
     targetMessageId: fallbackMessageId,
   });
+}
+
+/**
+ * Best-effort recovery of replyContent from JSON-looking text that failed to parse.
+ * Returns the extracted string, or null if the text doesn't look like attempted JSON.
+ */
+export function salvageReplyContent(raw: string): string | null {
+  if (!/[{[]/.test(raw) || !/reply_?[cC]ontent/.test(raw)) return null;
+  const m = raw.match(/"reply_?[cC]ontent"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (m?.[1] !== undefined) {
+    try { return JSON.parse(`"${m[1]}"`) as string; } catch { return m[1]; }
+  }
+  return null;
 }
 
 /**

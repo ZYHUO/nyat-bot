@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseReplyResponse } from '../../../src/pipeline/reply/parser.js';
+import { parseReplyResponse, salvageReplyContent } from '../../../src/pipeline/reply/parser.js';
 
 function parseSingle(raw: string, fallbackId: number) {
   const result = parseReplyResponse(raw, fallbackId);
@@ -205,6 +205,24 @@ describe('Reply Parser', () => {
       const raw = '{"content": "using content alias", "targetMessageId": 1}';
       const result = parseSingle(raw, fallbackId);
       expect(result.replyContent).toBe('using content alias');
+    });
+  });
+
+  describe('malformed-JSON salvage (波5)', () => {
+    it('recovers replyContent from truncated JSON instead of leaking it', () => {
+      // broken/truncated JSON — must NOT dump raw braces to the user
+      const r = parseSingle('{"replyContent": "你好喵~", "targetMessage', 42);
+      expect(r.replyContent).toBe('你好喵~');
+      expect(r.replyContent).not.toContain('{');
+    });
+    it('unescapes within the salvaged string', () => {
+      expect(salvageReplyContent('{"replyContent":"行\\"吧\\"喵"} oops')).toBe('行"吧"喵');
+    });
+    it('returns null for non-JSON text (plain fallback path)', () => {
+      expect(salvageReplyContent('就是一句普通的话')).toBeNull();
+    });
+    it('plain text still falls through unchanged', () => {
+      expect(parseSingle('今天天气不错', 42).replyContent).toBe('今天天气不错');
     });
   });
 

@@ -73,11 +73,36 @@ export function upsertExpressions(
 }
 
 /**
- * Get top expressions for a chat by count.
+ * Get top APPROVED expressions for a chat by count. Only gate-approved patterns
+ * inject into the prompt, so a few bad learned samples can't drift the voice.
  */
 export function getTopExpressions(chatId: number, limit: number): ExpressionEntry[] {
   const db = getDb();
   return db.prepare(
-    'SELECT * FROM expressions WHERE chat_id = ? ORDER BY count DESC LIMIT ?',
+    "SELECT * FROM expressions WHERE chat_id = ? AND status = 'approved' ORDER BY count DESC LIMIT ?",
   ).all(chatId, limit) as ExpressionEntry[];
+}
+
+/** Pending (un-reviewed) expressions for the approval gate. */
+export function getPendingExpressions(chatId: number, limit: number): Array<{ situation: string; style: string }> {
+  return getDb().prepare(
+    "SELECT situation, style FROM expressions WHERE chat_id = ? AND status = 'pending' ORDER BY count DESC LIMIT ?",
+  ).all(chatId, limit) as Array<{ situation: string; style: string }>;
+}
+
+/** Chats that have pending expressions awaiting review. */
+export function chatsWithPendingExpressions(): number[] {
+  const rows = getDb().prepare(
+    "SELECT DISTINCT chat_id FROM expressions WHERE status = 'pending'",
+  ).all() as Array<{ chat_id: number }>;
+  return rows.map((r) => r.chat_id);
+}
+
+/** Set an expression's review status + confidence. */
+export function setExpressionStatus(
+  chatId: number, situation: string, style: string, status: 'approved' | 'rejected', confidence: number,
+): void {
+  getDb().prepare(
+    'UPDATE expressions SET status = ?, confidence = ? WHERE chat_id = ? AND situation = ? AND style = ?',
+  ).run(status, confidence, chatId, situation, style);
 }
