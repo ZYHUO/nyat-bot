@@ -216,16 +216,26 @@ scripts/                  # 迁移 + 部署脚本
 - OpenAI 兼容 API 密钥（OpenAI / Google Gemini / Anthropic / 自建代理等）
 - Qdrant 向量库（可选；`scripts/deploy.sh` 会自动下载安装，不配置则语义记忆为空）
 
-#### 🚀 一键部署（推荐）
+#### 🚀 一键部署（推荐，小白也能装）
 
 ```bash
 git clone https://github.com/ZYHUO/nyat-bot.git && cd nyat-bot
-cp .env.example .env   # 填入 BOT_TOKEN / BOT_USERNAME / AI_PROVIDER_* 等
-sudo ./scripts/deploy.sh
+sudo ./scripts/deploy.sh        # 跟着问答走，不用手动编辑任何文件
 ```
 
-`deploy.sh` 端到端、可重复执行：依赖安装 → Qdrant（musl 静态版 + systemd）→ 构建（含 miniapp）→ 安装 `xxb-ts.service` → 自检（Qdrant healthz / 服务 active / Bot started）。SQLite 迁移开机自动按序应用。
-常用标志：`--skip-qdrant` `--skip-build` `--skip-deps` `--no-restart`；环境变量 `QDRANT_VERSION`（默认 1.18.1）。
+`deploy.sh` 是个端到端、可重复执行的安装向导：
+- **交互填配置**：问你 BOT_TOKEN（用 Telegram `getMe` 当场验证、自动填用户名）+ 一个 AI 接口（自动铺到所有用途）→ 写好 `.env`（权限 600）。配置没填好不会假装成功。
+- **环境自检/自愈**：架构(x86_64/ARM64)、Node 22(可自动装)、编译工具、内存/swap、磁盘、Redis(必需，可自动起)。
+- **装好一切**：依赖 → Qdrant(musl 静态版 + systemd) → 构建 → `xxb-ts.service` → **红绿灯自检**(Qdrant/Redis/服务/Bot started)，结尾给脱敏 `deploy-report.txt`。
+
+```bash
+sudo ./scripts/deploy.sh --update        # 秒级更新：git pull + 重建 + 重启
+sudo ./scripts/deploy.sh --doctor        # 只体检，不改动
+sudo ./scripts/deploy.sh --reconfigure   # 重填 token / AI 配置
+sudo ./scripts/deploy.sh --uninstall     # 停服并移除单元（保留数据）
+```
+更多标志：`--dry-run`(预览不执行) `--yes`(非交互) `--china`(国内 npm 镜像) `--minimal`(低内存最小部署) `--skip-{qdrant,build,deps}` `--no-restart`。
+墙内：下载被挡时 `export HTTPS_PROXY=…`，或手动下好 Qdrant 包用 `QDRANT_TARBALL=/path`；嵌入模型可设 `HF_ENDPOINT=https://hf-mirror.com`。
 
 #### 手动安装
 

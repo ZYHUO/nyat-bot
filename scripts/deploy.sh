@@ -25,14 +25,16 @@ QDRANT_BIN="/usr/local/bin/qdrant"
 QDRANT_STORAGE="${ROOT_DIR}/data/qdrant"
 AI_PROVIDERS=(REPLY REPLY_PRO VISION JUDGE SUMMARIZE ALLOWLIST_REVIEW)
 
-DRY=0; YES=0; CHINA=0; MINIMAL=0; DOCTOR=0; UNINSTALL=0; UPDATE=0
+[ -f "$ROOT_DIR/package.json" ] || { echo "找不到项目根（别用 curl|bash，请先 git clone 再 cd 进去运行 ./scripts/deploy.sh）" >&2; exit 1; }
+
+DRY=0; YES=0; CHINA=0; MINIMAL=0; DOCTOR=0; UNINSTALL=0; UPDATE=0; RECONFIG=0
 SKIP_QDRANT=0; SKIP_BUILD=0; SKIP_DEPS=0; NO_RESTART=0; COLOR=1
 for a in "$@"; do case "$a" in
   --dry-run) DRY=1 ;; --yes|-y) YES=1 ;; --china) CHINA=1 ;; --minimal) MINIMAL=1 ;;
-  --doctor) DOCTOR=1 ;; --uninstall) UNINSTALL=1 ;; --update) UPDATE=1 ;;
+  --doctor) DOCTOR=1 ;; --uninstall) UNINSTALL=1 ;; --update) UPDATE=1 ;; --reconfigure) RECONFIG=1 ;;
   --skip-qdrant) SKIP_QDRANT=1 ;; --skip-build) SKIP_BUILD=1 ;; --skip-deps) SKIP_DEPS=1 ;;
   --no-restart) NO_RESTART=1 ;; --no-color) COLOR=0 ;;
-  -h|--help) sed -n '2,22p' "$0" | sed 's/^#\s\?//'; exit 0 ;;
+  -h|--help) sed -n '2,24p' "$0" | sed 's/^#\s\?//'; exit 0 ;;
   *) echo "未知参数: $a （--help 看用法）" >&2; exit 2 ;;
 esac; done
 [ -t 1 ] || COLOR=0
@@ -64,16 +66,21 @@ EOF
   printf "${C_0}"
 }
 
-# write/replace a KEY=VALUE in .env idempotently, keep perms tight
+# write/replace a KEY=VALUE in .env idempotently, value-safe (no interpolation), perms 600
 set_env() {
   local k="$1" v="$2" tmp; tmp="$(mktemp)"
-  awk -F= -v k="$k" -v v="$v" 'BEGIN{d=0} $1==k{print k"="v; d=1; next} {print} END{if(!d)print k"="v}' .env >"$tmp"
+  grep -v "^${k}=" .env >"$tmp" 2>/dev/null || true   # drop ALL existing lines for this key
+  printf '%s=%s\n' "$k" "$v" >>"$tmp"                  # append value verbatim
   install -m 600 "$tmp" .env; rm -f "$tmp"
 }
 
-# ── node resolution (fnm/nvm under sudo) ─────────────────────────────────────
+# ── node resolution (fnm/nvm, incl. the sudo-invoking user's home) ───────────
 if ! command -v node >/dev/null 2>&1; then
-  N="$(ls -d /root/.local/share/fnm/node-versions/*/installation/bin/node "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -1 || true)"
+  SUH="$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6 || true)"
+  N="$(ls -d /root/.local/share/fnm/node-versions/*/installation/bin/node \
+        "$HOME"/.nvm/versions/node/*/bin/node \
+        ${SUH:+"$SUH"/.nvm/versions/node/*/bin/node} \
+        ${SUH:+"$SUH"/.local/share/fnm/node-versions/*/installation/bin/node} 2>/dev/null | sort -V | tail -1 || true)"
   [ -n "${N:-}" ] && export PATH="$(dirname "$N"):$PATH"
 fi
 node_major() { node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -104,10 +111,12 @@ fi
 #  --uninstall : stop + remove units (keep data)
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$UNINSTALL" = 1 ]; then
-  banner; confirm "停止并卸载 xxb-ts + qdrant 服务？（数据保留在 data/）" || exit 0
+  banner; confirm "停止并卸载 xxb-ts + qdrant 服务单元？（数据保留在 data/）" || exit 0
   run systemctl disable --now xxb-ts.service 2>/dev/null || true
   run systemctl disable --now qdrant.service 2>/dev/null || true
-  ok "已停服。数据仍在 ${ROOT_DIR}/data（如需彻底删除请自行 rm -rf）"
+  run rm -f /etc/systemd/system/xxb-ts.service /etc/systemd/system/qdrant.service
+  run systemctl daemon-reload
+  ok "已停服并移除单元。数据仍在 ${ROOT_DIR}/data（彻底删除请自行 rm -rf）"
   exit 0
 fi
 
@@ -118,11 +127,12 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$UPDATE" = 1 ]; then
   banner; step "更新代码并重启" "git pull · 重建 · 重启"
-  run git pull --ff-only || warn "git pull 跳过（非 git 仓库或有本地改动）"
+  if [ -d .git ]; then run git pull --ff-only || die_fix "git pull 失败（有本地改动？）" "git stash 或 git reset --hard origin/main 后重跑 --update"
+  else warn "非 git 仓库，跳过 pull"; fi
   if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund; else run npm install --no-audit --no-fund; fi
   run npm run build
-  [ "$NO_RESTART" = 0 ] && run systemctl restart xxb-ts.service
-  sleep 5
+  if [ "$NO_RESTART" = 1 ] || [ "$DRY" = 1 ]; then ok "已更新（未重启，按需 systemctl restart xxb-ts）"; exit 0; fi
+  run systemctl restart xxb-ts.service; sleep 5
   systemctl is-active --quiet xxb-ts && ok "已更新并重启" || die_fix "重启后未运行" "sudo journalctl -u xxb-ts -n 80 --no-pager"
   exit 0
 fi
@@ -161,19 +171,20 @@ else
   else warn "稍后 npm install 可能编译失败：sudo apt install -y build-essential python3"; fi
 fi
 
-# 内存 / swap
-MEM_MB=$(( $(grep -m1 MemAvailable /proc/meminfo | awk '{print $2}') / 1024 ))
-if [ "$MEM_MB" -lt 1800 ]; then
+# 内存 / swap （探测失败时退化为 0，不让算术在 set -e 下崩）
+MEM_KB="$(grep -m1 MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}')"; [[ "$MEM_KB" =~ ^[0-9]+$ ]] || MEM_KB=0
+MEM_MB=$(( MEM_KB / 1024 ))
+if [ "$MEM_MB" != 0 ] && [ "$MEM_MB" -lt 1800 ]; then
   warn "可用内存约 ${MEM_MB}MB —— 编译/运行可能被系统 Killed"
   if ! swapon --show 2>/dev/null | grep -q .; then
     warn "无 swap。建议加 2G：sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
   fi
-  [ "$MINIMAL" = 0 ] && confirm "内存偏小，是否切到 --minimal 最小部署（跳过 miniapp，构建限内存）？" && MINIMAL=1 || true
-else ok "内存 ${MEM_MB}MB 可用"; fi
+  if [ "$MINIMAL" = 0 ] && confirm "内存偏小，切到 --minimal 最小部署（跳过 miniapp + Qdrant，构建限内存）？"; then MINIMAL=1; fi
+elif [ "$MEM_MB" != 0 ]; then ok "内存 ${MEM_MB}MB 可用"; fi
 
 # 磁盘
-DISK_MB=$(df -m "$ROOT_DIR" | awk 'NR==2{print $4}')
-[ "$DISK_MB" -lt 800 ] && warn "磁盘可用 ${DISK_MB}MB 偏少（建议 ≥1G）" || ok "磁盘 ${DISK_MB}MB 可用"
+DISK_MB="$(df -m "$ROOT_DIR" 2>/dev/null | awk 'NR==2{print $4}')"; [[ "$DISK_MB" =~ ^[0-9]+$ ]] || DISK_MB=999999
+if [ "$DISK_MB" -lt 800 ]; then warn "磁盘可用 ${DISK_MB}MB 偏少（建议 ≥1G）"; else ok "磁盘充足"; fi
 
 # redis（队列必需）
 if redis-cli ping >/dev/null 2>&1; then ok "redis 已就绪"
@@ -194,24 +205,34 @@ fi
 
 # ── 2. 配置（前置！缺就交互引导，未配置则非零退出）────────────────────────────
 step "配置 .env" "填机器人 token 和 AI 接口"
-[ -f .env ] || install -m 600 .env.example .env
-TOKEN_BAD=0
-grep -qE '^BOT_TOKEN=\s*$|^BOT_TOKEN=(your|123456:|\*)' .env && TOKEN_BAD=1
-if [ "$TOKEN_BAD" = 1 ]; then
-  if [ "$YES" = 1 ] || [ ! -t 0 ]; then
-    die_fix "尚未配置 .env（BOT_TOKEN 为空/占位）" "编辑 $(pwd)/.env 填好后重跑，或交互运行 sudo ./scripts/deploy.sh"
-  fi
-  info "找 @BotFather → /newbot 拿一个 token（形如 123456789:AAH...）"
+[ -s .env ] || install -m 600 .env.example .env
+# 未配置 = token 缺失/空/占位，或 AI key 仍是 ***/占位
+ENV_OK=1
+grep -q '^BOT_TOKEN=' .env || ENV_OK=0
+grep -qE '^BOT_TOKEN=([[:space:]]*$|your|123456:|\*)' .env && ENV_OK=0
+grep -qE '^AI_PROVIDER_REPLY_KEY=([[:space:]]*$|\*\*\*|your)' .env && ENV_OK=0
+[ "$RECONFIG" = 1 ] && ENV_OK=0
+if [ "$ENV_OK" = 1 ]; then
+  chmod 600 .env 2>/dev/null || true; ok ".env 已配置"
+elif [ "$DRY" = 1 ]; then
+  ok "(dry-run) 这里会交互引导填 BOT_TOKEN + AI 接口"
+elif [ "$YES" = 1 ] || ! { : >/dev/tty; } 2>/dev/null; then
+  die_fix "尚未配置 .env（BOT_TOKEN/AI 为空或占位）" "编辑 $(pwd)/.env 填好，或在交互终端运行（ssh 记得加 -t）"
+else
+  cp -p .env .env.bak 2>/dev/null || true
+  trap 'mv -f .env.bak .env 2>/dev/null || true; printf "\n  已取消，.env 未改动\n" >&2; exit 130' INT
+  info "找 @BotFather → /newbot 拿 token（形如 123456789:AAH...）"
   for _try in 1 2 3; do
     TOK="$(ask_secret 'Telegram BOT_TOKEN')"
     [ -z "$TOK" ] && { warn "不能为空"; continue; }
-    UNAME="$(curl -fsS --connect-timeout 8 --max-time 20 ${HTTPS_PROXY:+-x "$HTTPS_PROXY"} "https://api.telegram.org/bot${TOK}/getMe" 2>/dev/null | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' || true)"
+    UNAME="$(curl -fsS --connect-timeout 8 --max-time 20 ${HTTPS_PROXY:+-x "$HTTPS_PROXY"} "https://api.telegram.org/bot${TOK}/getMe" 2>/dev/null \
+      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write((j.ok&&j.result&&j.result.username)||"")}catch{}})' 2>/dev/null || true)"
     if [ -n "$UNAME" ]; then set_env BOT_TOKEN "$TOK"; set_env BOT_USERNAME "$UNAME"; ok "验证通过：@$UNAME"; break; fi
     warn "token 无效或网络不可达（被墙？试 export HTTPS_PROXY=…）"
     [ "$_try" = 3 ] && die_fix "token 三次验证失败" "确认 token 正确、网络能访问 api.telegram.org"
   done
   echo
-  info "AI 接口（OpenAI 兼容即可：OpenAI / Gemini 代理 / 自建 newapi 等）。新手填一个就够，会自动铺到所有用途。"
+  info "AI 接口（OpenAI 兼容：OpenAI / Gemini 代理 / 自建 newapi 等）。填一个会自动铺到所有用途。"
   AI_EP="$(ask 'AI 接口地址 endpoint' 'https://api.openai.com/v1')"
   AI_KEY="$(ask_secret 'AI API key')"
   AI_MODEL="$(ask 'AI 模型' 'gpt-4o-mini')"
@@ -221,11 +242,10 @@ if [ "$TOKEN_BAD" = 1 ]; then
     set_env "AI_PROVIDER_${P}_MODEL" "$AI_MODEL"
   done
   set_env NODE_ENV production
+  rm -f .env.bak; trap - INT
   ok "已写入 .env（权限 600）"
-else
-  chmod 600 .env 2>/dev/null || true; ok ".env 已配置"
 fi
-mkdir -p logs data
+[ "$DRY" = 0 ] && mkdir -p logs data || true
 
 # ── 3. 依赖 ──────────────────────────────────────────────────────────────────
 if [ "$SKIP_DEPS" = 0 ]; then
@@ -233,15 +253,20 @@ if [ "$SKIP_DEPS" = 0 ]; then
   if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund || run npm install --no-audit --no-fund
   else run npm install --no-audit --no-fund; fi
   if [ "$MINIMAL" = 0 ] && [ -d miniapp-web ]; then run npm --prefix miniapp-web install --no-audit --no-fund || warn "miniapp 依赖装失败（不影响 bot 本体）"; fi
+  # 用户 clone、sudo 跑时，把 node_modules 还给该用户，免得之后 git pull/npm 报 EACCES
+  if [ "$DRY" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules miniapp-web/node_modules 2>/dev/null || true
+  fi
   ok "依赖就绪"
 else step "安装依赖" "已跳过 (--skip-deps)"; fi
 
 # ── 4. Qdrant 向量库 ─────────────────────────────────────────────────────────
 if [ "$SKIP_QDRANT" = 0 ] && [ "$MINIMAL" = 0 ]; then
   step "Qdrant 向量库" "语义记忆存储"
-  if [ ! -x "$QDRANT_BIN" ] || ! "$QDRANT_BIN" --version 2>/dev/null | grep -q "$QDRANT_VERSION"; then
+  [ -n "${QDRANT_TARBALL:-}" ] && [ ! -f "${QDRANT_TARBALL}" ] && die_fix "QDRANT_TARBALL 文件不存在: $QDRANT_TARBALL" "检查路径，或不设此变量让脚本自动下载"
+  if [ ! -x "$QDRANT_BIN" ] || ! "$QDRANT_BIN" --version 2>/dev/null | grep -qE "qdrant ${QDRANT_VERSION}([^0-9]|\$)"; then
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    if [ -n "${QDRANT_TARBALL:-}" ] && [ -f "$QDRANT_TARBALL" ]; then cp "$QDRANT_TARBALL" "$tmp/q.tgz"; info "用本地包 $QDRANT_TARBALL"
+    if [ -n "${QDRANT_TARBALL:-}" ]; then cp "$QDRANT_TARBALL" "$tmp/q.tgz"; info "用本地包 $QDRANT_TARBALL"
     else
       url="https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}/qdrant-$(qdrant_arch).tar.gz"
       info "下载 qdrant ${QDRANT_VERSION}…"
@@ -285,6 +310,8 @@ BOOTED=0
 for _i in $(seq 1 20); do
   PID="$(systemctl show -p MainPID --value xxb-ts 2>/dev/null || echo 0)"
   if grep -q "\"pid\":${PID}[,}].*Bot started" logs/app.log 2>/dev/null; then BOOTED=1; break; fi
+  # 兜底：pino-pretty(dev) 日志没有 JSON pid → 直接在最近行里找
+  if tail -n 80 logs/app.log 2>/dev/null | grep -q 'Bot started'; then BOOTED=1; break; fi
   if journalctl -u xxb-ts -n 200 --no-pager 2>/dev/null | grep -q 'Bot started'; then BOOTED=1; break; fi
   sleep 1
 done
@@ -303,18 +330,22 @@ echo
 if [ "$FAIL" = 0 ]; then
   printf "${C_G}  🎉 全部通过！机器人已上线。${C_0}\n"
   info "去 Telegram 把它拉进群试试。日志：tail -f ${ROOT_DIR}/logs/app.log"
+  info "首次用到长期记忆会从 HuggingFace 拉嵌入模型(~23MB)；国内卡住可设 HF_ENDPOINT=https://hf-mirror.com"
+  EXIT_CODE=0
 else
   printf "${C_Y}  有 %d 项没通过。${C_0}\n" "$FAIL"
-  info "体检：sudo ./scripts/deploy.sh --doctor"
+  info "体检：sudo ./scripts/deploy.sh --doctor   ·   重填配置：sudo ./scripts/deploy.sh --reconfigure"
   info "排错：sudo journalctl -u xxb-ts -n 80 --no-pager   或   tail -50 ${ROOT_DIR}/logs/app.log"
-  LASTERR="$({ tail -n 40 logs/app.log 2>/dev/null; journalctl -u xxb-ts -n 40 --no-pager 2>/dev/null; } | tail -20)"
+  LASTERR="$({ tail -n 40 logs/app.log 2>/dev/null; journalctl -u xxb-ts -n 40 --no-pager 2>/dev/null; } | tail -20 || true)"
   case "$LASTERR" in
     *ECONNREFUSED*6379*|*redis*) warn "像是 Redis 没连上：sudo systemctl enable --now redis-server" ;;
-    *401*|*Unauthorized*|*api*key*|*invalid*key*) warn "像是 AI key 不对：检查 .env 里的 AI_PROVIDER_*_KEY" ;;
-    *BOT_TOKEN*|*Unauthorized*40[13]*) warn "像是 BOT_TOKEN 不对：重跑向导填一次" ;;
+    *401*|*Unauthorized*|*api*key*|*invalid*key*) warn "像是 AI key 不对：sudo ./scripts/deploy.sh --reconfigure" ;;
+    *BOT_TOKEN*|*Unauthorized*40[13]*) warn "像是 BOT_TOKEN 不对：sudo ./scripts/deploy.sh --reconfigure" ;;
     *ZodError*|*env*) warn "像是 .env 配置缺项：按报错字段补全 .env" ;;
   esac
-  info "求助时把这个文件发出来（已脱敏）：$REPORT"
+  info "求助时把这个文件发出来（不含密钥）：$REPORT"
+  EXIT_CODE=1
 fi
 echo
 info "管理：systemctl {status,restart,stop} xxb-ts · systemctl status qdrant · 更新：sudo ./scripts/deploy.sh --update"
+exit "$EXIT_CODE"
