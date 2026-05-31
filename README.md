@@ -218,6 +218,17 @@ scripts/                  # 迁移 + 部署脚本
 
 #### 🚀 一键部署（推荐，小白也能装）
 
+**最简：一条命令**（自动装 git + 拉源码 + 引导配置，全程问答）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash
+```
+
+> 要传参数时用 `-s --`，例如国内镜像：`curl -fsSL .../install.sh | sudo bash -s -- --china`
+> 装到别处 / 换镜像：`NYATBOT_DIR=/opt/nyatbot NYATBOT_REPO=https://ghproxy.com/https://github.com/ZYHUO/nyat-bot.git`
+
+或先 clone 再装（等价）：
+
 ```bash
 git clone https://github.com/ZYHUO/nyat-bot.git && cd nyat-bot
 sudo ./scripts/deploy.sh        # 跟着问答走，不用手动编辑任何文件
