@@ -52,6 +52,8 @@ import {
   unmuteUser,
 } from "../tracking/user-profile.js";
 import { memorizeMessage } from "../memory/chroma.js";
+import { maybeReact } from "./reactions.js";
+import { recordInteraction } from "../tracking/social-graph.js";
 import {
   getReadyStickersByIntent,
   recordStickerSent,
@@ -1203,6 +1205,20 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       import("../knowledge/person-aliases.js")
         .then(({ captureAliases }) => captureAliases(job.chatId, formatted))
         .catch((err) => logger.debug({ err, chatId: job.chatId }, "captureAliases failed (non-critical)"));
+    }
+
+    // 3.1c Social graph — track member↔member reply ties (sync, cheap)
+    if (job.chatId < 0 && !formatted.isBot && formatted.replyTo) {
+      const r = formatted.replyTo;
+      if (r.uid && r.uid !== formatted.uid && r.uid !== getBotUid()) {
+        try { recordInteraction(job.chatId, formatted.uid, formatted.fullName, r.uid, r.fullName); }
+        catch { /* non-critical */ }
+      }
+    }
+
+    // 3.1d Emoji reaction — rare "the cat noticed" signal (≤2/day per chat, group only)
+    if (job.chatId < 0 && !formatted.isBot && !formatted.isAnonymous) {
+      void maybeReact(job.chatId, formatted.messageId, formatted.textContent || formatted.captionContent || "");
     }
 
     const e = env();

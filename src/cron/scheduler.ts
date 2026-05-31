@@ -89,13 +89,12 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
-  // Anonymous note guess game — hourly hint drip + 24h close
+  // Anonymous notes — close the 24h guess window (hint auto-drip removed; it spammed)
   tasks.push(schedule('17 * * * *', () => {
-    void safeRun('note-guess-game', async () => {
-      const { revealDueHints, closeExpiredNotes } = await import('../pipeline/dm-relay/handlers/note.js');
-      const hinted = await revealDueHints();
+    void safeRun('note-close', async () => {
+      const { closeExpiredNotes } = await import('../pipeline/dm-relay/handlers/note.js');
       const closed = await closeExpiredNotes();
-      if (hinted > 0 || closed > 0) logger.info({ hinted, closed }, 'Note guess-game tick');
+      if (closed > 0) logger.info({ closed }, 'Note close tick');
     });
   }));
 

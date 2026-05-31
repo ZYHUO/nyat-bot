@@ -19,6 +19,7 @@ import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/s
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildProfileInjection } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
+import { buildSocialInjection } from '../../tracking/social-graph.js';
 import { buildRoleHint } from '../../tracking/behavioral-roles.js';
 
 const SECTION_SEP = '\n\n---\n\n';
@@ -185,6 +186,11 @@ export function buildMessages(
     try {
       const roleBlock = buildRoleHint(chatId);
       if (roleBlock) userParts.push(`[群友角色]\n${roleBlock}`);
+    } catch { /* non-critical */ }
+    // Social graph — who interacts with whom (read the room)
+    try {
+      const socialBlock = buildSocialInjection(chatId);
+      if (socialBlock) userParts.push(`[群友关系]\n${socialBlock}`);
     } catch { /* non-critical */ }
   }
 

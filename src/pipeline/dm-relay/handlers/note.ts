@@ -10,7 +10,6 @@ import { resolveGroup, savePendingGroupSelection, clearPendingGroupSelection, ge
 import { resolveTarget } from '../target-resolver.js';
 import { runSafetyChecks } from '../safety.js';
 import { checkFeatureGate } from '../feature-gate.js';
-import { callWithFallback } from '../../../ai/fallback.js';
 import type { ResolvedGroup } from '../group-resolver.js';
 import type { FormattedMessage } from '../../../shared/types.js';
 
@@ -29,50 +28,6 @@ function buildNoteGroupMessage(noteId: number, targetMention: string, content: s
     ? `📜 有只害羞的小猫让本喵转交给 ${targetMention}：「${content}」`
     : `📜 有只害羞的小猫让本喵递张纸条：「${content}」`;
   return `${head}\n\n🔍 想猜是谁写的？私聊本喵「猜纸条 #${noteId} @某人」(24h内有效)`;
-}
-
-/** Generate 3 progressive content-based hints via AI. Never reveals identity. */
-async function generateHints(content: string): Promise<string[]> {
-  try {
-    const result = await callWithFallback({
-      usage: 'judge',
-      messages: [
-        {
-          role: 'system',
-          content: `根据一张匿名纸条的内容，生成3条循序渐进的"猜作者"提示（由弱到强）。
-严格规则：
-- 只能基于纸条的语气、用词、话题、情绪来推测，绝不能编造或提及具体姓名、用户名、昵称、性别、长相等身份信息
-- 每条提示一句话，简短有趣
-- 不要重复纸条原文
-仅输出JSON数组：["提示1","提示2","提示3"]`,
-        },
-        { role: 'user', content: `纸条内容：${content}` },
-      ],
-      maxTokens: 150,
-      temperature: 0.7,
-    });
-    const cleaned = result.content.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(cleaned) as unknown;
-    if (Array.isArray(parsed)) {
-      return parsed.filter((h): h is string => typeof h === 'string').slice(0, 3);
-    }
-  } catch (err) {
-    logger.debug({ err }, 'Note hint generation failed');
-  }
-  return [];
-}
-
-/** Fire-and-forget: generate + persist hints for a freshly published note. */
-function scheduleHintGeneration(noteId: number, content: string): void {
-  void generateHints(content).then((hints) => {
-    if (hints.length === 0) return;
-    try {
-      getDb().prepare('UPDATE anonymous_notes SET hints = ? WHERE id = ?')
-        .run(JSON.stringify(hints), noteId);
-    } catch (err) {
-      logger.debug({ err, noteId }, 'Failed to persist note hints');
-    }
-  });
 }
 
 // ── Rate limit helpers ──────────────────────────
@@ -268,9 +223,6 @@ export async function handleNoteStart(
     const noteId = Number(info.lastInsertRowid);
     await sendMessage(group.chatId, buildNoteGroupMessage(noteId, targetMention, content));
 
-    // Generate guess hints in the background
-    scheduleHintGeneration(noteId, content);
-
     // 8. Confirm to sender with rich stats
     const stats = getNoteStats(formatted.uid);
     const topStr = stats.top_targets.length > 0
@@ -377,7 +329,6 @@ export async function handleNotePendingGroup(
 
     const noteId = Number(info.lastInsertRowid);
     await sendMessage(selectedGroup.chatId, buildNoteGroupMessage(noteId, targetMention, content));
-    scheduleHintGeneration(noteId, content);
 
     const stats = getNoteStats(formatted.uid);
     await sender.sendDirect(
@@ -543,53 +494,9 @@ export async function handleNoteReveal(
   }
 }
 
-// ── Cron: hint drip + 24h close ──────────────────────────
-
-/**
- * Reveal the next progressive hint for published notes (H2 at 6h, H3 at 18h),
- * using Redis setnx to avoid double-posting. Returns count of hints revealed.
- */
-export async function revealDueHints(): Promise<number> {
-  const db = getDb();
-  const now = Math.floor(Date.now() / 1000);
-
-  // Notes still in the guessing window with hints generated. hint_level tracks
-  // the highest level already posted (durable in SQLite — survives Redis loss).
-  const rows = db.prepare(`
-    SELECT id, group_id, hints, published_at, hint_level FROM anonymous_notes
-    WHERE status = 'published' AND hints IS NOT NULL AND published_at IS NOT NULL
-      AND published_at > ? AND hint_level < 3
-  `).all(now - GUESS_WINDOW_SEC) as Array<{ id: number; group_id: number; hints: string; published_at: number; hint_level: number }>;
-
-  let revealed = 0;
-  for (const row of rows) {
-    let hints: string[];
-    try { hints = JSON.parse(row.hints) as string[]; } catch { continue; }
-    if (!Array.isArray(hints) || hints.length === 0) continue;
-
-    // Drip one level per tick, in order: level 2 at >=6h, level 3 at >=18h.
-    const nextLevel = row.hint_level + 1; // 2, then 3
-    if (nextLevel > 3) continue;
-    const threshold = nextLevel === 2 ? 6 * 3600 : 18 * 3600;
-    const age = now - row.published_at;
-    if (age < threshold || !hints[nextLevel - 1]) continue;
-
-    // Atomic claim: only one tick/process wins this CAS, and it persists —
-    // no re-post even if Redis is flushed or the service restarts.
-    const claimed = db.prepare(
-      'UPDATE anonymous_notes SET hint_level = ? WHERE id = ? AND hint_level = ?',
-    ).run(nextLevel, row.id, row.hint_level);
-    if (claimed.changes === 0) continue; // already revealed by a concurrent run
-
-    try {
-      await sendMessage(row.group_id, `🔍 纸条 #${row.id} 的新提示：${hints[nextLevel - 1]}`);
-      revealed++;
-    } catch (err) {
-      logger.debug({ err, noteId: row.id, level: nextLevel }, 'Hint reveal failed');
-    }
-  }
-  return revealed;
-}
+// ── Cron: 24h close ──────────────────────────
+// (The progressive "🔍 纸条 #N 的新提示" auto-drip was removed — nobody used it and
+//  it just spammed the group. Anonymous notes + manual guessing still work.)
 
 /**
  * Close notes past the 24h guess window: post a summary and mark status='closed'.

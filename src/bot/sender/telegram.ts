@@ -9,6 +9,20 @@ import { logger } from '../../shared/logger.js';
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 
+/** React to a message with a single emoji (Telegram setMessageReaction). Best-effort. */
+export async function reactToMessage(chatId: number, messageId: number, emoji: string): Promise<boolean> {
+  try {
+    const bot = getBot();
+    // emoji must be one of Telegram's allowed reaction emojis; callers supply only those.
+    const reaction = [{ type: 'emoji', emoji }] as Parameters<typeof bot.api.setMessageReaction>[2];
+    await bot.api.setMessageReaction(chatId, messageId, reaction);
+    return true;
+  } catch (err) {
+    logger.debug({ err, chatId, messageId, emoji }, 'setMessageReaction failed (non-critical)');
+    return false;
+  }
+}
+
 async function withRetry<T>(
   fn: () => Promise<T>,
   operation: string,
