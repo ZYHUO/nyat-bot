@@ -31,7 +31,7 @@ const envSchema = z.object({
   WEBHOOK_SECRET: z.string().optional(),
 
   // Queue
-  QUEUE_CONCURRENCY: z.coerce.number().int().positive().default(20),
+  QUEUE_CONCURRENCY: z.coerce.number().int().positive().default(8),
 
   // AI tuning
   HEDGE_DELAY_MS: z.coerce.number().int().nonnegative().default(2000),
