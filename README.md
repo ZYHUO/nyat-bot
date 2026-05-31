@@ -23,11 +23,14 @@
 
 **核心 AI**
 - 🧠 **三级判断管线** — L0 本地规则 → L1 微型 AI → L2 完整 AI，智能决定是否回复
-- 💬 **多条回复** — AI 可一次性回复多个人（JSON 数组格式），自动兼容单条回复
+- 💬 **自然接话** — bot 说完话后保持"在场"：最近几条内你或它任一方是问句即接，陈述句也按概率接（MaiBot 式 talk-frequency），不需 @ 或引用；群太热/@别人时自动克制
+- 🗣️ **自然语言调用指令** — "帮我签到"→签到、"看看我的图鉴"→卡册、"追踪比特币"→关注话题，私聊宽松、群里需点名
+- 💬 **多条回复 / 多目标** — AI 可一次性回复多个人（JSON 数组），每条精准引用各自目标
 - 🔄 **流式回复** — 打字中效果，逐段更新消息，用户体验流畅
 - 🛠️ **工具调用** — 网页搜索（xAI Grok / SearxNG）、网页抓取、IP 查询、定时器
-- 🎯 **多模型路由** — Judge / Reply / Reply Pro / Vision / Summarize 分配不同模型
+- 🎯 **多模型路由** — Judge / Reply / Reply Pro / Vision / Summarize 分配不同模型；Redis 运行时可覆盖
 - 🏎️ **Hedged Request** — 主模型超时自动发备用请求，谁快用谁（可关闭省 token）
+- 👁️ **视觉理解** — 图片/表情描述，结果缓存复用（migration 0028）
 
 **拟人回复（Humanizer V2）**
 - ✍️ **错别字 + 编辑纠正** — 30% 概率注入错别字，1.5s 后 editMessage 静默修正
@@ -44,56 +47,92 @@
 **群组功能**
 - 👥 **群成员花名册** — 自动追踪所有群成员的 username ↔ 显示名，注入 AI 上下文
 - 🤖 **Bot 交互知识库** — 记录群里其他 bot 的行为，AI 自动生成摘要，回复时注入知识
-- 🚫 **智能 Bot-to-Bot 屏蔽** — 有人类在场时不和其他 bot 聊天，无人时限制 1 次回复
-- ✅ **每日签到** — `/checkin` 连续签到、排名、AI 自由发挥奖励内容
-- 📋 **群聊白名单** — 审批制入群，AI 辅助审核，Master 通知
+- 🚫 **智能 Bot-to-Bot 屏蔽** — 有人类在场时不和其他 bot 聊天，无人时限制回合
+- ✅ **每日签到** — `/checkin` 连续签到、排名、里程碑（7/30/100 天）、AI 自由发挥奖励
+- 🏅 **声望系统** — 群友互动累积声望（migration 0014），行为角色自动标签（migration 0029）
+- 😺 **情绪 + 关系** — 每群情绪 valence（migration 0017）、对每位群友的好感度随时间衰减（migration 0018）
+- 🔭 **话题追踪** — `/watch 关键词`，有人聊到就提醒你
+- 🛡️ **入群验证 + 白名单** — 审批制入群，AI 辅助审核 + 验证问答，Master 通知
+
+**私聊功能（DM 助手）**
+- 📨 **传话/带话** — 私聊让本喵把话带到群里，可指定对象
+- 📜 **匿名小纸条** — 匿名给群里某人留言 + "猜作者"渐进提示小游戏（migration 0020）
+- 🌳 **树洞倾诉** — 匿名把心事分享到群，AI 温暖回应
+- 🔮 **缘分签** — 抽签/运势（migration 0022）
+- ⏰ **定时提醒** — 自然语言设提醒，到点喊你（"明天早上 6 点叫我"）
+- 🗂️ **群友档案/备注** — 记录与查看群成员资料（migration 0021）
+- 🎛️ **功能开关** — `/feature` 群管按需开关各 DM 功能；`/setdefault` 设默认群
+
+**收集 · 游戏 · 互动**
+- 🐾 **猫娘卡牌收集** — 26 张 N/R/SR/SSR/UR 猫娘卡，**签到免费解锁**（保底机制，无氪金），`/cards` 看图鉴（migration 0032）
+- 💞 **心愿单换卡** — `/wish add 卡名` → `/wish holders/wanted` 自动撮合群友间换卡
+- 🎲 **派对小游戏** — `/game tod`（真心话）`dare`（大冒险）`wyr`（二选一）`nhie`（我从未）`guess`（猜数字）
+- 🧠 **偏好记忆** — `/remember` 记住你的偏好，回复时自动注入
+
+**记忆 · 学习 · 自我进化**
+- 🏷️ **人物外号持久记忆** — 自动捕获"X 的外号是 Y"，跨会话不忘（migration 0027）
+- 🧩 **记忆重要度 + 遗忘** — 记忆按重要度评分，低价值记忆随时间淡忘（migration 0030），梦境式整理 cron
+- 📚 **黑话学习** — 自动挖掘群内黑话/梗，多阶段精炼释义（migration 0016/0026）
+- 📇 **结构化用户画像** — 7 分节画像（身份/关系/稳定事实/偏好/近况…，migration 0025）
+- 🎚️ **表达学习门控** — 学习群体语言风格，带质量门控（migration 0031）
+- 📈 **回复质量自评（ASI）** — 多维评分自家回复，rolling EMA 反哺 humanizer 自调（migration 0024）
+- 🎯 **结果追踪 + 奖励门控** — 追踪每条回复后续反应（被夸/被怼/被无视），调整情绪与策略
 
 **基础设施**
 - 📦 **BullMQ 消息队列** — Redis 支撑的高并发处理（可配置并发数）
-- 🗃️ **双存储** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）
+- 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）+ ChromaDB（语义记忆）
+- 🔁 **Ingress 自动故障转移** — 默认长轮询（不对外开放端口）；轮询挂掉自动切 webhook 备用，由 Redis 标志 + 看门狗控制
 - 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，macOS 窗口风格 UI，运行时配置管理
-- ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、数据清理（并发保护）
+- ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控）
 - 🔐 **安全防护** — SSRF 防护、webhook constant-time 验证、速率限制、Redis Lua 原子操作、去重锁
 - 📡 **频道消息源** — 自动抓取公开 Telegram 频道内容存入 ChromaDB，无需管理员权限
 - 🌐 **Cloudflare 绕过** — CF_FETCH skill 自动三级降级（直连 → Playwright+Xvfb → DrissionPage）
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
-- 🎨 **359 个贴纸意图** — AI 自主选择贴纸，覆盖情绪/社交/群聊/猫娘等场景
+- 🎨 **359 个贴纸意图** — AI 自主选择贴纸（top-N 截断 + Levenshtein 模糊匹配 + 反感反馈），覆盖情绪/社交/群聊/猫娘等场景
+- 🧪 **702 单元测试** — vitest 全绿基线；33 个 SQLite 迁移自动按序应用
 
 ### 🏗️ 架构
 
 ```
-Telegram Update
+Telegram Update  (长轮询 ⇄ webhook 自动故障转移)
   │
   ▼
 grammy Bot ──→ Formatter ──→ Context (Redis)
   │                              │
-  │                    Judge Pipeline (L0→L1→L2)
-  │                       │              │
-  │                    IGNORE    REPLY / REPLY_PRO
-  │                                      │
-  │                              BullMQ Queue
-  │                                      │
-  │                              Reply Pipeline
-  │                              ├─ 4-Way Context Retrieval
-  │                              │   ├─ Recent Window (20 msgs)
-  │                              │   ├─ Thread Trace (reply chain)
-  │                              │   ├─ Entity Mentions
-  │                              │   └─ Semantic (future)
-  │                              ├─ 5-Layer Prompt Builder
-  │                              ├─ Tool Executor (search, fetch...)
-  │                              ├─ Multi-Reply Parser
-  │                              └─ Streaming Sender
+  │              Judge Pipeline (L0 rules → L1 micro → L2 full)
+  │                  │           │            │
+  │             IGNORE    NL-cmd / DM       REPLY / REPLY_PRO
+  │                       intercepts       (含活跃接话 followup_to_bot)
+  │                          │                   │
+  │                          │             BullMQ Queue
+  │                          │                   │
+  │                          │             Reply Pipeline
+  │                          │             ├─ 4-Way Context Retrieval
+  │                          │             │   ├─ Recent Window
+  │                          │             │   ├─ Thread Trace (reply chain)
+  │                          │             │   ├─ Entity Mentions
+  │                          │             │   └─ Semantic (ChromaDB)
+  │                          │             ├─ 5-Layer Prompt Builder
+  │                          │             │   (+画像/外号/情绪/关系注入)
+  │                          │             ├─ Tool Executor (search, fetch...)
+  │                          │             ├─ Multi-Reply Parser
+  │                          │             ├─ Humanizer (self-tuning)
+  │                          │             └─ Streaming Sender
+  │                          ▼
+  │              DM Assistant (传话/纸条/树洞/缘分签/定时/档案)
+  │              · Cards & Games (/cards /wish /game) · Checkin
   │
-  ├─ Member Registry (Redis Hash)
-  ├─ Bot Interaction Tracker (SQLite)
-  ├─ Rate Limiter (Redis Lua)
-  ├─ Dedup Lock (Redis NX)
-  └─ Allowlist Guard
+  ├─ Member Registry (Redis Hash)      ├─ Mood / Relationship / Reputation
+  ├─ Bot Interaction Tracker (SQLite)  ├─ Outcome + ASI quality tracking
+  ├─ Rate Limiter (Redis Lua)          ├─ Learners (jargon / expression)
+  ├─ Dedup Lock (Redis NX)             └─ Memory (importance + forgetting)
+  └─ Allowlist + Join Verify
 
 Hono HTTP Server
-  ├─ /health
-  ├─ /miniapp_api (Admin)
-  └─ /webhook (Telegram)
+  ├─ /health   ├─ /miniapp_api (Admin)   └─ /webhook (failover)
+
+Cron: model health · profile sync · idle proactive · channel ingest
+      · memory dream · learner scan · cleanup
 ```
 
 ### 📁 项目结构
@@ -115,17 +154,25 @@ src/
 │   └── sender/           #   流式发送 + Telegram API
 ├── cron/                 # 定时任务 (node-cron)
 ├── db/                   # Redis (ioredis) + SQLite (better-sqlite3)
-├── knowledge/            # 知识库管理
+├── knowledge/            # 知识库 + 贴纸 + 人物外号
+├── learners/             # 黑话挖掘/释义 + 表达学习门控 + 学习并发门
+├── memory/               # ChromaDB 语义记忆 + 重要度/遗忘
+├── ingress/              # 长轮询 ⇄ webhook 故障转移
 ├── pipeline/             # 核心消息管线
 │   ├── context/          #   上下文管理 + 压缩 + 4路检索
-│   ├── judge/            #   三级判断 (规则 + micro + full AI)
+│   ├── judge/            #   三级判断 (rules + micro + full AI, 活跃接话)
 │   ├── reply/            #   回复生成 + 解析 + prompt构建
 │   │   ├── segmenter.ts  #     代码驱动的智能断句
-│   │   └── humanizer.ts  #     拟人化模块 (错别字/延迟/撤回/贴纸/修改...)
-│   └── tools/            #   工具系统 (7种工具)
+│   │   └── humanizer.ts  #     拟人化模块 (错别字/延迟/撤回/贴纸/自调...)
+│   ├── dm-relay/         #   私聊助手 (传话/纸条/树洞/缘分签/定时/档案)
+│   ├── gacha/            #   猫娘卡牌收集 + 心愿单换卡
+│   ├── games/            #   派对小游戏
+│   ├── nl-commands.ts    #   自然语言 → 指令路由
+│   ├── timing/           #   节奏/时序状态
+│   └── tools/            #   工具系统
 ├── queue/                # BullMQ 队列
 ├── shared/               # 类型 + 日志 (pino) + 配置
-└── tracking/             # 活跃度 + 模型健康 + Bot知识 + 结果追踪
+└── tracking/             # 活跃度 + 情绪 + 关系 + 声望 + 行为角色 + ASI + 结果追踪
 prompts/                  # AI Prompt 模板 (Markdown)
 ├── identity/             #   人格定义
 ├── safety/               #   安全护栏
@@ -256,6 +303,25 @@ AI 回复质量由 5 层 prompt 协同控制：
 
 Prompt 文件热缓存，修改后重启即生效，无需重新构建。
 
+### 💬 命令速查
+
+斜杠命令，或用**自然语言**触发（私聊任意意图、群里需 @ 或回复本喵）：
+
+| 命令 | 说明 | 自然语言示例 |
+|------|------|------|
+| `/checkin` | 每日签到（连签/排名/里程碑，免费解锁猫娘卡） | 「帮我签到」「打卡」 |
+| `/stats` | 群聊签到排行榜 | 「看看签到排名」 |
+| `/cards` | 我的猫娘图鉴 | 「看看我的图鉴」 |
+| `/wish` | 心愿单 `add 卡名` · `holders` 找持有人 · `wanted` | 「我想要九尾喵」「谁有我想要的卡」 |
+| `/game` | 小游戏 `tod`/`dare`/`wyr`/`nhie`/`guess` | 「玩真心话」「来个二选一」 |
+| `/watch` `/unwatch` `/watches` | 话题追踪 | 「追踪比特币」「取消追踪比特币」 |
+| `/muteme` `/unmuteme` | 让本喵不回复我 / 恢复 | 「别理我」「可以理我了」 |
+| `/feature` | 群功能开关（群管） | — |
+| `/remember` | 记住我的偏好 | 「记住我喜欢猫」 |
+| `/help` | 帮助 | 「你会什么」 |
+
+**私聊专属**：传话、匿名纸条、树洞、缘分签、定时提醒、群友档案 —— 直接用自然语言说即可（"帮我跟群里说…"、"纸条 给XX …"、"明天早上6点叫我"）。
+
 ### 🔐 安全特性
 
 - **Telegram WebApp HMAC-SHA256 认证** — constant-time 比较防时序攻击
@@ -312,12 +378,16 @@ Bot 可在回复时调用以下工具：
 xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts as an opinionated, cat-girl-themed group member that can:
 
 - **Intelligently decide** when to reply using a 3-level judge pipeline (local rules → micro AI → full AI)
-- **Reply to multiple people** in a single trigger using JSON array output format
+- **Carry a conversation naturally** — stays engaged after it speaks (MaiBot-style talk-frequency): picks up questions/statements from either side within the last few messages, no @ or reply needed, while staying restrained in hot chats
+- **Understand natural-language commands** — "帮我签到" → checkin, "看看我的图鉴" → card album, "追踪比特币" → watch topic (DM is lenient; groups require addressing the bot)
+- **Reply to multiple people** in a single trigger, each quoting its own target
 - **Call tools** — web search (xAI Grok), web fetch, IP lookup, timers
 - **Stream responses** with typing indicators and progressive message updates
-- **Track group members** with username ↔ display name mapping, injected into AI context
-- **Learn about other bots** by recording their interactions and auto-generating knowledge digests
-- **Handle concurrency** via BullMQ job queue backed by Redis
+- **Remember & learn** — durable nickname memory, importance-scored memory with forgetting, group jargon mining, 7-section user profiles, self-scored reply quality (ASI) feeding a self-tuning humanizer
+- **DM assistant** — relay messages to the group, anonymous notes (with a guess-the-author mini-game), tree-hollow confide, fate draws, natural-language reminders, member profiles
+- **Collect & play** — free (non-gacha) collectible cat-girl cards unlocked by checking in, wishlist-matched trading, and party games
+- **Track group social state** — per-chat mood, decaying per-user affinity, reputation, behavioral roles, and reply-outcome tracking
+- **Handle concurrency** via BullMQ job queue backed by Redis; auto-failover ingress (long polling ⇄ webhook)
 - **Humanize replies** — typo injection + edit correction, read delay, ack prefix, delete-resend, sticker-only short replies, thinking interjections, afterthought edits, typing indicator alignment, random jitter, smart segmentation
 
 ### Key Design Decisions
