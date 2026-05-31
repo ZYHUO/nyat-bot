@@ -13,3 +13,4 @@ coverage/
 .env.bak*
 _find_group*.mjs
 backups/
+deploy-report.txt

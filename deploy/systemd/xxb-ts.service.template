@@ -1,7 +1,7 @@
 [Unit]
 Description=xxb-ts Telegram bot
-After=network-online.target
-Wants=network-online.target
+After=network-online.target redis-server.service redis.service qdrant.service
+Wants=network-online.target redis-server.service qdrant.service
 
 [Service]
 Type=simple
