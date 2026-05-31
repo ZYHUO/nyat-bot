@@ -15,8 +15,8 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=30
 KillSignal=SIGINT
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:__WORKDIR__/logs/app.log
+StandardError=append:__WORKDIR__/logs/app.log
 
 [Install]
 WantedBy=multi-user.target

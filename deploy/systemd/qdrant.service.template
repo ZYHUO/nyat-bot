@@ -1,0 +1,20 @@
+[Unit]
+Description=Qdrant Vector DB (xxb-ts long-term memory)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__QDRANT_BIN__
+Restart=on-failure
+RestartSec=3
+# Bind to localhost only — never exposed externally.
+Environment=QDRANT__SERVICE__HOST=127.0.0.1
+Environment=QDRANT__SERVICE__HTTP_PORT=6333
+Environment=QDRANT__SERVICE__GRPC_PORT=6334
+Environment=QDRANT__STORAGE__STORAGE_PATH=__STORAGE__/storage
+Environment=QDRANT__STORAGE__SNAPSHOTS_PATH=__STORAGE__/snapshots
+Environment=QDRANT__TELEMETRY_DISABLED=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -51,12 +51,14 @@
 - ✅ **每日签到** — `/checkin` 连续签到、排名、里程碑（7/30/100 天）、AI 自由发挥奖励
 - 🏅 **声望系统** — 群友互动累积声望（migration 0014），行为角色自动标签（migration 0029）
 - 😺 **情绪 + 关系** — 每群情绪 valence（migration 0017）、对每位群友的好感度随时间衰减（migration 0018）
+- 🕸️ **群友社交图** — 追踪群友之间（非 bot↔人）的互动关系，注入回复 prompt「A 和 B 常互动」让猫娘读懂群气氛（migration 0034）
+- 😻 **emoji 反应** — `setMessageReaction` 轻量"已读卖萌"，对好笑/可爱/秀的消息偶尔反应，每群每天硬上限 2 次、不调 LLM
 - 🔭 **话题追踪** — `/watch 关键词`，有人聊到就提醒你
 - 🛡️ **入群验证 + 白名单** — 审批制入群，AI 辅助审核 + 验证问答，Master 通知
 
 **私聊功能（DM 助手）**
 - 📨 **传话/带话** — 私聊让本喵把话带到群里，可指定对象
-- 📜 **匿名小纸条** — 匿名给群里某人留言 + "猜作者"渐进提示小游戏（migration 0020）
+- 📜 **匿名小纸条** — 匿名给群里某人留言 + 手动"猜作者"小游戏（migration 0020）
 - 🌳 **树洞倾诉** — 匿名把心事分享到群，AI 温暖回应
 - 🔮 **缘分签** — 抽签/运势（migration 0022）
 - ⏰ **定时提醒** — 自然语言设提醒，到点喊你（"明天早上 6 点叫我"）
@@ -80,16 +82,17 @@
 
 **基础设施**
 - 📦 **BullMQ 消息队列** — Redis 支撑的高并发处理（可配置并发数）
-- 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）+ ChromaDB（语义记忆）
+- 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）+ **Qdrant**（语义记忆，int8 量化，进程内本地嵌入）
 - 🔁 **Ingress 自动故障转移** — 默认长轮询（不对外开放端口）；轮询挂掉自动切 webhook 备用，由 Redis 标志 + 看门狗控制
 - 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，macOS 窗口风格 UI，运行时配置管理
 - ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控）
 - 🔐 **安全防护** — SSRF 防护、webhook constant-time 验证、速率限制、Redis Lua 原子操作、去重锁
-- 📡 **频道消息源** — 自动抓取公开 Telegram 频道内容存入 ChromaDB，无需管理员权限
+- 📡 **频道消息源** — 自动抓取公开 Telegram 频道内容存入 Qdrant 向量库，无需管理员权限
 - 🌐 **Cloudflare 绕过** — CF_FETCH skill 自动三级降级（直连 → Playwright+Xvfb → DrissionPage）
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
 - 🎨 **359 个贴纸意图** — AI 自主选择贴纸（top-N 截断 + Levenshtein 模糊匹配 + 反感反馈），覆盖情绪/社交/群聊/猫娘等场景
-- 🧪 **702 单元测试** — vitest 全绿基线；33 个 SQLite 迁移自动按序应用
+- 🚀 **一键部署** — `scripts/deploy.sh` 端到端：依赖 → Qdrant → 构建 → systemd → 自检
+- 🧪 **712 单元测试** — vitest 全绿基线；34 个 SQLite 迁移自动按序应用
 
 ### 🏗️ 架构
 
@@ -111,7 +114,7 @@ grammy Bot ──→ Formatter ──→ Context (Redis)
   │                          │             │   ├─ Recent Window
   │                          │             │   ├─ Thread Trace (reply chain)
   │                          │             │   ├─ Entity Mentions
-  │                          │             │   └─ Semantic (ChromaDB)
+  │                          │             │   └─ Semantic (Qdrant, int8)
   │                          │             ├─ 5-Layer Prompt Builder
   │                          │             │   (+画像/外号/情绪/关系注入)
   │                          │             ├─ Tool Executor (search, fetch...)
@@ -156,7 +159,7 @@ src/
 ├── db/                   # Redis (ioredis) + SQLite (better-sqlite3)
 ├── knowledge/            # 知识库 + 贴纸 + 人物外号
 ├── learners/             # 黑话挖掘/释义 + 表达学习门控 + 学习并发门
-├── memory/               # ChromaDB 语义记忆 + 重要度/遗忘
+├── memory/               # Qdrant 语义记忆 (int8量化) + 重要度/遗忘
 ├── ingress/              # 长轮询 ⇄ webhook 故障转移
 ├── pipeline/             # 核心消息管线
 │   ├── context/          #   上下文管理 + 压缩 + 4路检索
@@ -195,6 +198,7 @@ scripts/                  # 迁移 + 部署脚本
 | 消息队列 | [BullMQ](https://bullmq.io/) (Redis) |
 | 数据库 | SQLite ([better-sqlite3](https://github.com/WiseLibs/better-sqlite3), WAL mode) |
 | 缓存/队列 | Redis ([ioredis](https://github.com/redis/ioredis)) |
+| 向量库 | [Qdrant](https://qdrant.tech/) (HNSW + int8 量化) · 本地嵌入 [@xenova/transformers](https://github.com/xenova/transformers.js) (all-MiniLM-L6-v2) |
 | 日志 | [pino](https://getpino.io/) |
 | 校验 | [zod](https://zod.dev/) |
 | Token 计算 | [tiktoken](https://github.com/openai/tiktoken) |
@@ -210,8 +214,20 @@ scripts/                  # 迁移 + 部署脚本
 - Redis ≥ 7
 - Telegram Bot Token（从 [@BotFather](https://t.me/BotFather) 获取）
 - OpenAI 兼容 API 密钥（OpenAI / Google Gemini / Anthropic / 自建代理等）
+- Qdrant 向量库（可选；`scripts/deploy.sh` 会自动下载安装，不配置则语义记忆为空）
 
-#### 安装
+#### 🚀 一键部署（推荐）
+
+```bash
+git clone https://github.com/ZYHUO/nyat-bot.git && cd nyat-bot
+cp .env.example .env   # 填入 BOT_TOKEN / BOT_USERNAME / AI_PROVIDER_* 等
+sudo ./scripts/deploy.sh
+```
+
+`deploy.sh` 端到端、可重复执行：依赖安装 → Qdrant（musl 静态版 + systemd）→ 构建（含 miniapp）→ 安装 `xxb-ts.service` → 自检（Qdrant healthz / 服务 active / Bot started）。SQLite 迁移开机自动按序应用。
+常用标志：`--skip-qdrant` `--skip-build` `--skip-deps` `--no-restart`；环境变量 `QDRANT_VERSION`（默认 1.18.1）。
+
+#### 手动安装
 
 ```bash
 git clone https://github.com/ZYHUO/nyat-bot.git
@@ -245,21 +261,24 @@ docker compose up -d    # 启动 Redis + Bot
 
 #### systemd 部署
 
+优先用上面的一键脚本 `sudo ./scripts/deploy.sh`（它会装好 Qdrant + 两个 systemd 服务）。手动等价步骤：
+
 ```bash
 npm run build
 npm run build:miniapp
-sudo ./scripts/install-systemd.sh
+sudo ./scripts/install-systemd.sh   # 安装 xxb-ts.service（日志写 logs/app.log）
+# Qdrant 向量库（语义记忆）— deploy.sh 已自动处理；如需单独装：
+#   下载 musl 静态版到 /usr/local/bin/qdrant，套用 deploy/systemd/qdrant.service.template
 sudo systemctl restart xxb-ts
-sudo systemctl status xxb-ts
+sudo systemctl status xxb-ts qdrant
 ```
 
 常用命令：
 
 ```bash
-sudo systemctl restart xxb-ts
-sudo systemctl stop xxb-ts
-sudo systemctl status xxb-ts
-journalctl -u xxb-ts -f
+sudo systemctl restart xxb-ts        # 重启 bot
+sudo systemctl status xxb-ts qdrant  # bot + 向量库状态
+journalctl -u xxb-ts -f              # 或 tail -f logs/app.log
 ```
 
 #### PM2 部署
