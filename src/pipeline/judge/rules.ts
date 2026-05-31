@@ -200,6 +200,24 @@ function mentionsOtherUser(text: string, botUsername: string): boolean {
   return matches.some((m) => m.toLowerCase() !== `@${botUsername.toLowerCase()}`);
 }
 
+// ── Active-conversation window ───────────────────────────────────────────────
+// Borrowed from MaiBot: after the bot itself speaks it stays "engaged" for a
+// short window, so natural follow-ups (no @ / no TG-reply) are routed to the
+// L1/L2 LLM judge instead of being hard-ignored by the recent_reply cooldown.
+// It is the *LLM* that then decides — this never auto-replies. Deliberately
+// disabled in hot chats (>= the hot_chat trigger) so it can't compound into spam.
+export const ACTIVE_CONV_ENABLED = true;        // tunable — master switch
+export const ACTIVE_CONV_WINDOW_SEC = 90;       // tunable — engaged window after the bot's last reply
+export const ACTIVE_CONV_MAX_HOT_5MIN = 25;     // tunable — disable at/above this burst rate (== hot_chat trigger)
+const ACTIVE_CONV_MIN_LEN = 2;                  // tunable — skip ultra-short noise (single emoji / "?")
+
+/** True during the brief engaged window after the bot's own last reply, in a calm live thread. */
+export function isActiveConvWindow(lastBotReplyAt: number | undefined, messagesLast5Min: number): boolean {
+  if (!ACTIVE_CONV_ENABLED || !lastBotReplyAt) return false;
+  if (messagesLast5Min >= ACTIVE_CONV_MAX_HOT_5MIN) return false;
+  return Date.now() - lastBotReplyAt <= ACTIVE_CONV_WINDOW_SEC * 1000;
+}
+
 export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   const {
     message: msg,
@@ -407,6 +425,14 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
       }
       if (lastBotReplyIndex === 0) {
         return null; // immediate human follow-up → let L1/L2 decide, don't hard-ignore
+      }
+      // index 1: still in the active-conversation window (bot spoke seconds ago,
+      // calm thread) → let L1/L2 judge this continuation instead of going silent.
+      if (
+        text.trim().length >= ACTIVE_CONV_MIN_LEN &&
+        isActiveConvWindow(ctx.lastBotReplyAt, groupActivity.messagesLast5Min)
+      ) {
+        return null;
       }
     }
     return makeResult("IGNORE", "recent_reply");

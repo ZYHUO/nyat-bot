@@ -4,7 +4,7 @@
 
 import type { FormattedMessage, JudgeResult } from "../../shared/types.js";
 import type { RuleContext } from "./rules.js";
-import { evaluateRules } from "./rules.js";
+import { evaluateRules, isActiveConvWindow, ACTIVE_CONV_ENABLED } from "./rules.js";
 import { microJudge } from "./micro.js";
 import { logger } from "../../shared/logger.js";
 import { env } from "../../env.js";
@@ -35,10 +35,17 @@ function findLastBotReplyIndex(
   return -1;
 }
 
-function shouldAcceptL1Result(result: JudgeResult): boolean {
-  const confidence = result.confidence ?? 0;
+// Inside the active-conversation window the bot just spoke, so a follow-up is more
+// likely meant for it: accept an L1 REPLY at a lower confidence (don't bounce every
+// borderline continuation to L2's same silence-biased prompt). Only the REPLY bar is
+// relaxed — IGNORE/REJECT and all error paths keep their silence bias.
+const ACTIVE_CONV_L1_REPLY_CONF = 0.6;
 
-  if (result.action === "REPLY") return confidence > 0.8;
+function shouldAcceptL1Result(result: JudgeResult, activeConv = false): boolean {
+  const confidence = result.confidence ?? 0;
+  const replyBar = activeConv ? ACTIVE_CONV_L1_REPLY_CONF : 0.8;
+
+  if (result.action === "REPLY") return confidence > replyBar;
   if (result.action === "IGNORE") return confidence >= 0.5;
   if (result.action === "REJECT") return confidence > 0.8;
   return false;
@@ -50,10 +57,11 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
   // ── L0: Local rules (0-5ms) ──
   const e = env();
 
-  // Pre-compute proactive engagement context (async, before sync evaluateRules)
+  // Pre-compute engagement context (async, before sync evaluateRules). Needed by
+  // both the proactive fall-through and the active-conversation window.
   let lastBotReplyAt: number | undefined;
   let recentHumanMsgCount: number | undefined;
-  if (e.JUDGE_PROACTIVE_ENABLED) {
+  if (e.JUDGE_PROACTIVE_ENABLED || ACTIVE_CONV_ENABLED) {
     const timingState = await getChatState(input.chatId);
     lastBotReplyAt = timingState.lastBotReplyAt;
     recentHumanMsgCount = input.recentMessages.filter(
@@ -103,6 +111,10 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
   }
 
   // ── L1: Micro model (150-300ms) ──
+  const activeConv = isActiveConvWindow(
+    lastBotReplyAt,
+    input.groupActivity.messagesLast5Min,
+  );
   const l1Result = await microJudge(
     input.message,
     input.recentMessages,
@@ -111,7 +123,7 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     knowledgeForJudge,
     input.chatId,
   );
-  if (shouldAcceptL1Result(l1Result)) {
+  if (shouldAcceptL1Result(l1Result, activeConv)) {
     logger.debug(
       {
         action: l1Result.action,

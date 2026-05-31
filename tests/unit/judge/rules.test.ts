@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { evaluateRules } from "../../../src/pipeline/judge/rules.js";
+import { evaluateRules, isActiveConvWindow } from "../../../src/pipeline/judge/rules.js";
 import type { RuleContext } from "../../../src/pipeline/judge/rules.js";
 import type { FormattedMessage } from "../../../src/shared/types.js";
 
@@ -404,6 +404,41 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("IGNORE");
+  });
+
+  it("index-1 continuation within the active-conversation window → null (defer to L1)", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
+    const human = makeMsg({ uid: 1002, textContent: "我也是" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "那一起去呀" }),
+      recentMessages: [botMsg, human],
+      lastBotReplyIndex: 1,
+      lastBotReplyAt: Date.now(), // bot spoke seconds ago → engaged window
+      groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 }, // calm
+    });
+    expect(evaluateRules(ctx)).toBeNull();
+  });
+
+  it("index-1 continuation OUTSIDE the window (bot spoke long ago) → IGNORE", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
+    const human = makeMsg({ uid: 1002, textContent: "我也是" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "那一起去呀" }),
+      recentMessages: [botMsg, human],
+      lastBotReplyIndex: 1,
+      lastBotReplyAt: Date.now() - 200_000, // >90s ago → window lapsed
+      groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
+    });
+    const r = evaluateRules(ctx);
+    expect(r).not.toBeNull();
+    expect(r!.rule).toBe("recent_reply");
+  });
+
+  it("isActiveConvWindow: engaged only in a calm thread shortly after the bot spoke", () => {
+    expect(isActiveConvWindow(Date.now(), 10)).toBe(true);   // calm + recent → engaged
+    expect(isActiveConvWindow(Date.now(), 25)).toBe(false);  // hot (>= ceiling) → disabled
+    expect(isActiveConvWindow(undefined, 5)).toBe(false);    // bot never spoke
+    expect(isActiveConvWindow(Date.now() - 200_000, 5)).toBe(false); // window lapsed
   });
 
   it("@others → IGNORE", () => {

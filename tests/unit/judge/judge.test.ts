@@ -6,9 +6,17 @@ const mockEvaluateRules = vi.fn();
 const mockMicroJudge = vi.fn();
 const mockEnv = vi.fn();
 const mockGetKnowledge = vi.fn();
+const mockIsActiveConvWindow = vi.fn(() => false);
+const mockGetChatState = vi.fn(async () => ({ lastBotReplyAt: undefined as number | undefined }));
 
 vi.mock("../../../src/pipeline/judge/rules.js", () => ({
   evaluateRules: (...args: unknown[]) => mockEvaluateRules(...args),
+  isActiveConvWindow: (...args: unknown[]) => mockIsActiveConvWindow(...(args as [])),
+  ACTIVE_CONV_ENABLED: true,
+}));
+
+vi.mock("../../../src/pipeline/timing/chat-runtime.js", () => ({
+  getChatState: (...args: unknown[]) => mockGetChatState(...(args as [])),
 }));
 
 vi.mock("../../../src/pipeline/judge/micro.js", () => ({
@@ -74,8 +82,11 @@ describe("judge", () => {
       JUDGE_KNOWLEDGE_ENABLED: false,
       JUDGE_KNOWLEDGE_PERMANENT: true,
       JUDGE_KNOWLEDGE_GROUP: true,
+      JUDGE_PROACTIVE_ENABLED: false,
     });
     mockGetKnowledge.mockReturnValue("");
+    mockIsActiveConvWindow.mockReturnValue(false);
+    mockGetChatState.mockResolvedValue({ lastBotReplyAt: undefined });
   });
 
   it("accepts medium-confidence L1 ignore without escalating to L2", async () => {
@@ -136,5 +147,42 @@ describe("judge", () => {
       "",
       -100123,
     );
+  });
+
+  it("accepts a medium-confidence L1 reply INSIDE the active-conversation window (no L2)", async () => {
+    mockIsActiveConvWindow.mockReturnValue(true);
+    mockGetChatState.mockResolvedValue({ lastBotReplyAt: Date.now() });
+    mockMicroJudge.mockResolvedValue({
+      action: "REPLY",
+      replyPath: "direct",
+      replyTier: "normal",
+      level: "L1_MICRO",
+      confidence: 0.65, // below normal 0.8 bar, above the relaxed 0.6 window bar
+      latencyMs: 90,
+    });
+
+    const result = await judge(makeInput());
+
+    expect(result.action).toBe("REPLY");
+    expect(result.level).toBe("L1_MICRO"); // accepted at L1, not escalated
+    expect(mockMicroJudge).toHaveBeenCalledTimes(1);
+  });
+
+  it("escalates the SAME medium-confidence L1 reply to L2 outside the window", async () => {
+    mockIsActiveConvWindow.mockReturnValue(false);
+    mockMicroJudge
+      .mockResolvedValueOnce({
+        action: "REPLY", replyPath: "direct", replyTier: "normal",
+        level: "L1_MICRO", confidence: 0.65, latencyMs: 90,
+      })
+      .mockResolvedValueOnce({
+        action: "REPLY", replyPath: "direct", replyTier: "normal",
+        level: "L1_MICRO", confidence: 0.9, latencyMs: 120,
+      });
+
+    const result = await judge(makeInput());
+
+    expect(result.level).toBe("L2_AI");
+    expect(mockMicroJudge).toHaveBeenCalledTimes(2);
   });
 });
