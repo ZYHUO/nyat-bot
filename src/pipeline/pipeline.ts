@@ -129,6 +129,10 @@ const DIRECT_INTERACTION_RULES = new Set([
   "mention_self_lookup",
   "whitelisted_command",
   "private_chat",
+  // Active-conversation engagement: deliberate "this is for the bot" decisions —
+  // don't let stale-reply suppression / the timing gate silence them.
+  "followup_to_bot",
+  "active_conv_engage",
 ]);
 
 function isAssistantTurn(

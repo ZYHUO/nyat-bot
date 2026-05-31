@@ -469,10 +469,26 @@ describe("L0 Rules Engine", () => {
 
   it("isActiveConv: live only when the bot is among the last few msgs in a calm thread", () => {
     expect(isActiveConv(0, 10)).toBe(true);   // bot just spoke, calm
-    expect(isActiveConv(2, 10)).toBe(true);   // within MAX_INDEX
-    expect(isActiveConv(3, 10)).toBe(false);  // too far back (>= MAX_INDEX)
+    expect(isActiveConv(3, 10)).toBe(true);   // within MAX_INDEX (tolerates an interjection)
+    expect(isActiveConv(4, 10)).toBe(false);  // too far back (>= MAX_INDEX)
     expect(isActiveConv(0, 25)).toBe(false);  // hot (>= ceiling)
     expect(isActiveConv(-1, 5)).toBe(false);  // bot never spoke
+  });
+
+  it("user's question after someone else interjected (bot still in last few msgs) → REPLY", () => {
+    // bot spoke, another user interjected, then the user asks the bot a question.
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "九点十九啦主人～" });
+    const other = makeMsg({ uid: 2002, fullName: "千雪", textContent: "又收到一只啾咪啦" });
+    const ctx = makeCtx({
+      message: makeMsg({ uid: 1001, textContent: "是不是要起床啦" }), // 是不是 → question
+      recentMessages: [botMsg, other],
+      lastBotReplyIndex: 1, // bot is 2nd-to-last; even at index 2 (addAssistant lag) it still qualifies
+      groupActivity: { messagesLast5Min: 8, messagesLast1Hour: 50 },
+    });
+    const result = evaluateRules(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("REPLY");
+    expect(result!.rule).toBe("followup_to_bot");
   });
 
   it("@others → IGNORE", () => {

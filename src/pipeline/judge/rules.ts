@@ -207,7 +207,8 @@ function mentionsOtherUser(text: string, botUsername: string): boolean {
 // It is the *LLM* that then decides — this never auto-replies. Deliberately
 // disabled in hot chats (>= the hot_chat trigger) so it can't compound into spam.
 export const ACTIVE_CONV_ENABLED = true;        // tunable — master switch
-export const ACTIVE_CONV_MAX_INDEX = 3;         // tunable — bot among the last N messages == a live exchange
+export const ACTIVE_CONV_MAX_INDEX = 4;         // tunable — bot among the last N messages == a live exchange
+                                                //   (covers a brief interjection / addAssistant lag between turns)
 export const ACTIVE_CONV_MAX_HOT_5MIN = 25;     // tunable — disable the relaxation at/above this burst rate
 const ACTIVE_CONV_MIN_LEN = 2;                  // tunable — skip ultra-short noise (single emoji / "?")
 // When someone speaks right after the bot and neither side asked a question, the bot
@@ -419,31 +420,38 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     }
   }
 
-  // 7. Recent reply — cooldown to prevent the bot from dominating, but NOT at the
-  // cost of dropping a direct follow-up to the bot. lastBotReplyIndex === 0 means a
-  // human is speaking immediately after the bot. If the bot's own last message was a
-  // question, this is almost certainly the answer → reply (even without a TG-reply/@).
-  // Other immediate follow-ups go to L1/L2 instead of a hard ignore. The cooldown
-  // still applies one message later (index 1) for non-question chatter.
-  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 2) {
-    const calm = groupActivity.messagesLast5Min < ACTIVE_CONV_MAX_HOT_5MIN;
-    const hasContent = text.trim().length >= ACTIVE_CONV_MIN_LEN;
-    if (ACTIVE_CONV_ENABLED && calm && hasContent && !mentionsOtherUser(text, botUsername)) {
-      const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];
-      const botLastText = botLast ? botLast.textContent || botLast.captionContent || "" : "";
-      // The bot is one of the last 1-2 messages — this is a live exchange it's in.
-      // Strong "for the bot" signals that need no @ / TG-reply: the bot just asked
-      // something (this is the answer), OR the user themselves is asking a question.
-      if (looksLikeQuestion(botLastText) || looksLikeQuestion(text)) {
-        return makeResult("REPLY", "followup_to_bot", { skipPathResolution: true });
-      }
-      // Plain statement immediately after the bot → continue the exchange "适时":
-      // engage a share of the time, otherwise defer to the L1/L2 judge.
-      if (lastBotReplyIndex === 0 && Math.random() < ACTIVE_CONV_ENGAGE_RATE) {
-        return makeResult("REPLY", "active_conv_engage", { skipPathResolution: true });
-      }
-      return null; // let L1/L2 decide instead of a hard ignore
+  // 7. Active-conversation engagement + recent-reply cooldown.
+  // When the bot is in a live exchange — it spoke within the last few messages
+  // (ACTIVE_CONV_MAX_INDEX, which tolerates a brief interjection / addAssistant lag)
+  // and the thread is calm — keep it engaged instead of going silent:
+  //   • a question from EITHER side (bot just asked, or the user is asking) → REPLY;
+  //   • a plain statement right after the bot → continue "适时" (engage a share);
+  //   • everything else → defer to the L1/L2 judge.
+  const calm = groupActivity.messagesLast5Min < ACTIVE_CONV_MAX_HOT_5MIN;
+  const hasContent = text.trim().length >= ACTIVE_CONV_MIN_LEN;
+  const inActiveExchange =
+    ACTIVE_CONV_ENABLED &&
+    lastBotReplyIndex >= 0 &&
+    lastBotReplyIndex < ACTIVE_CONV_MAX_INDEX &&
+    calm &&
+    hasContent &&
+    !mentionsOtherUser(text, botUsername);
+
+  if (inActiveExchange) {
+    const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];
+    const botLastText = botLast ? botLast.textContent || botLast.captionContent || "" : "";
+    if (looksLikeQuestion(botLastText) || looksLikeQuestion(text)) {
+      return makeResult("REPLY", "followup_to_bot", { skipPathResolution: true });
     }
+    if (lastBotReplyIndex === 0 && Math.random() < ACTIVE_CONV_ENGAGE_RATE) {
+      return makeResult("REPLY", "active_conv_engage", { skipPathResolution: true });
+    }
+    return null; // let L1/L2 decide instead of a hard ignore
+  }
+
+  // Residual cooldown: bot spoke in the last 2 messages but this didn't qualify as a
+  // continuation (hot thread / @others / no real content) → stay quiet, don't dominate.
+  if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 2) {
     return makeResult("IGNORE", "recent_reply");
   }
 
