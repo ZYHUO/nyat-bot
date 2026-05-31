@@ -27,7 +27,10 @@ console.log(`Chroma total: ${total}`);
 if (!probe) {
   const { collections } = await qdrant.getCollections();
   if (!collections.some((c) => c.name === COLLECTION)) {
-    await qdrant.createCollection(COLLECTION, { vectors: { size: 384, distance: 'Cosine' } });
+    await qdrant.createCollection(COLLECTION, {
+      vectors: { size: 384, distance: 'Cosine', on_disk: true },
+      quantization_config: { scalar: { type: 'int8', quantile: 0.99, always_ram: true } },
+    });
     await qdrant.createPayloadIndex(COLLECTION, { field_name: 'chatId', field_schema: 'integer', wait: true });
     console.log('Qdrant collection created');
   }

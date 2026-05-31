@@ -129,7 +129,13 @@ function getStore(): Promise<QdrantClient> {
     const { collections } = await c.getCollections();
     if (!collections.some((col) => col.name === COLLECTION_NAME)) {
       await c.createCollection(COLLECTION_NAME, {
-        vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
+        // Scalar int8 quantization: keep the quantized vectors in RAM for fast ANN,
+        // offload the float32 originals to disk; search rescores from disk to keep
+        // recall near-lossless. ~4x less RAM for the vector data.
+        vectors: { size: VECTOR_SIZE, distance: 'Cosine', on_disk: true },
+        quantization_config: {
+          scalar: { type: 'int8', quantile: 0.99, always_ram: true },
+        },
       });
       // Index chatId so the per-chat filter is a fast pre-filter, not a scan.
       await c.createPayloadIndex(COLLECTION_NAME, {
@@ -233,6 +239,9 @@ async function _searchMemoryInner(
     limit: topK,
     filter: { must: [{ key: 'chatId', match: { value: chatId } }] },
     with_payload: true,
+    // Under int8 quantization: over-fetch on the quantized index, then re-rank the
+    // candidates with the original (on-disk) vectors → near-lossless recall.
+    params: { quantization: { rescore: true, oversampling: 2.0 } },
   });
 
   const messages: ScoredMessage[] = [];
