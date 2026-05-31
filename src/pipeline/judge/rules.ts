@@ -184,6 +184,22 @@ export function looksLikeStickerDislike(text: string): boolean {
   return STICKER_DISLIKE_PATTERN.test(text);
 }
 
+// Reads like a question / prompt expecting an answer. Used so the bot doesn't go
+// silent when someone answers a question it just asked (without a TG-reply / @).
+const QUESTION_PATTERN =
+  /[?？]|怎么|怎样|咋|什么|为什么|为啥|是不是|有没有|要不要|对不对|好不好|多少|几[点个天]|哪[儿里位个]|谁|吗[\s~～!！。.…]*$|呢[\s~～!！。.…]*$/;
+export function looksLikeQuestion(text: string): boolean {
+  const t = (text || "").trim();
+  return t.length > 0 && QUESTION_PATTERN.test(t);
+}
+
+/** True if the text @-mentions a user other than the bot. */
+function mentionsOtherUser(text: string, botUsername: string): boolean {
+  const matches = text.match(/@(\w+)/g);
+  if (!matches) return false;
+  return matches.some((m) => m.toLowerCase() !== `@${botUsername.toLowerCase()}`);
+}
+
 export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   const {
     message: msg,
@@ -376,12 +392,23 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     }
   }
 
-  // 7. Recent reply — cooldown to prevent bot from dominating conversation
-  // lastBotReplyIndex = 0 means bot was the last message
-  // Threshold of 2: bot only needs to wait 2 other messages before chiming in again.
-  // This allows the bot to be a natural participant rather than only speaking
-  // once and vanishing for the rest of the conversation.
+  // 7. Recent reply — cooldown to prevent the bot from dominating, but NOT at the
+  // cost of dropping a direct follow-up to the bot. lastBotReplyIndex === 0 means a
+  // human is speaking immediately after the bot. If the bot's own last message was a
+  // question, this is almost certainly the answer → reply (even without a TG-reply/@).
+  // Other immediate follow-ups go to L1/L2 instead of a hard ignore. The cooldown
+  // still applies one message later (index 1) for non-question chatter.
   if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 2) {
+    if (!mentionsOtherUser(text, botUsername)) {
+      const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];
+      const botLastText = botLast ? botLast.textContent || botLast.captionContent || "" : "";
+      if (looksLikeQuestion(botLastText)) {
+        return makeResult("REPLY", "followup_to_bot", { skipPathResolution: true });
+      }
+      if (lastBotReplyIndex === 0) {
+        return null; // immediate human follow-up → let L1/L2 decide, don't hard-ignore
+      }
+    }
     return makeResult("IGNORE", "recent_reply");
   }
 

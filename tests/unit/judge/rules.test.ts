@@ -371,6 +371,41 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("recent_reply");
   });
 
+  it("answer to the bot's own question (no @/reply) → REPLY followup_to_bot", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "今天怎么这么早叫啾咪呀～" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "叫你起床呀" }),
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+    });
+    const result = evaluateRules(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("REPLY");
+    expect(result!.rule).toBe("followup_to_bot");
+  });
+
+  it("immediate follow-up after a bot statement (not a question) → null (defer to L1)", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "好的" }),
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+    });
+    expect(evaluateRules(ctx)).toBeNull();
+  });
+
+  it("immediate follow-up that @s someone else → still IGNORE", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "在吗？" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "@someone 你看这个" }),
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+    });
+    const result = evaluateRules(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+  });
+
   it("@others → IGNORE", () => {
     const ctx = makeCtx({
       message: makeMsg({ textContent: "hey @someone" }),
