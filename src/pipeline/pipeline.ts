@@ -84,6 +84,7 @@ import { logger } from "../shared/logger.js";
 import { parseMuteTimedRequest } from "./judge/rules.js";
 import { addWatch, removeWatch, listWatches, checkWatches } from "../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage, recordBotReply } from "../tracking/stats.js";
+import { recordBotReply as recordTimingBotReply } from "./timing/state-store.js";
 import { applyMoodEvent } from "../tracking/mood.js";
 import { recordSelfReply } from "../tracking/self-history.js";
 import { startGame, playGame, stopGame, hasActiveGame } from "./games/manager.js";
@@ -996,6 +997,10 @@ async function generateAndSendReplies(args: {
 
         _repliesSinceLastSticker++;
         try { recordBotReply(job.chatId); } catch { /* non-critical */ }
+        // Persist lastBotReplyAt to timing state (read by proactive-scan); the
+        // tracking recordBotReply above does NOT write it, and the timing-gate one
+        // is gated off by default.
+        void recordTimingBotReply(job.chatId).catch(() => { /* non-critical */ });
       } catch (err) {
         logger.error(
           { chatId: job.chatId, targetMessageId: reply.targetMessageId, err },

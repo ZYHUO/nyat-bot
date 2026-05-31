@@ -6,13 +6,12 @@ const mockEvaluateRules = vi.fn();
 const mockMicroJudge = vi.fn();
 const mockEnv = vi.fn();
 const mockGetKnowledge = vi.fn();
-const mockIsActiveConvWindow = vi.fn(() => false);
+const mockIsActiveConv = vi.fn(() => false);
 const mockGetChatState = vi.fn(async () => ({ lastBotReplyAt: undefined as number | undefined }));
 
 vi.mock("../../../src/pipeline/judge/rules.js", () => ({
   evaluateRules: (...args: unknown[]) => mockEvaluateRules(...args),
-  isActiveConvWindow: (...args: unknown[]) => mockIsActiveConvWindow(...(args as [])),
-  ACTIVE_CONV_ENABLED: true,
+  isActiveConv: (...args: unknown[]) => mockIsActiveConv(...(args as [])),
 }));
 
 vi.mock("../../../src/pipeline/timing/chat-runtime.js", () => ({
@@ -85,7 +84,7 @@ describe("judge", () => {
       JUDGE_PROACTIVE_ENABLED: false,
     });
     mockGetKnowledge.mockReturnValue("");
-    mockIsActiveConvWindow.mockReturnValue(false);
+    mockIsActiveConv.mockReturnValue(false);
     mockGetChatState.mockResolvedValue({ lastBotReplyAt: undefined });
   });
 
@@ -150,8 +149,7 @@ describe("judge", () => {
   });
 
   it("accepts a medium-confidence L1 reply INSIDE the active-conversation window (no L2)", async () => {
-    mockIsActiveConvWindow.mockReturnValue(true);
-    mockGetChatState.mockResolvedValue({ lastBotReplyAt: Date.now() });
+    mockIsActiveConv.mockReturnValue(true);
     mockMicroJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
@@ -169,7 +167,7 @@ describe("judge", () => {
   });
 
   it("escalates the SAME medium-confidence L1 reply to L2 outside the window", async () => {
-    mockIsActiveConvWindow.mockReturnValue(false);
+    mockIsActiveConv.mockReturnValue(false);
     mockMicroJudge
       .mockResolvedValueOnce({
         action: "REPLY", replyPath: "direct", replyTier: "normal",

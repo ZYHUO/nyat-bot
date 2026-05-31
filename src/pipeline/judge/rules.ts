@@ -187,7 +187,7 @@ export function looksLikeStickerDislike(text: string): boolean {
 // Reads like a question / prompt expecting an answer. Used so the bot doesn't go
 // silent when someone answers a question it just asked (without a TG-reply / @).
 const QUESTION_PATTERN =
-  /[?？]|怎么|怎样|咋|什么|为什么|为啥|是不是|有没有|要不要|对不对|好不好|多少|几[点个天]|哪[儿里位个]|谁|吗[\s~～!！。.…]*$|呢[\s~～!！。.…]*$/;
+  /[?？]|怎么|怎样|咋|什么|啥|为什么|为啥|干嘛|干啥|干什么|是不是|有没有|要不要|能不能|可不可以|行不行|去不去|对不对|好不好|多少|多久|多大|几[点个天号时]|哪[儿里位个]|谁|吗[\s~～!！。.…]*$|呢[\s~～!！。.…]*$/;
 export function looksLikeQuestion(text: string): boolean {
   const t = (text || "").trim();
   return t.length > 0 && QUESTION_PATTERN.test(t);
@@ -207,20 +207,24 @@ function mentionsOtherUser(text: string, botUsername: string): boolean {
 // It is the *LLM* that then decides — this never auto-replies. Deliberately
 // disabled in hot chats (>= the hot_chat trigger) so it can't compound into spam.
 export const ACTIVE_CONV_ENABLED = true;        // tunable — master switch
-export const ACTIVE_CONV_WINDOW_SEC = 90;       // tunable — engaged window after the bot's last reply
-export const ACTIVE_CONV_MAX_HOT_5MIN = 25;     // tunable — disable at/above this burst rate (== hot_chat trigger)
+export const ACTIVE_CONV_MAX_INDEX = 3;         // tunable — bot among the last N messages == a live exchange
+export const ACTIVE_CONV_MAX_HOT_5MIN = 25;     // tunable — disable the relaxation at/above this burst rate
 const ACTIVE_CONV_MIN_LEN = 2;                  // tunable — skip ultra-short noise (single emoji / "?")
-// When someone speaks right after the bot (and it wasn't answering a question), the
-// bot continues the exchange this fraction of the time — MaiBot talk-frequency style:
+// When someone speaks right after the bot and neither side asked a question, the bot
+// continues the exchange this fraction of the time — MaiBot talk-frequency style:
 // engages declarative follow-ups "适时" without replying to literally everything. The
 // rest fall through to the L1/L2 judge. Dial up = chattier, down = quieter.
 const ACTIVE_CONV_ENGAGE_RATE = 0.6;            // tunable — 0..1
 
-/** True during the brief engaged window after the bot's own last reply, in a calm live thread. */
-export function isActiveConvWindow(lastBotReplyAt: number | undefined, messagesLast5Min: number): boolean {
-  if (!ACTIVE_CONV_ENABLED || !lastBotReplyAt) return false;
-  if (messagesLast5Min >= ACTIVE_CONV_MAX_HOT_5MIN) return false;
-  return Date.now() - lastBotReplyAt <= ACTIVE_CONV_WINDOW_SEC * 1000;
+/**
+ * True when the bot is in a live exchange: it is one of the last few messages AND the
+ * thread is calm (not a burst). Uses `lastBotReplyIndex` (reliably derived from recent
+ * messages) — NOT a timing-store timestamp — so it works regardless of state writes.
+ */
+export function isActiveConv(lastBotReplyIndex: number, messagesLast5Min: number): boolean {
+  if (!ACTIVE_CONV_ENABLED) return false;
+  if (lastBotReplyIndex < 0 || lastBotReplyIndex >= ACTIVE_CONV_MAX_INDEX) return false;
+  return messagesLast5Min < ACTIVE_CONV_MAX_HOT_5MIN;
 }
 
 export function evaluateRules(ctx: RuleContext): JudgeResult | null {
@@ -422,29 +426,23 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   // Other immediate follow-ups go to L1/L2 instead of a hard ignore. The cooldown
   // still applies one message later (index 1) for non-question chatter.
   if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 2) {
-    if (!mentionsOtherUser(text, botUsername)) {
+    const calm = groupActivity.messagesLast5Min < ACTIVE_CONV_MAX_HOT_5MIN;
+    const hasContent = text.trim().length >= ACTIVE_CONV_MIN_LEN;
+    if (ACTIVE_CONV_ENABLED && calm && hasContent && !mentionsOtherUser(text, botUsername)) {
       const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];
       const botLastText = botLast ? botLast.textContent || botLast.captionContent || "" : "";
-      // Answering a question the bot just asked → always engage.
-      if (looksLikeQuestion(botLastText)) {
+      // The bot is one of the last 1-2 messages — this is a live exchange it's in.
+      // Strong "for the bot" signals that need no @ / TG-reply: the bot just asked
+      // something (this is the answer), OR the user themselves is asking a question.
+      if (looksLikeQuestion(botLastText) || looksLikeQuestion(text)) {
         return makeResult("REPLY", "followup_to_bot", { skipPathResolution: true });
       }
-      const hasContent = text.trim().length >= ACTIVE_CONV_MIN_LEN;
-      const inWindow = isActiveConvWindow(ctx.lastBotReplyAt, groupActivity.messagesLast5Min);
-      if (lastBotReplyIndex === 0) {
-        // Immediate follow-up to the bot's own statement (not a question). Continue
-        // the exchange "适时" — engage a share of the time, else let L1/L2 judge.
-        // Never hard-ignore an immediate follow-up.
-        if (hasContent && inWindow && Math.random() < ACTIVE_CONV_ENGAGE_RATE) {
-          return makeResult("REPLY", "active_conv_engage", { skipPathResolution: true });
-        }
-        return null;
+      // Plain statement immediately after the bot → continue the exchange "适时":
+      // engage a share of the time, otherwise defer to the L1/L2 judge.
+      if (lastBotReplyIndex === 0 && Math.random() < ACTIVE_CONV_ENGAGE_RATE) {
+        return makeResult("REPLY", "active_conv_engage", { skipPathResolution: true });
       }
-      // index 1: still inside the engaged window (calm thread, bot spoke seconds
-      // ago) → let L1/L2 judge this continuation instead of going silent.
-      if (hasContent && inWindow) {
-        return null;
-      }
+      return null; // let L1/L2 decide instead of a hard ignore
     }
     return makeResult("IGNORE", "recent_reply");
   }

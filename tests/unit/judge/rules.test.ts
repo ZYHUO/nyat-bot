@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { evaluateRules, isActiveConvWindow } from "../../../src/pipeline/judge/rules.js";
+import { evaluateRules, isActiveConv } from "../../../src/pipeline/judge/rules.js";
 import type { RuleContext } from "../../../src/pipeline/judge/rules.js";
 import type { FormattedMessage } from "../../../src/shared/types.js";
 
@@ -363,8 +363,8 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("mention_self");
   });
 
-  it("recent reply (within 2 messages) → IGNORE", () => {
-    const ctx = makeCtx({ lastBotReplyIndex: 1 });
+  it("low-content follow-up (single char) within 2 messages → IGNORE recent_reply", () => {
+    const ctx = makeCtx({ message: makeMsg({ textContent: "." }), lastBotReplyIndex: 1 });
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("IGNORE");
@@ -384,14 +384,28 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("followup_to_bot");
   });
 
-  it("immediate follow-up after a bot statement (not a question) → null (defer to L1)", () => {
-    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
+  it("user's OWN question right after the bot (e.g. 几点了) → REPLY followup_to_bot", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "主人又叫本喵干嘛喵～" });
     const ctx = makeCtx({
-      message: makeMsg({ textContent: "好的" }),
+      message: makeMsg({ textContent: "几点了" }),
       recentMessages: [botMsg],
       lastBotReplyIndex: 0,
     });
-    expect(evaluateRules(ctx)).toBeNull();
+    const result = evaluateRules(ctx);
+    expect(result!.action).toBe("REPLY");
+    expect(result!.rule).toBe("followup_to_bot");
+  });
+
+  it("statement after the bot's colloquial question (干嘛) → REPLY (bot asked)", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "主人又叫本喵干嘛喵～" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "笨猫" }),
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+    });
+    const result = evaluateRules(ctx);
+    expect(result!.action).toBe("REPLY");
+    expect(result!.rule).toBe("followup_to_bot");
   });
 
   it("immediate follow-up that @s someone else → still IGNORE", () => {
@@ -406,43 +420,26 @@ describe("L0 Rules Engine", () => {
     expect(result!.action).toBe("IGNORE");
   });
 
-  it("index-1 continuation within the active-conversation window → null (defer to L1)", () => {
+  it("index-1 plain continuation in a calm thread → null (defer to L1)", () => {
     const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
     const human = makeMsg({ uid: 1002, textContent: "我也是" });
     const ctx = makeCtx({
-      message: makeMsg({ textContent: "那一起去呀" }),
+      message: makeMsg({ textContent: "那一起去呀" }), // non-question statement
       recentMessages: [botMsg, human],
       lastBotReplyIndex: 1,
-      lastBotReplyAt: Date.now(), // bot spoke seconds ago → engaged window
       groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 }, // calm
     });
     expect(evaluateRules(ctx)).toBeNull();
   });
 
-  it("index-1 continuation OUTSIDE the window (bot spoke long ago) → IGNORE", () => {
-    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
-    const human = makeMsg({ uid: 1002, textContent: "我也是" });
-    const ctx = makeCtx({
-      message: makeMsg({ textContent: "那一起去呀" }),
-      recentMessages: [botMsg, human],
-      lastBotReplyIndex: 1,
-      lastBotReplyAt: Date.now() - 200_000, // >90s ago → window lapsed
-      groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
-    });
-    const r = evaluateRules(ctx);
-    expect(r).not.toBeNull();
-    expect(r!.rule).toBe("recent_reply");
-  });
-
-  it("statement follow-up right after the bot, inside window, engaged roll → REPLY active_conv_engage", () => {
+  it("statement right after a bot STATEMENT, engaged roll → REPLY active_conv_engage", () => {
     const rnd = vi.spyOn(Math, "random").mockReturnValue(0.1); // < ACTIVE_CONV_ENGAGE_RATE
     try {
-      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
+      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
       const ctx = makeCtx({
-        message: makeMsg({ textContent: "那一起去呀" }),
+        message: makeMsg({ textContent: "好梦呀" }), // statement, neither side asks
         recentMessages: [botMsg],
         lastBotReplyIndex: 0,
-        lastBotReplyAt: Date.now(),
         groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
       });
       const r = evaluateRules(ctx);
@@ -454,15 +451,14 @@ describe("L0 Rules Engine", () => {
     }
   });
 
-  it("statement follow-up right after the bot, NOT engaged this roll → null (defer to L1)", () => {
+  it("statement right after a bot STATEMENT, NOT engaged this roll → null (defer to L1)", () => {
     const rnd = vi.spyOn(Math, "random").mockReturnValue(0.95); // >= ACTIVE_CONV_ENGAGE_RATE
     try {
-      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
+      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
       const ctx = makeCtx({
-        message: makeMsg({ textContent: "那一起去呀" }),
+        message: makeMsg({ textContent: "好梦呀" }),
         recentMessages: [botMsg],
         lastBotReplyIndex: 0,
-        lastBotReplyAt: Date.now(),
         groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
       });
       expect(evaluateRules(ctx)).toBeNull();
@@ -471,11 +467,12 @@ describe("L0 Rules Engine", () => {
     }
   });
 
-  it("isActiveConvWindow: engaged only in a calm thread shortly after the bot spoke", () => {
-    expect(isActiveConvWindow(Date.now(), 10)).toBe(true);   // calm + recent → engaged
-    expect(isActiveConvWindow(Date.now(), 25)).toBe(false);  // hot (>= ceiling) → disabled
-    expect(isActiveConvWindow(undefined, 5)).toBe(false);    // bot never spoke
-    expect(isActiveConvWindow(Date.now() - 200_000, 5)).toBe(false); // window lapsed
+  it("isActiveConv: live only when the bot is among the last few msgs in a calm thread", () => {
+    expect(isActiveConv(0, 10)).toBe(true);   // bot just spoke, calm
+    expect(isActiveConv(2, 10)).toBe(true);   // within MAX_INDEX
+    expect(isActiveConv(3, 10)).toBe(false);  // too far back (>= MAX_INDEX)
+    expect(isActiveConv(0, 25)).toBe(false);  // hot (>= ceiling)
+    expect(isActiveConv(-1, 5)).toBe(false);  // bot never spoke
   });
 
   it("@others → IGNORE", () => {

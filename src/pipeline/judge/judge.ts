@@ -4,7 +4,7 @@
 
 import type { FormattedMessage, JudgeResult } from "../../shared/types.js";
 import type { RuleContext } from "./rules.js";
-import { evaluateRules, isActiveConvWindow, ACTIVE_CONV_ENABLED } from "./rules.js";
+import { evaluateRules, isActiveConv } from "./rules.js";
 import { microJudge } from "./micro.js";
 import { logger } from "../../shared/logger.js";
 import { env } from "../../env.js";
@@ -57,11 +57,10 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
   // ── L0: Local rules (0-5ms) ──
   const e = env();
 
-  // Pre-compute engagement context (async, before sync evaluateRules). Needed by
-  // both the proactive fall-through and the active-conversation window.
+  // Pre-compute proactive-engagement context (async, before sync evaluateRules).
   let lastBotReplyAt: number | undefined;
   let recentHumanMsgCount: number | undefined;
-  if (e.JUDGE_PROACTIVE_ENABLED || ACTIVE_CONV_ENABLED) {
+  if (e.JUDGE_PROACTIVE_ENABLED) {
     const timingState = await getChatState(input.chatId);
     lastBotReplyAt = timingState.lastBotReplyAt;
     recentHumanMsgCount = input.recentMessages.filter(
@@ -111,8 +110,10 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
   }
 
   // ── L1: Micro model (150-300ms) ──
-  const activeConv = isActiveConvWindow(
-    lastBotReplyAt,
+  // "Active conversation" = the bot is among the last few messages (reliably from
+  // recentMessages) in a calm thread — relaxes the L1 REPLY acceptance bar below.
+  const activeConv = isActiveConv(
+    ruleCtx.lastBotReplyIndex,
     input.groupActivity.messagesLast5Min,
   );
   const l1Result = await microJudge(
