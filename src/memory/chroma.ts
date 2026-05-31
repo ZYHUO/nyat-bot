@@ -1,31 +1,48 @@
 // ────────────────────────────────────────
-// ChromaDB 长期记忆客户端
+// 长期记忆向量库客户端 (Qdrant-backed)
 // ────────────────────────────────────────
 // - 写入：fire-and-forget，消息进 pipeline 后异步存入
 // - 读取：语义搜索，填 retriever.ts 的 semantic 路
-// - Embedding：@xenova/transformers 本地模型，无需外部 API
+// - Embedding：@xenova/transformers 本地模型 (all-MiniLM-L6-v2, 384-dim)，无外部 API
+// - 存储：Qdrant (HNSW + cosine)，进程外但内存/性能远优于旧的 Chroma Python 服务
+//   迁移自 ChromaDB；点 id = UUIDv5(`${chatId}_${messageId}`) 以满足 Qdrant id 约束。
 // ────────────────────────────────────────
 
-import { ChromaClient, type Collection } from 'chromadb';
+import { QdrantClient } from '@qdrant/js-client-rest';
+import { createHash } from 'node:crypto';
 import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
- * Score is derived from the cosine distance Chroma returns (relevance = 1 - distance,
- * clamped). Optional so callers that don't need it can ignore it; undefined when the
- * memory layer can't surface a distance.
+ * Qdrant returns cosine similarity directly (normalized embeddings ⇒ ~[0,1]); we
+ * clamp it to [0,1]. Optional so callers that don't need it can ignore it.
  */
 export type ScoredMessage = FormattedMessage & { score?: number };
 
-const CHROMA_HOST = process.env['CHROMA_HOST'] ?? 'localhost';
-const CHROMA_PORT = parseInt(process.env['CHROMA_PORT'] ?? '8400', 10);
+const QDRANT_HOST = process.env['QDRANT_HOST'] ?? '127.0.0.1';
+const QDRANT_PORT = parseInt(process.env['QDRANT_PORT'] ?? '6333', 10);
 const COLLECTION_NAME = 'xxb_group_history';
+const VECTOR_SIZE = 384;
+
+// Deterministic mid → Qdrant point id. Qdrant ids must be uint64 or UUID, but our
+// natural key is the string `${chatId}_${messageId}`, so map it to a stable UUIDv5
+// (no external dep). memorizeMessage + deleteMemories + the migration all agree.
+const ID_NAMESPACE = Buffer.from('6ba7b8119dad11d180b400c04fd430c8', 'hex'); // RFC4122 URL ns
+export function midToPointId(mid: string): string {
+  const h = Buffer.from(
+    createHash('sha1').update(ID_NAMESPACE).update(mid, 'utf8').digest().subarray(0, 16),
+  );
+  h[6] = (h[6]! & 0x0f) | 0x50; // version 5
+  h[8] = (h[8]! & 0x3f) | 0x80; // RFC4122 variant
+  const x = h.toString('hex');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
 
 // Lazy singletons
-let _client: ChromaClient | undefined;
-let _collection: Collection | undefined;
+let _client: QdrantClient | undefined;
+let _ready: Promise<QdrantClient> | undefined;
 let _embedder: ((texts: string[]) => Promise<number[][]>) | undefined;
 // Promise singleton: concurrent callers await the same load; errors clear it so next call retries
 let _embedderPromise: Promise<(texts: string[]) => Promise<number[][]>> | undefined;
@@ -95,23 +112,38 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
   return _embedderPromise;
 }
 
-// ── ChromaDB client + collection ─────────────────────────
+// ── Qdrant client + collection ───────────────────────────
 
-async function getCollection(): Promise<Collection> {
-  if (_collection) return _collection;
-
+function client(): QdrantClient {
   if (!_client) {
-    _client = new ChromaClient({ host: CHROMA_HOST, port: CHROMA_PORT, ssl: false });
+    _client = new QdrantClient({ host: QDRANT_HOST, port: QDRANT_PORT, https: false });
   }
+  return _client;
+}
 
-  _collection = await _client.getOrCreateCollection({
-    name: COLLECTION_NAME,
-    embeddingFunction: null as unknown as undefined, // we supply embeddings manually
-    metadata: { 'hnsw:space': 'cosine' },
+/** Ensure the collection (+ chatId payload index) exists; returns the client. */
+function getStore(): Promise<QdrantClient> {
+  if (_ready) return _ready;
+  _ready = (async () => {
+    const c = client();
+    const { collections } = await c.getCollections();
+    if (!collections.some((col) => col.name === COLLECTION_NAME)) {
+      await c.createCollection(COLLECTION_NAME, {
+        vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
+      });
+      // Index chatId so the per-chat filter is a fast pre-filter, not a scan.
+      await c.createPayloadIndex(COLLECTION_NAME, {
+        field_name: 'chatId', field_schema: 'integer', wait: true,
+      });
+      logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection created');
+    }
+    logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection ready');
+    return c;
+  })().catch((err) => {
+    _ready = undefined; // allow retry
+    throw err;
   });
-
-  logger.info({ host: CHROMA_HOST, port: CHROMA_PORT }, 'Chroma collection ready');
-  return _collection;
+  return _ready;
 }
 
 // ── Public API ────────────────────────────────────────────
@@ -128,29 +160,33 @@ export async function memorizeMessage(
   if (!text.trim() || msg.isBot) return;
 
   try {
-    const [embed, col] = await Promise.all([getEmbedder(), getCollection()]);
+    const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
     const [vector] = await embed([text]);
     if (!vector) return;
 
-    const chromaId = `${chatId}_${msg.messageId}`;
-    await col.upsert({
-      ids: [chromaId],
-      embeddings: [vector],
-      documents: [text],
-      metadatas: [{
-        chatId,
-        messageId: msg.messageId,
-        uid: msg.uid,
-        username: msg.username,
-        fullName: msg.fullName,
-        timestamp: msg.timestamp,
-        role: msg.role,
+    const mid = `${chatId}_${msg.messageId}`;
+    await store.upsert(COLLECTION_NAME, {
+      wait: false,
+      points: [{
+        id: midToPointId(mid),
+        vector,
+        payload: {
+          mid,
+          chatId,
+          messageId: msg.messageId,
+          uid: msg.uid,
+          username: msg.username,
+          fullName: msg.fullName,
+          timestamp: msg.timestamp,
+          role: msg.role,
+          text,
+        },
       }],
     });
     // Importance sidecar — track creation for later scoring / forgetting
     try {
       const { recordMemoryCreated } = await import('./importance.js');
-      recordMemoryCreated(chromaId, chatId, msg.timestamp);
+      recordMemoryCreated(mid, chatId, msg.timestamp);
     } catch { /* non-critical */ }
   } catch (err) {
     logger.warn({ err, chatId, messageId: msg.messageId }, 'Memory write failed (non-critical)');
@@ -188,40 +224,35 @@ async function _searchMemoryInner(
   query: string,
   topK: number,
 ): Promise<ScoredMessage[]> {
-  const [embed, col] = await Promise.all([getEmbedder(), getCollection()]);
+  const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
   const [vector] = await embed([query]);
   if (!vector) return [];
 
-  const res = await col.query({
-    queryEmbeddings: [vector],
-    nResults: topK,
-    where: { chatId: { $eq: chatId } },
+  const hits = await store.search(COLLECTION_NAME, {
+    vector,
+    limit: topK,
+    filter: { must: [{ key: 'chatId', match: { value: chatId } }] },
+    with_payload: true,
   });
 
-  const docs = res.documents?.[0] ?? [];
-  const metas = res.metadatas?.[0] ?? [];
-  const distances = res.distances?.[0] ?? [];
-
   const messages: ScoredMessage[] = [];
-  for (let i = 0; i < docs.length; i++) {
-    const doc = docs[i];
-    const meta = metas[i] as Record<string, unknown> | null;
-    if (!doc || !meta) continue;
+  for (const hit of hits) {
+    const meta = (hit.payload ?? {}) as Record<string, unknown>;
+    const doc = meta['text'] as string | undefined;
+    if (!doc) continue;
 
-    // Collection uses cosine space → distance ∈ [0,2]; relevance = 1 - distance,
-    // clamped to [0,1]. Leave score undefined if Chroma didn't return a distance.
-    const dist = distances[i];
-    const score = typeof dist === 'number'
-      ? Math.max(0, Math.min(1, 1 - dist))
+    // Qdrant Cosine returns similarity directly (higher = closer); clamp to [0,1].
+    const score = typeof hit.score === 'number'
+      ? Math.max(0, Math.min(1, hit.score))
       : undefined;
 
     messages.push({
       role: (meta['role'] as 'user' | 'assistant') ?? 'user',
-      uid: meta['uid'] as number ?? 0,
-      username: meta['username'] as string ?? '',
-      fullName: meta['fullName'] as string ?? '',
-      timestamp: meta['timestamp'] as number ?? 0,
-      messageId: meta['messageId'] as number ?? 0,
+      uid: (meta['uid'] as number) ?? 0,
+      username: (meta['username'] as string) ?? '',
+      fullName: (meta['fullName'] as string) ?? '',
+      timestamp: (meta['timestamp'] as number) ?? 0,
+      messageId: (meta['messageId'] as number) ?? 0,
       textContent: doc,
       isForwarded: false,
       score,
@@ -231,12 +262,12 @@ async function _searchMemoryInner(
   return messages;
 }
 
-/** Delete memory entries by id (used by the forgetting / consolidation cron). */
+/** Delete memory entries by their string id (`${chatId}_${messageId}`). */
 export async function deleteMemories(ids: string[]): Promise<number> {
   if (ids.length === 0) return 0;
   try {
-    const col = await getCollection();
-    await col.delete({ ids });
+    const store = await getStore();
+    await store.delete(COLLECTION_NAME, { points: ids.map(midToPointId), wait: false });
     return ids.length;
   } catch (err) {
     logger.warn({ err, count: ids.length }, 'deleteMemories failed (non-critical)');
@@ -246,10 +277,7 @@ export async function deleteMemories(ids: string[]): Promise<number> {
 
 export async function isMemoryAvailable(): Promise<boolean> {
   try {
-    if (!_client) {
-      _client = new ChromaClient({ host: CHROMA_HOST, port: CHROMA_PORT, ssl: false });
-    }
-    await _client.heartbeat();
+    await client().getCollections();
     return true;
   } catch {
     return false;
