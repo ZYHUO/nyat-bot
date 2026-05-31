@@ -434,6 +434,43 @@ describe("L0 Rules Engine", () => {
     expect(r!.rule).toBe("recent_reply");
   });
 
+  it("statement follow-up right after the bot, inside window, engaged roll → REPLY active_conv_engage", () => {
+    const rnd = vi.spyOn(Math, "random").mockReturnValue(0.1); // < ACTIVE_CONV_ENGAGE_RATE
+    try {
+      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
+      const ctx = makeCtx({
+        message: makeMsg({ textContent: "那一起去呀" }),
+        recentMessages: [botMsg],
+        lastBotReplyIndex: 0,
+        lastBotReplyAt: Date.now(),
+        groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
+      });
+      const r = evaluateRules(ctx);
+      expect(r).not.toBeNull();
+      expect(r!.action).toBe("REPLY");
+      expect(r!.rule).toBe("active_conv_engage");
+    } finally {
+      rnd.mockRestore();
+    }
+  });
+
+  it("statement follow-up right after the bot, NOT engaged this roll → null (defer to L1)", () => {
+    const rnd = vi.spyOn(Math, "random").mockReturnValue(0.95); // >= ACTIVE_CONV_ENGAGE_RATE
+    try {
+      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
+      const ctx = makeCtx({
+        message: makeMsg({ textContent: "那一起去呀" }),
+        recentMessages: [botMsg],
+        lastBotReplyIndex: 0,
+        lastBotReplyAt: Date.now(),
+        groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
+      });
+      expect(evaluateRules(ctx)).toBeNull();
+    } finally {
+      rnd.mockRestore();
+    }
+  });
+
   it("isActiveConvWindow: engaged only in a calm thread shortly after the bot spoke", () => {
     expect(isActiveConvWindow(Date.now(), 10)).toBe(true);   // calm + recent → engaged
     expect(isActiveConvWindow(Date.now(), 25)).toBe(false);  // hot (>= ceiling) → disabled

@@ -210,6 +210,11 @@ export const ACTIVE_CONV_ENABLED = true;        // tunable — master switch
 export const ACTIVE_CONV_WINDOW_SEC = 90;       // tunable — engaged window after the bot's last reply
 export const ACTIVE_CONV_MAX_HOT_5MIN = 25;     // tunable — disable at/above this burst rate (== hot_chat trigger)
 const ACTIVE_CONV_MIN_LEN = 2;                  // tunable — skip ultra-short noise (single emoji / "?")
+// When someone speaks right after the bot (and it wasn't answering a question), the
+// bot continues the exchange this fraction of the time — MaiBot talk-frequency style:
+// engages declarative follow-ups "适时" without replying to literally everything. The
+// rest fall through to the L1/L2 judge. Dial up = chattier, down = quieter.
+const ACTIVE_CONV_ENGAGE_RATE = 0.6;            // tunable — 0..1
 
 /** True during the brief engaged window after the bot's own last reply, in a calm live thread. */
 export function isActiveConvWindow(lastBotReplyAt: number | undefined, messagesLast5Min: number): boolean {
@@ -420,18 +425,24 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     if (!mentionsOtherUser(text, botUsername)) {
       const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];
       const botLastText = botLast ? botLast.textContent || botLast.captionContent || "" : "";
+      // Answering a question the bot just asked → always engage.
       if (looksLikeQuestion(botLastText)) {
         return makeResult("REPLY", "followup_to_bot", { skipPathResolution: true });
       }
+      const hasContent = text.trim().length >= ACTIVE_CONV_MIN_LEN;
+      const inWindow = isActiveConvWindow(ctx.lastBotReplyAt, groupActivity.messagesLast5Min);
       if (lastBotReplyIndex === 0) {
-        return null; // immediate human follow-up → let L1/L2 decide, don't hard-ignore
+        // Immediate follow-up to the bot's own statement (not a question). Continue
+        // the exchange "适时" — engage a share of the time, else let L1/L2 judge.
+        // Never hard-ignore an immediate follow-up.
+        if (hasContent && inWindow && Math.random() < ACTIVE_CONV_ENGAGE_RATE) {
+          return makeResult("REPLY", "active_conv_engage", { skipPathResolution: true });
+        }
+        return null;
       }
-      // index 1: still in the active-conversation window (bot spoke seconds ago,
-      // calm thread) → let L1/L2 judge this continuation instead of going silent.
-      if (
-        text.trim().length >= ACTIVE_CONV_MIN_LEN &&
-        isActiveConvWindow(ctx.lastBotReplyAt, groupActivity.messagesLast5Min)
-      ) {
+      // index 1: still inside the engaged window (calm thread, bot spoke seconds
+      // ago) → let L1/L2 judge this continuation instead of going silent.
+      if (hasContent && inWindow) {
         return null;
       }
     }
