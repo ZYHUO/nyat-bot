@@ -9,6 +9,7 @@ import { getChatState, transitionToRunning } from '../../pipeline/timing/chat-ru
 import { isTurnActorChat } from '../../pipeline/turn/actor.js';
 import { appendPending } from '../../pipeline/turn/buffer.js';
 import { interruptGeneration } from '../../pipeline/turn/abort-registry.js';
+import { bumpFocus } from '../../pipeline/turn/focus.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { env } from '../../env.js';
 import { getBotUid } from '../bot.js';
@@ -76,6 +77,11 @@ async function handleUpdate(ctx: Context): Promise<void> {
 
     // G3: 打断同 chat 在飞生成(TURN_ABORT_ENABLED=false 时为 no-op)
     interruptGeneration(chatId, isDirect ? 'direct_message' : 'new_message');
+
+    // G9: focus 事件(flag off 时 bumpFocus 自身为 no-op)
+    if (chatId < 0) {
+      void bumpFocus(chatId, isDirect ? 'direct_interaction' : 'passive_message').catch(() => {});
+    }
 
     // G4「还在打字」启发式:短消息 + 尾部无终止标点 → 用户多半还有下文,
     // 延长去抖窗口让整波念头落完再开回合。

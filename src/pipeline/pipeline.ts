@@ -716,6 +716,9 @@ async function generateAndSendReplies(args: {
       if (maxPlaceholderMsgId) {
         await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
       }
+      if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
+        import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'model_silent')).catch(() => {});
+      }
       logger.info(
         { chatId: job.chatId, messageId: formatted.messageId, reacted: !!replyResult.reactions },
         "Pipeline complete (model chose silence)",
@@ -1100,6 +1103,10 @@ async function generateAndSendReplies(args: {
       import("../tracking/social-needs.js")
         .then(({ markBotSpoke }) => markBotSpoke(job.chatId))
         .catch(() => {});
+      // G9: speaking raises focus — the bot is now "in" the conversation
+      if (e.TURN_FOCUS_ENABLED) {
+        import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'bot_spoke')).catch(() => {});
+      }
     }
 
     // G6: bounded self-continuation — the bot may follow up its own line a
@@ -1568,12 +1575,22 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       ? `[连发提示] 最新的 ${burstIds.length} 条消息（${burstIds.map((id) => `#${id}`).join('、')}）是同一波连发，很可能是一个完整的念头分几条打出来的。请把整波作为一个整体来判断（回不回、值不值得回），不要只盯最后一条——重点经常在前面几条里。`
       : undefined;
 
+    // G9: per-chat focus level modulates the judge's REPLY acceptance bar
+    let focusLevel: number | undefined;
+    if (e.TURN_FOCUS_ENABLED && job.turnContext && job.chatId < 0) {
+      try {
+        const { getFocus } = await import("./turn/focus.js");
+        focusLevel = await getFocus(job.chatId);
+      } catch { /* non-critical */ }
+    }
+
     const judgeResult = await judge({
       message: formatted, recentMessages,
       recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),
       botUid, botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
       chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
       burstHint,
+      focus: focusLevel,
     });
     timings["judge"] = Math.round(performance.now() - t3);
 
@@ -1677,6 +1694,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       timings["timing_gate"] = Math.round(performance.now() - tg);
 
       if (gateDecision.action === 'wait') {
+        if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
+          import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_wait')).catch(() => {});
+        }
         const waitSecBounded = gateDecision.waitSec ?? e.TIMING_WAIT_MIN_SEC;
         // G5: actor 模式暂存锚点条目,wait 到期后重注入 pending 真正回访
         // (而不是只解除屏蔽然后永远沉默)。
@@ -1720,6 +1740,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
             "Pipeline complete (gate cooldown defer, no reply)",
           );
           return;
+        }
+        if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
+          import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
         }
         await transitionToStop(job.chatId);
         const totalMs = Math.round(performance.now() - start);

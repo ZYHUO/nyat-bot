@@ -20,6 +20,7 @@ import {
   setScheduledJob,
   markDirty,
 } from '../pipeline/turn/buffer.js';
+import { getFocus, debounceFactor } from '../pipeline/turn/focus.js';
 import type { TurnTrigger } from '../pipeline/turn/types.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
@@ -29,13 +30,20 @@ let _seq = 0;
 /** G4「还在打字」启发式:尾句无终止标点 → 滑动窗口放大,让这波念头落完 */
 const STILL_TYPING_FACTOR = 1.75;
 
-function computeFireDelay(firstPendingAt: number | undefined, direct: boolean, stillTyping: boolean): number {
+function computeFireDelay(
+  firstPendingAt: number | undefined,
+  direct: boolean,
+  stillTyping: boolean,
+  focusFactor: number,
+): number {
   if (direct) return 0;
   const e = env();
   const now = Date.now();
-  const sliding = stillTyping
+  let sliding = stillTyping
     ? Math.round(e.TIMING_DEBOUNCE_MS * STILL_TYPING_FACTOR)
     : e.TIMING_DEBOUNCE_MS;
+  // G9: focus 调制 — 聊得起劲回得快,半挂机多等等
+  sliding = Math.round(sliding * focusFactor);
   const slidingFireAt = now + sliding;
   const hardFireAt = (firstPendingAt ?? now) + e.TIMING_DEBOUNCE_MAX_BUFFER_MS;
   return Math.max(0, Math.min(slidingFireAt, hardFireAt) - now);
@@ -60,8 +68,12 @@ export interface ScheduleTurnOptions {
 export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): Promise<void> {
   const queue = getQueue();
   const meta = await getTurnMeta(chatId);
+  let focusFactor = 1;
+  if (env().TURN_FOCUS_ENABLED && !opts.direct && opts.delayMsOverride === undefined) {
+    focusFactor = debounceFactor(await getFocus(chatId));
+  }
   const delay = opts.delayMsOverride
-    ?? computeFireDelay(meta.firstPendingAt, opts.direct ?? false, opts.stillTyping ?? false);
+    ?? computeFireDelay(meta.firstPendingAt, opts.direct ?? false, opts.stillTyping ?? false, focusFactor);
 
   // ── Try to reuse the already-scheduled job ──
   if (meta.scheduledJobId) {

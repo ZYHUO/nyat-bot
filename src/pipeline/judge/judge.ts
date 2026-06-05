@@ -6,6 +6,7 @@ import type { FormattedMessage, JudgeResult } from "../../shared/types.js";
 import type { RuleContext } from "./rules.js";
 import { evaluateRules, isActiveConv } from "./rules.js";
 import { microJudge } from "./micro.js";
+import { judgeReplyBar } from "../turn/focus.js";
 import { logger } from "../../shared/logger.js";
 import { env } from "../../env.js";
 import { getKnowledge } from "../../knowledge/manager.js";
@@ -22,6 +23,8 @@ export interface JudgeInput {
   groupActivity: { messagesLast5Min: number; messagesLast1Hour: number };
   /** G4: hint that the latest N messages are one burst — judge the whole thought, not the last line */
   burstHint?: string;
+  /** G9: per-chat focus level (0..1) — modulates the L1 REPLY acceptance bar */
+  focus?: number;
 }
 
 function findLastBotReplyIndex(
@@ -43,9 +46,12 @@ function findLastBotReplyIndex(
 // relaxed — IGNORE/REJECT and all error paths keep their silence bias.
 const ACTIVE_CONV_L1_REPLY_CONF = 0.6;
 
-function shouldAcceptL1Result(result: JudgeResult, activeConv = false): boolean {
+function shouldAcceptL1Result(result: JudgeResult, activeConv = false, focus?: number): boolean {
   const confidence = result.confidence ?? 0;
-  const replyBar = activeConv ? ACTIVE_CONV_L1_REPLY_CONF : 0.8;
+  // G9: focus 调制 REPLY 接受门槛(0.6 锁定 ↔ 0.8 默认沉默偏置);
+  // 只放松 REPLY,IGNORE/REJECT 与错误路径保持沉默偏置。
+  const baseBar = focus !== undefined ? judgeReplyBar(focus) : 0.8;
+  const replyBar = activeConv ? Math.min(ACTIVE_CONV_L1_REPLY_CONF, baseBar) : baseBar;
 
   if (result.action === "REPLY") return confidence > replyBar;
   if (result.action === "IGNORE") return confidence >= 0.5;
@@ -128,7 +134,7 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     undefined,
     input.burstHint,
   );
-  if (shouldAcceptL1Result(l1Result, activeConv)) {
+  if (shouldAcceptL1Result(l1Result, activeConv, input.focus)) {
     logger.debug(
       {
         action: l1Result.action,

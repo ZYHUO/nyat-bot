@@ -18,6 +18,7 @@ import { parseReplyResponse } from '../reply/parser.js';
 import { sendMessage, sendChatAction, sendSticker } from '../../bot/sender/telegram.js';
 import { getReadyStickersByIntent, recordStickerSent } from '../../knowledge/sticker/store.js';
 import { pendingCount } from './buffer.js';
+import { getFocus, followupProbability } from './focus.js';
 import { registerGeneration, clearGeneration } from './abort-registry.js';
 import { recordBotReply as recordTimingBotReply } from '../timing/state-store.js';
 import { getRedis } from '../../db/redis.js';
@@ -52,7 +53,11 @@ async function shouldYield(chatId: number): Promise<boolean> {
 export async function maybeSelfContinue(chatId: number, botUid: number): Promise<void> {
   const e = env();
   if (!e.TURN_SELF_FOLLOWUP_ENABLED || chatId >= 0) return;
-  if (Math.random() >= FOLLOWUP_BASE_PROBABILITY) return;
+  // G9: focus 调制接话欲(锁定对话 → 更愿意补一拍)
+  const probability = e.TURN_FOCUS_ENABLED
+    ? followupProbability(await getFocus(chatId))
+    : FOLLOWUP_BASE_PROBABILITY;
+  if (Math.random() >= probability) return;
 
   const redis = getRedis();
   // 冷却检查(只读;真正发出后才写,避免白白烧冷却)
