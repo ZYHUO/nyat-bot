@@ -779,6 +779,10 @@ async function generateAndSendReplies(args: {
     };
     const replyQuoteEnabled = override?.reply_quote !== false;
 
+    // G10: 每回合"人味预算"(actor 模式)— typo/撤回重发/后补编辑三者
+    // 一回合最多触发一个,效果像偶发的真实行为而不是抽搐生成器。
+    let humanizerBudget = job.turnContext ? 1 : Number.POSITIVE_INFINITY;
+
     // ── Humanizer: thinking interjection (insert between 1st and 2nd segments) ──
     // Skip for DM — users expect instant response in private chat
     const thinkingResult = isDmChat
@@ -819,14 +823,16 @@ async function generateAndSendReplies(args: {
       // ── Humanizer: typo injection ──
       // Skip for DM — users expect instant, clean response in private chat
       const humanizedText = reply.replyContent;
-      const typoResult = !isDmChat && !isInterjection && replyIdx === 0 && humanizedText.length >= 4
+      const typoResult = humanizerBudget > 0 && !isDmChat && !isInterjection && replyIdx === 0 && humanizedText.length >= 4
         ? (() => { const r = injectTypo(humanizedText, humanizerConfig); return r.typoIndex >= 0 ? r : null; })()
         : null;
+      if (typoResult) humanizerBudget--;
 
       // ── Humanizer: delete-and-resend (skip for interjections and DM) ──
-      const deleteResend = isDmChat || isInterjection
+      const deleteResend = isDmChat || isInterjection || humanizerBudget <= 0
         ? { shouldDeleteResend: false, deleteDelay: 0, modifiedText: humanizedText }
         : decideDeleteResend(replyIdx, replies.length, humanizedText, humanizerConfig);
+      if (deleteResend.shouldDeleteResend) humanizerBudget--;
 
       // ── MaiBot-style typing delay between segmented messages ──
       // First message uses the placeholder or sends immediately;
@@ -836,6 +842,13 @@ async function generateAndSendReplies(args: {
         const delay = calculateTypingDelay(prevText, segmenterConfig);
         await sendChatAction(job.chatId, 'typing');
         await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+      }
+
+      // ── G10: model-owned hesitation — the model marked THIS line as one it
+      // wants to brew on for a beat before sending (emphasis/turning point)
+      if (reply.hesitateBefore && !isDmChat) {
+        await sendChatAction(job.chatId, 'typing');
+        await new Promise((resolve) => setTimeout(resolve, 1200 + Math.random() * 1100));
       }
 
       try {
@@ -1009,9 +1022,10 @@ async function generateAndSendReplies(args: {
             }
 
             // ── Humanizer: afterthought edit (skip for interjections and DM) ──
-            if (!isDmChat && !isInterjection && currentMessageId) {
+            if (!isDmChat && !isInterjection && currentMessageId && humanizerBudget > 0) {
               const afterthought = decideAfterthoughtEdit(currentBaseText, humanizerConfig);
               if (afterthought.shouldEdit) {
+                humanizerBudget--;
                 const afterthoughtDelay = humanizerConfig?.afterthoughtEditDelay ?? DEFAULT_HUMANIZER_CONFIG.afterthoughtEditDelay;
                 const afterthoughtDelayJittered = humanizerConfig?.jitterEnabled !== false
                   ? applyJitter(afterthoughtDelay, humanizerConfig?.jitterFactor ?? 0.2)

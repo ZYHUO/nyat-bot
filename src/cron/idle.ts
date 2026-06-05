@@ -14,6 +14,9 @@ import { logger } from '../shared/logger.js';
 import { isGroupAllowed } from '../allowlist/allowlist.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
 import { getChatState } from '../pipeline/timing/chat-runtime.js';
+import { isTurnActorChat } from '../pipeline/turn/flags.js';
+import { generatePersonaProactiveText } from '../pipeline/turn/proactive-turn.js';
+import { getBotUid } from '../bot/bot.js';
 
 const ACTIVE_GROUPS_MAX_AGE = 30 * 86400; // prune groups unseen for 30 days
 const LAST_POKE_PREFIX = 'xxb:last_poke:';
@@ -120,37 +123,53 @@ export async function runIdleCheck(): Promise<void> {
 
       logger.info({ chatId, silenceSec }, 'Idle check: generating proactive message');
 
-      // Build a short context excerpt for the AI
-      const contextLines = recent.slice(-8).map((m) => {
-        const name = m.fullName || m.username || (m.role === 'assistant' ? e.BOT_USERNAME : '?');
-        const text = m.textContent || m.captionContent || '[sticker/media]';
-        return `${name}: ${text.slice(0, 100)}`;
-      }).join('\n');
+      let text: string;
+      if (e.TURN_PROACTIVE_ENABLED && isTurnActorChat(chatId)) {
+        // G11: 主动开口走与 reactive 回复同一条 5 层人格管线,
+        // 模型可以拒绝(silent)——"自己想不想说"也是人格的一部分。
+        const personaText = await generatePersonaProactiveText(
+          chatId,
+          getBotUid(),
+          `[主动开口·冷场] 群里已经沉默${Math.floor(silenceSec / 60)}分钟了。你可以自然地发起一个话题、接着之前聊的随口说一句、或分享点有意思的。禁止自我介绍、禁止"大家好"式开场。`,
+        );
+        if (!personaText) {
+          logger.debug({ chatId }, 'Idle proactive: persona generation declined/empty');
+          continue;
+        }
+        text = personaText;
+      } else {
+        // Legacy: throwaway-prompt generation
+        const contextLines = recent.slice(-8).map((m) => {
+          const name = m.fullName || m.username || (m.role === 'assistant' ? e.BOT_USERNAME : '?');
+          const t = m.textContent || m.captionContent || '[sticker/media]';
+          return `${name}: ${t.slice(0, 100)}`;
+        }).join('\n');
 
-      const result = await callWithFallback({
-        usage: 'reply',
-        messages: [
-          {
-            role: 'system',
-            content: `你是${e.BOT_USERNAME}，一只活泼可爱的猫娘群友。群聊已经沉默超过${Math.floor(e.IDLE_THRESHOLD_SEC / 60)}分钟了，请自然地发起一个话题或者说一句有趣的话来带动气氛。
+        const result = await callWithFallback({
+          usage: 'reply',
+          messages: [
+            {
+              role: 'system',
+              content: `你是${e.BOT_USERNAME}，一只活泼可爱的猫娘群友。群聊已经沉默超过${Math.floor(e.IDLE_THRESHOLD_SEC / 60)}分钟了，请自然地发起一个话题或者说一句有趣的话来带动气氛。
 要求：
 - 短句，不超过30字
 - 自然、随意，像真实群友主动说话
 - 可以评论之前的话题，或者随机说点有意思的事
 - 禁止自我介绍，禁止说"大家好"，禁止以"喵~"开头
 - 只输出要发送的纯文本，不要任何解释或格式`,
-          },
-          {
-            role: 'user',
-            content: `最近的聊天记录：\n${contextLines}\n\n群聊已沉默${Math.floor(silenceSec / 60)}分钟，请发起话题：`,
-          },
-        ],
-        maxTokens: 60,
-        temperature: 1.1,
-      });
+            },
+            {
+              role: 'user',
+              content: `最近的聊天记录：\n${contextLines}\n\n群聊已沉默${Math.floor(silenceSec / 60)}分钟，请发起话题：`,
+            },
+          ],
+          maxTokens: 60,
+          temperature: 1.1,
+        });
 
-      const text = result.content.trim().replace(/^["「『]|["」』]$/g, '');
-      if (!text || text.length < 2) continue;
+        text = result.content.trim().replace(/^["「『]|["」』]$/g, '');
+        if (!text || text.length < 2) continue;
+      }
 
       // Reward gate — skip the poke if it doesn't fit the moment
       const reward = await runRewardGate(chatId, recent, text, 'idle');

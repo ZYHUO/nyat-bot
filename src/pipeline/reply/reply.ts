@@ -542,6 +542,7 @@ export async function generateReply(
       stickerIntent: p.stickerIntent,
       replyQuote: p.replyQuote,
       modelStickerAct: p.modelStickerAct,
+      hesitateBefore: p.hesitateBefore,
     })),
     toolsUsed: result.toolsUsed,
     toolExecutionFailed,

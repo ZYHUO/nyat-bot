@@ -76,6 +76,8 @@ export interface ReplyOutput {
   isInterjection?: boolean;
   /** G2: 模型把贴纸当一等动作选出来的 → 投递层跳过贴纸冷却 */
   modelStickerAct?: boolean;
+  /** G10: 模型的投递意图 — 这句想停顿酝酿一拍再发 */
+  hesitateBefore?: boolean;
 }
 
 export interface RetrievedContext {

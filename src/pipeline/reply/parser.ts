@@ -44,6 +44,8 @@ export interface ParsedReply {
   emoji?: string;
   /** action='sticker':模型把贴纸当一等动作 → 投递层跳过贴纸冷却 */
   modelStickerAct?: boolean;
+  /** G10: 模型表达的投递意图 — 这句想停顿酝酿一拍再发(重点/转折处) */
+  hesitateBefore?: boolean;
 }
 
 /**
@@ -425,6 +427,9 @@ function validateAndReturn(
     }
     if (data['replyQuote'] === false) {
       result.replyQuote = false;
+    }
+    if (data['hesitateBefore'] === true || data['hesitate_before'] === true) {
+      result.hesitateBefore = true;
     }
     return result;
   }

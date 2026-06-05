@@ -72,7 +72,9 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
 - \`{"action":"silent"}\` — 看了但决定不说话（整个数组只放这一个元素）。当你觉得此刻插话不自然、或者大家的对话不需要你时，沉默是完全合法、经常是最像真人的选择。
 - 普通文字回复**不需要** action 字段。
 
-可以组合：例如 \`[{"action":"react",...对A的消息}, {"replyContent":"...",...回B}]\`。每次最多 1 个 react、1 张贴纸。真人不是每条都用文字回的——点个赞、甩张贴纸、或者干脆不说话，往往更自然。`;
+可以组合：例如 \`[{"action":"react",...对A的消息}, {"replyContent":"...",...回B}]\`。每次最多 1 个 react、1 张贴纸。真人不是每条都用文字回的——点个赞、甩张贴纸、或者干脆不说话，往往更自然。
+
+文字回复元素还可以带 \`"hesitateBefore": true\`：表示这句你想先停顿酝酿一拍再发出来（用在重点、转折、或不太好开口的那句上；整个回复最多 1 处）。`;
   }
   layers.push(contractExplanation);
 

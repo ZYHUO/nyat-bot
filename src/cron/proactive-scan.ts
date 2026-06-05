@@ -14,6 +14,7 @@ import { logger } from '../shared/logger.js';
 import { isGroupAllowed } from '../allowlist/allowlist.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
 import { getChatState } from '../pipeline/timing/chat-runtime.js';
+import { isTurnActorChat } from '../pipeline/turn/flags.js';
 import { runTimingGate } from '../pipeline/timing/gate.js';
 import { getBotUid } from '../bot/bot.js';
 import { loadCachedPrompt } from '../shared/config.js';
@@ -120,6 +121,16 @@ async function generateProactiveReply(
   topic: string,
   e: ReturnType<typeof env>,
 ): Promise<string | null> {
+  // G11: 人格化主动发言 — 与 reactive 回复同一条 5 层人格管线
+  if (e.TURN_PROACTIVE_ENABLED && isTurnActorChat(chatId)) {
+    const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
+    const { getBotUid } = await import('../bot/bot.js');
+    return generatePersonaProactiveText(
+      chatId,
+      getBotUid(),
+      `[主动插话] 你看到群里在聊：${topic}。你是群里的普通成员,想加入就自然地接一句,像真群友冒出来的话。`,
+    );
+  }
   const contextLines = recent.slice(-8).map((m) => {
     const name = m.fullName || m.username || (m.role === 'assistant' ? e.BOT_USERNAME : '?');
     const text = m.textContent || m.captionContent || '[media]';
