@@ -6,6 +6,7 @@ import { streamText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { AILabel, ContentPart } from './types.js';
 import { AIError } from '../shared/errors.js';
+import { mergeAbortSignals } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
 
 export interface StreamResult {
@@ -19,7 +20,7 @@ export interface StreamResult {
 export function streamModel(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number } = {},
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } = {},
 ): StreamResult {
   const apiKey = label.apiKeys[0];
   if (!apiKey) {
@@ -37,7 +38,7 @@ export function streamModel(
       messages: messages as Parameters<typeof streamText>[0]['messages'],
       maxTokens: opts.maxTokens,
       temperature: opts.temperature,
-      abortSignal: opts.timeout ? AbortSignal.timeout(opts.timeout) : undefined,
+      abortSignal: mergeAbortSignals(opts.timeout, opts.signal),
     });
 
     return {

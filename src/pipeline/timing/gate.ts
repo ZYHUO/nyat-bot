@@ -20,6 +20,7 @@ import type { FormattedMessage, JudgeResult } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
 import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
+import { mergeAbortSignals } from '../../shared/abort.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { isInGateCooldown } from './chat-runtime.js';
@@ -54,6 +55,8 @@ export interface GateInput {
    * "no one @ed me, so I shouldn't talk".
    */
   proactiveMode?: boolean;
+  /** External abort signal (turn interrupt). Aborts the gate LLM call → fail-open continue. */
+  signal?: AbortSignal;
 }
 
 const VALID_ACTIONS = new Set<GateAction>(['continue', 'wait', 'no_action']);
@@ -226,7 +229,9 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
   let raw: string;
   try {
-    const callPromise = callWithFallback({
+    // Real abort on timeout (not Promise.race fire-and-forget) + external
+    // turn-interrupt signal. Either firing cancels the underlying request.
+    const result = await callWithFallback({
       usage: e.TIMING_GATE_USAGE,
       messages: [
         { role: 'system', content: systemPrompt },
@@ -234,14 +239,8 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
       ],
       maxTokens: 200,
       temperature: 0,
+      signal: mergeAbortSignals(timeoutMs, input.signal),
     });
-
-    const result = await Promise.race([
-      callPromise,
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('gate_timeout')), timeoutMs);
-      }),
-    ]);
 
     raw = result.content;
   } catch (err) {

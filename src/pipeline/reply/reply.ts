@@ -38,12 +38,13 @@ const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
 async function generateReplyModelOutput(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   usage: string,
-  opts?: { temperatureOverride?: number },
+  opts?: { temperatureOverride?: number; signal?: AbortSignal },
 ) {
   const result = await callWithFallback({
     usage,
     messages,
     temperature: opts?.temperatureOverride,
+    signal: opts?.signal,
   });
 
   // Strip thinking blocks from models that emit them (e.g. gemini thinking tags)
@@ -130,7 +131,9 @@ export async function generateReply(
   replyPath?: ReplyPath,
   replyTier?: ReplyTier,
   segmenterConfig?: Partial<SegmenterConfig>,
+  callOpts?: { signal?: AbortSignal },
 ): Promise<{ replies: ReplyOutput[]; toolsUsed: string[]; toolExecutionFailed: boolean }> {
+  const interruptSignal = callOpts?.signal;
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
   const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
@@ -367,7 +370,7 @@ export async function generateReply(
   // 5. Call AI final writer (direct or planned both use no-tools final synthesis)
   let result: Awaited<ReturnType<typeof generateReplyModelOutput>>;
   try {
-    result = await generateReplyModelOutput(messages, usage);
+    result = await generateReplyModelOutput(messages, usage, { signal: interruptSignal });
     result.toolsUsed = toolsUsed;
   } catch (err) {
     // Handle content safety rejection gracefully
@@ -400,6 +403,7 @@ export async function generateReply(
     for (let i = 0; i < MAX_TOOL_ARTIFACT_RETRIES; i++) {
       result = await generateReplyModelOutput(appendToolArtifactRetryInstruction(messages), usage, {
         temperatureOverride: 0,
+        signal: interruptSignal,
       });
       result.toolsUsed = toolsUsed;
       parsedReplies = parseReplyResponse(result.content, message.messageId);
@@ -413,6 +417,7 @@ export async function generateReply(
     for (let i = 0; i < MAX_DUPLICATE_RETRIES; i++) {
       result = await generateReplyModelOutput(messages, usage, {
         temperatureOverride: 1.0,
+        signal: interruptSignal,
       });
       result.toolsUsed = toolsUsed;
       parsedReplies = parseReplyResponse(result.content, message.messageId);
@@ -427,6 +432,7 @@ export async function generateReply(
     for (let i = 0; i < MAX_MULTI_REPLY_RETRIES; i++) {
       result = await generateReplyModelOutput(messages, usage, {
         temperatureOverride: 1.0,
+        signal: interruptSignal,
       });
       result.toolsUsed = toolsUsed;
       parsedReplies = parseReplyResponse(result.content, message.messageId);

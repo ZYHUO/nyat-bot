@@ -46,6 +46,13 @@ export interface AICallOptions {
   stream?: boolean;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * External abort signal (e.g. turn-actor interrupt when new messages land
+   * mid-generation). Merged with the per-label timeout signal; an abort here
+   * surfaces as AIError code 'AI_ABORTED' and is NOT retried by the fallback
+   * chain.
+   */
+  signal?: AbortSignal;
 }
 
 export interface AICallResult {

@@ -8,6 +8,7 @@ import { QUEUE_NAME } from "./jobs.js";
 import type { MessageJobData } from "./jobs.js";
 import { getRedis } from "../db/redis.js";
 import { processPipeline } from "../pipeline/pipeline.js";
+import { runChatTurn } from "../pipeline/turn/actor.js";
 import { handleWaitResume } from "../pipeline/timing/chat-runtime.js";
 import { logger } from "../shared/logger.js";
 import { env } from "../env.js";
@@ -15,6 +16,12 @@ import { env } from "../env.js";
 let _worker: Worker<MessageJobData> | undefined;
 
 async function processMessage(job: Job<MessageJobData>): Promise<void> {
+  // Turn actor: per-chat cognition turn (drains the pending burst itself)
+  if (job.data.type === 'chat_turn') {
+    await runChatTurn(job.data, job.id);
+    return;
+  }
+
   // Phase 4: wait-resume jobs are routed to chat-runtime, not the regular pipeline
   if (job.data.type === 'wait_resume') {
     await handleWaitResume({

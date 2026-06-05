@@ -6,6 +6,10 @@ import { enqueue } from '../../queue/producer.js';
 import { enqueueWithDebounce, flushBuffer } from '../../pipeline/timing/debounce.js';
 import { looksLikeDirectInteraction } from '../../pipeline/timing/direct-interaction.js';
 import { getChatState, transitionToRunning } from '../../pipeline/timing/chat-runtime.js';
+import { isTurnActorChat } from '../../pipeline/turn/actor.js';
+import { appendPending } from '../../pipeline/turn/buffer.js';
+import { interruptGeneration } from '../../pipeline/turn/abort-registry.js';
+import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { env } from '../../env.js';
 import { getBotUid } from '../bot.js';
 
@@ -59,6 +63,33 @@ async function handleUpdate(ctx: Context): Promise<void> {
     update: ctx.update,
     enqueuedAt: Date.now(),
   };
+
+  // ── Turn-actor ingress path (G1) ──
+  // 消息不再各自成 job:写入 pending 缓冲 → 排程(或续期)该 chat 的认知
+  // 回合。WAIT/STOP 的唤醒判断移入 actor。edits 仍走旧路径(罕见且幂等)。
+  if (!isEdit && isTurnActorChat(chatId)) {
+    const isDirect = looksLikeDirectInteraction(ctx.update, {
+      botUid: getBotUid(),
+      botUsername: e.BOT_USERNAME,
+      botNicknames: e.BOT_NICKNAMES,
+    });
+
+    // G3: 打断同 chat 在飞生成(TURN_ABORT_ENABLED=false 时为 no-op)
+    interruptGeneration(chatId, isDirect ? 'direct_message' : 'new_message');
+
+    await appendPending({
+      update: ctx.update,
+      chatId,
+      messageId,
+      enqueuedAt: Date.now(),
+      direct: isDirect,
+    });
+    await scheduleTurn(chatId, {
+      trigger: isDirect ? 'direct' : 'message',
+      direct: isDirect,
+    });
+    return;
+  }
 
   // ── Timing-gate aware enqueue path ──
   if (e.TIMING_GATE_ENABLED && !isEdit) {

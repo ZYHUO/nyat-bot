@@ -21,6 +21,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     maxTokens: options.maxTokens ?? usage.maxTokens,
     temperature: options.temperature ?? usage.temperature,
     timeout: usage.timeout,
+    signal: options.signal,
   };
 
   const errors: Error[] = [];
@@ -57,6 +58,13 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     } catch (err) {
       errors.push(err instanceof Error ? err : new Error(String(err)));
 
+      // External abort (turn interrupt) — don't fallback, surface immediately
+      if (options.signal?.aborted) {
+        throw err instanceof AIError && err.code === 'AI_ABORTED'
+          ? err
+          : new AIError('Aborted by caller', labelName, label.model, 'AI_ABORTED');
+      }
+
       // Content safety rejection — don't fallback, throw immediately
       if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
         logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter');
@@ -80,7 +88,7 @@ async function hedgedCall(
   primaryLabel: ReturnType<typeof getLabel>,
   hedgeLabel: ReturnType<typeof getLabel>,
   messages: AICallOptions['messages'],
-  callOpts: { maxTokens?: number; temperature?: number; timeout?: number },
+  callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
   hedgeDelayMs: number,
   cooldown: CooldownTracker,
 ): Promise<AICallResult> {

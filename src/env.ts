@@ -186,6 +186,50 @@ const envSchema = z.object({
   // 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。
   TIMING_GATE_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(15),
 
+  // ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ──
+  // 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。
+  // G1: per-chat 回合 actor。开启后消息进 xxb:pending:{chatId}，由 turn job 统一消化。
+  TURN_ACTOR_ENABLED: booleanFromEnv.default(false),
+  // 灰度群列表（逗号分隔 chatId）。空 = TURN_ACTOR_ENABLED 时对所有 chat 生效。
+  TURN_ACTOR_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  // G3: 新消息打断在飞生成并带新上下文重规划。
+  TURN_ABORT_ENABLED: booleanFromEnv.default(false),
+  // 连续打断上限（MaiBot planner_interrupt_max_consecutive_count，默认 0=不打断；我们默认 1）。
+  TURN_INTERRUPT_MAX_CONSECUTIVE: z.coerce.number().int().nonnegative().default(1),
+  // 打断后静默期（毫秒），等这波消息发完再重规划（MaiBot 硬编码 1s）。
+  TURN_INTERRUPT_QUIET_MS: z.coerce.number().int().nonnegative().default(1000),
+  // 回合内内部轮次预算（reply + 自我接话 + 余量；MaiBot 是 10，保守起步）。
+  TURN_MAX_INTERNAL_ROUNDS: z.coerce.number().int().positive().default(4),
+  // G4: judge/gate/reply 以整个 burst 为决策单元（而非只看最后一条）。
+  TURN_BURST_JUDGE_ENABLED: booleanFromEnv.default(false),
+  // G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。
+  TURN_WAIT_RESUME_ENABLED: booleanFromEnv.default(false),
+  // G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。
+  TURN_UNANSWERED_REVISIT_ENABLED: booleanFromEnv.default(false),
+  // G2: 统一动作空间 planner（reply/react/sticker/silent/wait）。
+  TURN_ACTION_PLANNER_ENABLED: booleanFromEnv.default(false),
+  // G6: 发完后自我接话（"对了…"/补贴纸），新用户消息立即终止。
+  TURN_SELF_FOLLOWUP_ENABLED: booleanFromEnv.default(false),
+  TURN_SELF_FOLLOWUP_MAX: z.coerce.number().int().nonnegative().default(2),
+  // G9: per-chat focus/能量标量（调制判断门槛、防抖、打字节奏）。
+  TURN_FOCUS_ENABLED: booleanFromEnv.default(false),
+  // G11: idle/proactive cron 经 turn actor 走完整人格管线。
+  TURN_PROACTIVE_ENABLED: booleanFromEnv.default(false),
+  // G8: judge+gate+writer 合并为单次人格化社交决策（最后上，需 A/B）。
+  TURN_UNIFIED_DECISION_ENABLED: booleanFromEnv.default(false),
+  // gate no_action 冷却语义改向：冷却期内延后调度（MaiBot 拖时间），而非放行。
+  TURN_GATE_DEFER_COOLDOWN: booleanFromEnv.default(false),
+  // G13: 发送前反重复守卫（与自己最近消息相似度 > 阈值时带约束重生成一次）。
+  ANTI_REPEAT_ENABLED: booleanFromEnv.default(false),
+  ANTI_REPEAT_THRESHOLD: z.coerce.number().min(0).max(1).default(0.85),
+
   // ── Learner (Expression + Jargon, Stage D) ──
   LEARNER_ENABLED: booleanFromEnv.default(false),
   LEARNER_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(60),

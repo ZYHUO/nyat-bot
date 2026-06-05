@@ -6,7 +6,15 @@ import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { AILabel, AICallResult, ContentPart } from './types.js';
 import { AIError } from '../shared/errors.js';
+import { mergeAbortSignals } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
+
+/** Throw a normalized AI_ABORTED error when the external signal fired. */
+function throwIfExternallyAborted(label: AILabel, signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new AIError('Aborted by caller', label.name, label.model, 'AI_ABORTED');
+  }
+}
 
 // ── Claude native API (/v1/messages) ──────────────────────────────
 
@@ -30,7 +38,7 @@ interface ClaudeResponse {
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number },
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
 ): Promise<AICallResult> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
@@ -72,7 +80,7 @@ async function callClaude(
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify(body),
-    signal: opts.timeout ? AbortSignal.timeout(opts.timeout) : undefined,
+    signal: mergeAbortSignals(opts.timeout, opts.signal),
   });
 
   const latencyMs = Math.round(performance.now() - start);
@@ -149,7 +157,7 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
 async function callOpenAIRaw(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean },
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean; signal?: AbortSignal },
 ): Promise<AICallResult> {
   const start = performance.now();
   const apiKey = label.apiKeys[0]!;
@@ -171,7 +179,7 @@ async function callOpenAIRaw(
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify(body),
-    signal: opts.timeout ? AbortSignal.timeout(opts.timeout) : undefined,
+    signal: mergeAbortSignals(opts.timeout, opts.signal),
   });
 
   if (!res.ok) {
@@ -266,7 +274,7 @@ async function callOpenAIRaw(
 export async function callModel(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number } = {},
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } = {},
 ): Promise<AICallResult> {
   if (label.apiFormat === 'claude') {
     const textMessages = messages.map(m => ({
@@ -276,6 +284,7 @@ export async function callModel(
     try {
       return await callClaude(label, textMessages, opts);
     } catch (err) {
+      throwIfExternallyAborted(label, opts.signal);
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof AIError) throw err;
       if (message.includes('abort') || message.includes('timeout') || message.includes('TimeoutError')) {
@@ -294,10 +303,15 @@ export async function callModel(
   // Use raw fetch for vision (image content) or stream-only endpoints
   // to ensure correct OpenAI-compatible image_url serialization
   if (hasImageContent(messages) || label.stream) {
-    return callOpenAIRaw(label, messages, {
-      ...opts,
-      stream: label.stream,
-    });
+    try {
+      return await callOpenAIRaw(label, messages, {
+        ...opts,
+        stream: label.stream,
+      });
+    } catch (err) {
+      throwIfExternallyAborted(label, opts.signal);
+      throw err;
+    }
   }
 
   const provider = createOpenAI({
@@ -312,7 +326,7 @@ export async function callModel(
       messages: messages as Parameters<typeof generateText>[0]['messages'],
       maxTokens: opts.maxTokens,
       temperature: opts.temperature,
-      abortSignal: opts.timeout ? AbortSignal.timeout(opts.timeout) : undefined,
+      abortSignal: mergeAbortSignals(opts.timeout, opts.signal),
     });
 
     const latencyMs = Math.round(performance.now() - start);
@@ -337,6 +351,8 @@ export async function callModel(
   } catch (err) {
     const latencyMs = Math.round(performance.now() - start);
     const message = err instanceof Error ? err.message : String(err);
+
+    throwIfExternallyAborted(label, opts.signal);
 
     logger.warn({ label: label.name, model: label.model, latencyMs, err: message }, 'AI call failed');
 

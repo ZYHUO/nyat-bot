@@ -138,6 +138,7 @@ export async function microJudge(
   usage = 'judge',
   knowledgeBase?: string,
   chatId?: number,
+  signal?: AbortSignal,
 ): Promise<JudgeResult> {
   const start = performance.now();
   const config = getConfig();
@@ -161,6 +162,7 @@ export async function microJudge(
       ],
       maxTokens: 100,
       temperature: 0,
+      signal,
     });
   } catch (err) {
     if (err instanceof AIConfigError) {

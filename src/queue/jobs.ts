@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import type { UpdateLike } from '../shared/types.js';
+import type { TurnJobPayload } from '../pipeline/turn/types.js';
 
 export const QUEUE_NAME = 'xxb-messages';
 
@@ -18,7 +19,7 @@ export interface CoalesceInfo {
 }
 
 export interface MessageJobData {
-  type: 'message' | 'allowlist_review' | 'wait_resume';
+  type: 'message' | 'allowlist_review' | 'wait_resume' | 'chat_turn';
   chatId: number;
   messageId?: number;
   isEdit?: boolean;
@@ -41,4 +42,6 @@ export interface MessageJobData {
     /** Anchor messageId — the last message at time of wait decision */
     anchorMessageId?: number;
   };
+  /** Turn actor: payload for type='chat_turn' (per-chat cognition turn) */
+  turn?: TurnJobPayload;
 }
