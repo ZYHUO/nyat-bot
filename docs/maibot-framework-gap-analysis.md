@@ -94,3 +94,28 @@
 - 完整工作流结果:`/tmp/claude-0/-root/0f75a791-0274-4feb-828b-881659d097a7/tasks/wobqarihw.output`
 - MaiBot 源码快照:`/root/.tmp-maibot-study`(v1.0-rc.4)、TG 适配器:`/root/.tmp-maibot-tg-adapter`
 - 已移植机制清单(不在本差距列表内):ASI 兴趣评分、talk-frequency 自然接话、timing gate(MaiBot Stage-1)、humanizer 自调、主动意愿度等 19 项
+
+---
+
+## 实施状态(2026-06-05)
+
+B+C 梯队已实现(12 个提交,`83d4eb6..`),全部 env flag 门控、默认关闭,测试 789 全绿:
+
+| Gap | 状态 | Flag |
+|---|---|---|
+| G1 回合 actor | ✅ | `TURN_ACTOR_ENABLED` (+`TURN_ACTOR_CHAT_IDS` 灰度) |
+| G3 打断重规划 | ✅ | `TURN_ABORT_ENABLED` |
+| G4 整 burst 判断+还在打字 | ✅ | `TURN_BURST_JUDGE_ENABLED` |
+| G5 wait 真回访 | ✅ | `TURN_WAIT_RESUME_ENABLED` |
+| G7 未回应回访 | ✅ | `TURN_UNANSWERED_REVISIT_ENABLED` |
+| G2 动作空间 react/sticker/silent | ✅ | `TURN_ACTION_PLANNER_ENABLED` |
+| G6 自我接话 | ✅ | `TURN_SELF_FOLLOWUP_ENABLED` |
+| G9 focus 标量 | ✅ | `TURN_FOCUS_ENABLED` |
+| G10 投递意图+人味预算 | ✅ | 随 action planner / actor 模式 |
+| G11 人格化主动发言 | ✅ | `TURN_PROACTIVE_ENABLED` |
+| G12 单 owner 串行 | ✅ | 随 G1 结构性解决 |
+| G13 反重复+表达选择器接线 | ✅ | `ANTI_REPEAT_ENABLED` / 随 rich-context |
+| gate 冷却语义改向 | ✅ | `TURN_GATE_DEFER_COOLDOWN` |
+| G8 合并人格决策 | ⏸️ 有意延后 | 等 C 层真实流量验证后单独 A/B(两家评审一致建议) |
+
+核心新模块:`src/pipeline/turn/{types,flags,buffer,actor,abort-registry,quiet-period,answered-store,focus,self-continue,proactive-turn}.ts`、`src/queue/turn-scheduler.ts`、`src/pipeline/reply/{anti-repeat,reaction-emoji}.ts`。
