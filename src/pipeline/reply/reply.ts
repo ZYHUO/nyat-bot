@@ -131,14 +131,24 @@ export async function generateReply(
   replyPath?: ReplyPath,
   replyTier?: ReplyTier,
   segmenterConfig?: Partial<SegmenterConfig>,
-  callOpts?: { signal?: AbortSignal; burstIds?: number[] },
+  callOpts?: {
+    signal?: AbortSignal;
+    burstIds?: number[];
+    revisitCandidates?: Array<{ messageId: number; sender: string; snippet: string }>;
+  },
 ): Promise<{ replies: ReplyOutput[]; toolsUsed: string[]; toolExecutionFailed: boolean }> {
   const interruptSignal = callOpts?.signal;
   // G4: the turn drained a multi-message burst — tell the writer to answer
   // the whole thought and pick the real anchor, not just the newest line.
-  const burstHint = callOpts?.burstIds && callOpts.burstIds.length > 1
+  const burstPart = callOpts?.burstIds && callOpts.burstIds.length > 1
     ? `[连发上下文] 这次回复由一波连发触发，共 ${callOpts.burstIds.length} 条：${callOpts.burstIds.map((id) => `#${id}`).join('、')}（按时间顺序，最后一条最新，内容都在上方上下文里）。请把整波连发当作一个完整的念头来回应，不要只回最后一句；targetMessageId 选这一波里真正承载重点的那条（往往是提问/求助的那条，不一定是最后一条）。`
     : undefined;
+  // G7: surface still-unanswered recent messages so the model can scroll back
+  // ("对了你刚才问的那个…") — strictly optional, the model may ignore them.
+  const revisitPart = callOpts?.revisitCandidates && callOpts.revisitCandidates.length > 0
+    ? `[未回应的消息] 最近还有几条没人接的消息：\n${callOpts.revisitCandidates.map((c) => `- #${c.messageId} ${c.sender}：${c.snippet}`).join('\n')}\n如果当前话题合适、你也确实有话可说，可以在回复里顺带圆回去（多发一条、targetMessageId 填对应的 id）；不合适就直接忽略，别为了回而回。`
+    : undefined;
+  const burstHint = [burstPart, revisitPart].filter(Boolean).join('\n\n') || undefined;
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
   const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';

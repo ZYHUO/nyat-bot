@@ -660,12 +660,30 @@ async function generateAndSendReplies(args: {
     timings["retrieval"] = Math.round(performance.now() - t4);
 
     // 8. Generate reply (interruptible when invoked by the turn actor — G3;
-    // burst ids let the model pick the real anchor of the thought — G4)
+    // burst ids let the model pick the real anchor of the thought — G4;
+    // unanswered revisit candidates let it circle back — G7)
     const t5 = performance.now();
+    let revisitCandidates;
+    if (e.TURN_UNANSWERED_REVISIT_ENABLED && job.turnContext && job.chatId < 0) {
+      try {
+        const { pickRevisitCandidates } = await import("./turn/answered-store.js");
+        const recentForRevisit = await getRecent(job.chatId, 30);
+        revisitCandidates = await pickRevisitCandidates(
+          job.chatId,
+          recentForRevisit,
+          [formatted.messageId, ...(job.turnContext.burstMessageIds ?? [])],
+          botUid,
+        );
+        if (revisitCandidates.length === 0) revisitCandidates = undefined;
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "pickRevisitCandidates failed (non-critical)");
+      }
+    }
     const turnCallOpts = job.turnContext
       ? {
           signal: job.turnContext.signal,
           burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext.burstMessageIds : undefined,
+          revisitCandidates,
         }
       : undefined;
     const replyResult = await generateReply(
@@ -1052,6 +1070,17 @@ async function generateAndSendReplies(args: {
     if (job.chatId < 0 && sentMessages.length > 0) {
       import("../tracking/social-needs.js")
         .then(({ markBotSpoke }) => markBotSpoke(job.chatId))
+        .catch(() => {});
+    }
+
+    // G7: mark every replied-to target (and the trigger itself) as answered
+    if (sentMessages.length > 0) {
+      const answeredIds = Array.from(new Set([
+        formatted.messageId,
+        ...replies.map((r) => r.targetMessageId).filter((id) => id > 0),
+      ]));
+      import("./turn/answered-store.js")
+        .then(({ markAnswered }) => markAnswered(job.chatId, answeredIds))
         .catch(() => {});
     }
 
