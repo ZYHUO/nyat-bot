@@ -347,6 +347,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
       { exactReplyCount: 2 },
       123,
       undefined, // burstHint
+      undefined, // expressionOverride
     );
     expect(result.replies).toEqual([
       { replyContent: '第一条', targetMessageId: 42 },

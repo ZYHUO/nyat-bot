@@ -327,6 +327,25 @@ export async function generateReply(
   // Await the only truly async fetch
   const memberRoster = await memberRosterPromise;
 
+  // G13: LLM-driven expression selection (MaiBot maisaka_expression_selector
+  // port — was dead code, now wired). Rich-context replies pick style snippets
+  // matched to THIS conversation instead of the static top-N; cheap judge model.
+  let expressionOverride: string | undefined;
+  if (useRichContext && chatId < 0) {
+    try {
+      const { env: envFn } = await import('../../env.js');
+      if (envFn().EXPRESSION_INJECT_ENABLED) {
+        const { selectExpressions } = await import('../../learners/expression-selector.js');
+        const picked = await selectExpressions(chatId, contextStr.slice(-1200), envFn().EXPRESSION_INJECT_COUNT, 'judge');
+        if (picked.length > 0) {
+          expressionOverride = picked.map((ex) => `- ${ex.situation} → ${ex.style}`).join('\n');
+        }
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'selectExpressions failed (falls back to static injection)');
+    }
+  }
+
   // 4. Build messages array
   let toolResultsBlock: string | undefined;
   const usage = effectiveReplyTier === 'max' ? 'reply_max'
@@ -391,6 +410,7 @@ export async function generateReply(
     exactReplyCount ? { exactReplyCount } : undefined,
     chatId,
     burstHint,
+    expressionOverride,
   );
 
   // 5. Call AI final writer (direct or planned both use no-tools final synthesis)
@@ -448,6 +468,39 @@ export async function generateReply(
       result.toolsUsed = toolsUsed;
       parsedReplies = parseReplyResponse(result.content, message.messageId);
       if (!parsedReplies[0] || !(await isDuplicateReply(chatId, parsedReplies[0].replyContent))) break;
+    }
+  }
+
+  // 7.5 G13: near-duplicate guard — "我是不是刚说过非常像的话?"
+  // exact-match 之外抓"换汤不换药";命中则带约束重生成一次(MaiBot
+  // after_response retry-with-constraint 语义)。ANTI_REPEAT_ENABLED 门控。
+  if (parsedReplies[0]) {
+    try {
+      const { checkNearDuplicate } = await import('./anti-repeat.js');
+      const dup = await checkNearDuplicate(chatId, parsedReplies[0].replyContent);
+      if (dup.isNearDuplicate) {
+        logger.info({ chatId, ratio: dup.ratio }, 'Near-duplicate reply detected, regenerating with constraint');
+        const constrained = messages.map((m, idx) =>
+          idx === messages.length - 1 && m.role === 'user'
+            ? {
+                ...m,
+                content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n你刚刚说过非常类似的话（「${(dup.collidedWith ?? '').slice(0, 80)}…」）。换一个说法、换个角度、或者补充新的信息——禁止复读自己。`,
+              }
+            : m,
+        );
+        result = await generateReplyModelOutput(constrained, usage, {
+          temperatureOverride: 1.0,
+          signal: interruptSignal,
+        });
+        result.toolsUsed = toolsUsed;
+        const regenerated = parseReplyResponse(result.content, message.messageId);
+        // 重写后仍复读 → 保留第一版(已尽力,别为了不复读发更差的)
+        if (regenerated[0] && !(await checkNearDuplicate(chatId, regenerated[0].replyContent)).isNearDuplicate) {
+          parsedReplies = regenerated;
+        }
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Near-duplicate check failed (non-critical)');
     }
   }
 

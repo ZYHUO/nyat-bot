@@ -158,6 +158,7 @@ export function buildMessages(
   replyShapeHint?: ReplyShapeHint,
   chatId?: number,
   burstHint?: string,
+  expressionOverride?: string,
 ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
   const userParts: string[] = [];
 
@@ -187,7 +188,10 @@ export function buildMessages(
   }
 
   // Expression injection (Stage D)
-  if (chatId !== undefined && env().EXPRESSION_INJECT_ENABLED) {
+  // G13: 语境匹配的 LLM 选择结果(expression-selector)优先于静态 top-N
+  if (expressionOverride) {
+    userParts.push(`[本群常用表达]\n${expressionOverride}`);
+  } else if (chatId !== undefined && env().EXPRESSION_INJECT_ENABLED) {
     const exprs = getTopExpressions(chatId, env().EXPRESSION_INJECT_COUNT);
     if (exprs.length > 0) {
       const lines = exprs.map((e) => `- ${e.situation} → ${e.style}`).join('\n');
