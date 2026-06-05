@@ -19,6 +19,7 @@ import { getBotTracker } from '../../tracking/interaction.js';
 import { getUserProfilePrompt, getUserPreferences } from '../../tracking/user-profile.js';
 import { getReflection } from '../../tracking/outcome.js';
 import { planReply } from '../planner/planner.js';
+import { detectCommandIntent } from '../nl-commands.js';
 import { executeToolPlan, formatToolResultsForPrompt } from '../planner/executor.js';
 import { countTokens } from '../../ai/token-counter.js';
 import { logger } from '../../shared/logger.js';
@@ -27,7 +28,7 @@ import { getCachedRoster, setCachedRoster } from './member-cache.js';
 const MAX_DUPLICATE_RETRIES = 1;
 const MAX_MULTI_REPLY_RETRIES = 1;
 const MAX_TOOL_ARTIFACT_RETRIES = 1;
-const REPLY_SPLITTER_CHAR_THRESHOLD = 20; // Minimum length to trigger code-based segmentation
+const REPLY_SPLITTER_CHAR_THRESHOLD = 60; // 短回复(<60字)不分段，保持单条（之前 20，几乎都被切）
 const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
   normal: 48_000,
   pro: 72_000,
@@ -175,7 +176,17 @@ export async function generateReply(
   // 频道/匿名身份不能签到（uid 是群/频道 ID，不是真实用户）
   let checkinData: string | undefined;
   const msgText = message.textContent || '';
-  if (!message.isAnonymous && /^\/checkin(?:@\w+)?$/i.test(msgText.trim())) {
+  // Detect checkin/stats via exact slash command OR natural-language phrasing
+  // (e.g. "帮我签到"), so the data is injected even when the bot wasn't formally
+  // @addressed — otherwise the reply LLM hallucinates a checkin without the streak.
+  const cmdIntent = detectCommandIntent(msgText);
+  const isCheckinMsg = /^\/checkin(?:@\w+)?$/i.test(msgText.trim()) || cmdIntent?.cmd === '/checkin';
+  const isStatsMsg = /^\/stats(?:@\w+)?$/i.test(msgText.trim()) || cmdIntent?.cmd === '/stats';
+  if (isCheckinMsg && message.isAnonymous) {
+    // 匿名管理员/频道身份的 uid 是群/频道 ID，不是真实用户，无法签到。
+    // 明确告诉 LLM 不要假装签到成功或编造连签数据。
+    checkinData = '[签到系统] 对方是匿名管理员/频道身份，无法签到（不是真实用户身份）。请友善但明确地告诉TA：匿名身份不能签到，需要用真实身份发消息再签。绝对不要假装签到成功，也不要编造连签天数或奖励。';
+  } else if (isCheckinMsg) {
     try {
       const result = doCheckin(chatId, message.uid, message.username, message.fullName);
       let checkinStr = result.isNew
@@ -196,7 +207,7 @@ export async function generateReply(
   }
 
   // /stats 排行榜注入
-  if (/^\/stats(?:@\w+)?$/i.test(msgText.trim())) {
+  if (isStatsMsg) {
     try {
       const stats = getCheckinStats(chatId);
       const todayList = stats.todayRank.map(r =>

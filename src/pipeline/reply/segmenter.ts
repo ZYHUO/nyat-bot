@@ -34,15 +34,15 @@ export interface SegmenterConfig {
 
 const DEFAULT_CONFIG: SegmenterConfig = {
   enabled: true,
-  maxLength: 100,
-  maxSentenceNum: 8,
+  maxLength: 220,        // 每条更长，减少强切（之前 100）
+  maxSentenceNum: 3,     // 最多拆 3 条（之前 8，太碎）
   enableOverflowReturnAll: true,
   defaultReply: '嗯',
   enableKaomojiProtection: true,
-  typingChineseTime: 0.25,
-  typingEnglishTime: 0.12,
-  typingMinDelay: 0.8,
-  typingMaxDelay: 4.0,
+  typingChineseTime: 0.06,  // 打字延迟大幅降低（之前 0.25），加快
+  typingEnglishTime: 0.03,  // 之前 0.12
+  typingMinDelay: 0.3,      // 之前 0.8
+  typingMaxDelay: 1.2,      // 每条最多等 1.2s（之前 4.0s，是"慢"的主因）
   firstMessageQuoteReply: true,
 };
 
