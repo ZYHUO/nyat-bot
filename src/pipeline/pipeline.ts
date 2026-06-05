@@ -585,6 +585,27 @@ async function generateAndSendReplies(args: {
     e, start, timings, lockState, releaseHeldChatLock,
   } = args;
 
+  // 指令服从层:点名/回复 bot/私聊语境下的自然语言指令 → prompt 强注入 +
+  // 禁止沉默 + 关闭 humanizer 内容篡改(指令产物要保真)。
+  let instructionInfo: import("./reply/instruction.js").InstructionInfo | null = null;
+  try {
+    const { detectInstruction } = await import("./reply/instruction.js");
+    const addressed =
+      job.chatId > 0 || !!(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule));
+    instructionInfo = detectInstruction(formatted, {
+      addressed,
+      isMasterUser: isMaster(formatted.uid, e.MASTER_UID),
+    });
+    if (instructionInfo) {
+      logger.info(
+        { chatId: job.chatId, messageId: formatted.messageId, strength: instructionInfo.strength },
+        "Instruction detected — compliance mode",
+      );
+    }
+  } catch (err) {
+    logger.debug({ err, chatId: job.chatId }, "detectInstruction failed (non-critical)");
+  }
+
   let maxPlaceholderMsgId: number | undefined;
   try {
     // 6. reply_max: quota check + thinking placeholder
@@ -680,12 +701,13 @@ async function generateAndSendReplies(args: {
         logger.debug({ err, chatId: job.chatId }, "pickRevisitCandidates failed (non-critical)");
       }
     }
-    const turnCallOpts = job.turnContext
+    const turnCallOpts = job.turnContext || instructionInfo
       ? {
-          signal: job.turnContext.signal,
-          burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext.burstMessageIds : undefined,
+          signal: job.turnContext?.signal,
+          burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext?.burstMessageIds : undefined,
           revisitCandidates,
-          actionSpace: e.TURN_ACTION_PLANNER_ENABLED,
+          actionSpace: job.turnContext ? e.TURN_ACTION_PLANNER_ENABLED : undefined,
+          instruction: instructionInfo ?? undefined,
         }
       : undefined;
     const replyResult = await generateReply(
@@ -801,7 +823,8 @@ async function generateAndSendReplies(args: {
 
     // G10: 每回合"人味预算"(actor 模式)— typo/撤回重发/后补编辑三者
     // 一回合最多触发一个,效果像偶发的真实行为而不是抽搐生成器。
-    let humanizerBudget = job.turnContext ? 1 : Number.POSITIVE_INFINITY;
+    // 指令回复预算清零:让它"原样重复/翻译/报数"时不能被错别字篡改。
+    let humanizerBudget = instructionInfo ? 0 : job.turnContext ? 1 : Number.POSITIVE_INFINITY;
 
     // ── Humanizer: thinking interjection (insert between 1st and 2nd segments) ──
     // Skip for DM — users expect instant response in private chat

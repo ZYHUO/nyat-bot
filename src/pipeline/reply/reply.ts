@@ -137,6 +137,8 @@ export async function generateReply(
     revisitCandidates?: Array<{ messageId: number; sender: string; snippet: string }>;
     /** G2: 统一动作空间已启用 — 解析并执行 react/sticker/silent 动作 */
     actionSpace?: boolean;
+    /** 指令服从:prompt 强注入 + 禁止沉默 */
+    instruction?: { strength: 'master' | 'normal' };
   },
 ): Promise<{
   replies: ReplyOutput[];
@@ -158,7 +160,13 @@ export async function generateReply(
   const revisitPart = callOpts?.revisitCandidates && callOpts.revisitCandidates.length > 0
     ? `[未回应的消息] 最近还有几条没人接的消息：\n${callOpts.revisitCandidates.map((c) => `- #${c.messageId} ${c.sender}：${c.snippet}`).join('\n')}\n如果当前话题合适、你也确实有话可说，可以在回复里顺带圆回去（多发一条、targetMessageId 填对应的 id）；不合适就直接忽略，别为了回而回。`
     : undefined;
-  const burstHint = [burstPart, revisitPart].filter(Boolean).join('\n\n') || undefined;
+  // 指令服从:执行优先于人设(检测在 pipeline 层,确定性 0ms)
+  let instructionPart: string | undefined;
+  if (callOpts?.instruction) {
+    const { buildInstructionHint } = await import('./instruction.js');
+    instructionPart = buildInstructionHint(callOpts.instruction);
+  }
+  const burstHint = [burstPart, revisitPart, instructionPart].filter(Boolean).join('\n\n') || undefined;
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
   const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
@@ -528,6 +536,36 @@ export async function generateReply(
     // 沉默收尾 —— 不能落到 "All replies failed" 的故障兜底话术。
     void silentChosen;
     modelSilent = parsedReplies.length === 0 ? true : undefined;
+
+    // 指令禁止沉默:对直接指令选 silent → 带约束重生成一次;仍不说话
+    // 就明确回"做不到",绝不无声蒸发。
+    if (modelSilent && callOpts?.instruction) {
+      logger.info({ chatId }, 'Instruction reply came back silent, regenerating with constraint');
+      const constrained = messages.map((m, idx) =>
+        idx === messages.length - 1 && m.role === 'user'
+          ? { ...m, content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n这是对你的直接指令,不允许沉默或只发贴纸。必须输出实际执行指令的文字回复;确实做不到就明确说做不到+原因。` }
+          : m,
+      );
+      try {
+        result = await generateReplyModelOutput(constrained, usage, { signal: interruptSignal });
+        result.toolsUsed = toolsUsed;
+        const redo = parseReplyResponse(result.content, message.messageId)
+          .filter((r) => r.action === undefined || r.action === 'reply');
+        if (redo.length > 0 && redo[0]!.replyContent.trim()) {
+          parsedReplies = redo;
+          modelSilent = undefined;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Instruction silent-regen failed');
+      }
+      if (modelSilent) {
+        parsedReplies = [{
+          replyContent: '唔……这个本喵做不到喵',
+          targetMessageId: message.messageId,
+        }];
+        modelSilent = undefined;
+      }
+    }
   } else {
     // 动作空间未启用:静默丢弃模型越权产生的动作元素
     parsedReplies = parsedReplies.filter((r) => r.action === undefined || r.action === 'reply');
