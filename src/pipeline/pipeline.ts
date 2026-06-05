@@ -81,6 +81,7 @@ import {
 } from "../tracking/reply-max-quota.js";
 import { describeMultimodal } from "./multimodal.js";
 import { acquireChatLock } from "../queue/chat-lock.js";
+import { AIError } from "../shared/errors.js";
 import { env } from "../env.js";
 import { logger } from "../shared/logger.js";
 import { parseMuteTimedRequest } from "./judge/rules.js";
@@ -658,12 +659,13 @@ async function generateAndSendReplies(args: {
     const retrievedContext = await retrieveContext(job.chatId, formatted, botUid, { mode: retrievalMode });
     timings["retrieval"] = Math.round(performance.now() - t4);
 
-    // 8. Generate reply
+    // 8. Generate reply (interruptible when invoked by the turn actor — G3)
     const t5 = performance.now();
     const replyResult = await generateReply(
       formatted, retrievedContext, judgeResult.action,
       job.chatId, botUid, effectiveReplyPath, effectiveReplyTier,
       segmenterConfig,
+      job.turnContext?.signal ? { signal: job.turnContext.signal } : undefined,
     );
     const replies = replyResult.replies;
     timings["reply"] = Math.round(performance.now() - t5);
@@ -1119,6 +1121,17 @@ async function generateAndSendReplies(args: {
       await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
     }
 
+    // Turn interrupt (G3): not a failure — propagate to the actor, which
+    // waits the quiet period and replans with the new messages. No fallback
+    // message, no error log.
+    if (err instanceof AIError && err.code === "AI_ABORTED") {
+      logger.info(
+        { chatId: job.chatId, messageId: formatted.messageId },
+        "Reply generation interrupted by new message, propagating for replan",
+      );
+      throw err;
+    }
+
     const totalMs = Math.round(performance.now() - start);
     logger.error(
       { chatId: job.chatId, messageId: formatted.messageId, action: judgeResult.action, totalMs, timings, err },
@@ -1547,7 +1560,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // 5.46 Phase 3: Timing Gate — LLM-based rhythm control
     // Runs only when TIMING_GATE_ENABLED. Direct interactions, max-tier
     // replies, and cooldown all short-circuit to 'continue' inside runTimingGate().
-    if (e.TIMING_GATE_ENABLED) {
+    // Turn-actor replans bypass the gate entirely (MaiBot: post-interrupt
+    // replan skips the timing gate and goes straight back to the planner).
+    if (e.TIMING_GATE_ENABLED && !job.turnContext?.gateBypass) {
       const isDirect = !!(
         judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)
       );

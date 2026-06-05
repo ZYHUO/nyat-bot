@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { PendingEntry } from '../../../src/pipeline/turn/types.js';
+import { AIError } from '../../../src/shared/errors.js';
 
 const envState = {
   TURN_ACTOR_ENABLED: true,
   TURN_ACTOR_CHAT_IDS: [] as number[],
   TIMING_GATE_ENABLED: false,
+  TURN_ABORT_ENABLED: false,
+  TURN_INTERRUPT_MAX_CONSECUTIVE: 3,
+  TURN_INTERRUPT_QUIET_MS: 0,
 };
 
 const { processPipelineMock, scheduleTurnMock, transitionToRunningMock } = vi.hoisted(() => ({
@@ -49,9 +53,11 @@ vi.mock('../../../src/pipeline/turn/buffer.js', () => ({
     return was;
   }),
   bumpEpoch: vi.fn(async () => ++bufferState.epoch),
+  getLastMsgAt: vi.fn(async () => undefined),
 }));
 
 import { runChatTurn, isTurnActorChat } from '../../../src/pipeline/turn/actor.js';
+import { _resetAbortRegistry } from '../../../src/pipeline/turn/abort-registry.js';
 
 const CHAT = -100800;
 
@@ -88,6 +94,8 @@ beforeEach(() => {
   envState.TURN_ACTOR_ENABLED = true;
   envState.TURN_ACTOR_CHAT_IDS = [];
   envState.TIMING_GATE_ENABLED = false;
+  envState.TURN_ABORT_ENABLED = false;
+  _resetAbortRegistry();
 });
 
 describe('isTurnActorChat', () => {
@@ -181,5 +189,82 @@ describe('runChatTurn', () => {
     processPipelineMock.mockRejectedValueOnce(new Error('boom'));
     await runChatTurn(turnJob(), 'turn-1');
     expect(processPipelineMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('runChatTurn — G3 interrupt/replan', () => {
+  const aborted = () => new AIError('aborted', 'x', 'y', 'AI_ABORTED');
+
+  it('replans on AI_ABORTED with the newest pending message as anchor, gate bypassed', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)];
+
+    processPipelineMock.mockImplementationOnce(async () => {
+      // Interrupt arrives mid-generation: new messages land in pending
+      bufferState.pending = [entry(2), entry(3)];
+      throw aborted();
+    });
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    // call 0: judged entry 1 (aborted); call 1: tracking entry 2; call 2: replan judged entry 3
+    expect(processPipelineMock).toHaveBeenCalledTimes(3);
+
+    const tracked = processPipelineMock.mock.calls[1]![0] as { messageId: number; coalesce: { isLastInBatch: boolean } };
+    expect(tracked.messageId).toBe(2);
+    expect(tracked.coalesce.isLastInBatch).toBe(false);
+
+    const replanned = processPipelineMock.mock.calls[2]![0] as {
+      messageId: number;
+      turnContext: { gateBypass: boolean; isReplan: boolean; signal: AbortSignal };
+    };
+    expect(replanned.messageId).toBe(3);
+    expect(replanned.turnContext.gateBypass).toBe(true);
+    expect(replanned.turnContext.isReplan).toBe(true);
+    expect(replanned.turnContext.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('replans with the same anchor when no new messages landed (spurious abort)', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)];
+    processPipelineMock.mockRejectedValueOnce(aborted());
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(2);
+    const replanned = processPipelineMock.mock.calls[1]![0] as { messageId: number; turnContext: { gateBypass: boolean } };
+    expect(replanned.messageId).toBe(1);
+    expect(replanned.turnContext.gateBypass).toBe(true);
+  });
+
+  it('drops the reply silently after the replan budget is exhausted', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)];
+    processPipelineMock.mockRejectedValue(aborted());
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    // initial + MAX_REPLANS(2) attempts, then silent drop (no throw)
+    expect(processPipelineMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not replan when TURN_ABORT_ENABLED=false', async () => {
+    envState.TURN_ABORT_ENABLED = false;
+    bufferState.pending = [entry(1)];
+    processPipelineMock.mockRejectedValueOnce(aborted());
+
+    await runChatTurn(turnJob(), 'turn-1');
+    expect(processPipelineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('judged entries carry an interruptible signal in turnContext', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const job = processPipelineMock.mock.calls[0]![0] as { turnContext?: { signal?: AbortSignal; epoch?: number } };
+    expect(job.turnContext?.signal).toBeInstanceOf(AbortSignal);
+    expect(job.turnContext?.epoch).toBe(1);
   });
 });

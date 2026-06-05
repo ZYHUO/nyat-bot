@@ -308,6 +308,7 @@ describe("processPipeline path branching", () => {
       "direct",
       "normal",
       undefined,
+      undefined, // turn-actor callOpts (legacy path: none)
     );
   });
 
@@ -337,6 +338,7 @@ describe("processPipeline path branching", () => {
       "direct",
       "normal",
       undefined,
+      undefined, // turn-actor callOpts (legacy path: none)
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -443,6 +445,7 @@ describe("processPipeline path branching", () => {
       "planned",
       "pro",
       undefined,
+      undefined, // turn-actor callOpts (legacy path: none)
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -500,6 +503,7 @@ describe("processPipeline path branching", () => {
       "planned",
       "normal",
       undefined,
+      undefined, // turn-actor callOpts (legacy path: none)
     );
   });
 

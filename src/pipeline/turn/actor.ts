@@ -2,16 +2,18 @@
 // Turn Actor — per-chat 认知回合主体
 // ────────────────────────────────────────
 //
-// S3 阶段:最小"旧管线等价"实现。回合开火时原子取走整个 pending burst,
-// 逐条喂给现有 processPipeline:
-//   - direct 条目与最后一条 → 完整 judge→gate→reply
+// 回合开火时原子取走整个 pending burst,逐条喂给现有 processPipeline:
+//   - direct 条目与最后一条 → 完整 judge→gate→reply(可被打断,G3)
 //   - 其余 → tracking-only(与旧 debounce 的 isLastInBatch 语义 1:1)
 //   - WAIT/STOP 且无 direct → 整批 tracking-only(与旧 ingress 抑制等价)
 // 回合结束时若期间有新消息(dirty / pending 非空)→ 立即再排程,
 // 保证同 chat 永远只有一个回合在跑(G12 的结构性解)。
 //
-// 后续阶段在此演进:S4 abort/freshness、S5 整 burst 判断、
-// S6 wait 真回访、S8 动作空间、S9 自我接话。
+// G3 打断闭环(MaiBot 语义):
+//   ingress 新消息 → interruptGeneration → 写手调用以 AI_ABORTED 浮出 →
+//   等静默期(用户这波话说完)→ 重排 pending → 以最新消息为锚、跳过
+//   timing gate 重规划。连续打断受 TURN_INTERRUPT_MAX_CONSECUTIVE 约束,
+//   超限后当前生成被放行(注册表层面拒绝打断)。
 
 import type { MessageJobData } from '../../queue/jobs.js';
 import { processPipeline } from '../pipeline.js';
@@ -22,10 +24,17 @@ import {
   clearDirty,
   bumpEpoch,
 } from './buffer.js';
+import { registerGeneration, clearGeneration } from './abort-registry.js';
+import { waitForMessageQuiet } from './quiet-period.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { getChatState, transitionToRunning } from '../timing/chat-runtime.js';
+import type { PendingEntry } from './types.js';
+import { AIError } from '../../shared/errors.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+
+/** 单个 judged entry 的重规划上限(打断本身另有注册表层 cap) */
+const MAX_REPLANS = 2;
 
 /** Is this chat routed through the turn actor (graylist-aware)? */
 export function isTurnActorChat(chatId: number): boolean {
@@ -33,6 +42,110 @@ export function isTurnActorChat(chatId: number): boolean {
   if (!e.TURN_ACTOR_ENABLED) return false;
   const graylist = e.TURN_ACTOR_CHAT_IDS;
   return graylist.length === 0 || graylist.includes(chatId);
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof AIError && err.code === 'AI_ABORTED';
+}
+
+/** Run one entry through the pipeline as tracking-only bookkeeping. */
+async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number, suppressed: boolean): Promise<void> {
+  try {
+    await processPipeline({
+      type: 'message',
+      chatId,
+      messageId: entry.messageId,
+      update: entry.update,
+      enqueuedAt: entry.enqueuedAt,
+      coalesce: {
+        batchSize,
+        isLastInBatch: false,
+        flushReason: entry.direct ? 'direct_interaction' : 'window',
+      },
+      skipReply: suppressed ? true : undefined,
+    });
+  } catch (err) {
+    logger.error({ err, chatId, messageId: entry.messageId }, 'Turn: tracking entry failed');
+  }
+}
+
+/**
+ * Run a judged entry with G3 interrupt semantics: register an interruptible
+ * generation; on AI_ABORTED wait the quiet period, ingest the messages that
+ * caused the interrupt, then replan anchored on the newest one with the
+ * timing gate bypassed (MaiBot forced-continue).
+ */
+async function runJudgedEntry(
+  chatId: number,
+  entry: PendingEntry,
+  batchSize: number,
+  epoch: number,
+): Promise<void> {
+  const e = env();
+  let current = entry;
+  let currentBatch = batchSize;
+  let gateBypass = false;
+  let replans = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const controller = registerGeneration(chatId, epoch);
+    let interrupted = false;
+    try {
+      await processPipeline({
+        type: 'message',
+        chatId,
+        messageId: current.messageId,
+        update: current.update,
+        enqueuedAt: current.enqueuedAt,
+        coalesce: {
+          batchSize: currentBatch,
+          isLastInBatch: true,
+          flushReason: current.direct ? 'direct_interaction' : 'window',
+        },
+        turnContext: {
+          signal: controller.signal,
+          epoch,
+          gateBypass,
+          isReplan: replans > 0,
+        },
+      });
+      return;
+    } catch (err) {
+      if (!isAbortError(err) || !e.TURN_ABORT_ENABLED || replans >= MAX_REPLANS) {
+        if (isAbortError(err)) {
+          // 重规划预算耗尽:静默放弃这一回合的发言(消息已入上下文,
+          // 下一回合会带着完整语境重新决策)。
+          logger.info({ chatId, replans }, 'Turn: replan budget exhausted, dropping reply');
+          return;
+        }
+        throw err;
+      }
+      interrupted = true;
+      replans++;
+
+      // 等用户这一波消息发完(MaiBot post-interrupt 1s 静默期)
+      await waitForMessageQuiet(chatId, e.TURN_INTERRUPT_QUIET_MS);
+
+      // 消化打断期间的新消息:前段 tracking-only,最新一条成为新锚点
+      const fresh = await drainPending(chatId);
+      if (fresh.length > 0) {
+        for (const ne of fresh.slice(0, -1)) {
+          await trackEntry(chatId, ne, fresh.length, false);
+        }
+        current = fresh.at(-1)!;
+        currentBatch = fresh.length;
+      }
+      // 无论是否有新消息,重规划都跳过 gate(打断已证明此刻该说话)
+      gateBypass = true;
+      logger.info(
+        { chatId, replans, newAnchor: current.messageId, freshCount: fresh.length },
+        'Turn: replanning after interrupt',
+      );
+    } finally {
+      clearGeneration(chatId, controller, interrupted);
+    }
+  }
 }
 
 /**
@@ -94,19 +207,11 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     const judgeThis = !suppressed && (entry.direct === true || isFinal);
 
     try {
-      await processPipeline({
-        type: 'message',
-        chatId,
-        messageId: entry.messageId,
-        update: entry.update,
-        enqueuedAt: entry.enqueuedAt,
-        coalesce: {
-          batchSize: entries.length,
-          isLastInBatch: judgeThis,
-          flushReason: entry.direct ? 'direct_interaction' : 'window',
-        },
-        skipReply: suppressed ? true : undefined,
-      });
+      if (judgeThis) {
+        await runJudgedEntry(chatId, entry, entries.length, epoch);
+      } else {
+        await trackEntry(chatId, entry, entries.length, suppressed);
+      }
     } catch (err) {
       // One bad entry must not kill the rest of the burst.
       logger.error({ err, chatId, messageId: entry.messageId }, 'Turn: pipeline failed for entry');

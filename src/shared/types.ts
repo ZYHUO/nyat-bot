@@ -116,4 +116,16 @@ export interface ChatJob {
     waitSec: number;
     anchorMessageId?: number;
   };
+  /**
+   * Turn actor in-process context (NEVER serialized into BullMQ — the actor
+   * invokes processPipeline directly). signal: interrupt for the expensive
+   * writer stage (G3); gateBypass: replan skips the timing gate (MaiBot
+   * forced-continue after interrupt); epoch: cognition-turn generation id.
+   */
+  turnContext?: {
+    signal?: AbortSignal;
+    epoch?: number;
+    gateBypass?: boolean;
+    isReplan?: boolean;
+  };
 }
