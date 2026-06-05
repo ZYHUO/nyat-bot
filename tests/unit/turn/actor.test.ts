@@ -267,4 +267,43 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     expect(job.turnContext?.signal).toBeInstanceOf(AbortSignal);
     expect(job.turnContext?.epoch).toBe(1);
   });
+
+  it('judged entries of a multi-message burst carry the full burst ids (G4)', async () => {
+    bufferState.pending = [entry(1), entry(2), entry(3)];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[2]![0] as { turnContext?: { burstMessageIds?: number[] } };
+    expect(judged.turnContext?.burstMessageIds).toEqual([1, 2, 3]);
+  });
+
+  it('single-message turns omit burstMessageIds', async () => {
+    bufferState.pending = [entry(1)];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as { turnContext?: { burstMessageIds?: number[] } };
+    expect(judged.turnContext?.burstMessageIds).toBeUndefined();
+  });
+
+  it('replan extends the burst window with interrupt-time messages (G4+G3)', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1), entry(2)];
+
+    let firstJudged = true;
+    processPipelineMock.mockImplementation(async (job: { coalesce?: { isLastInBatch: boolean } }) => {
+      if (job.coalesce?.isLastInBatch && firstJudged) {
+        firstJudged = false;
+        bufferState.pending = [entry(3)];
+        throw new AIError('aborted', 'x', 'y', 'AI_ABORTED');
+      }
+    });
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const lastCall = processPipelineMock.mock.calls.at(-1)![0] as {
+      messageId: number;
+      turnContext?: { burstMessageIds?: number[] };
+    };
+    expect(lastCall.messageId).toBe(3);
+    expect(lastCall.turnContext?.burstMessageIds).toEqual([1, 2, 3]);
+  });
 });

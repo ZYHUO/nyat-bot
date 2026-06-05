@@ -67,6 +67,13 @@ describe('turn scheduler', () => {
     expect(data.turn.directPriority).toBe(true);
   });
 
+  it('extends the sliding window when the user looks mid-typing (G4)', async () => {
+    await scheduleTurn(CHAT, { trigger: 'message', stillTyping: true });
+    const opts = addMock.mock.calls[0]![2];
+    expect(opts.delay).toBeGreaterThan(envState.TIMING_DEBOUNCE_MS);
+    expect(opts.delay).toBeLessThanOrEqual(envState.TIMING_DEBOUNCE_MS * 1.75);
+  });
+
   it('caps the sliding delay at the hard deadline from firstPendingAt', async () => {
     // First message buffered 7.5s ago → hard deadline in 500ms < sliding 2000ms
     bufferState.meta.firstPendingAt = Date.now() - 7500;

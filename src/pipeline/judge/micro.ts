@@ -139,6 +139,7 @@ export async function microJudge(
   knowledgeBase?: string,
   chatId?: number,
   signal?: AbortSignal,
+  burstHint?: string,
 ): Promise<JudgeResult> {
   const start = performance.now();
   const config = getConfig();
@@ -157,7 +158,7 @@ export async function microJudge(
         { role: 'system', content: systemPrompt },
         {
           role: 'user',
-          content: `${kbBlock}${chatId !== undefined && chatId > 0 ? '私聊' : '群聊'}上下文:\n${contextStr}\n\n请对最新一条消息(★标记)做出决策。`,
+          content: `${kbBlock}${chatId !== undefined && chatId > 0 ? '私聊' : '群聊'}上下文:\n${contextStr}\n\n${burstHint ? `${burstHint}\n\n` : ''}请对最新一条消息(★标记)做出决策。`,
         },
       ],
       maxTokens: 100,

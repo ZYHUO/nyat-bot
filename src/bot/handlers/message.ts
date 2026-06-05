@@ -77,6 +77,14 @@ async function handleUpdate(ctx: Context): Promise<void> {
     // G3: 打断同 chat 在飞生成(TURN_ABORT_ENABLED=false 时为 no-op)
     interruptGeneration(chatId, isDirect ? 'direct_message' : 'new_message');
 
+    // G4「还在打字」启发式:短消息 + 尾部无终止标点 → 用户多半还有下文,
+    // 延长去抖窗口让整波念头落完再开回合。
+    const msgTextRaw = (msg.text ?? msg.caption ?? '').trim();
+    const stillTyping =
+      msgTextRaw.length > 0 &&
+      msgTextRaw.length < 60 &&
+      !/[。.!?！？…~〜)）」』"”\]】]$/.test(msgTextRaw);
+
     await appendPending({
       update: ctx.update,
       chatId,
@@ -87,6 +95,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
     await scheduleTurn(chatId, {
       trigger: isDirect ? 'direct' : 'message',
       direct: isDirect,
+      stillTyping,
     });
     return;
   }

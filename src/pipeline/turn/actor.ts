@@ -80,10 +80,12 @@ async function runJudgedEntry(
   entry: PendingEntry,
   batchSize: number,
   epoch: number,
+  burstMessageIds: number[],
 ): Promise<void> {
   const e = env();
   let current = entry;
   let currentBatch = batchSize;
+  let currentBurstIds = burstMessageIds;
   let gateBypass = false;
   let replans = 0;
 
@@ -108,6 +110,7 @@ async function runJudgedEntry(
           epoch,
           gateBypass,
           isReplan: replans > 0,
+          burstMessageIds: currentBurstIds.length > 1 ? currentBurstIds : undefined,
         },
       });
       return;
@@ -127,7 +130,8 @@ async function runJudgedEntry(
       // 等用户这一波消息发完(MaiBot post-interrupt 1s 静默期)
       await waitForMessageQuiet(chatId, e.TURN_INTERRUPT_QUIET_MS);
 
-      // 消化打断期间的新消息:前段 tracking-only,最新一条成为新锚点
+      // 消化打断期间的新消息:前段 tracking-only,最新一条成为新锚点;
+      // burst 视野扩展为「原 burst + 打断新增」(都已在上下文里)
       const fresh = await drainPending(chatId);
       if (fresh.length > 0) {
         for (const ne of fresh.slice(0, -1)) {
@@ -135,6 +139,10 @@ async function runJudgedEntry(
         }
         current = fresh.at(-1)!;
         currentBatch = fresh.length;
+        currentBurstIds = [
+          ...currentBurstIds,
+          ...fresh.map((f) => f.messageId).filter((id): id is number => id !== undefined),
+        ];
       }
       // 无论是否有新消息,重规划都跳过 gate(打断已证明此刻该说话)
       gateBypass = true;
@@ -201,6 +209,10 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   );
 
   // ── Process the burst through the existing pipeline (legacy-equivalent) ──
+  const burstMessageIds = entries
+    .map((en) => en.messageId)
+    .filter((id): id is number => id !== undefined);
+
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
     const isFinal = i === entries.length - 1;
@@ -208,7 +220,7 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
 
     try {
       if (judgeThis) {
-        await runJudgedEntry(chatId, entry, entries.length, epoch);
+        await runJudgedEntry(chatId, entry, entries.length, epoch, burstMessageIds);
       } else {
         await trackEntry(chatId, entry, entries.length, suppressed);
       }

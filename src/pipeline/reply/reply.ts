@@ -131,9 +131,14 @@ export async function generateReply(
   replyPath?: ReplyPath,
   replyTier?: ReplyTier,
   segmenterConfig?: Partial<SegmenterConfig>,
-  callOpts?: { signal?: AbortSignal },
+  callOpts?: { signal?: AbortSignal; burstIds?: number[] },
 ): Promise<{ replies: ReplyOutput[]; toolsUsed: string[]; toolExecutionFailed: boolean }> {
   const interruptSignal = callOpts?.signal;
+  // G4: the turn drained a multi-message burst — tell the writer to answer
+  // the whole thought and pick the real anchor, not just the newest line.
+  const burstHint = callOpts?.burstIds && callOpts.burstIds.length > 1
+    ? `[连发上下文] 这次回复由一波连发触发，共 ${callOpts.burstIds.length} 条：${callOpts.burstIds.map((id) => `#${id}`).join('、')}（按时间顺序，最后一条最新，内容都在上方上下文里）。请把整波连发当作一个完整的念头来回应，不要只回最后一句；targetMessageId 选这一波里真正承载重点的那条（往往是提问/求助的那条，不一定是最后一条）。`
+    : undefined;
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
   const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
@@ -365,6 +370,7 @@ export async function generateReply(
     toolResultsBlock,
     exactReplyCount ? { exactReplyCount } : undefined,
     chatId,
+    burstHint,
   );
 
   // 5. Call AI final writer (direct or planned both use no-tools final synthesis)

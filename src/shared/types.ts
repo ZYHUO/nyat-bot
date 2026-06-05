@@ -127,5 +127,7 @@ export interface ChatJob {
     epoch?: number;
     gateBypass?: boolean;
     isReplan?: boolean;
+    /** G4: messageIds of the whole drained burst (oldest→newest) — judge/reply treat it as one thought */
+    burstMessageIds?: number[];
   };
 }

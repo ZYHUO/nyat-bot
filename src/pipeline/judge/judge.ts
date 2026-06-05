@@ -20,6 +20,8 @@ export interface JudgeInput {
   botNicknames: string[];
   chatId: number;
   groupActivity: { messagesLast5Min: number; messagesLast1Hour: number };
+  /** G4: hint that the latest N messages are one burst — judge the whole thought, not the last line */
+  burstHint?: string;
 }
 
 function findLastBotReplyIndex(
@@ -123,6 +125,8 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     "judge",
     knowledgeForJudge,
     input.chatId,
+    undefined,
+    input.burstHint,
   );
   if (shouldAcceptL1Result(l1Result, activeConv)) {
     logger.debug(
@@ -149,6 +153,8 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     "reply",
     knowledgeForJudge,
     input.chatId,
+    undefined,
+    input.burstHint,
   );
   l2Result.level = "L2_AI";
 

@@ -659,13 +659,20 @@ async function generateAndSendReplies(args: {
     const retrievedContext = await retrieveContext(job.chatId, formatted, botUid, { mode: retrievalMode });
     timings["retrieval"] = Math.round(performance.now() - t4);
 
-    // 8. Generate reply (interruptible when invoked by the turn actor — G3)
+    // 8. Generate reply (interruptible when invoked by the turn actor — G3;
+    // burst ids let the model pick the real anchor of the thought — G4)
     const t5 = performance.now();
+    const turnCallOpts = job.turnContext
+      ? {
+          signal: job.turnContext.signal,
+          burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext.burstMessageIds : undefined,
+        }
+      : undefined;
     const replyResult = await generateReply(
       formatted, retrievedContext, judgeResult.action,
       job.chatId, botUid, effectiveReplyPath, effectiveReplyTier,
       segmenterConfig,
-      job.turnContext?.signal ? { signal: job.turnContext.signal } : undefined,
+      turnCallOpts,
     );
     const replies = replyResult.replies;
     timings["reply"] = Math.round(performance.now() - t5);
@@ -1474,11 +1481,19 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     const messagesLast5Min = recentMessages.filter((m) => m.timestamp >= now - 300).length;
     const messagesLast1Hour = recentMessages.filter((m) => m.timestamp >= now - 3600).length;
 
+    // G4: burst-aware judging — when the turn actor drained a multi-message
+    // burst, tell the judge to treat the whole burst as one thought.
+    const burstIds = e.TURN_BURST_JUDGE_ENABLED ? (job.turnContext?.burstMessageIds ?? []) : [];
+    const burstHint = burstIds.length > 1
+      ? `[连发提示] 最新的 ${burstIds.length} 条消息（${burstIds.map((id) => `#${id}`).join('、')}）是同一波连发，很可能是一个完整的念头分几条打出来的。请把整波作为一个整体来判断（回不回、值不值得回），不要只盯最后一条——重点经常在前面几条里。`
+      : undefined;
+
     const judgeResult = await judge({
       message: formatted, recentMessages,
       recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),
       botUid, botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
       chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
+      burstHint,
     });
     timings["judge"] = Math.round(performance.now() - t3);
 

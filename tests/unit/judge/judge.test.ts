@@ -108,6 +108,8 @@ describe("judge", () => {
       "judge",
       "",
       -100123,
+      undefined, // signal
+      undefined, // burstHint
     );
   });
 
@@ -145,6 +147,8 @@ describe("judge", () => {
       "reply",
       "",
       -100123,
+      undefined, // signal
+      undefined, // burstHint
     );
   });
 

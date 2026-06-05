@@ -139,6 +139,7 @@ export function buildMessages(
   toolResults?: string,
   replyShapeHint?: ReplyShapeHint,
   chatId?: number,
+  burstHint?: string,
 ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
   const userParts: string[] = [];
 
@@ -206,6 +207,11 @@ export function buildMessages(
 
   const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
   userParts.push(`[${contextLabel}]\n${context}`);
+
+  // G4: burst-aware reply — answer the whole multi-message thought
+  if (burstHint) {
+    userParts.push(burstHint);
+  }
 
   // DM mode: inject private chat style and capabilities hint
   if (chatId !== undefined && chatId > 0) {

@@ -26,11 +26,17 @@ import { logger } from '../shared/logger.js';
 
 let _seq = 0;
 
-function computeFireDelay(firstPendingAt: number | undefined, direct: boolean): number {
+/** G4「还在打字」启发式:尾句无终止标点 → 滑动窗口放大,让这波念头落完 */
+const STILL_TYPING_FACTOR = 1.75;
+
+function computeFireDelay(firstPendingAt: number | undefined, direct: boolean, stillTyping: boolean): number {
   if (direct) return 0;
   const e = env();
   const now = Date.now();
-  const slidingFireAt = now + e.TIMING_DEBOUNCE_MS;
+  const sliding = stillTyping
+    ? Math.round(e.TIMING_DEBOUNCE_MS * STILL_TYPING_FACTOR)
+    : e.TIMING_DEBOUNCE_MS;
+  const slidingFireAt = now + sliding;
   const hardFireAt = (firstPendingAt ?? now) + e.TIMING_DEBOUNCE_MAX_BUFFER_MS;
   return Math.max(0, Math.min(slidingFireAt, hardFireAt) - now);
 }
@@ -43,6 +49,8 @@ export interface ScheduleTurnOptions {
   direct?: boolean;
   /** wait 回合锚点 */
   anchorMessageId?: number;
+  /** G4: 最新一条消息看起来没打完(无终止标点)→ 延长去抖窗口 */
+  stillTyping?: boolean;
 }
 
 /**
@@ -52,7 +60,8 @@ export interface ScheduleTurnOptions {
 export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): Promise<void> {
   const queue = getQueue();
   const meta = await getTurnMeta(chatId);
-  const delay = opts.delayMsOverride ?? computeFireDelay(meta.firstPendingAt, opts.direct ?? false);
+  const delay = opts.delayMsOverride
+    ?? computeFireDelay(meta.firstPendingAt, opts.direct ?? false, opts.stillTyping ?? false);
 
   // ── Try to reuse the already-scheduled job ──
   if (meta.scheduledJobId) {
