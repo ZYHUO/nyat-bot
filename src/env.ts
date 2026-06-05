@@ -201,8 +201,9 @@ const envSchema = z.object({
     }),
   // G3: 新消息打断在飞生成并带新上下文重规划。
   TURN_ABORT_ENABLED: booleanFromEnv.default(false),
-  // 连续打断上限（MaiBot planner_interrupt_max_consecutive_count，默认 0=不打断；我们默认 1）。
-  TURN_INTERRUPT_MAX_CONSECUTIVE: z.coerce.number().int().nonnegative().default(1),
+  // 连续打断上限（MaiBot planner_interrupt_max_consecutive_count，默认 0=不打断；
+  // 我们默认 2 —— 高速群里第二条新消息也应能掐死陈旧生成,review #6）。
+  TURN_INTERRUPT_MAX_CONSECUTIVE: z.coerce.number().int().nonnegative().default(2),
   // 打断后静默期（毫秒），等这波消息发完再重规划（MaiBot 硬编码 1s）。
   TURN_INTERRUPT_QUIET_MS: z.coerce.number().int().nonnegative().default(1000),
   // 回合内内部轮次预算（reply + 自我接话 + 余量；MaiBot 是 10，保守起步）。

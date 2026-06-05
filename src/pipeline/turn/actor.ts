@@ -33,10 +33,18 @@ import { AIError } from '../../shared/errors.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
-/** 单个 judged entry 的重规划上限(打断本身另有注册表层 cap) */
-const MAX_REPLANS = 2;
-
 export { isTurnActorChat } from './flags.js';
+
+/**
+ * 单个 judged entry 的重规划上限,从回合内部轮次预算导出:
+ * TURN_MAX_INTERNAL_ROUNDS(默认 4)≈ 首次生成 + replans + 自我接话余量。
+ * NaN/缺失时回退 2 —— 这里绝不能因配置问题变成无限循环。
+ */
+function maxReplans(): number {
+  const rounds = Number(env().TURN_MAX_INTERNAL_ROUNDS);
+  const base = Number.isFinite(rounds) ? rounds - 2 : 2;
+  return Math.min(4, Math.max(1, base));
+}
 
 function isAbortError(err: unknown): boolean {
   return err instanceof AIError && err.code === 'AI_ABORTED';
@@ -111,7 +119,7 @@ async function runJudgedEntry(
       });
       return;
     } catch (err) {
-      if (!isAbortError(err) || !e.TURN_ABORT_ENABLED || replans >= MAX_REPLANS) {
+      if (!isAbortError(err) || !e.TURN_ABORT_ENABLED || replans >= maxReplans()) {
         if (isAbortError(err)) {
           // 重规划预算耗尽:静默放弃这一回合的发言(消息已入上下文,
           // 下一回合会带着完整语境重新决策)。
@@ -212,19 +220,31 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     'Turn started',
   );
 
-  // ── Process the burst through the existing pipeline (legacy-equivalent) ──
+  // ── Process the burst through the existing pipeline ──
   const burstMessageIds = [
     ...displacedReplayIds,
     ...entries.map((en) => en.messageId).filter((id): id is number => id !== undefined),
   ];
 
+  // 每回合恰好一个 judged 锚点:有 direct 取最后一条 direct,否则取末尾。
+  // (旧 debounce 语义会让 direct 和末尾各判一次 → 同回合可能双回复;
+  //  burst 窗口已让模型看到整波,单锚点足够。)
+  let anchorIndex = -1;
+  if (!suppressed) {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i]!.direct === true) {
+        anchorIndex = i;
+        break;
+      }
+    }
+    if (anchorIndex === -1) anchorIndex = entries.length - 1;
+  }
+
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
-    const isFinal = i === entries.length - 1;
-    const judgeThis = !suppressed && (entry.direct === true || isFinal);
 
     try {
-      if (judgeThis) {
+      if (i === anchorIndex) {
         await runJudgedEntry(chatId, entry, entries.length, epoch, burstMessageIds);
       } else {
         await trackEntry(chatId, entry, entries.length, suppressed);

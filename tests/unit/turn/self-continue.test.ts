@@ -48,6 +48,12 @@ vi.mock('../../../src/pipeline/turn/buffer.js', () => ({ pendingCount: pendingCo
 vi.mock('../../../src/pipeline/timing/state-store.js', () => ({
   recordBotReply: vi.fn(async () => {}),
 }));
+vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
+  isChatSuppressed: vi.fn(async () => false),
+}));
+vi.mock('../../../src/queue/chat-lock.js', () => ({
+  acquireChatLock: vi.fn(async () => vi.fn(async () => {})),
+}));
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({ get: redisGetMock, set: redisSetMock }),
 }));

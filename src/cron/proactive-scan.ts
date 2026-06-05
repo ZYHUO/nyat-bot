@@ -294,6 +294,8 @@ export async function runProactiveScan(): Promise<void> {
       // 8. send
       await sender.sendDirect(chatId, text);
       await markBotSpoke(chatId);
+      // G9: 主动插话同样拉升 focus(bumpFocus 在 flag off 时自身 no-op)
+      import('../pipeline/turn/focus.js').then(({ bumpFocus }) => bumpFocus(chatId, 'bot_spoke')).catch(() => {});
       await redis.set(PROACTIVE_LAST_PREFIX + chatId, String(now), 'EX', e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 2);
       logger.info({ chatId, text: text.slice(0, 80) }, 'Proactive message sent');
     } catch (err) {

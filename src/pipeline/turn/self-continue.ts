@@ -63,6 +63,12 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
   // 冷却检查(只读;真正发出后才写,避免白白烧冷却)
   if (await redis.get(COOLDOWN_KEY(chatId))) return;
 
+  // gate 刚让 chat 进 WAIT/STOP(节奏克制)→ 自我接话必须同样闭嘴
+  try {
+    const { isChatSuppressed } = await import('../timing/chat-runtime.js');
+    if (await isChatSuppressed(chatId)) return;
+  } catch { /* non-critical */ }
+
   const maxRounds = Math.min(Math.max(e.TURN_SELF_FOLLOWUP_MAX, 0), 3);
   let continueProbability = 1; // 第一拍已过基础概率门;后续拍减半
 
@@ -127,6 +133,9 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
     if (await shouldYield(chatId)) return;
 
     const item = speakable[0]!;
+    // 持锁发送:避免与下一回合的主回复在 Telegram 侧乱序
+    const { acquireChatLock } = await import('../../queue/chat-lock.js');
+    const releaseLock = await acquireChatLock(chatId);
     try {
       if (item.action === 'sticker' || item.replyContent.trim() === '[sticker]') {
         const candidates = getReadyStickersByIntent(item.stickerIntent ?? []);
@@ -153,6 +162,8 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
     } catch (err) {
       logger.debug({ err, chatId }, 'Self-continuation send failed (non-critical)');
       return;
+    } finally {
+      await releaseLock().catch(() => {});
     }
   }
 }

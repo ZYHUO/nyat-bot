@@ -9,6 +9,7 @@ const envState = {
   TURN_ABORT_ENABLED: false,
   TURN_INTERRUPT_MAX_CONSECUTIVE: 3,
   TURN_INTERRUPT_QUIET_MS: 0,
+  TURN_MAX_INTERNAL_ROUNDS: 4,
 };
 
 const { processPipelineMock, scheduleTurnMock, transitionToRunningMock } = vi.hoisted(() => ({
@@ -128,12 +129,13 @@ describe('runChatTurn', () => {
     expect(batchSizes).toEqual([3, 3, 3]);
   });
 
-  it('judges every direct entry in a mixed burst', async () => {
+  it('mixed burst: exactly ONE judged anchor — the last direct entry', async () => {
     bufferState.pending = [entry(1), entry(2, true), entry(3)];
     await runChatTurn(turnJob('direct'), 'turn-1');
 
     const flags = processPipelineMock.mock.calls.map((c) => (c[0] as { coalesce: { isLastInBatch: boolean } }).coalesce.isLastInBatch);
-    expect(flags).toEqual([false, true, true]);
+    // 单锚点:direct(#2)被判,末尾闲聊(#3)只做 tracking(避免同回合双回复)
+    expect(flags).toEqual([false, true, false]);
   });
 
   it('suppresses a passive burst while WAIT (tracking-only, skipReply)', async () => {

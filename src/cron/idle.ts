@@ -180,6 +180,8 @@ export async function runIdleCheck(): Promise<void> {
 
       await sender.sendDirect(chatId, text);
       await markBotSpoke(chatId);
+      // G9: 主动开口同样拉升 focus(bumpFocus 在 flag off 时自身 no-op)
+      import('../pipeline/turn/focus.js').then(({ bumpFocus }) => bumpFocus(chatId, 'bot_spoke')).catch(() => {});
       await redis.set(LAST_POKE_PREFIX + chatId, String(now), 'EX', e.IDLE_PROACTIVE_INTERVAL_SEC * 2);
 
       logger.info({ chatId, text, silenceSec }, 'Idle proactive message sent');

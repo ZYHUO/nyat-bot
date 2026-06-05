@@ -523,8 +523,11 @@ export async function generateReply(
     for (const r of parsedReplies) {
       if (r.action === 'sticker') r.modelStickerAct = true;
     }
-    // 主动沉默:模型明确选择不说话(react 仍可执行)
-    modelSilent = parsedReplies.length === 0 && (silentChosen || !!reactions) ? true : undefined;
+    // 主动沉默:模型明确选择不说话(react 仍可执行)。
+    // 解析后没有任何可发内容(silent / react-only / 坏元素被丢弃)统一按
+    // 沉默收尾 —— 不能落到 "All replies failed" 的故障兜底话术。
+    void silentChosen;
+    modelSilent = parsedReplies.length === 0 ? true : undefined;
   } else {
     // 动作空间未启用:静默丢弃模型越权产生的动作元素
     parsedReplies = parsedReplies.filter((r) => r.action === undefined || r.action === 'reply');

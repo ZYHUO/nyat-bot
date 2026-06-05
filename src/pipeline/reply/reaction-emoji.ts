@@ -3,7 +3,8 @@
 // ────────────────────────────────────────
 //
 // Telegram setMessageReaction 只接受固定集合;注意 ❤ 是 U+2764(不带
-// U+FE0F 变体选择符)。parser 校验模型选的 emoji,非法时回退 👍。
+// U+FE0F 变体选择符)。parser 校验模型选的 emoji,非法时丢弃该 react
+// 元素(发错情绪的 emoji 比不发更糟)。
 
 export const ALLOWED_REACTION_EMOJI = new Set([
   '👍', '👎', '❤', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱',

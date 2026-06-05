@@ -704,7 +704,13 @@ async function generateAndSendReplies(args: {
         setTimeout(() => {
           reactToMessage(job.chatId, r.targetMessageId, r.emoji)
             .then((ok) => {
-              if (ok) logger.info({ chatId: job.chatId, targetMessageId: r.targetMessageId, emoji: r.emoji }, "Model-chosen reaction sent");
+              if (ok) {
+                logger.info({ chatId: job.chatId, targetMessageId: r.targetMessageId, emoji: r.emoji }, "Model-chosen reaction sent");
+                // react 也算"回应过了"——别让 G7 回访反复推荐这条
+                import("./turn/answered-store.js")
+                  .then(({ markAnswered }) => markAnswered(job.chatId, [r.targetMessageId]))
+                  .catch(() => {});
+              }
             })
             .catch(() => {});
         }, 800 + Math.random() * 1500);
@@ -741,6 +747,16 @@ async function generateAndSendReplies(args: {
       return;
     }
 
+    // G3: 投递前最后一道打断检查 — 生成完成与开始发送之间用户又说话了,
+    // 整套 humanizer 延迟还没开始,此刻丢弃重规划仍然便宜。
+    // (开始发送后不再中止:真人也会把已经在打的那句话发完。)
+    if (job.turnContext?.signal?.aborted) {
+      if (maxPlaceholderMsgId) {
+        await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+      }
+      throw new AIError("Turn interrupted before send", "send", "send", "AI_ABORTED");
+    }
+
 // 9. Send all replies to Telegram
     const t6 = performance.now();
     const sentMessages: Array<{ messageId: number; text: string }> = [];
@@ -766,6 +782,10 @@ async function generateAndSendReplies(args: {
       logger.debug({ chatId: job.chatId, readDelay, incomingLength }, 'Humanizer: read delay');
       await new Promise((resolve) => setTimeout(resolve, readDelay * 1000));
       if (reFireTimer) clearTimeout(reFireTimer);
+      // G3: read delay 可达数秒,期间被打断 → 在第一条消息发出前丢弃重规划
+      if (job.turnContext?.signal?.aborted) {
+        throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
+      }
     }
 
     // ── Humanizer: ack prefix ──
@@ -1611,7 +1631,10 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // If L0 returned REPLY without a replyPath, ask L1 micro judge
     if (judgeResult.action === "REPLY" && judgeResult.replyPath === undefined && judgeResult.level === "L0_RULE") {
       const { microJudge } = await import("./judge/micro.js");
-      const pathResult = await microJudge(formatted, recentMessages, botUid, "judge", "", job.chatId);
+      const pathResult = await microJudge(
+        formatted, recentMessages, botUid, "judge", "", job.chatId,
+        job.turnContext?.signal, burstHint,
+      );
       if (pathResult.replyPath) judgeResult.replyPath = pathResult.replyPath;
       if (pathResult.replyTier) judgeResult.replyTier = pathResult.replyTier;
     }
@@ -1704,8 +1727,15 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         botName: e.BOT_USERNAME,
         botPersona,
         isDirectInteraction: isDirect,
+        signal: job.turnContext?.signal,
       });
       timings["timing_gate"] = Math.round(performance.now() - tg);
+
+      // G3: 打断发生在 gate 推理期间 → 不要基于陈旧状态提交 WAIT/STOP,
+      // 上抛给 actor 带新消息重规划(replan 时 gateBypass)。
+      if (job.turnContext?.signal?.aborted) {
+        throw new AIError("Turn interrupted during gate", "gate", "gate", "AI_ABORTED");
+      }
 
       if (gateDecision.action === 'wait') {
         if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
