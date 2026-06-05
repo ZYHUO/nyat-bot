@@ -119,3 +119,8 @@ B+C 梯队已实现(12 个提交,`83d4eb6..`),全部 env flag 门控、默认关
 | G8 合并人格决策 | ⏸️ 有意延后 | 等 C 层真实流量验证后单独 A/B(两家评审一致建议) |
 
 核心新模块:`src/pipeline/turn/{types,flags,buffer,actor,abort-registry,quiet-period,answered-store,focus,self-continue,proactive-turn}.ts`、`src/queue/turn-scheduler.ts`、`src/pipeline/reply/{anti-repeat,reaction-emoji}.ts`。
+
+### Rollout 记录
+- 2026-06-05 17:0x:三方 code review(Claude 7 角度 / cursor / codex×2 聚焦)→ 修复 14 项(含 2 个 codex P1:回合期 scheduledJobId 误清导致同群双回合、merged 超时信号误判为 caller abort)
+- 2026-06-05 17:5x:**全部群全量开启**(.env 追加 TURN_* 全 true,TURN_INTERRUPT_MAX_CONSECUTIVE=2),构建+重启,启动健康
+- 回滚方式:删除/置 false .env 中 Turn Actor 配置块 → 重启,旧路径未动
