@@ -136,3 +136,31 @@ export async function getLastMsgAt(chatId: number): Promise<number | undefined> 
   const raw = await getRedis().hget(META_KEY(chatId), 'lastMsgAt');
   return raw ? Number(raw) : undefined;
 }
+
+// ── G5: wait 锚点暂存 ───────────────────────────────────────────────
+// gate=wait 时把触发条目(原始 update)存起来;wait 到期后重注入 pending,
+// 让回合带着完整语境重新决策——"等一下再回"终于真的会回。
+
+const WAIT_ANCHOR_KEY = (chatId: number) => `xxb:turn:waitanchor:${chatId}`;
+
+export async function setWaitAnchor(chatId: number, entry: PendingEntry, ttlSec: number): Promise<void> {
+  await getRedis().set(WAIT_ANCHOR_KEY(chatId), JSON.stringify(entry), 'EX', Math.max(ttlSec, 30));
+}
+
+/** Atomically fetch-and-delete the stashed wait anchor (GETDEL). */
+export async function takeWaitAnchor(chatId: number): Promise<PendingEntry | null> {
+  const redis = getRedis();
+  const raw = await redis.getdel(WAIT_ANCHOR_KEY(chatId)).catch(async () => {
+    // Redis < 6.2 fallback
+    const v = await redis.get(WAIT_ANCHOR_KEY(chatId));
+    if (v) await redis.del(WAIT_ANCHOR_KEY(chatId));
+    return v;
+  });
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as PendingEntry;
+  } catch (err) {
+    logger.warn({ err, chatId }, 'Malformed wait anchor, dropping');
+    return null;
+  }
+}

@@ -70,8 +70,23 @@ const envValues: Record<string, unknown> = {
   TIMING_GATE_COOLDOWN_SEC: 15,
   TIMING_WAIT_MIN_SEC: 5,
   TIMING_WAIT_MAX_SEC: 120,
+  TURN_WAIT_RESUME_ENABLED: false,
+  TURN_ACTOR_ENABLED: false,
+  TURN_ACTOR_CHAT_IDS: [] as number[],
 };
 vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
+
+// G5 wait-resume replay collaborators
+const { scheduleTurnMock, appendPendingMock, takeWaitAnchorMock } = vi.hoisted(() => ({
+  scheduleTurnMock: vi.fn(async () => {}),
+  appendPendingMock: vi.fn(async () => ({ count: 1, firstPendingAt: 0 })),
+  takeWaitAnchorMock: vi.fn(async (): Promise<unknown> => null),
+}));
+vi.mock('../../../src/queue/turn-scheduler.js', () => ({ scheduleTurn: scheduleTurnMock }));
+vi.mock('../../../src/pipeline/turn/buffer.js', () => ({
+  appendPending: appendPendingMock,
+  takeWaitAnchor: takeWaitAnchorMock,
+}));
 
 describe('chat-runtime state machine', () => {
   let runtime: typeof import('../../../src/pipeline/timing/chat-runtime.js');
@@ -80,6 +95,9 @@ describe('chat-runtime state machine', () => {
     store.clear();
     vi.resetModules();
     enqueueWaitResumeMock.mockClear();
+    scheduleTurnMock.mockClear();
+    appendPendingMock.mockClear();
+    takeWaitAnchorMock.mockClear();
     envValues['TIMING_GATE_ENABLED'] = true;
     runtime = await import('../../../src/pipeline/timing/chat-runtime.js');
   });
@@ -179,6 +197,41 @@ describe('chat-runtime state machine', () => {
     });
     const s = await runtime.getChatState(-100);
     expect(s.state).toBe('RUNNING');
+  });
+
+  it('G5: wait-resume re-injects the stashed anchor and schedules a wait_timeout turn', async () => {
+    envValues['TURN_WAIT_RESUME_ENABLED'] = true;
+    envValues['TURN_ACTOR_ENABLED'] = true;
+    const anchor = { update: {}, chatId: -100, messageId: 42, enqueuedAt: 1, waitReplay: true };
+    takeWaitAnchorMock.mockResolvedValueOnce(anchor);
+
+    await runtime.transitionToWait(-100, 5, 42);
+    await runtime.handleWaitResume({
+      chatId: -100,
+      waitResume: { scheduledAt: Date.now(), waitSec: 5, anchorMessageId: 42 },
+    });
+
+    expect((await runtime.getChatState(-100)).state).toBe('RUNNING');
+    expect(appendPendingMock).toHaveBeenCalledWith(anchor);
+    expect(scheduleTurnMock).toHaveBeenCalledWith(-100, {
+      trigger: 'wait_timeout',
+      delayMsOverride: 0,
+      anchorMessageId: 42,
+    });
+    envValues['TURN_WAIT_RESUME_ENABLED'] = false;
+    envValues['TURN_ACTOR_ENABLED'] = false;
+  });
+
+  it('G5: legacy path (flag off) only unblocks, no replay', async () => {
+    await runtime.transitionToWait(-100, 5, 42);
+    await runtime.handleWaitResume({
+      chatId: -100,
+      waitResume: { scheduledAt: Date.now(), waitSec: 5, anchorMessageId: 42 },
+    });
+
+    expect((await runtime.getChatState(-100)).state).toBe('RUNNING');
+    expect(scheduleTurnMock).not.toHaveBeenCalled();
+    expect(appendPendingMock).not.toHaveBeenCalled();
   });
 
   it('isChatSuppressed returns true for WAIT and STOP', async () => {

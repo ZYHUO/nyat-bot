@@ -1210,6 +1210,14 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       timings["media"] = Math.round(performance.now() - tmedia);
     }
 
+    const e = env();
+    const botUid = getBotUid();
+    // G5: wait-resume replay — the anchor entry already went through every
+    // bookkeeping stage on first processing; skip context-save + tracking
+    // side-effects and go straight to judge→reply.
+    const isWaitReplay = job.turnContext?.isWaitReplay === true;
+
+    if (!isWaitReplay) {
     // 3. Save to context
     const t2 = performance.now();
     await addMessage(job.chatId, formatted);
@@ -1240,9 +1248,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     if (job.chatId < 0 && !formatted.isBot && !formatted.isAnonymous) {
       void maybeReact(job.chatId, formatted.messageId, formatted.textContent || formatted.captionContent || "");
     }
-
-    const e = env();
-    const botUid = getBotUid();
 
     // 3.34 First-DM onboarding (fire-and-forget) — once per user, then continue
     if (job.chatId > 0 && !formatted.isBot) {
@@ -1445,6 +1450,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         return;
       }
     }
+    } // end !isWaitReplay bookkeeping block (G5)
 
     // 3.95 Phase 1/4: tracking-only paths skip judge/reply.
     //   - coalesce.isLastInBatch=false → debounce batch non-final message
@@ -1597,9 +1603,30 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       timings["timing_gate"] = Math.round(performance.now() - tg);
 
       if (gateDecision.action === 'wait') {
+        const waitSecBounded = gateDecision.waitSec ?? e.TIMING_WAIT_MIN_SEC;
+        // G5: actor 模式暂存锚点条目,wait 到期后重注入 pending 真正回访
+        // (而不是只解除屏蔽然后永远沉默)。
+        if (e.TURN_WAIT_RESUME_ENABLED && job.turnContext) {
+          try {
+            const { setWaitAnchor } = await import("./turn/buffer.js");
+            await setWaitAnchor(
+              job.chatId,
+              {
+                update: job.update,
+                chatId: job.chatId,
+                messageId: formatted.messageId,
+                enqueuedAt: job.enqueuedAt,
+                waitReplay: true,
+              },
+              waitSecBounded + 120,
+            );
+          } catch (err) {
+            logger.warn({ err, chatId: job.chatId }, "setWaitAnchor failed (wait will be silence-only)");
+          }
+        }
         await transitionToWait(
           job.chatId,
-          gateDecision.waitSec ?? e.TIMING_WAIT_MIN_SEC,
+          waitSecBounded,
           formatted.messageId,
         );
         const totalMs = Math.round(performance.now() - start);
@@ -1611,6 +1638,15 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }
 
       if (gateDecision.action === 'no_action') {
+        // 冷却期延后:这条不回,但保持 RUNNING(不锁死整个 chat)
+        if (gateDecision.deferOnly) {
+          const totalMs = Math.round(performance.now() - start);
+          logger.info(
+            { chatId: job.chatId, totalMs, reason: gateDecision.reason, timings },
+            "Pipeline complete (gate cooldown defer, no reply)",
+          );
+          return;
+        }
         await transitionToStop(job.chatId);
         const totalMs = Math.round(performance.now() - start);
         logger.info(

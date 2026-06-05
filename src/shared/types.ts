@@ -129,5 +129,11 @@ export interface ChatJob {
     isReplan?: boolean;
     /** G4: messageIds of the whole drained burst (oldest→newest) — judge/reply treat it as one thought */
     burstMessageIds?: number[];
+    /**
+     * G5: wait-resume replay — the anchor entry already went through all
+     * bookkeeping stages on first processing; skip context-save/tracking
+     * side-effects and go straight to judge→reply.
+     */
+    isWaitReplay?: boolean;
   };
 }

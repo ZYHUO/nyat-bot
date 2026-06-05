@@ -20,6 +20,11 @@ export interface PendingEntry {
   /** 直接交互(@/回复 bot/私聊/命令)→ 回合应近即时开火且必须处理 */
   direct?: boolean;
   isEdit?: boolean;
+  /**
+   * G5: wait 到期重注入的锚点条目。bookkeeping 已做过(skipBookkeeping),
+   * 直接重新决策(跳过 gate);若同批有更新的消息则让位于新锚点。
+   */
+  waitReplay?: boolean;
 }
 
 /** chat_turn job 的载荷 */

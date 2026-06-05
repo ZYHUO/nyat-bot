@@ -284,6 +284,38 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     expect(judged.turnContext?.burstMessageIds).toBeUndefined();
   });
 
+  it('G5: a lone wait-replay anchor is judged with isWaitReplay + gateBypass', async () => {
+    bufferState.pending = [{ ...entry(42), waitReplay: true }];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(1);
+    const job = processPipelineMock.mock.calls[0]![0] as {
+      messageId: number;
+      coalesce: { isLastInBatch: boolean };
+      turnContext?: { isWaitReplay?: boolean; gateBypass?: boolean };
+    };
+    expect(job.messageId).toBe(42);
+    expect(job.coalesce.isLastInBatch).toBe(true);
+    expect(job.turnContext?.isWaitReplay).toBe(true);
+    expect(job.turnContext?.gateBypass).toBe(true);
+  });
+
+  it('G5: fresher messages displace the wait-replay anchor (re-anchor to newest)', async () => {
+    bufferState.pending = [{ ...entry(42), waitReplay: true }, entry(50)];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    // Replay entry is skipped entirely; only the fresh message is processed.
+    expect(processPipelineMock).toHaveBeenCalledTimes(1);
+    const job = processPipelineMock.mock.calls[0]![0] as {
+      messageId: number;
+      turnContext?: { isWaitReplay?: boolean; burstMessageIds?: number[] };
+    };
+    expect(job.messageId).toBe(50);
+    expect(job.turnContext?.isWaitReplay).toBe(false);
+    // Displaced anchor id stays in the burst window so the model can still target it.
+    expect(job.turnContext?.burstMessageIds).toEqual([42, 50]);
+  });
+
   it('replan extends the burst window with interrupt-time messages (G4+G3)', async () => {
     envState.TURN_ABORT_ENABLED = true;
     bufferState.pending = [entry(1), entry(2)];

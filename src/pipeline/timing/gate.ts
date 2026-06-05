@@ -37,6 +37,11 @@ export interface GateDecision {
   latencyMs: number;
   /** Raw model output (truncated). Only set when LLM was called. */
   raw?: string;
+  /**
+   * 冷却期延后(TURN_GATE_DEFER_COOLDOWN):跳过这次回复但**不**进入
+   * STOP 状态——对齐 MaiBot 的"no_action 后拖时间"语义,而不是放行。
+   */
+  deferOnly?: boolean;
 }
 
 export interface GateInput {
@@ -190,9 +195,17 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   if (input.judgeResult.replyTier === 'max') {
     return makeShortCircuit('continue', 'reply_tier_max_bypass', start);
   }
-  // Cooldown: previous gate decision was wait/no_action and TTL not elapsed
+  // Cooldown: previous gate decision was wait/no_action and TTL not elapsed.
+  // 默认(legacy)语义是 bypass→continue(放行);TURN_GATE_DEFER_COOLDOWN 把它
+  // 改向为 MaiBot 语义:冷却期内不重判,这条先不回(拖时间,不放行)。
   try {
     if (await isInGateCooldown(input.chatId)) {
+      if (e.TURN_GATE_DEFER_COOLDOWN) {
+        return {
+          ...makeShortCircuit('no_action', 'cooldown_defer', start),
+          deferOnly: true,
+        };
+      }
       return makeShortCircuit('continue', 'cooldown_bypass', start);
     }
   } catch (err) {

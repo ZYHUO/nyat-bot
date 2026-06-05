@@ -36,13 +36,7 @@ import { logger } from '../../shared/logger.js';
 /** 单个 judged entry 的重规划上限(打断本身另有注册表层 cap) */
 const MAX_REPLANS = 2;
 
-/** Is this chat routed through the turn actor (graylist-aware)? */
-export function isTurnActorChat(chatId: number): boolean {
-  const e = env();
-  if (!e.TURN_ACTOR_ENABLED) return false;
-  const graylist = e.TURN_ACTOR_CHAT_IDS;
-  return graylist.length === 0 || graylist.includes(chatId);
-}
+export { isTurnActorChat } from './flags.js';
 
 function isAbortError(err: unknown): boolean {
   return err instanceof AIError && err.code === 'AI_ABORTED';
@@ -108,8 +102,10 @@ async function runJudgedEntry(
         turnContext: {
           signal: controller.signal,
           epoch,
-          gateBypass,
+          // wait 回访跳过 gate:刚因 wait 沉默过,再问 gate 多半又是沉默
+          gateBypass: gateBypass || current.waitReplay === true,
           isReplan: replans > 0,
+          isWaitReplay: current.waitReplay === true,
           burstMessageIds: currentBurstIds.length > 1 ? currentBurstIds : undefined,
         },
       });
@@ -170,13 +166,21 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   // either changeDelay a fresh job or mark us dirty.
   await clearScheduledJob(chatId, jobId);
 
-  const entries = await drainPending(chatId);
-  if (entries.length === 0) {
+  const drained = await drainPending(chatId);
+  if (drained.length === 0) {
     // Raced duplicate turn, or a wait/proactive trigger with nothing buffered.
-    // wait_timeout / proactive semantics land in S6/S11.
     logger.debug({ chatId, trigger: turnPayload?.trigger }, 'Turn fired with empty buffer, exiting');
     return;
   }
+
+  // G5: wait 回访让位 — 若同批里有比锚点更新的真实消息,旧锚点退位
+  // (它的内容早已在上下文里;MaiBot timeout-with-new-messages 重锚定语义),
+  // 但它的 id 仍留在 burst 窗口里供模型选目标。
+  const hasFresh = drained.some((en) => !en.waitReplay);
+  const displacedReplayIds = hasFresh
+    ? drained.filter((en) => en.waitReplay).map((en) => en.messageId).filter((id): id is number => id !== undefined)
+    : [];
+  const entries = hasFresh ? drained.filter((en) => !en.waitReplay) : drained;
 
   const epoch = await bumpEpoch(chatId);
   const e = env();
@@ -209,9 +213,10 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   );
 
   // ── Process the burst through the existing pipeline (legacy-equivalent) ──
-  const burstMessageIds = entries
-    .map((en) => en.messageId)
-    .filter((id): id is number => id !== undefined);
+  const burstMessageIds = [
+    ...displacedReplayIds,
+    ...entries.map((en) => en.messageId).filter((id): id is number => id !== undefined),
+  ];
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;

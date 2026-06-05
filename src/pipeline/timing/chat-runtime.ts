@@ -25,6 +25,9 @@ import {
   type RuntimeState,
 } from './state-store.js';
 import { enqueueWaitResume } from '../../queue/producer.js';
+import { scheduleTurn } from '../../queue/turn-scheduler.js';
+import { appendPending, takeWaitAnchor } from '../turn/buffer.js';
+import { isTurnActorChat } from '../turn/flags.js';
 
 export type { ChatTimingState, RuntimeState };
 
@@ -170,6 +173,32 @@ export async function handleWaitResume(args: {
   }
 
   await enterRunning(chatId);
+
+  // G5: 真正的 wait 回访 — 把 wait 时暂存的锚点条目重注入 pending,
+  // 立即排程一个 wait_timeout 回合,带着完整语境重新决策(judge 仍可
+  // 选择沉默;若期间话题已翻篇,actor 会让位给更新的消息重新锚定)。
+  // 旧行为(flag off):只解除屏蔽,等下一条消息——"等一下"变成永久沉默。
+  if (env().TURN_WAIT_RESUME_ENABLED && isTurnActorChat(chatId)) {
+    try {
+      const anchor = await takeWaitAnchor(chatId);
+      if (anchor) {
+        await appendPending(anchor);
+      }
+      await scheduleTurn(chatId, {
+        trigger: 'wait_timeout',
+        delayMsOverride: 0,
+        anchorMessageId: waitResume?.anchorMessageId,
+      });
+      logger.info(
+        { chatId, anchorMessageId: waitResume?.anchorMessageId, replayed: !!anchor },
+        'wait-resume → RUNNING + wait_timeout turn scheduled',
+      );
+      return;
+    } catch (err) {
+      logger.warn({ err, chatId }, 'wait-resume replay failed, chat unblocked only');
+    }
+  }
+
   logger.info(
     {
       chatId,
