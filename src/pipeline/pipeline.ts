@@ -1102,6 +1102,21 @@ async function generateAndSendReplies(args: {
         .catch(() => {});
     }
 
+    // G6: bounded self-continuation — the bot may follow up its own line a
+    // beat later ("对了…"/sticker). Fire-and-forget; yields instantly to any
+    // new user message via pending check + abort registry.
+    if (
+      e.TURN_SELF_FOLLOWUP_ENABLED &&
+      job.turnContext &&
+      !job.turnContext.isWaitReplay &&
+      job.chatId < 0 &&
+      sentMessages.length > 0
+    ) {
+      import("./turn/self-continue.js")
+        .then(({ maybeSelfContinue }) => maybeSelfContinue(job.chatId, botUid))
+        .catch(() => {});
+    }
+
     // G7: mark every replied-to target (and the trigger itself) as answered
     if (sentMessages.length > 0) {
       const answeredIds = Array.from(new Set([
