@@ -29,8 +29,15 @@ const consecutiveInterrupts = new Map<number, number>();
 /**
  * Register a new interruptible generation for this chat.
  * Returns the AbortController whose signal must be threaded into the AI calls.
+ * 若该 chat 已有在飞生成(典型:self-continue 还没结束,新回合开始了),
+ * 直接掐掉旧的 —— 真回复永远优先于跟拍(codex review #2)。
  */
 export function registerGeneration(chatId: number, epoch: number): AbortController {
+  const prior = active.get(chatId);
+  if (prior && !prior.controller.signal.aborted) {
+    prior.controller.abort(new Error('superseded by newer generation'));
+    logger.debug({ chatId, priorEpoch: prior.epoch }, 'Prior in-flight generation superseded');
+  }
   const controller = new AbortController();
   active.set(chatId, { controller, epoch, startedAt: Date.now() });
   return controller;

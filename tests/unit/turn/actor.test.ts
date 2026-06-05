@@ -115,7 +115,8 @@ describe('runChatTurn', () => {
   it('exits quietly on an empty buffer (raced duplicate turn)', async () => {
     await runChatTurn(turnJob(), 'turn-1');
     expect(processPipelineMock).not.toHaveBeenCalled();
-    expect(bufferState.clearedJobs).toEqual(['turn-1']);
+    // scheduledJobId 保持指向本 job(运行期间新消息靠 active→markDirty 路径)
+    expect(bufferState.clearedJobs).toEqual([]);
   });
 
   it('judges only the final entry of a passive burst; earlier ones are tracking-only', async () => {

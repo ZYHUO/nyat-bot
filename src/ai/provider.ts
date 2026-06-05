@@ -6,12 +6,12 @@ import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { AILabel, AICallResult, ContentPart } from './types.js';
 import { AIError } from '../shared/errors.js';
-import { mergeAbortSignals } from '../shared/abort.js';
+import { mergeAbortSignals, isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
 
-/** Throw a normalized AI_ABORTED error when the external signal fired. */
+/** Throw a normalized AI_ABORTED error when the external signal fired (NOT for timeouts). */
 function throwIfExternallyAborted(label: AILabel, signal?: AbortSignal): void {
-  if (signal?.aborted) {
+  if (isCallerAbort(signal)) {
     throw new AIError('Aborted by caller', label.name, label.model, 'AI_ABORTED');
   }
 }

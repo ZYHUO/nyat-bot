@@ -20,7 +20,6 @@ import { processPipeline } from '../pipeline.js';
 import {
   drainPending,
   pendingCount,
-  clearScheduledJob,
   clearDirty,
   bumpEpoch,
 } from './buffer.js';
@@ -165,14 +164,16 @@ async function runJudgedEntry(
  * type='chat_turn' jobs. Idempotent: a duplicate/raced turn drains an
  * empty buffer and exits.
  */
-export async function runChatTurn(data: MessageJobData, jobId?: string): Promise<void> {
+export async function runChatTurn(data: MessageJobData, _jobId?: string): Promise<void> {
   const chatId = data.chatId;
   const turnPayload = data.turn;
   const start = performance.now();
 
-  // This job is now consuming the schedule slot — newer messages must
-  // either changeDelay a fresh job or mark us dirty.
-  await clearScheduledJob(chatId, jobId);
+  // 注意:运行期间**不**清 scheduledJobId —— meta 必须继续指向本(active)
+  // job,这样回合期间新消息走 scheduleTurn → getState()==='active' →
+  // markDirty,由本回合收尾时统一再排程。开局就清会让新消息另建并行
+  // turn job → 同群双回合并发(codex review #1)。job 完成后由
+  // removeOnComplete 移除,后续 getJob 落空自然走新建路径。
 
   const drained = await drainPending(chatId);
   if (drained.length === 0) {

@@ -30,3 +30,16 @@ export function isAbortError(err: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * True when the signal aborted due to a CALLER decision(turn 打断),
+ * NOT a timeout. AbortSignal.timeout() aborts with reason.name ===
+ * 'TimeoutError';外部打断用 controller.abort(new Error(...))。
+ * 合并信号(mergeAbortSignals)的 reason 来自先触发的那个 —— 这样
+ * 超时不会被误判成打断而跳过 fallback 链(codex review)。
+ */
+export function isCallerAbort(signal?: AbortSignal): boolean {
+  if (!signal?.aborted) return false;
+  const reason = signal.reason as { name?: string } | undefined;
+  return reason?.name !== 'TimeoutError';
+}

@@ -7,6 +7,7 @@ import { callModel } from './provider.js';
 import { getUsage, getLabel } from './labels.js';
 import { CooldownTracker } from './cooldown.js';
 import { AIError } from '../shared/errors.js';
+import { isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../db/redis.js';
 import { env } from '../env.js';
@@ -58,8 +59,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     } catch (err) {
       errors.push(err instanceof Error ? err : new Error(String(err)));
 
-      // External abort (turn interrupt) — don't fallback, surface immediately
-      if (options.signal?.aborted) {
+      // External abort (turn interrupt) — don't fallback, surface immediately.
+      // 按 reason 区分:超时引发的 abort(TimeoutError)继续走 fallback 链。
+      if (isCallerAbort(options.signal)) {
         throw err instanceof AIError && err.code === 'AI_ABORTED'
           ? err
           : new AIError('Aborted by caller', labelName, label.model, 'AI_ABORTED');
