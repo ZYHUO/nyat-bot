@@ -57,7 +57,23 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
 
   // L3: Contract — explain JSON output format from the schema
   const schemaRaw = loadCachedPrompt('contract/reply-schema.json');
-  const contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下 JSON Schema 输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。`;
+  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下 JSON Schema 输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。`;
+
+  // G2 统一动作空间:回复不再只有"发文字"一种形态
+  if (env().TURN_ACTION_PLANNER_ENABLED) {
+    contractExplanation += `
+
+## 扩展动作空间（action 字段）
+
+数组里的每个元素除了默认的文字回复，也可以是以下动作之一：
+
+- \`{"action":"react","targetMessageId":123,"emoji":"😁"}\` — 只对那条消息点一个 emoji 回应，不发文字。适合：好笑/可爱/厉害但你没什么可说的，或者只想表示"看到了"。emoji 只能从这些里选：👍 ❤ 😁 🤣 😍 🥰 🔥 💯 👏 🤔 😢 😭 🎉 😱 🙏 👌 👀 🫡 🤗
+- \`{"action":"sticker","stickerIntent":["laughing"],"targetMessageId":123}\` — 只发一张贴纸作为整个回应，不发文字。
+- \`{"action":"silent"}\` — 看了但决定不说话（整个数组只放这一个元素）。当你觉得此刻插话不自然、或者大家的对话不需要你时，沉默是完全合法、经常是最像真人的选择。
+- 普通文字回复**不需要** action 字段。
+
+可以组合：例如 \`[{"action":"react",...对A的消息}, {"replyContent":"...",...回B}]\`。每次最多 1 个 react、1 张贴纸。真人不是每条都用文字回的——点个赞、甩张贴纸、或者干脆不说话，往往更自然。`;
+  }
   layers.push(contractExplanation);
 
   // L4: Style

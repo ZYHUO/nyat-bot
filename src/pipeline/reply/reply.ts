@@ -135,8 +135,18 @@ export async function generateReply(
     signal?: AbortSignal;
     burstIds?: number[];
     revisitCandidates?: Array<{ messageId: number; sender: string; snippet: string }>;
+    /** G2: 统一动作空间已启用 — 解析并执行 react/sticker/silent 动作 */
+    actionSpace?: boolean;
   },
-): Promise<{ replies: ReplyOutput[]; toolsUsed: string[]; toolExecutionFailed: boolean }> {
+): Promise<{
+  replies: ReplyOutput[];
+  toolsUsed: string[];
+  toolExecutionFailed: boolean;
+  /** G2: model-chosen emoji reactions to execute as first-class acts */
+  reactions?: Array<{ targetMessageId: number; emoji: string }>;
+  /** G2: the model deliberately chose silence — send nothing, not an error */
+  modelSilent?: boolean;
+}> {
   const interruptSignal = callOpts?.signal;
   // G4: the turn drained a multi-message burst — tell the writer to answer
   // the whole thought and pick the real anchor, not just the newest line.
@@ -441,6 +451,35 @@ export async function generateReply(
     }
   }
 
+  // ── G2 action split: react/silent 抽离,sticker 标记为一等动作 ──
+  let reactions: Array<{ targetMessageId: number; emoji: string }> | undefined;
+  let modelSilent: boolean | undefined;
+  if (callOpts?.actionSpace) {
+    const reactItems = parsedReplies.filter((r) => r.action === 'react' && r.emoji);
+    if (reactItems.length > 0) {
+      // 每回合最多 1 个 react,避免刷屏
+      reactions = reactItems.slice(0, 1).map((r) => ({
+        targetMessageId: r.targetMessageId,
+        emoji: r.emoji!,
+      }));
+    }
+    const silentChosen = parsedReplies.some((r) => r.action === 'silent');
+    parsedReplies = parsedReplies.filter(
+      (r) => r.action === undefined || r.action === 'reply' || r.action === 'sticker',
+    );
+    for (const r of parsedReplies) {
+      if (r.action === 'sticker') r.modelStickerAct = true;
+    }
+    // 主动沉默:模型明确选择不说话(react 仍可执行)
+    modelSilent = parsedReplies.length === 0 && (silentChosen || !!reactions) ? true : undefined;
+  } else {
+    // 动作空间未启用:静默丢弃模型越权产生的动作元素
+    parsedReplies = parsedReplies.filter((r) => r.action === undefined || r.action === 'reply');
+    if (parsedReplies.length === 0) {
+      parsedReplies = [{ replyContent: '…', targetMessageId: message.messageId }];
+    }
+  }
+
   const hasHandoff = parsedReplies.length === 1 && parsedReplies[0]!.handoffToSplitter === true;
 
   if (exactReplyCount && parsedReplies.length !== exactReplyCount && !hasHandoff) {
@@ -496,13 +535,17 @@ export async function generateReply(
   }, `Reply generated (${parsedReplies.length} message(s))`);
 
   return {
-    replies: parsedReplies.map(p => ({
+    // 残余守卫:重试路径可能重新解析出动作元素,最终只放行文本/贴纸
+    replies: parsedReplies.filter((p) => !p.action || p.action === 'reply' || p.action === 'sticker').map(p => ({
       replyContent: p.replyContent,
       targetMessageId: p.targetMessageId,
       stickerIntent: p.stickerIntent,
       replyQuote: p.replyQuote,
+      modelStickerAct: p.modelStickerAct,
     })),
     toolsUsed: result.toolsUsed,
     toolExecutionFailed,
+    reactions,
+    modelSilent,
   };
 }

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { logger } from '../../shared/logger.js';
 import { ALLOWED_INTENTS } from '../../knowledge/sticker/types.js';
 import type { StickerIntent } from '../../knowledge/sticker/types.js';
+import { normalizeReactionEmoji } from './reaction-emoji.js';
 
 const STICKER_INTENTS = new Set<StickerIntent>(ALLOWED_INTENTS);
 
@@ -34,6 +35,15 @@ export interface ParsedReply {
   replyQuote?: boolean;
   /** True if this segment was inserted by the humanizer as a filler (e.g. "我想想") — skip typo/afterthought/delete-resend */
   isInterjection?: boolean;
+  /**
+   * G2 统一动作空间(TURN_ACTION_PLANNER_ENABLED):
+   *   reply(默认/缺省)| react(只点 emoji)| sticker(只发贴纸)| silent(主动沉默)
+   */
+  action?: 'reply' | 'react' | 'sticker' | 'silent';
+  /** action='react' 时的 emoji(已规范化到 Telegram 白名单) */
+  emoji?: string;
+  /** action='sticker':模型把贴纸当一等动作 → 投递层跳过贴纸冷却 */
+  modelStickerAct?: boolean;
 }
 
 /**
@@ -211,12 +221,24 @@ function tryArrayParse(raw: string, fallbackMessageId: number): ParsedReply[] | 
 
   if (!Array.isArray(arr) || arr.length === 0) return null;
 
-  // Validate each item
+  // Validate each item.
+  // 文本回复保持 all-or-nothing(任一坏 → 整组拒收,走兜底);
+  // 动作元素(react/sticker/silent)失败只丢该元素,不拖垮整组——
+  // 否则一个非法 emoji 会让用户看到整段原始 JSON。
   const results: ParsedReply[] = [];
   for (const item of arr) {
     if (typeof item !== 'object' || item === null) return null;
-    const validated = validateAndReturn(item as Record<string, unknown>, fallbackMessageId);
-    if (!validated) return null; // If ANY item fails, reject entire array
+    const record = item as Record<string, unknown>;
+    const validated = validateAndReturn(record, fallbackMessageId);
+    if (!validated) {
+      const isActionItem = typeof record['action'] === 'string'
+        && record['action'].toLowerCase() !== 'reply';
+      if (isActionItem) {
+        logger.debug({ action: record['action'] }, 'Dropping malformed action item');
+        continue;
+      }
+      return null; // malformed TEXT reply → reject entire array
+    }
     results.push(validated);
   }
 
@@ -264,6 +286,13 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
   if (salvaged) {
     logger.debug('Salvaged replyContent from malformed JSON');
     return truncateReply({ replyContent: salvaged, targetMessageId: fallbackMessageId });
+  }
+
+  // 3.8 A lone action item that failed validation (e.g. bad emoji) must not
+  // leak raw JSON to the user — degrade to deliberate silence.
+  if (/"action"\s*:\s*"(react|sticker|silent)"/i.test(trimmed)) {
+    logger.debug('Malformed lone action item, degrading to silent');
+    return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
   }
 
   // 4. Plain text fallback — treat entire response as reply content
@@ -331,6 +360,42 @@ function validateAndReturn(
   data: Record<string, unknown>,
   fallbackMessageId: number,
 ): ParsedReply | null {
+  // ── G2 action items (react / sticker / silent) ──
+  const actionRaw = typeof data['action'] === 'string' ? data['action'].toLowerCase() : undefined;
+  if (actionRaw === 'silent') {
+    return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
+  }
+  if (actionRaw === 'react') {
+    const emoji = normalizeReactionEmoji(data['emoji'] ?? data['reaction']);
+    if (!emoji) {
+      logger.debug({ emoji: data['emoji'] }, 'React action with non-allowed emoji, dropping');
+      return null;
+    }
+    let target = data['targetMessageId'] ?? data['target_message_id'] ?? fallbackMessageId;
+    if (typeof target === 'string') target = parseInt(target, 10);
+    if (typeof target !== 'number' || !Number.isFinite(target) || target <= 0) {
+      target = fallbackMessageId;
+    }
+    return { action: 'react', emoji, replyContent: '', targetMessageId: target as number };
+  }
+  if (actionRaw === 'sticker') {
+    const intents = normalizeStickerIntent(data['stickerIntent'] ?? data['sticker_intent']);
+    if (!intents) {
+      logger.debug('Sticker action without valid intent, dropping');
+      return null;
+    }
+    let target = data['targetMessageId'] ?? data['target_message_id'] ?? fallbackMessageId;
+    if (typeof target === 'string') target = parseInt(target, 10);
+    if (typeof target !== 'number' || !Number.isFinite(target)) target = fallbackMessageId;
+    return {
+      action: 'sticker',
+      replyContent: '[sticker]',
+      stickerIntent: intents,
+      targetMessageId: target as number,
+      replyQuote: false,
+    };
+  }
+
   // Normalize field names (handle camelCase and snake_case)
   const normalized: Record<string, unknown> = {
     replyContent: data['replyContent'] ?? data['reply_content'] ?? data['content'],

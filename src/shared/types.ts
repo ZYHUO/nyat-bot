@@ -74,6 +74,8 @@ export interface ReplyOutput {
   replyQuote?: boolean;
   /** True if this segment was inserted by the humanizer as a filler — skip typo/afterthought/delete-resend */
   isInterjection?: boolean;
+  /** G2: 模型把贴纸当一等动作选出来的 → 投递层跳过贴纸冷却 */
+  modelStickerAct?: boolean;
 }
 
 export interface RetrievedContext {

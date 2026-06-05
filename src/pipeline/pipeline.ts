@@ -31,6 +31,7 @@ import {
   sendSticker,
   deleteMessage,
   editMessage,
+  reactToMessage,
 } from "../bot/sender/telegram.js";
 import { getBotUid } from "../bot/bot.js";
 import { recordMessage as recordActivity } from "../tracking/activity.js";
@@ -684,6 +685,7 @@ async function generateAndSendReplies(args: {
           signal: job.turnContext.signal,
           burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext.burstMessageIds : undefined,
           revisitCandidates,
+          actionSpace: e.TURN_ACTION_PLANNER_ENABLED,
         }
       : undefined;
     const replyResult = await generateReply(
@@ -694,6 +696,32 @@ async function generateAndSendReplies(args: {
     );
     const replies = replyResult.replies;
     timings["reply"] = Math.round(performance.now() - t5);
+
+    // G2: model-chosen emoji reactions execute as first-class acts (with a
+    // small human-ish delay so the react doesn't land robotically instantly)
+    if (replyResult.reactions && replyResult.reactions.length > 0) {
+      for (const r of replyResult.reactions) {
+        setTimeout(() => {
+          reactToMessage(job.chatId, r.targetMessageId, r.emoji)
+            .then((ok) => {
+              if (ok) logger.info({ chatId: job.chatId, targetMessageId: r.targetMessageId, emoji: r.emoji }, "Model-chosen reaction sent");
+            })
+            .catch(() => {});
+        }, 800 + Math.random() * 1500);
+      }
+    }
+
+    // G2: deliberate silence — the model looked and chose not to speak.
+    if (replyResult.modelSilent && replies.length === 0) {
+      if (maxPlaceholderMsgId) {
+        await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+      }
+      logger.info(
+        { chatId: job.chatId, messageId: formatted.messageId, reacted: !!replyResult.reactions },
+        "Pipeline complete (model chose silence)",
+      );
+      return;
+    }
 
     // Re-acquire chat lock before sending
     lockState.release = await acquireChatLock(job.chatId);
@@ -816,7 +844,8 @@ async function generateAndSendReplies(args: {
           stickerPolicy.mode !== "off" &&
           reply.stickerIntent &&
           reply.stickerIntent.length > 0 &&
-          _repliesSinceLastSticker >= STICKER_COOLDOWN_REPLIES
+          // G2: 模型把贴纸当一等动作时跳过冷却(明确意图 > RNG 节流)
+          (_repliesSinceLastSticker >= STICKER_COOLDOWN_REPLIES || reply.modelStickerAct === true)
         ) {
           const candidates = getReadyStickersByIntent(reply.stickerIntent);
           if (candidates.length > 0) {
@@ -1273,8 +1302,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }
     }
 
-    // 3.1d Emoji reaction — rare "the cat noticed" signal (≤2/day per chat, group only)
-    if (job.chatId < 0 && !formatted.isBot && !formatted.isAnonymous) {
+    // 3.1d Emoji reaction — rare "the cat noticed" signal (≤2/day per chat, group only).
+    // G2: action planner 启用后由模型主动选择 react,关闭这个正则 RNG 旁路。
+    if (job.chatId < 0 && !formatted.isBot && !formatted.isAnonymous && !env().TURN_ACTION_PLANNER_ENABLED) {
       void maybeReact(job.chatId, formatted.messageId, formatted.textContent || formatted.captionContent || "");
     }
 
