@@ -1618,14 +1618,33 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       } catch { /* non-critical */ }
     }
 
-    const judgeResult = await judge({
-      message: formatted, recentMessages,
-      recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),
-      botUid, botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
-      chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
-      burstHint,
-      focus: focusLevel,
-    });
+    // G3: 重规划不重新审判"说不说" —— bot 已经决定要回了,打断只改变
+    // "说什么"(MaiBot: 打断后跳过 gate 直接回 planner)。否则锚点换成
+    // 用户那句简短补充后,judge 单看它会 IGNORE → 本该有的回复凭空消失。
+    // 模型仍可用 {"action":"silent"} 反悔,所以这不是强制说话。
+    let judgeResult: JudgeResult;
+    if (job.turnContext?.isReplan) {
+      judgeResult = {
+        action: "REPLY",
+        level: "L0_RULE",
+        rule: "turn_replan",
+        confidence: 1,
+        latencyMs: 0,
+      };
+      logger.info(
+        { chatId: job.chatId, messageId: formatted.messageId },
+        "Replan: engagement carried over, judge skipped",
+      );
+    } else {
+      judgeResult = await judge({
+        message: formatted, recentMessages,
+        recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),
+        botUid, botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
+        burstHint,
+        focus: focusLevel,
+      });
+    }
     timings["judge"] = Math.round(performance.now() - t3);
 
     // If L0 returned REPLY without a replyPath, ask L1 micro judge

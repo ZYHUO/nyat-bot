@@ -68,6 +68,16 @@ vi.mock("../../../src/pipeline/judge/judge.js", () => ({
   judge: (...args: unknown[]) => mockJudge(...args),
 }));
 
+vi.mock("../../../src/pipeline/judge/micro.js", () => ({
+  microJudge: vi.fn().mockResolvedValue({
+    action: "REPLY",
+    replyPath: "direct",
+    replyTier: "normal",
+    level: "L1_MICRO",
+    latencyMs: 0,
+  }),
+}));
+
 vi.mock("../../../src/pipeline/vision.js", () => ({
   describeImage: (...args: unknown[]) => mockDescribeImage(...args),
 }));
@@ -261,6 +271,25 @@ describe("processPipeline path branching", () => {
       CHANNEL_SOURCE_IDS: [],
     });
     sendDirect.mockResolvedValue({ messageId: 777 });
+  });
+
+  it("replan carries engagement over: judge is NOT re-run, reply still generates", async () => {
+    // G3 修复:打断重规划后锚点是用户的简短补充,如果重新过 judge 会被
+    // IGNORE → 本该有的回复凭空消失。重规划必须只改"说什么",不重审"说不说"。
+    mockGenerateReply.mockResolvedValue({
+      replies: [{ replyContent: "回你们两句", targetMessageId: 42 }],
+      toolsUsed: [],
+      toolExecutionFailed: false,
+    });
+    sendDirect.mockResolvedValue({ messageId: 1001 });
+
+    const job = makeJob();
+    job.turnContext = { isReplan: true, gateBypass: true, epoch: 2 };
+    await processPipeline(job);
+
+    expect(mockJudge).not.toHaveBeenCalled();
+    expect(mockGenerateReply).toHaveBeenCalledTimes(1);
+    expect(sendDirect).toHaveBeenCalled();
   });
 
   it("stores natural-language soft mute as temporary mute", async () => {
