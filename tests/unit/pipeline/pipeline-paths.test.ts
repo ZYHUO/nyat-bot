@@ -66,6 +66,7 @@ vi.mock("../../../src/pipeline/context/manager.js", () => ({
 
 vi.mock("../../../src/pipeline/judge/judge.js", () => ({
   judge: (...args: unknown[]) => mockJudge(...args),
+  l0Rule: vi.fn(() => null), // replan rule recovery — null = keep turn_replan
 }));
 
 vi.mock("../../../src/pipeline/judge/micro.js", () => ({

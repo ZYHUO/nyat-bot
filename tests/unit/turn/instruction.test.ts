@@ -44,8 +44,35 @@ describe('instruction detection', () => {
     '是什么意思',
     '你觉得这个怎么样',
     '我刚才发现一个好东西',
+    // cursor review #6 + review-workflow P1 误报回归集
+    '说起来这个挺好玩的',
+    '说实话我有点惊讶',
+    '说得对',
+    '发现一个宝藏频道',
+    '发烧了好难受',
+    '发展得还不错',
+    '发自内心地喜欢',
+    '停车场没位置了',
+    '讲道理这不怪我',
+    '讲真的我服了',
+    '给我看看你的猫',
+    '写得不错',
+    '画风好怪',
+    '继续加油',
+    '别走啊',
+    '念念不忘',
+    '读读看呗这本书',
   ])('ignores chatter/questions: %s', (text) => {
     expect(detectInstruction(msg(text), addressed)).toBeNull();
+  });
+
+  it.each([
+    '说一下你的看法',
+    '停止刷屏',
+    '发个贴纸',
+    '给我翻译翻译',
+  ])('still detects after the tightening: %s', (text) => {
+    expect(detectInstruction(msg(text), addressed)).toEqual({ strength: 'normal' });
   });
 
   it('requires the bot to be addressed', () => {

@@ -539,7 +539,9 @@ export async function generateReply(
 
     // 指令禁止沉默:对直接指令选 silent → 带约束重生成一次;仍不说话
     // 就明确回"做不到",绝不无声蒸发。
-    if (modelSilent && callOpts?.instruction) {
+    // 例外:react-only 也是一种"执行"(让它表态,它点了个赞)—— 不算沉默,
+    // 否则会出现"边 react 边说做不到"的精神分裂(review-workflow)。
+    if (modelSilent && callOpts?.instruction && !reactions) {
       logger.info({ chatId }, 'Instruction reply came back silent, regenerating with constraint');
       const constrained = messages.map((m, idx) =>
         idx === messages.length - 1 && m.role === 'user'

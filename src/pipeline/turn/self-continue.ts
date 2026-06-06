@@ -19,7 +19,7 @@ import { sendMessage, sendChatAction, sendSticker } from '../../bot/sender/teleg
 import { getReadyStickersByIntent, recordStickerSent } from '../../knowledge/sticker/store.js';
 import { pendingCount } from './buffer.js';
 import { getFocus, followupProbability } from './focus.js';
-import { registerGeneration, clearGeneration } from './abort-registry.js';
+import { registerWeakGeneration, clearGeneration } from './abort-registry.js';
 import { recordBotReply as recordTimingBotReply } from '../timing/state-store.js';
 import { getRedis } from '../../db/redis.js';
 import { AIError } from '../../shared/errors.js';
@@ -97,7 +97,9 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
       `只有当刚才的话明显没说完、或你真的还有一句值得说的时才补。\n` +
       `要补的话最多 1 条短消息（不超过50字）或 1 张贴纸，输出 JSON。`;
 
-    const controller = registerGeneration(chatId, 0);
+    // 弱注册:若有真回复正在生成(下一回合已开始),立刻让位 —— 绝不抢占
+    const controller = registerWeakGeneration(chatId, 0);
+    if (!controller) return;
     let content: string;
     try {
       const result = await callWithFallback({
@@ -136,6 +138,11 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
     // 持锁发送:避免与下一回合的主回复在 Telegram 侧乱序
     const { acquireChatLock } = await import('../../queue/chat-lock.js');
     const releaseLock = await acquireChatLock(chatId);
+    // 锁后复检(TOCTOU):等锁期间用户可能已经说话 → 让位
+    if (await shouldYield(chatId)) {
+      await releaseLock().catch(() => {});
+      return;
+    }
     try {
       if (item.action === 'sticker' || item.replyContent.trim() === '[sticker]') {
         const candidates = getReadyStickersByIntent(item.stickerIntent ?? []);

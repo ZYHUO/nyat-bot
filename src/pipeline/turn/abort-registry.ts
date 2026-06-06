@@ -26,6 +26,13 @@ const active = new Map<number, ActiveGeneration>();
 /** 每 chat 连续打断计数;生成无打断走完即重置 */
 const consecutiveInterrupts = new Map<number, number>();
 
+/** Caller-intent abort error — isCallerAbort() 白名单识别这个 name。 */
+function turnInterruptError(reason: string): Error {
+  const err = new Error(`turn_interrupt: ${reason}`);
+  err.name = 'TurnInterrupt';
+  return err;
+}
+
 /**
  * Register a new interruptible generation for this chat.
  * Returns the AbortController whose signal must be threaded into the AI calls.
@@ -35,7 +42,7 @@ const consecutiveInterrupts = new Map<number, number>();
 export function registerGeneration(chatId: number, epoch: number): AbortController {
   const prior = active.get(chatId);
   if (prior && !prior.controller.signal.aborted) {
-    prior.controller.abort(new Error('superseded by newer generation'));
+    prior.controller.abort(turnInterruptError('superseded by newer generation'));
     logger.debug({ chatId, priorEpoch: prior.epoch }, 'Prior in-flight generation superseded');
   }
   const controller = new AbortController();
@@ -44,15 +51,34 @@ export function registerGeneration(chatId: number, epoch: number): AbortControll
 }
 
 /**
+ * 弱注册(self-continue 等低优先级生成专用):已有在飞生成时返回 null,
+ * **绝不**抢占 —— 否则上一回合的跟拍会掐死下一回合的真回复(优先级
+ * 倒挂,review-workflow P1)。
+ */
+export function registerWeakGeneration(chatId: number, epoch: number): AbortController | null {
+  const prior = active.get(chatId);
+  if (prior && !prior.controller.signal.aborted) {
+    logger.debug({ chatId }, 'Weak generation yielded to active generation');
+    return null;
+  }
+  const controller = new AbortController();
+  active.set(chatId, { controller, epoch, startedAt: Date.now() });
+  return controller;
+}
+
+/**
  * Mark the generation finished. `interrupted=false` resets the consecutive
- * interrupt counter (MaiBot resets on a clean completion).
+ * interrupt counter (MaiBot resets on a clean completion)。
+ * 计数器重置带身份守卫:被 supersede 的旧 flow 在收尾时不许动新一代的
+ * 打断预算(review-workflow:counter corruption)。
  */
 export function clearGeneration(chatId: number, controller: AbortController, interrupted: boolean): void {
   const current = active.get(chatId);
-  if (current && current.controller === controller) {
+  const isCurrent = current?.controller === controller;
+  if (isCurrent) {
     active.delete(chatId);
   }
-  if (!interrupted) {
+  if (!interrupted && isCurrent) {
     consecutiveInterrupts.delete(chatId);
   }
 }
@@ -81,7 +107,7 @@ export function interruptGeneration(chatId: number, reason: string): boolean {
   }
 
   consecutiveInterrupts.set(chatId, count + 1);
-  current.controller.abort(new Error(`turn_interrupt: ${reason}`));
+  current.controller.abort(turnInterruptError(reason));
   logger.info(
     { chatId, reason, epoch: current.epoch, inFlightMs: Date.now() - current.startedAt, consecutive: count + 1 },
     'In-flight generation interrupted by new message',

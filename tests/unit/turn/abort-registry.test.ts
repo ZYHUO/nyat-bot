@@ -12,6 +12,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 
 import {
   registerGeneration,
+  registerWeakGeneration,
   clearGeneration,
   hasActiveGeneration,
   interruptGeneration,
@@ -74,10 +75,46 @@ describe('abort registry', () => {
 
   it('clearGeneration only removes the matching controller', () => {
     const stale = registerGeneration(CHAT, 1);
-    const fresh = registerGeneration(CHAT, 2); // replaces in map
+    const fresh = registerGeneration(CHAT, 2); // supersedes in map
     clearGeneration(CHAT, stale, false); // stale clear → ignored
     expect(hasActiveGeneration(CHAT)).toBe(true);
     clearGeneration(CHAT, fresh, false);
     expect(hasActiveGeneration(CHAT)).toBe(false);
+  });
+
+  it('registerGeneration supersedes: aborts the prior in-flight generation with a TurnInterrupt reason', () => {
+    const prior = registerGeneration(CHAT, 1);
+    registerGeneration(CHAT, 2);
+    expect(prior.signal.aborted).toBe(true);
+    expect((prior.signal.reason as Error).name).toBe('TurnInterrupt');
+  });
+
+  it('weak registration yields to an active generation — never preempts a real reply', () => {
+    const real = registerGeneration(CHAT, 5);
+    const weak = registerWeakGeneration(CHAT, 0);
+    expect(weak).toBeNull();
+    expect(real.signal.aborted).toBe(false); // 真回复毫发无损
+
+    clearGeneration(CHAT, real, false);
+    const weak2 = registerWeakGeneration(CHAT, 0);
+    expect(weak2).toBeInstanceOf(AbortController);
+  });
+
+  it('a superseded stale flow cannot reset the new generation interrupt budget', () => {
+    envState.TURN_INTERRUPT_MAX_CONSECUTIVE = 1;
+    const old = registerGeneration(CHAT, 1);
+    expect(interruptGeneration(CHAT, 'msg')).toBe(true); // 消耗预算 → count=1
+
+    const fresh = registerGeneration(CHAT, 2); // supersede old(已 abort)
+    // 旧 flow 在自己的 finally 里收尾 —— 不许重置新一代的预算
+    clearGeneration(CHAT, old, false);
+    expect(interruptGeneration(CHAT, 'msg2')).toBe(false); // cap 仍然生效
+    expect(fresh.signal.aborted).toBe(false);
+  });
+
+  it('interrupt abort reason is tagged TurnInterrupt (isCallerAbort allowlist)', () => {
+    const c = registerGeneration(CHAT, 1);
+    interruptGeneration(CHAT, 'new_message');
+    expect((c.signal.reason as Error).name).toBe('TurnInterrupt');
   });
 });

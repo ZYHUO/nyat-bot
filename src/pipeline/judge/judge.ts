@@ -59,6 +59,25 @@ function shouldAcceptL1Result(result: JudgeResult, activeConv = false, focus?: n
   return false;
 }
 
+/**
+ * L0-only 判定(确定性规则,0ms,无 LLM)。G3 replan 用它恢复锚点消息的
+ * 自然 rule —— 拦截器(mute/NL命令/remember 等)按 rule 分发,replan 合成
+ * 的 'turn_replan' 会让这些全部失配(review-workflow P1)。
+ */
+export function l0Rule(input: Pick<JudgeInput, 'message' | 'recentMessages' | 'botUid' | 'botUsername' | 'botNicknames' | 'chatId' | 'groupActivity'>): JudgeResult | null {
+  const ruleCtx: RuleContext = {
+    message: input.message,
+    recentMessages: input.recentMessages,
+    botUid: input.botUid,
+    botUsername: input.botUsername,
+    botNicknames: input.botNicknames,
+    chatId: input.chatId,
+    groupActivity: input.groupActivity,
+    lastBotReplyIndex: findLastBotReplyIndex(input.recentMessages, input.botUid),
+  };
+  return evaluateRules(ruleCtx);
+}
+
 export async function judge(input: JudgeInput): Promise<JudgeResult> {
   const totalStart = performance.now();
 

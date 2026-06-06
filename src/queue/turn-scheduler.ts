@@ -59,6 +59,12 @@ export interface ScheduleTurnOptions {
   anchorMessageId?: number;
   /** G4: 最新一条消息看起来没打完(无终止标点)→ 延长去抖窗口 */
   stillTyping?: boolean;
+  /**
+   * 跳过"复用已排程 job"分支,强制新建。回合尾声自我再排程必须用这个:
+   * 此刻 meta 还指向**本回合自己**(active)→ 复用分支只会 markDirty,
+   * 而本回合马上结束,没有任何人会再读这个 dirty → 消息永久挂起。
+   */
+  forceNew?: boolean;
 }
 
 /**
@@ -76,29 +82,36 @@ export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): P
     ?? computeFireDelay(meta.firstPendingAt, opts.direct ?? false, opts.stillTyping ?? false, focusFactor);
 
   // ── Try to reuse the already-scheduled job ──
-  if (meta.scheduledJobId) {
+  if (meta.scheduledJobId && !opts.forceNew) {
     const job = await queue.getJob(meta.scheduledJobId).catch(() => undefined);
     if (job) {
       const state = await job.getState().catch(() => 'unknown');
       if (state === 'delayed') {
         try {
-          // BullMQ changeDelay(delay) = "delay milliseconds FROM NOW,
-          // regardless of the original delay"(job.ts 文档注释原话)。
-          // 之前误以为相对 job.timestamp 而做了年龄补偿 → 活跃群每条新
-          // 消息把回合推后 job 年龄那么久 → 回合永不开火、pending 爆仓。
-          await job.changeDelay(delay);
-          // direct 升级:已有排程但本次是 direct → 也把载荷升级为 directPriority
+          // direct 升级先做:数据必须在 job 变为可提升之前就位(changeDelay(0)
+          // 会让 job 立即可被 worker 拿走,之后再 updateData 就晚了)。
           if (opts.direct && !job.data.turn?.directPriority) {
             await job.updateData({
               ...job.data,
               turn: { ...job.data.turn!, directPriority: true, trigger: 'direct' },
             });
           }
+          // BullMQ changeDelay(delay) = "delay milliseconds FROM NOW,
+          // regardless of the original delay"(job.ts 文档注释原话)。
+          // 之前误以为相对 job.timestamp 而做了年龄补偿 → 活跃群每条新
+          // 消息把回合推后 job 年龄那么久 → 回合永不开火、pending 爆仓。
+          await job.changeDelay(delay);
           logger.debug({ chatId, jobId: job.id, delay, trigger: opts.trigger }, 'Turn rescheduled (changeDelay)');
           return;
         } catch (err) {
-          // Promoted to active between getState and changeDelay — fall through.
-          logger.debug({ err, chatId }, 'changeDelay raced with promotion, falling through');
+          // TOCTOU:getState 和 changeDelay 之间 job 被提升(离开 delayed 集,
+          // changeDelay 抛 JobNotInState/-3)。此刻它已经是 active/waiting —
+          // 按 active 语义处理:标脏交给该回合收尾 forceNew 再排程。
+          // **绝不能** fall through 去新建 job —— 那会造出第二个并行回合
+          // (同群双回复,review-workflow P1)。
+          logger.debug({ err, chatId }, 'changeDelay raced with promotion → markDirty');
+          await markDirty(chatId);
+          return;
         }
       }
       if (state === 'active' || state === 'waiting') {

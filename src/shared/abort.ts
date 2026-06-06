@@ -33,13 +33,13 @@ export function isAbortError(err: unknown): boolean {
 
 /**
  * True when the signal aborted due to a CALLER decision(turn 打断),
- * NOT a timeout. AbortSignal.timeout() aborts with reason.name ===
- * 'TimeoutError';外部打断用 controller.abort(new Error(...))。
- * 合并信号(mergeAbortSignals)的 reason 来自先触发的那个 —— 这样
- * 超时不会被误判成打断而跳过 fallback 链(codex review)。
+ * NOT a timeout/网络层中断。**白名单**判定:只有 abort-registry 打出的
+ * `TurnInterrupt` reason 才算 caller abort(跳过 fallback 链);
+ * TimeoutError、裸 AbortError、网络 teardown 等一律走正常错误路径,
+ * 保留 fallback 重试(review-workflow:blocklist→allowlist)。
  */
 export function isCallerAbort(signal?: AbortSignal): boolean {
   if (!signal?.aborted) return false;
   const reason = signal.reason as { name?: string } | undefined;
-  return reason?.name !== 'TimeoutError';
+  return reason?.name === 'TurnInterrupt';
 }

@@ -138,7 +138,10 @@ describe('turn scheduler', () => {
     expect(addMock).toHaveBeenCalledTimes(1);
   });
 
-  it('falls through to a new job when changeDelay races with promotion', async () => {
+  it('changeDelay racing with promotion marks dirty — NEVER creates a parallel turn', async () => {
+    // TOCTOU:getState 后 job 被提升,changeDelay 抛 JobNotInState。
+    // 此刻 job 已是 active —— 必须走 markDirty 语义;新建 job 会造出
+    // 同群第二个并行回合(双回复,review-workflow P1)。
     bufferState.meta.scheduledJobId = 'turn-x';
     getJobMock.mockResolvedValue({
       id: 'turn-x',
@@ -152,6 +155,22 @@ describe('turn scheduler', () => {
     });
 
     await scheduleTurn(CHAT, { trigger: 'message' });
+    expect(addMock).not.toHaveBeenCalled();
+    expect(bufferState.dirty).toBe(true);
+  });
+
+  it('forceNew skips the reuse branch entirely (end-of-turn self-reschedule)', async () => {
+    bufferState.meta.scheduledJobId = 'turn-self';
+    getJobMock.mockResolvedValue({
+      id: 'turn-self',
+      timestamp: Date.now(),
+      data: { turn: {} },
+      getState: async () => 'active',
+    });
+
+    await scheduleTurn(CHAT, { trigger: 'message', forceNew: true });
+    expect(getJobMock).not.toHaveBeenCalled();
     expect(addMock).toHaveBeenCalledTimes(1);
+    expect(bufferState.dirty).toBe(false);
   });
 });

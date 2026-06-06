@@ -21,6 +21,7 @@ import {
   drainPending,
   pendingCount,
   clearDirty,
+  clearScheduledJob,
   bumpEpoch,
 } from './buffer.js';
 import { registerGeneration, clearGeneration } from './abort-registry.js';
@@ -164,7 +165,7 @@ async function runJudgedEntry(
  * type='chat_turn' jobs. Idempotent: a duplicate/raced turn drains an
  * empty buffer and exits.
  */
-export async function runChatTurn(data: MessageJobData, _jobId?: string): Promise<void> {
+export async function runChatTurn(data: MessageJobData, jobId?: string): Promise<void> {
   const chatId = data.chatId;
   const turnPayload = data.turn;
   const start = performance.now();
@@ -194,13 +195,32 @@ export async function runChatTurn(data: MessageJobData, _jobId?: string): Promis
   // 积压保护:调度故障/停机恢复后 pending 可能上千条;一个 turn job 顺序
   // 消化会超过 BullMQ lockDuration → stalled 重跑 → 重复处理。只保最新
   // MAX_TURN_BURST 条,更老的明确丢弃并记日志(不静默截断)。
+  // direct 条目(@bot/回复 bot)即使在被截断的旧段里也要保留(最多 5 条)——
+  // 否则 hasDirect=false,WAIT/STOP 不唤醒、锚点退化(cursor review #4)。
   const MAX_TURN_BURST = 30;
   if (entries.length > MAX_TURN_BURST) {
+    const recent = entries.slice(-MAX_TURN_BURST);
+    const older = entries.slice(0, -MAX_TURN_BURST);
+    const olderDirects = older.filter((en) => en.direct === true).slice(-5);
+    const droppedEntries = older.filter((en) => !olderDirects.includes(en));
     logger.warn(
-      { chatId, dropped: entries.length - MAX_TURN_BURST, kept: MAX_TURN_BURST },
+      { chatId, dropped: droppedEntries.length, kept: recent.length, keptOlderDirects: olderDirects.length },
       'Turn burst overflow — dropping oldest backlog entries',
     );
-    entries = entries.slice(-MAX_TURN_BURST);
+    // 被丢弃的条目不再回复,但做轻量入册(仅 format+context 保存,跳过
+    // media/judge/副作用)—— 否则停机恢复后上下文出现大段空洞,后续回复
+    // 像失忆(review-workflow:overflow drops bookkeeping)。
+    try {
+      const { formatMessage } = await import('../formatter.js');
+      const { addMessage } = await import('../context/manager.js');
+      for (const en of droppedEntries) {
+        const f = formatMessage(en.update);
+        if (f) await addMessage(chatId, f).catch(() => {});
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Overflow lightweight bookkeeping failed (non-critical)');
+    }
+    entries = [...olderDirects, ...recent];
   }
 
   const epoch = await bumpEpoch(chatId);
@@ -269,10 +289,16 @@ export async function runChatTurn(data: MessageJobData, _jobId?: string): Promis
   }
 
   // ── Self-reschedule when messages landed mid-turn ──
+  // 顺序关键(丢唤醒窗口,review-workflow P1):必须**先**清掉指向本 job 的
+  // meta 指针,**再**读 dirty/pending —— 这样窗口期内赶到的 ingress 要么
+  // 走 markDirty(指针还在,被随后的 recheck 捕获),要么指针已清、自建新
+  // job 自救。反过来读-后-清会留下"读完之后、清之前"标的 dirty 永远无人
+  // 消费。forceNew 必须:普通排程对 active 的本 job 只会 markDirty。
+  await clearScheduledJob(chatId, jobId);
   const wasDirty = await clearDirty(chatId);
   const stillPending = await pendingCount(chatId);
   if (wasDirty || stillPending > 0) {
-    await scheduleTurn(chatId, { trigger: 'message' });
+    await scheduleTurn(chatId, { trigger: 'message', forceNew: true });
   }
 
   logger.debug(

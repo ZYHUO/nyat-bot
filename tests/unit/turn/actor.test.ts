@@ -167,11 +167,32 @@ describe('runChatTurn', () => {
     expect(last.coalesce.isLastInBatch).toBe(true);
   });
 
-  it('reschedules itself when messages landed mid-turn (dirty flag)', async () => {
+  it('reschedules itself when messages landed mid-turn (dirty flag) — forceNew', async () => {
     bufferState.pending = [entry(1)];
     bufferState.dirty = true;
     await runChatTurn(turnJob(), 'turn-1');
-    expect(scheduleTurnMock).toHaveBeenCalledWith(CHAT, { trigger: 'message' });
+    // forceNew 必须:此刻 meta 还指向本(active)job,普通排程只会 markDirty
+    expect(scheduleTurnMock).toHaveBeenCalledWith(CHAT, { trigger: 'message', forceNew: true });
+  });
+
+  it('clears its own scheduledJobId when nothing is left to do', async () => {
+    bufferState.pending = [entry(1)];
+    await runChatTurn(turnJob(), 'turn-1');
+    expect(scheduleTurnMock).not.toHaveBeenCalled();
+    expect(bufferState.clearedJobs).toEqual(['turn-1']);
+  });
+
+  it('burst overflow keeps older direct entries (≤5) alongside the newest window', async () => {
+    const burst = [];
+    burst.push(entry(1, true)); // old direct — must survive the cap
+    for (let i = 2; i <= 40; i++) burst.push(entry(i));
+    bufferState.pending = burst;
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const processedIds = processPipelineMock.mock.calls.map((c) => (c[0] as { messageId: number }).messageId);
+    expect(processedIds).toContain(1); // direct preserved
+    expect(processedIds).toHaveLength(31); // 30 newest + 1 older direct
   });
 
   it('reschedules itself when pending refilled after drain', async () => {

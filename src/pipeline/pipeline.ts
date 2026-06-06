@@ -137,6 +137,9 @@ const DIRECT_INTERACTION_RULES = new Set([
   // don't let stale-reply suppression / the timing gate silence them.
   "followup_to_bot",
   "active_conv_engage",
+  // G3 replan: engagement 是从被打断的那次 judge 接力来的(准 direct)。
+  // 不在这里的话,replan 回复会被 stale-suppression 丢、指令层也不识别。
+  "turn_replan",
 ]);
 
 function isAssistantTurn(
@@ -315,6 +318,9 @@ const ADDRESSED_RULES = new Set([
   "reply_to_self",
   "reply_to_self_lookup",
   "reply_to_self_followup_lookup",
+  // G3 replan 锚点(打断 bot 的那条消息)继承点名语境 —— 否则锚点里的
+  // 自然语言命令(帮我签到)在 replan 路径不会被 dispatch。
+  "turn_replan",
 ]);
 
 /**
@@ -720,8 +726,11 @@ async function generateAndSendReplies(args: {
     timings["reply"] = Math.round(performance.now() - t5);
 
     // G2: model-chosen emoji reactions execute as first-class acts (with a
-    // small human-ish delay so the react doesn't land robotically instantly)
-    if (replyResult.reactions && replyResult.reactions.length > 0) {
+    // small human-ish delay so the react doesn't land robotically instantly)。
+    // 调度时机:modelSilent 路径立即排(react-only 是合法回应);文本路径
+    // 推迟到打断/陈旧检查之后排 —— 否则被丢弃的回复会留下孤儿 reaction。
+    const scheduleReactions = (): void => {
+      if (!replyResult.reactions || replyResult.reactions.length === 0) return;
       for (const r of replyResult.reactions) {
         setTimeout(() => {
           reactToMessage(job.chatId, r.targetMessageId, r.emoji)
@@ -737,10 +746,11 @@ async function generateAndSendReplies(args: {
             .catch(() => {});
         }, 800 + Math.random() * 1500);
       }
-    }
+    };
 
     // G2: deliberate silence — the model looked and chose not to speak.
     if (replyResult.modelSilent && replies.length === 0) {
+      scheduleReactions(); // react-only 回应照常落地
       if (maxPlaceholderMsgId) {
         await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
       }
@@ -778,6 +788,9 @@ async function generateAndSendReplies(args: {
       }
       throw new AIError("Turn interrupted before send", "send", "send", "AI_ABORTED");
     }
+
+    // 文本回复确定要发了 → 此刻才调度伴随的 reactions(孤儿 reaction 防护)
+    scheduleReactions();
 
 // 9. Send all replies to Telegram
     const t6 = performance.now();
@@ -1647,15 +1660,30 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // 模型仍可用 {"action":"silent"} 反悔,所以这不是强制说话。
     let judgeResult: JudgeResult;
     if (job.turnContext?.isReplan) {
+      // 用 L0 规则(0ms,无 LLM)恢复锚点的自然 rule:拦截器(mute 命令/
+      // NL 命令/remember/DM relay 等)按 rule 分发,全用 'turn_replan' 会
+      // 让它们失配。engagement 仍然强制 REPLY(除非 L0 明确 REJECT)。
+      const { l0Rule } = await import("./judge/judge.js");
+      const l0 = l0Rule({
+        message: formatted, recentMessages, botUid,
+        botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
+      });
+      if (l0?.action === "REJECT") {
+        logger.info({ chatId: job.chatId, rule: l0.rule }, "Replan anchor REJECTED by L0, dropping");
+        return;
+      }
       judgeResult = {
         action: "REPLY",
         level: "L0_RULE",
-        rule: "turn_replan",
+        rule: l0?.action === "REPLY" && l0.rule ? l0.rule : "turn_replan",
+        replyPath: l0?.action === "REPLY" ? l0.replyPath : undefined,
+        replyTier: l0?.action === "REPLY" ? l0.replyTier : undefined,
         confidence: 1,
         latencyMs: 0,
       };
       logger.info(
-        { chatId: job.chatId, messageId: formatted.messageId },
+        { chatId: job.chatId, messageId: formatted.messageId, recoveredRule: judgeResult.rule },
         "Replan: engagement carried over, judge skipped",
       );
     } else {
@@ -1741,6 +1769,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         judgeResult.rule !== "reply_to_self" &&
         judgeResult.rule !== "mention_self" &&
         judgeResult.rule !== "whitelisted_command" &&
+        judgeResult.rule !== "turn_replan" && // replan 的 engagement 接力自直接交互
         !judgeResult.rule?.includes("lookup")
       ) {
         logger.debug({ chatId: job.chatId, uid: formatted.uid }, "Pipeline: user soft-muted bot, skipping proactive reply");
