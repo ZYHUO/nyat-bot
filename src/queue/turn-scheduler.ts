@@ -82,9 +82,11 @@ export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): P
       const state = await job.getState().catch(() => 'unknown');
       if (state === 'delayed') {
         try {
-          // changeDelay is relative to the job's original timestamp.
-          const newDelay = Math.max(0, Date.now() - job.timestamp + delay);
-          await job.changeDelay(newDelay);
+          // BullMQ changeDelay(delay) = "delay milliseconds FROM NOW,
+          // regardless of the original delay"(job.ts 文档注释原话)。
+          // 之前误以为相对 job.timestamp 而做了年龄补偿 → 活跃群每条新
+          // 消息把回合推后 job 年龄那么久 → 回合永不开火、pending 爆仓。
+          await job.changeDelay(delay);
           // direct 升级:已有排程但本次是 direct → 也把载荷升级为 directPriority
           if (opts.direct && !job.data.turn?.directPriority) {
             await job.updateData({

@@ -189,7 +189,19 @@ export async function runChatTurn(data: MessageJobData, _jobId?: string): Promis
   const displacedReplayIds = hasFresh
     ? drained.filter((en) => en.waitReplay).map((en) => en.messageId).filter((id): id is number => id !== undefined)
     : [];
-  const entries = hasFresh ? drained.filter((en) => !en.waitReplay) : drained;
+  let entries = hasFresh ? drained.filter((en) => !en.waitReplay) : drained;
+
+  // 积压保护:调度故障/停机恢复后 pending 可能上千条;一个 turn job 顺序
+  // 消化会超过 BullMQ lockDuration → stalled 重跑 → 重复处理。只保最新
+  // MAX_TURN_BURST 条,更老的明确丢弃并记日志(不静默截断)。
+  const MAX_TURN_BURST = 30;
+  if (entries.length > MAX_TURN_BURST) {
+    logger.warn(
+      { chatId, dropped: entries.length - MAX_TURN_BURST, kept: MAX_TURN_BURST },
+      'Turn burst overflow — dropping oldest backlog entries',
+    );
+    entries = entries.slice(-MAX_TURN_BURST);
+  }
 
   const epoch = await bumpEpoch(chatId);
   const e = env();

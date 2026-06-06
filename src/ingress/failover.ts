@@ -89,7 +89,13 @@ export function startIngressWatchdog(redis: Redis, mode: IngressMode): void {
       } else {
         // webhook mode — periodically retry the preferred polling transport
         const raw = await redis.get(WEBHOOK_SINCE_KEY);
-        const since = raw ? parseInt(raw, 10) : Date.now();
+        let since = raw ? parseInt(raw, 10) : 0;
+        if (!since) {
+          // key 缺失时必须落盘补一个起点 —— 否则每个 tick 都把 since 当
+          // "现在",恢复倒计时永远归零,bot 永久卡在 webhook 模式。
+          since = Date.now();
+          await redis.set(WEBHOOK_SINCE_KEY, String(since)).catch(() => {});
+        }
         if (Date.now() - since > RECOVERY_MS) {
           switching = true;
           log.info('Webhook recovery window elapsed — retrying polling');
