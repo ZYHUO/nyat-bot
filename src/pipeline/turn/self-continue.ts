@@ -11,6 +11,7 @@
 //   - 模型用 {"action":"silent"} 表态"就这样" —— 沉默是预期主路径
 
 import { getRecent, addAssistant } from '../context/manager.js';
+import { similarityRatio } from '../reply/anti-repeat.js';
 import { slimContextForAI } from '../context/slim.js';
 import { buildSystemPrompt } from '../reply/prompt-builder.js';
 import { callWithFallback } from '../../ai/fallback.js';
@@ -88,13 +89,25 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
 
     const contextStr = slimContextForAI(recent.slice(0, -1), current, botUid);
     const systemPrompt = buildSystemPrompt('normal', undefined, chatId);
+    // 自己刚发的话(最多 2 条)— 明确喂给模型,禁止换皮重答
+    const ownRecentTexts = recent
+      .filter((m) => m.role === 'assistant' || m.uid === botUid)
+      .slice(-2)
+      .map((m) => m.textContent)
+      .filter(Boolean);
+    const ownBlock = ownRecentTexts.length > 0
+      ? `你刚才已经回复过：${ownRecentTexts.map((t) => `「${t.slice(0, 80)}」`).join('、')}\n`
+      : '';
     const userMsg =
       `[群聊上下文]\n${contextStr}\n\n` +
-      `[自我接话判断] 上面最后那（几）条是你自己刚发的，现在还没有人接话。` +
-      `你要不要自然地补一拍？比如"对了…"式的补充、一句自我吐槽、或一张贴纸` +
-      `（{"action":"sticker","stickerIntent":["..."]}）。\n` +
-      `**大多数情况下正确答案是 {"action":"silent"}** —— 真人不会总是自言自语；` +
-      `只有当刚才的话明显没说完、或你真的还有一句值得说的时才补。\n` +
+      `[自我接话判断] 上面最后那（几）条是你自己刚发的，现在还没有人接话。\n` +
+      ownBlock +
+      `你要不要自然地补一拍？**补一拍 ≠ 再回答一次**。合法的补充只有三种：` +
+      `(1) 全新的信息/话题延伸（"对了…"），(2) 对你自己上一句的自我吐槽，` +
+      `(3) 一张贴纸（{"action":"sticker","stickerIntent":["..."]}）。\n` +
+      `**绝对禁止**：把刚才已经回答过的内容换个说法再说一遍、再次回应用户那条消息、` +
+      `重复同样的意思。如果你想说的话和上面「你刚才已经回复过」的内容意思相近 → 必须 {"action":"silent"}。\n` +
+      `**大多数情况下正确答案是 {"action":"silent"}** —— 真人不会总是自言自语。\n` +
       `要补的话最多 1 条短消息（不超过50字）或 1 张贴纸，输出 JSON。`;
 
     // 弱注册:若有真回复正在生成(下一回合已开始),立刻让位 —— 绝不抢占
@@ -135,6 +148,29 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
     if (await shouldYield(chatId)) return;
 
     const item = speakable[0]!;
+
+    // 重答守卫(线上事故:"你吃早饭没"被回答两次)。followup 必须是新内容:
+    //   1) 与自己最近消息 bigram 相似度 > 0.4(followup 的阈值比主回复反
+    //      重复的 0.85 严得多 —— 补充本来就该全新)
+    //   2) 与自己上一条消息开头重合(≥2 字)→ 典型的"换皮重答"指纹
+    //      (两次都以"还没"开头);重复开场白本身也很机器人
+    if (!item.action && item.replyContent) {
+      const norm = (s: string) => s.replace(/[\s,。,!?!?~…·、"「」"]+/g, '');
+      const candidate = norm(item.replyContent);
+      for (const own of ownRecentTexts) {
+        const ownNorm = norm(own);
+        const tooSimilar = similarityRatio(item.replyContent, own) > 0.4;
+        const samePrefix = candidate.length >= 2 && ownNorm.length >= 2
+          && candidate.slice(0, 2) === ownNorm.slice(0, 2);
+        if (tooSimilar || samePrefix) {
+          logger.info(
+            { chatId, tooSimilar, samePrefix },
+            'Self-continuation looked like a re-answer, dropping',
+          );
+          return;
+        }
+      }
+    }
     // 持锁发送:避免与下一回合的主回复在 Telegram 侧乱序
     const { acquireChatLock } = await import('../../queue/chat-lock.js');
     const releaseLock = await acquireChatLock(chatId);

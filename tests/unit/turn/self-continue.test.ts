@@ -64,8 +64,8 @@ import { _resetAbortRegistry } from '../../../src/pipeline/turn/abort-registry.j
 const CHAT = -100950;
 const BOT_UID = 9999;
 
-function botMsg(messageId: number) {
-  return { role: 'assistant', uid: BOT_UID, messageId, textContent: 'x', timestamp: 0 };
+function botMsg(messageId: number, textContent = '本喵在等主人投喂呀') {
+  return { role: 'assistant', uid: BOT_UID, messageId, textContent, timestamp: 0 };
 }
 
 let randomSpy: ReturnType<typeof vi.spyOn>;
@@ -151,6 +151,37 @@ describe('G6 self-continuation', () => {
     expect(sendStickerMock).toHaveBeenCalledTimes(1);
     expect(sendMessageMock).not.toHaveBeenCalled();
     expect(addAssistantMock).toHaveBeenCalledWith(CHAT, { textContent: '[sticker]', messageId: 778 });
+  });
+
+  it('re-answer guard: drops a follow-up that opens like the bot own last reply', async () => {
+    // 线上事故指纹:两条都以"还没"开头(换皮重答)
+    getRecentMock.mockResolvedValue([botMsg(1, '还没呢，本喵在等主人投喂呀~ 主人吃过啦？'), botMsg(2, '还没呢，本喵在等主人投喂呀~ 主人吃过啦？')]);
+    callMock.mockResolvedValueOnce({ content: '{"replyContent":"还没呢主人，本喵刚醒就被抓来营业了喵","targetMessageId":2}' });
+
+    await run();
+
+    expect(sendMessageMock).not.toHaveBeenCalled();
+    expect(redisSetMock).not.toHaveBeenCalled();
+  });
+
+  it('re-answer guard: drops a near-duplicate follow-up (bigram similarity)', async () => {
+    getRecentMock.mockResolvedValue([botMsg(1, '这个方案本喵觉得挺靠谱的可以先试试看'), botMsg(2, '这个方案本喵觉得挺靠谱的可以先试试看')]);
+    callMock.mockResolvedValueOnce({ content: '{"replyContent":"嗯这个方案本喵觉得挺靠谱可以先试试","targetMessageId":2}' });
+
+    await run();
+
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('re-answer guard: genuinely new content still goes out', async () => {
+    getRecentMock.mockResolvedValue([botMsg(1, '还没呢，本喵在等主人投喂呀~'), botMsg(2, '还没呢，本喵在等主人投喂呀~')]);
+    callMock
+      .mockResolvedValueOnce({ content: '{"replyContent":"对了主人记得帮本喵带杯豆浆","targetMessageId":2}' })
+      .mockResolvedValue({ content: '{"action":"silent"}' });
+
+    await run();
+
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
   });
 
   it('drops the follow-up if users spoke during generation', async () => {
