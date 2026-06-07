@@ -576,6 +576,27 @@ export async function generateReply(
     }
   }
 
+  // ── 目标校验守卫(线上事故:主人提问,回复却"贴"到了频道贴子下面)──
+  // 模型把 targetMessageId 指向了非触发消息时,核对目标的发送者:若是
+  // 频道身份/匿名/bot 的消息,且用户并没有明确委托"去回复那条",一律
+  // 拉回到触发消息。话题相关 ≠ 应该把回复挂到频道贴子下。
+  const delegationMarkers = /(回复|回应|怼|评价|告诉|转告|提醒|@)/;
+  const userDelegated = delegationMarkers.test(message.textContent || '');
+  if (!userDelegated) {
+    for (const p of parsedReplies) {
+      if (!p.action && p.targetMessageId !== message.messageId) {
+        const target = retrievedContext.merged.find((m) => m.messageId === p.targetMessageId);
+        if (target && (target.isBot || target.isAnonymous)) {
+          logger.info(
+            { chatId, badTarget: p.targetMessageId, retargeted: message.messageId },
+            'Reply targeted a channel/bot message without delegation, retargeting to the asker',
+          );
+          p.targetMessageId = message.messageId;
+        }
+      }
+    }
+  }
+
   const hasHandoff = parsedReplies.length === 1 && parsedReplies[0]!.handoffToSplitter === true;
 
   if (exactReplyCount && parsedReplies.length !== exactReplyCount && !hasHandoff) {

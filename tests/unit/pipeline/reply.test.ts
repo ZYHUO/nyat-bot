@@ -164,6 +164,42 @@ describe('generateReply', () => {
     mockSegmentReply.mockImplementation((text: string) => ({ segments: [text], originalText: text }));
   });
 
+  it('retargets a reply aimed at a channel/bot message back to the asker (no delegation)', async () => {
+    // 线上事故:主人问"什么时候支持支付宝口令支付",模型把 targetMessageId
+    // 指向了 1.5h 前频道身份的相关吐槽 → 回复贴到频道贴子下面。
+    mockParseReplyResponse.mockImplementation(() => ([
+      { replyContent: '主人，本喵不确定喵', targetMessageId: 196230 },
+    ]));
+    const ctx = makeContext();
+    ctx.merged = [
+      { role: 'user', uid: 777, fullName: '灵车频道', timestamp: 1700000000, messageId: 196230, textContent: 'api 要钱啊', isForwarded: false, isAnonymous: true } as never,
+    ];
+
+    const result = await generateReply(
+      makeMessage({ messageId: 196242, textContent: '什么时候支持支付宝口令支付' }),
+      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+    );
+
+    expect(result.replies[0]!.targetMessageId).toBe(196242); // 拉回提问者
+  });
+
+  it('keeps a cross-target when the user explicitly delegated (回复/怼/告诉)', async () => {
+    mockParseReplyResponse.mockImplementation(() => ([
+      { replyContent: '你个大笨蛋', targetMessageId: 196230 },
+    ]));
+    const ctx = makeContext();
+    ctx.merged = [
+      { role: 'user', uid: 777, fullName: '某频道', timestamp: 1700000000, messageId: 196230, textContent: '瞎说什么', isForwarded: false, isAnonymous: true } as never,
+    ];
+
+    const result = await generateReply(
+      makeMessage({ messageId: 196242, textContent: '帮我怼一下楼上那条' }),
+      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+    );
+
+    expect(result.replies[0]!.targetMessageId).toBe(196230); // 明确委托 → 保留
+  });
+
   it('uses direct execution without tools when replyPath is direct', async () => {
     const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
 
