@@ -100,6 +100,7 @@ import {
   transitionToStop,
   transitionToRunning,
   recordGateContinue,
+  getChatState,
 } from "./timing/chat-runtime.js";
 import { loadCachedPrompt } from "../shared/config.js";
 
@@ -633,6 +634,30 @@ async function generateAndSendReplies(args: {
     logger.debug({ err, chatId: job.chatId }, "detectInstruction failed (non-critical)");
   }
 
+  // ── 迟到回复(重做版):15-40s 慢尾只在"bot 真的离开过"时发生 ──
+  // 条件:群聊、actor 回合、非 replan、非指令、**非点名**(@/回复 bot 永远
+  // 不迟到),且本群 ≥10 分钟没回过话(期间被点名会回话 → 时钟自动刷新,
+  // 即一次迟到/任何回复后 10 分钟内不会再迟到)。
+  // 命中后:生成前注入"刚没看到"语气提示,投递时静默等待(不显示 typing),
+  // 只在最后 2-3 秒才显示"正在输入"——像刚拿起手机才看到。
+  let latenessSec: number | undefined;
+  const isDirectForLateness = !!(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule));
+  if (
+    job.chatId < 0 && job.turnContext && !job.turnContext.isReplan &&
+    !instructionInfo && !isDirectForLateness
+  ) {
+    try {
+      const tstate = await getChatState(job.chatId);
+      const idleMs = tstate.lastBotReplyAt ? Date.now() - tstate.lastBotReplyAt : Number.POSITIVE_INFINITY;
+      if (idleMs >= 10 * 60_000 && Math.random() < 0.3) {
+        latenessSec = 15 + Math.random() * 25;
+        logger.info({ chatId: job.chatId, latenessSec: Math.round(latenessSec), idleMin: Math.round(idleMs / 60000) }, "Late-reply mode: bot was away");
+      }
+    } catch (err) {
+      logger.debug({ err, chatId: job.chatId }, "lateness check failed (non-critical)");
+    }
+  }
+
   let maxPlaceholderMsgId: number | undefined;
   try {
     // 6. reply_max: quota check + thinking placeholder
@@ -751,15 +776,19 @@ async function generateAndSendReplies(args: {
         logger.debug({ err, chatId: job.chatId }, "pickRevisitCandidates failed (non-critical)");
       }
     }
-    const turnCallOpts = job.turnContext || instructionInfo
+    const turnCallOpts = job.turnContext || instructionInfo || latenessSec !== undefined
       ? {
           signal: job.turnContext?.signal,
           burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext?.burstMessageIds : undefined,
           revisitCandidates,
           actionSpace: job.turnContext ? e.TURN_ACTION_PLANNER_ENABLED : undefined,
           instruction: instructionInfo ?? undefined,
+          latenessHint: latenessSec !== undefined
+            ? '[迟到回复] 你刚才没在看这个群(在忙别的),过了好一会儿才看到这条消息。回复**开头**自然带一句迟到的语气("刚没看到""才看到喵"之类),轻描淡写就好,不用正式道歉。'
+            : undefined,
         }
       : undefined;
+    const genStartMs = Date.now();
     const replyResult = await generateReply(
       formatted, retrievedContext, judgeResult.action,
       job.chatId, botUid, effectiveReplyPath, effectiveReplyTier,
@@ -877,13 +906,16 @@ async function generateAndSendReplies(args: {
       try {
         const recent8 = await getRecent(job.chatId, 8);
         const idx = recent8.findIndex((m) => m.messageId === formatted.messageId);
-        const interleaved = idx >= 0 && recent8
-          .slice(idx + 1)
-          .some((m) => m.uid !== formatted.uid && m.role !== 'assistant' && !m.isBot);
-        if (!interleaved) {
-          const quoteRatio = chatStyle?.quoteRatio ?? 0.2;
-          const suppressProb = 1 - Math.min(0.85, Math.max(0.08, quoteRatio * 2.5));
-          suppressLatestQuote = Math.random() < suppressProb;
+        // 触发消息必须在窗口内才评估(找不到 → 保守保留引用)
+        if (idx >= 0) {
+          const interleaved = recent8
+            .slice(idx + 1)
+            .some((m) => m.uid !== formatted.uid && m.role !== 'assistant' && !m.isBot);
+          if (!interleaved) {
+            const quoteRatio = chatStyle?.quoteRatio ?? 0.2;
+            const suppressProb = 1 - Math.min(0.85, Math.max(0.08, quoteRatio * 2.5));
+            suppressLatestQuote = Math.random() < suppressProb;
+          }
         }
       } catch (err) {
         logger.debug({ err, chatId: job.chatId }, 'quote-policy check failed (non-critical)');
@@ -906,20 +938,34 @@ async function generateAndSendReplies(args: {
 
     const incomingLength = formatted.textContent?.length ?? 0;
     const isDmChat = job.chatId > 0;
-    // #1 重尾延迟:read delay 过人类分布采样(偶尔"刚在刷别的"慢半拍)+ 作息调速
-    const readDelayBase = isDmChat ? 0 : calculateReadDelay(incomingLength, humanizerConfig);
-    const readDelay = readDelayBase > 0
-      ? sampleHumanDelay(readDelayBase, { capSec: 25 })
-      : 0;
+    // 延迟构成:
+    //   - 迟到分支(latenessSec):计划总迟到时长 − 已消耗的生成时间,
+    //     剩余部分静默等待 —— "没在看手机的人不会显示正在输入"
+    //   - 常规分支:短延迟人类分布采样(慢尾已移到迟到分支,这里不再有 15-40s)
+    let readDelay: number;
+    if (latenessSec !== undefined) {
+      readDelay = Math.max(2.5, latenessSec - (Date.now() - genStartMs) / 1000);
+    } else {
+      const readDelayBase = isDmChat ? 0 : calculateReadDelay(incomingLength, humanizerConfig);
+      readDelay = readDelayBase > 0
+        ? sampleHumanDelay(readDelayBase, { capSec: 8, tailProb: 0 })
+        : 0;
+    }
     if (readDelay > 0) {
-      // Show typing during read delay so user sees bot is "processing"
+      // 只在最后 2-3 秒显示"正在输入"(刚拿起手机才开始打字);
+      // 之前的整段 typing 会让 40 秒的"正在输入…"看起来像卡死。
+      const typingLead = Math.min(readDelay, 2 + Math.random());
+      const silentPart = readDelay - typingLead;
+      logger.debug({ chatId: job.chatId, readDelay, silentPart, incomingLength }, 'Humanizer: read delay');
+      if (silentPart > 0) {
+        await new Promise((resolve) => setTimeout(resolve, silentPart * 1000));
+        // 静默期内被打断 → 还没"看到",直接重规划
+        if (job.turnContext?.signal?.aborted) {
+          throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
+        }
+      }
       await sendChatAction(job.chatId, 'typing');
-      // Re-fire typing if delay > 5s (Telegram indicator expires after 5s)
-      const reFireTimer = readDelay > 5 ? setTimeout(() => sendChatAction(job.chatId, 'typing').catch(() => {}), 4500) : null;
-      logger.debug({ chatId: job.chatId, readDelay, incomingLength }, 'Humanizer: read delay');
-      await new Promise((resolve) => setTimeout(resolve, readDelay * 1000));
-      if (reFireTimer) clearTimeout(reFireTimer);
-      // G3: read delay 可达数秒,期间被打断 → 在第一条消息发出前丢弃重规划
+      await new Promise((resolve) => setTimeout(resolve, typingLead * 1000));
       if (job.turnContext?.signal?.aborted) {
         throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
       }

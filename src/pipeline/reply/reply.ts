@@ -139,6 +139,8 @@ export async function generateReply(
     actionSpace?: boolean;
     /** 指令服从:prompt 强注入 + 禁止沉默 */
     instruction?: { strength: 'master' | 'normal' };
+    /** 迟到回复:注入"刚没看到"语气提示 */
+    latenessHint?: string;
   },
 ): Promise<{
   replies: ReplyOutput[];
@@ -372,7 +374,9 @@ export async function generateReply(
     }
   }
 
-  const burstHint = [...stateParts, burstPart, revisitPart, instructionPart].filter(Boolean).join('\n\n') || undefined;
+  const burstHint = [...stateParts, callOpts?.latenessHint, burstPart, revisitPart, instructionPart]
+    .filter(Boolean)
+    .join('\n\n') || undefined;
 
   // G13: LLM-driven expression selection (MaiBot maisaka_expression_selector
   // port — was dead code, now wired). Rich-context replies pick style snippets
