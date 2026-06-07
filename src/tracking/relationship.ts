@@ -174,3 +174,14 @@ export function relationshipPromptHint(state: RelState): string {
       return '';
   }
 }
+
+/**
+ * #8 生人/熟人不对称:互动 ≤2 次的发送者注入"陌生人,矜持点"提示。
+ * 此前新人拿不到任何提示,跟 50+ 次互动的老熟人一个亲昵调。
+ */
+export function newcomerPromptHint(count: number): string | null {
+  if (count <= 2) {
+    return '[关系] 这位群友你们几乎没说过话(近乎陌生人):语气客气一点,别自来熟、别上昵称、别贴贴。';
+  }
+  return null;
+}

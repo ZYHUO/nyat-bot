@@ -11,6 +11,7 @@
 //   - 模型用 {"action":"silent"} 表态"就这样" —— 沉默是预期主路径
 
 import { getRecent, addAssistant } from '../context/manager.js';
+import { sampleHumanDelay } from '../reply/latency-model.js';
 import { similarityRatio } from '../reply/anti-repeat.js';
 import { slimContextForAI } from '../context/slim.js';
 import { buildSystemPrompt } from '../reply/prompt-builder.js';
@@ -77,8 +78,9 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
     if (Math.random() >= continueProbability) return;
     continueProbability *= 0.5;
 
-    // 人类节拍:发完一句,过一两秒才想起"对了…"
-    await sleep(BEAT_MIN_MS + Math.random() * (BEAT_MAX_MS - BEAT_MIN_MS));
+    // 人类节拍:发完一句,过一两秒才想起"对了…"(重尾:偶尔过十几秒)
+    const beatSec = sampleHumanDelay((BEAT_MIN_MS + BEAT_MAX_MS) / 2000, { capSec: 15, floorSec: 1.5 });
+    await sleep(beatSec * 1000);
     if (await shouldYield(chatId)) return;
 
     const recent = await getRecent(chatId, 15);

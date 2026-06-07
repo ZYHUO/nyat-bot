@@ -11,6 +11,7 @@ import { describeImage, describeImageCached, describeStickerCached } from "./vis
 import { retrieveContext } from "./context/retriever.js";
 import { generateReply } from "./reply/reply.js";
 import { calculateTypingDelay, type SegmenterConfig } from "./reply/segmenter.js";
+import { sampleHumanDelay } from "./reply/latency-model.js";
 import {
   calculateReadDelay,
   decideAckPrefix,
@@ -141,6 +142,26 @@ const DIRECT_INTERACTION_RULES = new Set([
   // 不在这里的话,replan 回复会被 stale-suppression 丢、指令层也不识别。
   "turn_replan",
 ]);
+
+/**
+ * #9 分钟级延迟改错字:真人常常过几分钟才想起来 edit 一个 typo。
+ * 进程内定时器(重启丢失可接受);触发时若中间有人说过话 → "被打断忘了改"。
+ */
+function scheduleDeferredTypoFix(chatId: number, messageId: number, correctText: string, sentAtSec: number): void {
+  const delayMs = (120 + Math.random() * 360) * 1000; // 2–8 分钟
+  const timer = setTimeout(() => {
+    void (async () => {
+      try {
+        const recent = await getRecent(chatId, 6);
+        const interrupted = recent.some((m) => m.role !== "assistant" && m.timestamp > sentAtSec);
+        if (interrupted) return; // 有人说话了,忘了改
+        await editMessage(chatId, messageId, correctText);
+        logger.debug({ chatId, messageId }, "Deferred typo fix applied");
+      } catch { /* non-critical */ }
+    })();
+  }, delayMs);
+  timer.unref?.();
+}
 
 function isAssistantTurn(
   message: { role: string; uid: number },
@@ -630,7 +651,26 @@ async function generateAndSendReplies(args: {
 
     // Pre-load runtime override for segmenter config (needed before generateReply)
     const override = await loadOverrideCached(getRedis()).catch(() => null);
-    const segmenterConfig: Partial<SegmenterConfig> | undefined = override?.reply_segmentation
+
+    // #6/#11 群风格 underlay:长度镜像 + 标点/emoji 习惯随群漂移。
+    // 运营 override > 群风格 > 全局默认。
+    let styleSeg: Partial<SegmenterConfig> | undefined;
+    let styleHum: Partial<HumanizerConfig> | undefined;
+    let chatStyle: import("../tracking/chat-style.js").ChatStyle | null = null;
+    if (job.chatId < 0) {
+      try {
+        const { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay } = await import("../tracking/chat-style.js");
+        chatStyle = await getChatStyle(job.chatId);
+        if (chatStyle) {
+          styleSeg = styleSegmenterOverlay(chatStyle);
+          styleHum = styleHumanizerOverlay(chatStyle);
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "chat-style fetch failed (non-critical)");
+      }
+    }
+
+    const overrideSeg: Partial<SegmenterConfig> | undefined = override?.reply_segmentation
       ? {
           enabled: override.reply_segmentation.enabled,
           maxLength: override.reply_segmentation.max_length,
@@ -640,6 +680,8 @@ async function generateAndSendReplies(args: {
           typingEnglishTime: override.reply_segmentation.typing_english_time,
         }
       : undefined;
+    const segmenterConfig: Partial<SegmenterConfig> | undefined =
+      styleSeg || overrideSeg ? { ...(styleSeg ?? {}), ...(overrideSeg ?? {}) } : undefined;
     const baseHumanizerConfig: Partial<HumanizerConfig> | undefined = override?.humanizer
       ? Object.fromEntries(
           Object.entries({
@@ -670,12 +712,14 @@ async function generateAndSendReplies(args: {
     // #4 ASI self-tune: per-chat humanizer override (set by asi-scoring when the
     // rolling uncanny-risk EMA crosses thresholds). Shallow-merge over the
     // computed config so dialed-down rates win. Null-safe: no override → unchanged.
-    let humanizerConfig: Partial<HumanizerConfig> | undefined = baseHumanizerConfig;
+    // 合并顺序:群风格 underlay < 运营 override < ASI 自调 per-chat override
+    let humanizerConfig: Partial<HumanizerConfig> | undefined =
+      styleHum || baseHumanizerConfig ? { ...(styleHum ?? {}), ...(baseHumanizerConfig ?? {}) } : undefined;
     try {
       const chatOverrideRaw = await getRedis().get(`xxb:humanizer:override:${job.chatId}`);
       if (chatOverrideRaw) {
         const chatOverride = JSON.parse(chatOverrideRaw) as Partial<HumanizerConfig>;
-        humanizerConfig = { ...(baseHumanizerConfig ?? {}), ...chatOverride };
+        humanizerConfig = { ...(humanizerConfig ?? {}), ...chatOverride };
       }
     } catch (err) {
       logger.debug({ err, chatId: job.chatId }, "Humanizer per-chat override fetch failed (non-critical)");
@@ -792,6 +836,60 @@ async function generateAndSendReplies(args: {
     // 文本回复确定要发了 → 此刻才调度伴随的 reactions(孤儿 reaction 防护)
     scheduleReactions();
 
+    // #7 typing ghost:~3% 概率"正在输入…"几秒然后什么都不发——
+    // 真人经常打了一半觉得算了。仅限:群聊、非指令、非 direct 交互、
+    // 人味预算还在、5 分钟冷却。对 bot 是浪费一次生成,对人味是真实感。
+    if (
+      job.chatId < 0 &&
+      !instructionInfo &&
+      !(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)) &&
+      Math.random() < 0.03
+    ) {
+      try {
+        const ghostKey = `xxb:ghost:${job.chatId}`;
+        const set = await getRedis().set(ghostKey, '1', 'EX', 300, 'NX');
+        if (set !== null) {
+          const ghostSec = 4 + Math.random() * 8;
+          logger.info({ chatId: job.chatId, ghostSec: Math.round(ghostSec) }, 'Typing ghost — typed then abandoned');
+          await sendChatAction(job.chatId, 'typing');
+          if (ghostSec > 5) {
+            setTimeout(() => sendChatAction(job.chatId, 'typing').catch(() => {}), 4500);
+          }
+          await new Promise((r) => setTimeout(r, ghostSec * 1000));
+          if (e.TURN_FOCUS_ENABLED) {
+            import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'model_silent')).catch(() => {});
+          }
+          if (maxPlaceholderMsgId) {
+            await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+          }
+          return; // 打了一半,算了
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, 'typing ghost failed (non-critical)');
+      }
+    }
+
+    // #3 小群降 quote:回复紧跟目标消息、中间没别人插话时,引用是冗余的
+    // ——真人只在需要"消歧"时才 quote。概率随本群真人引用率回归;
+    // 指向他人消息的跨目标回复保留引用(那正是需要消歧的场景)。
+    let suppressLatestQuote = false;
+    if (job.chatId < 0 && !instructionInfo) {
+      try {
+        const recent8 = await getRecent(job.chatId, 8);
+        const idx = recent8.findIndex((m) => m.messageId === formatted.messageId);
+        const interleaved = idx >= 0 && recent8
+          .slice(idx + 1)
+          .some((m) => m.uid !== formatted.uid && m.role !== 'assistant' && !m.isBot);
+        if (!interleaved) {
+          const quoteRatio = chatStyle?.quoteRatio ?? 0.2;
+          const suppressProb = 1 - Math.min(0.85, Math.max(0.08, quoteRatio * 2.5));
+          suppressLatestQuote = Math.random() < suppressProb;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, 'quote-policy check failed (non-critical)');
+      }
+    }
+
 // 9. Send all replies to Telegram
     const t6 = performance.now();
     const sentMessages: Array<{ messageId: number; text: string }> = [];
@@ -808,7 +906,11 @@ async function generateAndSendReplies(args: {
 
     const incomingLength = formatted.textContent?.length ?? 0;
     const isDmChat = job.chatId > 0;
-    const readDelay = isDmChat ? 0 : calculateReadDelay(incomingLength, humanizerConfig);
+    // #1 重尾延迟:read delay 过人类分布采样(偶尔"刚在刷别的"慢半拍)+ 作息调速
+    const readDelayBase = isDmChat ? 0 : calculateReadDelay(incomingLength, humanizerConfig);
+    const readDelay = readDelayBase > 0
+      ? sampleHumanDelay(readDelayBase, { capSec: 25 })
+      : 0;
     if (readDelay > 0) {
       // Show typing during read delay so user sees bot is "processing"
       await sendChatAction(job.chatId, 'typing');
@@ -900,7 +1002,12 @@ async function generateAndSendReplies(args: {
       // subsequent messages simulate human typing rhythm.
       if (replyIdx > 0) {
         const prevText = replies[replyIdx - 1]!.replyContent;
-        const delay = calculateTypingDelay(prevText, segmenterConfig);
+        // #1 段间打字延迟同样走人类分布(段间偶尔停顿想词,但尾巴收紧)
+        const delay = sampleHumanDelay(calculateTypingDelay(prevText, segmenterConfig), {
+          tailProb: 0.06,
+          capSec: 8,
+          floorSec: 0.2,
+        });
         await sendChatAction(job.chatId, 'typing');
         await new Promise((resolve) => setTimeout(resolve, delay * 1000));
       }
@@ -953,8 +1060,10 @@ async function generateAndSendReplies(args: {
         // aimed at someone other than the requester actually points at THEM.
         const targetAlreadyQuoted =
           reply.targetMessageId > 0 && quotedTargets.has(reply.targetMessageId);
+        const quoteDroppedByPolicy =
+          suppressLatestQuote && reply.targetMessageId === formatted.messageId;
         const replyToId =
-          !replyQuoteEnabled || reply.replyQuote === false || reply.targetMessageId <= 0 || targetAlreadyQuoted
+          !replyQuoteEnabled || reply.replyQuote === false || reply.targetMessageId <= 0 || targetAlreadyQuoted || quoteDroppedByPolicy
             ? undefined
             : reply.targetMessageId;
         // quotedTargets is updated at the actual text-send site below, so sticker-only
@@ -1063,11 +1172,16 @@ async function generateAndSendReplies(args: {
 
             // ── Humanizer: typo correction via edit ──
             if (typoResult && typoResult.correction === 'edit' && currentMessageId) {
-              const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-              await sendChatAction(job.chatId, 'typing');
-              await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-              await editMessage(job.chatId, currentMessageId, typoResult.originalText).catch(() => {});
-              logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
+              if (Math.random() < 0.4) {
+                // #9 四成概率拖到几分钟后才想起来改(被打断就忘了)
+                scheduleDeferredTypoFix(job.chatId, currentMessageId, typoResult.originalText, Math.floor(Date.now() / 1000));
+              } else {
+                const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+                await sendChatAction(job.chatId, 'typing');
+                await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
+                await editMessage(job.chatId, currentMessageId, typoResult.originalText).catch(() => {});
+                logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
+              }
             }
 
             // ── Humanizer: typo append (send correct char as follow-up) ──
@@ -1656,6 +1770,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       try {
         const { getFocus } = await import("./turn/focus.js");
         focusLevel = await getFocus(job.chatId);
+        // #5/#12: 精力低(深夜/犯懒)时注意力打折 → judge 更倾向沉默
+        const { getLifeState } = await import("../tracking/life-state.js");
+        focusLevel = focusLevel * Math.max(0.5, getLifeState().energy + 0.15);
       } catch { /* non-critical */ }
     }
 

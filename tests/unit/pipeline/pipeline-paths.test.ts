@@ -69,6 +69,11 @@ vi.mock("../../../src/pipeline/judge/judge.js", () => ({
   l0Rule: vi.fn(() => null), // replan rule recovery — null = keep turn_replan
 }));
 
+vi.mock("../../../src/pipeline/reply/latency-model.js", () => ({
+  // 测试用真实计时器 — 把重尾人类延迟压成毫秒级,保持调用形状
+  sampleHumanDelay: vi.fn(() => 0.01),
+}));
+
 vi.mock("../../../src/pipeline/judge/micro.js", () => ({
   microJudge: vi.fn().mockResolvedValue({
     action: "REPLY",

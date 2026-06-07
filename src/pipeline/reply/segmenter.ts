@@ -30,6 +30,8 @@ export interface SegmenterConfig {
   typingMaxDelay: number;
   /** First message only uses quote-reply */
   firstMessageQuoteReply: boolean;
+  /** #11 句尾句号去除概率(随群标点习惯漂移) */
+  periodDropRate: number;
 }
 
 const DEFAULT_CONFIG: SegmenterConfig = {
@@ -44,6 +46,7 @@ const DEFAULT_CONFIG: SegmenterConfig = {
   typingMinDelay: 0.3,      // 之前 0.8
   typingMaxDelay: 1.2,      // 每条最多等 1.2s（之前 4.0s，是"慢"的主因）
   firstMessageQuoteReply: true,
+  periodDropRate: 0.9,
 };
 
 // ─── Kaomoji regex ───
@@ -157,12 +160,12 @@ function isCloseQuote(char: string): boolean {
  * - 5% chance to delete ，(comma)
  * - 20% chance to replace ，(comma) with a space
  */
-function randomRemovePunctuation(text: string): string {
+function randomRemovePunctuation(text: string, periodDropRate = 0.9): string {
   let result = '';
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
     if (char === '。' && i === text.length - 1) {
-      if (Math.random() > 0.1) continue; // 90% remove trailing period
+      if (Math.random() < periodDropRate) continue; // 按群习惯去句尾句号
     } else if (char === '，') {
       const rand = Math.random();
       if (rand < 0.05) continue; // 5% delete comma
@@ -395,7 +398,7 @@ export function segmentReply(text: string, config?: Partial<SegmenterConfig>): S
   let sentences = splitIntoSentences(processed);
 
   // 5. Random punctuation removal on each sentence
-  sentences = sentences.map(randomRemovePunctuation);
+  sentences = sentences.map((s) => randomRemovePunctuation(s, cfg.periodDropRate));
 
   // 6. Recover kaomoji
   if (kaomojiMapping.size > 0) {

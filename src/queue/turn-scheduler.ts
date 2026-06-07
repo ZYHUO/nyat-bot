@@ -21,6 +21,7 @@ import {
   markDirty,
 } from '../pipeline/turn/buffer.js';
 import { getFocus, debounceFactor } from '../pipeline/turn/focus.js';
+import { getLifeState } from '../tracking/life-state.js';
 import type { TurnTrigger } from '../pipeline/turn/types.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
@@ -44,6 +45,8 @@ function computeFireDelay(
     : e.TIMING_DEBOUNCE_MS;
   // G9: focus 调制 — 聊得起劲回得快,半挂机多等等
   sliding = Math.round(sliding * focusFactor);
+  // #5/#12 作息调速:深夜/吃饭/犯懒时整体慢半拍(direct 路径不经过这里)
+  sliding = Math.round(sliding * getLifeState().speedFactor);
   const slidingFireAt = now + sliding;
   const hardFireAt = (firstPendingAt ?? now) + e.TIMING_DEBOUNCE_MAX_BUFFER_MS;
   return Math.max(0, Math.min(slidingFireAt, hardFireAt) - now);

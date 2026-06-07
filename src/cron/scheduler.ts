@@ -116,6 +116,14 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // #8 关系叙事 — 每天给互动多的群友写/更新一句 "你和TA" 的共同经历概括
+  tasks.push(schedule('19 5 * * *', () => {
+    void safeRun('relationship-summarize', async () => {
+      const { runRelationshipSummarize } = await import('./relationship-summarize.js');
+      await runRelationshipSummarize();
+    });
+  }));
+
   // Expression learning gate — hourly auto-review of pending learned patterns
   tasks.push(schedule('51 * * * *', () => {
     void safeRun('expression-gate', async () => {

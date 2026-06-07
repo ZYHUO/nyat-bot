@@ -142,3 +142,16 @@ export function searchJargons(chatId: number, term: string): JargonEntry[] {
     'SELECT * FROM jargons WHERE chat_id = ? AND content LIKE ? AND meaning != \'\' ORDER BY count DESC LIMIT 5',
   ).all(chatId, `%${term}%`) as JargonEntry[];
 }
+
+/**
+ * #4 黑话注入:取本群已推断出含义的高频黑话(供 prompt [本群黑话] 块)。
+ * 从"被动工具查询"升级为"自然脱口而出"的素材源。
+ */
+export function getTopJargons(chatId: number, limit = 5): JargonEntry[] {
+  const db = getDb();
+  return db.prepare(
+    `SELECT * FROM jargons
+      WHERE chat_id = ? AND status = 'inferred' AND meaning != ''
+      ORDER BY count DESC LIMIT ?`,
+  ).all(chatId, limit) as JargonEntry[];
+}

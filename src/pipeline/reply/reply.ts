@@ -166,7 +166,7 @@ export async function generateReply(
     const { buildInstructionHint } = await import('./instruction.js');
     instructionPart = buildInstructionHint(callOpts.instruction);
   }
-  const burstHint = [burstPart, revisitPart, instructionPart].filter(Boolean).join('\n\n') || undefined;
+  // burstHint 在 stateParts 组装完成后再拼(见 memberRoster 之后)
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
   const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
@@ -334,6 +334,45 @@ export async function generateReply(
 
   // Await the only truly async fetch
   const memberRoster = await memberRosterPromise;
+
+  // ── 人味状态提示集(#2 社交状态 #4 黑话 #5 作息 #8 生熟关系 #10 执念 #12 lazy)──
+  // 统一走 hint 通道进 user turn(system prompt 保持稳定以吃缓存)。
+  const stateParts: string[] = [];
+  try {
+    const { getLifeState } = await import('../../tracking/life-state.js');
+    const ls = getLifeState();
+    if (ls.hint) stateParts.push(ls.hint);
+  } catch { /* non-critical */ }
+  if (chatId < 0) {
+    try {
+      const { socialStateHint } = await import('../../tracking/social-needs.js');
+      const social = await socialStateHint(chatId);
+      if (social) stateParts.push(`[社交状态] ${social}`);
+    } catch { /* non-critical */ }
+    try {
+      const { getObsession } = await import('../../tracking/obsessions.js');
+      stateParts.push((await getObsession()).hint);
+    } catch { /* non-critical */ }
+    try {
+      const { getTopJargons } = await import('../../learners/jargon-miner.js');
+      const jargons = getTopJargons(chatId, 5);
+      if (jargons.length > 0) {
+        const lines = jargons.map((j) => `${j.content} = ${j.meaning.slice(0, 40)}`).join('；');
+        stateParts.push(`[本群黑话] ${lines}\n(这些是群里的梗,语境合适时可以自然用上,别滥用)`);
+      }
+    } catch { /* non-critical */ }
+    if (!message.isBot && !message.isAnonymous) {
+      try {
+        const { getRelationship, newcomerPromptHint } = await import('../../tracking/relationship.js');
+        const rel = getRelationship(chatId, message.uid);
+        const newcomer = newcomerPromptHint(rel.count);
+        if (newcomer) stateParts.push(newcomer);
+        else if (rel.lastSummary) stateParts.push(`[你和TA] ${rel.lastSummary.slice(0, 100)}`);
+      } catch { /* non-critical */ }
+    }
+  }
+
+  const burstHint = [...stateParts, burstPart, revisitPart, instructionPart].filter(Boolean).join('\n\n') || undefined;
 
   // G13: LLM-driven expression selection (MaiBot maisaka_expression_selector
   // port — was dead code, now wired). Rich-context replies pick style snippets
