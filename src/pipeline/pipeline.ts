@@ -823,9 +823,17 @@ async function generateAndSendReplies(args: {
       }
     }
 
-    // ── Humanizer: ack prefix ──
+    // G10: 每回合"人味预算"(actor 模式)— 确认前缀/typo/撤回重发/后补编辑
+    // 一回合最多触发一个,效果像偶发的真实行为而不是抽搐生成器。
+    // 指令回复预算清零:让它"原样重复/翻译/报数"时不能被错别字篡改。
+    let humanizerBudget = instructionInfo ? 0 : job.turnContext ? 1 : Number.POSITIVE_INFINITY;
+
+    // ── Humanizer: ack prefix(纳入人味预算)──
     const totalReplyLength = replies.reduce((sum, r) => sum + (r.replyContent?.length ?? 0), 0);
-    const ackPrefix = decideAckPrefix(totalReplyLength, humanizerConfig);
+    const ackPrefix = humanizerBudget > 0
+      ? decideAckPrefix(totalReplyLength, humanizerConfig)
+      : { shouldSend: false as const, prefix: null, delay: 0 };
+    if (ackPrefix.shouldSend) humanizerBudget--;
 
     const stickerPolicy = {
       enabled: override?.sticker_policy?.enabled ?? true,
@@ -833,11 +841,6 @@ async function generateAndSendReplies(args: {
       sendPosition: override?.sticker_policy?.send_position ?? "after",
     };
     const replyQuoteEnabled = override?.reply_quote !== false;
-
-    // G10: 每回合"人味预算"(actor 模式)— typo/撤回重发/后补编辑三者
-    // 一回合最多触发一个,效果像偶发的真实行为而不是抽搐生成器。
-    // 指令回复预算清零:让它"原样重复/翻译/报数"时不能被错别字篡改。
-    let humanizerBudget = instructionInfo ? 0 : job.turnContext ? 1 : Number.POSITIVE_INFINITY;
 
     // ── Humanizer: thinking interjection (insert between 1st and 2nd segments) ──
     // Skip for DM — users expect instant response in private chat
@@ -860,14 +863,16 @@ async function generateAndSendReplies(args: {
       const reply = replies[replyIdx]!;
 
       // ── Humanizer: ack prefix (send before first reply) ──
-      // Skip for DM — users expect instant response in private chat
+      // Skip for DM — users expect instant response in private chat.
+      // 前缀**不带引用**:真人"嗯"一声只是占位,quote 由正文自己决定 ——
+      // 否则同一条消息被"嗯"和正文各 reply 一次,非常机器人。
       if (replyIdx === 0 && !isDmChat && ackPrefix.shouldSend && ackPrefix.prefix) {
         await sendChatAction(job.chatId, 'typing');
         const ackDelay = humanizerConfig?.jitterEnabled !== false
           ? applyJitter(1.0, humanizerConfig?.jitterFactor ?? 0.2)
           : 1.0;
         await new Promise((resolve) => setTimeout(resolve, ackDelay * 1000));
-        await sender.sendDirect(job.chatId, ackPrefix.prefix, reply.targetMessageId).catch(() => {});
+        await sender.sendDirect(job.chatId, ackPrefix.prefix).catch(() => {});
         // Pause between prefix and main content
         await sendChatAction(job.chatId, 'typing');
         await new Promise((resolve) => setTimeout(resolve, (ackPrefix.delay ?? 1.5) * 1000));
