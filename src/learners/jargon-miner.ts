@@ -35,14 +35,18 @@ export function upsertJargons(
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
 
+  // raw_samples 必须始终是合法 JSON 数组:历史 bug 是插入裸文本,
+  // ON CONFLICT 的 json_array_length() 一碰就抛 'malformed JSON' 炸掉
+  // 整个事务(6/6 起线上 SqliteError 的真身)。插入即 json_array(?),
+  // 冲突路径从 excluded 里取第一个元素续插。
   const insertStmt = db.prepare(`
     INSERT INTO jargons (chat_id, content, raw_samples, count, status, created_at, updated_at)
-    VALUES (?, ?, ?, 1, 'pending', ?, ?)
+    VALUES (?, ?, json_array(?), 1, 'pending', ?, ?)
     ON CONFLICT(chat_id, content) DO UPDATE SET
       count = count + 1,
       raw_samples = CASE
-        WHEN json_array_length(jargons.raw_samples) < 10
-        THEN json_insert(jargons.raw_samples, '$[#]', excluded.raw_samples)
+        WHEN json_valid(jargons.raw_samples) AND json_array_length(jargons.raw_samples) < 10
+        THEN json_insert(jargons.raw_samples, '$[#]', json_extract(excluded.raw_samples, '$[0]'))
         ELSE jargons.raw_samples
       END,
       updated_at = excluded.updated_at
