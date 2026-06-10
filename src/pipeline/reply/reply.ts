@@ -620,94 +620,75 @@ export async function generateReply(
     }
   }
 
-  // ── G2 action split: react/silent 抽离,sticker 标记为一等动作 ──
-  let reactions: Array<{ targetMessageId: number; emoji: string }> | undefined;
-  let modelSilent: boolean | undefined;
-  if (callOpts?.actionSpace) {
-    const reactItems = parsedReplies.filter((r) => r.action === 'react' && r.emoji);
-    if (reactItems.length > 0) {
-      // 每回合最多 1 个 react,避免刷屏
-      reactions = reactItems.slice(0, 1).map((r) => ({
-        targetMessageId: r.targetMessageId,
-        emoji: r.emoji!,
-      }));
-    }
-    const silentChosen = parsedReplies.some((r) => r.action === 'silent');
-    parsedReplies = parsedReplies.filter(
-      (r) => r.action === undefined || r.action === 'reply' || r.action === 'sticker',
-    );
-    for (const r of parsedReplies) {
-      if (r.action === 'sticker') r.modelStickerAct = true;
-    }
-    // 主动沉默:模型明确选择不说话(react 仍可执行)。
-    // 解析后没有任何可发内容(silent / react-only / 坏元素被丢弃)统一按
-    // 沉默收尾 —— 不能落到 "All replies failed" 的故障兜底话术。
-    void silentChosen;
-    modelSilent = parsedReplies.length === 0 ? true : undefined;
-
-    // 指令禁止沉默:对直接指令选 silent → 带约束重生成一次;仍不说话
-    // 就明确回"做不到",绝不无声蒸发。
-    // 例外:react-only 也是一种"执行"(让它表态,它点了个赞)—— 不算沉默,
-    // 否则会出现"边 react 边说做不到"的精神分裂(review-workflow)。
-    if (modelSilent && callOpts?.instruction && !reactions) {
-      logger.info({ chatId }, 'Instruction reply came back silent, regenerating with constraint');
-      const constrained = messages.map((m, idx) =>
-        idx === messages.length - 1 && m.role === 'user'
-          ? { ...m, content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n这是对你的直接指令,不允许沉默或只发贴纸。必须输出实际执行指令的文字回复;确实做不到就明确说做不到+原因。` }
-          : m,
-      );
-      try {
-        result = await generateReplyModelOutput(constrained, usage, { signal: interruptSignal });
-        result.toolsUsed = toolsUsed;
-        const redo = parseReplyResponse(result.content, message.messageId)
-          .filter((r) => r.action === undefined || r.action === 'reply');
-        if (redo.length > 0 && redo[0]!.replyContent.trim()) {
-          parsedReplies = redo;
-          modelSilent = undefined;
-        }
-      } catch (err) {
-        logger.debug({ err, chatId }, 'Instruction silent-regen failed');
-      }
-      if (modelSilent) {
-        parsedReplies = [{
-          replyContent: '唔……这个本喵做不到喵',
-          targetMessageId: message.messageId,
-        }];
-        modelSilent = undefined;
-      }
-    }
-  } else {
-    // 动作空间未启用:静默丢弃模型越权产生的动作元素
-    parsedReplies = parsedReplies.filter((r) => r.action === undefined || r.action === 'reply');
-    if (parsedReplies.length === 0) {
-      parsedReplies = [{ replyContent: '…', targetMessageId: message.messageId }];
-    }
-  }
-
-  // ── 目标校验守卫(线上事故:主人提问,回复却"贴"到了频道贴子下面)──
-  // 模型把 targetMessageId 指向了非触发消息时,核对目标的发送者:若是
-  // 频道身份/匿名/bot 的消息,且用户并没有明确委托"去回复那条",一律
-  // 拉回到触发消息。话题相关 ≠ 应该把回复挂到频道贴子下。
+  // ── P5 归一化管线:动作拆分 ∘ 目标守卫 ∘ 占位过滤(幂等,所有 regen 必经)──
+  // 此前 regen 路径(exactReplyCount 等)绕过这些守卫 → 整类数据丢失/逃逸 bug。
   const delegationMarkers = /(回复|回应|怼|评价|告诉|转告|提醒|@)/;
   const userDelegated = delegationMarkers.test(message.textContent || '');
-  if (!userDelegated) {
-    for (const p of parsedReplies) {
-      if (!p.action && p.targetMessageId !== message.messageId) {
-        const target = retrievedContext.merged.find((m) => m.messageId === p.targetMessageId);
-        if (target && (target.isBot || target.isAnonymous)) {
-          logger.info(
-            { chatId, badTarget: p.targetMessageId, retargeted: message.messageId },
-            'Reply targeted a channel/bot message without delegation, retargeting to the asker',
-          );
-          p.targetMessageId = message.messageId;
+  let reactions: Array<{ targetMessageId: number; emoji: string }> | undefined;
+  let modelSilent: boolean | undefined;
+
+  const normalizeDraft = (raw: ReturnType<typeof parseReplyResponse>): ReturnType<typeof parseReplyResponse> => {
+    let texts = raw;
+    if (callOpts?.actionSpace) {
+      const reactItems = raw.filter((r) => r.action === 'react' && r.emoji);
+      // 每回合最多 1 个 react;以**最终**草稿为准(regen 后旧 react 不残留)
+      reactions = reactItems.length > 0
+        ? reactItems.slice(0, 1).map((r) => ({ targetMessageId: r.targetMessageId, emoji: r.emoji! }))
+        : undefined;
+      texts = raw.filter((r) => r.action === undefined || r.action === 'reply' || r.action === 'sticker');
+      for (const r of texts) {
+        if (r.action === 'sticker') r.modelStickerAct = true;
+      }
+    } else {
+      texts = raw.filter((r) => r.action === undefined || r.action === 'reply');
+    }
+    // 目标守卫:未委托时不许把回复挂到频道身份/bot 消息下(线上事故)
+    if (!userDelegated) {
+      for (const p of texts) {
+        if (!p.action && p.targetMessageId !== message.messageId) {
+          const target = retrievedContext.merged.find((m) => m.messageId === p.targetMessageId);
+          if (target && (target.isBot || target.isAnonymous)) {
+            logger.info(
+              { chatId, badTarget: p.targetMessageId, retargeted: message.messageId },
+              'Reply targeted a channel/bot message without delegation, retargeting to the asker',
+            );
+            p.targetMessageId = message.messageId;
+          }
         }
       }
+    }
+    // 占位过滤:空输出的字面 '…' 兜底不算内容(直接发出去很蠢)
+    if (texts.length > 0 && texts.every((p) => !p.action && p.replyContent.trim() === '…')) {
+      texts = [];
+    }
+    return texts;
+  };
+
+  parsedReplies = normalizeDraft(parsedReplies);
+
+  // 指令禁止沉默(两种动作模式统一;react-only 算执行,不算沉默)
+  if (parsedReplies.length === 0 && callOpts?.instruction && !reactions) {
+    logger.info({ chatId }, 'Instruction reply came back silent, regenerating with constraint');
+    const constrained = messages.map((m, idx) =>
+      idx === messages.length - 1 && m.role === 'user'
+        ? { ...m, content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n这是对你的直接指令,不允许沉默或只发贴纸。必须输出实际执行指令的文字回复;确实做不到就明确说做不到+原因。` }
+        : m,
+    );
+    try {
+      result = await generateReplyModelOutput(constrained, usage, { signal: interruptSignal });
+      result.toolsUsed = toolsUsed;
+      parsedReplies = normalizeDraft(parseReplyResponse(result.content, message.messageId));
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Instruction silent-regen failed');
+    }
+    if (parsedReplies.length === 0) {
+      parsedReplies = [{ replyContent: '唔……这个本喵做不到喵', targetMessageId: message.messageId }];
     }
   }
 
   const hasHandoff = parsedReplies.length === 1 && parsedReplies[0]!.handoffToSplitter === true;
 
-  if (exactReplyCount && parsedReplies.length !== exactReplyCount && !hasHandoff) {
+  if (exactReplyCount && parsedReplies.length !== exactReplyCount && parsedReplies.length > 0 && !hasHandoff) {
     logger.info({ chatId, exactReplyCount, actualReplyCount: parsedReplies.length }, 'Explicit multi-reply request not satisfied, regenerating');
     for (let i = 0; i < MAX_MULTI_REPLY_RETRIES; i++) {
       result = await generateReplyModelOutput(messages, usage, {
@@ -715,7 +696,7 @@ export async function generateReply(
         signal: interruptSignal,
       });
       result.toolsUsed = toolsUsed;
-      parsedReplies = parseReplyResponse(result.content, message.messageId);
+      parsedReplies = normalizeDraft(parseReplyResponse(result.content, message.messageId));
       if (parsedReplies.length === exactReplyCount) break;
     }
   }
@@ -750,16 +731,8 @@ export async function generateReply(
     }
   }
 
-  // "…"占位防外漏:模型空输出时 parser 兜底返回字面 '…',直接发出去
-  // 就是一条莫名其妙的省略号消息(用户实测吐槽)。空响应 = 没话说 →
-  // 按主动沉默收尾,不发任何东西。
-  const onlyPlaceholder = parsedReplies.length > 0
-    && parsedReplies.every((p) => !p.action && p.replyContent.trim() === '…');
-  if (onlyPlaceholder && !callOpts?.instruction) {
-    logger.info({ chatId }, 'Empty-output placeholder suppressed → model silent');
-    parsedReplies = [];
-    modelSilent = true;
-  }
+  // 终态:归一化后没有任何可发文本 = 主动沉默(react 仍可执行)
+  modelSilent = parsedReplies.length === 0 ? true : undefined;
 
   const latencyMs = Math.round(performance.now() - start);
   logger.info({

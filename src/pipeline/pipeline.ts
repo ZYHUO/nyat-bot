@@ -1889,9 +1889,10 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // → 后续消息命中跟进规则 → 自动回 → 永远"刚说过话" → 69 次回复里
       // 只有 12 次经过心流)。被点名(@/回复 bot/命令)仍然直通。
       const CONVERSATIONAL_L0 = new Set(["followup_to_bot", "active_conv_engage"]);
-      const l0 = l0Raw && l0Raw.action === "REPLY" && CONVERSATIONAL_L0.has(l0Raw.rule ?? "")
-        ? null // 交给心流(带着自我状态和刷屏自检)重新决定
-        : l0Raw;
+      // hot_chat 骰子同样降级:P2 用确定性的参与预算(velocity 因子)替代 RNG
+      const demoteReply = l0Raw && l0Raw.action === "REPLY" && CONVERSATIONAL_L0.has(l0Raw.rule ?? "");
+      const demoteIgnore = l0Raw && l0Raw.action === "IGNORE" && l0Raw.rule === "hot_chat";
+      const l0 = demoteReply || demoteIgnore ? null : l0Raw;
       if (l0) {
         judgeResult = l0;
       } else if (await isInGateCooldown(job.chatId)) {
@@ -1899,23 +1900,16 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         logger.debug({ chatId: job.chatId }, "Heart skipped (cooldown), pass");
         return;
       } else {
-        // 刷屏硬闸(确定性,0ms),两条规则任一命中 → 直接 pass 不问心流:
-        //   a) 最近 12 条里 bot 占比 ≥1/3(真群友不会霸屏)
-        //   b) 最近 5 分钟 bot 已回 ≥4 条(节奏上限,防快聊群刷屏)
-        const recentForShare = recentMessages.slice(-12);
-        const botShare = recentForShare.length >= 6
-          ? recentForShare.filter((m) => m.role === "assistant" || m.uid === botUid).length / recentForShare.length
-          : 0;
-        const nowSec = Math.floor(Date.now() / 1000);
-        const botRepliesLast5Min = recentMessages.filter(
-          (m) => (m.role === "assistant" || m.uid === botUid) && m.timestamp >= nowSec - 300,
-        ).length;
-        if (botShare >= 1 / 3 || botRepliesLast5Min >= 4) {
+        // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
+        // 硬阈以下确定性 pass(不烧心流调用);中间带给心流一句体感注记。
+        const { computeEngagement, HARD_PASS_BUDGET } = await import("./heart/engagement.js");
+        const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
+        if (engagement.budget <= HARD_PASS_BUDGET) {
           const { recordGateNoAction } = await import("./timing/state-store.js");
           await recordGateNoAction(job.chatId).catch(() => {});
           logger.info(
-            { chatId: job.chatId, botShare: Math.round(botShare * 100), botRepliesLast5Min },
-            "Heart skipped (chattiness governor), pass",
+            { chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors },
+            "Heart skipped (engagement budget), pass",
           );
           return;
         }
@@ -1936,9 +1930,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           botName: e.BOT_USERNAME,
           selfState,
           lastSpokeSecAgo,
-          burstNote: heartBurstIds.length > 1
-            ? `(★ 是一波 ${heartBurstIds.length} 条连发的末尾,把整波当一个完整念头来评估)`
-            : undefined,
+          burstNote: [
+            heartBurstIds.length > 1
+              ? `(★ 是一波 ${heartBurstIds.length} 条连发的末尾,把整波当一个完整念头来评估)`
+              : undefined,
+            engagement.note ?? undefined,
+          ].filter(Boolean).join('\n') || undefined,
           signal: job.turnContext.signal,
         });
         // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
