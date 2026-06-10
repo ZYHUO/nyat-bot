@@ -73,6 +73,16 @@ function entry(messageId: number, direct = false): PendingEntry {
   };
 }
 
+function cmdEntry(messageId: number, text: string): PendingEntry {
+  return {
+    update: { update_id: messageId, message: { message_id: messageId, chat: { id: CHAT, type: 'supergroup' }, from: { id: 100 + messageId }, text } } as never,
+    chatId: CHAT,
+    messageId,
+    enqueuedAt: Date.now(),
+    direct: true,
+  };
+}
+
 function turnJob(trigger: 'message' | 'direct' = 'message') {
   return {
     type: 'chat_turn' as const,
@@ -138,6 +148,39 @@ describe('runChatTurn', () => {
     const flags = processPipelineMock.mock.calls.map((c) => (c[0] as { coalesce: { isLastInBatch: boolean } }).coalesce.isLastInBatch);
     // 单锚点:direct(#2)被判,末尾闲聊(#3)只做 tracking(避免同回合双回复)
     expect(flags).toEqual([false, true, false]);
+  });
+
+  it('every slash command in a burst is judged — 两个人同窗 /checkin 各自有回执', async () => {
+    bufferState.pending = [cmdEntry(1, '/checkin'), cmdEntry(2, '/checkin')];
+    await runChatTurn(turnJob('direct'), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(2);
+    const flags = processPipelineMock.mock.calls.map(
+      (c) => (c[0] as { coalesce: { isLastInBatch: boolean } }).coalesce.isLastInBatch,
+    );
+    expect(flags).toEqual([true, true]); // 命令是事务,不受单锚点预算约束
+  });
+
+  it('command + passive message: 命令有回执,普通消息仍按聊天锚点考虑', async () => {
+    bufferState.pending = [entry(1), cmdEntry(2, '/checkin')];
+    await runChatTurn(turnJob('direct'), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls
+      .map((c) => c[0] as { messageId: number; coalesce: { isLastInBatch: boolean } })
+      .filter((j) => j.coalesce.isLastInBatch)
+      .map((j) => j.messageId);
+    expect(judged.sort()).toEqual([1, 2]); // 签到回执不吞掉 #1 的聊天考虑
+  });
+
+  it('command addressed to another bot is NOT command-judged', async () => {
+    bufferState.pending = [{ ...cmdEntry(1, '/start@other_bot'), direct: false }, entry(2)];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls
+      .map((c) => c[0] as { messageId: number; coalesce: { isLastInBatch: boolean } })
+      .filter((j) => j.coalesce.isLastInBatch)
+      .map((j) => j.messageId);
+    expect(judged).toEqual([2]); // 别家的命令只是普通条目
   });
 
   it('an edit is never the default anchor — the newest non-edit entry is judged (review #0/#3)', async () => {

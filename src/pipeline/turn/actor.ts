@@ -50,6 +50,29 @@ function isAbortError(err: unknown): boolean {
   return err instanceof AIError && err.code === 'AI_ABORTED';
 }
 
+/**
+ * burst 条目是否斜杠命令(与 L0 getCommandName 对齐:带 @suffix 时必须
+ * 指向本 bot)。命令条目逐条 judged —— 签到/帮助这类回执是事务,不参与
+ * "每回合一个聊天锚点"的预算。
+ */
+function isCommandEntry(entry: PendingEntry, botUsername: string): boolean {
+  const u = entry.update as {
+    message?: unknown;
+    edited_message?: unknown;
+    channel_post?: unknown;
+    edited_channel_post?: unknown;
+  };
+  const msg = (u.message ?? u.edited_message ?? u.channel_post ?? u.edited_channel_post) as
+    | { text?: unknown; caption?: unknown }
+    | undefined;
+  const text =
+    (typeof msg?.text === 'string' ? msg.text : '') ||
+    (typeof msg?.caption === 'string' ? msg.caption : '');
+  const m = text.trim().match(/^\/(\w+)(?:@(\w+))?/);
+  if (!m?.[1]) return false;
+  return !m[2] || m[2].toLowerCase() === (botUsername ?? '').toLowerCase();
+}
+
 /** Run one entry through the pipeline as tracking-only bookkeeping. */
 async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number, suppressed: boolean): Promise<void> {
   try {
@@ -259,35 +282,44 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     ...entries.map((en) => en.messageId).filter((id): id is number => id !== undefined),
   ];
 
-  // 每回合恰好一个 judged 锚点:有 direct 取最后一条 direct,否则取末尾
-  // 最新的**非编辑**条目。(旧 debounce 语义会让 direct 和末尾各判一次 →
-  // 同回合可能双回复;burst 窗口已让模型看到整波,单锚点足够。)
+  // 斜杠命令是**事务性请求**,每条都必须有回执:两个人同窗 /checkin,
+  // 单锚点会吞掉前一个人的签到(命令回执只在 judged 路径触发 —— L0
+  // whitelisted_command → 拦截器,tracking-only 永远到不了)。命令逐条
+  // judged,确定性拦截无 LLM 浪费;"每回合一个锚点"的预算只约束聊天式回复。
+  const judgedIdx = new Set<number>();
+  // 聊天式锚点:有 direct 取最后一条 direct,否则取末尾最新的**非编辑**
+  // 条目。(旧 debounce 语义会让 direct 和末尾各判一次 → 同回合可能双回复;
+  // burst 窗口已让模型看到整波,单锚点足够。)
   // 编辑永不当默认锚点:锚到一条改旧消息上,bot 会把陈年消息当成刚发的
   // 接话(review P1 #0/#3)。改出 @bot 的编辑带 direct,走上面的 direct 扫描。
-  // 全是被动编辑的回合 → anchorIndex 保持 -1,整批 tracking-only 纯入册。
-  let anchorIndex = -1;
+  // 全是被动编辑的回合 → 无锚点,整批 tracking-only 纯入册。
   if (!suppressed) {
+    for (let i = 0; i < entries.length; i++) {
+      if (isCommandEntry(entries[i]!, e.BOT_USERNAME)) judgedIdx.add(i);
+    }
+    let anchorIndex = -1;
     for (let i = entries.length - 1; i >= 0; i--) {
-      if (entries[i]!.direct === true) {
+      if (entries[i]!.direct === true && !judgedIdx.has(i)) {
         anchorIndex = i;
         break;
       }
     }
     if (anchorIndex === -1) {
       for (let i = entries.length - 1; i >= 0; i--) {
-        if (entries[i]!.isEdit !== true) {
+        if (entries[i]!.isEdit !== true && !judgedIdx.has(i)) {
           anchorIndex = i;
           break;
         }
       }
     }
+    if (anchorIndex !== -1) judgedIdx.add(anchorIndex);
   }
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
 
     try {
-      if (i === anchorIndex) {
+      if (judgedIdx.has(i)) {
         await runJudgedEntry(chatId, entry, entries.length, epoch, burstMessageIds);
       } else {
         await trackEntry(chatId, entry, entries.length, suppressed);
