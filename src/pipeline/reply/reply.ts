@@ -372,6 +372,32 @@ export async function generateReply(
         else if (rel.lastSummary) stateParts.push(`[你和TA] ${rel.lastSummary.slice(0, 100)}`);
       } catch { /* non-critical */ }
     }
+    // 微反应群提示(千雪对标):本群说话都很短 → bot 也要敢发 2-10 字
+    try {
+      const { getChatStyle } = await import('../../tracking/chat-style.js');
+      const style = await getChatStyle(chatId);
+      if (style?.microStyle) {
+        stateParts.push(`[本群节奏] 这个群说话都很短(中位 ${style.medianChars} 字)。你的回复也照这个长度来:多数时候 2-10 字的微反应("对对对""笑死""这么强")就是最像群友的;**不要**每条都写成 20 字的完整句子。`);
+      }
+    } catch { /* non-critical */ }
+    // 复读链检测:≥2 个不同群友连发同一句短话 → 跟一句就是最自然的参与
+    try {
+      const tail = retrievedContext.merged.slice(-5).filter((m) => m.role !== 'assistant' && !m.isBot);
+      if (tail.length >= 2) {
+        const norm = (t: string) => t.replace(/\s+/g, '');
+        const lastText = norm(tail[tail.length - 1]!.textContent || '');
+        if (lastText && lastText.length <= 12) {
+          const echoers = new Set<number>();
+          for (let i = tail.length - 1; i >= 0; i--) {
+            if (norm(tail[i]!.textContent || '') === lastText) echoers.add(tail[i]!.uid);
+            else break;
+          }
+          if (echoers.size >= 2) {
+            stateParts.push(`[复读链] 群里 ${echoers.size} 个人在复读「${lastText.slice(0, 12)}」。跟着原样复读一句(或微变体)是最自然的参与方式;不想跟就正常回。`);
+          }
+        }
+      }
+    } catch { /* non-critical */ }
     // G7 群共同经历:消息命中往事关键词 → callback("上次群里那件事…")
     try {
       const { recallEpisodes } = await import('../../tracking/group-episodes.js');

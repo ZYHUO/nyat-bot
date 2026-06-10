@@ -21,6 +21,8 @@ export interface ChatStyle {
   quoteRatio: number;
   /** 以句号/感叹/问号收尾的消息占比 0..1 */
   punctEndRate: number;
+  /** 微反应群:中位数 ≤12 字(对对对/笑死/草 式短打群) */
+  microStyle: boolean;
   sampleSize: number;
 }
 
@@ -46,7 +48,7 @@ export async function getChatStyle(chatId: number): Promise<ChatStyle | null> {
       const emojiDensity = humans.filter((m) => EMOJI_RE.test(m.textContent)).length / humans.length;
       const quoteRatio = humans.filter((m) => !!m.replyTo).length / humans.length;
       const punctEndRate = humans.filter((m) => PUNCT_END_RE.test(m.textContent.trim())).length / humans.length;
-      style = { medianChars, emojiDensity, quoteRatio, punctEndRate, sampleSize: humans.length };
+      style = { medianChars, emojiDensity, quoteRatio, punctEndRate, microStyle: medianChars <= 12, sampleSize: humans.length };
     }
   } catch (err) {
     logger.debug({ err, chatId }, 'getChatStyle failed (non-critical)');
