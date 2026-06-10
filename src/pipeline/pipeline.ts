@@ -1861,11 +1861,19 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // 未命中 → 一次带人格+自我状态的心流判断,直接给出 reply/wait/pass
       // (它就是 gate,后面的 gate 块对 heart 路径跳过)。
       const { l0Rule } = await import("./judge/judge.js");
-      const l0 = l0Rule({
+      const l0Raw = l0Rule({
         message: formatted, recentMessages, botUid,
         botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
       });
+      // "对话热度"类 L0 规则(bot 刚说过话 → 骰子自动 REPLY)在心流模式
+      // 下**降级为建议**:它们曾绕过心流和刷屏闸形成自激循环(bot 说一句
+      // → 后续消息命中跟进规则 → 自动回 → 永远"刚说过话" → 69 次回复里
+      // 只有 12 次经过心流)。被点名(@/回复 bot/命令)仍然直通。
+      const CONVERSATIONAL_L0 = new Set(["followup_to_bot", "active_conv_engage"]);
+      const l0 = l0Raw && l0Raw.action === "REPLY" && CONVERSATIONAL_L0.has(l0Raw.rule ?? "")
+        ? null // 交给心流(带着自我状态和刷屏自检)重新决定
+        : l0Raw;
       if (l0) {
         judgeResult = l0;
       } else if (await isInGateCooldown(job.chatId)) {
@@ -1873,16 +1881,24 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         logger.debug({ chatId: job.chatId }, "Heart skipped (cooldown), pass");
         return;
       } else {
-        // 刷屏硬闸(确定性,0ms):最近 12 条里 bot 占比 ≥40% → 直接 pass,
-        // 不问心流。prompt 自检靠不住时代码兜底 —— 真群友不会霸屏。
+        // 刷屏硬闸(确定性,0ms),两条规则任一命中 → 直接 pass 不问心流:
+        //   a) 最近 12 条里 bot 占比 ≥1/3(真群友不会霸屏)
+        //   b) 最近 5 分钟 bot 已回 ≥4 条(节奏上限,防快聊群刷屏)
         const recentForShare = recentMessages.slice(-12);
         const botShare = recentForShare.length >= 6
           ? recentForShare.filter((m) => m.role === "assistant" || m.uid === botUid).length / recentForShare.length
           : 0;
-        if (botShare >= 0.4) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const botRepliesLast5Min = recentMessages.filter(
+          (m) => (m.role === "assistant" || m.uid === botUid) && m.timestamp >= nowSec - 300,
+        ).length;
+        if (botShare >= 1 / 3 || botRepliesLast5Min >= 4) {
           const { recordGateNoAction } = await import("./timing/state-store.js");
           await recordGateNoAction(job.chatId).catch(() => {});
-          logger.info({ chatId: job.chatId, botShare: Math.round(botShare * 100) }, "Heart skipped (chattiness governor), pass");
+          logger.info(
+            { chatId: job.chatId, botShare: Math.round(botShare * 100), botRepliesLast5Min },
+            "Heart skipped (chattiness governor), pass",
+          );
           return;
         }
         const { composeSelfState } = await import("./heart/self-state.js");
