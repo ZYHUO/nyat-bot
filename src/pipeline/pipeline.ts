@@ -797,6 +797,7 @@ async function generateAndSendReplies(args: {
           revisitCandidates,
           actionSpace: job.turnContext ? e.TURN_ACTION_PLANNER_ENABLED : undefined,
           instruction: instructionInfo ?? undefined,
+          heartWhy: job.turnContext?.heartWhy,
           latenessHint: latenessSec !== undefined
             ? '[迟到回复] 你刚才没在看这个群(在忙别的),过了好一会儿才看到这条消息。回复**开头**自然带一句迟到的语气("刚没看到""才看到喵"之类),轻描淡写就好,不用正式道歉。'
             : undefined,
@@ -1358,6 +1359,8 @@ async function generateAndSendReplies(args: {
       if (e.TURN_FOCUS_ENABLED) {
         import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'bot_spoke')).catch(() => {});
       }
+      // L2: 落点入持续内心(立场延续,下一回合别自相矛盾)
+      import("./heart/mind.js").then(({ noteStance }) => noteStance(job.chatId, sentMessages[0]?.text ?? '')).catch(() => {});
     }
 
     // G6: bounded self-continuation — the bot may follow up its own line a
@@ -1938,6 +1941,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
             : undefined,
           signal: job.turnContext.signal,
         });
+        // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
+        import("./heart/mind.js").then(({ noteThought }) => noteThought(job.chatId, heart.why)).catch(() => {});
         if (heart.act === 'wait') {
           // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)
           const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
@@ -1965,6 +1970,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         }
         judgeResult = heart.judgeResult;
         job.turnContext.gateBypass = true; // 心流就是 gate,别再问一遍
+        job.turnContext.heartWhy = heart.why; // L1:写手顺着同一个念头开笔
       }
     } else {
       judgeResult = await judge({

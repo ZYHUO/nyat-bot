@@ -141,6 +141,8 @@ export async function generateReply(
     instruction?: { strength: 'master' | 'normal' };
     /** 迟到回复:注入"刚没看到"语气提示 */
     latenessHint?: string;
+    /** L1: 心流的内心独白 — 决定与写作是同一个念头 */
+    heartWhy?: string;
   },
 ): Promise<{
   replies: ReplyOutput[];
@@ -339,20 +341,25 @@ export async function generateReply(
 
   // ── 此刻的你:一段叙述代替五六个状态标签块(心流层同源,S13)──
   // 判断"接不接"的我和决定"怎么说"的我读的是同一份自我状态。
-  const stateParts: string[] = [];
+  // P4:状态块带优先级,最终按预算合成(指令类永不裁,氛围类按序让位)
+  const ctxParts: Array<[number, string]> = [];
+  const stateParts = {
+    push: (t: string) => ctxParts.push([50, t]),
+    pushP: (p: number, t: string) => ctxParts.push([p, t]),
+  };
   if (chatId < 0) {
     // P2:自我状态只进群聊 —— DM 里"注意收着点/半挂机"这类群语境叙述很怪
     try {
       const { composeSelfState } = await import('../heart/self-state.js');
       const self = await composeSelfState(chatId);
-      stateParts.push(`[此刻的你] ${self.narration}`);
+      stateParts.pushP(20, `[此刻的你] ${self.narration}`);
     } catch { /* non-critical */ }
     try {
       const { getTopJargons } = await import('../../learners/jargon-miner.js');
       const jargons = getTopJargons(chatId, 5);
       if (jargons.length > 0) {
         const lines = jargons.map((j) => `${j.content} = ${j.meaning.slice(0, 40)}`).join('；');
-        stateParts.push(`[本群黑话] ${lines}\n(这些是群里的梗,语境合适时可以自然用上,别滥用)`);
+        stateParts.pushP(40, `[本群黑话] ${lines}\n(这些是群里的梗,语境合适时可以自然用上,别滥用)`);
       }
     } catch { /* non-critical */ }
     if (!message.isBot && !message.isAnonymous) {
@@ -360,8 +367,8 @@ export async function generateReply(
         const { getRelationship, newcomerPromptHint } = await import('../../tracking/relationship.js');
         const rel = getRelationship(chatId, message.uid);
         const newcomer = newcomerPromptHint(rel.count);
-        if (newcomer) stateParts.push(newcomer);
-        else if (rel.lastSummary) stateParts.push(`[你和TA] ${rel.lastSummary.slice(0, 100)}`);
+        if (newcomer) stateParts.pushP(15, newcomer);
+        else if (rel.lastSummary) stateParts.pushP(30, `[你和TA] ${rel.lastSummary.slice(0, 100)}`);
       } catch { /* non-critical */ }
     }
     // 微反应群提示(千雪对标):本群说话都很短 → bot 也要敢发 2-10 字
@@ -369,7 +376,7 @@ export async function generateReply(
       const { getChatStyle } = await import('../../tracking/chat-style.js');
       const style = await getChatStyle(chatId);
       if (style?.microStyle) {
-        stateParts.push(`[本群节奏] 这个群说话都很短(中位 ${style.medianChars} 字)。你的回复也照这个长度来:多数时候 2-10 字的微反应("对对对""笑死""这么强")就是最像群友的;**不要**每条都写成 20 字的完整句子。`);
+        stateParts.pushP(18, `[本群节奏] 这个群说话都很短(中位 ${style.medianChars} 字)。你的回复也照这个长度来:多数时候 2-10 字的微反应("对对对""笑死""这么强")就是最像群友的;**不要**每条都写成 20 字的完整句子。`);
       }
     } catch { /* non-critical */ }
     // 复读链检测:≥2 个不同群友连发同一句短话 → 跟一句就是最自然的参与
@@ -385,7 +392,7 @@ export async function generateReply(
             else break;
           }
           if (echoers.size >= 2) {
-            stateParts.push(`[复读链] 群里 ${echoers.size} 个人在复读「${lastText.slice(0, 12)}」。跟着原样复读一句(或微变体)是最自然的参与方式;不想跟就正常回。`);
+            stateParts.pushP(12, `[复读链] 群里 ${echoers.size} 个人在复读「${lastText.slice(0, 12)}」。跟着原样复读一句(或微变体)是最自然的参与方式;不想跟就正常回。`);
           }
         }
       }
@@ -395,7 +402,7 @@ export async function generateReply(
       const { recallEpisodes } = await import('../../tracking/group-episodes.js');
       const episodes = recallEpisodes(chatId, queryText, 2);
       if (episodes.length > 0) {
-        stateParts.push(`[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
+        stateParts.pushP(35, `[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
       }
     } catch { /* non-critical */ }
     // G8 黑话理解侧:入站消息里出现已学会的黑话 → 含义随消息注入,
@@ -404,14 +411,32 @@ export async function generateReply(
       const { searchJargonsInText } = await import('../../learners/jargon-miner.js');
       const matched = searchJargonsInText(chatId, queryText, 3);
       if (matched.length > 0) {
-        stateParts.push(`[消息里的黑话] ${matched.map((j) => `${j.content}=${j.meaning.slice(0, 30)}`).join('；')}`);
+        stateParts.pushP(10, `[消息里的黑话] ${matched.map((j) => `${j.content}=${j.meaning.slice(0, 30)}`).join('；')}`);
       }
     } catch { /* non-critical */ }
   }
 
-  const burstHint = [...stateParts, callOpts?.latenessHint, burstPart, revisitPart, instructionPart]
-    .filter(Boolean)
-    .join('\n\n') || undefined;
+  // L1: 内心独白放最后(离 CURRENT_MESSAGE 最近) —— 写手顺着决定接话的
+  // 那个念头开笔,而不是失忆后重新猜一个角度。
+  const heartPart = callOpts?.heartWhy
+    ? `[你的念头] 你看到这条消息时心里想的是:「${callOpts.heartWhy}」。顺着这个念头说,别另起炉灶。`
+    : undefined;
+  // 指令/念头/迟到/连发是行为指令(p<10,永不裁);其余按优先级进预算
+  if (instructionPart) ctxParts.push([1, instructionPart]);
+  if (heartPart) ctxParts.push([2, heartPart]);
+  if (callOpts?.latenessHint) ctxParts.push([3, callOpts.latenessHint]);
+  if (burstPart) ctxParts.push([4, burstPart]);
+  if (revisitPart) ctxParts.push([45, revisitPart]);
+  const CTX_BUDGET_CHARS = 1400;
+  let used = 0;
+  const kept: string[] = [];
+  for (const [prio, text] of ctxParts.sort((a, b) => a[0] - b[0])) {
+    if (prio < 10 || used + text.length <= CTX_BUDGET_CHARS) {
+      kept.push(text);
+      used += text.length;
+    }
+  }
+  const burstHint = kept.join('\n\n') || undefined;
 
   // G13: LLM-driven expression selection (MaiBot maisaka_expression_selector
   // port — was dead code, now wired). Rich-context replies pick style snippets
@@ -424,7 +449,7 @@ export async function generateReply(
         const { selectExpressions } = await import('../../learners/expression-selector.js');
         const picked = await selectExpressions(chatId, contextStr.slice(-1200), envFn().EXPRESSION_INJECT_COUNT, 'judge');
         if (picked.length > 0) {
-          expressionOverride = picked.map((ex) => `- 当${ex.situation}时,可以像群友那样说:「${ex.style}」`).join('\n');
+          expressionOverride = picked.map((ex) => `「${ex.style}」`).join(' ');
         // G6 使用强化:被选中注入即 count++
         try {
           const { reinforceExpressions } = await import('../../learners/expression-learner.js');

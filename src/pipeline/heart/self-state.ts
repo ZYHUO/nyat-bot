@@ -61,6 +61,14 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
     if (social) parts.push(social);
   } catch { /* fail-soft */ }
 
+  // 持续内心(L2):上一个念头/立场延续,不再每条消息失忆重启
+  try {
+    const { getMind } = await import('./mind.js');
+    const mind = await getMind(chatId);
+    if (mind.lastThought) parts.push(`你刚才心里想的是:「${mind.lastThought}」`);
+    if (mind.stance) parts.push(`你最近一次发言的落点:「${mind.stance}」(别自相矛盾)`);
+  } catch { /* fail-soft */ }
+
   // 本周执念
   try {
     const { getObsession } = await import('../../tracking/obsessions.js');

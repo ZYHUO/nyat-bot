@@ -182,15 +182,17 @@ export function buildMessages(
   // G13: 语境匹配的 LLM 选择结果(expression-selector)优先于静态 top-N
   // G3 软性习惯框架 + G4 高 recency:不再是干巴数据表;素材块在本函数
   // 末尾(CURRENT_MESSAGE 紧前)推入,埋中间会被几千 token 稀释掉。
-  const EXPR_HEADER = '[表达习惯参考]\n这些是本群常见的说话习惯,语境合适时可以自然这样表达(不必每条都用,更不要生搬硬套):';
-  const formatExprLine = (situation: string, style: string): string => `- 当${situation}时,可以像群友那样说:「${style}」`;
+  // L4:风格示例化 —— 指令表("当X时可以说Y")会让模型先写正常回复再
+  // 生硬缝一句"学来的话",留下接缝;few-shot 原句让它靠模仿吸收腔调。
+  const EXPR_HEADER = '[群味] 本群平时说话的味道(感受语感就好,不用照搬原句):';
+  const formatExprLine = (_situation: string, style: string): string => `「${style}」`;
   let expressionBlock: string | undefined;
   if (expressionOverride) {
     expressionBlock = `${EXPR_HEADER}\n${expressionOverride}`;
   } else if (chatId !== undefined && env().EXPRESSION_INJECT_ENABLED) {
     const exprs = getTopExpressions(chatId, env().EXPRESSION_INJECT_COUNT);
     if (exprs.length > 0) {
-      const lines = exprs.map((e) => formatExprLine(e.situation, e.style)).join('\n');
+      const lines = exprs.map((e) => formatExprLine(e.situation, e.style)).join(' ');
       expressionBlock = `${EXPR_HEADER}\n${lines}`;
       // G6 使用强化:被注入即视为一次"使用",count++ → 常被用的表达爬升
       try {

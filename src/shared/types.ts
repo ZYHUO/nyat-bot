@@ -133,6 +133,8 @@ export interface ChatJob {
     isReplan?: boolean;
     /** G4: messageIds of the whole drained burst (oldest→newest) — judge/reply treat it as one thought */
     burstMessageIds?: number[];
+    /** L1: 心流决定接话时的内心独白 — 写手顺着同一个念头开笔 */
+    heartWhy?: string;
     /**
      * G5: wait-resume replay — the anchor entry already went through all
      * bookkeeping stages on first processing; skip context-save/tracking
