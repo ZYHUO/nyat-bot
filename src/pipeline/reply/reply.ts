@@ -337,24 +337,15 @@ export async function generateReply(
   // Await the only truly async fetch
   const memberRoster = await memberRosterPromise;
 
-  // ── 人味状态提示集(#2 社交状态 #4 黑话 #5 作息 #8 生熟关系 #10 执念 #12 lazy)──
-  // 统一走 hint 通道进 user turn(system prompt 保持稳定以吃缓存)。
+  // ── 此刻的你:一段叙述代替五六个状态标签块(心流层同源,S13)──
+  // 判断"接不接"的我和决定"怎么说"的我读的是同一份自我状态。
   const stateParts: string[] = [];
   try {
-    const { getLifeState } = await import('../../tracking/life-state.js');
-    const ls = getLifeState();
-    if (ls.hint) stateParts.push(ls.hint);
+    const { composeSelfState } = await import('../heart/self-state.js');
+    const self = await composeSelfState(chatId);
+    stateParts.push(`[此刻的你] ${self.narration}`);
   } catch { /* non-critical */ }
   if (chatId < 0) {
-    try {
-      const { socialStateHint } = await import('../../tracking/social-needs.js');
-      const social = await socialStateHint(chatId);
-      if (social) stateParts.push(`[社交状态] ${social}`);
-    } catch { /* non-critical */ }
-    try {
-      const { getObsession } = await import('../../tracking/obsessions.js');
-      stateParts.push((await getObsession()).hint);
-    } catch { /* non-critical */ }
     try {
       const { getTopJargons } = await import('../../learners/jargon-miner.js');
       const jargons = getTopJargons(chatId, 5);

@@ -23,6 +23,13 @@ vi.mock('../../../src/tracking/life-state.js', () => ({
   getLifeState: vi.fn(() => ({ state: 'normal', energy: 0.85, hint: null, speedFactor: 1, lazyDay: false })),
 }));
 
+vi.mock('../../../src/pipeline/heart/self-state.js', () => ({
+  // 测试里不要真实自我状态(执念/作息会随日期漂移) → 抛错走 fail-soft 跳过
+  composeSelfState: vi.fn(async () => {
+    throw new Error('self-state disabled in tests');
+  }),
+}));
+
 vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({
   buildSystemPrompt: (...args: unknown[]) => mockBuildSystemPrompt(...args),
   buildMessages: (...args: unknown[]) => mockBuildMessages(...args),

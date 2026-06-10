@@ -223,7 +223,10 @@ const envSchema = z.object({
   TURN_FOCUS_ENABLED: booleanFromEnv.default(false),
   // G11: idle/proactive cron 经 turn actor 走完整人格管线。
   TURN_PROACTIVE_ENABLED: booleanFromEnv.default(false),
-  // G8: judge+gate+writer 合并为单次人格化社交决策（最后上，需 A/B）。
+  // G8/S13 心流:L0 未命中的被动群消息,judge L1/L2 + gate 合并为一次
+  // 带人格+自我状态的"心流判断"(reply/wait/pass)。1 次调用替代 1-3 次。
+  HEART_ENABLED: booleanFromEnv.default(false),
+  // (旧名,弃用,留着防 .env 报错)
   TURN_UNIFIED_DECISION_ENABLED: booleanFromEnv.default(false),
   // gate no_action 冷却语义改向：冷却期内延后调度（MaiBot 拖时间），而非放行。
   TURN_GATE_DEFER_COOLDOWN: booleanFromEnv.default(false),

@@ -1854,6 +1854,66 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         { chatId: job.chatId, messageId: formatted.messageId, recoveredRule: judgeResult.rule },
         "Replan: engagement carried over, judge skipped",
       );
+    } else if (e.HEART_ENABLED && job.chatId < 0 && job.turnContext) {
+      // ── 心流路径(S13/G8):一颗心代替三个过滤器 ──
+      // L0 规则先跑(0ms 快路:@/回复bot/命令/mute/游戏等确定性场景)。
+      // 未命中 → 一次带人格+自我状态的心流判断,直接给出 reply/wait/pass
+      // (它就是 gate,后面的 gate 块对 heart 路径跳过)。
+      const { l0Rule } = await import("./judge/judge.js");
+      const l0 = l0Rule({
+        message: formatted, recentMessages, botUid,
+        botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
+      });
+      if (l0) {
+        judgeResult = l0;
+      } else {
+        const { composeSelfState } = await import("./heart/self-state.js");
+        const { heartDecision } = await import("./heart/decision.js");
+        const selfState = await composeSelfState(job.chatId);
+        let lastSpokeSecAgo: number | undefined;
+        try {
+          const ts = await getChatState(job.chatId);
+          if (ts.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - ts.lastBotReplyAt) / 1000;
+        } catch { /* non-critical */ }
+        const heart = await heartDecision({
+          chatId: job.chatId,
+          message: formatted,
+          recentMessages,
+          botUid,
+          botName: e.BOT_USERNAME,
+          selfState,
+          lastSpokeSecAgo,
+          signal: job.turnContext.signal,
+        });
+        if (heart.act === 'wait') {
+          // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)
+          const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
+          if (e.TURN_WAIT_RESUME_ENABLED) {
+            try {
+              const { setWaitAnchor } = await import("./turn/buffer.js");
+              await setWaitAnchor(job.chatId, {
+                update: job.update, chatId: job.chatId,
+                messageId: formatted.messageId, enqueuedAt: job.enqueuedAt, waitReplay: true,
+              }, waitSec + 120);
+            } catch { /* non-critical */ }
+          }
+          await transitionToWait(job.chatId, waitSec, formatted.messageId);
+          logger.info({ chatId: job.chatId, why: heart.why }, "Pipeline complete (heart=wait)");
+          return;
+        }
+        if (heart.act === 'pass') {
+          if (e.TURN_FOCUS_ENABLED) {
+            import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
+          }
+          const { recordGateNoAction } = await import("./timing/state-store.js");
+          await recordGateNoAction(job.chatId).catch(() => {});
+          logger.info({ chatId: job.chatId, why: heart.why }, "Pipeline complete (heart=pass, still present)");
+          return;
+        }
+        judgeResult = heart.judgeResult;
+        job.turnContext.gateBypass = true; // 心流就是 gate,别再问一遍
+      }
     } else {
       judgeResult = await judge({
         message: formatted, recentMessages,
