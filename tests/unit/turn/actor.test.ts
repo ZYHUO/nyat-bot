@@ -55,6 +55,7 @@ vi.mock('../../../src/pipeline/turn/buffer.js', () => ({
   }),
   bumpEpoch: vi.fn(async () => ++bufferState.epoch),
   getLastMsgAt: vi.fn(async () => undefined),
+  hasPendingDirect: vi.fn(async () => false),
 }));
 
 import { runChatTurn, isTurnActorChat } from '../../../src/pipeline/turn/actor.js';
@@ -172,7 +173,7 @@ describe('runChatTurn', () => {
     bufferState.dirty = true;
     await runChatTurn(turnJob(), 'turn-1');
     // forceNew 必须:此刻 meta 还指向本(active)job,普通排程只会 markDirty
-    expect(scheduleTurnMock).toHaveBeenCalledWith(CHAT, { trigger: 'message', forceNew: true });
+    expect(scheduleTurnMock).toHaveBeenCalledWith(CHAT, { trigger: 'message', direct: false, forceNew: true });
   });
 
   it('clears its own scheduledJobId when nothing is left to do', async () => {

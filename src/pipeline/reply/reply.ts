@@ -340,12 +340,13 @@ export async function generateReply(
   // ── 此刻的你:一段叙述代替五六个状态标签块(心流层同源,S13)──
   // 判断"接不接"的我和决定"怎么说"的我读的是同一份自我状态。
   const stateParts: string[] = [];
-  try {
-    const { composeSelfState } = await import('../heart/self-state.js');
-    const self = await composeSelfState(chatId);
-    stateParts.push(`[此刻的你] ${self.narration}`);
-  } catch { /* non-critical */ }
   if (chatId < 0) {
+    // P2:自我状态只进群聊 —— DM 里"注意收着点/半挂机"这类群语境叙述很怪
+    try {
+      const { composeSelfState } = await import('../heart/self-state.js');
+      const self = await composeSelfState(chatId);
+      stateParts.push(`[此刻的你] ${self.narration}`);
+    } catch { /* non-critical */ }
     try {
       const { getTopJargons } = await import('../../learners/jargon-miner.js');
       const jargons = getTopJargons(chatId, 5);
@@ -709,11 +710,16 @@ export async function generateReply(
     const { segments } = segmentReply(parsedReplies[0]!.replyContent, segmenterConfig);
 
     if (segments.length > 1) {
+      const first = parsedReplies[0]!;
       parsedReplies = segments.map((seg, idx) => ({
         replyContent: seg,
         targetMessageId: primaryTargetId,
         // Only first segment gets quote-reply; the rest go without
-        replyQuote: idx === 0 ? parsedReplies[0]!.replyQuote : false,
+        replyQuote: idx === 0 ? first.replyQuote : false,
+        // P2:切段不丢字段 —— 犹豫挂第一段,贴纸意图挂最后一段(贴纸在文后发)
+        hesitateBefore: idx === 0 ? first.hesitateBefore : undefined,
+        stickerIntent: idx === segments.length - 1 ? first.stickerIntent : undefined,
+        modelStickerAct: idx === segments.length - 1 ? first.modelStickerAct : undefined,
       }));
       logger.debug({ count: segments.length }, 'Code segmenter split reply into multiple messages');
     }

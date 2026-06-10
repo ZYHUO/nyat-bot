@@ -14,7 +14,6 @@ import type { FormattedMessage, ReplyTier } from '../../shared/types.js';
 import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { getTopExpressions, reinforceExpressions } from '../../learners/expression-learner.js';
-import { getChatMood, moodPromptHint } from '../../tracking/mood.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildProfileInjection } from '../../tracking/user-profile.js';
@@ -80,16 +79,8 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
 
   // L4: Style
   let styleLayer = loadCachedPrompt('style/tone.md');
-  // Stage E: mood drift hint appended to style layer
-  if (chatId !== undefined && env().MOOD_INJECT_ENABLED) {
-    try {
-      const mood = getChatMood(chatId);
-      const hint = moodPromptHint(mood);
-      if (hint) styleLayer = `${styleLayer}\n\n${hint}`;
-    } catch {
-      /* mood injection is non-critical; ignore errors */
-    }
-  }
+  // Stage E mood hint:已并入 [此刻的你] 自我状态叙述(self-state.ts),
+  // 这里不再重复注入(P2 双注入修复)。
   // Stage F: relationship narrative hint appended to style layer
   if (chatId !== undefined && userId !== undefined && env().RELATIONSHIP_ENABLED) {
     try {

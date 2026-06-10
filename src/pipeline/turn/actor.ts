@@ -298,7 +298,11 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   const wasDirty = await clearDirty(chatId);
   const stillPending = await pendingCount(chatId);
   if (wasDirty || stillPending > 0) {
-    await scheduleTurn(chatId, { trigger: 'message', forceNew: true });
+    // P1:缓冲里有 direct(@/回复 bot 在回合活跃期到达,被降级成 dirty)
+    // → 立即开火,不罚去抖窗口
+    const { hasPendingDirect } = await import('./buffer.js');
+    const direct = await hasPendingDirect(chatId).catch(() => false);
+    await scheduleTurn(chatId, { trigger: direct ? 'direct' : 'message', direct, forceNew: true });
   }
 
   logger.debug(

@@ -42,6 +42,8 @@ export interface HeartInput {
   selfState: SelfState;
   /** bot 上次发言距今秒数(在场感) */
   lastSpokeSecAgo?: number;
+  /** 连发提示(G4):★ 锚点是一波 N 条连发的末尾,整体评估 */
+  burstNote?: string;
   signal?: AbortSignal;
 }
 
@@ -107,7 +109,8 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   const presence = input.lastSpokeSecAgo !== undefined && input.lastSpokeSecAgo < 180
     ? `\n(你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,正处于对话中)`
     : '';
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  const burstLine = input.burstNote ? `\n${input.burstNote}` : '';
+  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${burstLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
 
   let raw: string;
   try {

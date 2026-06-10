@@ -106,19 +106,29 @@ import {
 import { loadCachedPrompt } from "../shared/config.js";
 
 const sender = new StreamingSender();
-const _recentStickerIds = new Set<string>();
-const _recentStickerQueue: string[] = [];
+// P2:贴纸冷却/去重 per-chat 化 —— 旧的模块级全局让 A 群发贴纸重置 B 群
+// 的冷却(跨群共享状态,行为相互污染)。
 const MAX_RECENT_STICKERS = 50;
-let _repliesSinceLastSticker = 0;
 const STICKER_COOLDOWN_REPLIES = 6;
-function _trackRecentSticker(id: string): void {
-  _recentStickerIds.add(id);
-  _recentStickerQueue.push(id);
-  if (_recentStickerQueue.length > MAX_RECENT_STICKERS) {
-    const old = _recentStickerQueue.shift()!;
-    _recentStickerIds.delete(old);
+interface StickerState { ids: Set<string>; queue: string[]; repliesSince: number }
+const _stickerStates = new Map<number, StickerState>();
+function _stickerState(chatId: number): StickerState {
+  let st = _stickerStates.get(chatId);
+  if (!st) {
+    st = { ids: new Set(), queue: [], repliesSince: STICKER_COOLDOWN_REPLIES };
+    _stickerStates.set(chatId, st);
   }
-  _repliesSinceLastSticker = 0;
+  return st;
+}
+function _trackRecentSticker(chatId: number, id: string): void {
+  const st = _stickerState(chatId);
+  st.ids.add(id);
+  st.queue.push(id);
+  if (st.queue.length > MAX_RECENT_STICKERS) {
+    const old = st.queue.shift()!;
+    st.ids.delete(old);
+  }
+  st.repliesSince = 0;
 }
 const TEMP_MUTE_CLEAR_RULES = new Set([
   "reply_to_self",
@@ -696,15 +706,18 @@ async function generateAndSendReplies(args: {
       }
     }
 
+    // P1:部分 override 不得用 undefined 覆盖群风格 underlay(过滤空值)
     const overrideSeg: Partial<SegmenterConfig> | undefined = override?.reply_segmentation
-      ? {
-          enabled: override.reply_segmentation.enabled,
-          maxLength: override.reply_segmentation.max_length,
-          maxSentenceNum: override.reply_segmentation.max_sentence_num,
-          defaultReply: override.reply_segmentation.default_reply,
-          typingChineseTime: override.reply_segmentation.typing_chinese_time,
-          typingEnglishTime: override.reply_segmentation.typing_english_time,
-        }
+      ? (Object.fromEntries(
+          Object.entries({
+            enabled: override.reply_segmentation.enabled,
+            maxLength: override.reply_segmentation.max_length,
+            maxSentenceNum: override.reply_segmentation.max_sentence_num,
+            defaultReply: override.reply_segmentation.default_reply,
+            typingChineseTime: override.reply_segmentation.typing_chinese_time,
+            typingEnglishTime: override.reply_segmentation.typing_english_time,
+          }).filter(([, v]) => v !== undefined),
+        ) as Partial<SegmenterConfig>)
       : undefined;
     const segmenterConfig: Partial<SegmenterConfig> | undefined =
       styleSeg || overrideSeg ? { ...(styleSeg ?? {}), ...(overrideSeg ?? {}) } : undefined;
@@ -863,15 +876,13 @@ async function generateAndSendReplies(args: {
       throw new AIError("Turn interrupted before send", "send", "send", "AI_ABORTED");
     }
 
-    // 文本回复确定要发了 → 此刻才调度伴随的 reactions(孤儿 reaction 防护)
-    scheduleReactions();
-
     // #7 typing ghost:~3% 概率"正在输入…"几秒然后什么都不发——
     // 真人经常打了一半觉得算了。仅限:群聊、非指令、非 direct 交互、
     // 人味预算还在、5 分钟冷却。对 bot 是浪费一次生成,对人味是真实感。
     if (
       job.chatId < 0 &&
       !instructionInfo &&
+      process.env['NODE_ENV'] !== 'test' && // 3% 骰子会让测试薛定谔
       !(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)) &&
       Math.random() < 0.03
     ) {
@@ -898,6 +909,10 @@ async function generateAndSendReplies(args: {
         logger.debug({ err, chatId: job.chatId }, 'typing ghost failed (non-critical)');
       }
     }
+
+    // 文本回复确定要发了(ghost 没触发)→ 此刻才调度伴随的 reactions
+    // (P2:ghost 之后才排,否则"打了一半算了"还留下一个孤儿 emoji)
+    scheduleReactions();
 
     // #3 小群降 quote:回复紧跟目标消息、中间没别人插话时,引用是冗余的
     // ——真人只在需要"消歧"时才 quote。概率随本群真人引用率回归;
@@ -1076,15 +1091,15 @@ async function generateAndSendReplies(args: {
           reply.stickerIntent &&
           reply.stickerIntent.length > 0 &&
           // G2: 模型把贴纸当一等动作时跳过冷却(明确意图 > RNG 节流)
-          (_repliesSinceLastSticker >= STICKER_COOLDOWN_REPLIES || reply.modelStickerAct === true)
+          (_stickerState(job.chatId).repliesSince >= STICKER_COOLDOWN_REPLIES || reply.modelStickerAct === true)
         ) {
           const candidates = getReadyStickersByIntent(reply.stickerIntent);
           if (candidates.length > 0) {
             candidates.sort((a, b) => b.score - a.score);
-            const fresh = candidates.filter((c) => !_recentStickerIds.has(c.fileUniqueId));
+            const fresh = candidates.filter((c) => !_stickerState(job.chatId).ids.has(c.fileUniqueId));
             const pool = (fresh.length > 0 ? fresh : candidates).slice(0, 10);
             const picked = pool[Math.floor(Math.random() * pool.length)]!;
-            _trackRecentSticker(picked.fileUniqueId);
+            _trackRecentSticker(job.chatId, picked.fileUniqueId);
             stickerFileId = picked.fileId;
             stickerFileUniqueId = picked.fileUniqueId;
             stickerIntent = reply.stickerIntent[0];
@@ -1156,10 +1171,10 @@ async function generateAndSendReplies(args: {
           const stickerCandidates = getReadyStickersByIntent([stickerOnlyResult.intent]);
           if (stickerCandidates.length > 0) {
             stickerCandidates.sort((a, b) => b.score - a.score);
-            const fresh = stickerCandidates.filter((c) => !_recentStickerIds.has(c.fileUniqueId));
+            const fresh = stickerCandidates.filter((c) => !_stickerState(job.chatId).ids.has(c.fileUniqueId));
             const pool = (fresh.length > 0 ? fresh : stickerCandidates).slice(0, 5);
             const picked = pool[Math.floor(Math.random() * pool.length)]!;
-            _trackRecentSticker(picked.fileUniqueId);
+            _trackRecentSticker(job.chatId, picked.fileUniqueId);
             stickerOnlyFileId = picked.fileId;
             stickerOnlyFileUniqueId = picked.fileUniqueId;
           }
@@ -1296,7 +1311,7 @@ async function generateAndSendReplies(args: {
           sentMessages.push({ messageId: stickerMsgId ?? 0, text: '[sticker]' });
         }
 
-        _repliesSinceLastSticker++;
+        _stickerState(job.chatId).repliesSince++;
         try { recordBotReply(job.chatId); } catch { /* non-critical */ }
         // Persist lastBotReplyAt to timing state (read by proactive-scan); the
         // tracking recordBotReply above does NOT write it, and the timing-gate one
@@ -1828,7 +1843,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // 用户那句简短补充后,judge 单看它会 IGNORE → 本该有的回复凭空消失。
     // 模型仍可用 {"action":"silent"} 反悔,所以这不是强制说话。
     let judgeResult: JudgeResult;
-    if (job.turnContext?.isReplan) {
+    if (job.turnContext?.isReplan || job.turnContext?.isWaitReplay) {
       // 用 L0 规则(0ms,无 LLM)恢复锚点的自然 rule:拦截器(mute 命令/
       // NL 命令/remember/DM relay 等)按 rule 分发,全用 'turn_replan' 会
       // 让它们失配。engagement 仍然强制 REPLY(除非 L0 明确 REJECT)。
@@ -1909,6 +1924,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           const ts = await getChatState(job.chatId);
           if (ts.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - ts.lastBotReplyAt) / 1000;
         } catch { /* non-critical */ }
+        const heartBurstIds = job.turnContext.burstMessageIds ?? [];
         const heart = await heartDecision({
           chatId: job.chatId,
           message: formatted,
@@ -1917,6 +1933,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           botName: e.BOT_USERNAME,
           selfState,
           lastSpokeSecAgo,
+          burstNote: heartBurstIds.length > 1
+            ? `(★ 是一波 ${heartBurstIds.length} 条连发的末尾,把整波当一个完整念头来评估)`
+            : undefined,
           signal: job.turnContext.signal,
         });
         if (heart.act === 'wait') {

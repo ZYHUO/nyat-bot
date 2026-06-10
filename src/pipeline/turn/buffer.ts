@@ -34,6 +34,9 @@ export async function appendPending(entry: PendingEntry): Promise<{ count: numbe
   multi.expire(pendingKey, KEY_TTL_SEC);
   multi.hsetnx(metaKey, 'firstPendingAt', String(now));
   multi.hset(metaKey, 'lastMsgAt', String(now));
+  // P1 修复:direct 位持久化 —— 回合活跃期间到达的 @/回复 bot 走
+  // markDirty 路径会丢失 direct 性,收尾再排程时被罚整整一个去抖窗口。
+  if (entry.direct) multi.hset(metaKey, 'pendingDirect', '1');
   multi.expire(metaKey, KEY_TTL_SEC);
   const results = await multi.exec();
   const count = (results?.[0]?.[1] as number) ?? 0;
@@ -63,7 +66,7 @@ export async function drainPending(chatId: number): Promise<PendingEntry[]> {
   const multi = redis.multi();
   multi.lrange(pendingKey, 0, -1);
   multi.del(pendingKey);
-  multi.hdel(metaKey, 'firstPendingAt');
+  multi.hdel(metaKey, 'firstPendingAt', 'pendingDirect');
   const results = await multi.exec();
   const raw = (results?.[0]?.[1] as string[]) ?? [];
 
@@ -163,4 +166,10 @@ export async function takeWaitAnchor(chatId: number): Promise<PendingEntry | nul
     logger.warn({ err, chatId }, 'Malformed wait anchor, dropping');
     return null;
   }
+}
+
+/** 缓冲中是否有 direct 条目(回合收尾再排程时恢复即时开火用) */
+export async function hasPendingDirect(chatId: number): Promise<boolean> {
+  const v = await getRedis().hget(META_KEY(chatId), 'pendingDirect');
+  return v === '1';
 }

@@ -201,7 +201,8 @@ export function reinforceExpressions(ids: number[]): void {
   if (ids.length === 0) return;
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
-  const stmt = db.prepare('UPDATE expressions SET count = count + 1, updated_at = ? WHERE id = ?');
+  // 封顶 60:注入即强化会正反馈锁死 top-5(P2),封顶后新表达仍有机会爬升
+  const stmt = db.prepare('UPDATE expressions SET count = count + 1, updated_at = ? WHERE id = ? AND count < 60');
   const run = db.transaction(() => {
     for (const id of ids) stmt.run(now, id);
   });

@@ -43,6 +43,8 @@ export async function enqueue(data: MessageJobData): Promise<string | undefined>
  *
  * jobId pattern is independent from regular message jobs to avoid collision.
  */
+let _waitSeq = 0;
+
 export async function enqueueWaitResume(
   chatId: number,
   waitSec: number,
@@ -50,7 +52,7 @@ export async function enqueueWaitResume(
 ): Promise<string | undefined> {
   const queue = getQueue();
   const scheduledAt = Date.now();
-  const jobId = `wait-${chatId}-${scheduledAt}`;
+  const jobId = `wait-${chatId}-${scheduledAt}-${_waitSeq++}`;
   const data: MessageJobData = {
     type: 'wait_resume',
     chatId,
