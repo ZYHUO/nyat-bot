@@ -300,9 +300,10 @@ export async function callModel(
     throw new AIError('No API key configured', label.name, label.model, 'AI_NO_KEY');
   }
 
-  // Use raw fetch for vision (image content) or stream-only endpoints
-  // to ensure correct OpenAI-compatible image_url serialization
-  if (hasImageContent(messages) || label.stream) {
+  // Use raw fetch for vision (image content), stream-only endpoints, or
+  // reasoning-enabled labels (AI SDK generateText 不透传 reasoning_effort —
+  // 只有 raw 路径会把 body.reasoning_effort 发出去)。
+  if (hasImageContent(messages) || label.stream || label.reasoningEffort) {
     try {
       return await callOpenAIRaw(label, messages, {
         ...opts,

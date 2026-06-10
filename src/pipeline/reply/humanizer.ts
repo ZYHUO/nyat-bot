@@ -89,7 +89,8 @@ const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   readDelayPerChar: 0.04,
   readDelayMax: 5.0,
 
-  ackPrefixEnabled: true,
+  // 用户反馈:单独蹦一个"嗯/…"气泡很蠢(看上下文就知道在想)→ 默认关闭
+  ackPrefixEnabled: false,
   ackPrefixRate: 0.25,
   ackPrefixMinLength: 30,
   ackPrefixPool: ['嗯', '嗯嗯', '..', '...', '啊', '哦'],
@@ -107,7 +108,8 @@ const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   emojiReplyMaxLength: 15,
   emojiPool: ['👌', '😂', '🙏', '👍', '❤️', '😊', '🤔', '😅', '😍', '🥺', '💪', '🎉', '👀', '💀', '🫡', '🙃'],
 
-  thinkingInterjectionEnabled: true,
+  // 同上:"我想想/等下"占位气泡默认关闭
+  thinkingInterjectionEnabled: false,
   thinkingInterjectionRate: 0.10,
   thinkingInterjectionMinTotalLength: 80,
   thinkingInterjectionMinSegments: 3,

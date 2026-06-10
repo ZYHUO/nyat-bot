@@ -200,3 +200,15 @@ export async function clearChatState(chatId: number): Promise<void> {
 
 // ── exposed for testing ──
 export const _internal = { key, parseState };
+
+/**
+ * 记录一次 gate no_action 决策(冷却用)但**不**进入 STOP。
+ * actor 模式语义:no_action = "这条不接",人还在场 —— 旧的 enterStop 会把
+ * chat 锁死到有人 @ 才醒,这正是"说几下就跑了"的根源。
+ */
+export async function recordGateNoAction(chatId: number): Promise<void> {
+  await persist(chatId, {
+    lastGateAt: Date.now(),
+    lastGateAction: 'no_action',
+  });
+}

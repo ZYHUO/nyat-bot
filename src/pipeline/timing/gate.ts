@@ -62,6 +62,8 @@ export interface GateInput {
   proactiveMode?: boolean;
   /** External abort signal (turn interrupt). Aborts the gate LLM call → fail-open continue. */
   signal?: AbortSignal;
+  /** bot 上次发言距今秒数(在场感:刚说过话就别突然消失) */
+  lastSpokeSecAgo?: number;
 }
 
 const VALID_ACTIONS = new Set<GateAction>(['continue', 'wait', 'no_action']);
@@ -233,9 +235,15 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
   const ctxStr = slimContextForAI(input.recentMessages, input.message, input.botUid);
   const judgeSummary = `judge.action=${input.judgeResult.action} judge.rule=${input.judgeResult.rule ?? 'n/a'} judge.tier=${input.judgeResult.replyTier ?? 'normal'}`;
+  // 在场感:刚参与过对话(≤3 分钟)→ 聊到一半突然消失非常突兀。
+  // gate 历史上的 no_action 理由清一色"保持高傲/与我无关" —— 高傲是
+  // 人设,但对话中途蒸发不是高傲,是故障。
+  const presenceBlock = input.lastSpokeSecAgo !== undefined && input.lastSpokeSecAgo < 180
+    ? `\n[在场感] 你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,**正处于对话中**。对话进行中突然消失是很怪的——除非话题确实已经结束、或这条明显不是说给你的,否则倾向 continue。"高傲"体现在说话的语气里,不是体现在中途蒸发。\n`
+    : '';
   const userMsg =
     `[最近聊天上下文]\n${ctxStr}\n\n` +
-    `[Judge 决策]\n${judgeSummary}\n\n` +
+    `[Judge 决策]\n${judgeSummary}\n${presenceBlock}\n` +
     `请基于以上信息判断节奏，输出符合 schema 的 JSON。`;
 
   const timeoutMs = e.TIMING_GATE_TIMEOUT_MS;

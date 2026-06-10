@@ -1957,6 +1957,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       const tg = performance.now();
       let botPersona = '';
       try { botPersona = loadCachedPrompt('identity/persona.md'); } catch { /* non-fatal */ }
+      // 在场感:bot 上次发言距今(供 gate 抗"中途蒸发")
+      let lastSpokeSecAgo: number | undefined;
+      try {
+        const ts = await getChatState(job.chatId);
+        if (ts.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - ts.lastBotReplyAt) / 1000;
+      } catch { /* non-critical */ }
       const gateDecision = await runTimingGate({
         chatId: job.chatId,
         message: formatted,
@@ -1967,6 +1973,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         botPersona,
         isDirectInteraction: isDirect,
         signal: job.turnContext?.signal,
+        lastSpokeSecAgo,
       });
       timings["timing_gate"] = Math.round(performance.now() - tg);
 
@@ -2027,7 +2034,14 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
           import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
         }
-        await transitionToStop(job.chatId);
+        // actor 模式:no_action = 这条不接,但**人还在场**(只记冷却,不 STOP)。
+        // 旧 enterStop 会把 chat 锁死到被 @ 才醒 → "说几下就跑了"。
+        if (job.turnContext) {
+          const { recordGateNoAction } = await import("./timing/state-store.js");
+          await recordGateNoAction(job.chatId).catch(() => {});
+        } else {
+          await transitionToStop(job.chatId);
+        }
         const totalMs = Math.round(performance.now() - start);
         logger.info(
           { chatId: job.chatId, totalMs, reason: gateDecision.reason, timings },
