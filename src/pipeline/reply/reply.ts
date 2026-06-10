@@ -24,6 +24,14 @@ import { executeToolPlan, formatToolResultsForPrompt } from '../planner/executor
 import { countTokens } from '../../ai/token-counter.js';
 import { logger } from '../../shared/logger.js';
 import { getCachedRoster, setCachedRoster } from './member-cache.js';
+import { composeSelfState } from '../heart/self-state.js';
+import { getTopJargons, searchJargonsInText } from '../../learners/jargon-miner.js';
+import { getRelationship, newcomerPromptHint } from '../../tracking/relationship.js';
+import { recallEpisodes } from '../../tracking/group-episodes.js';
+import { takePendingQuestion } from '../../tracking/curiosity.js';
+import { getChatStyle } from '../../tracking/chat-style.js';
+import { checkNearDuplicate } from './anti-repeat.js';
+import { buildInstructionHint } from './instruction.js';
 
 const MAX_DUPLICATE_RETRIES = 1;
 const MAX_MULTI_REPLY_RETRIES = 1;
@@ -167,7 +175,6 @@ export async function generateReply(
   // 指令服从:执行优先于人设(检测在 pipeline 层,确定性 0ms)
   let instructionPart: string | undefined;
   if (callOpts?.instruction) {
-    const { buildInstructionHint } = await import('./instruction.js');
     instructionPart = buildInstructionHint(callOpts.instruction);
   }
   // burstHint 在 stateParts 组装完成后再拼(见 memberRoster 之后)
@@ -350,12 +357,10 @@ export async function generateReply(
   if (chatId < 0) {
     // P2:自我状态只进群聊 —— DM 里"注意收着点/半挂机"这类群语境叙述很怪
     try {
-      const { composeSelfState } = await import('../heart/self-state.js');
       const self = await composeSelfState(chatId);
       stateParts.pushP(20, `[此刻的你] ${self.narration}`);
     } catch { /* non-critical */ }
     try {
-      const { getTopJargons } = await import('../../learners/jargon-miner.js');
       const jargons = getTopJargons(chatId, 5);
       if (jargons.length > 0) {
         const lines = jargons.map((j) => `${j.content} = ${j.meaning.slice(0, 40)}`).join('；');
@@ -364,7 +369,6 @@ export async function generateReply(
     } catch { /* non-critical */ }
     if (!message.isBot && !message.isAnonymous) {
       try {
-        const { getRelationship, newcomerPromptHint } = await import('../../tracking/relationship.js');
         const rel = getRelationship(chatId, message.uid);
         const newcomer = newcomerPromptHint(rel.count);
         if (newcomer) stateParts.pushP(15, newcomer);
@@ -373,7 +377,6 @@ export async function generateReply(
     }
     // 微反应群提示(千雪对标):本群说话都很短 → bot 也要敢发 2-10 字
     try {
-      const { getChatStyle } = await import('../../tracking/chat-style.js');
       const style = await getChatStyle(chatId);
       if (style?.microStyle) {
         stateParts.pushP(18, `[本群节奏] 这个群说话都很短(中位 ${style.medianChars} 字)。你的回复也照这个长度来:多数时候 2-10 字的微反应("对对对""笑死""这么强")就是最像群友的;**不要**每条都写成 20 字的完整句子。`);
@@ -397,9 +400,17 @@ export async function generateReply(
         }
       }
     } catch { /* non-critical */ }
+    // L5 好奇心延续:之前问 TA 的问题悬着,TA 现在出现了 → 可以追一句
+    if (!message.isBot && !message.isAnonymous) {
+      try {
+        const pendingQ = await takePendingQuestion(chatId, message.uid);
+        if (pendingQ) {
+          stateParts.pushP(13, `[惦记] 你之前问过TA:「${pendingQ}」,一直没等到回答。现在TA出现了——语境合适的话顺口追一下(真群友会记得自己好奇过什么);TA这条消息正好在回答的话就自然接上。`);
+        }
+      } catch { /* non-critical */ }
+    }
     // G7 群共同经历:消息命中往事关键词 → callback("上次群里那件事…")
     try {
-      const { recallEpisodes } = await import('../../tracking/group-episodes.js');
       const episodes = recallEpisodes(chatId, queryText, 2);
       if (episodes.length > 0) {
         stateParts.pushP(35, `[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
@@ -408,7 +419,6 @@ export async function generateReply(
     // G8 黑话理解侧:入站消息里出现已学会的黑话 → 含义随消息注入,
     // bot 不再对群内梗一脸茫然(MaiBot query_jargon 的注入式对标)
     try {
-      const { searchJargonsInText } = await import('../../learners/jargon-miner.js');
       const matched = searchJargonsInText(chatId, queryText, 3);
       if (matched.length > 0) {
         stateParts.pushP(10, `[消息里的黑话] ${matched.map((j) => `${j.content}=${j.meaning.slice(0, 30)}`).join('；')}`);
@@ -592,7 +602,6 @@ export async function generateReply(
   // after_response retry-with-constraint 语义)。ANTI_REPEAT_ENABLED 门控。
   if (parsedReplies[0]) {
     try {
-      const { checkNearDuplicate } = await import('./anti-repeat.js');
       const dup = await checkNearDuplicate(chatId, parsedReplies[0].replyContent);
       if (dup.isNearDuplicate) {
         logger.info({ chatId, ratio: dup.ratio }, 'Near-duplicate reply detected, regenerating with constraint');

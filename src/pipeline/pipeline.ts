@@ -6,7 +6,7 @@ import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath, ReplyTier } fro
 import { resolveReplyPath, resolveReplyTier } from "../shared/types.js";
 import { formatMessage } from "./formatter.js";
 import { addMessage, getRecent, addAssistant } from "./context/manager.js";
-import { judge } from "./judge/judge.js";
+import { judge, l0Rule } from "./judge/judge.js";
 import { describeImage, describeImageCached, describeStickerCached } from "./vision.js";
 import { retrieveContext } from "./context/retriever.js";
 import { generateReply } from "./reply/reply.js";
@@ -89,7 +89,7 @@ import { logger } from "../shared/logger.js";
 import { parseMuteTimedRequest } from "./judge/rules.js";
 import { addWatch, removeWatch, listWatches, checkWatches } from "../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage, recordBotReply } from "../tracking/stats.js";
-import { recordBotReply as recordTimingBotReply } from "./timing/state-store.js";
+import { recordBotReply as recordTimingBotReply, recordGateNoAction } from "./timing/state-store.js";
 import { applyMoodEvent } from "../tracking/mood.js";
 import { recordSelfReply } from "../tracking/self-history.js";
 import { startGame, playGame, stopGame, hasActiveGame } from "./games/manager.js";
@@ -104,6 +104,15 @@ import {
   isInGateCooldown,
 } from "./timing/chat-runtime.js";
 import { loadCachedPrompt } from "../shared/config.js";
+import { composeSelfState } from "./heart/self-state.js";
+import { heartDecision } from "./heart/decision.js";
+import { computeEngagement, HARD_PASS_BUDGET } from "./heart/engagement.js";
+import { needsLookup } from "./heart/path-heuristic.js";
+import { setWaitAnchor } from "./turn/buffer.js";
+import { pickRevisitCandidates } from "./turn/answered-store.js";
+import { getFocus as getChatFocus } from "./turn/focus.js";
+import { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay, type ChatStyle } from "../tracking/chat-style.js";
+import { getLifeState } from "../tracking/life-state.js";
 
 const sender = new StreamingSender();
 // P2:贴纸冷却/去重 per-chat 化 —— 旧的模块级全局让 A 群发贴纸重置 B 群
@@ -692,10 +701,9 @@ async function generateAndSendReplies(args: {
     // 运营 override > 群风格 > 全局默认。
     let styleSeg: Partial<SegmenterConfig> | undefined;
     let styleHum: Partial<HumanizerConfig> | undefined;
-    let chatStyle: import("../tracking/chat-style.js").ChatStyle | null = null;
+    let chatStyle: ChatStyle | null = null;
     if (job.chatId < 0) {
       try {
-        const { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay } = await import("../tracking/chat-style.js");
         chatStyle = await getChatStyle(job.chatId);
         if (chatStyle) {
           styleSeg = styleSegmenterOverlay(chatStyle);
@@ -777,7 +785,6 @@ async function generateAndSendReplies(args: {
     let revisitCandidates;
     if (e.TURN_UNANSWERED_REVISIT_ENABLED && job.turnContext && job.chatId < 0) {
       try {
-        const { pickRevisitCandidates } = await import("./turn/answered-store.js");
         const recentForRevisit = await getRecent(job.chatId, 30);
         revisitCandidates = await pickRevisitCandidates(
           job.chatId,
@@ -1361,6 +1368,13 @@ async function generateAndSendReplies(args: {
       }
       // L2: 落点入持续内心(立场延续,下一回合别自相矛盾)
       import("./heart/mind.js").then(({ noteStance }) => noteStance(job.chatId, sentMessages[0]?.text ?? '')).catch(() => {});
+      // L5: 自己问出的问题成为"惦记"(对方再出现时可追问)
+      if (!formatted.isBot && !formatted.isAnonymous) {
+        const lastSent = sentMessages.at(-1)?.text ?? '';
+        import("../tracking/curiosity.js")
+          .then(({ noteAskedQuestion }) => noteAskedQuestion(job.chatId, formatted.uid, lastSent))
+          .catch(() => {});
+      }
     }
 
     // G6: bounded self-continuation — the bot may follow up its own line a
@@ -1833,10 +1847,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     let focusLevel: number | undefined;
     if (e.TURN_FOCUS_ENABLED && job.turnContext && job.chatId < 0) {
       try {
-        const { getFocus } = await import("./turn/focus.js");
-        focusLevel = await getFocus(job.chatId);
+        focusLevel = await getChatFocus(job.chatId);
         // #5/#12: 精力低(深夜/犯懒)时注意力打折 → judge 更倾向沉默
-        const { getLifeState } = await import("../tracking/life-state.js");
         focusLevel = focusLevel * Math.max(0.5, getLifeState().energy + 0.15);
       } catch { /* non-critical */ }
     }
@@ -1850,7 +1862,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // 用 L0 规则(0ms,无 LLM)恢复锚点的自然 rule:拦截器(mute 命令/
       // NL 命令/remember/DM relay 等)按 rule 分发,全用 'turn_replan' 会
       // 让它们失配。engagement 仍然强制 REPLY(除非 L0 明确 REJECT)。
-      const { l0Rule } = await import("./judge/judge.js");
       const l0 = l0Rule({
         message: formatted, recentMessages, botUid,
         botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
@@ -1878,7 +1889,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // L0 规则先跑(0ms 快路:@/回复bot/命令/mute/游戏等确定性场景)。
       // 未命中 → 一次带人格+自我状态的心流判断,直接给出 reply/wait/pass
       // (它就是 gate,后面的 gate 块对 heart 路径跳过)。
-      const { l0Rule } = await import("./judge/judge.js");
       const l0Raw = l0Rule({
         message: formatted, recentMessages, botUid,
         botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
@@ -1902,10 +1912,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       } else {
         // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
         // 硬阈以下确定性 pass(不烧心流调用);中间带给心流一句体感注记。
-        const { computeEngagement, HARD_PASS_BUDGET } = await import("./heart/engagement.js");
         const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
         if (engagement.budget <= HARD_PASS_BUDGET) {
-          const { recordGateNoAction } = await import("./timing/state-store.js");
           await recordGateNoAction(job.chatId).catch(() => {});
           logger.info(
             { chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors },
@@ -1913,8 +1921,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           );
           return;
         }
-        const { composeSelfState } = await import("./heart/self-state.js");
-        const { heartDecision } = await import("./heart/decision.js");
         const selfState = await composeSelfState(job.chatId);
         let lastSpokeSecAgo: number | undefined;
         try {
@@ -1945,7 +1951,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
           if (e.TURN_WAIT_RESUME_ENABLED) {
             try {
-              const { setWaitAnchor } = await import("./turn/buffer.js");
               await setWaitAnchor(job.chatId, {
                 update: job.update, chatId: job.chatId,
                 messageId: formatted.messageId, enqueuedAt: job.enqueuedAt, waitReplay: true,
@@ -1960,7 +1965,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           if (e.TURN_FOCUS_ENABLED) {
             import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
           }
-          const { recordGateNoAction } = await import("./timing/state-store.js");
           await recordGateNoAction(job.chatId).catch(() => {});
           logger.info({ chatId: job.chatId, why: heart.why }, "Pipeline complete (heart=pass, still present)");
           return;
@@ -1987,7 +1991,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // planner 自己会再判 needTools。legacy 模式保留 microJudge 原行为。
     if (judgeResult.action === "REPLY" && judgeResult.replyPath === undefined && judgeResult.level === "L0_RULE") {
       if (e.HEART_ENABLED) {
-        const { needsLookup } = await import("./heart/path-heuristic.js");
         judgeResult.replyPath = needsLookup(formatted.textContent || formatted.captionContent || "")
           ? "planned"
           : "direct";
@@ -2117,7 +2120,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // (而不是只解除屏蔽然后永远沉默)。
         if (e.TURN_WAIT_RESUME_ENABLED && job.turnContext) {
           try {
-            const { setWaitAnchor } = await import("./turn/buffer.js");
             await setWaitAnchor(
               job.chatId,
               {
@@ -2162,7 +2164,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // actor 模式:no_action = 这条不接,但**人还在场**(只记冷却,不 STOP)。
         // 旧 enterStop 会把 chat 锁死到被 @ 才醒 → "说几下就跑了"。
         if (job.turnContext) {
-          const { recordGateNoAction } = await import("./timing/state-store.js");
           await recordGateNoAction(job.chatId).catch(() => {});
         } else {
           await transitionToStop(job.chatId);
