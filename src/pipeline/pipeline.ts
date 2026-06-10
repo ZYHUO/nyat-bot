@@ -1926,15 +1926,25 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
     timings["judge"] = Math.round(performance.now() - t3);
 
-    // If L0 returned REPLY without a replyPath, ask L1 micro judge
+    // If L0 returned REPLY without a replyPath, resolve direct vs planned.
+    // 心流模式:确定性关键词启发式(0ms)——@/回复bot/私聊这些最高频
+    // 交互不再为"要不要用工具"多打一次 LLM。误判代价温和:planned 的
+    // planner 自己会再判 needTools。legacy 模式保留 microJudge 原行为。
     if (judgeResult.action === "REPLY" && judgeResult.replyPath === undefined && judgeResult.level === "L0_RULE") {
-      const { microJudge } = await import("./judge/micro.js");
-      const pathResult = await microJudge(
-        formatted, recentMessages, botUid, "judge", "", job.chatId,
-        job.turnContext?.signal, burstHint,
-      );
-      if (pathResult.replyPath) judgeResult.replyPath = pathResult.replyPath;
-      if (pathResult.replyTier) judgeResult.replyTier = pathResult.replyTier;
+      if (e.HEART_ENABLED) {
+        const { needsLookup } = await import("./heart/path-heuristic.js");
+        judgeResult.replyPath = needsLookup(formatted.textContent || formatted.captionContent || "")
+          ? "planned"
+          : "direct";
+      } else {
+        const { microJudge } = await import("./judge/micro.js");
+        const pathResult = await microJudge(
+          formatted, recentMessages, botUid, "judge", "", job.chatId,
+          job.turnContext?.signal, burstHint,
+        );
+        if (pathResult.replyPath) judgeResult.replyPath = pathResult.replyPath;
+        if (pathResult.replyTier) judgeResult.replyTier = pathResult.replyTier;
+      }
     }
 
     const rawReplyPath = resolveReplyPath(judgeResult.action, judgeResult.replyPath);
