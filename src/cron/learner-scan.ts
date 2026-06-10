@@ -135,6 +135,15 @@ export async function runLearnerScan(): Promise<void> {
         continue;
       }
 
+      // G1: 重检计数先于抽取 —— 已知词条在新消息里复现即 count++,
+      // 这是黑话计数的主通道(抽取 LLM 不会重复报已知词)。
+      try {
+        const { recountJargonsInMessages } = await import('../learners/jargon-miner.js');
+        recountJargonsInMessages(chatId, newMsgs.map((m) => m.textContent || '').filter(Boolean));
+      } catch (err) {
+        logger.debug({ err, chatId }, 'learner-scan: jargon recount failed (non-critical)');
+      }
+
       await extractFromChat(chatId, newMsgs, e);
       await runJargonInference(chatId, e);
 

@@ -34,7 +34,8 @@ describe('selectExpressions', () => {
 
   it('returns all when count <= maxCount', async () => {
     const entries = [makeEntry(1, 'a', 10), makeEntry(2, 'b', 5)];
-    mockAll.mockReturnValueOnce(entries);
+    // G10 地板:count>=2 查询(2 行 < 3)→ 回退全量查询
+    mockAll.mockReturnValueOnce(entries).mockReturnValueOnce(entries);
     const result = await selectExpressions(-1001, '日常聊天', 5, 'judge');
     expect(result).toEqual(entries);
   });

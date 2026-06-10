@@ -18,6 +18,10 @@ vi.mock('../../../src/env.js', () => ({ env: () => envState }));
 vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
+vi.mock('../../../src/tracking/life-state.js', () => ({
+  getLifeState: vi.fn(() => ({ state: 'normal', energy: 0.85, hint: null, speedFactor: 1, lazyDay: false })),
+}));
+
 vi.mock('../../../src/queue/producer.js', () => ({
   getQueue: () => ({ add: addMock, getJob: getJobMock }),
 }));

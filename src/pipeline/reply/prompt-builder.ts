@@ -13,7 +13,7 @@ import { resolve } from 'node:path';
 import type { FormattedMessage, ReplyTier } from '../../shared/types.js';
 import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
-import { getTopExpressions } from '../../learners/expression-learner.js';
+import { getTopExpressions, reinforceExpressions } from '../../learners/expression-learner.js';
 import { getChatMood, moodPromptHint } from '../../tracking/mood.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
@@ -189,13 +189,22 @@ export function buildMessages(
 
   // Expression injection (Stage D)
   // G13: 语境匹配的 LLM 选择结果(expression-selector)优先于静态 top-N
+  // G3 软性习惯框架 + G4 高 recency:不再是干巴数据表;素材块在本函数
+  // 末尾(CURRENT_MESSAGE 紧前)推入,埋中间会被几千 token 稀释掉。
+  const EXPR_HEADER = '[表达习惯参考]\n这些是本群常见的说话习惯,语境合适时可以自然这样表达(不必每条都用,更不要生搬硬套):';
+  const formatExprLine = (situation: string, style: string): string => `- 当${situation}时,可以像群友那样说:「${style}」`;
+  let expressionBlock: string | undefined;
   if (expressionOverride) {
-    userParts.push(`[本群常用表达]\n${expressionOverride}`);
+    expressionBlock = `${EXPR_HEADER}\n${expressionOverride}`;
   } else if (chatId !== undefined && env().EXPRESSION_INJECT_ENABLED) {
     const exprs = getTopExpressions(chatId, env().EXPRESSION_INJECT_COUNT);
     if (exprs.length > 0) {
-      const lines = exprs.map((e) => `- ${e.situation} → ${e.style}`).join('\n');
-      userParts.push(`[本群常用表达]\n${lines}`);
+      const lines = exprs.map((e) => formatExprLine(e.situation, e.style)).join('\n');
+      expressionBlock = `${EXPR_HEADER}\n${lines}`;
+      // G6 使用强化:被注入即视为一次"使用",count++ → 常被用的表达爬升
+      try {
+        reinforceExpressions(exprs.map((e) => e.id));
+      } catch { /* non-critical */ }
     }
   }
 
@@ -229,6 +238,12 @@ export function buildMessages(
 
   const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
   userParts.push(`[${contextLabel}]\n${context}`);
+
+  // G4(语言生命):学到的群语言放在 CURRENT_MESSAGE 紧前 —— 最高 recency,
+  // 模型真正"带着群的腔调"开口,而不是被埋在状态提示堆里。
+  if (expressionBlock) {
+    userParts.push(expressionBlock);
+  }
 
   // G4: burst-aware reply — answer the whole multi-message thought
   if (burstHint) {

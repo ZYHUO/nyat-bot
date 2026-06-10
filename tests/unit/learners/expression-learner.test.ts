@@ -87,7 +87,8 @@ describe('getTopExpressions', () => {
       { id: 1, chat_id: -1001, situation: 'a', style: 'b', count: 10, source_msg_id: null, created_at: 0, updated_at: 0 },
       { id: 2, chat_id: -1001, situation: 'c', style: 'd', count: 5, source_msg_id: null, created_at: 0, updated_at: 0 },
     ];
-    mockAll.mockReturnValueOnce(fakeRows);
+    // G10 注入池地板:先查 count>=2(2 行 < 地板 3 → 回退全量查询)
+    mockAll.mockReturnValueOnce(fakeRows).mockReturnValueOnce(fakeRows);
     const result = getTopExpressions(-1001, 5);
     expect(result).toEqual(fakeRows);
     expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('ORDER BY count DESC'));

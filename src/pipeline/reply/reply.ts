@@ -372,6 +372,23 @@ export async function generateReply(
         else if (rel.lastSummary) stateParts.push(`[你和TA] ${rel.lastSummary.slice(0, 100)}`);
       } catch { /* non-critical */ }
     }
+    // G7 群共同经历:消息命中往事关键词 → callback("上次群里那件事…")
+    try {
+      const { recallEpisodes } = await import('../../tracking/group-episodes.js');
+      const episodes = recallEpisodes(chatId, queryText, 2);
+      if (episodes.length > 0) {
+        stateParts.push(`[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
+      }
+    } catch { /* non-critical */ }
+    // G8 黑话理解侧:入站消息里出现已学会的黑话 → 含义随消息注入,
+    // bot 不再对群内梗一脸茫然(MaiBot query_jargon 的注入式对标)
+    try {
+      const { searchJargonsInText } = await import('../../learners/jargon-miner.js');
+      const matched = searchJargonsInText(chatId, queryText, 3);
+      if (matched.length > 0) {
+        stateParts.push(`[消息里的黑话] ${matched.map((j) => `${j.content}=${j.meaning.slice(0, 30)}`).join('；')}`);
+      }
+    } catch { /* non-critical */ }
   }
 
   const burstHint = [...stateParts, callOpts?.latenessHint, burstPart, revisitPart, instructionPart]
@@ -389,7 +406,12 @@ export async function generateReply(
         const { selectExpressions } = await import('../../learners/expression-selector.js');
         const picked = await selectExpressions(chatId, contextStr.slice(-1200), envFn().EXPRESSION_INJECT_COUNT, 'judge');
         if (picked.length > 0) {
-          expressionOverride = picked.map((ex) => `- ${ex.situation} → ${ex.style}`).join('\n');
+          expressionOverride = picked.map((ex) => `- 当${ex.situation}时,可以像群友那样说:「${ex.style}」`).join('\n');
+        // G6 使用强化:被选中注入即 count++
+        try {
+          const { reinforceExpressions } = await import('../../learners/expression-learner.js');
+          reinforceExpressions(picked.map((ex) => ex.id));
+        } catch { /* non-critical */ }
         }
       }
     } catch (err) {

@@ -240,7 +240,8 @@ const envSchema = z.object({
   LEARNER_MAX_CHATS_PER_TICK: z.coerce.number().int().positive().default(3),
   EXPRESSION_INJECT_ENABLED: booleanFromEnv.default(false),
   EXPRESSION_INJECT_COUNT: z.coerce.number().int().positive().default(5),
-  JARGON_INFERENCE_THRESHOLDS: z.string().default('4,8,25,100'),
+  // G1: 首档 4→3,黑话冷启动更快过推断线(重检计数修复后才有意义)
+  JARGON_INFERENCE_THRESHOLDS: z.string().default('3,8,25,100'),
   JARGON_QUERY_ENABLED: booleanFromEnv.default(false),
 
   // ── Idle proactive cron (group has been silent → poke) ──

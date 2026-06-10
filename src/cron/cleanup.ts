@@ -39,6 +39,14 @@ export async function runCleanup(deps?: CleanupDeps): Promise<void> {
     logger.warn({ err }, 'Failed to clean expired topic watches');
   }
 
+  // 6.5 G10: prune stale single-occurrence learnings (expressions/jargons)
+  try {
+    const { pruneStaleLearnings } = await import('../learners/expression-learner.js');
+    pruneStaleLearnings();
+  } catch (err) {
+    logger.warn({ err }, 'Failed to prune stale learnings');
+  }
+
   // 7. Stage F: prune old self-replies (>60 days)
   try {
     pruneOldSelfReplies(60);

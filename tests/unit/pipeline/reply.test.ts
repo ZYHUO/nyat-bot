@@ -19,6 +19,10 @@ const mockPlanReply = vi.fn();
 const mockExecuteToolPlan = vi.fn();
 const mockSegmentReply = vi.fn();
 
+vi.mock('../../../src/tracking/life-state.js', () => ({
+  getLifeState: vi.fn(() => ({ state: 'normal', energy: 0.85, hint: null, speedFactor: 1, lazyDay: false })),
+}));
+
 vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({
   buildSystemPrompt: (...args: unknown[]) => mockBuildSystemPrompt(...args),
   buildMessages: (...args: unknown[]) => mockBuildMessages(...args),

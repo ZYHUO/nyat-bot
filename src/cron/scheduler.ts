@@ -124,6 +124,19 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // G7(语言生命)群共同经历 — 每 2 小时为活跃群提炼 0-2 条"群里发生的事"
+  tasks.push(schedule('37 */2 * * *', () => {
+    void safeRun('group-episodes', async () => {
+      const { getRedis } = await import('../db/redis.js');
+      const { summarizeEpisodes } = await import('../tracking/group-episodes.js');
+      const raw = await getRedis().zrange('xxb:active_groups', -6, -1);
+      for (const idStr of raw) {
+        const chatId = Number(idStr);
+        if (chatId < 0) await summarizeEpisodes(chatId).catch(() => {});
+      }
+    });
+  }));
+
   // Expression learning gate — hourly auto-review of pending learned patterns
   tasks.push(schedule('51 * * * *', () => {
     void safeRun('expression-gate', async () => {
