@@ -68,6 +68,12 @@ export interface ScheduleTurnOptions {
    * 而本回合马上结束,没有任何人会再读这个 dirty → 消息永久挂起。
    */
   forceNew?: boolean;
+  /**
+   * 已有 delayed 回合时**不**滑动定时器(changeDelay 是"从现在起重新
+   * 计时"):被动编辑入册用 —— 内容会被既有回合一并 drain,但连续改
+   * typo 不该把真消息的回复一直往后推(review #2)。没有排程时照常新建。
+   */
+  noReschedule?: boolean;
 }
 
 /**
@@ -90,6 +96,11 @@ export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): P
     if (job) {
       const state = await job.getState().catch(() => 'unknown');
       if (state === 'delayed') {
+        if (opts.noReschedule) {
+          // 既有回合到点自会 drain pending 里的这条;不动它的定时器。
+          logger.debug({ chatId, jobId: job.id, trigger: opts.trigger }, 'Turn untouched (noReschedule)');
+          return;
+        }
         try {
           // direct 升级先做:数据必须在 job 变为可提升之前就位(changeDelay(0)
           // 会让 job 立即可被 worker 拿走,之后再 updateData 就晚了)。

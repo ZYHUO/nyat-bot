@@ -35,7 +35,7 @@ import {
   reactToMessage,
 } from "../bot/sender/telegram.js";
 import { getBotUid } from "../bot/bot.js";
-import { recordMessage as recordActivity } from "../tracking/activity.js";
+import { recordMessage as recordActivity, getActivitySummary } from "../tracking/activity.js";
 import { getBotTracker } from "../tracking/interaction.js";
 import { tryGenerateDigest } from "../tracking/bot-digest.js";
 import {
@@ -1368,11 +1368,16 @@ async function generateAndSendReplies(args: {
       }
       // L2: 落点入持续内心(立场延续,下一回合别自相矛盾)
       import("./heart/mind.js").then(({ noteStance }) => noteStance(job.chatId, sentMessages[0]?.text ?? '')).catch(() => {});
-      // L5: 自己问出的问题成为"惦记"(对方再出现时可追问)
+      // L5: 惦记两段式收尾(review #7):回复确认发出后才核销已注入的旧
+      // 惦记(prompt 拼装只 peek 不删,被打断/抑制时问题保留下次再追),
+      // **再**记录本次回复的新问句 —— 同一个 key,顺序反了会误删新问句。
       if (!formatted.isBot && !formatted.isAnonymous) {
         const lastSent = sentMessages.at(-1)?.text ?? '';
         import("../tracking/curiosity.js")
-          .then(({ noteAskedQuestion }) => noteAskedQuestion(job.chatId, formatted.uid, lastSent))
+          .then(async ({ commitPendingQuestion, noteAskedQuestion }) => {
+            await commitPendingQuestion(job.chatId, formatted.uid);
+            await noteAskedQuestion(job.chatId, formatted.uid, lastSent);
+          })
           .catch(() => {});
       }
     }
@@ -1832,9 +1837,18 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     const t3 = performance.now();
     const recentMessages = await getRecent(job.chatId, e.JUDGE_WINDOW_SIZE);
 
+    // 群速不能只从窗口数:recentMessages 被 JUDGE_WINDOW_SIZE(30)截断,
+    // 高速群里 hot_chat ≥40/≥60 和参与预算的 firehose 阈值永远够不到
+    // (review #9/#12 velocity 死分支)。activity zset 是未截断的真实计数;
+    // 取 max 兜底(zset 失败时 getActivitySummary 内部吞错返回 0)。
     const now = Math.floor(Date.now() / 1000);
-    const messagesLast5Min = recentMessages.filter((m) => m.timestamp >= now - 300).length;
-    const messagesLast1Hour = recentMessages.filter((m) => m.timestamp >= now - 3600).length;
+    let messagesLast5Min = recentMessages.filter((m) => m.timestamp >= now - 300).length;
+    let messagesLast1Hour = recentMessages.filter((m) => m.timestamp >= now - 3600).length;
+    try {
+      const act = await getActivitySummary(job.chatId);
+      messagesLast5Min = Math.max(messagesLast5Min, act.messages5min);
+      messagesLast1Hour = Math.max(messagesLast1Hour, act.messages1hour);
+    } catch { /* fail-soft: 窗口近似 */ }
 
     // G4: burst-aware judging — when the turn actor drained a multi-message
     // burst, tell the judge to treat the whole burst as one thought.

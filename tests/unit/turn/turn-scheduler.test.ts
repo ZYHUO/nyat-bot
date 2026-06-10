@@ -163,6 +163,28 @@ describe('turn scheduler', () => {
     expect(bufferState.dirty).toBe(true);
   });
 
+  it('noReschedule leaves an existing delayed job untouched (passive edit, review #2)', async () => {
+    bufferState.meta.scheduledJobId = 'turn-edit';
+    const changeDelay = vi.fn(async () => {});
+    getJobMock.mockResolvedValue({
+      id: 'turn-edit',
+      timestamp: Date.now(),
+      data: { turn: { trigger: 'message' } },
+      getState: async () => 'delayed',
+      changeDelay,
+    });
+
+    await scheduleTurn(CHAT, { trigger: 'message', noReschedule: true });
+
+    expect(changeDelay).not.toHaveBeenCalled(); // 改 typo 不滑动真消息的去抖窗口
+    expect(addMock).not.toHaveBeenCalled();
+  });
+
+  it('noReschedule still creates a turn when none is scheduled (编辑内容及时入册)', async () => {
+    await scheduleTurn(CHAT, { trigger: 'message', noReschedule: true });
+    expect(addMock).toHaveBeenCalledTimes(1);
+  });
+
   it('forceNew skips the reuse branch entirely (end-of-turn self-reschedule)', async () => {
     bufferState.meta.scheduledJobId = 'turn-self';
     getJobMock.mockResolvedValue({

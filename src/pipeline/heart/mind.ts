@@ -30,13 +30,14 @@ export async function getMind(chatId: number): Promise<Mind> {
   }
 }
 
-/** 心流每次决策后记录念头(fire-and-forget) */
+/** 心流每次决策后记录念头(fire-and-forget;multi 保证写入与 TTL 原子) */
 export async function noteThought(chatId: number, thought: string): Promise<void> {
   if (!thought) return;
   try {
-    const redis = getRedis();
-    await redis.hset(MIND_KEY(chatId), 'lastThought', thought.slice(0, 60));
-    await redis.expire(MIND_KEY(chatId), TTL_SEC);
+    await getRedis().multi()
+      .hset(MIND_KEY(chatId), 'lastThought', thought.slice(0, 60))
+      .expire(MIND_KEY(chatId), TTL_SEC)
+      .exec();
   } catch { /* non-critical */ }
 }
 
@@ -44,8 +45,9 @@ export async function noteThought(chatId: number, thought: string): Promise<void
 export async function noteStance(chatId: number, replyText: string): Promise<void> {
   if (!replyText) return;
   try {
-    const redis = getRedis();
-    await redis.hset(MIND_KEY(chatId), 'stance', replyText.slice(0, 60));
-    await redis.expire(MIND_KEY(chatId), TTL_SEC);
+    await getRedis().multi()
+      .hset(MIND_KEY(chatId), 'stance', replyText.slice(0, 60))
+      .expire(MIND_KEY(chatId), TTL_SEC)
+      .exec();
   } catch { /* non-critical */ }
 }

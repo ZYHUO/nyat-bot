@@ -28,7 +28,7 @@ import { composeSelfState } from '../heart/self-state.js';
 import { getTopJargons, searchJargonsInText } from '../../learners/jargon-miner.js';
 import { getRelationship, newcomerPromptHint } from '../../tracking/relationship.js';
 import { recallEpisodes } from '../../tracking/group-episodes.js';
-import { takePendingQuestion } from '../../tracking/curiosity.js';
+import { peekPendingQuestion } from '../../tracking/curiosity.js';
 import { getChatStyle } from '../../tracking/chat-style.js';
 import { checkNearDuplicate } from './anti-repeat.js';
 import { buildInstructionHint } from './instruction.js';
@@ -357,7 +357,9 @@ export async function generateReply(
   if (chatId < 0) {
     // P2:自我状态只进群聊 —— DM 里"注意收着点/半挂机"这类群语境叙述很怪
     try {
-      const self = await composeSelfState(chatId);
+      // heartWhy 在场时不再读 mind.lastThought —— 那是同一个念头,
+      // [你的念头] 已注入,自我状态里再写一遍是双倍复读(review #14)
+      const self = await composeSelfState(chatId, { omitThought: !!callOpts?.heartWhy });
       stateParts.pushP(20, `[此刻的你] ${self.narration}`);
     } catch { /* non-critical */ }
     try {
@@ -403,7 +405,9 @@ export async function generateReply(
     // L5 好奇心延续:之前问 TA 的问题悬着,TA 现在出现了 → 可以追一句
     if (!message.isBot && !message.isAnonymous) {
       try {
-        const pendingQ = await takePendingQuestion(chatId, message.uid);
+        // 只 peek 不删:发送确认后 pipeline 才 commit 核销(review #7),
+        // 生成被打断/迟到抑制/静默时惦记保留,下次 TA 出现还能追
+        const pendingQ = await peekPendingQuestion(chatId, message.uid);
         if (pendingQ) {
           stateParts.pushP(13, `[惦记] 你之前问过TA:「${pendingQ}」,一直没等到回答。现在TA出现了——语境合适的话顺口追一下(真群友会记得自己好奇过什么);TA这条消息正好在回答的话就自然接上。`);
         }

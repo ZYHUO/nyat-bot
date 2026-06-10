@@ -259,9 +259,12 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     ...entries.map((en) => en.messageId).filter((id): id is number => id !== undefined),
   ];
 
-  // 每回合恰好一个 judged 锚点:有 direct 取最后一条 direct,否则取末尾。
-  // (旧 debounce 语义会让 direct 和末尾各判一次 → 同回合可能双回复;
-  //  burst 窗口已让模型看到整波,单锚点足够。)
+  // 每回合恰好一个 judged 锚点:有 direct 取最后一条 direct,否则取末尾
+  // 最新的**非编辑**条目。(旧 debounce 语义会让 direct 和末尾各判一次 →
+  // 同回合可能双回复;burst 窗口已让模型看到整波,单锚点足够。)
+  // 编辑永不当默认锚点:锚到一条改旧消息上,bot 会把陈年消息当成刚发的
+  // 接话(review P1 #0/#3)。改出 @bot 的编辑带 direct,走上面的 direct 扫描。
+  // 全是被动编辑的回合 → anchorIndex 保持 -1,整批 tracking-only 纯入册。
   let anchorIndex = -1;
   if (!suppressed) {
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -270,7 +273,14 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
         break;
       }
     }
-    if (anchorIndex === -1) anchorIndex = entries.length - 1;
+    if (anchorIndex === -1) {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i]!.isEdit !== true) {
+          anchorIndex = i;
+          break;
+        }
+      }
+    }
   }
 
   for (let i = 0; i < entries.length; i++) {

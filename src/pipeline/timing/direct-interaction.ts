@@ -50,6 +50,12 @@ export interface DirectInteractionContext {
   botUid: number;
   botUsername: string;
   botNicknames: string[];
+  /**
+   * 关掉"编辑一律算 direct"的兜底规则,只按编辑后的**内容**判断
+   * (@bot/昵称/回复 bot/命令)。turn actor 入口用:旧消息的 typo 修正
+   * 不该唤醒 bot,但改出 @bot 的编辑仍要算点名(review #8)。
+   */
+  editByContentOnly?: boolean;
 }
 
 /**
@@ -70,7 +76,7 @@ export function looksLikeDirectInteraction(
 ): boolean {
   const { msg, isEdit } = pickMessage(update);
   if (!msg) return false;
-  if (isEdit) return true;
+  if (isEdit && !ctx.editByContentOnly) return true;
 
   const chatType =
     typeof msg.chat?.type === 'string' ? (msg.chat.type as string) : '';

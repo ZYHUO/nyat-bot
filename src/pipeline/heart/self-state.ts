@@ -20,7 +20,16 @@ export interface SelfState {
   energy: number;
 }
 
-export async function composeSelfState(chatId: number): Promise<SelfState> {
+export interface SelfStateOpts {
+  /**
+   * 不注入"你刚才心里想的是…"。回复路径已经把当下心流的 heartWhy 作为
+   * [你的念头] 注入时,再读 mind.lastThought 就是同一句话写两遍
+   * (review #14:noteThought 抢跑赢了 retrieveContext)。
+   */
+  omitThought?: boolean;
+}
+
+export async function composeSelfState(chatId: number, opts?: SelfStateOpts): Promise<SelfState> {
   const parts: string[] = [];
   let energy = 0.8;
 
@@ -49,7 +58,9 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
   try {
     const { getFocus } = await import('../turn/focus.js');
     const focus = await getFocus(chatId);
-    if (focus > 0.65) parts.push('这个群你刚才说过几句话了(说太多就是刷屏,注意收着点)');
+    // 只给事实性在场感,不带"收着点"指令 —— 刷屏自检的规范表述在
+    // heart.md,三处同时下达同一指令会把心流压成过度沉默(review #10)
+    if (focus > 0.65) parts.push('这个群你刚才说过几句话了');
     else if (focus < 0.18) parts.push('这个群你最近没怎么看,半挂机状态');
     energy = energy * 0.6 + focus * 0.4;
   } catch { /* fail-soft */ }
@@ -65,7 +76,7 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
   try {
     const { getMind } = await import('./mind.js');
     const mind = await getMind(chatId);
-    if (mind.lastThought) parts.push(`你刚才心里想的是:「${mind.lastThought}」`);
+    if (mind.lastThought && !opts?.omitThought) parts.push(`你刚才心里想的是:「${mind.lastThought}」`);
     if (mind.stance) parts.push(`你最近一次发言的落点:「${mind.stance}」(别自相矛盾)`);
   } catch { /* fail-soft */ }
 

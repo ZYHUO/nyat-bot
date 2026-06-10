@@ -27,6 +27,33 @@ describe('looksLikeDirectInteraction', () => {
     expect(looksLikeDirectInteraction(u, ctx)).toBe(true);
   });
 
+  describe('editByContentOnly(turn actor 入口,review #8)', () => {
+    const ctxContent = { ...ctx, editByContentOnly: true };
+
+    it('typo 修正编辑 → false(被动入册,不唤醒)', () => {
+      const u = { update_id: 1, edited_message: { chat: { type: 'supergroup' }, text: 'fix typo' } } as UpdateLike;
+      expect(looksLikeDirectInteraction(u, ctxContent)).toBe(false);
+    });
+
+    it('编辑改出 @bot → true(仍算点名)', () => {
+      const u = { update_id: 1, edited_message: { chat: { type: 'supergroup' }, text: '改一下 @xxb_bot 看这个' } } as UpdateLike;
+      expect(looksLikeDirectInteraction(u, ctxContent)).toBe(true);
+    });
+
+    it('编辑的是回复 bot 的消息 → true', () => {
+      const u = {
+        update_id: 1,
+        edited_message: { chat: { type: 'supergroup' }, text: 'fixed', reply_to_message: { from: { id: 9999 } } },
+      } as UpdateLike;
+      expect(looksLikeDirectInteraction(u, ctxContent)).toBe(true);
+    });
+
+    it('非编辑消息不受该开关影响', () => {
+      expect(looksLikeDirectInteraction(update({ text: 'hello world' }), ctxContent)).toBe(false);
+      expect(looksLikeDirectInteraction(update({ text: 'hey @xxb_bot' }), ctxContent)).toBe(true);
+    });
+  });
+
   it('slash command → true', () => {
     expect(looksLikeDirectInteraction(update({ text: '/checkin' }), ctx)).toBe(true);
     expect(looksLikeDirectInteraction(update({ text: '   /help@xxb_bot' }), ctx)).toBe(true);

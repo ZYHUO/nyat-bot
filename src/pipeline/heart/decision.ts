@@ -93,7 +93,14 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   try {
     let personaCore = '';
     try {
-      personaCore = loadCachedPrompt('identity/persona.md').slice(0, 700);
+      // 结构化截取而非固定偏移 slice:身份/识人守则(主人 uid、"绝不管别人
+      // 叫主人")是心流的硬依赖,persona.md 改版加长时固定 700 字符会把它们
+      // 静默截掉(review #11)。取「我在群里的样子」之前的全部身份段。
+      const full = loadCachedPrompt('identity/persona.md');
+      const cut = full.indexOf('## 我在群里的样子');
+      personaCore = cut > 0
+        ? full.slice(0, cut).trimEnd()
+        : (full.length <= 900 ? full : full.slice(0, 900));
     } catch { /* persona optional for the heart call */ }
     systemPrompt = loadCachedPrompt('task/heart.md')
       .replace(/\{bot_name\}/g, input.botName)

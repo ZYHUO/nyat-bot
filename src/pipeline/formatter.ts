@@ -70,6 +70,7 @@ interface TgMessage {
   sender_chat?: TgChat;
   sender_tag?: string;
   date: number;
+  edit_date?: number;
   chat: { id: number; type: string };
   text?: string;
   caption?: string;
@@ -174,7 +175,9 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
     uid,
     username,
     fullName,
-    timestamp: msg.date,
+    // 编辑事件用 edit_date:date 是原始发送时间,陈年消息的 typo 修正若按
+    // 原时间入册,上下文里会把几小时前的行当成"刚发的"渲染(review #0)
+    timestamp: msg.edit_date ?? msg.date,
     messageId: msg.message_id,
     textContent: msg.text ?? '',
     isForwarded,

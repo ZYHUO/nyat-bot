@@ -140,6 +140,39 @@ describe('runChatTurn', () => {
     expect(flags).toEqual([false, true, false]);
   });
 
+  it('an edit is never the default anchor — the newest non-edit entry is judged (review #0/#3)', async () => {
+    bufferState.pending = [entry(1), { ...entry(2), isEdit: true }];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(2);
+    const judged = processPipelineMock.mock.calls
+      .map((c) => c[0] as { messageId: number; coalesce: { isLastInBatch: boolean } })
+      .filter((j) => j.coalesce.isLastInBatch);
+    expect(judged).toHaveLength(1);
+    expect(judged[0]!.messageId).toBe(1);
+  });
+
+  it('an all-edit passive burst is tracking-only (typo 修正不该唤醒 bot)', async () => {
+    bufferState.pending = [{ ...entry(1), isEdit: true }, { ...entry(2), isEdit: true }];
+    await runChatTurn(turnJob(), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(2);
+    for (const call of processPipelineMock.mock.calls) {
+      expect((call[0] as { coalesce: { isLastInBatch: boolean } }).coalesce.isLastInBatch).toBe(false);
+    }
+  });
+
+  it('a direct edit (@bot 改出来的) still anchors via the direct scan (review #8)', async () => {
+    bufferState.pending = [entry(1), { ...entry(2, true), isEdit: true }];
+    await runChatTurn(turnJob('direct'), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls
+      .map((c) => c[0] as { messageId: number; coalesce: { isLastInBatch: boolean } })
+      .filter((j) => j.coalesce.isLastInBatch);
+    expect(judged).toHaveLength(1);
+    expect(judged[0]!.messageId).toBe(2);
+  });
+
   it('suppresses a passive burst while WAIT (tracking-only, skipReply)', async () => {
     envState.TIMING_GATE_ENABLED = true;
     chatState = { state: 'WAIT' };
