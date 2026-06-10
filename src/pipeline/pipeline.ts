@@ -101,6 +101,7 @@ import {
   transitionToRunning,
   recordGateContinue,
   getChatState,
+  isInGateCooldown,
 } from "./timing/chat-runtime.js";
 import { loadCachedPrompt } from "../shared/config.js";
 
@@ -1867,7 +1868,23 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       });
       if (l0) {
         judgeResult = l0;
+      } else if (await isInGateCooldown(job.chatId)) {
+        // 冷却短路:刚 pass/wait 过(15s 内)→ 不再为每条消息烧一次心流调用
+        logger.debug({ chatId: job.chatId }, "Heart skipped (cooldown), pass");
+        return;
       } else {
+        // 刷屏硬闸(确定性,0ms):最近 12 条里 bot 占比 ≥40% → 直接 pass,
+        // 不问心流。prompt 自检靠不住时代码兜底 —— 真群友不会霸屏。
+        const recentForShare = recentMessages.slice(-12);
+        const botShare = recentForShare.length >= 6
+          ? recentForShare.filter((m) => m.role === "assistant" || m.uid === botUid).length / recentForShare.length
+          : 0;
+        if (botShare >= 0.4) {
+          const { recordGateNoAction } = await import("./timing/state-store.js");
+          await recordGateNoAction(job.chatId).catch(() => {});
+          logger.info({ chatId: job.chatId, botShare: Math.round(botShare * 100) }, "Heart skipped (chattiness governor), pass");
+          return;
+        }
         const { composeSelfState } = await import("./heart/self-state.js");
         const { heartDecision } = await import("./heart/decision.js");
         const selfState = await composeSelfState(job.chatId);

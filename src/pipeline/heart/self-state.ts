@@ -49,7 +49,7 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
   try {
     const { getFocus } = await import('../turn/focus.js');
     const focus = await getFocus(chatId);
-    if (focus > 0.65) parts.push('这个群你刚才聊得正起劲,还在兴头上');
+    if (focus > 0.65) parts.push('这个群你刚才说过几句话了(说太多就是刷屏,注意收着点)');
     else if (focus < 0.18) parts.push('这个群你最近没怎么看,半挂机状态');
     energy = energy * 0.6 + focus * 0.4;
   } catch { /* fail-soft */ }

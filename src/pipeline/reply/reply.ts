@@ -719,6 +719,17 @@ export async function generateReply(
     }
   }
 
+  // "…"占位防外漏:模型空输出时 parser 兜底返回字面 '…',直接发出去
+  // 就是一条莫名其妙的省略号消息(用户实测吐槽)。空响应 = 没话说 →
+  // 按主动沉默收尾,不发任何东西。
+  const onlyPlaceholder = parsedReplies.length > 0
+    && parsedReplies.every((p) => !p.action && p.replyContent.trim() === '…');
+  if (onlyPlaceholder && !callOpts?.instruction) {
+    logger.info({ chatId }, 'Empty-output placeholder suppressed → model silent');
+    parsedReplies = [];
+    modelSilent = true;
+  }
+
   const latencyMs = Math.round(performance.now() - start);
   logger.info({
     chatId,
