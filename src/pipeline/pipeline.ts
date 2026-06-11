@@ -7,7 +7,7 @@ import { resolveReplyPath, resolveReplyTier } from "../shared/types.js";
 import { formatMessage } from "./formatter.js";
 import { addMessage, getRecent, addAssistant } from "./context/manager.js";
 import { judge, l0Rule } from "./judge/judge.js";
-import { describeImage, describeImageCached, describeStickerCached } from "./vision.js";
+import { processMedia } from "./stages/media.js";
 import { retrieveContext } from "./context/retriever.js";
 import { generateReply } from "./reply/reply.js";
 import { calculateTypingDelay, type SegmenterConfig } from "./reply/segmenter.js";
@@ -81,7 +81,6 @@ import {
   getRemainingMaxQuota,
   consumeMaxQuota,
 } from "../tracking/reply-max-quota.js";
-import { describeMultimodal } from "./multimodal.js";
 import { acquireChatLock } from "../queue/chat-lock.js";
 import { AIError } from "../shared/errors.js";
 import { env } from "../env.js";
@@ -186,66 +185,6 @@ async function shouldSuppressStaleReply(
   return recent
     .slice(currentIndex + 1)
     .some((entry) => isAssistantTurn(entry, botUid));
-}
-
-// ── Extracted helper 1: Media processing ────────────────────────────
-
-async function processMedia(formatted: FormattedMessage): Promise<void> {
-  const hasMedia = !!(
-    formatted.imageFileId ||
-    formatted.sticker ||
-    formatted.audioFileId ||
-    formatted.voiceFileId ||
-    formatted.documentFileId ||
-    formatted.videoFileId ||
-    formatted.videoNoteFileId
-  );
-  if (hasMedia) {
-    await Promise.all([
-      formatted.imageFileId
-        ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId)
-            .then((d) => { if (d) formatted.imageDescriptions = [d]; })
-            .catch((err) => logger.warn({ err }, "Vision failed, continuing"))
-        : Promise.resolve(),
-      formatted.sticker
-        ? describeStickerCached(formatted.sticker.fileId, formatted.sticker.fileUniqueId)
-            .then((d) => { if (d && d !== "[图片]") (formatted.sticker as { description?: string }).description = d; })
-            .catch((err) => logger.warn({ err }, "Sticker description failed, continuing"))
-        : Promise.resolve(),
-      (formatted.audioFileId || formatted.voiceFileId || formatted.documentFileId || formatted.videoFileId || formatted.videoNoteFileId)
-        ? describeMultimodal(formatted)
-            .then((d) => { if (d) formatted.textContent = (formatted.textContent ? formatted.textContent + "\n" + d : d).trim(); })
-            .catch((err) => logger.warn({ err }, "Multimodal processing failed, continuing"))
-        : Promise.resolve(),
-    ]);
-  }
-
-  // ReplyTo attachment — if user replies to a message with a file/image, process it
-  if (formatted.replyTo && !formatted.documentFileId && !formatted.imageFileId) {
-    if (formatted.replyTo.documentFileId) {
-      formatted.documentFileId = formatted.replyTo.documentFileId;
-      formatted.documentMimeType = formatted.replyTo.documentMimeType;
-      formatted.documentFileName = formatted.replyTo.documentFileName;
-      try {
-        const desc = await describeMultimodal(formatted);
-        if (desc) {
-          formatted.textContent = (formatted.textContent ? formatted.textContent + "\n" + desc : desc).trim();
-        }
-      } catch (err) {
-        logger.warn({ err }, "ReplyTo document processing failed, continuing");
-      }
-      formatted.documentFileId = undefined;
-    } else if (formatted.replyTo.imageFileId) {
-      try {
-        const description = await describeImage(formatted.replyTo.imageFileId);
-        if (description) {
-          formatted.imageDescriptions = [description];
-        }
-      } catch (err) {
-        logger.warn({ err }, "ReplyTo image processing failed, continuing");
-      }
-    }
-  }
 }
 
 // ── Extracted helper 2: Mute command intercepts ─────────────────────
