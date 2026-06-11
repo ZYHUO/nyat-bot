@@ -8,6 +8,7 @@
 //   - 回复时把入站消息与 episode 关键词匹配,命中 → 注入 [群里的往事]
 //   - 召回即强化(recall_count++),久不召回的旧事在 prune 时让位
 
+import type { Database, Statement } from 'better-sqlite3';
 import { getDb } from '../db/sqlite.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { callWithFallback } from '../ai/fallback.js';
@@ -15,6 +16,23 @@ import { logger } from '../shared/logger.js';
 
 const MAX_EPISODES_PER_CHAT = 60;
 const MIN_MSGS_FOR_SUMMARY = 25;
+/** 召回最低分(hits×权重×salience):低于它的偶然重叠一律不注入 */
+const MIN_RECALL_SCORE = 0.5;
+
+// recall 是每次回复的热路径 —— prepared statement 提升到模块级缓存,
+// 按 db 实例身份失效(测试换 :memory: 库、closeDb 重开都安全)。
+let _stmts: { db: Database; select: Statement; bump: Statement } | null = null;
+function recallStmts(): { select: Statement; bump: Statement } {
+  const db = getDb();
+  if (!_stmts || _stmts.db !== db) {
+    _stmts = {
+      db,
+      select: db.prepare('SELECT * FROM group_episodes WHERE chat_id = ? ORDER BY created_at DESC LIMIT 200'),
+      bump: db.prepare('UPDATE group_episodes SET recall_count = recall_count + 1, last_recalled_at = ? WHERE id = ?'),
+    };
+  }
+  return _stmts;
+}
 
 export interface GroupEpisode {
   id: number;
@@ -92,27 +110,43 @@ export async function summarizeEpisodes(chatId: number): Promise<number> {
   return saved;
 }
 
-/** 回复时:入站文本命中关键词的往事(≤limit 条),召回即强化 */
+/**
+ * 回复时:入站文本命中关键词的往事(≤limit 条),召回即强化。
+ *
+ * 评分制(审计修复):旧逻辑 raw includes + 先到先得,完全无视已存储的
+ * salience —— 2 字 CJK 词(今天/这个)的偶然子串重叠让陈旧低价值往事
+ * 挤掉真正相关的高价值往事,且 recall_count++ 自我强化使其越错越牢。
+ * 现在:
+ *   - 统计 DISTINCT 关键词命中数;长词(≥4)权重 ×2(强回调信号)
+ *   - 硬门槛:≥2 个不同关键词命中,或单命中但关键词长度 ≥4
+ *   - 软门槛:score = Σ权重 × salience ≥ MIN_RECALL_SCORE
+ *   - 排序:score 降序,平分按 created_at 新近优先;取 top-limit
+ *   - 只有最终注入的才 recall_count++
+ */
 export function recallEpisodes(chatId: number, messageText: string, limit = 2): GroupEpisode[] {
   if (!messageText || messageText.length < 4) return [];
-  const db = getDb();
-  const rows = db.prepare(
-    'SELECT * FROM group_episodes WHERE chat_id = ? ORDER BY created_at DESC LIMIT 200',
-  ).all(chatId) as GroupEpisode[];
+  const { select, bump } = recallStmts();
+  const rows = select.all(chatId) as GroupEpisode[];
   if (rows.length === 0) return [];
 
-  const hits: GroupEpisode[] = [];
+  const scored: Array<{ row: GroupEpisode; score: number }> = [];
   for (const row of rows) {
-    const kws = row.keywords.split(/\s+/).filter((k) => k.length >= 2);
-    if (kws.some((k) => messageText.includes(k))) {
-      hits.push(row);
-      if (hits.length >= limit) break;
-    }
+    const kws = [...new Set(row.keywords.split(/\s+/).filter((k) => k.length >= 2))];
+    const hitKws = kws.filter((k) => messageText.includes(k));
+    if (hitKws.length === 0) continue;
+    // 硬门槛:单个 2-3 字命中是噪声,不进入评分
+    if (hitKws.length < 2 && hitKws[0]!.length < 4) continue;
+    const weight = hitKws.reduce((sum, k) => sum + (k.length >= 4 ? 2 : 1), 0);
+    const score = weight * row.salience;
+    if (score < MIN_RECALL_SCORE) continue;
+    scored.push({ row, score });
   }
-  if (hits.length > 0) {
-    const now = Math.floor(Date.now() / 1000);
-    const bump = db.prepare('UPDATE group_episodes SET recall_count = recall_count + 1, last_recalled_at = ? WHERE id = ?');
-    for (const h of hits) bump.run(now, h.id);
-  }
+  if (scored.length === 0) return [];
+
+  scored.sort((a, b) => b.score - a.score || b.row.created_at - a.row.created_at);
+  const hits = scored.slice(0, limit).map((s) => s.row);
+
+  const now = Math.floor(Date.now() / 1000);
+  for (const h of hits) bump.run(now, h.id);
   return hits;
 }
