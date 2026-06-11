@@ -49,3 +49,54 @@ describe('toMarkdownV2 golden — code', () => {
     expect(toMarkdownV2('`**not bold**`')).toBe('`**not bold**`');
   });
 });
+
+describe('toMarkdownV2 — URL link entities (#37)', () => {
+  it('wraps a bare URL as a valid link entity (display escaped, href raw)', () => {
+    expect(toMarkdownV2('see https://example.com/page now')).toBe(
+      'see [https://example\\.com/page](https://example.com/page) now',
+    );
+  });
+
+  it('Wikipedia-style URL keeps balanced parens; href escapes only ) and \\', () => {
+    expect(toMarkdownV2('https://en.wikipedia.org/wiki/Foo_(bar) now')).toBe(
+      '[https://en\\.wikipedia\\.org/wiki/Foo\\_\\(bar\\)](https://en.wikipedia.org/wiki/Foo_(bar\\)) now',
+    );
+  });
+
+  it('prose-closing paren is NOT swallowed into the URL', () => {
+    expect(toMarkdownV2('(see https://x.com/a)')).toBe(
+      '\\(see [https://x\\.com/a](https://x.com/a)\\)',
+    );
+  });
+
+  it('snake_case URL no longer leaks raw underscores', () => {
+    expect(toMarkdownV2('https://x.com/a_b_c in text')).toBe(
+      '[https://x\\.com/a\\_b\\_c](https://x.com/a_b_c) in text',
+    );
+  });
+
+  it('trailing sentence punctuation stays out of the link target', () => {
+    expect(toMarkdownV2('看这个 https://example.com/page。')).toBe(
+      '看这个 [https://example\\.com/page](https://example.com/page)。',
+    );
+    expect(toMarkdownV2('go to https://example.com/page.')).toBe(
+      'go to [https://example\\.com/page](https://example.com/page)\\.',
+    );
+  });
+
+  it('URL with query string produces a fully-escaped display text', () => {
+    expect(toMarkdownV2('https://e.com/a?b=1&c=2 ok')).toBe(
+      '[https://e\\.com/a?b\\=1&c\\=2](https://e.com/a?b=1&c=2) ok',
+    );
+  });
+});
+
+describe('toMarkdownV2 — code-entity escaping (#37)', () => {
+  it('escapes backslashes inside inline code', () => {
+    expect(toMarkdownV2('path `C:\\tmp\\x` ok')).toBe('path `C:\\\\tmp\\\\x` ok');
+  });
+
+  it('escapes backticks and backslashes inside code blocks', () => {
+    expect(toMarkdownV2('```a `b` c\\d```')).toBe('```\na \\`b\\` c\\\\d\n```');
+  });
+});
