@@ -15,10 +15,12 @@ export interface CleanupDeps {
 }
 
 export async function runCleanup(deps?: CleanupDeps): Promise<void> {
-  // Cleanup tasks (best-effort, errors are caught internally):
-  // 1. Remove expired Redis context entries beyond retention
-  // 2. Trim old reply_outcomes beyond threshold
-  // 3. Clean up stale pending entries
+  // Cleanup tasks (best-effort, errors are caught internally).
+  // Redis context / pending buffers are NOT handled here — they expire via
+  // rolling TTLs at the write sites (context/manager.ts, turn/buffer.ts).
+  // NOTE: append-only log tables (reply_outcomes/relay_log/reputation_log/
+  // fate_history/daily_stats/reply_reflections) have no retention yet —
+  // deliberate TODO, see audit item "extend runCleanup with real retention".
 
   // 4. Prune reviewed allowlist entries older than 30 days
   if (deps) {
