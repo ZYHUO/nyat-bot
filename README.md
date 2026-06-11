@@ -22,7 +22,9 @@
 ### ✨ 特性
 
 **核心 AI**
-- 🧠 **三级判断管线** — L0 本地规则 → L1 微型 AI → L2 完整 AI，智能决定是否回复
+- ❤️ **心流层（Heart）** — 一颗带人格与"此刻自我状态"的心代替三个过滤器：L0 规则未命中的群消息走**一次**心流判断，自己决定 reply / wait / pass —— 决定"接不接"的我和决定"怎么说"的我是同一个我（更便宜：1 次调用 ≤ 旧的 1-3 次）
+- 🔄 **回合制 Turn Actor** — MaiBot 式 per-chat 认知回合：连发合并成一个念头整体评估、生成中被新消息打断→重规划、"等TA说完"真的会回来接话（wait-resume）、有界自我接话（"对了…"/补贴纸）
+- 🧠 **三级判断管线** — L0 本地规则 → L1 微型 AI → L2 完整 AI，智能决定是否回复（心流关闭时的回退链路）
 - 💬 **自然接话** — bot 说完话后保持"在场"：最近几条内你或它任一方是问句即接，陈述句也按概率接（MaiBot 式 talk-frequency），不需 @ 或引用；群太热/@别人时自动克制
 - 🗣️ **自然语言调用指令** — "帮我签到"→签到、"看看我的图鉴"→卡册、"追踪比特币"→关注话题，私聊宽松、群里需点名
 - 💬 **多条回复 / 多目标** — AI 可一次性回复多个人（JSON 数组），每条精准引用各自目标
@@ -73,6 +75,8 @@
 
 **记忆 · 学习 · 自我进化**
 - 🏷️ **人物外号持久记忆** — 自动捕获"X 的外号是 Y"，跨会话不忘（migration 0027）
+- 📖 **群共同经历记忆** — cron 把群里发生的事摘要成"往事"，聊天命中时注入「群里的往事」让本喵像老群友一样 callback；相关性评分召回（distinct 关键词 × salience 门槛），杜绝"今天/这个"式偶然重叠的误召回（migration 0035）
+- 🧵 **持续内心（Mind）** — 上一个念头/立场跨消息延续，判断与写作共用同一段第一人称自我叙述，不再每条消息失忆重启
 - 🧩 **记忆重要度 + 遗忘** — 记忆按重要度评分，低价值记忆随时间淡忘（migration 0030），梦境式整理 cron
 - 📚 **黑话学习** — 自动挖掘群内黑话/梗，多阶段精炼释义（migration 0016/0026）
 - 📇 **结构化用户画像** — 7 分节画像（身份/关系/稳定事实/偏好/近况…，migration 0025）
@@ -85,14 +89,15 @@
 - 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）+ **Qdrant**（语义记忆，int8 量化，进程内本地嵌入）
 - 🔁 **Ingress 自动故障转移** — 默认长轮询（不对外开放端口）；轮询挂掉自动切 webhook 备用，由 Redis 标志 + 看门狗控制
 - 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，macOS 窗口风格 UI，运行时配置管理
-- ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控）
+- ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控；日志表 90/180 天滚动 retention）
 - 🔐 **安全防护** — SSRF 防护、webhook constant-time 验证、速率限制、Redis Lua 原子操作、去重锁
 - 📡 **频道消息源** — 自动抓取公开 Telegram 频道内容存入 Qdrant 向量库，无需管理员权限
 - 🌐 **Cloudflare 绕过** — CF_FETCH skill 自动三级降级（直连 → Playwright+Xvfb → DrissionPage）
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
 - 🎨 **359 个贴纸意图** — AI 自主选择贴纸（top-N 截断 + Levenshtein 模糊匹配 + 反感反馈），覆盖情绪/社交/群聊/猫娘等场景
 - 🚀 **一键部署** — `scripts/deploy.sh` 端到端：依赖 → Qdrant → 构建 → systemd → 自检
-- 🧪 **712 单元测试** — vitest 全绿基线；34 个 SQLite 迁移自动按序应用
+- 🧪 **942 单元测试** — vitest 全绿基线；37 个 SQLite 迁移自动按序应用
+- 🪦 **优雅关机契约** — worker 排干在飞任务、游离的自我接话统一中止信号排干、写缓冲落盘,SIGTERM 不丢消息不留孤儿锁
 
 ### 🏗️ 架构
 
@@ -100,16 +105,17 @@
 Telegram Update  (长轮询 ⇄ webhook 自动故障转移)
   │
   ▼
-grammy Bot ──→ Formatter ──→ Context (Redis)
+grammy Bot ──→ Turn Buffer (Redis, 连发合并) ──→ chat_turn (BullMQ)
   │                              │
-  │              Judge Pipeline (L0 rules → L1 micro → L2 full)
-  │                  │           │            │
-  │             IGNORE    NL-cmd / DM       REPLY / REPLY_PRO
-  │                       intercepts       (含活跃接话 followup_to_bot)
-  │                          │                   │
-  │                          │             BullMQ Queue
-  │                          │                   │
-  │                          │             Reply Pipeline
+  │              Pipeline Orchestrator (pipeline.ts)
+  │                  │
+  │              Formatter ──→ Context (Redis)
+  │                  │
+  │              L0 rules ──未命中──→ ❤️ Heart (心流: reply/wait/pass)
+  │                  │                    │   (打断 → 重规划 · wait → 真回访)
+  │             IGNORE / NL-cmd / DM    REPLY
+  │                 intercepts            │
+  │                  │              Reply Pipeline (stages/deliver)
   │                          │             ├─ 4-Way Context Retrieval
   │                          │             │   ├─ Recent Window
   │                          │             │   ├─ Thread Trace (reply chain)
@@ -162,8 +168,12 @@ src/
 ├── memory/               # Qdrant 语义记忆 (int8量化) + 重要度/遗忘
 ├── ingress/              # 长轮询 ⇄ webhook 故障转移
 ├── pipeline/             # 核心消息管线
+│   ├── pipeline.ts       #   编排器 (orchestrator)
+│   ├── stages/           #   管线阶段模块 (media/intercepts/stale-reply/deliver)
+│   ├── heart/            #   心流层 (decision + self-state + mind + engagement)
+│   ├── turn/             #   回合制 actor (buffer/scheduler/focus/self-continue)
 │   ├── context/          #   上下文管理 + 压缩 + 4路检索
-│   ├── judge/            #   三级判断 (rules + micro + full AI, 活跃接话)
+│   ├── judge/            #   三级判断 (rules + micro + full AI, 心流回退链路)
 │   ├── reply/            #   回复生成 + 解析 + prompt构建
 │   │   ├── segmenter.ts  #     代码驱动的智能断句
 │   │   └── humanizer.ts  #     拟人化模块 (错别字/延迟/撤回/贴纸/自调...)
@@ -171,7 +181,7 @@ src/
 │   ├── gacha/            #   猫娘卡牌收集 + 心愿单换卡
 │   ├── games/            #   派对小游戏
 │   ├── nl-commands.ts    #   自然语言 → 指令路由
-│   ├── timing/           #   节奏/时序状态
+│   ├── timing/           #   节奏/时序状态 (timing gate + chat runtime)
 │   └── tools/            #   工具系统
 ├── queue/                # BullMQ 队列
 ├── shared/               # 类型 + 日志 (pino) + 配置
@@ -417,7 +427,8 @@ Bot 可在回复时调用以下工具：
 
 xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts as an opinionated, cat-girl-themed group member that can:
 
-- **Intelligently decide** when to reply using a 3-level judge pipeline (local rules → micro AI → full AI)
+- **Decide with one heart** — a single persona-aware "heart" call (with a first-person self-state narration) decides reply / wait / pass for passive group messages; the self that decides and the self that writes are the same self (3-level judge pipeline remains as the fallback)
+- **Think in turns** — MaiBot-style per-chat cognition turns: message bursts judged as one thought, mid-generation interrupts trigger a replan, "wait for them to finish" genuinely comes back, bounded self-continuation
 - **Carry a conversation naturally** — stays engaged after it speaks (MaiBot-style talk-frequency): picks up questions/statements from either side within the last few messages, no @ or reply needed, while staying restrained in hot chats
 - **Understand natural-language commands** — "帮我签到" → checkin, "看看我的图鉴" → card album, "追踪比特币" → watch topic (DM is lenient; groups require addressing the bot)
 - **Reply to multiple people** in a single trigger, each quoting its own target
