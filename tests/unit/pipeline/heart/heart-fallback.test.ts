@@ -63,7 +63,7 @@ const baseInput = (signal?: AbortSignal) => ({
   recentMessages: [],
   botUid: 9,
   botName: 'x',
-  selfState: { narration: 'n', energy: 1 },
+  selfState: { narration: 'n', narrationNoThought: 'n', energy: 1 },
   signal,
 });
 

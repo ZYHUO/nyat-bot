@@ -151,6 +151,8 @@ export async function generateReply(
     latenessHint?: string;
     /** L1: 心流的内心独白 — 决定与写作是同一个念头 */
     heartWhy?: string;
+    /** 审计 #38:心流分支算好的自我状态快照,同回合直接复用 */
+    selfState?: { narration: string; narrationNoThought: string; energy: number };
   },
 ): Promise<{
   replies: ReplyOutput[];
@@ -358,9 +360,11 @@ export async function generateReply(
     // P2:自我状态只进群聊 —— DM 里"注意收着点/半挂机"这类群语境叙述很怪
     try {
       // heartWhy 在场时不再读 mind.lastThought —— 那是同一个念头,
-      // [你的念头] 已注入,自我状态里再写一遍是双倍复读(review #14)
-      const self = await composeSelfState(chatId, { omitThought: !!callOpts?.heartWhy });
-      stateParts.pushP(20, `[此刻的你] ${self.narration}`);
+      // [你的念头] 已注入,自我状态里再写一遍是双倍复读(review #14)。
+      // 心流分支已拼装过 → 直接复用快照(审计 #38:不再二次取 4 个源)
+      const self = callOpts?.selfState ?? await composeSelfState(chatId);
+      const narration = callOpts?.heartWhy ? self.narrationNoThought : self.narration;
+      stateParts.pushP(20, `[此刻的你] ${narration}`);
     } catch { /* non-critical */ }
     try {
       const jargons = getTopJargons(chatId, 5);

@@ -51,12 +51,14 @@ export async function isChatSuppressed(chatId: number): Promise<boolean> {
  * True when a recent gate decision was wait/no_action and we should NOT call
  * the gate LLM again immediately (cooldown). Returns false when feature off.
  */
-export async function isInGateCooldown(chatId: number): Promise<boolean> {
+export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingState): Promise<boolean> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) return false;
   const cooldownMs = e.TIMING_GATE_COOLDOWN_SEC * 1000;
   if (cooldownMs <= 0) return false;
-  const s = await storeGetChatState(chatId);
+  // 审计 #38:心流分支一回合读同一 timing hash 3-4 次 → 调用方可传入
+  // 已读快照,冷却判断与 lastSpokeSecAgo 共用一份
+  const s = prefetched ?? await storeGetChatState(chatId);
   if (
     s.lastGateAction === 'wait' ||
     s.lastGateAction === 'no_action'

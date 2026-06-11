@@ -474,9 +474,15 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       const demoteReply = l0Raw && l0Raw.action === "REPLY" && CONVERSATIONAL_L0.has(l0Raw.rule ?? "");
       const demoteIgnore = l0Raw && l0Raw.action === "IGNORE" && l0Raw.rule === "hot_chat";
       const l0 = demoteReply || demoteIgnore ? null : l0Raw;
+      // 审计 #38 slice 3:timing 状态一回合只读一次 —— 冷却判断与
+      // lastSpokeSecAgo 共用同一份快照(旧码同一 hash 读 2 次)。
+      let tstate: Awaited<ReturnType<typeof getChatState>> | undefined;
+      if (!l0) {
+        try { tstate = await getChatState(job.chatId); } catch { /* non-critical */ }
+      }
       if (l0) {
         judgeResult = l0;
-      } else if (await isInGateCooldown(job.chatId)) {
+      } else if (await isInGateCooldown(job.chatId, tstate)) {
         // 冷却短路:刚 pass/wait 过(15s 内)→ 不再为每条消息烧一次心流调用
         logger.debug({ chatId: job.chatId }, "Heart skipped (cooldown), pass");
         return;
@@ -493,11 +499,10 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           return;
         }
         const selfState = await composeSelfState(job.chatId);
+        // 审计 #38 slice 2:快照挂上 turnContext,写手同回合直接复用
+        job.turnContext.selfState = selfState;
         let lastSpokeSecAgo: number | undefined;
-        try {
-          const ts = await getChatState(job.chatId);
-          if (ts.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - ts.lastBotReplyAt) / 1000;
-        } catch { /* non-critical */ }
+        if (tstate?.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - tstate.lastBotReplyAt) / 1000;
         const heartBurstIds = job.turnContext.burstMessageIds ?? [];
         const heart = await heartDecision({
           chatId: job.chatId,

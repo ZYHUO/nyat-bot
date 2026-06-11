@@ -34,7 +34,7 @@ const baseInput = {
   recentMessages: [],
   botUid: 9,
   botName: 'xxb',
-  selfState: { narration: '你状态正常。', energy: 0.8 },
+  selfState: { narration: '你状态正常。', narrationNoThought: '你状态正常。', energy: 0.8 },
 };
 
 beforeEach(() => callMock.mockReset());
@@ -86,7 +86,7 @@ describe('heart decision (S13 心流)', () => {
 
   it('self-state narration lands in the system prompt', async () => {
     callMock.mockResolvedValue({ content: '{"act":"pass","why":"x"}' });
-    await heartDecision({ ...baseInput, selfState: { narration: '你困得不行。', energy: 0.1 } });
+    await heartDecision({ ...baseInput, selfState: { narration: '你困得不行。', narrationNoThought: '你困得不行。', energy: 0.1 } });
     const sys = callMock.mock.calls[0]![0].messages[0].content as string;
     expect(sys).toContain('你困得不行。');
   });

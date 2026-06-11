@@ -8,91 +8,134 @@
 // 叙述**,心流判断和写手共用同一份 —— 决定"接不接"的我和决定"怎么说"
 // 的我是同一个我。
 //
-// 纯组装,无 LLM 调用;每个来源都 fail-soft。
+// 纯组装,无 LLM 调用;每个来源都 fail-soft(debug 留痕,不再静默)。
+// 审计 #38:四个独立异步源并行取(旧码 6 段串行 await,Redis RTT 串成
+// 一列);同回合判断与写作共用一份快照(memo 在 turnContext 上,见
+// pipeline.ts 心流分支),所以这里同时产出含/不含 lastThought 两个变体。
 
 import { getLifeState } from '../../tracking/life-state.js';
 import { logger } from '../../shared/logger.js';
 
 export interface SelfState {
-  /** 第一人称叙述,2-5 句 */
+  /** 第一人称叙述,2-5 句(含「你刚才心里想的是…」,如有) */
   narration: string;
+  /**
+   * 同上但不含 lastThought 句。回复路径已把当下心流的 heartWhy 作为
+   * [你的念头] 注入时用这份 —— 否则同一句话写两遍(review #14)。
+   */
+  narrationNoThought: string;
   /** 0..1(life-state energy × focus 融合,供调试/遥测) */
   energy: number;
 }
 
-export interface SelfStateOpts {
-  /**
-   * 不注入"你刚才心里想的是…"。回复路径已经把当下心流的 heartWhy 作为
-   * [你的念头] 注入时,再读 mind.lastThought 就是同一句话写两遍
-   * (review #14:noteThought 抢跑赢了 retrieveContext)。
-   */
-  omitThought?: boolean;
-}
+export async function composeSelfState(chatId: number): Promise<SelfState> {
+  // 四个独立异步源并行取;组装仍按固定顺序(life → mood → focus →
+  // social → thought → stance → obsession),叙述与旧版逐字一致。
+  const [moodPart, focusVal, socialPart, mindData, obsessionPart] = await Promise.all([
+    (async (): Promise<string | null> => {
+      try {
+        const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
+        const hint = moodPromptHint(getChatMood(chatId));
+        // moodPromptHint 已是自然语句,去掉可能的标签前缀
+        return hint ? hint.replace(/^\[[^\]]*\]\s*/, '') : null;
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: mood source failed');
+        return null;
+      }
+    })(),
+    (async (): Promise<number | null> => {
+      try {
+        const { getFocus } = await import('../turn/focus.js');
+        return await getFocus(chatId);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: focus source failed');
+        return null;
+      }
+    })(),
+    (async (): Promise<string | null> => {
+      try {
+        const { socialStateHint } = await import('../../tracking/social-needs.js');
+        return (await socialStateHint(chatId)) || null;
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: social source failed');
+        return null;
+      }
+    })(),
+    (async (): Promise<{ lastThought?: string; stance?: string } | null> => {
+      try {
+        const { getMind } = await import('./mind.js');
+        return await getMind(chatId);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: mind source failed');
+        return null;
+      }
+    })(),
+    (async (): Promise<string | null> => {
+      try {
+        const { getObsession } = await import('../../tracking/obsessions.js');
+        const ob = await getObsession();
+        // hint 是带标签的完整段,这里只要 flavor 短句
+        const flavor = ob.hint.replace(/^\[[^\]]*\]\s*/, '').split('。')[0];
+        return flavor || null;
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: obsession source failed');
+        return null;
+      }
+    })(),
+  ]);
 
-export async function composeSelfState(chatId: number, opts?: SelfStateOpts): Promise<SelfState> {
-  const parts: string[] = [];
+  const before: string[] = [];
   let energy = 0.8;
 
   // 作息/精力(同步,确定性)
   try {
     const ls = getLifeState();
     energy = ls.energy;
-    if (ls.state === 'sleeping') parts.push('现在是深夜,你困得不行,刚被消息吵醒,迷迷糊糊的');
-    else if (ls.state === 'eating') parts.push('你正在吃饭,一边扒饭一边瞄手机');
-    else if (ls.lazyDay) parts.push('今天你莫名蔫蔫的,什么都提不起劲,能少说就少说');
-    else if (ls.hint?.includes('夜深')) parts.push('夜深了,你有点困但还赖着没睡');
-    else if (ls.hint?.includes('刚睡醒')) parts.push('你刚睡醒没多久,还有点迷糊');
-  } catch { /* fail-soft */ }
+    if (ls.state === 'sleeping') before.push('现在是深夜,你困得不行,刚被消息吵醒,迷迷糊糊的');
+    else if (ls.state === 'eating') before.push('你正在吃饭,一边扒饭一边瞄手机');
+    else if (ls.lazyDay) before.push('今天你莫名蔫蔫的,什么都提不起劲,能少说就少说');
+    else if (ls.hint?.includes('夜深')) before.push('夜深了,你有点困但还赖着没睡');
+    else if (ls.hint?.includes('刚睡醒')) before.push('你刚睡醒没多久,还有点迷糊');
+  } catch (err) {
+    logger.debug({ err, chatId }, 'self-state: life source failed');
+  }
 
-  // 群心情(mood,同步)
-  try {
-    const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
-    const hint = moodPromptHint(getChatMood(chatId));
-    if (hint) {
-      // moodPromptHint 已是自然语句,去掉可能的标签前缀
-      parts.push(hint.replace(/^\[[^\]]*\]\s*/, ''));
-    }
-  } catch { /* fail-soft */ }
+  // 群心情(mood)
+  if (moodPart) before.push(moodPart);
 
   // 对话热度(focus)
-  try {
-    const { getFocus } = await import('../turn/focus.js');
-    const focus = await getFocus(chatId);
+  if (focusVal !== null) {
     // 只给事实性在场感,不带"收着点"指令 —— 刷屏自检的规范表述在
     // heart.md,三处同时下达同一指令会把心流压成过度沉默(review #10)
-    if (focus > 0.65) parts.push('这个群你刚才说过几句话了');
-    else if (focus < 0.18) parts.push('这个群你最近没怎么看,半挂机状态');
-    energy = energy * 0.6 + focus * 0.4;
-  } catch { /* fail-soft */ }
+    if (focusVal > 0.65) before.push('这个群你刚才说过几句话了');
+    else if (focusVal < 0.18) before.push('这个群你最近没怎么看,半挂机状态');
+    energy = energy * 0.6 + focusVal * 0.4;
+  }
 
   // 孤独感
-  try {
-    const { socialStateHint } = await import('../../tracking/social-needs.js');
-    const social = await socialStateHint(chatId);
-    if (social) parts.push(social);
-  } catch { /* fail-soft */ }
+  if (socialPart) before.push(socialPart);
 
   // 持续内心(L2):上一个念头/立场延续,不再每条消息失忆重启
-  try {
-    const { getMind } = await import('./mind.js');
-    const mind = await getMind(chatId);
-    if (mind.lastThought && !opts?.omitThought) parts.push(`你刚才心里想的是:「${mind.lastThought}」`);
-    if (mind.stance) parts.push(`你最近一次发言的落点:「${mind.stance}」(别自相矛盾)`);
-  } catch { /* fail-soft */ }
+  const thoughtPart = mindData?.lastThought
+    ? `你刚才心里想的是:「${mindData.lastThought}」`
+    : null;
+  const after: string[] = [];
+  if (mindData?.stance) after.push(`你最近一次发言的落点:「${mindData.stance}」(别自相矛盾)`);
 
   // 本周执念
-  try {
-    const { getObsession } = await import('../../tracking/obsessions.js');
-    const ob = await getObsession();
-    // hint 是带标签的完整段,这里只要 flavor 短句
-    const flavor = ob.hint.replace(/^\[[^\]]*\]\s*/, '').split('。')[0];
-    if (flavor) parts.push(flavor);
-  } catch { /* fail-soft */ }
+  if (obsessionPart) after.push(obsessionPart);
 
-  const narration = parts.length > 0
-    ? parts.join('；') + '。'
-    : '你状态正常,精神还不错。';
+  const make = (withThought: boolean): string => {
+    const all = [...before, ...(withThought && thoughtPart ? [thoughtPart] : []), ...after];
+    return all.length > 0 ? all.join('；') + '。' : '你状态正常,精神还不错。';
+  };
 
-  logger.debug({ chatId, energy, parts: parts.length }, 'Self-state composed');
-  return { narration, energy };
+  const narration = make(true);
+  const narrationNoThought = make(false);
+
+  logger.debug(
+    { chatId, energy, parts: before.length + after.length + (thoughtPart ? 1 : 0) },
+    'Self-state composed',
+  );
+  return { narration, narrationNoThought, energy };
 }

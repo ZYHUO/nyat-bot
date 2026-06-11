@@ -136,6 +136,11 @@ export interface ChatJob {
     /** L1: 心流决定接话时的内心独白 — 写手顺着同一个念头开笔 */
     heartWhy?: string;
     /**
+     * 心流分支算好的自我状态快照 — 同一回合写手直接复用,不再二次
+     * 拼装(审计 #38:composeSelfState 一回合曾跑两次,~4 RTT × 2)。
+     */
+    selfState?: { narration: string; narrationNoThought: string; energy: number };
+    /**
      * G5: wait-resume replay — the anchor entry already went through all
      * bookkeeping stages on first processing; skip context-save/tracking
      * side-effects and go straight to judge→reply.
