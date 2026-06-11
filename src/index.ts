@@ -254,6 +254,14 @@ async function main(): Promise<void> {
         _flushAllBuffers();
       } catch { /* non-critical */ }
       // (debounce 内存缓冲已拆除 —— P1 单一入口后 pending 在 Redis,重启无损)
+      // 审计 #41:游离的自我接话不归 BullMQ 管 —— 先掐中止信号并排干,
+      // 否则它们可能在 teardown 之后 sendMessage / 留下孤儿 chat 锁。
+      // 信号掐下后,closeWorker 期间收尾的 job 再触发 maybeSelfContinue
+      // 也会在入口直接 no-op。
+      try {
+        const { drainSelfContinuations } = await import('./pipeline/turn/self-continue.js');
+        await drainSelfContinuations();
+      } catch { /* non-critical */ }
       // Close worker FIRST — waits for in-progress jobs to finish
       // (they still need bot for sendMessage). Then stop bot.
       await closeWorker();

@@ -58,7 +58,11 @@ vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({ get: redisGetMock, set: redisSetMock }),
 }));
 
-import { maybeSelfContinue } from '../../../src/pipeline/turn/self-continue.js';
+import {
+  maybeSelfContinue,
+  drainSelfContinuations,
+  _resetSelfContinueShutdown,
+} from '../../../src/pipeline/turn/self-continue.js';
 import { _resetAbortRegistry } from '../../../src/pipeline/turn/abort-registry.js';
 
 const CHAT = -100950;
@@ -83,6 +87,7 @@ beforeEach(() => {
   getRecentMock.mockReset().mockResolvedValue([botMsg(1), botMsg(2)]);
   envState.TURN_SELF_FOLLOWUP_ENABLED = true;
   _resetAbortRegistry();
+  _resetSelfContinueShutdown();
 });
 
 afterEach(() => {
@@ -190,6 +195,53 @@ describe('G6 self-continuation', () => {
       .mockResolvedValueOnce(0) // pre-LLM check
       .mockResolvedValue(1);    // post-LLM check → yield
     await run();
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('shutdown contract (#41)', () => {
+  it('after drainSelfContinuations, new continuations no-op at the entry', async () => {
+    await drainSelfContinuations();
+
+    const p = maybeSelfContinue(CHAT, BOT_UID);
+    await vi.runAllTimersAsync();
+    await p;
+
+    expect(callMock).not.toHaveBeenCalled();
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('shutdown mid-beat aborts the sleep and nothing is sent', async () => {
+    callMock.mockResolvedValue({ content: '{"replyContent":"不该发出去","targetMessageId":2}' });
+
+    const p = maybeSelfContinue(CHAT, BOT_UID);
+    // 节拍 sleep 进行中(fake timers 未推进)→ 掐关机信号
+    const drained = drainSelfContinuations();
+    await vi.runAllTimersAsync();
+    await p;
+    await drained;
+
+    expect(callMock).not.toHaveBeenCalled(); // 没活到 LLM 调用
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('drain waits for the in-flight continuation to settle (outstanding set)', async () => {
+    let resolveLlm!: (v: { content: string }) => void;
+    callMock.mockImplementationOnce(() => new Promise((r) => { resolveLlm = r; }));
+
+    const p = maybeSelfContinue(CHAT, BOT_UID);
+    await vi.advanceTimersByTimeAsync(20_000); // 节拍睡完,进入 LLM 调用
+
+    let drainDone = false;
+    const drained = drainSelfContinuations().then(() => { drainDone = true; });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(drainDone).toBe(false); // 在飞的还没退场,drain 不提前返回
+
+    resolveLlm({ content: '{"action":"silent"}' });
+    await vi.runAllTimersAsync();
+    await p;
+    await drained;
+    expect(drainDone).toBe(true);
     expect(sendMessageMock).not.toHaveBeenCalled();
   });
 });

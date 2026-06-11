@@ -32,14 +32,15 @@ export function isAbortError(err: unknown): boolean {
 }
 
 /**
- * True when the signal aborted due to a CALLER decision(turn 打断),
- * NOT a timeout/网络层中断。**白名单**判定:只有 abort-registry 打出的
- * `TurnInterrupt` reason 才算 caller abort(跳过 fallback 链);
- * TimeoutError、裸 AbortError、网络 teardown 等一律走正常错误路径,
- * 保留 fallback 重试(review-workflow:blocklist→allowlist)。
+ * True when the signal aborted due to a CALLER decision(turn 打断/进程
+ * 关机),NOT a timeout/网络层中断。**白名单**判定:只有 abort-registry
+ * 打出的 `TurnInterrupt` 和 shutdown 契约打出的 `Shutdown` reason 才算
+ * caller abort(跳过 fallback 链);TimeoutError、裸 AbortError、网络
+ * teardown 等一律走正常错误路径,保留 fallback 重试
+ * (review-workflow:blocklist→allowlist)。
  */
 export function isCallerAbort(signal?: AbortSignal): boolean {
   if (!signal?.aborted) return false;
   const reason = signal.reason as { name?: string } | undefined;
-  return reason?.name === 'TurnInterrupt';
+  return reason?.name === 'TurnInterrupt' || reason?.name === 'Shutdown';
 }

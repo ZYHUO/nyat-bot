@@ -25,6 +25,7 @@ import { registerWeakGeneration, clearGeneration } from './abort-registry.js';
 import { recordBotReply as recordTimingBotReply } from '../timing/state-store.js';
 import { getRedis } from '../../db/redis.js';
 import { AIError } from '../../shared/errors.js';
+import { mergeAbortSignals } from '../../shared/abort.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
@@ -35,8 +36,36 @@ const BEAT_MAX_MS = 5000;
 
 const COOLDOWN_KEY = (chatId: number) => `xxb:turn:followup:${chatId}`;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+// ── 审计 #41:关机契约 ──
+// maybeSelfContinue 是 fire-and-forget(pipeline 不 await),BullMQ 的
+// closeWorker 只等 job,不等这些游离 promise —— SIGTERM 后它们可能在
+// teardown 之后 sendMessage、或把 chat 锁留成孤儿。统一中止信号 + 在册
+// 集合:shutdown() 先掐信号(新接话直接 no-op)再排干在飞的。
+let shutdownController = new AbortController();
+const outstanding = new Set<Promise<void>>();
+
+/** index.ts shutdown():中止全部自我接话并等待退场(有界:接话内部所有
+ *  sleep/LLM 调用都挂在这个信号上,abort 后毫秒级返回)。 */
+export async function drainSelfContinuations(): Promise<void> {
+  shutdownController.abort(Object.assign(new Error('shutdown'), { name: 'Shutdown' }));
+  await Promise.allSettled([...outstanding]);
+}
+
+/** 测试钩子:重置关机状态(模块级单例,测试间共享) */
+export function _resetSelfContinueShutdown(): void {
+  shutdownController = new AbortController();
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((r) => {
+    const done = (): void => {
+      signal?.removeEventListener('abort', done);
+      clearTimeout(t);
+      r();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 /** 新用户消息在路上/缓冲里 → 接话让位 */
@@ -53,6 +82,18 @@ async function shouldYield(chatId: number): Promise<boolean> {
  * Fire-and-forget — never throws.
  */
 export async function maybeSelfContinue(chatId: number, botUid: number): Promise<void> {
+  if (shutdownController.signal.aborted) return; // 关机中:不再开新接话
+  const p = runSelfContinue(chatId, botUid).catch(() => {});
+  outstanding.add(p);
+  try {
+    await p;
+  } finally {
+    outstanding.delete(p);
+  }
+}
+
+async function runSelfContinue(chatId: number, botUid: number): Promise<void> {
+  const shutSig = shutdownController.signal;
   const e = env();
   if (!e.TURN_SELF_FOLLOWUP_ENABLED || chatId >= 0) return;
   // G9: focus 调制接话欲(锁定对话 → 更愿意补一拍)
@@ -80,7 +121,8 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
 
     // 人类节拍:发完一句,过一两秒才想起"对了…"(重尾:偶尔过十几秒)
     const beatSec = sampleHumanDelay((BEAT_MIN_MS + BEAT_MAX_MS) / 2000, { capSec: 15, floorSec: 1.5 });
-    await sleep(beatSec * 1000);
+    await sleep(beatSec * 1000, shutSig);
+    if (shutSig.aborted) return; // 关机:节拍中被叫停
     if (await shouldYield(chatId)) return;
 
     const recent = await getRecent(chatId, 15);
@@ -125,7 +167,9 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
         ],
         maxTokens: 300,
         temperature: 0.9,
-        signal: controller.signal,
+        // 弱注册打断 ∪ 关机信号(都是事件型 caller abort,不是定时器 ——
+        // 没有 #34 的信号中毒问题;关机时 fallback 链也应整体放弃)
+        signal: mergeAbortSignals(undefined, controller.signal, shutSig),
       });
       content = result.content;
     } catch (err) {
@@ -176,8 +220,8 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
     // 持锁发送:避免与下一回合的主回复在 Telegram 侧乱序
     const { acquireChatLock } = await import('../../queue/chat-lock.js');
     const releaseLock = await acquireChatLock(chatId);
-    // 锁后复检(TOCTOU):等锁期间用户可能已经说话 → 让位
-    if (await shouldYield(chatId)) {
+    // 锁后复检(TOCTOU):等锁期间用户可能已经说话 → 让位;关机同理
+    if (shutSig.aborted || (await shouldYield(chatId))) {
       await releaseLock().catch(() => {});
       return;
     }
@@ -195,7 +239,8 @@ export async function maybeSelfContinue(chatId: number, botUid: number): Promise
       } else {
         const text = item.replyContent.slice(0, 200);
         await sendChatAction(chatId, 'typing');
-        await sleep(Math.min(text.length * 60, 1200));
+        await sleep(Math.min(text.length * 60, 1200), shutSig);
+        if (shutSig.aborted) return; // 关机:别在 teardown 后发消息
         const msgId = await sendMessage(chatId, text);
         if (msgId) {
           await addAssistant(chatId, { textContent: text, messageId: msgId });
