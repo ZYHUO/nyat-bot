@@ -25,7 +25,7 @@ import {
   type HumanizerConfig,
 } from "./reply/humanizer.js";
 import { applyChatPathPolicy, reflectChatPathPolicy } from "./path-policy.js";
-import { StreamingSender } from "../bot/sender/streaming.js";
+import { sender, TEMP_MUTE_CLEAR_RULES, DIRECT_INTERACTION_RULES, ADDRESSED_RULES } from "./shared.js";
 import {
   sendChatAction,
   sendMessage,
@@ -114,7 +114,6 @@ import { getFocus as getChatFocus } from "./turn/focus.js";
 import { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay, type ChatStyle } from "../tracking/chat-style.js";
 import { getLifeState } from "../tracking/life-state.js";
 
-const sender = new StreamingSender();
 // P2:贴纸冷却/去重 per-chat 化 —— 旧的模块级全局让 A 群发贴纸重置 B 群
 // 的冷却(跨群共享状态,行为相互污染)。
 const MAX_RECENT_STICKERS = 50;
@@ -139,31 +138,6 @@ function _trackRecentSticker(chatId: number, id: string): void {
   }
   st.repliesSince = 0;
 }
-const TEMP_MUTE_CLEAR_RULES = new Set([
-  "reply_to_self",
-  "reply_to_self_lookup",
-  "reply_to_self_followup_lookup",
-  "mention_self",
-  "mention_self_lookup",
-]);
-
-const DIRECT_INTERACTION_RULES = new Set([
-  "reply_to_self",
-  "reply_to_self_lookup",
-  "reply_to_self_followup_lookup",
-  "mention_self",
-  "mention_self_lookup",
-  "whitelisted_command",
-  "private_chat",
-  // Active-conversation engagement: deliberate "this is for the bot" decisions —
-  // don't let stale-reply suppression / the timing gate silence them.
-  "followup_to_bot",
-  "active_conv_engage",
-  // G3 replan: engagement 是从被打断的那次 judge 接力来的(准 direct)。
-  // 不在这里的话,replan 回复会被 stale-suppression 丢、指令层也不识别。
-  "turn_replan",
-]);
-
 /**
  * #9 分钟级延迟改错字:真人常常过几分钟才想起来 edit 一个 typo。
  * 进程内定时器(重启丢失可接受);触发时若中间有人说过话 → "被打断忘了改"。
@@ -351,19 +325,6 @@ async function tryMuteCommandIntercepts(
 }
 
 // ── Extracted helper 3: Pre-mute-gate intercepts ────────────────────
-
-// Judge rules that mean "the bot was addressed" in a group — the gate for
-// natural-language command invocation (DMs are always eligible).
-const ADDRESSED_RULES = new Set([
-  "mention_self",
-  "mention_self_lookup",
-  "reply_to_self",
-  "reply_to_self_lookup",
-  "reply_to_self_followup_lookup",
-  // G3 replan 锚点(打断 bot 的那条消息)继承点名语境 —— 否则锚点里的
-  // 自然语言命令(帮我签到)在 replan 路径不会被 dispatch。
-  "turn_replan",
-]);
 
 /**
  * Dispatch a known command (slash or NL-resolved) to its handler.
