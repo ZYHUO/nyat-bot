@@ -668,11 +668,12 @@ export async function generateAndSendReplies(args: {
         // If sticker-only replacement resolved a sticker, skip text send
         const skipTextSend = stickerOnlyFileId !== undefined && stickerOnlyResult.shouldReplace;
 
-        // 簿记真相(审计 #39b):'append' 修正的气泡**保留**错字文本(只是
-        // 后补一个正确字),记录 originalText 会让上下文/outcome 与屏幕上的
-        // 消息不一致;只有 'edit' 修正最终把气泡改成 originalText。
+        // 簿记真相(审计 #39b):只有 'edit' 修正最终把气泡改成 originalText;
+        // 'append'(气泡保留错字,后补一个正确字)和 null(故意不改)的屏上
+        // 文本都是 typoedText —— 记录 originalText 会让上下文/outcome 与
+        // 屏幕上的消息不一致。
         const recordedText = typoResult
-          ? (typoResult.correction === 'append' ? typoResult.typoedText : typoResult.originalText)
+          ? (typoResult.correction === 'edit' ? typoResult.originalText : typoResult.typoedText)
           : effectiveText;
 
         if (!isStickerOnly && !skipTextSend) {
