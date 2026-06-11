@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ReplyOutput",
-  "description": "啾咪囝回复输出格式（单条对象或多条数组）",
+  "description": "回复输出:单条对象,或 1-5 个元素的数组(多条短泡泡按顺序发出)",
   "oneOf": [
     { "$ref": "#/$defs/singleReply" },
     {
@@ -18,21 +18,30 @@
       "properties": {
         "replyContent": {
           "type": "string",
-          "description": "纯文本回复内容，禁止 Markdown / HTML",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "description": "回复文本,纯文本为主。只发贴纸不发字时填 \"[sticker]\" 并必须同时给 stickerIntent"
         },
         "targetMessageId": {
           "type": "integer",
-          "description": "要回复的消息 ID"
+          "description": "回复指向的消息 ID(上下文里每条消息开头的 #数字)"
         },
         "stickerIntent": {
-          "type": "string",
-          "enum": ["cute", "comfort", "tease", "happy", "sleepy"],
-          "description": "贴纸意图（绝大多数情况下省略，≤15% 频率）"
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" }, "maxItems": 3 }
+          ],
+          "description": "贴纸意图(英文词,如 \"laughing\" 或 [\"happy\",\"excited\"] 按优先级排列)。绝大多数回复省略"
+        },
+        "replyQuote": {
+          "type": "boolean",
+          "description": "false = 不引用任何消息直接发(主动开口/插嘴);省略 = 引用 targetMessageId 那条"
+        },
+        "hesitateBefore": {
+          "type": "boolean",
+          "description": "true = 发这句之前先停顿酝酿一拍(用在重点/转折/不好开口的那句;整组最多 1 处)"
         }
-      },
-      "additionalProperties": false
+      }
     }
   }
 }

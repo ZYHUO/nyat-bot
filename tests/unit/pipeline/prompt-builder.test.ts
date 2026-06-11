@@ -44,14 +44,18 @@ describe('Prompt Builder', () => {
       expect(prompt).not.toContain('Reply Pro Task');
     });
 
-    it('builds correct 5-layer prompt for pro tier', () => {
+    it('pro tier keeps the reply.md base and appends the pro addendum', () => {
+      // reply.md 是基座(目标选择等硬规则),pro/max 是差异附录 —— 替换式
+      // 装配会让深度回复丢失 targetMessageId 硬规则(回错人)。
       const prompt = buildSystemPrompt('pro');
       expect(prompt).toContain('# L1 Identity');
       expect(prompt).toContain('# L2 Safety');
       expect(prompt).toContain('# L3 — 输出契约');
       expect(prompt).toContain('# L4 Style');
+      expect(prompt).toContain('# Reply Task');
       expect(prompt).toContain('# Reply Pro Task');
-      expect(prompt).not.toContain('# Reply Task\n');
+      // 附录在基座之后
+      expect(prompt.indexOf('# Reply Pro Task')).toBeGreaterThan(prompt.indexOf('# Reply Task'));
     });
 
     it('includes JSON schema in contract layer', () => {

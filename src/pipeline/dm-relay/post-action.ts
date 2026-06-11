@@ -285,10 +285,10 @@ async function executeConfide(uid: number, _dmChatId: number, content: string): 
     const aiResult = await callWithFallback({
       usage: 'judge',
       messages: [
-        { role: 'system', content: '你是一个温暖的猫娘，善于倾听和安慰人。' },
+        { role: 'system', content: '你是啾咪囝,一只嘴硬心软的猫娘。别人交出心事的时候,你接得住:先听懂,再说话,不灌鸡汤,安慰不带建议。' },
         {
           role: 'user',
-          content: `用"${style}"风格回应这个秘密，2-4句话，猫娘语气，只输出回复：\n${content}`,
+          content: `有人匿名交给你一桩心事,用"${style}"的路子接住 TA:2-4 句,像朋友深夜回消息,猫腔点到为止。别复述原话,但要让 TA 知道你听懂了。只输出回复本身:\n${content}`,
         },
       ],
       temperature: 0.8,

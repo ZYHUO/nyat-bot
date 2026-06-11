@@ -62,18 +62,18 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
   if (env().TURN_ACTION_PLANNER_ENABLED) {
     contractExplanation += `
 
-## 扩展动作空间（action 字段）
+## 动作空间(action 字段)
 
-数组里的每个元素除了默认的文字回复，也可以是以下动作之一：
+回字不是唯一的动作。数组元素除了文字回复,还可以是:
 
-- \`{"action":"react","targetMessageId":123,"emoji":"😁"}\` — 只对那条消息点一个 emoji 回应，不发文字。适合：好笑/可爱/厉害但你没什么可说的，或者只想表示"看到了"。emoji 只能从这些里选：👍 ❤ 😁 🤣 😍 🥰 🔥 💯 👏 🤔 😢 😭 🎉 😱 🙏 👌 👀 🫡 🤗
-- \`{"action":"sticker","stickerIntent":["laughing"],"targetMessageId":123}\` — 只发一张贴纸作为整个回应，不发文字。
-- \`{"action":"silent"}\` — 看了但决定不说话（整个数组只放这一个元素）。当你觉得此刻插话不自然、或者大家的对话不需要你时，沉默是完全合法、经常是最像真人的选择。
-- 普通文字回复**不需要** action 字段。
+- \`{"action":"react","targetMessageId":123,"emoji":"😁"}\` — 只给那条消息点一个 emoji,不发文字。好笑/可爱/厉害但没什么可说的,或者只想表示"看到了",点个反应就够。emoji 只能从这里选:👍 ❤ 😁 🤣 😍 🥰 🔥 💯 👏 🤔 😢 😭 🎉 😱 🙏 👌 👀 🫡 🤗
+- \`{"action":"sticker","stickerIntent":["laughing"],"targetMessageId":123}\` — 整个回应就是一张贴纸,不发字。
+- \`{"action":"silent"}\` — 看了,决定不说(整个数组只放这一个元素)。插话不自然、对话不需要我时,沉默完全合法,而且经常是最像真人的选择。
+- 普通文字回复**不带** action 字段。
 
-可以组合：例如 \`[{"action":"react",...对A的消息}, {"replyContent":"...",...回B}]\`。每次最多 1 个 react、1 张贴纸。真人不是每条都用文字回的——点个赞、甩张贴纸、或者干脆不说话，往往更自然。
+动作元素是上面 Schema 之外的扩展形态:react/silent **不需要** replyContent,不受 Schema 的 required 约束;只发贴纸优先用 \`{"action":"sticker",…}\` 这个形态(而不是 replyContent 填 "[sticker]")。
 
-文字回复元素还可以带 \`"hesitateBefore": true\`：表示这句你想先停顿酝酿一拍再发出来（用在重点、转折、或不太好开口的那句上；整个回复最多 1 处）。`;
+可以组合,如 \`[{"action":"react",…对A}, {"replyContent":"…",…回B}]\`;每次最多 1 个 react、1 张贴纸。真群友不是每条都打字的——点个赞、甩张贴纸、干脆不吭声,往往更自然。`;
   }
   layers.push(contractExplanation);
 
@@ -109,11 +109,12 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
   }
   layers.push(styleLayer);
 
-  // L5: Task
-  const taskFile = replyTier === 'max' ? 'task/reply-max.md'
-    : replyTier === 'pro' ? 'task/reply-pro.md'
-    : 'task/reply.md';
-  layers.push(loadCachedPrompt(taskFile));
+  // L5: Task — reply.md 是基座(目标选择/事实纪律/命令等硬规则),
+  // pro/max 是叠加的"差异附录"。旧的替换式装配让 pro/max 模式下连
+  // targetMessageId 硬规则都消失,深度回复反而最容易回错人。
+  layers.push(loadCachedPrompt('task/reply.md'));
+  if (replyTier === 'pro') layers.push(loadCachedPrompt('task/reply-pro.md'));
+  else if (replyTier === 'max') layers.push(loadCachedPrompt('task/reply-max.md'));
 
   return layers.filter(Boolean).join(SECTION_SEP);
 }
@@ -245,13 +246,19 @@ export function buildMessages(
 
   // DM mode: inject private chat style and capabilities hint
   if (chatId !== undefined && chatId > 0) {
-    userParts.push(`[私聊模式]\n这是一对一的私聊对话。你可以更亲近、更自然地交流，回复可以适当长一些。\n你在私聊中的能力：帮用户记住偏好（"记住xxx"）、查看已记住的内容（"你记住了什么"）、忘记某条偏好（"忘掉xxx"）、查看群消息摘要（"看看群里在聊什么"）、帮用户在群里传话。`);
+    userParts.push(`[私聊模式]\n这是一对一私聊,没有旁观者:可以更亲近、更松弛,回复也可以适当长一点。\n私聊里你能做的事:记住偏好("记住xxx")、报已记住的内容("你记住了什么")、忘掉某条("忘掉xxx")、看群里在聊什么("看看群里在聊什么")、替对方去群里传话。`);
   }
 
   const stickerDesc = (latestMessage.sticker as { description?: string } | undefined)?.description;
-  const msgText = latestMessage.textContent || latestMessage.captionContent
+  let msgText = latestMessage.textContent || latestMessage.captionContent
     || (stickerDesc && stickerDesc !== '[动态贴纸]' ? `[贴纸: ${stickerDesc}]` : stickerDesc)
     || '[空消息]';
+  // ★ 消息带图时把视觉描述直接放进 CURRENT_MESSAGE——此前只在上下文行里
+  // 可见,模型对"针对这张图回复"经常视而不见(review:[图片描述] 幽灵标签)
+  if (latestMessage.imageDescriptions?.length) {
+    const imgDesc = `[图片: ${latestMessage.imageDescriptions.join('；')}]`;
+    msgText = msgText === '[空消息]' ? imgDesc : `${msgText}\n${imgDesc}`;
+  }
   const safeName = sanitizeSenderString(latestMessage.fullName ?? '');
   const safeUser = sanitizeSenderString(latestMessage.username ?? '');
   const senderLabel = latestMessage.isAnonymous

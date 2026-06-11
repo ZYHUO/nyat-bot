@@ -1947,7 +1947,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           message: formatted,
           recentMessages,
           botUid,
-          botName: e.BOT_USERNAME,
+          // 显示名而非 @handle:"你是hunhebi_bot"和下面 persona 的"我是啾咪囝"打架
+          botName: e.BOT_NICKNAMES[0] || e.BOT_USERNAME,
           selfState,
           lastSpokeSecAgo,
           burstNote: [
@@ -2111,7 +2112,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         recentMessages,
         judgeResult,
         botUid,
-        botName: e.BOT_USERNAME,
+        botName: e.BOT_NICKNAMES[0] || e.BOT_USERNAME,
         botPersona,
         isDirectInteraction: isDirect,
         signal: job.turnContext?.signal,

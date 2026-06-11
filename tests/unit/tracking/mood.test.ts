@@ -121,9 +121,14 @@ describe('mood — pure functions', () => {
     expect(mod.moodPromptHint({ valence: -10, bucket: 'calm', lastEventSummary: '' })).toBe('');
   });
 
-  it('moodPromptHint non-empty when |valence| >= threshold', () => {
-    expect(mod.moodPromptHint({ valence: 30, bucket: 'good', lastEventSummary: '' })).toContain('心情');
-    expect(mod.moodPromptHint({ valence: -30, bucket: 'down', lastEventSummary: '' })).toContain('心情');
+  it('moodPromptHint non-empty when |valence| >= threshold (裸叙述,无标签)', () => {
+    const good = mod.moodPromptHint({ valence: 30, bucket: 'good', lastEventSummary: '' });
+    const down = mod.moodPromptHint({ valence: -30, bucket: 'down', lastEventSummary: '' });
+    expect(good.length).toBeGreaterThan(0);
+    expect(down.length).toBeGreaterThan(0);
+    // 唯一消费方是 composeSelfState 的第一人称叙事,不允许标签前缀
+    expect(good).not.toMatch(/^[【\[]/);
+    expect(down).not.toMatch(/^[【\[]/);
   });
 
   it('moodPromptHint empty when MOOD_INJECT_ENABLED=false', () => {

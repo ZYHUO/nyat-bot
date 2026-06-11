@@ -220,7 +220,7 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     systemPrompt = loadCachedPrompt('task/timing-gate.md');
     if (!systemPrompt) throw new Error('timing-gate prompt not found');
     const modeBlock = input.proactiveMode
-      ? `## 当前模式：主动评估（proactive）\n你不是被用户 @ 或回复。这是 bot 自己看到群里在聊有趣话题，想主动插一句。\n\n判断标准（与默认模式不同，请重点遵守这条）：\n- **不要**因为"没人@bot"就 no_action。麦麦本身就是群里普通成员，闲聊不需要被点名。\n- **该 wait** 的情况：用户 A 和用户 B 正在密集来回（最近 30 秒内连续互动），插进去会打断他们。\n- **该 no_action** 的情况：群里在讨论非常严肃 / 敏感话题（如争吵、负面情绪宣泄）、或最近一条消息是 bot 自己刚发的。\n- **可以 continue** 的情况：群里在闲聊 / 玩梗 / 分享 / 提问，并且没有用户 A↔B 正在密集对话；这种情况下你想加入就加入，自然得像群友。\n- 倾向 continue。后面还有回复生成的最后一道把关，不会乱说话。`
+      ? `## 当前模式:主动插话(proactive)\n这次没有人 @ ${input.botName},是 ${input.botName} 自己看到群里在聊,想主动搭一句。判断标准和默认模式不同:\n- **不要**因为"没人点名"就 no_action——群友插话本来就不需要被点名,这正是本模式存在的意义。\n- **wait**:两个人正在密集一来一回(30 秒内连续互怼/互聊),现在挤进去是打断,等这波过去。\n- **no_action**:在吵架、在宣泄负面情绪、聊严肃敏感话题;或最近一条就是 ${input.botName} 自己发的。\n- **continue**:群里在闲聊/玩梗/分享/提问,且没有密集的二人对话——想加入就加入,自然得像群友。\n- 倾向 continue:后面还有写手最后一道把关,这里只看时机。`
       : '';
     systemPrompt = systemPrompt
       .replace(/\{bot_name\}/g, input.botName)

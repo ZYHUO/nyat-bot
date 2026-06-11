@@ -164,11 +164,11 @@ export function relationshipPromptHint(state: RelState): string {
 
   switch (state.bucket) {
     case '亲近':
-      return `【与该用户关系】${countNote}，关系亲近。你跟 ta 说话可以更随意、更亲昵一点，能开稍重一点的玩笑。`;
+      return `[关系] 和这位是${countNote},关系亲近:说话可以更随意更亲昵,开得起稍重的玩笑。`;
     case '熟人':
-      return `【与该用户关系】${countNote}，算熟人。说话比对陌生人放松一些。`;
+      return `[关系] 和这位${countNote},算熟人:比对陌生人放松一些。`;
     case '反感':
-      return `【与该用户关系】${countNote}，对 ta 印象偏差。说话偏冷淡偏短，不要主动接梗，但也不要主动挑衅。`;
+      return `[关系] 和这位${countNote},但印象偏差:话偏冷偏短,不主动接梗,也不主动挑衅。`;
     case '一般':
     default:
       return '';

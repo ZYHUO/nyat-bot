@@ -156,15 +156,17 @@ export function moodPromptHint(state: MoodState): string {
   const threshold = env().MOOD_INJECT_THRESHOLD;
   if (Math.abs(state.valence) < threshold) return '';
 
+  // 裸叙述,不带标签:唯一消费方是 composeSelfState 的第一人称叙事,
+  // 带【标签】会原样嵌进句子中间(strip 正则只认半角 [])
   switch (state.bucket) {
     case 'cheerful':
-      return '【当前心情】今天群里气氛很好，你心情飘飘的，说话偏轻快俏皮，愿意接梗。';
+      return '今天群里气氛好,你心情飘飘的,说话轻快爱接梗';
     case 'good':
-      return '【当前心情】最近群里互动不错，你心情还行，说话比平时稍轻松一点。';
+      return '最近群里互动不错,你心情还行,比平时松弛一点';
     case 'down':
-      return '【当前心情】最近被晾或者被怼了几次，你有点没劲，说话偏冷淡偏短，少接梗。';
+      return '最近被晾了几次,你有点蔫,话偏短偏冷,懒得接梗';
     case 'grumpy':
-      return '【当前心情】最近被骂得不轻，你比较烦躁，说话短促易没耐心，但不要骂回去。';
+      return '最近被怼得不轻,你心里有点烦,说话短促没耐心(但不骂回去)';
     case 'calm':
     default:
       return '';
