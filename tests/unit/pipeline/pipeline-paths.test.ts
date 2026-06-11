@@ -582,6 +582,42 @@ describe("processPipeline path branching", () => {
     );
   }, 15000); // real humanizer delays — generous timeout to avoid suite-load flakiness
 
+  it("sticker-only send failure records NOTHING (no messageId:0 phantom) — #39c", async () => {
+    mockJudge.mockResolvedValue({
+      action: "REPLY",
+      replyPath: "direct",
+      replyTier: "normal",
+      level: "L1_MICRO",
+      latencyMs: 12,
+    });
+    mockGenerateReply.mockResolvedValue({
+      replies: [{
+        replyContent: "[sticker]",
+        targetMessageId: 42,
+        stickerIntent: ["happy"],
+        modelStickerAct: true, // 跳过冷却,确定走贴纸路径
+      }],
+      toolsUsed: [],
+      toolExecutionFailed: false,
+    });
+    // 防 RNG:关掉 emoji/sticker-only 替换,贴纸只走主路径
+    mockLoadOverride.mockResolvedValue({ humanizer: { emoji_reply_enabled: false } });
+    mockGetReadyStickersByIntent.mockReturnValue([
+      { fileId: "f1", fileUniqueId: "u1", score: 1 },
+    ]);
+    mockSendSticker.mockRejectedValue(new Error("sticker send failed"));
+
+    await processPipeline(makeJob()); // 内部吞错,不应 throw
+
+    // 修复前:push {messageId: 0} 幻影 → addAssistant(chatId, {messageId: 0})
+    expect(mockAddAssistant).not.toHaveBeenCalled();
+    // sentMessages 为空 → 走"全部发送失败"故障路径(兜底致歉消息)
+    const fallbackSent = sendDirect.mock.calls.some(
+      (c: unknown[]) => typeof c[1] === "string" && (c[1] as string).includes("故障"),
+    );
+    expect(fallbackSent).toBe(true);
+  }, 15000);
+
   it("quote-replies each DISTINCT target in a multi-target reply", async () => {
     // Bug: a reply aimed at someone other than the requester must quote THAT
     // person's message, not get its quote dropped just because an earlier bubble

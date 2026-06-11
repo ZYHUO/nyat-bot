@@ -668,28 +668,43 @@ export async function generateAndSendReplies(args: {
         // If sticker-only replacement resolved a sticker, skip text send
         const skipTextSend = stickerOnlyFileId !== undefined && stickerOnlyResult.shouldReplace;
 
+        // 簿记真相(审计 #39b):'append' 修正的气泡**保留**错字文本(只是
+        // 后补一个正确字),记录 originalText 会让上下文/outcome 与屏幕上的
+        // 消息不一致;只有 'edit' 修正最终把气泡改成 originalText。
+        const recordedText = typoResult
+          ? (typoResult.correction === 'append' ? typoResult.typoedText : typoResult.originalText)
+          : effectiveText;
+
         if (!isStickerOnly && !skipTextSend) {
           if (replyIdx === 0 && maxPlaceholderMsgId) {
-            await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText).catch(() => {});
-            // ── Humanizer: typo correction (placeholder path) ──
-            if (typoResult && typoResult.correction === 'edit') {
-              const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-              await sendChatAction(job.chatId, 'typing');
-              await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-              await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText).catch(() => {});
-              logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
-            }
-            sentMessages.push({ messageId: maxPlaceholderMsgId, text: typoResult ? typoResult.originalText : effectiveText });
-            // ── Humanizer: typo append (placeholder path — send correct char as follow-up) ──
-            if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
-              const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-              await sendChatAction(job.chatId, 'typing');
-              await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
-              const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
-              if (appendSent.messageId) {
-                sentMessages.push({ messageId: appendSent.messageId, text: typoResult.correctChar });
+            // 审计 #39a:编辑失败时 placeholder 还停留在"思考中…",此时
+            // 无条件 push 会把没送达的回复记成已发送(污染上下文/outcome)。
+            const edited = await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText)
+              .then(() => true)
+              .catch(() => false);
+            if (edited) {
+              // ── Humanizer: typo correction (placeholder path) ──
+              if (typoResult && typoResult.correction === 'edit') {
+                const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+                await sendChatAction(job.chatId, 'typing');
+                await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
+                await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText).catch(() => {});
+                logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
               }
-              logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append (placeholder)');
+              sentMessages.push({ messageId: maxPlaceholderMsgId, text: recordedText });
+              // ── Humanizer: typo append (placeholder path — send correct char as follow-up) ──
+              if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
+                const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
+                await sendChatAction(job.chatId, 'typing');
+                await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
+                const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
+                if (appendSent.messageId) {
+                  sentMessages.push({ messageId: appendSent.messageId, text: typoResult.correctChar });
+                }
+                logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append (placeholder)');
+              }
+            } else {
+              logger.warn({ chatId: job.chatId, maxPlaceholderMsgId }, 'Placeholder edit failed — reply not recorded as sent');
             }
           } else {
             const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
@@ -698,7 +713,7 @@ export async function generateAndSendReplies(args: {
 
             // ── Humanizer: delete-and-resend ──
             let currentMessageId: number | undefined = sent.messageId;
-            let currentBaseText = typoResult ? typoResult.originalText : effectiveText;
+            let currentBaseText = recordedText;
             if (deleteResend.shouldDeleteResend && sent.messageId) {
               await sendChatAction(job.chatId, 'typing');
               await new Promise((resolve) => setTimeout(resolve, deleteResend.deleteDelay * 1000));
@@ -791,7 +806,11 @@ export async function generateAndSendReplies(args: {
           if (stickerMsgId && stickerFileUniqueId) {
             recordStickerSent(job.chatId, stickerMsgId, stickerFileUniqueId, stickerFileId, stickerIntent);
           }
-          sentMessages.push({ messageId: stickerMsgId ?? 0, text: '[sticker]' });
+          // 审计 #39c:发送失败时不再 push messageId:0 幻影(messageId 0 会
+          // 进 addAssistant 污染上下文;上面 sticker-only 分支早就是这个写法)
+          if (stickerMsgId) {
+            sentMessages.push({ messageId: stickerMsgId, text: '[sticker]' });
+          }
         }
 
         _stickerState(job.chatId).repliesSince++;
