@@ -138,12 +138,27 @@ async function gatherUserContext(uid: number): Promise<string> {
   if (profile?.username) parts.push(`用户名：@${profile.username}`);
   if (profile?.profile_prompt) parts.push(`个性签名：${profile.profile_prompt}`);
 
-  const recentMsgs = db.prepare(
-    "SELECT text_content FROM messages WHERE uid = ? AND text_content != '' ORDER BY created_at DESC LIMIT 5",
-  ).all(uid) as Array<{ text_content: string }>;
-
-  if (recentMsgs.length > 0) {
-    parts.push(`最近发言：${recentMsgs.map(m => m.text_content).join('；')}`);
+  // 最近发言:读 user_profiles.pending_messages(滚动 JSON 数组,每条入站
+  // 消息都在写,跨群按 updated_at 取最活跃的几个)。旧的 messages 表自上下文
+  // 迁去 Redis 后零写入,从它 SELECT 永远为空 —— "最近发言"静默缺失。
+  const profileRows = db.prepare(
+    'SELECT pending_messages FROM user_profiles WHERE uid = ? ORDER BY updated_at DESC LIMIT 3',
+  ).all(uid) as Array<{ pending_messages: string }>;
+  const recentTexts: string[] = [];
+  for (const row of profileRows) {
+    try {
+      const arr = (JSON.parse(row.pending_messages) as unknown[])
+        .filter((t): t is string => typeof t === 'string' && t.trim() !== '');
+      // 数组内旧→新;新的在前展示(对齐旧 ORDER BY created_at DESC)
+      for (const t of arr.reverse()) {
+        recentTexts.push(t);
+        if (recentTexts.length >= 5) break;
+      }
+    } catch { /* 单行坏 JSON 不拖累其余 */ }
+    if (recentTexts.length >= 5) break;
+  }
+  if (recentTexts.length > 0) {
+    parts.push(`最近发言：${recentTexts.join('；')}`);
   }
 
   // member_profiles schema: owner_id, target_id, notes, tags
