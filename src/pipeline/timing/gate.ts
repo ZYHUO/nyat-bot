@@ -20,7 +20,6 @@ import type { FormattedMessage, JudgeResult } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
 import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
-import { mergeAbortSignals } from '../../shared/abort.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { isInGateCooldown } from './chat-runtime.js';
@@ -260,7 +259,12 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
       ],
       maxTokens: 200,
       temperature: 0,
-      signal: mergeAbortSignals(timeoutMs, input.signal),
+      // 与 heart/decision.ts 同因:超时预算必须是 per-attempt cap,不能
+      // 烧进共享 signal(首跳超时会毒化整条 fallback 链)。gate 是
+      // fail-open,所以旧 bug 在这里表现为"看似裁决过,实为全链 DOA 后
+      // 的 continue" —— 比 heart 的静默吞回复隐蔽,但同样是假裁决。
+      signal: input.signal,
+      maxTimeoutMs: timeoutMs,
     });
 
     raw = result.content;

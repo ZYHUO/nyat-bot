@@ -16,7 +16,6 @@ import type { FormattedMessage, JudgeResult } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
 import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
-import { mergeAbortSignals } from '../../shared/abort.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import type { SelfState } from './self-state.js';
@@ -129,7 +128,13 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
       ],
       maxTokens: 120,
       temperature: 0,
-      signal: mergeAbortSignals(e.TIMING_GATE_TIMEOUT_MS, input.signal),
+      // 只传原始打断信号。8s 预算改为 per-attempt cap(maxTimeoutMs):
+      // 旧写法把 AbortSignal.timeout 烧进共享 signal,主标签一旦超时,
+      // 所有 backup 的合并信号天生已 aborted → 心流在慢主模型下没有任何
+      // 可用 fallback,fail-closed pass = 静默吞回复。
+      // 代价:最坏 attempts × 8s 串行(hedge/cooldown 通常会短路)。
+      signal: input.signal,
+      maxTimeoutMs: e.TIMING_GATE_TIMEOUT_MS,
     });
     raw = result.content;
   } catch (err) {

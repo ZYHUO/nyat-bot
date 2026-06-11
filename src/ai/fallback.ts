@@ -21,7 +21,13 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   const callOpts = {
     maxTokens: options.maxTokens ?? usage.maxTokens,
     temperature: options.temperature ?? usage.temperature,
-    timeout: usage.timeout,
+    // Per-attempt budget: callModel turns this into a FRESH AbortSignal.timeout
+    // for each attempt. maxTimeoutMs lets latency-bounded callers (heart/gate)
+    // cap every attempt without baking a shared timeout signal into
+    // options.signal (which would poison all backups once it fires).
+    timeout: options.maxTimeoutMs !== undefined
+      ? Math.min(usage.timeout, options.maxTimeoutMs)
+      : usage.timeout,
     signal: options.signal,
   };
 

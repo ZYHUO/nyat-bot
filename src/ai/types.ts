@@ -51,8 +51,20 @@ export interface AICallOptions {
    * mid-generation). Merged with the per-label timeout signal; an abort here
    * surfaces as AIError code 'AI_ABORTED' and is NOT retried by the fallback
    * chain.
+   *
+   * 注意:不要把 AbortSignal.timeout(...) 烧进这个 signal —— 它会被 fallback
+   * 链的**每一次**尝试复用,首跳超时后所有 backup 立刻 DOA(信号中毒)。
+   * 想限定每次尝试的时长用 maxTimeoutMs。
    */
   signal?: AbortSignal;
+  /**
+   * Per-attempt wall-clock cap (ms). Caps the usage label's own timeout for
+   * EACH attempt (primary / hedge / every backup) via the per-attempt
+   * AbortSignal.timeout inside callModel, so a slow primary still leaves the
+   * backups alive. Worst-case total wall-clock = attempts × min(usage.timeout,
+   * maxTimeoutMs) — callers on latency-sensitive paths should keep this tight.
+   */
+  maxTimeoutMs?: number;
 }
 
 export interface AICallResult {
