@@ -19,39 +19,56 @@ const META_KEY = (chatId: number) => `xxb:turn:meta:${chatId}`;
 /** pending/meta TTL:防止已退群/死群的缓冲永久残留 */
 const KEY_TTL_SEC = 24 * 60 * 60;
 
+// Atomic append:RPUSH + 双 TTL + meta 簿记 + highWatermark max,单次往返。
+// (同 context/manager.ts 的 RPUSH_TRIM_LUA 模式。)
+// 旧实现是 1 次 multi + 3 次串行 RTT(hget/hset/hget),每条入站消息 4 RTT,
+// 且 highWatermark 的 read-modify-write 有竞态;Lua 里的 compare-set 是原子的。
+// KEYS: [1]=pendingKey [2]=metaKey
+// ARGV: [1]=entryJson [2]=nowMs [3]=ttlSec [4]=direct('1'/'0') [5]=messageId('0'=无)
+const APPEND_PENDING_LUA = `
+local count = redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+redis.call('HSETNX', KEYS[2], 'firstPendingAt', ARGV[2])
+redis.call('HSET', KEYS[2], 'lastMsgAt', ARGV[2])
+if ARGV[4] == '1' then
+  redis.call('HSET', KEYS[2], 'pendingDirect', '1')
+end
+local msgId = tonumber(ARGV[5])
+if msgId and msgId > 0 then
+  local hwm = tonumber(redis.call('HGET', KEYS[2], 'highWatermark') or '0')
+  if msgId > hwm then
+    redis.call('HSET', KEYS[2], 'highWatermark', ARGV[5])
+  end
+end
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
+return {count, redis.call('HGET', KEYS[2], 'firstPendingAt')}
+`;
+
 /**
  * Append one inbound update to the chat's pending buffer.
  * Returns the new buffer length and the (possibly just-set) firstPendingAt.
+ *
+ * 单条 Lua 原子完成全部簿记(P1 的 direct 位持久化语义保留:回合活跃期间
+ * 到达的 @/回复 bot 走 markDirty 路径会丢失 direct 性,收尾再排程时被罚
+ * 整整一个去抖窗口)。
  */
 export async function appendPending(entry: PendingEntry): Promise<{ count: number; firstPendingAt: number }> {
   const redis = getRedis();
   const now = Date.now();
-  const pendingKey = PENDING_KEY(entry.chatId);
-  const metaKey = META_KEY(entry.chatId);
 
-  const multi = redis.multi();
-  multi.rpush(pendingKey, JSON.stringify(entry));
-  multi.expire(pendingKey, KEY_TTL_SEC);
-  multi.hsetnx(metaKey, 'firstPendingAt', String(now));
-  multi.hset(metaKey, 'lastMsgAt', String(now));
-  // P1 修复:direct 位持久化 —— 回合活跃期间到达的 @/回复 bot 走
-  // markDirty 路径会丢失 direct 性,收尾再排程时被罚整整一个去抖窗口。
-  if (entry.direct) multi.hset(metaKey, 'pendingDirect', '1');
-  multi.expire(metaKey, KEY_TTL_SEC);
-  const results = await multi.exec();
-  const count = (results?.[0]?.[1] as number) ?? 0;
+  const result = (await redis.eval(
+    APPEND_PENDING_LUA,
+    2,
+    PENDING_KEY(entry.chatId),
+    META_KEY(entry.chatId),
+    JSON.stringify(entry),
+    String(now),
+    String(KEY_TTL_SEC),
+    entry.direct ? '1' : '0',
+    String(entry.messageId || 0),
+  )) as [number, string | null];
 
-  // High-watermark: keep max messageId seen (read-modify-write; single
-  // process + per-chat low contention makes this race acceptable).
-  if (entry.messageId) {
-    const hwm = Number((await redis.hget(metaKey, 'highWatermark')) ?? '0');
-    if (entry.messageId > hwm) {
-      await redis.hset(metaKey, 'highWatermark', String(entry.messageId));
-    }
-  }
-
-  const firstRaw = await redis.hget(metaKey, 'firstPendingAt');
-  return { count, firstPendingAt: Number(firstRaw ?? now) };
+  return { count: result[0] ?? 0, firstPendingAt: Number(result[1] ?? now) };
 }
 
 /**

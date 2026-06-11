@@ -56,6 +56,36 @@ const redisMock = {
     return next;
   }),
   expire: vi.fn(async () => 1),
+  // Emulates APPEND_PENDING_LUA's atomic semantics (the mock has no Lua VM;
+  // the script's contract is asserted through appendPending's behavior).
+  eval: vi.fn(
+    async (
+      _script: string,
+      _numKeys: number,
+      pendingKey: string,
+      metaKey: string,
+      entryJson: string,
+      now: string,
+      _ttl: string,
+      direct: string,
+      msgId: string,
+    ) => {
+      const l = lists.get(pendingKey) ?? [];
+      l.push(entryJson);
+      lists.set(pendingKey, l);
+      const h = hashes.get(metaKey) ?? {};
+      if (!('firstPendingAt' in h)) h['firstPendingAt'] = now;
+      h['lastMsgAt'] = now;
+      if (direct === '1') h['pendingDirect'] = '1';
+      const m = Number(msgId);
+      if (m > 0) {
+        const hwm = Number(h['highWatermark'] ?? '0');
+        if (m > hwm) h['highWatermark'] = msgId;
+      }
+      hashes.set(metaKey, h);
+      return [l.length, h['firstPendingAt']];
+    },
+  ),
   multi: () => {
     const ops: Array<() => Promise<unknown>> = [];
     const m: Record<string, unknown> = {};
@@ -90,6 +120,7 @@ import {
   clearDirty,
   bumpEpoch,
   getHighWatermark,
+  hasPendingDirect,
 } from '../../../src/pipeline/turn/buffer.js';
 
 const CHAT = -100500;
@@ -141,6 +172,42 @@ describe('turn pending buffer', () => {
     await appendPending(entry(8)); // out-of-order edit/late delivery
     await appendPending(entry(15));
     expect(await getHighWatermark(CHAT)).toBe(15);
+  });
+
+  it('appendPending is a single round-trip (one eval, no multi/hget/hset)', async () => {
+    redisMock.eval.mockClear();
+    redisMock.hget.mockClear();
+    redisMock.hset.mockClear();
+    redisMock.hsetnx.mockClear();
+    redisMock.rpush.mockClear();
+
+    await appendPending(entry(1));
+
+    // 旧实现:1 multi + hget + 条件 hset + hget = 最多 4 RTT。
+    // 新契约:整个 append 是一次 eval,别的什么都不发。
+    expect(redisMock.eval).toHaveBeenCalledTimes(1);
+    expect(redisMock.hget).not.toHaveBeenCalled();
+    expect(redisMock.hset).not.toHaveBeenCalled();
+    expect(redisMock.hsetnx).not.toHaveBeenCalled();
+    expect(redisMock.rpush).not.toHaveBeenCalled();
+  });
+
+  it('pendingDirect set only when entry.direct, cleared on drain', async () => {
+    await appendPending(entry(1, false));
+    expect(await hasPendingDirect(CHAT)).toBe(false);
+
+    await appendPending(entry(2, true));
+    expect(await hasPendingDirect(CHAT)).toBe(true);
+
+    await drainPending(CHAT);
+    expect(await hasPendingDirect(CHAT)).toBe(false);
+  });
+
+  it('skips high-watermark write for entries without a messageId', async () => {
+    await appendPending(entry(0)); // messageId 0 → 不写 hwm
+    expect(await getHighWatermark(CHAT)).toBe(0);
+    await appendPending(entry(7));
+    expect(await getHighWatermark(CHAT)).toBe(7);
   });
 
   it('drops malformed entries on drain instead of throwing', async () => {
