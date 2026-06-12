@@ -12,22 +12,43 @@ import { z } from 'zod';
 import { searchMemory } from '../../memory/chroma.js';
 import { getProfileSections, getUserPreferences } from '../../tracking/user-profile.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
+import { getChatAliases } from '../../knowledge/person-aliases.js';
 import { getAll, getGroupMembers, addAssistant } from '../context/manager.js';
 import { getBot } from '../../bot/bot.js';
 import { logger } from '../../shared/logger.js';
+
+// 进程 TZ=Asia/Shanghai(systemd Environment),与 slim.ts 的上下文时间戳
+// 同源 —— 不要用 toISOString(UTC),摘要/记忆里的时间会和正文差 8 小时。
+function fmtTs(tsSec: number): string {
+  const d = new Date(tsSec * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// AI SDK v4:工具 execute 抛异常会让**整个** generateText reject(已查
+// node_modules 源码确认),换 label 重跑、已执行步骤全丢。所有查询工具
+// 必须自兜底,把故障变成给模型看的文本。
+function toolGuard(err: unknown, tool: string, chatId: number): string {
+  logger.warn({ err, tool, chatId }, 'agent tool failed (returned as text)');
+  return '(工具暂时故障,换个方式回答或如实说查不到)';
+}
 
 export const queryMemorySchema = z.object({
   query: z.string().describe('要回忆的内容关键词或问题,如"上次谁说要去日本"'),
 });
 
 export async function executeQueryMemory(chatId: number, query: string): Promise<string> {
-  const hits = await searchMemory(chatId, query, 6, 1500);
-  if (hits.length === 0) return '(长期记忆里没有找到相关内容)';
-  const lines = hits.map((m) => {
-    const when = m.timestamp ? new Date(m.timestamp * 1000).toISOString().slice(0, 10) : '?';
-    return `[${when}] ${m.fullName || m.username || 'unknown'}: ${(m.textContent || '').slice(0, 120)}`;
-  });
-  return `长期记忆检索结果(按相关度):\n${lines.join('\n')}`;
+  try {
+    const hits = await searchMemory(chatId, query, 6, 1500);
+    if (hits.length === 0) return '(长期记忆里没有找到相关内容)';
+    const lines = hits.map((m) => {
+      const when = m.timestamp ? fmtTs(m.timestamp).slice(0, 5) : '?';
+      return `[${when}] ${m.fullName || m.username || 'unknown'}: ${(m.textContent || '').slice(0, 120)}`;
+    });
+    return `长期记忆检索结果(按相关度):\n${lines.join('\n')}`;
+  } catch (err) {
+    return toolGuard(err, 'QUERY_MEMORY', chatId);
+  }
 }
 
 export const queryPersonProfileSchema = z.object({
@@ -35,7 +56,21 @@ export const queryPersonProfileSchema = z.object({
 });
 
 export async function executeQueryPersonProfile(chatId: number, name: string): Promise<string> {
-  const needle = name.replace(/^@/, '').toLowerCase();
+  try {
+    return await queryPersonProfileInner(chatId, name);
+  } catch (err) {
+    return toolGuard(err, 'QUERY_PERSON_PROFILE', chatId);
+  }
+}
+
+async function queryPersonProfileInner(chatId: number, name: string): Promise<string> {
+  let needle = name.replace(/^@/, '').toLowerCase();
+  // 外号解析:普通 reply 路径靠 buildAliasInjection 认得外号,工具也得认
+  try {
+    const aliases = getChatAliases(chatId, 50);
+    const aliasHit = aliases.find((a) => a.alias.toLowerCase() === needle);
+    if (aliasHit) needle = aliasHit.subject_name.toLowerCase();
+  } catch { /* 外号表缺失不影响主流程 */ }
   const members = await getGroupMembers(chatId);
   const hit = members.find(
     (m) =>
@@ -75,6 +110,18 @@ export async function executeFetchHistory(
   beforeMessageId: number | undefined,
   count: number,
 ): Promise<string> {
+  try {
+    return await fetchHistoryInner(chatId, beforeMessageId, count);
+  } catch (err) {
+    return toolGuard(err, 'FETCH_HISTORY', chatId);
+  }
+}
+
+async function fetchHistoryInner(
+  chatId: number,
+  beforeMessageId: number | undefined,
+  count: number,
+): Promise<string> {
   const all = await getAll(chatId, 500);
   let cutoff = all.length;
   if (beforeMessageId !== undefined) {
@@ -100,7 +147,12 @@ export async function executeSendImage(
   messageId: number,
   caption?: string,
 ): Promise<string> {
-  const all = await getAll(chatId, 500);
+  let all;
+  try {
+    all = await getAll(chatId, 500);
+  } catch (err) {
+    return toolGuard(err, 'SEND_IMAGE', chatId);
+  }
   const msg = all.find((m) => m.messageId === messageId);
   if (!msg) return `(找不到消息 #${messageId})`;
   if (!msg.imageFileId) return `(消息 #${messageId} 没有图片,不要瞎指)`;

@@ -35,23 +35,36 @@ function mtmKey(chatId: number): string {
   return MTM_PREFIX + chatId;
 }
 
-// 头部比对后裁剪:被内建 trim 动过头就放弃(返回 0)
-const GUARDED_LTRIM_LUA = `
-local key = KEYS[1]
-if redis.call('LINDEX', key, 0) == ARGV[1] then
-  redis.call('LTRIM', key, tonumber(ARGV[2]), -1)
+// 头部比对后:裁原文 + 存摘要 + FIFO 截断 + 续期,单脚本原子完成。
+// 拆成两次调用的话,裁掉原文后、摘要写入前崩溃 → 这段记忆静默空洞
+// (code review #6)。头部被内建 trim 动过则整轮放弃(返回 0)。
+const GUARDED_COMPRESS_LUA = `
+local ctx = KEYS[1]
+local mtm = KEYS[2]
+if redis.call('LINDEX', ctx, 0) == ARGV[1] then
+  redis.call('LTRIM', ctx, tonumber(ARGV[2]), -1)
+  redis.call('RPUSH', mtm, ARGV[3])
+  redis.call('LTRIM', mtm, -tonumber(ARGV[4]), -1)
+  redis.call('EXPIRE', mtm, tonumber(ARGV[5]))
   return 1
 end
 return 0
 `;
 
+// 进程 TZ=Asia/Shanghai(systemd Environment),与 slim.ts 的上下文时间
+// 同源。不要用 toISOString —— UTC 会和正文差 8 小时(code review #2)。
+function fmtTs(tsSec: number): string {
+  const d = new Date(tsSec * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function renderForCompression(messages: FormattedMessage[]): string {
   const lines: string[] = [];
   for (const m of messages) {
-    const t = new Date(m.timestamp * 1000).toISOString().slice(5, 16).replace('T', ' ');
     const who = m.role === 'assistant' ? '你(bot)' : m.fullName || m.username || `uid${m.uid}`;
     const text = (m.textContent || '[非文本]').slice(0, 120);
-    lines.push(`[${t}] ${who}: ${text}`);
+    lines.push(`[${fmtTs(m.timestamp)}] ${who}: ${text}`);
   }
   return lines.join('\n');
 }
@@ -100,18 +113,8 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
       const summaryText = result.content.trim();
       if (!summaryText) return;
 
-      // 先裁原文、裁成功才存摘要 —— 反过来会重复:头部被内建 trim 抢先
-      // 动过时 LTRIM 放弃,原文还在,下一条消息立刻重新触发压缩,同一批
-      // 消息生成两条几乎相同的摘要(上线首日实测踩到)。裁失败丢弃本次
-      // LLM 结果,等下一轮重压,语义正确且无重复。
-      const trimmed = await redis.eval(
-        GUARDED_LTRIM_LUA, 1, ctxKey, rawEntries[0]!, String(rawEntries.length),
-      );
-      if (trimmed !== 1) {
-        logger.info({ chatId }, 'Mid-term compression discarded (ctx head moved during LLM call)');
-        return;
-      }
-
+      // 裁原文+存摘要单脚本原子(头部被内建 trim 动过 → 整轮放弃,
+      // 等下一轮重压 —— 先存后裁会重复,裁存分离会丢,都踩过/评过)。
       const entry: MidTermSummary = {
         summary: summaryText.slice(0, 600),
         fromTs: messages[0]!.timestamp,
@@ -119,11 +122,15 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
         count: messages.length,
         createdAt: Date.now(),
       };
-      const pipeline = redis.pipeline();
-      pipeline.rpush(mtmKey(chatId), JSON.stringify(entry));
-      pipeline.ltrim(mtmKey(chatId), -e.MTM_MAX_SUMMARIES, -1);
-      pipeline.expire(mtmKey(chatId), MTM_TTL);
-      await pipeline.exec();
+      const committed = await redis.eval(
+        GUARDED_COMPRESS_LUA, 2, ctxKey, mtmKey(chatId),
+        rawEntries[0]!, String(rawEntries.length), JSON.stringify(entry),
+        String(e.MTM_MAX_SUMMARIES), String(MTM_TTL),
+      );
+      if (committed !== 1) {
+        logger.info({ chatId }, 'Mid-term compression discarded (ctx head moved during LLM call)');
+        return;
+      }
 
       logger.info(
         { chatId, compressed: messages.length, summaryChars: entry.summary.length },
@@ -147,9 +154,7 @@ export async function getMidTermBlock(chatId: number): Promise<string | null> {
     for (let i = 0; i < raw.length; i++) {
       try {
         const s = JSON.parse(raw[i]!) as MidTermSummary;
-        const from = new Date(s.fromTs * 1000).toISOString().slice(5, 16).replace('T', ' ');
-        const to = new Date(s.toTs * 1000).toISOString().slice(5, 16).replace('T', ' ');
-        lines.push(`${i + 1}. (${from}~${to}, ${s.count}条) ${s.summary}`);
+        lines.push(`${i + 1}. (${fmtTs(s.fromTs)}~${fmtTs(s.toTs)}, ${s.count}条) ${s.summary}`);
       } catch { /* skip corrupted */ }
     }
     if (lines.length === 0) return null;

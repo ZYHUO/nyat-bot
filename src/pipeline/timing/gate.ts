@@ -274,9 +274,10 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   }
 
   let parsed = parseGateResponse(raw);
-  if (!parsed) {
+  if (!parsed && !input.signal?.aborted) {
     // MaiBot 借鉴:解析失败先带纠正提示重试一次(gate 模型轻量,成本低)。
     // 直接 fail-open continue 会让 bot 在本该沉默的时机插嘴,破坏节奏感。
+    // turn 已被打断时跳过重试 —— 别为注定要 replan 的回合再烧一轮 LLM。
     try {
       const retry = await callWithFallback({
         usage: e.TIMING_GATE_USAGE,

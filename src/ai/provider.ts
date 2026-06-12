@@ -285,9 +285,15 @@ export async function callModel(
       const parts = m.content.filter((p) => p.type !== 'text' || p.text.trim().length > 0);
       return { ...m, content: parts };
     })
-    .filter((m) =>
-      typeof m.content === 'string' ? m.content.trim().length > 0 : m.content.length > 0,
-    );
+    .filter((m) => {
+      const keep = typeof m.content === 'string' ? m.content.trim().length > 0 : m.content.length > 0;
+      // 丢 system 消息绝不能静默:多半是 prompt 文件被写空(热重载读到
+      // 半成品),人设全丢却查无此事比 400 更难排查。
+      if (!keep && m.role === 'system') {
+        logger.warn({ label: label.name }, 'Dropping EMPTY system message — prompt file blank?');
+      }
+      return keep;
+    });
 
   if (label.apiFormat === 'claude') {
     const textMessages = messages.map(m => ({

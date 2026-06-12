@@ -185,8 +185,9 @@ const envSchema = z.object({
   // 阶段 4：gate 选 wait/no_action 后，下次再调 gate 的冷却时间（秒）。
   // 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。
   TIMING_GATE_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(15),
-  // no_action 指数退避(MaiBot 借鉴):连续 no_action 第 START_COUNT 次起
-  // 冷却窗口按 2^n 拉长,封顶 CAP;continue/真实回复清零计数。
+  // no_action 指数退避(MaiBot 借鉴):窗口 = base * 2^max(0, n-START),
+  // 即第 START_COUNT+1 次 no_action 起开始翻倍,封顶 CAP;continue/真实
+  // 回复清零计数。
   NO_ACTION_BACKOFF_START_COUNT: z.coerce.number().int().nonnegative().default(2),
   NO_ACTION_BACKOFF_CAP_SEC: z.coerce.number().int().positive().default(300),
 

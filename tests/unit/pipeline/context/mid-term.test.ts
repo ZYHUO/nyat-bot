@@ -37,11 +37,18 @@ const redisMock = {
     return 'OK';
   }),
   expire: vi.fn(async () => 1),
-  // guarded LTRIM Lua:头部没变才裁
-  eval: vi.fn(async (_script: string, _nk: number, key: string, expectedFirst: string, chunkStr: string) => {
-    const l = lists.get(key) ?? [];
+  // guarded compress Lua:头部没变 → 裁 ctx + 存摘要 + FIFO 截断(原子)
+  eval: vi.fn(async (
+    _script: string, _nk: number,
+    ctxKey: string, mtmKey: string,
+    expectedFirst: string, chunkStr: string, summaryJson: string, maxStr: string, _ttl: string,
+  ) => {
+    const l = lists.get(ctxKey) ?? [];
     if (l[0] === expectedFirst) {
-      lists.set(key, l.slice(Number(chunkStr)));
+      lists.set(ctxKey, l.slice(Number(chunkStr)));
+      const m = lists.get(mtmKey) ?? [];
+      m.push(summaryJson);
+      lists.set(mtmKey, m.slice(-Number(maxStr)));
       return 1;
     }
     return 0;

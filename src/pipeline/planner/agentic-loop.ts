@@ -14,6 +14,8 @@
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { getUsage, getLabel } from '../../ai/labels.js';
+import { CooldownTracker } from '../../ai/cooldown.js';
+import { getRedis } from '../../db/redis.js';
 import { buildToolSet } from '../tools/registry.js';
 import { loadPrompt, getConfig } from '../../shared/config.js';
 import { mergeAbortSignals, isCallerAbort } from '../../shared/abort.js';
@@ -55,13 +57,20 @@ export async function runAgenticPlanner(input: AgenticPlanInput): Promise<Agenti
   const start = performance.now();
 
   // 简化版 fallback:按 usage 的 label 链逐个试(agentic 必须走 AI SDK
-  // 原生 tool use,不能复用 callWithFallback 的纯文本管线)
+  // 原生 tool use,不能复用 callWithFallback 的纯文本管线)。cooldown
+  // 与 callWithFallback 共享同一 Redis 视角:429 冷却中的 label 跳过,
+  // 失败 429 时也写回冷却 —— 两条路径对 label 健康的认知保持一致。
   const labelNames = [usage.label, ...usage.backups];
+  const cooldown = new CooldownTracker(getRedis());
   let lastErr: unknown;
   for (const labelName of labelNames) {
     const label = getLabel(labelName);
     const apiKey = label.apiKeys[0];
     if (!apiKey || label.apiFormat === 'claude') continue; // claude 原生格式标签跳过
+    if (await cooldown.isCoolingDown(label.model).catch(() => false)) {
+      logger.debug({ label: labelName, model: label.model }, 'Agentic planner skipping cooled-down label');
+      continue;
+    }
 
     try {
       const provider = createOpenAI({
@@ -131,6 +140,10 @@ export async function runAgenticPlanner(input: AgenticPlanInput): Promise<Agenti
       lastErr = err;
       // 外部打断(turn interrupt)直接上抛,让 replan 机制接手
       if (isCallerAbort(input.signal)) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('429') || msg.toLowerCase().includes('rate limit')) {
+        await cooldown.setCooldown(label.model).catch(() => {});
+      }
       logger.warn({ err, label: labelName, chatId: input.chatId }, 'Agentic planner label failed, trying next');
     }
   }
