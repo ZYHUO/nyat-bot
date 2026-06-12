@@ -49,6 +49,10 @@ export async function maybeReact(chatId: number, messageId: number, text: string
     if (!emoji) return;
     if (Math.random() >= REACT_PROBABILITY) return;
 
+    // 硬作息:睡着的猫不会点表情(凌晨三点冒出 reaction 会穿帮)
+    const { isAsleep } = await import('../tracking/sleep.js');
+    if (await isAsleep()) return;
+
     // Atomic daily cap: only the first DAILY_CAP eligible+rolled messages react.
     const redis = getRedis();
     const key = dayKey(chatId);

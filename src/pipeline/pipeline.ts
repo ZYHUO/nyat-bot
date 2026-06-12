@@ -61,6 +61,7 @@ import { needsLookup } from "./heart/path-heuristic.js";
 import { setWaitAnchor } from "./turn/buffer.js";
 import { getFocus as getChatFocus } from "./turn/focus.js";
 import { getLifeState } from "../tracking/life-state.js";
+import { isAsleep, sleepSilencesAtStageA, sleepWakeDecision } from "../tracking/sleep.js";
 
 
 // ── Main pipeline orchestrator ──────────────────────────────────────
@@ -407,6 +408,25 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       messagesLast1Hour = Math.max(messagesLast1Hour, act.messages1hour);
     } catch { /* fail-soft: 窗口近似 */ }
 
+    // 4.05 睡眠门 Stage A(硬作息):真睡着了 —— 闲聊与将进 L1/L2/heart
+    // 的消息直接静默,不烧 LLM(含 replan/wait-replay 锚点:聊着聊着睡着
+    // 了就别准时回访)。指令/直接交互/功能规则放行,由命令分发层与
+    // Stage B(5.45b)接手。bookkeeping(context/记忆/活动)在上面已完成。
+    if (await isAsleep()) {
+      const l0 = l0Rule({
+        message: formatted, recentMessages, botUid,
+        botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
+      });
+      if (sleepSilencesAtStageA(l0)) {
+        logger.info(
+          { chatId: job.chatId, messageId: formatted.messageId, rule: l0?.rule ?? null },
+          "Pipeline complete (asleep, chatter silenced)",
+        );
+        return;
+      }
+    }
+
     // G4: burst-aware judging — when the turn actor drained a multi-message
     // burst, tell the judge to treat the whole burst as one thought.
     const burstIds = e.TURN_BURST_JUDGE_ENABLED ? (job.turnContext?.burstMessageIds ?? []) : [];
@@ -648,6 +668,24 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         logger.debug({ chatId: job.chatId, uid: formatted.uid }, "Pipeline: user soft-muted bot, skipping proactive reply");
         return;
       }
+    }
+
+    // 5.45b 睡眠门 Stage B(硬作息):slash/NL 指令已在上面的拦截层分发完,
+    // 还走到这里的只剩直接交互(@/回 bot/私聊)与功能规则。功能规则豁免
+    // (post-mute 拦截与 /checkin /stats 的 LLM 渲染还要处理),直接交互掷
+    // "升级式吵醒"骰子:主人必醒,越 ping 越容易醒;没醒 → 静默。醒了的
+    // 回复自带迷糊语气(self-state 的 sleeping 叙述)+ 迷糊窗口内继续接话。
+    if (await isAsleep()) {
+      const verdict = await sleepWakeDecision(job.chatId, formatted.uid, judgeResult.rule);
+      if (verdict === "silent") {
+        const totalMs = Math.round(performance.now() - start);
+        logger.info(
+          { chatId: job.chatId, totalMs, rule: judgeResult.rule, timings },
+          "Pipeline complete (asleep, not woken)",
+        );
+        return;
+      }
+      // 'pass'(豁免规则)/'wake'(被吵醒)→ 继续往下走
     }
 
     // 5.46 Phase 3: Timing Gate — LLM-based rhythm control

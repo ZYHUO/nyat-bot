@@ -43,6 +43,12 @@ export interface RuntimeOverride {
     typing_chinese_time?: number;
     typing_english_time?: number;
   };
+  sleep_schedule?: {
+    /** false = 运行时临时关掉硬睡眠门(不动 env flag) */
+    enabled?: boolean;
+    /** 强制起床/快去睡 —— 只改门的输入,不改 date-seeded 作息表 */
+    force?: 'awake' | 'asleep';
+  };
   humanizer?: {
     typo_enabled?: boolean;
     typo_rate?: number;
@@ -78,6 +84,7 @@ export async function loadOverride(redis: Redis): Promise<RuntimeOverride | null
     if (parsed['reply_quote'] !== undefined) result.reply_quote = parsed['reply_quote'] as boolean;
     if (parsed['reply_segmentation']) result.reply_segmentation = parsed['reply_segmentation'] as RuntimeOverride['reply_segmentation'];
     if (parsed['humanizer']) result.humanizer = parsed['humanizer'] as RuntimeOverride['humanizer'];
+    if (parsed['sleep_schedule']) result.sleep_schedule = parsed['sleep_schedule'] as RuntimeOverride['sleep_schedule'];
     return result;
   } catch {
     logger.warn('Failed to parse runtime override from Redis');

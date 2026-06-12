@@ -168,6 +168,16 @@ export function startCronJobs(deps?: CronDeps): void {
     void safeRun('idle-check', runIdleCheck);
   }));
 
+  // 硬作息边沿:到点睡觉说晚安、到点起床说早安(每分钟查一次状态翻转)
+  if (env().SLEEP_SCHEDULE_ENABLED && env().SLEEP_ANNOUNCE_ENABLED) {
+    tasks.push(schedule('* * * * *', () => {
+      void safeRun('sleep-announce', async () => {
+        const { runSleepAnnounce } = await import('./sleep-announce.js');
+        await runSleepAnnounce();
+      });
+    }));
+  }
+
   // Proactive scan — periodic chat-aware engagement (Stage C)
   if (env().PROACTIVE_SCAN_ENABLED) {
     tasks.push(schedule(`*/${env().PROACTIVE_SCAN_INTERVAL_MIN} * * * *`, () => {
@@ -215,6 +225,7 @@ const CRON_TIMEOUT_MS: Record<string, number> = {
   'knowledge-sync': 15 * 60_000,
   'user-profile-sync': 10 * 60_000,
   'idle-check': 60_000,
+  'sleep-announce': 60_000,
   'channel-sync': 10 * 60_000,
 };
 const DEFAULT_CRON_TIMEOUT_MS = 5 * 60_000;

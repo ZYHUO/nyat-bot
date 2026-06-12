@@ -23,6 +23,7 @@ import { pendingCount } from './buffer.js';
 import { getFocus, followupProbability } from './focus.js';
 import { registerWeakGeneration, clearGeneration } from './abort-registry.js';
 import { recordBotReply as recordTimingBotReply } from '../timing/state-store.js';
+import { isAsleep } from '../../tracking/sleep.js';
 import { getRedis } from '../../db/redis.js';
 import { AIError } from '../../shared/errors.js';
 import { mergeAbortSignals } from '../../shared/abort.js';
@@ -96,6 +97,12 @@ async function runSelfContinue(chatId: number, botUid: number): Promise<void> {
   const shutSig = shutdownController.signal;
   const e = env();
   if (!e.TURN_SELF_FOLLOWUP_ENABLED || chatId >= 0) return;
+  // 硬作息:睡着了不自言自语(被吵醒的迷糊回复也不该带"对了…"接话)。
+  // 静态 import:动态 import 是真实异步 I/O,会让 fake-timer 测试与
+  // 节拍定时器错位(runAllTimersAsync 提前跑完)。
+  try {
+    if (await isAsleep()) return;
+  } catch { /* non-critical */ }
   // G9: focus 调制接话欲(锁定对话 → 更愿意补一拍)
   const probability = e.TURN_FOCUS_ENABLED
     ? followupProbability(await getFocus(chatId))

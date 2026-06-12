@@ -57,6 +57,10 @@ vi.mock('../../../src/queue/chat-lock.js', () => ({
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({ get: redisGetMock, set: redisSetMock }),
 }));
+// 硬作息门:这套测试聚焦接话逻辑,默认醒着
+vi.mock('../../../src/tracking/sleep.js', () => ({
+  isAsleep: vi.fn(async () => false),
+}));
 
 import {
   maybeSelfContinue,

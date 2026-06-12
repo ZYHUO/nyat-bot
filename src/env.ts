@@ -277,6 +277,13 @@ const envSchema = z.object({
   IDLE_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
   IDLE_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
 
+  // ── Sleep schedule(硬作息门):到点真睡觉,睡觉不闲聊,指令照常 ──
+  // 直接交互(@/回 bot/私聊)走升级式吵醒,主人必醒;作息表沿用
+  // life-state 的 date-seeded daySchedule(起床 07:00-08:30 / 入睡 23:30-01:00)
+  SLEEP_SCHEDULE_ENABLED: booleanFromEnv.default(false),
+  // 到点睡觉/起床时向最近活跃的群发晚安/早安(固定短句池,无 LLM)
+  SLEEP_ANNOUNCE_ENABLED: booleanFromEnv.default(false),
+
   // ── Mood drift (Stage E) ──
   // Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。
   MOOD_ENABLED: booleanFromEnv.default(false),

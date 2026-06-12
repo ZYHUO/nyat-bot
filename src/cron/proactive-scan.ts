@@ -18,6 +18,7 @@ import { isTurnActorChat } from '../pipeline/turn/flags.js';
 import { runTimingGate } from '../pipeline/timing/gate.js';
 import { getBotUid } from '../bot/bot.js';
 import { loadCachedPrompt } from '../shared/config.js';
+import { isAsleep } from '../tracking/sleep.js';
 import type { FormattedMessage } from '../shared/types.js';
 
 const PROACTIVE_LAST_PREFIX = 'xxb:proactive:last:';
@@ -167,6 +168,11 @@ export async function runProactiveScan(): Promise<void> {
   if (!e.PROACTIVE_SCAN_ENABLED) return;
   if (!isWithinActiveHours(e.PROACTIVE_SCAN_HOUR_START, e.PROACTIVE_SCAN_HOUR_END)) {
     logger.debug('Proactive scan: outside active hours, skipping');
+    return;
+  }
+  // 硬作息:睡着了不主动插话
+  if (await isAsleep()) {
+    logger.debug('Proactive scan: asleep, skipping');
     return;
   }
 

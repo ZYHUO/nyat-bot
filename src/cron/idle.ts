@@ -17,6 +17,7 @@ import { getChatState } from '../pipeline/timing/chat-runtime.js';
 import { isTurnActorChat } from '../pipeline/turn/flags.js';
 import { generatePersonaProactiveText } from '../pipeline/turn/proactive-turn.js';
 import { getBotUid } from '../bot/bot.js';
+import { isAsleep } from '../tracking/sleep.js';
 
 const ACTIVE_GROUPS_MAX_AGE = 30 * 86400; // prune groups unseen for 30 days
 const LAST_POKE_PREFIX = 'xxb:last_poke:';
@@ -46,6 +47,11 @@ async function discoverActiveGroupChats(): Promise<number[]> {
 export async function runIdleCheck(): Promise<void> {
   if (!isWithinActiveHours()) {
     logger.debug('Idle check: outside active hours, skipping');
+    return;
+  }
+  // 硬作息:睡着了不会主动搭话(活跃时段门之外的兜底 —— 强制睡/seeded 表都盖住)
+  if (await isAsleep()) {
+    logger.debug('Idle check: asleep, skipping');
     return;
   }
 
