@@ -137,6 +137,7 @@ async function runJudgedEntry(
           gateBypass: gateBypass || current.waitReplay === true,
           isReplan: replans > 0,
           isWaitReplay: current.waitReplay === true,
+          sleepCatchup: current.sleepCatchup === true,
           burstMessageIds: currentBurstIds.length > 1 ? currentBurstIds : undefined,
         },
       });

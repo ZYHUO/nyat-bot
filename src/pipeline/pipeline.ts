@@ -61,7 +61,8 @@ import { needsLookup } from "./heart/path-heuristic.js";
 import { setWaitAnchor } from "./turn/buffer.js";
 import { getFocus as getChatFocus } from "./turn/focus.js";
 import { getLifeState } from "../tracking/life-state.js";
-import { isAsleep, sleepSilencesAtStageA, sleepWakeDecision } from "../tracking/sleep.js";
+import { getSleepPhase, sleepStageAVerdict, sleepWakeDecision } from "../tracking/sleep.js";
+import { pushSleepPending, clearSleepPending } from "../tracking/sleep-queue.js";
 
 
 // ── Main pipeline orchestrator ──────────────────────────────────────
@@ -408,17 +409,36 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       messagesLast1Hour = Math.max(messagesLast1Hour, act.messages1hour);
     } catch { /* fail-soft: 窗口近似 */ }
 
-    // 4.05 睡眠门 Stage A(硬作息):真睡着了 —— 闲聊与将进 L1/L2/heart
-    // 的消息直接静默,不烧 LLM(含 replan/wait-replay 锚点:聊着聊着睡着
-    // 了就别准时回访)。指令/直接交互/功能规则放行,由命令分发层与
-    // Stage B(5.45b)接手。bookkeeping(context/记忆/活动)在上面已完成。
-    if (await isAsleep()) {
+    // 4.05 睡眠门 Stage A(硬作息 v2):睡着时指令/点名/功能规则放行
+    // (命令分发层与 Stage B 接手);对话热度类 L0 自动接话不烧 judge,
+    // 直接攒进睡眠队列;L1/heart 闲聊按预算放 judge 判"值不值得回"
+    // (REPLY 会在 Stage B 入队),预算外静默。补回回放(sleepCatchup)
+    // 绕过整个睡眠门 —— 防半夜补回被再次入队死循环。
+    const sleepBypass = job.turnContext?.sleepCatchup === true;
+    const sleepPhaseA = sleepBypass ? "awake" : await getSleepPhase();
+    if (sleepPhaseA !== "awake") {
       const l0 = l0Rule({
         message: formatted, recentMessages, botUid,
         botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
       });
-      if (sleepSilencesAtStageA(l0)) {
+      const verdictA = await sleepStageAVerdict(job.chatId, l0, sleepPhaseA);
+      if (verdictA === "queue") {
+        await pushSleepPending(job.chatId, {
+          entry: {
+            update: job.update, chatId: job.chatId, messageId: formatted.messageId,
+            enqueuedAt: job.enqueuedAt, waitReplay: true, sleepCatchup: true,
+          },
+          rule: l0?.rule,
+          ts: Date.now(),
+        });
+        logger.info(
+          { chatId: job.chatId, messageId: formatted.messageId, rule: l0?.rule ?? null },
+          "Pipeline complete (asleep, queued for catch-up)",
+        );
+        return;
+      }
+      if (verdictA === "silent") {
         logger.info(
           { chatId: job.chatId, messageId: formatted.messageId, rule: l0?.rule ?? null },
           "Pipeline complete (asleep, chatter silenced)",
@@ -670,22 +690,36 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }
     }
 
-    // 5.45b 睡眠门 Stage B(硬作息):slash/NL 指令已在上面的拦截层分发完,
-    // 还走到这里的只剩直接交互(@/回 bot/私聊)与功能规则。功能规则豁免
-    // (post-mute 拦截与 /checkin /stats 的 LLM 渲染还要处理),直接交互掷
-    // "升级式吵醒"骰子:主人必醒,越 ping 越容易醒;没醒 → 静默。醒了的
-    // 回复自带迷糊语气(self-state 的 sleeping 叙述)+ 迷糊窗口内继续接话。
-    if (await isAsleep()) {
-      const verdict = await sleepWakeDecision(job.chatId, formatted.uid, judgeResult.rule);
-      if (verdict === "silent") {
-        const totalMs = Math.round(performance.now() - start);
-        logger.info(
-          { chatId: job.chatId, totalMs, rule: judgeResult.rule, timings },
-          "Pipeline complete (asleep, not woken)",
-        );
-        return;
+    // 5.45b 睡眠门 Stage B(硬作息 v2):slash/NL 指令已在上面的拦截层分发
+    // 完。功能规则豁免(post-mute 拦截与 /checkin /stats 的 LLM 渲染还要处
+    // 理);点名(@/回 bot/私聊)掷"升级式吵醒"骰子:主人必醒,越 ping 越
+    // 容易醒,午睡浅概率翻倍;没醒的点名与 judge 判 REPLY 的闲聊 → 攒进
+    // 睡眠队列,半夜醒/早上起床后补。被吵醒 → 清该 chat 队列("看过手机
+    // 了"),回复自带迷糊语气(self-state)+ 迷糊窗口内继续接话。
+    if (!sleepBypass) {
+      const sleepPhaseB = await getSleepPhase();
+      if (sleepPhaseB !== "awake") {
+        const verdict = await sleepWakeDecision(job.chatId, formatted.uid, judgeResult.rule, sleepPhaseB);
+        if (verdict === "wake") {
+          await clearSleepPending(job.chatId);
+        } else if (verdict === "queue") {
+          await pushSleepPending(job.chatId, {
+            entry: {
+              update: job.update, chatId: job.chatId, messageId: formatted.messageId,
+              enqueuedAt: job.enqueuedAt, waitReplay: true, sleepCatchup: true,
+            },
+            rule: judgeResult.rule,
+            ts: Date.now(),
+          });
+          const totalMs = Math.round(performance.now() - start);
+          logger.info(
+            { chatId: job.chatId, totalMs, rule: judgeResult.rule, timings },
+            "Pipeline complete (asleep, queued for catch-up)",
+          );
+          return;
+        }
+        // 'pass'(豁免)/'wake'(被吵醒)→ 继续往下走
       }
-      // 'pass'(豁免规则)/'wake'(被吵醒)→ 继续往下走
     }
 
     // 5.46 Phase 3: Timing Gate — LLM-based rhythm control

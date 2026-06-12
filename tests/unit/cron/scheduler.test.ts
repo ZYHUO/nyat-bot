@@ -53,6 +53,7 @@ vi.mock('../../../src/tracking/stats.js', () => ({
 process.env['PROACTIVE_SCAN_ENABLED'] = 'false';
 process.env['VERIFY_ENABLED'] = 'false';
 process.env['LEARNER_ENABLED'] = 'false';
+process.env['SLEEP_SCHEDULE_ENABLED'] = 'false';
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'

@@ -280,6 +280,7 @@ export async function generateAndSendReplies(args: {
           instruction: instructionInfo ?? undefined,
           heartWhy: job.turnContext?.heartWhy,
           selfState: job.turnContext?.selfState,
+          sleepCatchup: job.turnContext?.sleepCatchup,
           latenessHint: latenessSec !== undefined
             ? '[迟到回复] 你刚才没在看这个群(在忙别的),过了好一会儿才看到这条消息。回复**开头**自然带一句迟到的语气("刚没看到""才看到喵"之类),轻描淡写就好,不用正式道歉。'
             : undefined,

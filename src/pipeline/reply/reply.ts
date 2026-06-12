@@ -152,6 +152,8 @@ export async function generateReply(
     instruction?: { strength: 'master' | 'normal' };
     /** 迟到回复:注入"刚没看到"语气提示 */
     latenessHint?: string;
+    /** 作息 v2:睡眠队列补回 — "刚睡醒看到"语气 + 允许 silent 反悔 */
+    sleepCatchup?: boolean;
     /** L1: 心流的内心独白 — 决定与写作是同一个念头 */
     heartWhy?: string;
     /** 审计 #38:心流分支算好的自我状态快照,同回合直接复用 */
@@ -442,10 +444,15 @@ export async function generateReply(
   const heartPart = callOpts?.heartWhy
     ? `[你的念头] 你看到这条消息时心里想的是:「${callOpts.heartWhy}」。顺着这个念头说,别另起炉灶。`
     : undefined;
+  // 作息 v2:补觉回复注记 —— 在场时压掉迟到注记(两者语义重叠,只留一个)
+  const catchupPart = callOpts?.sleepCatchup
+    ? '[补觉回复] 这条消息是你睡觉时错过的,刚睡醒(或半夜迷迷糊糊摸到手机)才看到,现在补个回复。开头自然带一句"刚睡醒看到""昨晚睡了才看到喵"之类,轻描淡写;如果话题明显已经翻篇/不需要回了,就输出 {"action":"silent"}。'
+    : undefined;
   // 指令/念头/迟到/连发是行为指令(p<10,永不裁);其余按优先级进预算
   if (instructionPart) ctxParts.push([1, instructionPart]);
   if (heartPart) ctxParts.push([2, heartPart]);
-  if (callOpts?.latenessHint) ctxParts.push([3, callOpts.latenessHint]);
+  if (catchupPart) ctxParts.push([3, catchupPart]);
+  else if (callOpts?.latenessHint) ctxParts.push([3, callOpts.latenessHint]);
   if (burstPart) ctxParts.push([4, burstPart]);
   if (revisitPart) ctxParts.push([45, revisitPart]);
   const CTX_BUDGET_CHARS = 1400;

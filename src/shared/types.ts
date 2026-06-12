@@ -146,5 +146,10 @@ export interface ChatJob {
      * side-effects and go straight to judge→reply.
      */
     isWaitReplay?: boolean;
+    /**
+     * 作息 v2:睡眠队列补回的回放回合 —— 绕过睡眠门(防再入队死循环),
+     * 写手收到"[补觉回复]"注记(刚睡醒/半夜刷手机语气,别当刚聊到一半)。
+     */
+    sleepCatchup?: boolean;
   };
 }

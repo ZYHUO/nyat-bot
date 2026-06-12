@@ -4,6 +4,7 @@
 
 import { getBot } from '../bot.js';
 import { toMarkdownV2 } from './markdown.js';
+import { recordSpeech } from '../../tracking/speech-meter.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RETRIES = 3;
@@ -83,7 +84,7 @@ export async function sendMessage(
   text: string,
   replyToId?: number,
 ): Promise<number> {
-  return withRetry(async () => {
+  const messageId = await withRetry(async () => {
     const bot = getBot();
     const md = toMarkdownV2(text);
     const replyParams = replyToId ? { message_id: replyToId } : undefined;
@@ -116,6 +117,9 @@ export async function sendMessage(
       throw err;
     }
   }, 'sendMessage');
+  // 作息 v2:发言计数(动态就寝的"累"度量;fire-and-forget)
+  recordSpeech();
+  return messageId;
 }
 
 /**

@@ -168,12 +168,13 @@ export function startCronJobs(deps?: CronDeps): void {
     void safeRun('idle-check', runIdleCheck);
   }));
 
-  // 硬作息边沿:到点睡觉说晚安、到点起床说早安(每分钟查一次状态翻转)
-  if (env().SLEEP_SCHEDULE_ENABLED && env().SLEEP_ANNOUNCE_ENABLED) {
+  // 硬作息心跳(v2):动态就寝 shift、晚安/早安边沿、半夜醒、补回排水
+  // (问候由 SLEEP_ANNOUNCE_ENABLED 在函数内部单独控制,心跳必须常跑)
+  if (env().SLEEP_SCHEDULE_ENABLED) {
     tasks.push(schedule('* * * * *', () => {
-      void safeRun('sleep-announce', async () => {
-        const { runSleepAnnounce } = await import('./sleep-announce.js');
-        await runSleepAnnounce();
+      void safeRun('sleep-cycle', async () => {
+        const { runSleepCycle } = await import('./sleep-cycle.js');
+        await runSleepCycle();
       });
     }));
   }
@@ -225,7 +226,7 @@ const CRON_TIMEOUT_MS: Record<string, number> = {
   'knowledge-sync': 15 * 60_000,
   'user-profile-sync': 10 * 60_000,
   'idle-check': 60_000,
-  'sleep-announce': 60_000,
+  'sleep-cycle': 60_000,
   'channel-sync': 10 * 60_000,
 };
 const DEFAULT_CRON_TIMEOUT_MS = 5 * 60_000;

@@ -25,6 +25,11 @@ export interface PendingEntry {
    * 直接重新决策(跳过 gate);若同批有更新的消息则让位于新锚点。
    */
   waitReplay?: boolean;
+  /**
+   * 作息 v2:睡眠队列补回的条目(半夜醒/早上起床回放)。与 waitReplay
+   * 同走回放通道,额外:绕过睡眠门(防补回被再次入队死循环)+ 写手注记。
+   */
+  sleepCatchup?: boolean;
 }
 
 /** chat_turn job 的载荷 */
