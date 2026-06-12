@@ -273,7 +273,28 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     return makeShortCircuit('continue', 'llm_call_failed', start);
   }
 
-  const parsed = parseGateResponse(raw);
+  let parsed = parseGateResponse(raw);
+  if (!parsed) {
+    // MaiBot 借鉴:解析失败先带纠正提示重试一次(gate 模型轻量,成本低)。
+    // 直接 fail-open continue 会让 bot 在本该沉默的时机插嘴,破坏节奏感。
+    try {
+      const retry = await callWithFallback({
+        usage: e.TIMING_GATE_USAGE,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMsg },
+          { role: 'assistant', content: raw.slice(0, 300) },
+          { role: 'user', content: '上面的输出不是合法 JSON。只输出一个 JSON 对象,不要任何其他文字。' },
+        ],
+        maxTokens: 200,
+        temperature: 0,
+        signal: input.signal,
+        maxTimeoutMs: timeoutMs,
+      });
+      parsed = parseGateResponse(retry.content);
+      if (parsed) raw = retry.content;
+    } catch { /* 重试失败走下面的 fail-open */ }
+  }
   if (!parsed) {
     logger.warn(
       { chatId: input.chatId, rawSnippet: raw.slice(0, 200) },

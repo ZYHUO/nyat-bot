@@ -152,6 +152,7 @@ export function buildMessages(
   chatId?: number,
   burstHint?: string,
   expressionOverride?: string,
+  midTermMemory?: string,
 ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
   const userParts: string[] = [];
 
@@ -162,6 +163,11 @@ export function buildMessages(
 
   if (knowledge) {
     userParts.push(`[知识库]\n${knowledge}`);
+  }
+
+  // 中期记忆(MaiBot 借鉴):滚出窗口的旧对话压缩摘要,pinned 背景
+  if (midTermMemory) {
+    userParts.push(`[中期记忆] 更早对话的压缩摘要(背景参考,别逐句复述):\n${midTermMemory}`);
   }
 
   if (checkinData) {

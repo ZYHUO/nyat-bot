@@ -13,6 +13,12 @@ import { addTimer, listTimers, deleteTimer } from './timer.js';
 import { queryBotKnowledge } from './bot-knowledge.js';
 import { executePoll } from './poll.js';
 import { buildJargonTool } from './jargon-tool.js';
+import {
+  queryMemorySchema, executeQueryMemory,
+  queryPersonProfileSchema, executeQueryPersonProfile,
+  fetchHistorySchema, executeFetchHistory,
+  sendImageSchema, executeSendImage,
+} from './agent-tools.js';
 import { env } from '../../env.js';
 import { loadSkills, type LoadedSkillEntry } from './skill-loader.js';
 
@@ -169,6 +175,47 @@ function buildSchemasAndTools(
   const jargonDef = buildJargonTool(chatId);
   if (jargonDef) {
     register(jargonDef.name, jargonDef.schema, jargonDef.tool);
+  }
+
+  // ── Agent builtin tools(MaiBot Maisaka builtin_tool 对应)──
+  // 让模型按需拉记忆/画像/历史,而不是全靠预注入。只读、容错。
+  register(
+    'QUERY_MEMORY',
+    queryMemorySchema,
+    tool({
+      description: '检索本群长期记忆。当聊到过去的事、需要回忆"之前谁说过什么"时使用。',
+      parameters: queryMemorySchema,
+      execute: async ({ query }) => executeQueryMemory(chatId, query),
+    }),
+  );
+  register(
+    'QUERY_PERSON_PROFILE',
+    queryPersonProfileSchema,
+    tool({
+      description: '查询某个群友的画像(性格、偏好、你和TA的关系)。当回复涉及具体的人、需要了解TA时使用。',
+      parameters: queryPersonProfileSchema,
+      execute: async ({ name }) => executeQueryPersonProfile(chatId, name),
+    }),
+  );
+  register(
+    'FETCH_HISTORY',
+    fetchHistorySchema,
+    tool({
+      description: '拉取比当前上下文更早的聊天记录。当话题指向"刚才/上面聊的"但上下文里看不到时使用。',
+      parameters: fetchHistorySchema,
+      execute: async ({ before_message_id, count }) => executeFetchHistory(chatId, before_message_id, count),
+    }),
+  );
+  if (e.SEND_IMAGE_TOOL_ENABLED) {
+    register(
+      'SEND_IMAGE',
+      sendImageSchema,
+      tool({
+        description: '把上下文里某条消息的图片转发到群里。仅当回复确实需要把图分享出来时使用(如有人问"哪张图"),不要滥用。',
+        parameters: sendImageSchema,
+        execute: async ({ message_id, caption }) => executeSendImage(chatId, message_id, caption),
+      }),
+    );
   }
 
   return { tools, schemas };

@@ -54,8 +54,8 @@ export async function isChatSuppressed(chatId: number): Promise<boolean> {
 export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingState): Promise<boolean> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) return false;
-  const cooldownMs = e.TIMING_GATE_COOLDOWN_SEC * 1000;
-  if (cooldownMs <= 0) return false;
+  const baseMs = e.TIMING_GATE_COOLDOWN_SEC * 1000;
+  if (baseMs <= 0) return false;
   // 审计 #38:心流分支一回合读同一 timing hash 3-4 次 → 调用方可传入
   // 已读快照,冷却判断与 lastSpokeSecAgo 共用一份
   const s = prefetched ?? await storeGetChatState(chatId);
@@ -63,6 +63,15 @@ export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingSt
     s.lastGateAction === 'wait' ||
     s.lastGateAction === 'no_action'
   ) {
+    // 指数退避(MaiBot 借鉴):连续 no_action 时窗口 base*2^(n-start),
+    // 封顶 CAP —— 沉默群里 gate 不再每 15s 白烧一次 LLM。wait 不参与
+    // 退避(它有自己的 waitUntil 节奏)。direct 消息在 runTimingGate 的
+    // 上游 short-circuit,不受冷却影响,@bot 永远立即唤醒。
+    let cooldownMs = baseMs;
+    if (s.lastGateAction === 'no_action' && (s.noActionCount ?? 0) > 0) {
+      const over = Math.max(0, (s.noActionCount ?? 0) - e.NO_ACTION_BACKOFF_START_COUNT);
+      cooldownMs = Math.min(baseMs * Math.pow(2, over), e.NO_ACTION_BACKOFF_CAP_SEC * 1000);
+    }
     if (s.lastGateAt && Date.now() - s.lastGateAt < cooldownMs) {
       return true;
     }

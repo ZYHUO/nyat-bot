@@ -51,6 +51,11 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
     redis.zadd('xxb:active_groups', ts, String(chatId)).catch(() => {});
   }
 
+  // 中期记忆:ctx 接近上限时压缩最老一段(fire-and-forget,内部有锁+flag)
+  import('./mid-term.js')
+    .then(({ maybeCompressMidTerm }) => maybeCompressMidTerm(chatId))
+    .catch(() => {});
+
   // Track group member (skip bots and assistant messages)
   if (message.uid && message.role === 'user' && !message.isBot && !message.isAnonymous) {
     try {

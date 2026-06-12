@@ -21,6 +21,13 @@ const redisMock = {
     return n;
   }),
   expire: vi.fn(async () => 1),
+  hincrby: vi.fn(async (k: string, field: string, by: number) => {
+    const h = store.get(k) ?? {};
+    const next = (Number(h[field]) || 0) + by;
+    h[field] = String(next);
+    store.set(k, h);
+    return next;
+  }),
   del: vi.fn(async (k: string) => {
     return store.delete(k) ? 1 : 0;
   }),
@@ -73,6 +80,8 @@ const envValues: Record<string, unknown> = {
   TURN_WAIT_RESUME_ENABLED: false,
   TURN_ACTOR_ENABLED: false,
   TURN_ACTOR_CHAT_IDS: [] as number[],
+  NO_ACTION_BACKOFF_START_COUNT: 2,
+  NO_ACTION_BACKOFF_CAP_SEC: 300,
 };
 vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
@@ -173,6 +182,45 @@ describe('chat-runtime state machine', () => {
   it('isInGateCooldown false after continue', async () => {
     await runtime.recordGateContinue(-100);
     expect(await runtime.isInGateCooldown(-100)).toBe(false);
+  });
+
+  it('no_action 指数退避:连续 no_action 拉长冷却窗口,封顶 CAP', async () => {
+    // MaiBot 借鉴:window = base * 2^max(0, count - START_COUNT), cap 300s
+    const ss = await import('../../../src/pipeline/timing/state-store.js');
+    const k = `xxb:timing:state:${-100}`;
+
+    // count=4 → 15 * 2^2 = 60s 窗口;35s 前的 no_action 仍在冷却
+    for (let i = 0; i < 4; i++) await ss.recordGateNoAction(-100);
+    let h = store.get(k)!;
+    expect(h['noActionCount']).toBe('4');
+    h['lastGateAt'] = String(Date.now() - 35_000);
+    expect(await runtime.isInGateCooldown(-100)).toBe(true);
+
+    // count=2 → 2^0 → 基础 15s 窗口;35s 前已出窗
+    h['noActionCount'] = '2';
+    expect(await runtime.isInGateCooldown(-100)).toBe(false);
+
+    // count=20 → 理论 15*2^18 但封顶 300s;299s 前仍在冷却,301s 前出窗
+    h['noActionCount'] = '20';
+    h['lastGateAt'] = String(Date.now() - 299_000);
+    expect(await runtime.isInGateCooldown(-100)).toBe(true);
+    h['lastGateAt'] = String(Date.now() - 301_000);
+    expect(await runtime.isInGateCooldown(-100)).toBe(false);
+  });
+
+  it('continue/真实回复清零 noActionCount', async () => {
+    const ss = await import('../../../src/pipeline/timing/state-store.js');
+    const k = `xxb:timing:state:${-100}`;
+    await ss.recordGateNoAction(-100);
+    await ss.recordGateNoAction(-100);
+    expect(store.get(k)!['noActionCount']).toBe('2');
+
+    await ss.recordContinue(-100);
+    expect(store.get(k)!['noActionCount']).toBeUndefined();
+
+    await ss.recordGateNoAction(-100);
+    await ss.recordBotReply(-100);
+    expect(store.get(k)!['noActionCount']).toBeUndefined();
   });
 
   it('handleWaitResume transitions WAIT → RUNNING', async () => {

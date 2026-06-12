@@ -35,6 +35,8 @@ export interface ChatTimingState {
   lastUserMsgAt?: number;
   lastGateAt?: number;
   lastGateAction?: 'continue' | 'wait' | 'no_action';
+  /** 连续 no_action 次数(指数退避用;continue/回复后清零)。MaiBot 借鉴。 */
+  noActionCount?: number;
 }
 
 const KEY_PREFIX = 'xxb:timing:state:';
@@ -77,6 +79,10 @@ function parseState(raw: Record<string, string>): ChatTimingState {
     gateAction === 'no_action'
   ) {
     out.lastGateAction = gateAction;
+  }
+  if (raw['noActionCount']) {
+    const n = Number(raw['noActionCount']);
+    if (Number.isFinite(n) && n > 0) out.noActionCount = n;
   }
   return out;
 }
@@ -177,11 +183,11 @@ export async function recordContinue(chatId: number): Promise<void> {
   await persist(chatId, {
     lastGateAt: Date.now(),
     lastGateAction: 'continue',
-  });
+  }, ['noActionCount']);
 }
 
 export async function recordBotReply(chatId: number): Promise<void> {
-  await persist(chatId, { lastBotReplyAt: Date.now() });
+  await persist(chatId, { lastBotReplyAt: Date.now() }, ['noActionCount']);
 }
 
 export async function recordUserMessage(chatId: number): Promise<void> {
@@ -205,10 +211,17 @@ export const _internal = { key, parseState };
  * 记录一次 gate no_action 决策(冷却用)但**不**进入 STOP。
  * actor 模式语义:no_action = "这条不接",人还在场 —— 旧的 enterStop 会把
  * chat 锁死到有人 @ 才醒,这正是"说几下就跑了"的根源。
+ * 同时 HINCRBY noActionCount(指数退避;MaiBot base*2^(n-start) 语义),
+ * continue/真实回复时清零。
  */
 export async function recordGateNoAction(chatId: number): Promise<void> {
   await persist(chatId, {
     lastGateAt: Date.now(),
     lastGateAction: 'no_action',
   });
+  try {
+    await getRedis().hincrby(key(chatId), 'noActionCount', 1);
+  } catch (err) {
+    logger.debug({ err, chatId }, 'noActionCount incr failed (non-critical)');
+  }
 }

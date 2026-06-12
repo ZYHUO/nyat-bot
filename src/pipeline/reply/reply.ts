@@ -19,6 +19,9 @@ import { getBotTracker } from '../../tracking/interaction.js';
 import { getUserProfilePrompt, getUserPreferences } from '../../tracking/user-profile.js';
 import { getReflection } from '../../tracking/outcome.js';
 import { planReply } from '../planner/planner.js';
+import { runAgenticPlanner } from '../planner/agentic-loop.js';
+import { getMidTermBlock } from '../context/mid-term.js';
+import { env } from '../../env.js';
 import { detectCommandIntent } from '../nl-commands.js';
 import { executeToolPlan, formatToolResultsForPrompt } from '../planner/executor.js';
 import { countTokens } from '../../ai/token-counter.js';
@@ -489,6 +492,25 @@ export async function generateReply(
   let toolExecutionFailed = false;
 
   if (effectiveReplyPath === 'planned') {
+    // ── Agentic 循环(MaiBot Maisaka 借鉴):多轮 plan→act,失败回退旧路 ──
+    let legacyPlannerNeeded = true;
+    if (env().PLANNER_AGENTIC_ENABLED) {
+      const agentic = await runAgenticPlanner({
+        messageText: queryText,
+        context: contextStr,
+        knowledge,
+        chatId,
+        userId: message.uid,
+        signal: interruptSignal,
+      });
+      if (!agentic.failed) {
+        toolsUsed = agentic.toolsUsed;
+        toolResultsBlock = agentic.toolResultsBlock;
+        legacyPlannerNeeded = false;
+      }
+    }
+
+    if (legacyPlannerNeeded) {
     const availableTools = getToolNames(chatId, message.uid);
     const plan = await planReply({
       usage,
@@ -527,7 +549,11 @@ export async function generateReply(
         };
       }
     }
+    }
   }
+
+  // 中期记忆 pinned 块(flag off 时为 null,零开销)
+  const midTermMemory = await getMidTermBlock(chatId).catch(() => null);
 
   const messages = buildMessages(
     systemPrompt,
@@ -545,6 +571,7 @@ export async function generateReply(
     chatId,
     burstHint,
     expressionOverride,
+    midTermMemory ?? undefined,
   );
 
   // 5. Call AI final writer (direct or planned both use no-tools final synthesis)

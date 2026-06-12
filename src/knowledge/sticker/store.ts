@@ -552,6 +552,9 @@ export function recordStickerSent(
         (chat_id, message_id, file_unique_id, file_id, intent, sent_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(chatId, messageId, fileUniqueId, fileId, intent ?? null, now);
+    // MaiBot 借鉴:发送**成功后**才计一次自用 —— 此前 usage_count 只统计
+    // 群友发图,bot 自己的使用从不计入,选图加权一直偏向冷门贴纸。
+    incrementUsageCount(fileUniqueId);
   } catch (err) {
     logger.warn({ err, chatId, messageId }, 'recordStickerSent failed');
   }

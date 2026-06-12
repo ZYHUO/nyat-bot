@@ -276,6 +276,19 @@ export async function callModel(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } = {},
 ): Promise<AICallResult> {
+  // MaiBot 借鉴:纯空白片段会让部分供应商返回 400/422(格式错)。
+  // 文本消息空白 → 整条丢弃;内容数组里空白 text part → 滤掉该 part,
+  // 滤空后只剩图片仍保留(vision 合法),全空才丢整条。
+  messages = messages
+    .map((m) => {
+      if (typeof m.content === 'string') return m;
+      const parts = m.content.filter((p) => p.type !== 'text' || p.text.trim().length > 0);
+      return { ...m, content: parts };
+    })
+    .filter((m) =>
+      typeof m.content === 'string' ? m.content.trim().length > 0 : m.content.length > 0,
+    );
+
   if (label.apiFormat === 'claude') {
     const textMessages = messages.map(m => ({
       role: m.role,

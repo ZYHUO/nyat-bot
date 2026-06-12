@@ -185,6 +185,10 @@ const envSchema = z.object({
   // 阶段 4：gate 选 wait/no_action 后，下次再调 gate 的冷却时间（秒）。
   // 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。
   TIMING_GATE_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(15),
+  // no_action 指数退避(MaiBot 借鉴):连续 no_action 第 START_COUNT 次起
+  // 冷却窗口按 2^n 拉长,封顶 CAP;continue/真实回复清零计数。
+  NO_ACTION_BACKOFF_START_COUNT: z.coerce.number().int().nonnegative().default(2),
+  NO_ACTION_BACKOFF_CAP_SEC: z.coerce.number().int().positive().default(300),
 
   // ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ──
   // 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。
@@ -208,6 +212,22 @@ const envSchema = z.object({
   TURN_INTERRUPT_QUIET_MS: z.coerce.number().int().nonnegative().default(1000),
   // 回合内内部轮次预算（reply + 自我接话 + 余量；MaiBot 是 10，保守起步）。
   TURN_MAX_INTERNAL_ROUNDS: z.coerce.number().int().positive().default(4),
+  // ── Agentic planner（MaiBot 1.0.0 Maisaka 多轮 plan→act 借鉴）──
+  // 开了之后 planned 路径用 generateText({tools,maxSteps}) 原生工具循环,
+  // 工具结果回写 LLM 历史,可自适应换工具/重查;失败自动回退旧 JSON 计划。
+  PLANNER_AGENTIC_ENABLED: booleanFromEnv.default(false),
+  // 循环步数上限（MaiBot MAX_INTERNAL_ROUNDS=10,工具场景 4 够用）。
+  PLANNER_MAX_STEPS: z.coerce.number().int().positive().default(4),
+  // SEND_IMAGE 工具(把上下文里的图转发出去,唯一有出站副作用的 agent 工具)。
+  SEND_IMAGE_TOOL_ENABLED: booleanFromEnv.default(false),
+  // ── 中期记忆(MaiBot 1.0.0 借鉴):ctx 滚出窗口前压缩成可引用摘要 ──
+  MTM_ENABLED: booleanFromEnv.default(false),
+  // 每轮压缩的最老消息条数
+  MTM_CHUNK: z.coerce.number().int().positive().default(150),
+  // 摘要 FIFO 上限(超出丢最老的)
+  MTM_MAX_SUMMARIES: z.coerce.number().int().positive().default(10),
+  // 压缩输入字符上限(防超长撑爆 summarize 模型)
+  MTM_INPUT_MAX_CHARS: z.coerce.number().int().positive().default(16000),
   // G4: judge/gate/reply 以整个 burst 为决策单元（而非只看最后一条）。
   TURN_BURST_JUDGE_ENABLED: booleanFromEnv.default(false),
   // G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。

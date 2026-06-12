@@ -7,12 +7,20 @@ import { callWithFallback } from '../ai/fallback.js';
 import { logger } from '../shared/logger.js';
 import type { FormattedMessage } from '../shared/types.js';
 
+// MaiBot 借鉴:超大文件直接丢弃 —— 发给 LLM 会 413/超时,卡住整条管线。
+// Telegram 文件上限 50MB,base64 后 ×1.33;10MB 已远超任何视觉模型需要。
+const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+
 async function downloadTelegramFile(fileId: string): Promise<{ buffer: ArrayBuffer; mimeType: string } | null> {
   try {
     const bot = getBot();
     const file = await bot.api.getFile(fileId);
     const filePath = file.file_path;
     if (!filePath) return null;
+    if (file.file_size && file.file_size > MAX_MEDIA_BYTES) {
+      logger.info({ fileId, fileSize: file.file_size }, 'Media too large, skipping download');
+      return null;
+    }
 
     const token = bot.token;
     const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
@@ -20,6 +28,10 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: ArrayBuff
     if (!response.ok) return null;
 
     const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_MEDIA_BYTES) {
+      logger.info({ fileId, bytes: buffer.byteLength }, 'Media too large after download, dropping');
+      return null;
+    }
     const mimeType = response.headers.get('content-type') ?? 'application/octet-stream';
     return { buffer, mimeType };
   } catch (err) {
