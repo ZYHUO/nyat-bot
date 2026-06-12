@@ -129,7 +129,7 @@ describe('mid-term memory', () => {
     expect(JSON.parse(lists.get(CTX_KEY)![0]!).messageId).toBe(151);
   });
 
-  it('压缩期间头部被内建 trim 动过 → 放弃裁剪,摘要照存', async () => {
+  it('压缩期间头部被内建 trim 动过 → 整轮丢弃,不存摘要(防同批重压出重复摘要)', async () => {
     fillCtx(385);
     callWithFallbackMock.mockImplementation(async () => {
       // LLM 调用期间,内建 trim 抢先丢掉头部 10 条
@@ -138,8 +138,9 @@ describe('mid-term memory', () => {
     });
     await maybeCompressMidTerm(CHAT);
 
-    expect(lists.get(MTM_KEY)).toHaveLength(1);
-    // 没有二次裁剪:长度只少了内建 trim 的 10 条
+    // 摘要不入库(否则下一轮重压同批消息 → 重复摘要,上线首日实测)
+    expect(lists.get(MTM_KEY) ?? []).toHaveLength(0);
+    // 也没有二次裁剪:长度只少了内建 trim 的 10 条
     expect(lists.get(CTX_KEY)).toHaveLength(375);
   });
 

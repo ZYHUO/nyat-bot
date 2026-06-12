@@ -100,6 +100,18 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
       const summaryText = result.content.trim();
       if (!summaryText) return;
 
+      // 先裁原文、裁成功才存摘要 —— 反过来会重复:头部被内建 trim 抢先
+      // 动过时 LTRIM 放弃,原文还在,下一条消息立刻重新触发压缩,同一批
+      // 消息生成两条几乎相同的摘要(上线首日实测踩到)。裁失败丢弃本次
+      // LLM 结果,等下一轮重压,语义正确且无重复。
+      const trimmed = await redis.eval(
+        GUARDED_LTRIM_LUA, 1, ctxKey, rawEntries[0]!, String(rawEntries.length),
+      );
+      if (trimmed !== 1) {
+        logger.info({ chatId }, 'Mid-term compression discarded (ctx head moved during LLM call)');
+        return;
+      }
+
       const entry: MidTermSummary = {
         summary: summaryText.slice(0, 600),
         fromTs: messages[0]!.timestamp,
@@ -113,12 +125,8 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
       pipeline.expire(mtmKey(chatId), MTM_TTL);
       await pipeline.exec();
 
-      // 裁掉已压缩的原文(头部被内建 trim 动过则放弃,容忍重叠)
-      const trimmed = await redis.eval(
-        GUARDED_LTRIM_LUA, 1, ctxKey, rawEntries[0]!, String(rawEntries.length),
-      );
       logger.info(
-        { chatId, compressed: messages.length, trimmed: trimmed === 1, summaryChars: entry.summary.length },
+        { chatId, compressed: messages.length, summaryChars: entry.summary.length },
         'Mid-term memory compressed',
       );
     } finally {

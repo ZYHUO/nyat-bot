@@ -60,8 +60,11 @@ function buildSchemasAndTools(
     }),
   );
 
+  // 注意:不要用 z.string().url() —— 它生成 JSON Schema format:"uri",
+  // OpenAI 工具端点直接 400(冒烟实测)。URL 合法性由 web-fetch 的
+  // SSRF/协议校验把关,这里只收字符串。
   const fetchSchema = z.object({
-    url: z.string().url().describe('要抓取的网页URL'),
+    url: z.string().describe('要抓取的网页URL(http/https 完整地址)'),
   });
   register(
     'FETCH',

@@ -70,7 +70,10 @@ export async function runAgenticPlanner(input: AgenticPlanInput): Promise<Agenti
         compatibility: 'compatible',
       });
       const result = await generateText({
-        model: provider(label.model),
+        // structuredOutputs:false → 工具不带 strict:true。strict 模式要求
+        // required 含全部 key,带可选参数的工具(FETCH_HISTORY/ADD_TIMER)
+        // 会被 OpenAI 端 400(冒烟实测);zod 在执行侧已兜底校验。
+        model: provider(label.model, { structuredOutputs: false }),
         system: systemPrompt,
         messages: [{ role: 'user', content: buildUserPrompt(input) }],
         tools,
