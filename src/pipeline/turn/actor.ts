@@ -157,14 +157,35 @@ async function runJudgedEntry(
       // 等用户这一波消息发完(MaiBot post-interrupt 1s 静默期)
       await waitForMessageQuiet(chatId, e.TURN_INTERRUPT_QUIET_MS);
 
-      // 消化打断期间的新消息:前段 tracking-only,最新一条成为新锚点;
+      // 消化打断期间的新消息:非锚点 tracking-only,锚点选择与 runChatTurn
+      // 一致——**direct 优先**(最后一条 reply-to-bot/@bot),否则取最新的
+      // 非编辑条目。无条件取 fresh.at(-1) 会让"用户 reply bot + 别人紧跟
+      // 插话"场景下点名被挤掉,bot 跑去回应插话的话题,原 reply-to-bot
+      // 用户答非所问(2026-06-12 用户反馈,日志实例 msg 75953"糖")。
       // burst 视野扩展为「原 burst + 打断新增」(都已在上下文里)
       const fresh = await drainPending(chatId);
       if (fresh.length > 0) {
-        for (const ne of fresh.slice(0, -1)) {
-          await trackEntry(chatId, ne, fresh.length, false);
+        let anchorIdx = -1;
+        for (let i = fresh.length - 1; i >= 0; i--) {
+          if (fresh[i]!.direct === true) {
+            anchorIdx = i;
+            break;
+          }
         }
-        current = fresh.at(-1)!;
+        if (anchorIdx === -1) {
+          for (let i = fresh.length - 1; i >= 0; i--) {
+            if (fresh[i]!.isEdit !== true) {
+              anchorIdx = i;
+              break;
+            }
+          }
+        }
+        if (anchorIdx === -1) anchorIdx = fresh.length - 1;
+        for (let i = 0; i < fresh.length; i++) {
+          if (i === anchorIdx) continue;
+          await trackEntry(chatId, fresh[i]!, fresh.length, false);
+        }
+        current = fresh[anchorIdx]!;
         currentBatch = fresh.length;
         currentBurstIds = [
           ...currentBurstIds,

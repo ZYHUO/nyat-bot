@@ -649,4 +649,68 @@ describe("processPipeline path branching", () => {
     const replyTargets = sendDirect.mock.calls.map((c: unknown[]) => c[2]);
     expect(replyTargets).toEqual(expect.arrayContaining([42, 99]));
   }, 15000); // real humanizer delays — generous timeout to avoid suite-load flakiness
+
+  it("direct (reply-to-bot) interactions are exempt from small-group quote suppression", async () => {
+    // #3 小群降 quote 修复:rule ∈ DIRECT_INTERACTION_RULES → 跳过抑制评估。
+    // 场景构造:群风格 quoteRatio=0 → suppressProb=0.92,Math.random=0.9
+    // 本应抑制(0.9 < 0.92,且 0.9 > 全部 humanizer 概率 → 不误触发);
+    // direct 豁免后引用必须保留(2026-06-12 reply-to-bot 裸消息根因)。
+    const { _resetChatStyleCache } = await import("../../../src/tracking/chat-style.js");
+    _resetChatStyleCache();
+    mockJudge.mockResolvedValue({
+      action: "REPLY",
+      rule: "reply_to_self",
+      replyPath: "direct",
+      replyTier: "normal",
+      level: "L0_RULE",
+      latencyMs: 0,
+    });
+    // 15 条无 replyTo 的人类消息 → quoteRatio=0;触发消息(42)在窗口
+    // 尾部 → 无人插话,抑制前置条件全部满足
+    const fillers = Array.from({ length: 15 }, (_, i) => ({
+      ...makeFormattedMessage(),
+      messageId: 100 + i,
+      uid: 2000 + i,
+      textContent: `msg ${i}`,
+    }));
+    mockGetRecent.mockResolvedValue([...fillers, makeFormattedMessage()]);
+    const rand = vi.spyOn(Math, "random").mockReturnValue(0.9);
+    try {
+      await processPipeline({ type: "message", chatId: -100777, enqueuedAt: Date.now(), update: {} });
+    } finally {
+      rand.mockRestore();
+    }
+    const replyCall = sendDirect.mock.calls.find((c: unknown[]) => c[1] === "hi");
+    expect(replyCall).toBeDefined();
+    expect(replyCall![2]).toBe(42);
+  }, 15000);
+
+  it("small-group quote suppression still fires for non-direct replies", async () => {
+    // 同样的抑制场景,但非 direct(无 rule)→ 策略照常生效,引用被砍
+    const { _resetChatStyleCache } = await import("../../../src/tracking/chat-style.js");
+    _resetChatStyleCache();
+    mockJudge.mockResolvedValue({
+      action: "REPLY",
+      replyPath: "chat",
+      replyTier: "normal",
+      level: "L1_MICRO",
+      latencyMs: 0,
+    });
+    const fillers = Array.from({ length: 15 }, (_, i) => ({
+      ...makeFormattedMessage(),
+      messageId: 100 + i,
+      uid: 2000 + i,
+      textContent: `msg ${i}`,
+    }));
+    mockGetRecent.mockResolvedValue([...fillers, makeFormattedMessage()]);
+    const rand = vi.spyOn(Math, "random").mockReturnValue(0.9);
+    try {
+      await processPipeline({ type: "message", chatId: -100778, enqueuedAt: Date.now(), update: {} });
+    } finally {
+      rand.mockRestore();
+    }
+    const replyCall = sendDirect.mock.calls.find((c: unknown[]) => c[1] === "hi");
+    expect(replyCall).toBeDefined();
+    expect(replyCall![2]).toBeUndefined();
+  }, 15000);
 });

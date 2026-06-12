@@ -325,6 +325,52 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     expect(replanned.turnContext.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('replan anchors on the direct entry, not the newest interjection', async () => {
+    // 修复:用户 reply bot(direct)后别人紧跟插话,replan 无条件取
+    // fresh.at(-1) 会把点名挤掉,bot 跑去回应插话话题(2026-06-12 反馈,
+    // 日志实例 msg 75953"糖")。锚点选择须与 runChatTurn 一致:direct 优先。
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)];
+
+    processPipelineMock.mockImplementationOnce(async () => {
+      bufferState.pending = [entry(2, true), entry(3)];
+      throw aborted();
+    });
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(3);
+    // 非锚点条目(3)tracking-only 入册
+    const tracked = processPipelineMock.mock.calls[1]![0] as { messageId: number; coalesce: { isLastInBatch: boolean } };
+    expect(tracked.messageId).toBe(3);
+    expect(tracked.coalesce.isLastInBatch).toBe(false);
+    // 锚点是 direct 条目(2),且按 direct 语义开火
+    const replanned = processPipelineMock.mock.calls[2]![0] as {
+      messageId: number;
+      coalesce: { flushReason: string };
+      turnContext: { isReplan: boolean };
+    };
+    expect(replanned.messageId).toBe(2);
+    expect(replanned.coalesce.flushReason).toBe('direct_interaction');
+    expect(replanned.turnContext.isReplan).toBe(true);
+  });
+
+  it('replan skips edit entries as anchor when no direct entry exists', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)];
+
+    processPipelineMock.mockImplementationOnce(async () => {
+      bufferState.pending = [entry(2), { ...entry(3), isEdit: true }];
+      throw aborted();
+    });
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(3);
+    const replanned = processPipelineMock.mock.calls[2]![0] as { messageId: number };
+    expect(replanned.messageId).toBe(2);
+  });
+
   it('replans with the same anchor when no new messages landed (spurious abort)', async () => {
     envState.TURN_ABORT_ENABLED = true;
     bufferState.pending = [entry(1)];

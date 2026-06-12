@@ -135,10 +135,10 @@ export async function generateAndSendReplies(args: {
   // 命中后:生成前注入"刚没看到"语气提示,投递时静默等待(不显示 typing),
   // 只在最后 2-3 秒才显示"正在输入"——像刚拿起手机才看到。
   let latenessSec: number | undefined;
-  const isDirectForLateness = !!(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule));
+  const isDirectInteraction = !!(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule));
   if (
     job.chatId < 0 && job.turnContext && !job.turnContext.isReplan &&
-    !instructionInfo && !isDirectForLateness
+    !instructionInfo && !isDirectInteraction
   ) {
     try {
       const tstate = await getChatState(job.chatId);
@@ -400,8 +400,12 @@ export async function generateAndSendReplies(args: {
     // #3 小群降 quote:回复紧跟目标消息、中间没别人插话时,引用是冗余的
     // ——真人只在需要"消歧"时才 quote。概率随本群真人引用率回归;
     // 指向他人消息的跨目标回复保留引用(那正是需要消歧的场景)。
+    // direct(回复 bot/@bot/接力 replan)豁免:别人专门对 bot 说话,回应
+    // 必须 quote 回去——turn actor 让回复紧跟触发消息成为常态,"无人插话"
+    // 几乎恒真,不豁免的话 reply-to-bot 的回应大概率变成裸消息,在群里
+    // 看起来像接话而不是回复(2026-06-12 用户反馈的根因)。
     let suppressLatestQuote = false;
-    if (job.chatId < 0 && !instructionInfo) {
+    if (job.chatId < 0 && !instructionInfo && !isDirectInteraction) {
       try {
         const recent8 = await getRecent(job.chatId, 8);
         const idx = recent8.findIndex((m) => m.messageId === formatted.messageId);
@@ -414,6 +418,12 @@ export async function generateAndSendReplies(args: {
             const quoteRatio = chatStyle?.quoteRatio ?? 0.2;
             const suppressProb = 1 - Math.min(0.85, Math.max(0.08, quoteRatio * 2.5));
             suppressLatestQuote = Math.random() < suppressProb;
+            if (suppressLatestQuote) {
+              logger.debug(
+                { chatId: job.chatId, messageId: formatted.messageId, suppressProb, quoteRatio },
+                'quote suppressed by small-group policy',
+              );
+            }
           }
         }
       } catch (err) {

@@ -20,6 +20,7 @@ import { buildProfileInjection } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
 import { buildRoleHint } from '../../tracking/behavioral-roles.js';
+import { getBotUid } from '../../bot/bot.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -268,6 +269,17 @@ export function buildMessages(
   let currentMsgBlock = `[CURRENT_MESSAGE_TO_REPLY]\nmessage_id: ${latestMessage.messageId}\n发送者: ${senderLabel}`;
   if (latestMessage.senderTag) {
     currentMsgBlock += `\n用户Tag: ${latestMessage.senderTag}`;
+  }
+  // ★ replyTo 显式注入:此前只在上下文行里以「→回复 …」可见,replan 换锚
+  // 或长上下文时模型经常感知不到"这条是在对我说话",回出来的内容跑题
+  // (2026-06-12 用户反馈)。回复他人的消息也注明,便于指向性回应。
+  if (latestMessage.replyTo) {
+    const rt = latestMessage.replyTo;
+    const rtName = sanitizeSenderString(rt.fullName ?? '');
+    const rtSnip = (rt.textSnippet ?? '').slice(0, 60);
+    currentMsgBlock += rt.uid === getBotUid()
+      ? `\n回复对象: 你刚才的消息(#${rt.messageId}「${rtSnip}」)——这条消息是专门对你说的,回应它`
+      : `\n回复对象: ${rtName} 的消息(#${rt.messageId}「${rtSnip}」)`;
   }
   // Structured multi-section profile (#3): prefer the composed section block;
   // fall back to the legacy single profile_prompt string when no sections exist.

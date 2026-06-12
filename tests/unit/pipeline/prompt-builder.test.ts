@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { buildSystemPrompt, buildMessages, _resetPromptCache } from '../../../src/pipeline/reply/prompt-builder.js';
 import type { FormattedMessage } from '../../../src/shared/types.js';
 
+// replyTo 注入需要 botUid 来区分"回复 bot"和"回复他人"
+vi.mock('../../../src/bot/bot.js', () => ({ getBotUid: () => 8888 }));
+
 // Mock the config module to provide a known prompts directory
 vi.mock('../../../src/shared/config.js', () => {
   const promptFiles: Record<string, string> = {
@@ -87,6 +90,33 @@ describe('Prompt Builder', () => {
       expect(messages).toHaveLength(2);
       expect(messages[0]!.role).toBe('system');
       expect(messages[1]!.role).toBe('user');
+    });
+
+    it('marks reply-to-bot messages explicitly in CURRENT_MESSAGE', () => {
+      // replan 换锚/长上下文时模型经常感知不到"这条是在对我说话"
+      // (2026-06-12 反馈)——replyTo 必须显式注入,不能只靠上下文行
+      const msg: FormattedMessage = {
+        ...latestMessage,
+        replyTo: { messageId: 7, uid: 8888, fullName: '啾咪囝', textSnippet: '分本喵一口喵' },
+      };
+      const messages = buildMessages('sys', 'ctx', msg);
+      expect(messages[1]!.content).toContain('回复对象: 你刚才的消息(#7「分本喵一口喵」)');
+      expect(messages[1]!.content).toContain('专门对你说的');
+    });
+
+    it('marks reply-to-others without the bot phrasing', () => {
+      const msg: FormattedMessage = {
+        ...latestMessage,
+        replyTo: { messageId: 9, uid: 555, fullName: 'Bob', textSnippet: 'yo' },
+      };
+      const messages = buildMessages('sys', 'ctx', msg);
+      expect(messages[1]!.content).toContain('回复对象: Bob 的消息(#9「yo」)');
+      expect(messages[1]!.content).not.toContain('专门对你说的');
+    });
+
+    it('omits the reply-to line when the message replies to nothing', () => {
+      const messages = buildMessages('sys', 'ctx', latestMessage);
+      expect(messages[1]!.content).not.toContain('回复对象');
     });
 
     it('system message contains the prompt', () => {
