@@ -1,12 +1,15 @@
 import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { isAgreementTail } from './expression-filter.js';
 import type { LearnerScanResult, ExpressionEntry } from './types.js';
 
-/** G9 程序级硬过滤:别学 bot 自己的话(回音室)和媒体占位符 */
+/** G9 程序级硬过滤:别学 bot 自己的话(回音室)、媒体占位符、附和句尾口癖 */
 function isLearnableExpression(situation: string, style: string, botMarkers: string[]): boolean {
   const combined = `${situation} ${style}`;
   if (/\[(?:表情|图片|贴纸|sticker|media|语音|视频)/i.test(combined)) return false;
+  // "…是吧/…对吧"这类附和句尾当标点的口癖不学(否则注入即强化,自激循环)
+  if (isAgreementTail(style)) return false;
   for (const marker of botMarkers) {
     if (marker && combined.includes(marker)) return false;
   }
@@ -142,15 +145,20 @@ export function upsertExpressions(
  */
 export function getTopExpressions(chatId: number, limit: number): ExpressionEntry[] {
   const db = getDb();
+  // 注入侧双保险:即使 DB 里残留/被 merge 靠拢出的附和句尾,注入前也滤掉
+  // (多取一些再过滤,保证滤后仍够 limit 条)。
+  const fetch = limit * 3;
+  const filter = (rows: ExpressionEntry[]): ExpressionEntry[] =>
+    rows.filter((r) => !isAgreementTail(r.style)).slice(0, limit);
   // G10 注入池地板:count>=2 的(真被群里反复用的)够多时只从它们里取,
   // 不让 1500+ 条单次噪音稀释注入池(MaiBot weighted_sample from count>1 同义)。
-  const reinforced = db.prepare(
+  const reinforced = filter(db.prepare(
     "SELECT * FROM expressions WHERE chat_id = ? AND status = 'approved' AND count >= 2 ORDER BY count DESC LIMIT ?",
-  ).all(chatId, limit) as ExpressionEntry[];
+  ).all(chatId, fetch) as ExpressionEntry[]);
   if (reinforced.length >= Math.min(limit, 3)) return reinforced;
-  return db.prepare(
+  return filter(db.prepare(
     "SELECT * FROM expressions WHERE chat_id = ? AND status = 'approved' ORDER BY count DESC LIMIT ?",
-  ).all(chatId, limit) as ExpressionEntry[];
+  ).all(chatId, fetch) as ExpressionEntry[]);
 }
 
 /**
@@ -201,8 +209,9 @@ export function reinforceExpressions(ids: number[]): void {
   if (ids.length === 0) return;
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
-  // 封顶 60:注入即强化会正反馈锁死 top-5(P2),封顶后新表达仍有机会爬升
-  const stmt = db.prepare('UPDATE expressions SET count = count + 1, updated_at = ? WHERE id = ? AND count < 60');
+  // 封顶 30:注入即强化会正反馈锁死 top-5(P2),封顶后新表达仍有机会爬升。
+  // (60→30:口癖自激教训后调低,top 句式不再死锁、洗库更快)
+  const stmt = db.prepare('UPDATE expressions SET count = count + 1, updated_at = ? WHERE id = ? AND count < 30');
   const run = db.transaction(() => {
     for (const id of ids) stmt.run(now, id);
   });
