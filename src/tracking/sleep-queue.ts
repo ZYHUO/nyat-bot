@@ -13,6 +13,7 @@
 
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
+import { isTurnActorChat } from '../pipeline/turn/flags.js';
 import type { PendingEntry } from '../pipeline/turn/types.js';
 
 const QKEY = (chatId: number): string => `xxb:sleep:pendingq:${chatId}`;
@@ -34,7 +35,17 @@ const ADDRESSED_RULES_FOR_PRIORITY = new Set([
   'private_chat',
 ]);
 
-export async function pushSleepPending(chatId: number, item: SleepPendingItem): Promise<void> {
+/**
+ * 入队一条睡眠欠账。仅接受能被回放的 turn-actor 群 —— 补回走 actor 的
+ * wait-resume 通道,非 actor 群入了也永远回放不出去,只会被 drain 取出
+ * 后默默丢弃(cursor review 抓到的数据丢失点)。非 actor → 不入队、返回
+ * false,调用方据此静默(与 v1 一致:无法回放就别假装攒着)。
+ */
+export async function pushSleepPending(chatId: number, item: SleepPendingItem): Promise<boolean> {
+  if (!isTurnActorChat(chatId)) {
+    logger.debug({ chatId }, 'Sleep queue: chat not replayable (non turn-actor), not queued');
+    return false;
+  }
   try {
     const redis = getRedis();
     await redis
@@ -46,8 +57,10 @@ export async function pushSleepPending(chatId: number, item: SleepPendingItem): 
       .expire(INDEX_KEY, TTL_SEC)
       .exec();
     logger.info({ chatId, rule: item.rule }, 'Sleep queue: message stashed for catch-up');
+    return true;
   } catch (err) {
     logger.debug({ err, chatId }, 'Sleep queue: push failed (non-critical)');
+    return false;
   }
 }
 

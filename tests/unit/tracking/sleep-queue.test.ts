@@ -36,6 +36,12 @@ const redisMock = {
 };
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 
+// 默认所有群可回放(turn actor);单测里临时改成 false 验证非 actor 丢弃
+let actorChat = true;
+vi.mock('../../../src/pipeline/turn/flags.js', () => ({
+  isTurnActorChat: () => actorChat,
+}));
+
 const { pushSleepPending, clearSleepPending, listSleepPendingChats, takeSleepPending, peekSleepQueues } =
   await import('../../../src/tracking/sleep-queue.js');
 
@@ -49,6 +55,7 @@ const entry = (messageId: number) => ({
 beforeEach(() => {
   lists.clear();
   sets.clear();
+  actorChat = true;
   vi.clearAllMocks();
 });
 
@@ -59,6 +66,18 @@ describe('sleep-queue', () => {
     }
     expect(lists.get('xxb:sleep:pendingq:-100')!.length).toBe(3);
     expect(await listSleepPendingChats()).toEqual([-100]);
+  });
+
+  it('非 turn-actor 群不入队、返回 false(回放不出去,别假装攒着)', async () => {
+    actorChat = false;
+    const ok = await pushSleepPending(-100, { entry: entry(1), rule: 'mention_self', ts: 1 });
+    expect(ok).toBe(false);
+    expect(lists.get('xxb:sleep:pendingq:-100')).toBeUndefined();
+    expect(await listSleepPendingChats()).toEqual([]);
+  });
+
+  it('turn-actor 群入队返回 true', async () => {
+    expect(await pushSleepPending(-100, { entry: entry(1), rule: 'heart', ts: 1 })).toBe(true);
   });
 
   it('take:点名规则优先于更新的闲聊;取后清空', async () => {

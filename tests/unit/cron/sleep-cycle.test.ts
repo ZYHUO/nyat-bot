@@ -47,9 +47,14 @@ const takeSleepPending = vi.fn(async (chatId: number) => {
   queues.splice(idx, 1);
   return { entry: { update: {}, chatId, messageId: 42, enqueuedAt: 0 }, rule: 'mention_self', ts: 1 };
 });
+const clearSleepPending = vi.fn(async (chatId: number) => {
+  const idx = queues.findIndex((q) => q.chatId === chatId);
+  if (idx >= 0) queues.splice(idx, 1);
+});
 vi.mock('../../../src/tracking/sleep-queue.js', () => ({
   peekSleepQueues: vi.fn(async () => [...queues]),
   takeSleepPending: (chatId: number) => takeSleepPending(chatId),
+  clearSleepPending: (chatId: number) => clearSleepPending(chatId),
 }));
 
 const appendPending = vi.fn(async () => ({ count: 1, firstPendingAt: 0 }));
@@ -60,7 +65,8 @@ const scheduleTurn = vi.fn(async () => {});
 vi.mock('../../../src/queue/turn-scheduler.js', () => ({
   scheduleTurn: (...a: unknown[]) => scheduleTurn(...a),
 }));
-vi.mock('../../../src/pipeline/turn/flags.js', () => ({ isTurnActorChat: () => true }));
+let actorChat = true;
+vi.mock('../../../src/pipeline/turn/flags.js', () => ({ isTurnActorChat: () => actorChat }));
 vi.mock('../../../src/pipeline/turn/proactive-turn.js', () => ({
   generatePersonaProactiveText: vi.fn(async () => null),
 }));
@@ -98,6 +104,7 @@ beforeEach(() => {
   activeGroups = [];
   queues = [];
   phase = 'awake';
+  actorChat = true;
   envValues['SLEEP_SCHEDULE_ENABLED'] = true;
   envValues['SLEEP_ANNOUNCE_ENABLED'] = true;
   _resetBedtimeShifts();
@@ -178,6 +185,18 @@ describe('runSleepCycle', () => {
 
     await runSleepCycle(); // 没额度键 → 不再回放
     expect(appendPending).toHaveBeenCalledTimes(2);
+  });
+
+  it('补回排水:非 turn-actor 群残留 → 先清队列再跳过(不假装回放,不卡死)', async () => {
+    actorChat = false; // 灰度名单中途变更,队列里残留了非 actor 群
+    store.set('xxb:sleep:laststate', 'awake');
+    store.set('xxb:sleep:drain', '5');
+    queues = [{ chatId: -1, lastTs: 100, hasAddressed: true }];
+    await runSleepCycle();
+    expect(clearSleepPending).toHaveBeenCalledWith(-1); // 清掉,不被反复挑中
+    expect(takeSleepPending).not.toHaveBeenCalled();    // 不 take-then-drop
+    expect(appendPending).not.toHaveBeenCalled();       // 不回放
+    expect(store.has('xxb:sleep:drain')).toBe(false);   // 队列空 → 额度键删除,收敛
   });
 
   it('问候同日去重:边沿抖动不重复发', async () => {

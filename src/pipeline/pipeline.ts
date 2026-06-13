@@ -424,7 +424,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       });
       const verdictA = await sleepStageAVerdict(job.chatId, l0, sleepPhaseA);
       if (verdictA === "queue") {
-        await pushSleepPending(job.chatId, {
+        const queued = await pushSleepPending(job.chatId, {
           entry: {
             update: job.update, chatId: job.chatId, messageId: formatted.messageId,
             enqueuedAt: job.enqueuedAt, waitReplay: true, sleepCatchup: true,
@@ -434,7 +434,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         });
         logger.info(
           { chatId: job.chatId, messageId: formatted.messageId, rule: l0?.rule ?? null },
-          "Pipeline complete (asleep, queued for catch-up)",
+          queued
+            ? "Pipeline complete (asleep, queued for catch-up)"
+            : "Pipeline complete (asleep, not replayable, silenced)",
         );
         return;
       }
@@ -703,7 +705,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         if (verdict === "wake") {
           await clearSleepPending(job.chatId);
         } else if (verdict === "queue") {
-          await pushSleepPending(job.chatId, {
+          const queued = await pushSleepPending(job.chatId, {
             entry: {
               update: job.update, chatId: job.chatId, messageId: formatted.messageId,
               enqueuedAt: job.enqueuedAt, waitReplay: true, sleepCatchup: true,
@@ -714,7 +716,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           const totalMs = Math.round(performance.now() - start);
           logger.info(
             { chatId: job.chatId, totalMs, rule: judgeResult.rule, timings },
-            "Pipeline complete (asleep, queued for catch-up)",
+            queued
+              ? "Pipeline complete (asleep, queued for catch-up)"
+              : "Pipeline complete (asleep, not replayable, silenced)",
           );
           return;
         }

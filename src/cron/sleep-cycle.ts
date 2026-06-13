@@ -22,7 +22,7 @@ import { markBotSpoke } from '../tracking/social-needs.js';
 import { getSleepPhase, nightDateStr } from '../tracking/sleep.js';
 import { setBedtimeShift, effectiveSleepMin, daySchedule } from '../tracking/life-state.js';
 import { getSpeechCounts, bedtimeShiftFromCount, bjDateStr } from '../tracking/speech-meter.js';
-import { peekSleepQueues, takeSleepPending } from '../tracking/sleep-queue.js';
+import { peekSleepQueues, takeSleepPending, clearSleepPending } from '../tracking/sleep-queue.js';
 import { appendPending } from '../pipeline/turn/buffer.js';
 import { scheduleTurn } from '../queue/turn-scheduler.js';
 import { isTurnActorChat } from '../pipeline/turn/flags.js';
@@ -177,12 +177,16 @@ async function drainOneChat(): Promise<boolean> {
   const queues = await peekSleepQueues(); // 点名优先,其次最新
   if (queues.length === 0) return false;
   const { chatId } = queues[0]!;
-  const item = await takeSleepPending(chatId); // 取最欠回的一条并清空该 chat
-  if (!item) return queues.length > 1;
+  // 防御:补回只能走 turn actor 的 wait-resume 通道。非 actor 群理论上
+  // 在 pushSleepPending 就被拦了入不了队;万一灰度名单中途变更让它残留,
+  // 这里**先清掉再跳过**(clear 而非 take —— 不假装回放),避免被反复挑中。
   if (!isTurnActorChat(chatId)) {
-    logger.info({ chatId }, 'Sleep cycle: chat not on turn actor, catch-up skipped');
+    await clearSleepPending(chatId);
+    logger.info({ chatId }, 'Sleep cycle: chat not on turn actor, queue dropped');
     return queues.length > 1;
   }
+  const item = await takeSleepPending(chatId); // 取最欠回的一条并清空该 chat
+  if (!item) return queues.length > 1;
   try {
     await appendPending({ ...item.entry, waitReplay: true, sleepCatchup: true });
     await scheduleTurn(chatId, {
