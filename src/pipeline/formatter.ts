@@ -89,6 +89,7 @@ interface TgMessage {
   reply_markup?: {
     inline_keyboard?: Array<Array<{ text: string; callback_data?: string; url?: string; switch_inline_query?: string }>>;
   };
+  via_bot?: { id: number; username?: string };
 }
 
 function buildFullName(user: TgUser): string {
@@ -250,6 +251,10 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
     }));
     if (buttons.length > 0) formatted.inlineKeyboard = buttons;
   }
+
+  // via_bot:经某 bot 的 inline 模式发出(显示 "via @xxx")。代发回执常是
+  // "via @目标bot" 或由配套下载 bot 代发,据此把结果认回去。
+  if (msg.via_bot?.username) formatted.viaBot = msg.via_bot.username;
 
   return formatted;
 }

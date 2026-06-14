@@ -34,6 +34,8 @@ export interface FormattedMessage {
   videoNoteFileId?: string;
   /** inline keyboard 按钮(主要用于"看见"其他 bot 回执的按钮:命令档案学习 + 代发可达性) */
   inlineKeyboard?: Array<{ text: string; callbackData?: string; url?: string; switchInline?: string }>;
+  /** 经某 bot inline 模式发出(Telegram "via @xxx");代发回执认领用 */
+  viaBot?: string;
   isBot?: boolean;
   /** 匿名管理员（sender_chat 是群组）或频道发言（sender_chat 是频道） */
   isAnonymous?: boolean;

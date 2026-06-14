@@ -845,6 +845,17 @@ export async function generateAndSendReplies(args: {
       throw new Error("All replies failed to send");
     }
 
+    // 自发代发认领:回复本身就是 `/cmd@bot ...`(模型 direct 路径直接打命令,
+    // 没走 USE_BOT_COMMAND 工具)→ 补登记 pending,让对方回执能被接回来。
+    if (job.chatId < 0) {
+      const first = sentMessages[0]?.text ?? "";
+      if (/^\/[a-zA-Z][a-zA-Z0-9_]{0,30}@\w+/.test(first.trim())) {
+        import("../tools/bot-delegation.js")
+          .then(({ maybeRegisterTypedDelegation }) => maybeRegisterTypedDelegation(job.chatId, first, sentMessages[0]!.messageId))
+          .catch(() => {});
+      }
+    }
+
     // Consume max quota only after successful reply
     if (effectiveReplyTier === "max") {
       consumeMaxQuota(formatted.uid);

@@ -37,7 +37,7 @@ vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: vi.fn(async ()
 vi.mock('../../../src/pipeline/reply/parser.js', () => ({ parseReplyResponse: () => [{ replyContent: '查到啦,8.8.8.8 在美国喵' }] }));
 
 const { _e: envVals } = (await import('../../../src/env.js')) as unknown as { _e: Record<string, unknown> };
-const { executeUseBotCommand, tryHandleDelegationReceipt, PENDING_KEY } = await import('../../../src/pipeline/tools/bot-delegation.js');
+const { executeUseBotCommand, tryHandleDelegationReceipt, maybeRegisterTypedDelegation, PENDING_KEY } = await import('../../../src/pipeline/tools/bot-delegation.js');
 
 function bmsg(o: Partial<FormattedMessage>): FormattedMessage {
   return { role: 'user', uid: 5, username: 'b', fullName: 'B', timestamp: 1, messageId: 9, textContent: '', isForwarded: false, isBot: true, ...o } as FormattedMessage;
@@ -105,9 +105,25 @@ describe('tryHandleDelegationReceipt 回执处理', () => {
     expect(await tryHandleDelegationReceipt(-100, bmsg({ username: 'uzumaru_geoip_bot', textContent: 'IP: ...' }), 9999)).toBe(false);
   });
 
-  it('非目标 bot → 不处理', async () => {
+  it('非目标 bot 且无关联 → 不处理', async () => {
     setPending();
     expect(await tryHandleDelegationReceipt(-100, bmsg({ username: 'other_bot', textContent: 'hi' }), 9999)).toBe(false);
+  });
+
+  it('配套下载 bot 代发、正文带 "via @目标bot" → 认领(CloudMusicDownloader 真实案例)', async () => {
+    store.set(PENDING_KEY(-100), JSON.stringify({ bot: 'Music163bot', command: '/music', args: '晴天', sentMid: 1, issuedAt: 1 }));
+    const r = await tryHandleDelegationReceipt(-100, bmsg({
+      username: 'CloudMusicDownloader',
+      textContent: '「晴天」- 周杰伦\nflac 53MB\nvia @Music163bot',
+    }), 9999);
+    expect(r).toBe(true);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('经 inline(viaBot=目标bot)发出 → 认领', async () => {
+    store.set(PENDING_KEY(-100), JSON.stringify({ bot: 'Music163bot', command: '/music', args: '晴天', sentMid: 1, issuedAt: 1 }));
+    const r = await tryHandleDelegationReceipt(-100, bmsg({ username: 'SomeUserBot', viaBot: 'Music163bot', textContent: '晴天 - 周杰伦' }), 9999);
+    expect(r).toBe(true);
   });
 
   it('进度占位(⏳ Querying)→ 不消费,继续等', async () => {
@@ -148,5 +164,36 @@ describe('tryHandleDelegationReceipt 回执处理', () => {
     expect(store.has(PENDING_KEY(-100))).toBe(false);
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(String(sendMessage.mock.calls[0]![1])).toMatch(/查到/);
+  });
+});
+
+describe('maybeRegisterTypedDelegation(模型直接打命令也能接回执)', () => {
+  it('回复就是 /cmd@bot → 补登记 pending', async () => {
+    await maybeRegisterTypedDelegation(-100, '/music@Music163bot 晴天', 555);
+    const raw = store.get(PENDING_KEY(-100));
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw!)).toMatchObject({ bot: 'Music163bot', command: '/music', args: '晴天', sentMid: 555 });
+  });
+
+  it('解释性提到命令(不在开头)→ 不登记', async () => {
+    await maybeRegisterTypedDelegation(-100, '你可以发 /music@Music163bot 晴天 试试', 555);
+    expect(store.has(PENDING_KEY(-100))).toBe(false);
+  });
+
+  it('已有 pending → 不覆盖', async () => {
+    store.set(PENDING_KEY(-100), JSON.stringify({ bot: 'x', command: '/y', args: '', sentMid: 1, issuedAt: 1 }));
+    await maybeRegisterTypedDelegation(-100, '/music@Music163bot 晴天', 555);
+    expect(JSON.parse(store.get(PENDING_KEY(-100))!).bot).toBe('x');
+  });
+
+  it('flag 关 → 不登记', async () => {
+    envVals['BOT_DELEGATION_ENABLED'] = false;
+    await maybeRegisterTypedDelegation(-100, '/music@Music163bot 晴天', 555);
+    expect(store.has(PENDING_KEY(-100))).toBe(false);
+  });
+
+  it('@自己 → 不登记', async () => {
+    await maybeRegisterTypedDelegation(-100, '/help@hunhebi_bot', 555);
+    expect(store.has(PENDING_KEY(-100))).toBe(false);
   });
 });

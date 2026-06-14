@@ -99,6 +99,28 @@ export async function executeUseBotCommand(
   }
 }
 
+/**
+ * 模型走 direct 路径时常**直接把 `/命令@bot 参数` 当回复打出去**(没用
+ * USE_BOT_COMMAND 工具)—— 这其实有效(对方会回),但没登记 pending,结果
+ * 接不回来。这里在出站回复里识别这种自发代发,补登记 pending,让回执照样
+ * 被认领。只认"消息开头就是 /cmd@bot"的(排除解释性提到命令的句子)。
+ */
+export async function maybeRegisterTypedDelegation(chatId: number, text: string, sentMid: number): Promise<void> {
+  if (!env().BOT_DELEGATION_ENABLED || chatId >= 0) return;
+  const m = text.trim().match(/^(\/[a-zA-Z][a-zA-Z0-9_]{0,30})@(\w+)(?:\s+([\s\S]{0,120}))?$/);
+  if (!m) return;
+  const cmd = m[1]!.toLowerCase();
+  const bot = m[2]!;
+  if (bot.toLowerCase() === env().BOT_USERNAME.toLowerCase()) return; // 别认成自己
+  try {
+    const redis = getRedis();
+    if (await redis.get(PENDING_KEY(chatId))) return; // 已有 pending,不覆盖
+    const pending: PendingDelegation = { bot, command: cmd, args: (m[3] || '').trim(), sentMid, issuedAt: Math.floor(Date.now() / 1000) };
+    await redis.set(PENDING_KEY(chatId), JSON.stringify(pending), 'EX', PENDING_TTL_SEC);
+    logger.info({ chatId, bot, cmd }, 'Delegation: auto-registered from typed command');
+  } catch { /* non-critical */ }
+}
+
 // 进度占位识别:⏳/Initializing/Querying/正在.../please wait 这类不是最终结果。
 // 长度上限放宽到 120(review #9:啰嗦的中文进度句也得认出来),仍设上限避免
 // 把"正好含'正在'二字的真结果"误判成占位。
@@ -118,7 +140,7 @@ export async function tryHandleDelegationReceipt(
   formatted: FormattedMessage,
   botUid: number,
 ): Promise<boolean> {
-  if (!env().BOT_DELEGATION_ENABLED || !formatted.isBot || !formatted.username) return false;
+  if (!env().BOT_DELEGATION_ENABLED || !formatted.isBot) return false;
   const redis = getRedis();
   let pending: PendingDelegation | undefined;
   try {
@@ -128,7 +150,14 @@ export async function tryHandleDelegationReceipt(
   } catch {
     return false;
   }
-  if (!pending || formatted.username.toLowerCase() !== pending.bot.toLowerCase()) return false;
+  if (!pending) return false;
+  // 回执认领:目标 bot 常不直接以自己的名义回 —— 可能 via inline(viaBot)、
+  // 由配套下载 bot 代发(正文带 "via @目标bot"),或就是自己。三者皆认。
+  const target = pending.bot.toLowerCase();
+  const fromMatch = (formatted.username || '').toLowerCase() === target;
+  const viaMatch = (formatted.viaBot || '').toLowerCase() === target;
+  const textMatch = `${formatted.textContent || ''} ${formatted.captionContent || ''}`.toLowerCase().includes(`@${target}`);
+  if (!fromMatch && !viaMatch && !textMatch) return false;
 
   const resultText = (formatted.textContent || formatted.captionContent || '').trim();
   const hasMedia = !!(formatted.audioFileId || formatted.voiceFileId || formatted.documentFileId || formatted.imageFileId || formatted.videoFileId);

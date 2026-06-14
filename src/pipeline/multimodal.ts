@@ -42,7 +42,9 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: ArrayBuff
 
 async function describeAudio(fileId: string, label: string): Promise<string> {
   const downloaded = await downloadTelegramFile(fileId);
-  if (!downloaded) return `[${label}：无法下载]`;
+  // 下不动(多半文件太大)≠ 内容不存在:文件已在群里、别人收得到。用中性占位,
+  // 别写"无法下载"——否则 bot 会把别的 bot 发来的歌/语音误读成"失败了"。
+  if (!downloaded) return `[${label}]`;
 
   try {
     const base64 = Buffer.from(downloaded.buffer).toString('base64');
@@ -77,7 +79,7 @@ async function describeDocument(
   fileName: string | undefined,
 ): Promise<string> {
   const downloaded = await downloadTelegramFile(fileId);
-  if (!downloaded) return '[文档：无法下载]';
+  if (!downloaded) return '[文档]'; // 下不动≠不存在;中性占位,别误导成失败
 
   const effectiveMime = mimeType ?? downloaded.mimeType;
 
