@@ -168,6 +168,16 @@ export function startCronJobs(deps?: CronDeps): void {
     void safeRun('idle-check', runIdleCheck);
   }));
 
+  // 借力其他 bot:周期观察学命令档案(P1,纯观察,flag 默认关)
+  if (env().BOT_COMMAND_LEARN_ENABLED) {
+    tasks.push(schedule(`*/${env().BOT_COMMAND_LEARN_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('bot-command-learn', async () => {
+        const { runBotCommandLearn } = await import('./bot-command-scan.js');
+        await runBotCommandLearn();
+      });
+    }));
+  }
+
   // 硬作息心跳(v2):动态就寝 shift、晚安/早安边沿、半夜醒、补回排水
   // (问候由 SLEEP_ANNOUNCE_ENABLED 在函数内部单独控制,心跳必须常跑)
   if (env().SLEEP_SCHEDULE_ENABLED) {

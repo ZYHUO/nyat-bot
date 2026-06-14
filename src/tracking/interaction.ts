@@ -5,6 +5,29 @@
 
 import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
+import { getProfilesForBot, whyNotInvocable } from '../learners/bot-command-store.js';
+
+/** 渲染某 bot 已学到的命令档案(给 planner/写手看:能不能用、怎么用、要不要@) */
+function renderCommandProfiles(botUsername: string): string {
+  let profiles;
+  try { profiles = getProfilesForBot(botUsername); } catch { return ''; }
+  if (!profiles || profiles.length === 0) return '';
+  const lines = profiles.map((p) => {
+    const usable = whyNotInvocable(p) === null;
+    const tag = p.status === 'blocked'
+      ? '🚫不可代发(管理/敏感)'
+      : usable
+        ? '✅可代发'
+        : `⏳学习中(${p.observation_count}次/置信${p.confidence.toFixed(2)})`;
+    const constraints = [
+      p.needs_admin === 1 ? '需管理员' : null,
+      p.needs_reply === 1 ? '需回复某条消息' : null,
+      `回执:${p.output_type}`,
+    ].filter(Boolean).join('、');
+    return `- ${p.usage_syntax || p.command_name}(@${botUsername}):${p.use_scenario || '?'} [${tag};${constraints}]`;
+  });
+  return `已学到的命令(代发须 /命令@${botUsername} 参数):\n${lines.join('\n')}`;
+}
 
 const MAX_BOTS_PER_GROUP = 20;
 const MAX_RAW_RECORDS = 1000;
@@ -198,7 +221,9 @@ export class BotInteractionTracker {
     const botUsername = q.replace(/^@/, '');
     let digest = this.getDigest(chatId, botUsername);
     if (!digest) digest = this.getGlobalDigest(botUsername);
-    return digest || `暂无关于 @${botUsername} 的知识记录。`;
+    const cmds = renderCommandProfiles(botUsername);
+    const parts = [digest, cmds].filter(Boolean);
+    return parts.join('\n\n') || `暂无关于 @${botUsername} 的知识记录。`;
   }
 
   private loadMeta(

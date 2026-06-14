@@ -136,4 +136,27 @@ describe('formatMessage', () => {
     expect(msg).not.toBeNull();
     expect(msg!.textContent).toBe('edited text');
   });
+
+  it('captures inline keyboard buttons (callback / url) from another bot reply', () => {
+    const msg = formatMessage(makeTgUpdate({
+      from: { id: 555, is_bot: true, first_name: 'GeoBot', username: 'uzumaru_geoip_bot' },
+      text: '🔍 查询中',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '确认身份', callback_data: 'verify:1' }],
+          [{ text: '详情', url: 'https://example.com/x' }],
+        ],
+      },
+    }));
+    expect(msg).not.toBeNull();
+    expect(msg!.inlineKeyboard).toEqual([
+      { text: '确认身份', callbackData: 'verify:1' },
+      { text: '详情', url: 'https://example.com/x' },
+    ]);
+  });
+
+  it('no inlineKeyboard field when message has no reply_markup', () => {
+    const msg = formatMessage(makeTgUpdate({ text: 'plain' }));
+    expect(msg!.inlineKeyboard).toBeUndefined();
+  });
 });

@@ -62,6 +62,16 @@ function formatContent(msg: FormattedMessage): string {
     parts.push(`[转发自 ${msg.forwardFrom}]`);
   }
 
+  // inline 按钮:让模型看见其他 bot 回执上的按钮(url 标出链接,callback
+  // 标 [需点击] —— bot 点不了,据此判断这条数据可不可达)
+  if (msg.inlineKeyboard && msg.inlineKeyboard.length > 0) {
+    const btns = msg.inlineKeyboard
+      .slice(0, 8)
+      .map((b) => (b.url ? `${b.text}→${b.url}` : b.callbackData ? `${b.text}(需点击)` : b.text))
+      .join(' | ');
+    parts.push(`[按钮: ${btns}]`);
+  }
+
   return parts.join(' ') || '[空消息]';
 }
 

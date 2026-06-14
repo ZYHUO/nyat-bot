@@ -277,6 +277,16 @@ const envSchema = z.object({
   IDLE_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
   IDLE_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
 
+  // ── 借力其他 bot(学其他 bot 的命令,需要时代发)──
+  // P1:观察学习每个 bot 的命令档案(怎么用/场景/needs_reply/needs_admin/output_type)
+  BOT_COMMAND_LEARN_ENABLED: booleanFromEnv.default(false),
+  // 学习扫描间隔(分钟)
+  BOT_COMMAND_LEARN_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户"
+  BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),
+  // 每群代发限速(秒):两次代发最小间隔
+  BOT_DELEGATION_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(60),
+
   // ── Sleep schedule(硬作息门):到点真睡觉,睡觉不闲聊,指令照常 ──
   // 直接交互(@/回 bot/私聊)走升级式吵醒,主人必醒;作息表沿用
   // life-state 的 date-seeded daySchedule(起床 07:00-08:30 / 入睡 23:30-01:00)

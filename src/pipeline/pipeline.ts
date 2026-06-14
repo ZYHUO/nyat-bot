@@ -365,6 +365,21 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
     } // end !isWaitReplay bookkeeping block (G5)
 
+    // 3.96 代发回执:这条 bot 消息是不是我们代发命令的结果?是则消费它并
+    // 用结果另起一条回复答原问题(否则它会在 judge 被当普通 bot 消息忽略)。
+    // flag 关时 tryHandleDelegationReceipt 直接返回 false,零开销。
+    if (formatted.isBot) {
+      try {
+        const { tryHandleDelegationReceipt } = await import("./tools/bot-delegation.js");
+        if (await tryHandleDelegationReceipt(job.chatId, formatted, botUid)) {
+          logger.info({ chatId: job.chatId, bot: formatted.username }, "Pipeline complete (delegation receipt handled)");
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "delegation receipt check failed (non-critical)");
+      }
+    }
+
     // 3.95 Phase 1/4: tracking-only paths skip judge/reply.
     //   - coalesce.isLastInBatch=false → debounce batch non-final message
     //   - skipReply=true              → chat in STOP/WAIT, this message is

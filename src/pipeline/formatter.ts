@@ -86,6 +86,9 @@ interface TgMessage {
   forward_sender_name?: string;
   forward_from_chat?: { id: number; title?: string; type: string };
   forward_date?: number;
+  reply_markup?: {
+    inline_keyboard?: Array<Array<{ text: string; callback_data?: string; url?: string; switch_inline_query?: string }>>;
+  };
 }
 
 function buildFullName(user: TgUser): string {
@@ -234,6 +237,18 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
 
   if (msg.video_note) {
     formatted.videoNoteFileId = msg.video_note.file_id;
+  }
+
+  // Inline keyboard — 让 bot "看得见"别的 bot 回执上的按钮(命令档案学习 +
+  // 代发回执可达性判断用)。只取可序列化的关键字段,去掉空行。
+  if (msg.reply_markup?.inline_keyboard?.length) {
+    const buttons = msg.reply_markup.inline_keyboard.flat().map((b) => ({
+      text: b.text,
+      ...(b.callback_data ? { callbackData: b.callback_data } : {}),
+      ...(b.url ? { url: b.url } : {}),
+      ...(b.switch_inline_query !== undefined ? { switchInline: b.switch_inline_query } : {}),
+    }));
+    if (buttons.length > 0) formatted.inlineKeyboard = buttons;
   }
 
   return formatted;

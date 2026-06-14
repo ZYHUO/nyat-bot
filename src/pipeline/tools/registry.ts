@@ -154,6 +154,29 @@ function buildSchemasAndTools(
     }),
   );
 
+  // 借力其他 bot:代发其命令(P2,flag 默认关;闸/安全门全在 execute 里)
+  if (e.BOT_DELEGATION_ENABLED) {
+    const useBotCmdSchema = z.object({
+      bot_username: z.string().describe('目标 bot 的用户名(不含 @)'),
+      command: z.string().describe('要发的命令,/xxx 形式'),
+      args: z.string().optional().describe('命令参数(可选),如 IP、歌名'),
+    });
+    register(
+      'USE_BOT_COMMAND',
+      useBotCmdSchema,
+      tool({
+        description: [
+          '借用本群另一个 bot 的命令来帮用户办事(如查股价/IP/歌)。',
+          '仅在:用户的需求确实要靠那个 bot、且自己的 SEARCH/记忆答不了时才用;先用 BOT_KNOWLEDGE 确认该 bot 有这条命令。',
+          '能不能代发由系统把关(没学熟/需管理员/结果在按钮后/对方不理 bot 都会被拒,届时改成把命令告诉用户)。',
+        ].join('\n'),
+        parameters: useBotCmdSchema,
+        execute: async ({ bot_username, command, args }) =>
+          (await import('./bot-delegation.js')).executeUseBotCommand(chatId, bot_username, command, args ?? ''),
+      }),
+    );
+  }
+
   const pollSchema = z.object({
     question: z.string().describe('投票问题'),
     options: z.array(z.string()).min(2).max(10).describe('选项列表，2-10个'),
