@@ -11,6 +11,9 @@ describe('path heuristic (replaces L0 microJudge backfill)', () => {
     'https://github.com/foo/bar 这个项目咋样',
     '查下这个ip的归属地',
     '现在几点了',
+    '帮我点首晴天',
+    '点歌 水手',
+    '来一首周杰伦的歌',
   ])('lookup → planned: %s', (t) => expect(needsLookup(t)).toBe(true));
 
   it.each([
