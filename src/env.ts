@@ -282,6 +282,11 @@ const envSchema = z.object({
   BOT_COMMAND_LEARN_ENABLED: booleanFromEnv.default(false),
   // 学习扫描间隔(分钟)
   BOT_COMMAND_LEARN_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段
+  // (默认关,灰度;失败自动回退老两段路径)
+  REPLY_MERGED_TOOLS_ENABLED: booleanFromEnv.default(false),
+  REPLY_TOOLS_MAX_STEPS: z.coerce.number().int().min(2).max(6).default(4),
+
   // P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户"
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),
   // 每群代发限速(秒):两次代发最小间隔

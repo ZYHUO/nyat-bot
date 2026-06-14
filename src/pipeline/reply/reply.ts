@@ -498,7 +498,11 @@ export async function generateReply(
   let toolsUsed: string[] = [];
   let toolExecutionFailed = false;
 
-  if (effectiveReplyPath === 'planned') {
+  // 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段。
+  // 启用时跳过下面的预跑工具块(工具由写手自己边写边调),toolResultsBlock 留空。
+  const mergedToolsActive = effectiveReplyPath === 'planned' && env().REPLY_MERGED_TOOLS_ENABLED;
+
+  if (effectiveReplyPath === 'planned' && !mergedToolsActive) {
     // ── Agentic 循环(MaiBot Maisaka 借鉴):多轮 plan→act,失败回退旧路 ──
     let legacyPlannerNeeded = true;
     if (env().PLANNER_AGENTIC_ENABLED) {
@@ -581,11 +585,46 @@ export async function generateReply(
     midTermMemory ?? undefined,
   );
 
-  // 5. Call AI final writer (direct or planned both use no-tools final synthesis)
+  // 合并写手:在 system 末尾加工具约束——工具是中间步,最终必须只吐 reply JSON。
+  if (mergedToolsActive && messages[0]?.role === 'system') {
+    messages[0] = {
+      ...messages[0],
+      content: messages[0].content +
+        '\n\n[工具]\n你可以调用工具(查资料/借力本群其他 bot)来获取你不知道的实时信息。' +
+        '工具调用是中间步骤、不展示给用户;拿到结果后,**最终输出必须且只能是 reply JSON**' +
+        '(格式与不调工具时完全一样)。能直接答就别调工具。',
+    };
+  }
+
+  // 5. Call AI final writer.
+  //   - 合并写手(mergedToolsActive):一次带工具调用,失败回退纯文本写手
+  //   - 否则:纯文本写手(direct / 老两段 planned 都已把 TOOL_RESULTS 拼进 prompt)
   let result: Awaited<ReturnType<typeof generateReplyModelOutput>>;
   try {
-    result = await generateReplyModelOutput(messages, usage, { signal: interruptSignal });
-    result.toolsUsed = toolsUsed;
+    if (mergedToolsActive) {
+      const { generateReplyWithTools } = await import('./reply-with-tools.js');
+      const merged = await generateReplyWithTools({
+        messages, usage, chatId, userId: message.uid, signal: interruptSignal,
+      });
+      if (!merged.failed && merged.content) {
+        result = {
+          content: merged.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim(),
+          toolsUsed: merged.toolsUsed,
+          tokenUsage: merged.tokenUsage,
+          model: merged.model,
+          label: merged.label,
+          latencyMs: merged.latencyMs,
+        } as Awaited<ReturnType<typeof generateReplyModelOutput>>;
+        toolsUsed = merged.toolsUsed;
+      } else {
+        // 合并写手挂了 → 退回纯文本写手(无工具数据,best-effort)
+        result = await generateReplyModelOutput(messages, usage, { signal: interruptSignal });
+        result.toolsUsed = toolsUsed;
+      }
+    } else {
+      result = await generateReplyModelOutput(messages, usage, { signal: interruptSignal });
+      result.toolsUsed = toolsUsed;
+    }
   } catch (err) {
     // Handle content safety rejection gracefully
     if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
