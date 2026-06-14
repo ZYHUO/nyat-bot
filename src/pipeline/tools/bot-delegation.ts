@@ -29,6 +29,7 @@ const WHY_TEXT: Record<string, string> = {
   unknown_command: '还没学过这个 bot 的这条命令,不能代发',
   blocked_by_safety: '这是管理/敏感类命令,不能代发',
   needs_admin: '这条命令需要管理员权限,我没有,不能代发',
+  needs_reply: '这条命令得回复某条消息才生效,代发搞不定',
   not_mature_count: '这条命令还没观察够次数,不敢乱发',
   not_mature_confidence: '对这条命令还没把握,不敢乱发',
   output_unreachable: '这条命令的结果藏在按钮后面,bot 点不了,代发也拿不到',
@@ -69,10 +70,10 @@ export async function executeUseBotCommand(
       return `${reason}。${teach}`.trim();
     }
 
-    // 限速:同 chat 两次代发最小间隔
+    // 限速:只读检查在前,**不在失败/空操作路径上烧冷却**(review #4)——
+    // 真正 armed 放到成功发出之后。
     const redis = getRedis();
-    const cd = await redis.set(COOLDOWN_KEY(chatId), '1', 'EX', Math.max(1, e.BOT_DELEGATION_COOLDOWN_SEC), 'NX');
-    if (cd === null) return '刚替你问过一次了,缓一下再说,别刷屏。';
+    if (await redis.get(COOLDOWN_KEY(chatId))) return '刚替你问过一次了,缓一下再说,别刷屏。';
 
     // 已有未完成的代发 → 不并发(回执匹配会乱)
     const existing = await redis.get(PENDING_KEY(chatId));
@@ -86,7 +87,9 @@ export async function executeUseBotCommand(
     const pending: PendingDelegation = {
       bot, command: cmd, args: cleanArgs, sentMid, issuedAt: Math.floor(Date.now() / 1000),
     };
+    // 发成功才登记 pending + armed 冷却
     await redis.set(PENDING_KEY(chatId), JSON.stringify(pending), 'EX', PENDING_TTL_SEC);
+    await redis.set(COOLDOWN_KEY(chatId), '1', 'EX', Math.max(1, e.BOT_DELEGATION_COOLDOWN_SEC)).catch(() => {});
     logger.info({ chatId, bot, cmd }, 'Delegation: command sent, awaiting receipt');
 
     return `已经替用户向 @${bot} 发了 ${text},正在等它回结果。现在跟用户说一句"我帮你问问~"之类的过渡话,**不要编造结果**,真结果回来后会自动接着回。`;
@@ -96,11 +99,13 @@ export async function executeUseBotCommand(
   }
 }
 
-// 进度占位识别:⏳/Initializing/Querying/正在.../please wait 这类不是最终结果
-const PROGRESS_RE = /⏳|initializing|querying|loading|正在(查询|发送|处理)|please\s*wait|稍候|命中缓存/i;
+// 进度占位识别:⏳/Initializing/Querying/正在.../please wait 这类不是最终结果。
+// 长度上限放宽到 120(review #9:啰嗦的中文进度句也得认出来),仍设上限避免
+// 把"正好含'正在'二字的真结果"误判成占位。
+const PROGRESS_RE = /⏳|initializing|querying|loading|正在(查询|搜索|发送|处理|努力)|please\s*wait|稍候|稍等|命中缓存|查询中|搜索中|加载中/i;
 function isProgressPlaceholder(text: string): boolean {
   const t = text.trim();
-  return t.length > 0 && t.length < 40 && PROGRESS_RE.test(t);
+  return t.length > 0 && t.length < 120 && PROGRESS_RE.test(t);
 }
 
 /**
@@ -126,19 +131,25 @@ export async function tryHandleDelegationReceipt(
   if (!pending || formatted.username.toLowerCase() !== pending.bot.toLowerCase()) return false;
 
   const resultText = (formatted.textContent || formatted.captionContent || '').trim();
-  // 结果藏在按钮后 / 纯进度占位 → 不消费,继续等真结果(TTL 到了自然放弃)
-  const buttonsOnly = !resultText && (formatted.inlineKeyboard?.length ?? 0) > 0;
-  if (buttonsOnly) {
-    await redis.del(PENDING_KEY(chatId)).catch(() => {});
-    logger.info({ chatId, bot: pending.bot }, 'Delegation: result gated behind buttons, giving up');
-    return true; // 消费掉(避免把按钮消息当普通 bot 消息),但不答(够不到)
+  const hasMedia = !!(formatted.audioFileId || formatted.voiceFileId || formatted.documentFileId || formatted.imageFileId || formatted.videoFileId);
+
+  // 纯进度占位 → 不消费,继续等真结果(review #9:含长进度句)
+  if (!resultText && !hasMedia && (formatted.inlineKeyboard?.length ?? 0) > 0) {
+    // 只有按钮、没正文也没媒体 → 可能是"先发个带按钮的占位,正文随后到"
+    // (review #5)。不消费、不放弃,继续等后续真结果;真被按钮 gate 住就让
+    // TTL 自然过期。
+    return false;
   }
   if (isProgressPlaceholder(resultText)) return false; // 还在跑,继续等
+  if (!resultText && !hasMedia) return false; // 空消息,继续等
 
-  // 命中最终结果:清 pending,另起一条回复用结果答原问题
+  // 命中最终结果(文本或媒体):清 pending,另起一条回复
   await redis.del(PENDING_KEY(chatId)).catch(() => {});
+  // 媒体类:对方已把文件/音频发到群里(大家都看得见),没有正文时给个说明,
+  // 让写手自然致意而不是答"没查到"(review #6)
+  const payload = resultText || (hasMedia ? '(对方已经把文件/音频/图片发到群里了)' : '');
   try {
-    await answerFromDelegation(chatId, botUid, pending, resultText.slice(0, 600));
+    await answerFromDelegation(chatId, botUid, pending, payload.slice(0, 600));
   } catch (err) {
     logger.warn({ err, chatId }, 'Delegation: answer generation failed');
   }

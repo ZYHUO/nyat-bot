@@ -159,6 +159,8 @@ export function whyNotInvocable(profile: BotCommandProfile | undefined): string 
   if (!profile) return 'unknown_command';
   if (profile.status === 'blocked') return 'blocked_by_safety';
   if (profile.needs_admin === 1) return 'needs_admin';
+  // 代发是"新发一条命令",没有可 reply 的目标消息;needs_reply 类只能教用户
+  if (profile.needs_reply === 1) return 'needs_reply';
   if (profile.observation_count < MATURITY_MIN_OBSERVATIONS) return 'not_mature_count';
   if (profile.confidence < MATURITY_MIN_CONFIDENCE) return 'not_mature_confidence';
   if (!USABLE_OUTPUT_TYPES.has(profile.output_type)) return 'output_unreachable';

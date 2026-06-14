@@ -75,6 +75,11 @@ describe('upsertCommandObservation + 成熟度', () => {
     expect(whyNotInvocable(p)).toBe('blocked_by_safety');
   });
 
+  it('needs_reply=1(需回复某条消息)→ 不可代发(review #2)', () => {
+    for (let i = 0; i < 5; i++) upsertCommandObservation({ botUsername: 'rb', command: '/q', needsAdmin: false, outputType: 'text', needsReply: true });
+    expect(whyNotInvocable(getCommandProfile('rb', '/q'))).toBe('needs_reply');
+  });
+
   it('callback 回执(数据在按钮后)→ 不可代发', () => {
     for (let i = 0; i < 5; i++) upsertCommandObservation({ botUsername: 'b', command: '/q', needsAdmin: false, outputType: 'callback' });
     expect(whyNotInvocable(getCommandProfile('b', '/q'))).toBe('output_unreachable');

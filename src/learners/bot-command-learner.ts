@@ -49,20 +49,34 @@ function deriveOutputType(responses: FormattedMessage[]): string {
 }
 
 /** 在一段消息序列里挖"命令→bot 回应"配对(命令消息 id > watermark 才算新) */
-export function minePairs(msgs: FormattedMessage[], botUid: number, sinceMid: number): { pairs: Pair[]; maxMid: number } {
+// 通用/噪声命令:不值得学,且最容易把后面无关 bot 的发言误配进来(review #10)
+const GENERIC_COMMANDS = new Set(['/start', '/help', '/rules', '/menu', '/about', '/ping', '/id', '/settings']);
+
+/**
+ * 挖"命令→bot 回应"配对。
+ * safeMaxMid = 已"结清"(回应窗口完整可观测)的命令里最大的 messageId ——
+ * 只把水位推进到这里,防止窗口边缘"命令在、回应还没到"的命令被永久跳过(#8)。
+ */
+export function minePairs(msgs: FormattedMessage[], botUid: number, sinceMid: number): { pairs: Pair[]; safeMaxMid: number } {
   const pairs: Pair[] = [];
-  let maxMid = sinceMid;
+  let safeMaxMid = sinceMid;
+  const lastTs = msgs.length > 0 ? msgs[msgs.length - 1]!.timestamp : 0;
+  // 位置/时间上回应窗口是否已完整可观测(后面消息够多 或 已过去足够时间)
+  const positionSettled = (i: number, m: FormattedMessage): boolean =>
+    i + PAIR_WINDOW < msgs.length || lastTs - m.timestamp > PAIR_WINDOW_SEC;
+  const bump = (mid: number): void => { if (mid > safeMaxMid) safeMaxMid = mid; };
+
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i]!;
     const text = (m.textContent || '').trim();
     const cm = text.match(/^(\/[a-zA-Z][a-zA-Z0-9_]{0,30})(?:@(\w+))?(?:\s+([\s\S]{0,80}))?/);
     if (!cm) continue;
     if (m.messageId <= sinceMid) continue;
-    if (m.messageId > maxMid) maxMid = m.messageId;
     const command = cm[1]!.toLowerCase();
     const targetHint = cm[2];
     const args = (cm[3] || '').trim();
-    // 找后续窗口内的 bot 回应
+    if (GENERIC_COMMANDS.has(command)) { if (positionSettled(i, m)) bump(m.messageId); continue; }
+    // 找后续窗口内的 bot 回应(优先 reply 到本命令的;否则取首个候选 bot)
     const responses: FormattedMessage[] = [];
     let respBot = '';
     for (let j = i + 1; j < Math.min(i + 1 + PAIR_WINDOW, msgs.length); j++) {
@@ -70,12 +84,18 @@ export function minePairs(msgs: FormattedMessage[], botUid: number, sinceMid: nu
       if (n.timestamp - m.timestamp > PAIR_WINDOW_SEC) break;
       if (n.isBot && n.uid !== botUid && n.username) {
         if (targetHint && n.username.toLowerCase() !== targetHint.toLowerCase()) continue;
+        // 该 bot 回应明确 reply 了别的消息(不是本命令)→ 不是对本命令的回应,跳过
+        if (n.replyTo && n.replyTo.messageId && n.replyTo.messageId !== m.messageId) continue;
         if (respBot && n.username !== respBot) continue;
         respBot = n.username;
         responses.push(n);
       }
     }
-    if (!respBot || responses.length === 0) continue;
+    const pairFormed = !!respBot && responses.length > 0;
+    // 结清 = 配上了对(已拿到回应) 或 窗口已确定过完。只对结清的命令推进水位,
+    // 窗口边缘"命令在、回应还没到"的留到下个 tick 重挖(review #8)。
+    if (pairFormed || positionSettled(i, m)) bump(m.messageId);
+    if (!pairFormed) continue;
     pairs.push({
       bot: respBot,
       command,
@@ -85,7 +105,7 @@ export function minePairs(msgs: FormattedMessage[], botUid: number, sinceMid: nu
       responseText: responses.map((r) => r.textContent || r.captionContent || '').filter(Boolean).join(' ⏎ ').slice(0, 300),
     });
   }
-  return { pairs, maxMid };
+  return { pairs, safeMaxMid };
 }
 
 interface ExtractedProfile {
@@ -114,9 +134,12 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
   const msgs = await getRecent(chatId, 120);
   if (msgs.length === 0) return 0;
 
-  const { pairs, maxMid } = minePairs(msgs, botUid, sinceMid);
-  if (maxMid > sinceMid) await redis.set(WM_KEY(chatId), String(maxMid), 'EX', 30 * 86400).catch(() => {});
-  if (pairs.length === 0) return 0;
+  const { pairs, safeMaxMid } = minePairs(msgs, botUid, sinceMid);
+  const advanceWatermark = async (): Promise<void> => {
+    if (safeMaxMid > sinceMid) await redis.set(WM_KEY(chatId), String(safeMaxMid), 'EX', 30 * 86400).catch(() => {});
+  };
+  // 没有配对:没有要 LLM 抽取的东西,直接把水位推进到已结清处(无损)
+  if (pairs.length === 0) { await advanceWatermark(); return 0; }
 
   // 去重到 (bot, command),保留证据样本 + 合并 output_type
   const byCmd = new Map<string, Pair[]>();
@@ -131,9 +154,12 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
 
   let extracted: ExtractedProfile[] = [];
   try {
+    // 用函数式 replacement:samples/bot_name 含 $&、$' 等会被 String.replace 当
+    // 特殊替换模式吃掉(review #3:股价/格式化回执里 $ 很常见)
+    const name = env().BOT_NICKNAMES[0] || env().BOT_USERNAME;
     const tmpl = loadCachedPrompt('system/extract_bot_commands.md')
-      .replace('{bot_name}', env().BOT_NICKNAMES[0] || env().BOT_USERNAME)
-      .replace('{samples}', samples);
+      .replace('{bot_name}', () => name)
+      .replace('{samples}', () => samples);
     const res = await callWithFallback({
       usage: 'summarize',
       messages: [{ role: 'user', content: tmpl }],
@@ -142,6 +168,8 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
     });
     extracted = parseExtraction(res.content);
   } catch (err) {
+    // 抽取失败:**不推进水位**,下个 tick 重挖这些配对重试(review #1:
+    // 否则 LLM 故障期间挖到的命令永久丢失)
     logger.debug({ err, chatId }, 'bot-command-learner: LLM extraction failed');
     return 0;
   }
@@ -165,6 +193,8 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
     });
     learned++;
   }
+  // 抽取+upsert 都成功了,这批配对已消化 → 现在才推进水位(review #1)
+  await advanceWatermark();
   if (learned > 0) logger.info({ chatId, learned }, 'bot-command-learner: profiles updated');
   return learned;
 }

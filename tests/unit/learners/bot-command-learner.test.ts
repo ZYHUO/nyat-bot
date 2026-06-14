@@ -16,10 +16,10 @@ describe('minePairs', () => {
       msg({ messageId: 10, uid: 1, textContent: '/geo 8.8.8.8', timestamp: 100 }),
       msg({ messageId: 11, uid: 5, username: 'uzumaru_geoip_bot', isBot: true, textContent: 'IP: 8.8.8.8 ASN Google', timestamp: 105 }),
     ];
-    const { pairs, maxMid } = minePairs(msgs, BOT_UID, 0);
+    const { pairs, safeMaxMid } = minePairs(msgs, BOT_UID, 0);
     expect(pairs.length).toBe(1);
     expect(pairs[0]).toMatchObject({ bot: 'uzumaru_geoip_bot', command: '/geo', args: '8.8.8.8', outputType: 'text' });
-    expect(maxMid).toBe(10);
+    expect(safeMaxMid).toBe(10); // 配上对即结清,水位推进到命令 mid
   });
 
   it('回执只有 callback 按钮、无正文 → output_type=callback', () => {
@@ -37,6 +37,38 @@ describe('minePairs', () => {
       msg({ messageId: 31, uid: 5, username: 'b', isBot: true, textContent: 'ok', timestamp: 101 }),
     ];
     expect(minePairs(msgs, BOT_UID, 30).pairs.length).toBe(0); // mid 30 <= wm
+  });
+
+  it('窗口边缘(命令在末尾、回应未到)→ 不配对且不推进水位(review #8)', () => {
+    // 命令是最后一条,后面没有消息 → 窗口未结清
+    const msgs = [
+      msg({ messageId: 99, uid: 2, textContent: '闲聊', timestamp: 90 }),
+      msg({ messageId: 100, uid: 1, textContent: '/geo 9.9.9.9', timestamp: 100 }),
+    ];
+    const { pairs, safeMaxMid } = minePairs(msgs, BOT_UID, 0);
+    expect(pairs.length).toBe(0);
+    expect(safeMaxMid).toBe(0); // 未结清,水位不推进 → 下个 tick 回应到了能重挖
+  });
+
+  it('通用命令(/start)不学,但已结清则推进水位(review #10)', () => {
+    const msgs = [
+      msg({ messageId: 60, uid: 1, textContent: '/start', timestamp: 100 }),
+      msg({ messageId: 61, uid: 9, username: 'welcome_bot', isBot: true, textContent: '欢迎新人', timestamp: 101 }),
+      ...Array.from({ length: 6 }, (_, k) => msg({ messageId: 70 + k, uid: 2, textContent: 'x', timestamp: 110 + k })),
+    ];
+    const { pairs, safeMaxMid } = minePairs(msgs, BOT_UID, 0);
+    expect(pairs.find((p) => p.command === '/start')).toBeUndefined(); // 不学 /start
+    expect(safeMaxMid).toBeGreaterThanOrEqual(60); // 已结清,水位推进
+  });
+
+  it('回应明确 reply 了别的消息 → 不误配', () => {
+    const msgs = [
+      msg({ messageId: 80, uid: 1, textContent: '/geo a', timestamp: 100 }),
+      msg({ messageId: 81, uid: 5, username: 'b', isBot: true, textContent: '回别人的', timestamp: 101,
+        replyTo: { messageId: 79, uid: 3, fullName: 'X', textSnippet: 'other' } }),
+      ...Array.from({ length: 6 }, (_, k) => msg({ messageId: 90 + k, uid: 2, textContent: 'x', timestamp: 110 + k })),
+    ];
+    expect(minePairs(msgs, BOT_UID, 0).pairs.length).toBe(0);
   });
 
   it('@指向时只配对该 bot;bot 触发标 triggerByBot', () => {

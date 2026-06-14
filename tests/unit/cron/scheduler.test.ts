@@ -54,6 +54,7 @@ process.env['PROACTIVE_SCAN_ENABLED'] = 'false';
 process.env['VERIFY_ENABLED'] = 'false';
 process.env['LEARNER_ENABLED'] = 'false';
 process.env['SLEEP_SCHEDULE_ENABLED'] = 'false';
+process.env['BOT_COMMAND_LEARN_ENABLED'] = 'false';
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'

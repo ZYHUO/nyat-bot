@@ -82,6 +82,15 @@ describe('executeUseBotCommand 安全门', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it('已有 pending 时调用 → 不发、且不烧冷却(review #4)', async () => {
+    profile = {}; why = null;
+    store.set(PENDING_KEY(-100), JSON.stringify({ bot: 'x', command: '/y', args: '', sentMid: 1, issuedAt: 1 }));
+    const r = await executeUseBotCommand(-100, 'b', '/geo', 'a');
+    expect(r).toMatch(/还在等回执/);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(store.has('xxb:delegation:cd:-100')).toBe(false); // 冷却没被烧
+  });
+
   it('私聊 → 拒绝', async () => {
     const r = await executeUseBotCommand(100, 'b', '/geo', 'a');
     expect(r).toMatch(/私聊/);
@@ -108,12 +117,28 @@ describe('tryHandleDelegationReceipt 回执处理', () => {
     expect(store.has(PENDING_KEY(-100))).toBe(true); // pending 还在
   });
 
-  it('结果藏按钮后(无正文+按钮)→ 消费但不答(够不到)', async () => {
+  it('只有按钮无正文(可能占位)→ 不消费、继续等(review #5)', async () => {
     setPending();
     const r = await tryHandleDelegationReceipt(-100, bmsg({ username: 'uzumaru_geoip_bot', textContent: '', inlineKeyboard: [{ text: '确认身份', callbackData: 'x' }] }), 9999);
+    expect(r).toBe(false);
+    expect(store.has(PENDING_KEY(-100))).toBe(true); // pending 保留,等后续真结果
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('媒体回执无正文 → 消费 + 致意(不答"没查到",review #6)', async () => {
+    setPending();
+    const r = await tryHandleDelegationReceipt(-100, bmsg({ username: 'uzumaru_geoip_bot', textContent: '', audioFileId: 'aud123' }), 9999);
     expect(r).toBe(true);
     expect(store.has(PENDING_KEY(-100))).toBe(false);
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('长进度句(>40字)→ 仍识别为占位,继续等(review #9)', async () => {
+    setPending();
+    const long = '正在查询您请求的IP地址归属信息以及相关的网络服务商数据,请稍候片刻马上就好';
+    const r = await tryHandleDelegationReceipt(-100, bmsg({ username: 'uzumaru_geoip_bot', textContent: long }), 9999);
+    expect(r).toBe(false);
+    expect(store.has(PENDING_KEY(-100))).toBe(true);
   });
 
   it('最终文本结果 → 消费 + 清 pending + 生成回复', async () => {
