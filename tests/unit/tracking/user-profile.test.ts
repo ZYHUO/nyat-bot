@@ -46,13 +46,14 @@ function initSchema(db: Database.Database): void {
   }
 }
 
-// The 7-section JSON contract the prompt now asks the model to emit.
+// The 8-section JSON contract the prompt now asks the model to emit (G: +topics).
 function sectionJson(over: Record<string, string[]> = {}): string {
   return JSON.stringify({
     identity: [],
     relationships: [],
     stable_facts: [],
     interaction_prefs: [],
+    topics: [],
     recent: [],
     uncertain: [],
     maintenance: [],
@@ -153,6 +154,25 @@ describe('user-profile', () => {
     expect(row.pending_messages).toBe('[]');
   });
 
+  it('G: parses and stores the topics section', async () => {
+    for (let i = 1; i <= 8; i++) {
+      recordUserMessage(-1001, 42, 'alice', 'Alice', 'curious', `msg-${i}`);
+    }
+    _flushAllBuffers();
+    mockCallWithFallback.mockResolvedValue({
+      content: sectionJson({
+        identity: ['学生'],
+        topics: ['VPS', '显卡', '二次元'],
+      }),
+    });
+
+    await runUserProfileSync();
+
+    const sections = getProfileSections(-1001, 42);
+    const topics = sections.find((s) => s.section_name === 'topics');
+    expect(topics?.bullets).toEqual(['VPS', '显卡', '二次元']);
+  });
+
   it('upsert is idempotent on (chat_id, uid, section_name) across syncs', async () => {
     for (let i = 1; i <= 8; i++) {
       recordUserMessage(-1001, 42, 'alice', 'Alice', undefined, `a-${i}`);
@@ -238,7 +258,7 @@ describe('user-profile', () => {
     expect(sections).toEqual([{ section_name: 'stable_facts', bullets: ['爱好摄影'] }]);
   });
 
-  it('uses a conservative prompt that forbids over-inference and asks for 7-section JSON', async () => {
+  it('uses a conservative prompt that forbids over-inference and asks for 8-section JSON', async () => {
     for (let i = 1; i <= 8; i++) {
       recordUserMessage(-1001, 42, 'alice', 'Alice', '威严满满', `msg-${i}`);
     }
@@ -255,9 +275,10 @@ describe('user-profile', () => {
     };
     expect(args.messages[0]?.content).toContain('证据不足时只做保守描述');
     expect(args.messages[0]?.content).toContain('不要从用户名、昵称或 Tag 过度推断人格');
-    // New output contract: 7 named JSON sections.
+    // New output contract: 8 named JSON sections (G added 'topics').
     expect(args.messages[0]?.content).toContain('identity');
     expect(args.messages[0]?.content).toContain('uncertain');
+    expect(args.messages[0]?.content).toContain('topics');
     expect(args.messages[0]?.content).toContain('只输出 JSON 对象');
     expect(args.messages[1]?.content).toContain('用户标签(Tag): 威严满满');
     expect(args.messages[1]?.content).toContain('最新发言(8条)');

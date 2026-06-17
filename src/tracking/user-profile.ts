@@ -21,6 +21,7 @@ const PROFILE_SECTION_NAMES = [
   'relationships',
   'stable_facts',
   'interaction_prefs',
+  'topics',
   'recent',
   'uncertain',
   'maintenance',
@@ -167,6 +168,7 @@ const SECTION_LABELS: Record<string, string> = {
   relationships: '关系',
   stable_facts: '稳定事实',
   interaction_prefs: '互动偏好',
+  topics: '常聊话题',
   recent: '近况',
   uncertain: '待确认',
   maintenance: '维护',
@@ -499,11 +501,12 @@ export async function runUserProfileSync(): Promise<void> {
 
       const systemPrompt = `你是一个群聊用户画像分析师。根据用户最近的发言，更新对该用户的结构化画像。
 画像用于帮助群聊 bot 更好地理解和回应这个用户。
-输出必须是一个 JSON 对象，包含以下 7 个键，每个键的值都是「短句字符串数组」（每条不超过 30 字，中文）：
+输出必须是一个 JSON 对象，包含以下 8 个键，每个键的值都是「短句字符串数组」（每条不超过 30 字，中文）：
 - identity: 用户是谁、可推断的身份/角色（仅凭发言可确认的）
 - relationships: 与群友或 bot 的关系线索
 - stable_facts: 稳定不变的事实（长期兴趣、职业、所在地等）
 - interaction_prefs: 互动与说话风格偏好（语气、节奏、喜欢/讨厌的话题）
+- topics: 经常聊的话题/领域标签（如 VPS/机场/二次元/编程/显卡，每个 2-6 字，最多 5 个）
 - recent: 最近的近况、情绪或正在聊的事（易变，最多 2 条）
 - uncertain: 证据不足、仅作猜测、需进一步确认的点
 - maintenance: 与该用户互动时 bot 应注意的事项

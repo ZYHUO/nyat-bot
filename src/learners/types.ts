@@ -30,6 +30,8 @@ export interface LearnedExpression {
 export interface LearnedJargon {
   content: string;
   source_id?: string;
+  /** B:领域标签(infra/meme/general…),供按域选择性注入 */
+  domain?: string;
 }
 
 export interface LearnerScanResult {

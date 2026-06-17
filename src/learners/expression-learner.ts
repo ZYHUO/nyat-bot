@@ -68,6 +68,7 @@ export function parseLearnerOutput(raw: string): LearnerScanResult {
       jargons.push({
         content: obj['content'].slice(0, 30),
         source_id: typeof obj['source_id'] === 'string' ? obj['source_id'] : undefined,
+        domain: typeof obj['domain'] === 'string' ? obj['domain'].slice(0, 16) : undefined,
       });
     }
   }

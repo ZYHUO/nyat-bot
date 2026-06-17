@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { upsertJargons, getJargonsForInference, markJargonInferred, queryJargon, searchJargons } from '../../../src/learners/jargon-miner.js';
+import { upsertJargons, getJargonsForInference, markJargonInferred, queryJargon, searchJargons, getTopJargons, getTopJargonsForContext, detectJargonDomain } from '../../../src/learners/jargon-miner.js';
 
 const mockRun = vi.fn();
 const mockAll = vi.fn().mockReturnValue([]);
@@ -30,6 +30,75 @@ describe('upsertJargons', () => {
   it('uses ON CONFLICT to increment count', () => {
     upsertJargons(-1001, [{ content: 'test' }]);
     expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('ON CONFLICT'));
+  });
+
+  it('B: writes the domain column, defaulting to general (insert carries domain)', () => {
+    upsertJargons(-1001, [{ content: '三网绕', domain: 'infra' }, { content: 'yyds' }]);
+    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('domain'));
+    // run args: (chatId, content, sample, domain, now, now)
+    expect(mockRun).toHaveBeenCalledWith(-1001, '三网绕', expect.any(String), 'infra', expect.any(Number), expect.any(Number));
+    expect(mockRun).toHaveBeenCalledWith(-1001, 'yyds', expect.any(String), 'general', expect.any(Number), expect.any(Number));
+  });
+});
+
+describe('getTopJargons', () => {
+  beforeEach(() => {
+    mockAll.mockClear();
+    mockPrepare.mockClear();
+  });
+
+  it('B: filters by domain when one is supplied', () => {
+    mockAll.mockReturnValueOnce([]);
+    getTopJargons(-1001, 5, 'infra');
+    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('domain = ?'));
+    expect(mockAll).toHaveBeenCalledWith(-1001, 'infra', 5);
+  });
+
+  it('B: omits the domain filter when none is supplied', () => {
+    mockAll.mockReturnValueOnce([]);
+    getTopJargons(-1001, 5);
+    expect(mockPrepare).not.toHaveBeenCalledWith(expect.stringContaining('domain = ?'));
+    expect(mockAll).toHaveBeenCalledWith(-1001, 5);
+  });
+});
+
+describe('detectJargonDomain (B)', () => {
+  it('detects infra from VPS/机场/线路 vocabulary', () => {
+    expect(detectJargonDomain('这个机场的三网绕线路怎么样')).toBe('infra');
+    expect(detectJargonDomain('小鸡测速丢包严重')).toBe('infra');
+    expect(detectJargonDomain('解锁流媒体吗')).toBe('infra');
+  });
+
+  it('returns undefined for non-infra / empty text', () => {
+    expect(detectJargonDomain('今天天气真好哈哈哈')).toBeUndefined();
+    expect(detectJargonDomain('')).toBeUndefined();
+  });
+});
+
+describe('getTopJargonsForContext (B)', () => {
+  beforeEach(() => {
+    mockAll.mockClear();
+    mockPrepare.mockClear();
+  });
+
+  it('biases toward the detected domain, topping up with global highs (deduped)', () => {
+    const infraRow = { id: 1, chat_id: -1001, content: '三网绕', meaning: 'm', count: 9, status: 'inferred', raw_samples: '[]', domain: 'infra', created_at: 0, updated_at: 0 };
+    const globalRows = [
+      infraRow, // duplicate — must be filtered out
+      { id: 2, chat_id: -1001, content: 'yyds', meaning: 'm2', count: 8, status: 'inferred', raw_samples: '[]', domain: 'general', created_at: 0, updated_at: 0 },
+    ];
+    // 1st all() = domain query, 2nd all() = global fill
+    mockAll.mockReturnValueOnce([infraRow]).mockReturnValueOnce(globalRows);
+    const result = getTopJargonsForContext(-1001, '机场线路问题', 5);
+    expect(result.map((j) => j.content)).toEqual(['三网绕', 'yyds']);
+  });
+
+  it('falls back to plain top jargons when no domain is detected', () => {
+    mockAll.mockReturnValueOnce([]);
+    getTopJargonsForContext(-1001, '随便聊聊', 5);
+    // single global query, no domain filter
+    expect(mockAll).toHaveBeenCalledWith(-1001, 5);
+    expect(mockPrepare).not.toHaveBeenCalledWith(expect.stringContaining('domain = ?'));
   });
 });
 

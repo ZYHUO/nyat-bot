@@ -39,9 +39,11 @@ export function upsertJargons(
   // ON CONFLICT 的 json_array_length() 一碰就抛 'malformed JSON' 炸掉
   // 整个事务(6/6 起线上 SqliteError 的真身)。插入即 json_array(?),
   // 冲突路径从 excluded 里取第一个元素续插。
+  // B:带 domain 列(默认 general)。ON CONFLICT 时若旧值是 general 而新学到
+  // 了更具体的域,则更新(general 视为"未分类",可被覆盖)。
   const insertStmt = db.prepare(`
-    INSERT INTO jargons (chat_id, content, raw_samples, count, status, created_at, updated_at)
-    VALUES (?, ?, json_array(?), 1, 'pending', ?, ?)
+    INSERT INTO jargons (chat_id, content, raw_samples, count, status, domain, created_at, updated_at)
+    VALUES (?, ?, json_array(?), 1, 'pending', ?, ?, ?)
     ON CONFLICT(chat_id, content) DO UPDATE SET
       count = count + 1,
       raw_samples = CASE
@@ -49,6 +51,8 @@ export function upsertJargons(
         THEN json_insert(jargons.raw_samples, '$[#]', json_extract(excluded.raw_samples, '$[0]'))
         ELSE jargons.raw_samples
       END,
+      domain = CASE WHEN jargons.domain = 'general' AND excluded.domain != 'general'
+                    THEN excluded.domain ELSE jargons.domain END,
       updated_at = excluded.updated_at
   `);
 
@@ -57,7 +61,8 @@ export function upsertJargons(
     for (const item of items) {
       if (!item.content.trim()) continue;
       const sample = contextSnippet ? contextSnippet.slice(0, 200) : '';
-      insertStmt.run(chatId, item.content.trim(), sample, now, now);
+      const domain = (item.domain || 'general').trim() || 'general';
+      insertStmt.run(chatId, item.content.trim(), sample, domain, now, now);
       inserted++;
     }
   });
@@ -151,13 +156,60 @@ export function searchJargons(chatId: number, term: string): JargonEntry[] {
  * #4 黑话注入:取本群已推断出含义的高频黑话(供 prompt [本群黑话] 块)。
  * 从"被动工具查询"升级为"自然脱口而出"的素材源。
  */
-export function getTopJargons(chatId: number, limit = 5): JargonEntry[] {
+export function getTopJargons(chatId: number, limit = 5, domain?: string): JargonEntry[] {
   const db = getDb();
+  // B:传 domain 则按域取(选择性注入,如 VPS 话题只注 infra 黑话);不传取全部。
+  if (domain) {
+    return db.prepare(
+      `SELECT * FROM jargons
+        WHERE chat_id = ? AND status = 'inferred' AND meaning != '' AND domain = ?
+        ORDER BY count DESC LIMIT ?`,
+    ).all(chatId, domain, limit) as JargonEntry[];
+  }
   return db.prepare(
     `SELECT * FROM jargons
       WHERE chat_id = ? AND status = 'inferred' AND meaning != ''
       ORDER BY count DESC LIMIT ?`,
   ).all(chatId, limit) as JargonEntry[];
+}
+
+/**
+ * B 域检测:从文本里嗅出当前话题的领域。目前只特判 `infra`(这些群最强的
+ * 专域:机场/VPS/线路),其余留给 undefined(= 不偏置,取全部高频黑话)。
+ * meme/general 的边界太糊,硬分只会误伤,所以不强行分。
+ */
+const INFRA_DOMAIN_RE = new RegExp(
+  [
+    '机场', 'vps', '小鸡', '落地', '中转', '节点', '线路', '三网', '绕',
+    '直连', 'iplc', 'iepl', 'bgp', '丢包', '测速', '带宽', '延迟',
+    '解锁', '流媒体', '端口', '套餐', '保号', '回国', '原生ip', '纯净ip',
+  ].join('|'),
+  'i',
+);
+
+export function detectJargonDomain(text: string): string | undefined {
+  if (!text) return undefined;
+  if (INFRA_DOMAIN_RE.test(text)) return 'infra';
+  return undefined;
+}
+
+/**
+ * B 选择性注入:按当前文本的领域偏置 [本群黑话] 块。命中某域时先取该域的
+ * 高频黑话,再用全局高频(去重)补齐到 limit,保证块不被掏空。无域命中
+ * 时退化为原来的 getTopJargons(取全部高频)。
+ */
+export function getTopJargonsForContext(
+  chatId: number,
+  text: string,
+  limit = 5,
+): JargonEntry[] {
+  const domain = detectJargonDomain(text);
+  if (!domain) return getTopJargons(chatId, limit);
+  const domainHits = getTopJargons(chatId, limit, domain);
+  if (domainHits.length >= limit) return domainHits;
+  const seen = new Set(domainHits.map((j) => j.content));
+  const fill = getTopJargons(chatId, limit).filter((j) => !seen.has(j.content));
+  return [...domainHits, ...fill].slice(0, limit);
 }
 
 /**

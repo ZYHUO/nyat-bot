@@ -26,6 +26,29 @@ describe('parseLearnerOutput', () => {
     expect(result.jargons[0]).toEqual({ content: 'yyds', source_id: '12' });
   });
 
+  it('captures the jargon domain tag when present (B)', () => {
+    const raw = `[
+      {"content": "三网绕", "domain": "infra", "source_id": "12"},
+      {"content": "xswl", "domain": "meme", "source_id": "5"}
+    ]`;
+    const result = parseLearnerOutput(raw);
+    expect(result.jargons).toHaveLength(2);
+    expect(result.jargons[0]!.domain).toBe('infra');
+    expect(result.jargons[1]!.domain).toBe('meme');
+  });
+
+  it('truncates an over-long domain tag to 16 chars (B)', () => {
+    const raw = JSON.stringify([{ content: '黑话', domain: 'x'.repeat(40), source_id: '1' }]);
+    const result = parseLearnerOutput(raw);
+    expect(result.jargons[0]!.domain).toHaveLength(16);
+  });
+
+  it('leaves domain undefined when the tag is absent (B)', () => {
+    const raw = JSON.stringify([{ content: 'yyds', source_id: '1' }]);
+    const result = parseLearnerOutput(raw);
+    expect(result.jargons[0]!.domain).toBeUndefined();
+  });
+
   it('returns empty on invalid JSON', () => {
     const result = parseLearnerOutput('not json at all');
     expect(result.expressions).toHaveLength(0);

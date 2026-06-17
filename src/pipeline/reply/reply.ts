@@ -28,7 +28,7 @@ import { countTokens } from '../../ai/token-counter.js';
 import { logger } from '../../shared/logger.js';
 import { getCachedRoster, setCachedRoster } from './member-cache.js';
 import { composeSelfState } from '../heart/self-state.js';
-import { getTopJargons, searchJargonsInText } from '../../learners/jargon-miner.js';
+import { getTopJargonsForContext, searchJargonsInText } from '../../learners/jargon-miner.js';
 import { getRelationship, newcomerPromptHint } from '../../tracking/relationship.js';
 import { recallEpisodes } from '../../tracking/group-episodes.js';
 import { peekPendingQuestion } from '../../tracking/curiosity.js';
@@ -372,7 +372,9 @@ export async function generateReply(
       stateParts.pushP(20, `[此刻的你] ${narration}`);
     } catch { /* non-critical */ }
     try {
-      const jargons = getTopJargons(chatId, 5);
+      // B 选择性注入:当前消息谈到 infra(机场/VPS/线路)就先注 infra 黑话,
+      // 全局高频补齐;无域命中时退化为取全部高频。
+      const jargons = getTopJargonsForContext(chatId, queryText, 5);
       if (jargons.length > 0) {
         const lines = jargons.map((j) => `${j.content} = ${j.meaning.slice(0, 40)}`).join('；');
         stateParts.pushP(40, `[本群黑话] ${lines}\n(这些是群里的梗,语境合适时可以自然用上,别滥用)`);

@@ -22,16 +22,18 @@
 
 黑话长这样:拼音缩写(yyds、xswl)、英文缩写(CPU、API 这类在语境里有特殊含义的)、网络用语/中文缩写(社死、内卷)。
 
+每个黑话**带一个 domain 领域标签**(便于按场景复用):`infra`(机场/VPS/网络/线路/节点黑话)、`meme`(整活玩梗/二次元)、`general`(其它/不确定)。
+
 ## 输出
 
-输出一个 JSON 数组,两类条目混在一起:
+输出一个 JSON 数组,两类条目混在一起(黑话条目带 domain):
 
 ```json
 [
   {"situation": "对某事表示震惊", "style": "使用 我勒个xxx", "source_id": "3"},
   {"situation": "表示讽刺的赞同", "style": "对对对", "source_id": "7"},
-  {"content": "yyds", "source_id": "12"},
-  {"content": "xswl", "source_id": "5"}
+  {"content": "三网绕", "domain": "infra", "source_id": "12"},
+  {"content": "xswl", "domain": "meme", "source_id": "5"}
 ]
 ```
 
