@@ -282,6 +282,9 @@ const envSchema = z.object({
   BOT_COMMAND_LEARN_ENABLED: booleanFromEnv.default(false),
   // 学习扫描间隔(分钟)
   BOT_COMMAND_LEARN_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // 贴纸对战(E):群里连发贴纸时本喵带"战力评分"入场。reactive,默认关。
+  STICKER_BATTLE_ENABLED: booleanFromEnv.default(false),
+
   // 入站 bot 消息分类层(A 多bot共存 / D 降噪 / 命令学习 的共用地基)。
   // 先 shadow:打标 + 日志,不改任何行为;精度够了再让 A/D 消费。
   BOT_CLASSIFIER_ENABLED: booleanFromEnv.default(false),

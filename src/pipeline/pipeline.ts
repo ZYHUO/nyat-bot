@@ -180,6 +180,14 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       void maybeReact(job.chatId, formatted.messageId, formatted.textContent || formatted.captionContent || "");
     }
 
+    // 3.1e 贴纸对战(E)— 入站贴纸时检测"贴纸战"并带战力入场(fire-and-forget,
+    // reactive、不走 proactive cron;内部过作息/抑制门 + 冷却 + 概率,flag 默认关)。
+    if (job.chatId < 0 && !formatted.isBot && formatted.sticker && env().STICKER_BATTLE_ENABLED) {
+      import("./games/sticker-battle.js")
+        .then(({ maybeStickerBattle }) => maybeStickerBattle(job.chatId))
+        .catch(() => {});
+    }
+
     // 3.34 First-DM onboarding (fire-and-forget) — once per user, then continue
     if (job.chatId > 0 && !formatted.isBot) {
       const redis = getRedis();
