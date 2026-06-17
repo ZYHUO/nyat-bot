@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PlannerOutput",
+  "type": "object",
+  "required": ["needTools", "answerStrategy", "steps"],
+  "properties": {
+    "needTools": {
+      "type": "boolean"
+    },
+    "answerStrategy": {
+      "type": "string",
+      "enum": ["direct", "tool_then_answer"]
+    },
+    "steps": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["tool", "args", "purpose"],
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "args": {
+            "type": "object"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

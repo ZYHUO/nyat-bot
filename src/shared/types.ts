@@ -36,6 +36,8 @@ export interface FormattedMessage {
   inlineKeyboard?: Array<{ text: string; callbackData?: string; url?: string; switchInline?: string }>;
   /** 经某 bot inline 模式发出(Telegram "via @xxx");代发回执认领用 */
   viaBot?: string;
+  /** 入站其他 bot 消息的分类(self/verify/ad/echo/cmd_result/chat/unknown);A/D/学习器共用 */
+  botClass?: string;
   isBot?: boolean;
   /** 匿名管理员（sender_chat 是群组）或频道发言（sender_chat 是频道） */
   isAnonymous?: boolean;

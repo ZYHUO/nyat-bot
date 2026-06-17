@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JudgeOutput",
+  "description": "Judge 决策输出格式",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["REPLY", "IGNORE", "REJECT"],
+      "description": "决策动作"
+    },
+    "replyPath": {
+      "type": "string",
+      "enum": ["direct", "planned"],
+      "description": "回复路径：direct=直接回复，planned=允许走工具/重路径"
+    },
+    "replyTier": {
+      "type": "string",
+      "enum": ["normal", "pro"],
+      "description": "回复模型档位：normal=普通，pro=更高预算/更强分析"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "决策置信度"
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "决策理由（可选，用于调试）",
+      "maxLength": 500
+    }
+  },
+  "additionalProperties": false
+}

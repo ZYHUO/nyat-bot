@@ -124,6 +124,24 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     const e = env();
     const botUid = getBotUid();
+
+    // 3.0 bot 消息分类(地基,shadow:只打标 + 日志,不改行为)。其他 bot
+    // 的入站消息打 botClass,供后续 A 互动 / D 降噪 / 命令学习共用一个判定。
+    if (e.BOT_CLASSIFIER_ENABLED && formatted.isBot && formatted.uid !== botUid && job.chatId < 0) {
+      try {
+        const { classifyBotMessage } = await import("../tracking/bot-classifier.js");
+        const { getProfilesForBot } = await import("../learners/bot-command-store.js");
+        const hasProfile = formatted.username ? getProfilesForBot(formatted.username).length > 0 : false;
+        formatted.botClass = classifyBotMessage(formatted, { hasCommandProfile: hasProfile });
+        logger.info(
+          { chatId: job.chatId, bot: formatted.username, botClass: formatted.botClass },
+          "Bot message classified (shadow)",
+        );
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "bot classify failed (non-critical)");
+      }
+    }
+
     // G5: wait-resume replay — the anchor entry already went through every
     // bookkeeping stage on first processing; skip context-save + tracking
     // side-effects and go straight to judge→reply.

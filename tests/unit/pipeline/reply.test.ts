@@ -104,6 +104,11 @@ vi.mock('../../../src/shared/config.js', () => ({
 
 import { generateReply } from '../../../src/pipeline/reply/reply.js';
 
+// 这些用例测的是 legacy planner / 工具执行路径。.env 现已开 REPLY_MERGED_TOOLS_ENABLED
+// (合并写手会旁路 planner 块);env() 首调即缓存,故在首个 env() 调用前钉死为关,
+// 让 planned 用例确定性走 planner→executeToolPlan 路径。
+process.env['REPLY_MERGED_TOOLS_ENABLED'] = 'false';
+
 function makeMessage(overrides: Partial<FormattedMessage> = {}): FormattedMessage {
   return {
     role: 'user',
