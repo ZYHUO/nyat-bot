@@ -285,6 +285,13 @@ const envSchema = z.object({
   // 贴纸对战(E):群里连发贴纸时本喵带"战力评分"入场。reactive,默认关。
   STICKER_BATTLE_ENABLED: booleanFromEnv.default(false),
 
+  // C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。
+  NETWORK_BURST_ENABLED: booleanFromEnv.default(false),
+
+  // A 多 bot 共存:对会话型 bot(千雪)/带媒体结果的工具 bot(解析姬)做反应。
+  // reactive、不走 judge,自带 chat-lock + per-peer fatigue + 作息门。默认关。
+  PEER_REACTION_ENABLED: booleanFromEnv.default(false),
+
   // D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习
   //(保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。
   BOT_DENOISE_ENABLED: booleanFromEnv.default(false),

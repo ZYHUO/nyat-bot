@@ -193,6 +193,14 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         .catch(() => {});
     }
 
+    // 3.1f 网络事件 burst(C)— 集体喊"挂了/CF炸了"时冒一句(fire-and-forget,
+    // 30s 滑窗 + 10min 冷却 + 作息/抑制门;内部先匹配故障词,非故障消息零开销)。
+    if (job.chatId < 0 && !formatted.isBot && env().NETWORK_BURST_ENABLED) {
+      import("./games/network-burst.js")
+        .then(({ maybeNetworkBurst }) => maybeNetworkBurst(job.chatId, formatted, botUid))
+        .catch(() => {});
+    }
+
     // 3.34 First-DM onboarding (fire-and-forget) — once per user, then continue
     if (job.chatId > 0 && !formatted.isBot) {
       const redis = getRedis();
@@ -420,6 +428,17 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         "Pipeline complete (denoise: bot ad/verify/echo silenced)",
       );
       return;
+    }
+
+    // 3.97 A 多 bot 共存:会话型 bot(千雪)/带媒体的工具结果(解析姬)→ 另起
+    // 一条 peer 反应(fire-and-forget,自带 chat-lock/fatigue/作息门/@我让位)。
+    // 在代发回执之后:cmd_result 若是我们点的命令回执,3.96 已认领并 return。
+    // 不 early-return:非点名 bot 消息后面 L0 bot_message 会 0ms IGNORE。
+    if (e.PEER_REACTION_ENABLED && formatted.isBot && formatted.uid !== botUid &&
+        (formatted.botClass === "chat" || formatted.botClass === "cmd_result")) {
+      import("./games/peer-reaction.js")
+        .then(({ maybePeerReaction }) => maybePeerReaction(job.chatId, formatted, botUid))
+        .catch(() => {});
     }
 
     // 3.95 Phase 1/4: tracking-only paths skip judge/reply.
