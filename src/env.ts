@@ -285,6 +285,10 @@ const envSchema = z.object({
   // 贴纸对战(E):群里连发贴纸时本喵带"战力评分"入场。reactive,默认关。
   STICKER_BATTLE_ENABLED: booleanFromEnv.default(false),
 
+  // D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习
+  //(保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。
+  BOT_DENOISE_ENABLED: booleanFromEnv.default(false),
+
   // 入站 bot 消息分类层(A 多bot共存 / D 降噪 / 命令学习 的共用地基)。
   // 先 shadow:打标 + 日志,不改任何行为;精度够了再让 A/D 消费。
   BOT_CLASSIFIER_ENABLED: booleanFromEnv.default(false),

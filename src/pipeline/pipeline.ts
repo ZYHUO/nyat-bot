@@ -142,6 +142,11 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }
     }
 
+    // D 降噪:ad/verify/echo 类其他 bot 消息 → 不进 digest/学习、不烧 judge
+    //(但保留进 ctx)。在 bookkeeping 与 judge 前都要用,故在此作用域声明。
+    const isDenoiseBot = e.BOT_DENOISE_ENABLED &&
+      (formatted.botClass === "ad" || formatted.botClass === "verify" || formatted.botClass === "echo");
+
     // G5: wait-resume replay — the anchor entry already went through every
     // bookkeeping stage on first processing; skip context-save + tracking
     // side-effects and go straight to judge→reply.
@@ -333,8 +338,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Profile notification check failed'); }
     }
 
-    // 3.6 Bot interaction tracking
-    if (formatted.isBot && formatted.username) {
+    // 3.6 Bot interaction tracking(D 降噪:ad/verify/echo 不进 digest/学习)
+    if (formatted.isBot && formatted.username && !isDenoiseBot) {
       try {
         getBotTracker()?.recordInteraction(job.chatId, {
           ts: formatted.timestamp, type: "message", bot: formatted.username,
@@ -404,6 +409,17 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       } catch (err) {
         logger.debug({ err, chatId: job.chatId }, "delegation receipt check failed (non-critical)");
       }
+    }
+
+    // 3.965 D 降噪:ad/verify/echo 类其他 bot 消息(已在 ctx,不删)→ tracking-only,
+    // 不烧 judge/heart。顺序在代发回执(3.96)之后:cmd_result 先被回执认领,
+    // 这里只拦广告/验证/复读。
+    if (isDenoiseBot) {
+      logger.info(
+        { chatId: job.chatId, bot: formatted.username, botClass: formatted.botClass },
+        "Pipeline complete (denoise: bot ad/verify/echo silenced)",
+      );
+      return;
     }
 
     // 3.95 Phase 1/4: tracking-only paths skip judge/reply.

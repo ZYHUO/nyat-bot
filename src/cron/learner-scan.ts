@@ -42,12 +42,17 @@ function updateScanState(chatId: number, lastMsgId: number): void {
   ).run(chatId, lastMsgId, now);
 }
 
+// F 复读防串台:源头过滤——广告/验证/复读类其他 bot 的消息不喂给学习器
+// (codex:抽取前过滤,比 prompt 约束硬;核心防线是 botClass 而非 viaBot)
+const NON_LEARNABLE_BOT_CLASS = new Set(['ad', 'verify', 'echo']);
 function formatMessagesForLearner(messages: FormattedMessage[]): string {
-  return messages.map((m) => {
-    const name = m.fullName || m.username || (m.role === 'assistant' ? 'SELF' : '?');
-    const text = m.textContent || m.captionContent || '[media]';
-    return `[source_id:${m.messageId}] ${name}: ${text.slice(0, 200)}`;
-  }).join('\n');
+  return messages
+    .filter((m) => !(m.isBot && m.botClass && NON_LEARNABLE_BOT_CLASS.has(m.botClass)))
+    .map((m) => {
+      const name = m.fullName || m.username || (m.role === 'assistant' ? 'SELF' : '?');
+      const text = m.textContent || m.captionContent || '[media]';
+      return `[source_id:${m.messageId}] ${name}: ${text.slice(0, 200)}`;
+    }).join('\n');
 }
 
 async function extractFromChat(chatId: number, messages: FormattedMessage[], e: ReturnType<typeof env>): Promise<void> {
