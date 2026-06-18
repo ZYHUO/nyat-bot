@@ -326,6 +326,22 @@ const envSchema = z.object({
   // 到点睡觉/起床时向最近活跃的群发晚安/早安(固定短句池,无 LLM)
   SLEEP_ANNOUNCE_ENABLED: booleanFromEnv.default(false),
 
+  // ── DM 好感主动私聊 (功能 B) ──
+  // B1:睡前/起床给「已私聊过 bot 的高好感用户」发悄悄话(带跨群外号)。默认关。
+  SLEEP_DM_ENABLED: booleanFromEnv.default(false),
+  DM_GREET_AFFINITY_MIN: z.coerce.number().default(40),
+  DM_GREET_MAX_USERS: z.coerce.number().int().default(2),       // 每个边沿最多几人
+  DM_PROACTIVE_COOLDOWN_HOURS: z.coerce.number().default(20),    // 同人两次主动 DM 最小间隔
+  // B3:群里@催pm(高好感但从没 DM)。最危险,默认关灰度。
+  PM_NUDGE_ENABLED: booleanFromEnv.default(false),
+  PM_NUDGE_AFFINITY_MIN: z.coerce.number().default(45),          // 较高门槛(用户要求达高好感才主动)
+  PM_NUDGE_MIN_INTERACTIONS: z.coerce.number().int().default(20),
+  PM_NUDGE_MAX_ATTEMPTS: z.coerce.number().int().default(3),     // 三家建议≤3
+  PM_NUDGE_INTERVAL_DAYS: z.string().default('3,5,7'),           // 递增间隔
+  PM_NUDGE_GLOBAL_DAILY_MAX: z.coerce.number().int().default(2), // 全局每日主动@上限(防封号生命线)
+  PM_NUDGE_EXHAUST_PENALTY: z.coerce.number().default(15),       // 催满未果扣好感
+  PM_NUDGE_COOLDOWN_DAYS: z.coerce.number().default(30),         // exhausted 后冷却
+
   // ── School schedule (功能 A) ──
   // 16 岁上学人设:确定性周课表 + school_overrides 特殊日,注入 self-state。
   // 默认关。睡眠硬门优先级高于上课。

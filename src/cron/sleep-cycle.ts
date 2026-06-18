@@ -228,11 +228,20 @@ export async function runSleepCycle(): Promise<void> {
       if (e.SLEEP_ANNOUNCE_ENABLED) {
         await announce(await pickActiveChats(GOODNIGHT_ACTIVITY_SEC), 'goodnight');
       }
+      // 功能 B1:睡前给已私聊的高好感用户发悄悄话(SLEEP_DM_ENABLED 内部门控)
+      if (e.SLEEP_DM_ENABLED) {
+        const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
+        await announceDmGreetings('goodnight');
+      }
     } else {
       // 起床:先问候(欠回复的群优先),下一分钟起逐 chat 补回
       const oweChats = (await peekSleepQueues()).map((q) => q.chatId);
       if (e.SLEEP_ANNOUNCE_ENABLED) {
         await announce(await pickActiveChats(MORNING_ACTIVITY_SEC, oweChats), 'morning');
+      }
+      if (e.SLEEP_DM_ENABLED) {
+        const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
+        await announceDmGreetings('morning');
       }
       if (oweChats.length > 0) {
         await redis.set(DRAIN_KEY, String(MORNING_DRAIN_BUDGET), 'EX', 3600);

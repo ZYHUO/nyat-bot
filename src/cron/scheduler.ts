@@ -124,6 +124,17 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // 功能 B3:@催pm 扫描(默认关灰度)。内部还有好感门/递增间隔/全局每日上限/
+  // allowlist+mute+成员+isAsleep 安全门;每 3 小时扫一次,实际发送受日上限封顶。
+  if (env().PM_NUDGE_ENABLED) {
+    tasks.push(schedule('13 */3 * * *', () => {
+      void safeRun('pm-nudge', async () => {
+        const { runPmNudge } = await import('./pm-nudge.js');
+        await runPmNudge();
+      });
+    }));
+  }
+
   // G7(语言生命)群共同经历 — 每 2 小时为活跃群提炼 0-2 条"群里发生的事"
   tasks.push(schedule('37 */2 * * *', () => {
     void safeRun('group-episodes', async () => {

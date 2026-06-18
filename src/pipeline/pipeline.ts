@@ -204,6 +204,25 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }).catch((err) => logger.debug({ err }, 'Onboarding check failed (non-critical)'));
     }
 
+    // 3.345 DM 好感(功能 B):记录私聊过(供睡前/起床 DM 资格)+ 停 @催pm +
+    // flush 攒着的话。全程 fire-and-forget,不阻塞管线;flush 仅在有攒话时动工。
+    if (job.chatId > 0 && !formatted.isBot) {
+      void (async () => {
+        try {
+          const { markDmEver, markPmDmOpen } = await import('../tracking/dm-state.js');
+          markDmEver(formatted.uid);
+          markPmDmOpen(formatted.uid);
+          const { countDmPending } = await import('../tracking/dm-pending.js');
+          if (countDmPending(formatted.uid) > 0) {
+            const { flushDmPendingOnInbound } = await import('./dm-proactive.js');
+            await flushDmPendingOnInbound(formatted.uid);
+          }
+        } catch (err) {
+          logger.debug({ err }, 'DM affinity inbound hook failed (non-critical)');
+        }
+      })();
+    }
+
     // 3.35 DM pending confide intercept (before judge, DM only) —
     // when user said "树洞" earlier and we asked for content, treat the next
     // DM message as that content and dispatch via doConfide.

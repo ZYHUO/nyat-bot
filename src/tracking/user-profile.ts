@@ -219,6 +219,23 @@ export function getUserTag(chatId: number, uid: number): string | null {
   return row?.sender_tag ?? null;
 }
 
+/**
+ * 跨群外号(功能 B):sender_tag 是 TG 全局身份,不因群而异。DM 场景取该 uid
+ * 在所有群里最新的非空 sender_tag,避免叫错某个群的外号。fail-soft 返回 null。
+ */
+export function getAggregatedUserTag(uid: number): string | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT sender_tag FROM user_profiles
+        WHERE uid = ? AND sender_tag IS NOT NULL AND sender_tag != ''
+        ORDER BY updated_at DESC LIMIT 1`,
+    ).get(uid) as { sender_tag: string | null } | undefined;
+    return row?.sender_tag ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── 用户偏好 CRUD ──────────────────────────────────────
 
 const MAX_PREFS_PER_USER = 20; // 每人最多保留多少条偏好
