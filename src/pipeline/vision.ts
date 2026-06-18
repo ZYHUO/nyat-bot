@@ -48,11 +48,14 @@ export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmot
     const dataUrl = await fetchImageDataUrl(fileId);
     if (!dataUrl) return null;
     const prompt =
-      '你在给一只猫娘 bot 的贴纸库做情绪标注。只看图,别管任何 emoji。判断这张贴纸表达的情绪/适用场景。' +
-      '严格输出 JSON(不要多余文字):{"emotion_tags":["开心","害羞"],"mood_map":{"happy":0.8,"shy":0.4},' +
-      '"persona_fit":true,"description":"一句话描述"}。emotion_tags 用中文常见情绪词(开心/难过/生气/害羞/惊讶/' +
-      '卖萌/无语/疑惑/委屈/得意/困/爱心 等),3-6 个;mood_map 值 0-1;persona_fit=这张是否适合可爱猫娘发(太丑/' +
-      '太成人/纯文字截图=false)。';
+      'Label this sticker for a cute catgirl bot\'s sticker library. Look ONLY at the image — ignore any emoji. ' +
+      'Output STRICT JSON only (no prose): {"emotion_tags":["happy","shy"],"mood_map":{"happy":0.8,"shy":0.4},' +
+      '"persona_fit":true,"description":"one short line"}. ' +
+      'emotion_tags: 3-6 lowercase ENGLISH emotion/scene words from this vocabulary when possible: ' +
+      'cute, happy, sad, angry, surprised, shy, flustered, embarrassed, confused, playful, teasing, smug, ' +
+      'sleepy, tired, comforting, gentle, soft, affectionate, pouty, deadpan, unimpressed, sarcastic, crying, ' +
+      'excited, cheerful, curious, nervous, awkward, calm, peaceful, warmth, greeting, farewell, thanking. ' +
+      'mood_map: 0-1 values. persona_fit=false if ugly/adult/plain-text-screenshot.';
     const result = await callWithFallback({
       usage: 'vision',
       messages: [
