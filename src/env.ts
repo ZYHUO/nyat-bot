@@ -92,6 +92,9 @@ const envSchema = z.object({
   // 关 → describeAudio 直接返回中性占位,不发那通注定失败的调用。
   // 接上可用 audio 模型后:置 true + AI_USAGE_AUDIO_LABEL=<模型> 即生效。
   AUDIO_TRANSCRIBE_ENABLED: booleanFromEnv.default(false),
+  // PDF 识别:同理默认关。当前 vision 路由实际落到 GPT(sub2gpt54mini),
+  // 读不了 PDF base64,这通调用必败。gemini/PDF-capable vision 恢复后置 true。
+  PDF_VISION_ENABLED: booleanFromEnv.default(false),
 
   // Join verification
   VERIFY_ENABLED: booleanFromEnv.default(false),

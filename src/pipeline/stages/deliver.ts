@@ -47,6 +47,7 @@ import {
 } from "../../tracking/reply-max-quota.js";
 import { acquireChatLock } from "../../queue/chat-lock.js";
 import { AIError } from "../../shared/errors.js";
+import { isCallerAbort } from "../../shared/abort.js";
 import { env } from "../../env.js";
 import { logger } from "../../shared/logger.js";
 import { recordBotReply } from "../../tracking/stats.js";
@@ -1001,7 +1002,14 @@ export async function generateAndSendReplies(args: {
     // Turn interrupt (G3): not a failure — propagate to the actor, which
     // waits the quiet period and replans with the new messages. No fallback
     // message, no error log.
-    if (err instanceof AIError && err.code === "AI_ABORTED") {
+    // 主判据用 signal.reason(最稳健,不依赖 SDK 是否包裹原始错误);裸 TurnInterrupt
+    // (signal.throwIfAborted())与归一后的 AIError/AI_ABORTED 双保险——否则正常打断
+    // 会落到下面的 error 日志 + 给用户发『出了点小故障』道歉。
+    if (
+      isCallerAbort(job.turnContext?.signal) ||
+      (err instanceof Error && err.name === "TurnInterrupt") ||
+      (err instanceof AIError && err.code === "AI_ABORTED")
+    ) {
       logger.info(
         { chatId: job.chatId, messageId: formatted.messageId },
         "Reply generation interrupted by new message, propagating for replan",

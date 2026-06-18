@@ -32,17 +32,18 @@ export function assembleBurstHint(parts: CtxPart[], budgetChars: number): string
   let used = 0;
   const kept: Array<{ order: number; text: string }> = [];
   for (const part of [...parts].sort((a, b) => a.keep - b.keep)) {
+    const sep = kept.length > 0 ? 2 : 0; // 渲染时 join('\n\n') 的块间分隔符,计入预算
     if (part.keep < KEEP_ALWAYS) {
       // 必留块:无视预算,且不参与下面的截断判断(它们恒排在最前)。
       kept.push({ order: part.order, text: part.text });
-      used += part.text.length;
+      used += part.text.length + sep;
       continue;
     }
     // 严格优先级截断:已按 keep 升序,第一个放不下的可选块之后全是同/更低
     // 优先级的块 —— 直接停,避免"更次要但更短的块顶替更重要的块存活"(重要度倒挂)。
-    if (used + part.text.length > budgetChars) break;
+    if (used + part.text.length + sep > budgetChars) break;
     kept.push({ order: part.order, text: part.text });
-    used += part.text.length;
+    used += part.text.length + sep;
   }
   return kept.sort((a, b) => a.order - b.order).map((p) => p.text).join('\n\n') || undefined;
 }

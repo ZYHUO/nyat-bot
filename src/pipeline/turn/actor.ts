@@ -47,7 +47,13 @@ function maxReplans(): number {
 }
 
 function isAbortError(err: unknown): boolean {
-  return err instanceof AIError && err.code === 'AI_ABORTED';
+  // AI 调用层把调用方打断归一成 AIError/AI_ABORTED;但 signal.throwIfAborted()
+  // 抛的是裸 TurnInterrupt(name='TurnInterrupt',message 不含 'abort'),旧判据
+  // 漏接 → 正常打断被当真错误上抛到 worker。两种形状都认。
+  return (
+    (err instanceof AIError && err.code === 'AI_ABORTED') ||
+    (err instanceof Error && (err.name === 'TurnInterrupt' || err.name === 'Shutdown'))
+  );
 }
 
 /**

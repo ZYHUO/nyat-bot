@@ -100,6 +100,11 @@ async function describeDocument(
 
   // PDF — gemini can handle PDFs as base64 image-like inline
   if (effectiveMime === 'application/pdf') {
+    // 当前 vision 路由实际落到 GPT,读不了 PDF base64 → 这通调用必败(与语音同类)。
+    // 默认跳过,不烧 30s timeout + backup;接上 PDF-capable vision 后置 PDF_VISION_ENABLED=true。
+    if (!env().PDF_VISION_ENABLED) {
+      return `[PDF文档${fileName ? `「${fileName}」` : ''}]`;
+    }
     try {
       const base64 = Buffer.from(downloaded.buffer).toString('base64');
       const dataUrl = `data:application/pdf;base64,${base64}`;

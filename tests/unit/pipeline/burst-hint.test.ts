@@ -74,6 +74,16 @@ describe('assembleBurstHint', () => {
     expect(out).not.toContain('P'.repeat(100));
   });
 
+  it('counts the \\n\\n separator against the budget so rendered length never exceeds it', () => {
+    const parts: CtxPart[] = [
+      { order: 10, keep: 20, text: 'AAAAA' }, // 5 chars — fits (no separator yet)
+      { order: 20, keep: 21, text: 'BBBBB' }, // 5 + 2(sep) = 12 > 10 → must drop
+    ];
+    const out = assembleBurstHint(parts, 10)!;
+    expect(out).toBe('AAAAA');
+    expect(out.length).toBeLessThanOrEqual(10);
+  });
+
   it('returns undefined when there are no parts', () => {
     expect(assembleBurstHint([], 1400)).toBeUndefined();
   });

@@ -122,16 +122,16 @@ describe('heart fallback signal hygiene (#34)', () => {
     expect(d.why).toBe('llm_failed');
   });
 
-  it('TurnInterrupt abort still short-circuits the chain (no backup burn)', async () => {
+  it('TurnInterrupt abort short-circuits the chain (no backup burn) and re-throws for replan', async () => {
     const controller = new AbortController();
     callModelMock.mockImplementationOnce(async () => {
       controller.abort(Object.assign(new Error('turn interrupt'), { name: 'TurnInterrupt' }));
       throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     });
 
-    const d = await heartDecision(baseInput(controller.signal));
-
-    expect(callModelMock).toHaveBeenCalledTimes(1); // 打断不进 fallback
-    expect(d.act).toBe('pass'); // heart 永不 throw,fail-closed
+    // 调用方打断 ≠ LLM 故障:heart 上抛 AI_ABORTED 交给 actor 重规划,
+    // 不再 fail-closed pass 吞掉本该 replan 的回合(并消除最大 warn 噪音源)。
+    await expect(heartDecision(baseInput(controller.signal))).rejects.toMatchObject({ code: 'AI_ABORTED' });
+    expect(callModelMock).toHaveBeenCalledTimes(1); // 打断不进 fallback,不烧 backup
   });
 });

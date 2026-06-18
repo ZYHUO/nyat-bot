@@ -14,6 +14,8 @@
 
 import type { FormattedMessage, JudgeResult } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
+import { isCallerAbort } from '../../shared/abort.js';
+import { AIError } from '../../shared/errors.js';
 import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
@@ -138,6 +140,12 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
     });
     raw = result.content;
   } catch (err) {
+    // 调用方打断(turn 新消息/关机)≠ LLM 故障:上抛交给 actor 走『等静默期+
+    // 带新上下文重规划』。若 fail-closed pass 吞掉,既丢了本该 replan 的回合,
+    // 又把正常打断刷成 warn(实测占当前进程最大 warn 来源)。
+    if (isCallerAbort(input.signal) || (err instanceof AIError && err.code === 'AI_ABORTED')) {
+      throw err;
+    }
     const latencyMs = Math.round(performance.now() - start);
     logger.warn({ err, chatId: input.chatId }, 'heart LLM failed, fail-closed pass');
     return { act: 'pass', path: 'chat', why: 'llm_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
