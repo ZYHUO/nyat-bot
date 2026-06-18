@@ -11,7 +11,16 @@ const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Geck
 export async function executeSearch(query: string): Promise<string> {
   const e = env();
 
-  // Route 1: xAI Responses API with web_search (best quality)
+  // Route 1: Gemini Google-Search grounding (primary)
+  if (e.GEMINI_API_KEY) {
+    try {
+      return await geminiSearch(query, e.GEMINI_API_KEY, e.GEMINI_SEARCH_MODEL);
+    } catch (err) {
+      logger.warn({ err, query }, 'Gemini search failed, falling back');
+    }
+  }
+
+  // Route 2: xAI Responses API with web_search
   if (e.XAI_API_KEY) {
     try {
       return await xaiSearch(query, e.XAI_API_KEY, e.XAI_SEARCH_MODEL);
@@ -27,6 +36,59 @@ export async function executeSearch(query: string): Promise<string> {
 
   // Route 3: DDG Lite (always available)
   return ddgLiteSearch(query);
+}
+
+// ── Gemini Google-Search grounding ──
+// generateContent + tools:[{google_search:{}}] → 模型联网搜索后给出综合答案 +
+// groundingMetadata.groundingChunks(来源)。key 走 query string(Gemini API 约定),
+// 不进任何日志。
+
+interface GeminiGroundResponse {
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+    groundingMetadata?: {
+      groundingChunks?: Array<{ web?: { title?: string; uri?: string } }>;
+      webSearchQueries?: string[];
+    };
+  }>;
+  error?: { message?: string };
+}
+
+async function geminiSearch(query: string, apiKey: string, model: string): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: query }] }],
+      tools: [{ google_search: {} }],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Gemini search ${res.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const data = (await res.json()) as GeminiGroundResponse;
+  if (data.error) throw new Error(`Gemini search: ${data.error.message ?? 'unknown'}`);
+
+  const cand = data.candidates?.[0];
+  const text = (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('').trim();
+  if (!text) return `没有找到与"${query}"相关的结果。`;
+
+  const sources = [
+    ...new Set(
+      (cand?.groundingMetadata?.groundingChunks ?? [])
+        .map((c) => c.web?.title?.trim())
+        .filter((t): t is string => !!t),
+    ),
+  ].slice(0, MAX_RESULTS);
+
+  let out = `关于"${query}"的搜索结果：\n${text}`;
+  if (sources.length) out += `\n来源：${sources.join('、')}`;
+  return out;
 }
 
 // ── xAI Responses API search ──

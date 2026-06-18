@@ -48,6 +48,10 @@ const envSchema = z.object({
   SEARXNG_URL: z.string().url().optional(),
   XAI_API_KEY: z.string().optional(),
   XAI_SEARCH_MODEL: z.string().default('grok-4-0709'),
+  // Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。
+  // 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2.5-flash-lite 免费可用。
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_SEARCH_MODEL: z.string().default('gemini-2.5-flash-lite'),
   FETCH_GATEWAY_URL: z.string().optional(),
   FETCH_WORKER_URL: z.string().url().optional(),
   // Firecrawl 兜底:JS 重页面 / Cloudflare 验证页,免费路由(直连/Jina/本地绕过)
