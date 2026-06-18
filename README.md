@@ -29,7 +29,8 @@
 - 🗣️ **自然语言调用指令** — "帮我签到"→签到、"看看我的图鉴"→卡册、"追踪比特币"→关注话题，私聊宽松、群里需点名
 - 💬 **多条回复 / 多目标** — AI 可一次性回复多个人（JSON 数组），每条精准引用各自目标
 - 🔄 **流式回复** — 打字中效果，逐段更新消息，用户体验流畅
-- 🛠️ **工具调用** — 网页搜索（xAI Grok / SearxNG）、网页抓取、IP 查询、定时器
+- 🛠️ **工具调用** — 联网搜索（**Gemini Google-Search grounding** 主路由 → xAI / SearxNG / DDG 回退）、网页抓取、IP 查询、定时器
+- 🎒 **真实身份 · 上学日程** — 16 岁高中生人设:确定性周课表 + 节假日/补课 override，上课偷瞄手机回得短、课间/放学话变多、每天一句「今日感想」,作息与睡眠层联动（migration 0040）
 - 🎯 **多模型路由** — Judge / Reply / Reply Pro / Vision / Summarize 分配不同模型；Redis 运行时可覆盖
 - 🏎️ **Hedged Request** — 主模型超时自动发备用请求，谁快用谁（可关闭省 token）
 - 👁️ **视觉理解** — 图片/表情描述，结果缓存复用（migration 0028）
@@ -66,6 +67,7 @@
 - ⏰ **定时提醒** — 自然语言设提醒，到点喊你（"明天早上 6 点叫我"）
 - 🗂️ **群友档案/备注** — 记录与查看群成员资料（migration 0021）
 - 🎛️ **功能开关** — `/feature` 群管按需开关各 DM 功能；`/setdefault` 设默认群
+- 💗 **好感度驱动主动私聊** — 跨群累积好感（非简单累加,√加权压缩）；对已私聊过的高好感群友睡前/起床发悄悄话（带跨群外号画像）；达高好感但从没私聊→群里 @ 喊"来 pm"（≤3 次递增间隔 + 全局每日上限 + allowlist/mute/成员/作息安全门,默认灰度）；攒着想说的话等对方私聊时自然说出（migrations 0040-0041）
 
 **收集 · 游戏 · 互动**
 - 🐾 **猫娘卡牌收集** — 26 张 N/R/SR/SSR/UR 猫娘卡，**签到免费解锁**（保底机制，无氪金），`/cards` 看图鉴（migration 0032）
@@ -92,11 +94,11 @@
 - ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控；日志表 90/180 天滚动 retention）
 - 🔐 **安全防护** — SSRF 防护、webhook constant-time 验证、速率限制、Redis Lua 原子操作、去重锁
 - 📡 **频道消息源** — 自动抓取公开 Telegram 频道内容存入 Qdrant 向量库，无需管理员权限
-- 🌐 **Cloudflare 绕过** — CF_FETCH skill 自动三级降级（直连 → Playwright+Xvfb → DrissionPage）
+- 🔥 **Firecrawl 抓取兜底** — JS 重页面 / Cloudflare 验证页:免费路由（直连 → 本地浏览器绕过 → Jina Reader）全失败后落到自托管 Firecrawl（无头浏览器过 CF JS Challenge）。NodeSeek 等强 CF 站点直接走 Firecrawl,默认关、配 key 才启用
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
-- 🎨 **359 个贴纸意图** — AI 自主选择贴纸（top-N 截断 + Levenshtein 模糊匹配 + 反感反馈），覆盖情绪/社交/群聊/猫娘等场景
+- 🎨 **359 个贴纸意图 + 常驻贴纸包** — AI 按意图自主选贴纸（top-N 截断 + Levenshtein 模糊 + 反感反馈）;指定贴纸包作「常驻主力」（走视觉识图生成情绪标签、忽略 emoji,选择时预留多数候选槽,其余学习来的贴纸仍可用）（migrations 0042-0043）
 - 🚀 **一键部署** — `scripts/deploy.sh` 端到端：依赖 → Qdrant → 构建 → systemd → 自检
-- 🧪 **942 单元测试** — vitest 全绿基线；37 个 SQLite 迁移自动按序应用
+- 🧪 **1121 单元测试** — vitest 全绿基线；43 个 SQLite 迁移自动按序应用
 - 🪦 **优雅关机契约** — worker 排干在飞任务、游离的自我接话统一中止信号排干、写缓冲落盘,SIGTERM 不丢消息不留孤儿锁
 
 ### 🏗️ 架构
@@ -141,7 +143,8 @@ Hono HTTP Server
   ├─ /health   ├─ /miniapp_api (Admin)   └─ /webhook (failover)
 
 Cron: model health · profile sync · idle proactive · channel ingest
-      · memory dream · learner scan · cleanup
+      · memory dream · learner scan · cleanup · relationship summarize
+      · sleep cycle · pm-nudge · school day-plan · resident-sticker vision
 ```
 
 ### 📁 项目结构
@@ -338,6 +341,12 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 | `BOT_NICKNAMES` | Bot 昵称（逗号分隔） | `xxb,啾咪囝` |
 | `MASTER_UID` | 主人 Telegram UID | `0` |
 | `ALLOWLIST_ENABLED` | 启用群聊白名单 | `false` |
+| `GEMINI_API_KEY` | Gemini 联网搜索 key（AI Studio）；空=回退 xAI/DDG | (可选) |
+| `GEMINI_SEARCH_MODEL` / `GEMINI_SEARCH_PROXY` | 搜索模型 / 出口受限时的代理 | `gemini-2.5-flash-lite` / — |
+| `FIRECRAWL_API_KEY` / `FIRECRAWL_API_URL` | 抓取兜底（自托管可填 localhost） | (可选) |
+| `RESIDENT_STICKER_PACKS` | 常驻贴纸包 set_name（逗号分隔） | (可选) |
+
+> 实际模型路由用 `AI_PROVIDER_<NAME>_*` + `AI_USAGE_<NAME>_*`(provider/usage 分离,Redis `xxb:admin:model_routing:override` 可运行时覆盖);上表 `AI_*` 为兼容旧式简化配置。功能开关一律 `*_ENABLED`(默认关,灰度上线):如 `SCHOOL_SCHEDULE_ENABLED` / `SLEEP_DM_ENABLED` / `PM_NUDGE_ENABLED`。
 
 ### 📊 Prompt 五层系统
 
@@ -389,8 +398,8 @@ Bot 可在回复时调用以下工具：
 
 | 工具 | 说明 |
 |------|------|
-| `WEB_SEARCH` | 网页搜索（xAI Grok / SearxNG / DuckDuckGo） |
-| `WEB_FETCH` | 抓取网页内容（HTML→文本） |
+| `WEB_SEARCH` | 联网搜索（Gemini Google-Search grounding 主路由 → xAI / SearxNG / DuckDuckGo 回退） |
+| `WEB_FETCH` | 抓取网页内容（直连 → 本地浏览器绕过 → Jina Reader → Firecrawl 自托管兜底；HTML→文本） |
 | `BOT_KNOWLEDGE` | 查询群组 bot 知识库 |
 | `IP_QUALITY` | IP 地址质量/风险查询 |
 | `SET_TIMER` | 设置定时提醒 |
@@ -432,7 +441,9 @@ xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts 
 - **Carry a conversation naturally** — stays engaged after it speaks (MaiBot-style talk-frequency): picks up questions/statements from either side within the last few messages, no @ or reply needed, while staying restrained in hot chats
 - **Understand natural-language commands** — "帮我签到" → checkin, "看看我的图鉴" → card album, "追踪比特币" → watch topic (DM is lenient; groups require addressing the bot)
 - **Reply to multiple people** in a single trigger, each quoting its own target
-- **Call tools** — web search (xAI Grok), web fetch, IP lookup, timers
+- **Call tools** — web search (Gemini Google-Search grounding → xAI / SearxNG / DDG fallback), web fetch (with self-hosted Firecrawl fallback for JS/Cloudflare pages), IP lookup, timers
+- **Live a real life** — 16-year-old high-schooler persona: deterministic weekly timetable + holiday/make-up overrides; sneaks the phone in class (short replies), chattier after school, a daily "today's mood" line
+- **Affinity-driven proactive DM** — cross-group affinity (√-weighted, not naive sum); bedtime/wake whispers to high-affinity users who've DMed before; gated group "@ come pm me" nudges for high-affinity strangers (≤3 tries, daily cap, allowlist/mute/membership/sleep gates, off by default); saved-up things flushed when they DM
 - **Stream responses** with typing indicators and progressive message updates
 - **Remember & learn** — durable nickname memory, importance-scored memory with forgetting, group jargon mining, 7-section user profiles, self-scored reply quality (ASI) feeding a self-tuning humanizer
 - **DM assistant** — relay messages to the group, anonymous notes (with a guess-the-author mini-game), tree-hollow confide, fate draws, natural-language reminders, member profiles
