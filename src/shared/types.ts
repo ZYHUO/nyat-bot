@@ -93,6 +93,11 @@ export interface RetrievedContext {
   entity: FormattedMessage[];
   merged: FormattedMessage[];
   tokenCount: number;
+  /**
+   * 已 slim 好的上下文串(用 merged+currentMessage+botUid 算出,与 tokenCount 同源)。
+   * 写手层直接复用,避免对同一份 merged 再 slim+tiktoken 一遍(同步编码阻塞 event loop)。
+   */
+  contextStr?: string;
 }
 
 // Structural shape of a Telegram Update, wide enough to accept both grammy's

@@ -193,12 +193,15 @@ export async function generateReply(
   // 1. Build system prompt (5-layer)
   const systemPrompt = buildSystemPrompt(effectiveReplyTier, message.uid, chatId);
 
-  // 2. Compress and format context
-  const contextStr = slimContextForAI(retrievedContext.merged, message, botUid);
+  // 2. Compress and format context — 复用 retriever 已算好的 slim 串与 token 数,
+  //    避免对同一份 merged 再 slim+tiktoken 一遍(同步编码阻塞 event loop)。
+  const contextStr = retrievedContext.contextStr ?? slimContextForAI(retrievedContext.merged, message, botUid);
   const budget = REPLY_CONTEXT_BUDGET[effectiveReplyTier];
-  // Fast path: for CJK-heavy content, use ~2 chars/token heuristic
-  // Skip expensive tokenizer call if clearly over budget
-  const contextTokens = contextStr.length > budget * 2 ? budget : countTokens(contextStr);
+  // Fast path: for CJK-heavy content, use ~2 chars/token heuristic to skip the
+  // tokenizer when clearly over budget; reuse retriever's exact count when present.
+  const contextTokens = retrievedContext.contextStr !== undefined
+    ? retrievedContext.tokenCount
+    : contextStr.length > budget * 2 ? budget : countTokens(contextStr);
   const remainingContextBudget = Math.max(0, budget - contextTokens);
 
   // 3. Load knowledge (keyword-scoped like PHP searchKnowledge; empty query → full KB)

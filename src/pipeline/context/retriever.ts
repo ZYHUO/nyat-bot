@@ -307,6 +307,7 @@ export async function retrieveContext(
       entity: [],
       merged,
       tokenCount,
+      contextStr,
     };
   }
 
@@ -335,6 +336,7 @@ export async function retrieveContext(
       entity: [],
       merged: recent,
       tokenCount: recentTokens,
+      contextStr: recentContextStr,
     };
   }
 
@@ -371,5 +373,5 @@ export async function retrieveContext(
     tokenCount,
   }, 'Context retrieved');
 
-  return { recent, semantic, thread, entity, merged, tokenCount };
+  return { recent, semantic, thread, entity, merged, tokenCount, contextStr };
 }

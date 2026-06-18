@@ -24,6 +24,7 @@ vi.mock('../../../src/memory/chroma.js', () => ({
 }));
 
 import { retrieveContext } from '../../../src/pipeline/context/retriever.js';
+import { slimContextForAI } from '../../../src/pipeline/context/slim.js';
 
 function makeMsg(overrides: Partial<FormattedMessage> = {}): FormattedMessage {
   return {
@@ -202,6 +203,15 @@ describe('Context Retriever', () => {
     const result = await retrieveContext(1, current, 9999, { totalTokenBudget: 200 });
     expect(result.merged.length).toBe(50);
     expect(result.tokenCount).toBeGreaterThan(200);
+  });
+
+  it('surfaces a contextStr consistent with slim(merged) so the writer can reuse it', async () => {
+    const msgs = [makeMsg({ messageId: 1 }), makeMsg({ messageId: 2 })];
+    mockGetRecent.mockResolvedValue(msgs);
+    const current = makeMsg({ messageId: 99 });
+    const result = await retrieveContext(1, current, 9999);
+    expect(typeof result.contextStr).toBe('string');
+    expect(result.contextStr).toBe(slimContextForAI(result.merged, current, 9999));
   });
 
   it('sorts merged messages by timestamp', async () => {
