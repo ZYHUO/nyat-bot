@@ -1,0 +1,101 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const mockEnv = vi.fn(() => ({ SCHOOL_SCHEDULE_ENABLED: true }));
+vi.mock('../../../src/env.js', () => ({ env: () => mockEnv() }));
+vi.mock('../../../src/shared/logger.js', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+// no school_overrides row → getDb().prepare().get() returns undefined path; mock to throw → treated as no override
+vi.mock('../../../src/db/sqlite.js', () => ({
+  getDb: () => ({ prepare: () => ({ get: () => undefined }) }),
+}));
+
+import { getSchoolState } from '../../../src/tracking/school-state.js';
+
+// helper: build a Date that is the given Beijing weekday + HH:MM.
+// 2026-06-15 is a Monday (UTC). We pick UTC times and add nothing — getSchoolState
+// converts to Beijing by +8h, so we pass UTC = Beijing-8h.
+function bjDate(isoBeijing: string): Date {
+  // isoBeijing like '2026-06-15T08:10' (Beijing). Convert to UTC by -8h.
+  const asUtc = new Date(isoBeijing + ':00Z');
+  return new Date(asUtc.getTime() - 8 * 3600_000);
+}
+
+describe('getSchoolState', () => {
+  beforeEach(() => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true });
+  });
+
+  it('returns free no-op when disabled', () => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: false });
+    const s = getSchoolState(bjDate('2026-06-15T08:10'));
+    expect(s.phase).toBe('free');
+    expect(s.selfLine).toBeNull();
+  });
+
+  it('weekday during first period → in_class with a subject and low attention', () => {
+    // Monday 08:10 → 第1节 (08:00-08:45)
+    const s = getSchoolState(bjDate('2026-06-15T08:10'));
+    expect(s.isSchoolDay).toBe(true);
+    expect(s.phase).toBe('in_class');
+    expect(s.currentSubject).toBe('语文'); // Monday slot 0
+    expect(s.attentionFactor).toBeLessThanOrEqual(0.3);
+    expect(s.selfLine).toContain('上语文课');
+  });
+
+  it('weekday between periods → break', () => {
+    // Monday 08:48 → between 第1节(…08:45) and 第2节(08:55…)
+    const s = getSchoolState(bjDate('2026-06-15T08:48'));
+    expect(s.phase).toBe('break');
+    expect(s.selfLine).toContain('课间');
+  });
+
+  it('weekday lunch window → lunch, selfLine null (life-state eating covers)', () => {
+    const s = getSchoolState(bjDate('2026-06-15T12:30'));
+    expect(s.phase).toBe('lunch');
+    expect(s.selfLine).toBeNull();
+  });
+
+  it('weekday after 16:35 before evening → after_school, full attention', () => {
+    const s = getSchoolState(bjDate('2026-06-15T17:30'));
+    expect(s.phase).toBe('after_school');
+    expect(s.attentionFactor).toBe(1);
+    expect(s.selfLine).toContain('放学');
+  });
+
+  it('weekday evening study window → evening_study', () => {
+    const s = getSchoolState(bjDate('2026-06-15T20:00'));
+    expect(s.phase).toBe('evening_study');
+    expect(s.selfLine).toContain('晚自习');
+  });
+
+  it('weekend → free, no school line', () => {
+    // 2026-06-13 is Saturday
+    const s = getSchoolState(bjDate('2026-06-13T10:00'));
+    expect(s.isSchoolDay).toBe(false);
+    expect(s.phase).toBe('free');
+    expect(s.selfLine).toBeNull();
+  });
+
+  it('late night after evening study → free', () => {
+    const s = getSchoolState(bjDate('2026-06-15T22:30'));
+    expect(s.phase).toBe('free');
+  });
+});
+
+describe('getSchoolState with overrides', () => {
+  it('holiday override → not a school day, holiday line', async () => {
+    vi.resetModules();
+    vi.doMock('../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: true }) }));
+    vi.doMock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn() } }));
+    vi.doMock('../../../src/db/sqlite.js', () => ({
+      getDb: () => ({ prepare: () => ({ get: () => ({ kind: 'holiday', makeup_dow: null, end_min: null, note: '端午节' }) }) }),
+    }));
+    const mod = await import('../../../src/tracking/school-state.js');
+    const s = mod.getSchoolState(bjDate('2026-06-15T08:10'));
+    expect(s.isSchoolDay).toBe(false);
+    expect(s.phase).toBe('holiday');
+    expect(s.selfLine).toContain('放假');
+    expect(s.selfLine).toContain('端午节');
+  });
+});

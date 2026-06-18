@@ -88,9 +88,13 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
   let energy = 0.8;
 
   // 作息/精力(同步,确定性)
+  let lifeSleeping = false;
+  let lifeEating = false;
   try {
     const ls = getLifeState();
     energy = ls.energy;
+    lifeSleeping = ls.state === 'sleeping';
+    lifeEating = ls.state === 'eating';
     if (ls.state === 'sleeping') before.push('现在是深夜,你困得不行,刚被消息吵醒,迷迷糊糊的');
     else if (ls.state === 'eating') before.push('你正在吃饭,一边扒饭一边瞄手机');
     else if (ls.lazyDay) before.push('今天你莫名蔫蔫的,什么都提不起劲,能少说就少说');
@@ -98,6 +102,18 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
     else if (ls.hint?.includes('刚睡醒')) before.push('你刚睡醒没多久,还有点迷糊');
   } catch (err) {
     logger.debug({ err, chatId }, 'self-state: life source failed');
+  }
+
+  // 上学日程(功能 A):睡眠硬门优先(睡着不注入);午饭由 life-state eating 覆盖,
+  // 避免"在上课"和"在吃饭"打架。只调语气,行为延迟仍由 life-state 决定。
+  if (!lifeSleeping && !lifeEating) {
+    try {
+      const { getSchoolSelfStateLine } = await import('../../tracking/school-state.js');
+      const schoolLine = getSchoolSelfStateLine();
+      if (schoolLine) before.push(schoolLine);
+    } catch (err) {
+      logger.debug({ err, chatId }, 'self-state: school source failed');
+    }
   }
 
   // 群心情(mood)

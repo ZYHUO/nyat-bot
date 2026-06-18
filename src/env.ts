@@ -326,6 +326,11 @@ const envSchema = z.object({
   // 到点睡觉/起床时向最近活跃的群发晚安/早安(固定短句池,无 LLM)
   SLEEP_ANNOUNCE_ENABLED: booleanFromEnv.default(false),
 
+  // ── School schedule (功能 A) ──
+  // 16 岁上学人设:确定性周课表 + school_overrides 特殊日,注入 self-state。
+  // 默认关。睡眠硬门优先级高于上课。
+  SCHOOL_SCHEDULE_ENABLED: booleanFromEnv.default(false),
+
   // ── Mood drift (Stage E) ──
   // Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。
   MOOD_ENABLED: booleanFromEnv.default(false),
