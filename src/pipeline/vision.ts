@@ -9,6 +9,84 @@ import { logger } from '../shared/logger.js';
 import { getDb } from '../db/sqlite.js';
 import { getStickerDescription, storeAnalysisResult } from '../knowledge/sticker/store.js';
 
+/** 下载 Telegram 图片为 data URL(静态图;webm/tgs 返回 null)。供描述/识图复用。 */
+async function fetchImageDataUrl(fileId: string): Promise<string | null> {
+  const bot = getBot();
+  const file = await bot.api.getFile(fileId);
+  const filePath = file.file_path;
+  if (!filePath) return null;
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  if (ext === 'webm' || ext === 'tgs') return null; // 动态:调用方应传缩略图 file_id
+  const fileUrl = `https://api.telegram.org/file/bot${bot.token}/${filePath}`;
+  const response = await fetch(fileUrl);
+  if (!response.ok) return null;
+  const buffer = await response.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString('base64');
+  let mimeType = response.headers.get('content-type') ?? 'image/jpeg';
+  if (mimeType.includes('octet')) {
+    const b = new Uint8Array(buffer.slice(0, 4));
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) mimeType = 'image/webp';
+    else if (b[0] === 0x89 && b[1] === 0x50) mimeType = 'image/png';
+    else mimeType = 'image/jpeg';
+  }
+  return `data:${mimeType};base64,${base64}`;
+}
+
+export interface StickerEmotion {
+  emotionTags: string[];
+  moodMap: Record<string, number>;
+  personaFit: boolean;
+  description: string;
+}
+
+/**
+ * 识图分析一张贴纸的情绪(供常驻贴纸入库)。走视觉模型,返回结构化情绪标签 +
+ * mood_map + 是否适配猫娘人设 + 描述。失败返回 null。emoji 不作参考(全靠看图)。
+ */
+export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmotion | null> {
+  try {
+    const dataUrl = await fetchImageDataUrl(fileId);
+    if (!dataUrl) return null;
+    const prompt =
+      '你在给一只猫娘 bot 的贴纸库做情绪标注。只看图,别管任何 emoji。判断这张贴纸表达的情绪/适用场景。' +
+      '严格输出 JSON(不要多余文字):{"emotion_tags":["开心","害羞"],"mood_map":{"happy":0.8,"shy":0.4},' +
+      '"persona_fit":true,"description":"一句话描述"}。emotion_tags 用中文常见情绪词(开心/难过/生气/害羞/惊讶/' +
+      '卖萌/无语/疑惑/委屈/得意/困/爱心 等),3-6 个;mood_map 值 0-1;persona_fit=这张是否适合可爱猫娘发(太丑/' +
+      '太成人/纯文字截图=false)。';
+    const result = await callWithFallback({
+      usage: 'vision',
+      messages: [
+        { role: 'user', content: [{ type: 'image', image: dataUrl }, { type: 'text', text: prompt }] },
+      ],
+      maxTokens: 300,
+    });
+    const raw = result.content.trim();
+    const json = raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1);
+    const parsed = JSON.parse(json) as {
+      emotion_tags?: unknown; mood_map?: unknown; persona_fit?: unknown; description?: unknown;
+    };
+    const emotionTags = Array.isArray(parsed.emotion_tags)
+      ? parsed.emotion_tags.filter((t): t is string => typeof t === 'string').slice(0, 8)
+      : [];
+    const moodMap: Record<string, number> = {};
+    if (parsed.mood_map && typeof parsed.mood_map === 'object') {
+      for (const [k, v] of Object.entries(parsed.mood_map as Record<string, unknown>)) {
+        if (typeof v === 'number') moodMap[k] = Math.max(0, Math.min(1, v));
+      }
+    }
+    if (emotionTags.length === 0 && Object.keys(moodMap).length === 0) return null;
+    return {
+      emotionTags,
+      moodMap,
+      personaFit: parsed.persona_fit !== false,
+      description: typeof parsed.description === 'string' ? parsed.description.slice(0, 200) : '',
+    };
+  } catch (err) {
+    logger.debug({ fileId, err }, 'analyzeStickerEmotion failed');
+    return null;
+  }
+}
+
 /**
  * Describe an image via vision model.
  * Downloads from Telegram, sends to vision model, returns description.

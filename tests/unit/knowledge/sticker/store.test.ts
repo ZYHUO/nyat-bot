@@ -47,8 +47,9 @@ function initSchema(db: Database.Database): void {
     'utf-8',
   );
   db.exec(feedbackSql);
-  // Resident sticker column
+  // Resident sticker column + analysis file id
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/0042_sticker_resident.sql'), 'utf-8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/0043_sticker_analysis_fileid.sql'), 'utf-8'));
 }
 
 function makeMeta(overrides: Record<string, unknown> = {}) {
@@ -270,22 +271,27 @@ describe('StickerStore', () => {
       expect(result).toEqual([]);
     });
 
-    it('resident stickers are candidates even with no emotion-tag match, and reserve majority slots', () => {
-      // 12 resident (no tags) + 5 normal that match 'cute'
+    it('resident stickers (analyzed, even with no tag match) reserve majority slots', () => {
+      // 12 resident: seeded pending, then vision-analyzed → ready (no matching tags here)
       for (let i = 0; i < 12; i++) {
-        upsertResidentSticker({ fileUniqueId: `res_${i}`, fileId: `rf_${i}`, setName: 'ResPack', emoji: '⭐', format: 'static_webp' });
+        upsertResidentSticker({ fileUniqueId: `res_${i}`, fileId: `rf_${i}`, analysisFileId: `af_${i}`, setName: 'ResPack', emoji: '⭐', format: 'static_webp' });
+        storeAnalysisResult(`res_${i}`, { personaFit: true }); // 识图完成 → ready,无 cute 标签
       }
       for (let i = 0; i < 5; i++) {
         recordStickerUsage(makeMeta({ fileUniqueId: `norm_${i}`, fileId: `nf_${i}` }), makeSample({ fileUniqueId: `norm_${i}` }));
         storeAnalysisResult(`norm_${i}`, { emotionTags: ['cute'], moodMap: { happy: 0.9 }, personaFit: true });
       }
-      const result = getReadyStickersByIntent('cute');
-      const ids = result.map((r) => r.fileUniqueId);
-      const residentCount = ids.filter((id) => id.startsWith('res_')).length;
-      const normalCount = ids.filter((id) => id.startsWith('norm_')).length;
-      expect(result.length).toBe(10); // top-N
-      expect(residentCount).toBe(7); // RESIDENT_SLOTS reserved
-      expect(normalCount).toBe(3); // others still present (less)
+      const ids = getReadyStickersByIntent('cute').map((r) => r.fileUniqueId);
+      expect(ids.length).toBe(10);
+      expect(ids.filter((id) => id.startsWith('res_')).length).toBe(7); // RESIDENT_SLOTS reserved
+      expect(ids.filter((id) => id.startsWith('norm_')).length).toBe(3); // others still present (less)
+    });
+
+    it('resident seeded pending is NOT selectable until vision-analyzed', () => {
+      upsertResidentSticker({ fileUniqueId: 'res_p', fileId: 'rf_p', analysisFileId: 'af_p', setName: 'ResPack', emoji: '⭐', format: 'static_webp' });
+      expect(getReadyStickersByIntent('cute')).toEqual([]); // still pending
+      storeAnalysisResult('res_p', { emotionTags: ['cute'], personaFit: true });
+      expect(getReadyStickersByIntent('cute').map((r) => r.fileUniqueId)).toContain('res_p');
     });
 
     it('resident reservation degrades gracefully: no resident → normal fills all slots', () => {
@@ -299,10 +305,10 @@ describe('StickerStore', () => {
     });
 
     it('upsertResidentSticker is idempotent (re-seed updates file_id, no dup)', () => {
-      upsertResidentSticker({ fileUniqueId: 'r1', fileId: 'old', setName: 'P', emoji: '⭐', format: 'static_webp' });
-      upsertResidentSticker({ fileUniqueId: 'r1', fileId: 'new', setName: 'P', emoji: '⭐', format: 'static_webp' });
-      const result = getReadyStickersByIntent('anything');
-      const r1 = result.filter((r) => r.fileUniqueId === 'r1');
+      upsertResidentSticker({ fileUniqueId: 'r1', fileId: 'old', analysisFileId: 'a', setName: 'P', emoji: '⭐', format: 'static_webp' });
+      upsertResidentSticker({ fileUniqueId: 'r1', fileId: 'new', analysisFileId: 'a', setName: 'P', emoji: '⭐', format: 'static_webp' });
+      storeAnalysisResult('r1', { personaFit: true }); // analyzed → ready
+      const r1 = getReadyStickersByIntent('anything').filter((r) => r.fileUniqueId === 'r1');
       expect(r1.length).toBe(1);
       expect(r1[0]!.fileId).toBe('new');
     });

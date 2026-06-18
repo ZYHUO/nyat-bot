@@ -117,35 +117,55 @@ function rowToSample(row: StickerSampleRow): StickerSample {
 // ── Public API ────────────────────────────────────
 
 /**
- * 把常驻包里的一张贴纸直接登记为可用(resident=1, ready, persona_fit=1)。
- * 无情绪标签也行 —— 选择时常驻贴纸走基础分保底。重复 seed 幂等(刷新 file_id,
- * 不动已有的 user_score/emotion_tags 等学习/分析结果)。返回是否新插入。
+ * 把常驻包里的一张贴纸登记为常驻(resident=1)。**seed 为 pending —— 等识图分析
+ * 出情绪标签后才转 ready 可选**(emoji 全是 ⭐ 不能当参考)。analysisFileId = 用于
+ * 视觉分析的图片(静态贴纸=贴纸本身,视频/动图=缩略图);latest_file_id 是发送用的。
+ * 幂等:已 ready/已分析的不回退(只刷 file_id);仅未分析的保持 pending。
  */
 export function upsertResidentSticker(meta: {
   fileUniqueId: string;
   fileId: string;
+  analysisFileId: string;
   setName: string;
   emoji: string;
   format: StickerFormat;
-}): boolean {
+}): void {
   const now = Math.floor(Date.now() / 1000);
-  const info = getDb().prepare(`
+  getDb().prepare(`
     INSERT INTO sticker_items (
-      file_unique_id, latest_file_id, set_name, emoji, sticker_format,
+      file_unique_id, latest_file_id, analysis_file_id, set_name, emoji, sticker_format,
       usage_count, sample_count, first_seen_at, last_seen_at,
-      analysis_status, persona_fit, resident
-    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, 'ready', 1, 1)
+      analysis_status, resident
+    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 'pending', 1)
     ON CONFLICT(file_unique_id) DO UPDATE SET
       latest_file_id = excluded.latest_file_id,
+      analysis_file_id = excluded.analysis_file_id,
       set_name = COALESCE(excluded.set_name, set_name),
       emoji = COALESCE(excluded.emoji, emoji),
       sticker_format = CASE WHEN excluded.sticker_format != 'unknown' THEN excluded.sticker_format ELSE sticker_format END,
       last_seen_at = excluded.last_seen_at,
-      analysis_status = 'ready',
-      persona_fit = 1,
       resident = 1
-  `).run(meta.fileUniqueId, meta.fileId, meta.setName, meta.emoji, meta.format, now, now);
-  return info.changes > 0 && info.lastInsertRowid !== 0;
+  `).run(meta.fileUniqueId, meta.fileId, meta.analysisFileId, meta.setName, meta.emoji, meta.format, now, now);
+}
+
+interface ResidentPendingRow {
+  file_unique_id: string;
+  analysis_file_id: string | null;
+  latest_file_id: string | null;
+}
+
+/** 待识图的常驻贴纸(pending),供分析器逐批处理。 */
+export function listPendingResidentStickers(limit: number): Array<{ fileUniqueId: string; analysisFileId: string }> {
+  const rows = getDb().prepare(`
+    SELECT file_unique_id, analysis_file_id, latest_file_id
+    FROM sticker_items
+    WHERE resident = 1 AND analysis_status = 'pending'
+    ORDER BY last_seen_at ASC
+    LIMIT ?
+  `).all(limit) as ResidentPendingRow[];
+  return rows
+    .map((r) => ({ fileUniqueId: r.file_unique_id, analysisFileId: r.analysis_file_id ?? r.latest_file_id ?? '' }))
+    .filter((r) => r.analysisFileId);
 }
 
 export function recordStickerUsage(

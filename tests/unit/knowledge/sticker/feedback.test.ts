@@ -35,6 +35,7 @@ function initSchema(db: Database.Database): void {
     'utf-8',
   );
   db.exec(feedbackSql);
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/0042_sticker_resident.sql'), 'utf-8'));
 }
 
 function seedReadySticker(

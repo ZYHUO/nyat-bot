@@ -145,6 +145,17 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // 常驻贴纸识图:每 3 分钟分析一小批 pending 常驻贴纸(分批避免打爆视觉额度;
+  // 全部分析完后自动 no-op)。
+  if (env().RESIDENT_STICKER_PACKS) {
+    tasks.push(schedule('*/3 * * * *', () => {
+      void safeRun('resident-sticker-analyze', async () => {
+        const { analyzeResidentStickers } = await import('../knowledge/sticker/resident.js');
+        await analyzeResidentStickers(6);
+      });
+    }));
+  }
+
   // G7(语言生命)群共同经历 — 每 2 小时为活跃群提炼 0-2 条"群里发生的事"
   tasks.push(schedule('37 */2 * * *', () => {
     void safeRun('group-episodes', async () => {

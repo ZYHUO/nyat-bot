@@ -16,7 +16,7 @@ const { scoreIntentMatch, getReadyStickersByIntent } = await import(
 );
 
 function initSchema(db: Database.Database): void {
-  const migrations = ['migrations/0003_stickers.sql', 'migrations/0006_sticker_feedback.sql'];
+  const migrations = ['migrations/0003_stickers.sql', 'migrations/0006_sticker_feedback.sql', 'migrations/0042_sticker_resident.sql'];
   for (const m of migrations) {
     db.exec(readFileSync(resolve(process.cwd(), m), 'utf-8'));
   }
