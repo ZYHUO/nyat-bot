@@ -5,6 +5,8 @@ const mockEnv = vi.fn(() => ({
   FETCH_WORKER_URL: undefined as string | undefined,
   NODESEEK_READER_URLS: undefined as string | undefined,
   WEB_FETCH_USER_AGENT: 'XXB-WebFetch/1.0',
+  FIRECRAWL_API_KEY: undefined as string | undefined,
+  FIRECRAWL_API_URL: 'https://api.firecrawl.dev',
 }));
 
 vi.mock('../../../../src/env.js', () => ({
@@ -34,6 +36,8 @@ describe('executeFetch', () => {
       FETCH_WORKER_URL: undefined,
       NODESEEK_READER_URLS: undefined,
       WEB_FETCH_USER_AGENT: 'XXB-WebFetch/1.0',
+      FIRECRAWL_API_KEY: undefined,
+      FIRECRAWL_API_URL: 'https://api.firecrawl.dev',
     });
   });
 
@@ -3286,5 +3290,83 @@ describe('executeFetch', () => {
     expect(result).toContain('Topic title');
     expect(result).toContain('bob');
     expect(result).toContain('reply body');
+  });
+});
+
+describe('executeFetch + Firecrawl fallback', () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEnv.mockReturnValue({
+      FETCH_GATEWAY_URL: undefined,
+      FETCH_WORKER_URL: undefined,
+      NODESEEK_READER_URLS: undefined,
+      WEB_FETCH_USER_AGENT: 'XXB-WebFetch/1.0',
+      FIRECRAWL_API_KEY: 'fc-test-key',
+      FIRECRAWL_API_URL: 'https://api.firecrawl.dev',
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('falls back to Firecrawl when free routes hit a Cloudflare challenge', async () => {
+    mockFetchUrlPinned.mockResolvedValue({
+      statusCode: 403,
+      headers: { server: 'cloudflare', 'cf-mitigated': 'challenge', 'content-type': 'text/html; charset=UTF-8' },
+      body: '<html><head><title>Just a moment...</title></head><body>challenge</body></html>',
+    });
+    // 本地绕过(:8900)与任何 reader 都失败,只有 Firecrawl 端点成功
+    globalThis.fetch = vi.fn().mockImplementation((u: string) => {
+      if (typeof u === 'string' && u.includes('api.firecrawl.dev')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ success: true, data: { markdown: 'Firecrawl 抓到的正文内容', metadata: { title: '示例标题' } } }),
+        });
+      }
+      return Promise.resolve({ ok: false, json: async () => ({ error: 'fail' }), text: async () => '' });
+    }) as unknown as typeof fetch;
+
+    const result = await executeFetch('https://example.com/');
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://api.firecrawl.dev/v1/scrape',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer fc-test-key' }),
+      }),
+    );
+    expect(result).toContain('Firecrawl 抓到的正文内容');
+    expect(result).toContain('示例标题');
+    expect(result).not.toContain('Cloudflare 验证');
+  });
+
+  it('does not call Firecrawl when no API key is configured', async () => {
+    mockEnv.mockReturnValue({
+      FETCH_GATEWAY_URL: undefined,
+      FETCH_WORKER_URL: undefined,
+      NODESEEK_READER_URLS: undefined,
+      WEB_FETCH_USER_AGENT: 'XXB-WebFetch/1.0',
+      FIRECRAWL_API_KEY: undefined,
+      FIRECRAWL_API_URL: 'https://api.firecrawl.dev',
+    });
+    mockFetchUrlPinned.mockResolvedValue({
+      statusCode: 403,
+      headers: { server: 'cloudflare', 'cf-mitigated': 'challenge', 'content-type': 'text/html; charset=UTF-8' },
+      body: '<html><head><title>Just a moment...</title></head><body>challenge</body></html>',
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false, json: async () => ({ error: 'fail' }), text: async () => '',
+    }) as unknown as typeof fetch;
+
+    const result = await executeFetch('https://example.com/');
+
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('api.firecrawl.dev'),
+      expect.anything(),
+    );
+    expect(result).toContain('Cloudflare 验证');
   });
 });

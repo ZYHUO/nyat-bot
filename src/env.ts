@@ -50,6 +50,10 @@ const envSchema = z.object({
   XAI_SEARCH_MODEL: z.string().default('grok-4-0709'),
   FETCH_GATEWAY_URL: z.string().optional(),
   FETCH_WORKER_URL: z.string().url().optional(),
+  // Firecrawl 兜底:JS 重页面 / Cloudflare 验证页,免费路由(直连/Jina/本地绕过)
+  // 全失败后才落到这条付费路由。未配 KEY → 默认关,不发任何 Firecrawl 调用。
+  FIRECRAWL_API_KEY: z.string().optional(),
+  FIRECRAWL_API_URL: z.string().url().default('https://api.firecrawl.dev'),
   NODESEEK_READER_URLS: z.string().optional(),
   WEB_FETCH_USER_AGENT: z.string().default('XXB-WebFetch/1.0'),
   IP_QUALITY_API_URL: z.string().url().optional(),

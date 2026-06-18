@@ -59,6 +59,21 @@ describe('assembleBurstHint', () => {
     expect(out.indexOf('INSTRUCTION')).toBeLessThan(out.indexOf('HEART'));
   });
 
+  it('strict priority truncation: a lighter (higher-keep) short block does not survive after a heavier one was skipped', () => {
+    // necessary block eats most of the budget; the heavier optional block (keep=20)
+    // is too big to fit, the lighter one (keep=35) is short enough — first-fit would
+    // wrongly keep the lighter one (importance inversion). Strict truncation drops both.
+    const parts: CtxPart[] = [
+      { order: 80, keep: 1, text: 'I'.repeat(1200) },  // must-keep, fills budget
+      { order: 50, keep: 20, text: 'S'.repeat(300) },  // heavier optional — does NOT fit
+      { order: 30, keep: 35, text: 'P'.repeat(100) },  // lighter+shorter — must NOT sneak in
+    ];
+    const out = assembleBurstHint(parts, 1400)!;
+    expect(out).toContain('I'.repeat(1200));
+    expect(out).not.toContain('S'.repeat(300));
+    expect(out).not.toContain('P'.repeat(100));
+  });
+
   it('returns undefined when there are no parts', () => {
     expect(assembleBurstHint([], 1400)).toBeUndefined();
   });

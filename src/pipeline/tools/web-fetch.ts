@@ -115,6 +115,8 @@ export async function executeFetch(url: string): Promise<string> {
         if (looksLikeChallengeText(content)) {
           const reader = await tryPublicReaderFallback(url);
           if (reader) return reader;
+          const fc = await tryFirecrawl(url);
+          if (fc) return fc;
           return '抓取失败: Cloudflare 验证未通过，当前代理返回的是验证页。';
         }
         const [summary, truncated] = truncateText(content);
@@ -135,6 +137,8 @@ export async function executeFetch(url: string): Promise<string> {
       if (looksLikeChallengeText(fetched.text)) {
         const reader = await tryPublicReaderFallback(url);
         if (reader) return reader;
+        const fc = await tryFirecrawl(url);
+        if (fc) return fc;
         return '抓取失败: Cloudflare 验证未通过，当前网关返回的是验证页。';
       }
 
@@ -156,6 +160,8 @@ export async function executeFetch(url: string): Promise<string> {
       if (cloudflareChallenge) {
         const reader = await tryPublicReaderFallback(url);
         if (reader) return reader;
+        const fc = await tryFirecrawl(url);
+        if (fc) return fc;
         return '抓取失败: Cloudflare 验证未通过，当前本地浏览器绕过服务无法读取该页面。';
       }
       return `抓取失败: 目标网页返回状态码 ${pinned.statusCode}`;
@@ -175,7 +181,7 @@ export async function executeFetch(url: string): Promise<string> {
     return summarizePage(url, pinned.body, contentType);
   } catch (err) {
     logger.error({ err, url }, 'Fetch failed');
-    return await tryCfFallback(url) ?? `抓取失败: ${err instanceof Error ? err.message : String(err)}`;
+    return await tryCfFallback(url) ?? await tryFirecrawl(url) ?? `抓取失败: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
@@ -1304,6 +1310,41 @@ function isCloudflareChallenge(
 
 function headerValue(value: string | string[] | undefined): string {
   return Array.isArray(value) ? value.join(', ') : value ?? '';
+}
+
+// Firecrawl 兜底路由:免费路由(直连/网关/本地浏览器绕过/Jina)全失败后的最后一跳。
+// Firecrawl 服务端带无头浏览器 + 托管代理,对 JS 重页面和 Cloudflare 验证页强不少。
+// 默认关(未配 FIRECRAWL_API_KEY 直接返回 null),避免每次抓取都打付费 API。
+// url 在 executeFetch 入口已过 assertUrlSsrfSafe;Firecrawl 在它服务端抓取,无本地 SSRF 风险。
+async function tryFirecrawl(url: string): Promise<string | null> {
+  const e = env();
+  if (!e.FIRECRAWL_API_KEY) return null;
+  try {
+    const base = e.FIRECRAWL_API_URL.replace(/\/+$/, '');
+    const res = await fetch(`${base}/v1/scrape`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${e.FIRECRAWL_API_KEY}` },
+      body: JSON.stringify({ url, formats: ['markdown'], onlyMainContent: true, timeout: 25_000 }),
+      signal: AbortSignal.timeout(35_000),
+    });
+    if (!res.ok) {
+      logger.warn({ url, status: res.status }, 'Firecrawl fallback non-ok');
+      return null;
+    }
+    const d = (await res.json()) as {
+      success?: boolean;
+      data?: { markdown?: string; metadata?: { title?: string } };
+    };
+    const markdown = d.data?.markdown?.trim();
+    if (!d.success || !markdown) return null;
+    if (looksLikeChallengeText(markdown)) return null;
+    const title = d.data?.metadata?.title?.trim() || extractReaderTitle(markdown);
+    const [summary, truncated] = truncateText(markdown);
+    return formatOutput(url, title, summary, truncated);
+  } catch (err) {
+    logger.warn({ url, err }, 'Firecrawl fallback failed');
+    return null;
+  }
 }
 
 async function tryCfFallback(url: string): Promise<string | null> {
