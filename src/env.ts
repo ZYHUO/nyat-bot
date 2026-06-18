@@ -52,6 +52,9 @@ const envSchema = z.object({
   // 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2.5-flash-lite 免费可用。
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_SEARCH_MODEL: z.string().default('gemini-2.5-flash-lite'),
+  // 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让
+  // Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/Firecrawl 等本地连接被绕)。
+  GEMINI_SEARCH_PROXY: z.string().optional(),
   FETCH_GATEWAY_URL: z.string().optional(),
   FETCH_WORKER_URL: z.string().url().optional(),
   // Firecrawl 兜底:JS 重页面 / Cloudflare 验证页,免费路由(直连/Jina/本地绕过)

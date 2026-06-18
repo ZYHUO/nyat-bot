@@ -2,10 +2,19 @@
 // Web search tool — xAI Responses API (primary) + DDG Lite fallback
 // ────────────────────────────────────────
 
+import { ProxyAgent } from 'undici';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RESULTS = 5;
+
+// 仅 Gemini 搜索走代理(本机出口地区不被 grounding 支持)。懒构造、按 URL 缓存。
+let _geminiProxy: { url: string; agent: ProxyAgent } | undefined;
+function geminiProxyAgent(proxyUrl: string | undefined): ProxyAgent | undefined {
+  if (!proxyUrl) return undefined;
+  if (_geminiProxy?.url !== proxyUrl) _geminiProxy = { url: proxyUrl, agent: new ProxyAgent(proxyUrl) };
+  return _geminiProxy.agent;
+}
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 export async function executeSearch(query: string): Promise<string> {
@@ -14,7 +23,7 @@ export async function executeSearch(query: string): Promise<string> {
   // Route 1: Gemini Google-Search grounding (primary)
   if (e.GEMINI_API_KEY) {
     try {
-      return await geminiSearch(query, e.GEMINI_API_KEY, e.GEMINI_SEARCH_MODEL);
+      return await geminiSearch(query, e.GEMINI_API_KEY, e.GEMINI_SEARCH_MODEL, e.GEMINI_SEARCH_PROXY);
     } catch (err) {
       logger.warn({ err, query }, 'Gemini search failed, falling back');
     }
@@ -54,8 +63,9 @@ interface GeminiGroundResponse {
   error?: { message?: string };
 }
 
-async function geminiSearch(query: string, apiKey: string, model: string): Promise<string> {
+async function geminiSearch(query: string, apiKey: string, model: string, proxyUrl?: string): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
+  const dispatcher = geminiProxyAgent(proxyUrl);
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -64,7 +74,9 @@ async function geminiSearch(query: string, apiKey: string, model: string): Promi
       tools: [{ google_search: {} }],
     }),
     signal: AbortSignal.timeout(30_000),
-  });
+    // undici dispatcher(代理);DOM fetch 类型无此字段,故 cast
+    ...(dispatcher ? { dispatcher } : {}),
+  } as RequestInit & { dispatcher?: ProxyAgent });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
