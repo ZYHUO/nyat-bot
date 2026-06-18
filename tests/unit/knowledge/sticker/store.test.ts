@@ -25,6 +25,7 @@ const {
   markWaitingForPreview,
   setRawAssetPath,
   getReadyStickersByIntent,
+  upsertResidentSticker,
   getSamples,
   recordStickerSent,
   lookupSentSticker,
@@ -46,6 +47,8 @@ function initSchema(db: Database.Database): void {
     'utf-8',
   );
   db.exec(feedbackSql);
+  // Resident sticker column
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/0042_sticker_resident.sql'), 'utf-8'));
 }
 
 function makeMeta(overrides: Record<string, unknown> = {}) {
@@ -265,6 +268,43 @@ describe('StickerStore', () => {
     it('should return empty array when no ready stickers exist', () => {
       const result = getReadyStickersByIntent('cute');
       expect(result).toEqual([]);
+    });
+
+    it('resident stickers are candidates even with no emotion-tag match, and reserve majority slots', () => {
+      // 12 resident (no tags) + 5 normal that match 'cute'
+      for (let i = 0; i < 12; i++) {
+        upsertResidentSticker({ fileUniqueId: `res_${i}`, fileId: `rf_${i}`, setName: 'ResPack', emoji: '⭐', format: 'static_webp' });
+      }
+      for (let i = 0; i < 5; i++) {
+        recordStickerUsage(makeMeta({ fileUniqueId: `norm_${i}`, fileId: `nf_${i}` }), makeSample({ fileUniqueId: `norm_${i}` }));
+        storeAnalysisResult(`norm_${i}`, { emotionTags: ['cute'], moodMap: { happy: 0.9 }, personaFit: true });
+      }
+      const result = getReadyStickersByIntent('cute');
+      const ids = result.map((r) => r.fileUniqueId);
+      const residentCount = ids.filter((id) => id.startsWith('res_')).length;
+      const normalCount = ids.filter((id) => id.startsWith('norm_')).length;
+      expect(result.length).toBe(10); // top-N
+      expect(residentCount).toBe(7); // RESIDENT_SLOTS reserved
+      expect(normalCount).toBe(3); // others still present (less)
+    });
+
+    it('resident reservation degrades gracefully: no resident → normal fills all slots', () => {
+      for (let i = 0; i < 5; i++) {
+        recordStickerUsage(makeMeta({ fileUniqueId: `n_${i}`, fileId: `f_${i}` }), makeSample({ fileUniqueId: `n_${i}` }));
+        storeAnalysisResult(`n_${i}`, { emotionTags: ['cute'], personaFit: true });
+      }
+      const result = getReadyStickersByIntent('cute');
+      expect(result.length).toBe(5);
+      expect(result.every((r) => r.fileUniqueId.startsWith('n_'))).toBe(true);
+    });
+
+    it('upsertResidentSticker is idempotent (re-seed updates file_id, no dup)', () => {
+      upsertResidentSticker({ fileUniqueId: 'r1', fileId: 'old', setName: 'P', emoji: '⭐', format: 'static_webp' });
+      upsertResidentSticker({ fileUniqueId: 'r1', fileId: 'new', setName: 'P', emoji: '⭐', format: 'static_webp' });
+      const result = getReadyStickersByIntent('anything');
+      const r1 = result.filter((r) => r.fileUniqueId === 'r1');
+      expect(r1.length).toBe(1);
+      expect(r1[0]!.fileId).toBe('new');
     });
 
     it('should return matching stickers with scores', () => {

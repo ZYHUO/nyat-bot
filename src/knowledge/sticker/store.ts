@@ -22,6 +22,9 @@ const MAX_SAMPLES_PER_CHAT = 10;
 
 const STICKER_TOPN = 10; // tunable — cap candidates before weighted-random selection
 const RELAXED_USER_SCORE_FLOOR = 0.01; // tunable — relaxed second-pass keeps lightly-disliked stickers
+// 常驻贴纸:候选 top-N 中预留给常驻包的槽位(占多数),其余留给意图匹配的普通贴纸。
+const RESIDENT_SLOTS = 7; // of STICKER_TOPN
+const RESIDENT_BASE_SCORE = 0.6; // 常驻贴纸无情绪标签时的基础分(意图匹配再加成)
 const FUZZY_SIM_THRESHOLD = 0.7; // tunable — min normalized edit-distance similarity for a fuzzy intent match
 const FUZZY_MATCH_SCORE = 1; // tunable — score awarded when only a fuzzy (no exact/synonym) match exists
 
@@ -112,6 +115,38 @@ function rowToSample(row: StickerSampleRow): StickerSample {
 }
 
 // ── Public API ────────────────────────────────────
+
+/**
+ * 把常驻包里的一张贴纸直接登记为可用(resident=1, ready, persona_fit=1)。
+ * 无情绪标签也行 —— 选择时常驻贴纸走基础分保底。重复 seed 幂等(刷新 file_id,
+ * 不动已有的 user_score/emotion_tags 等学习/分析结果)。返回是否新插入。
+ */
+export function upsertResidentSticker(meta: {
+  fileUniqueId: string;
+  fileId: string;
+  setName: string;
+  emoji: string;
+  format: StickerFormat;
+}): boolean {
+  const now = Math.floor(Date.now() / 1000);
+  const info = getDb().prepare(`
+    INSERT INTO sticker_items (
+      file_unique_id, latest_file_id, set_name, emoji, sticker_format,
+      usage_count, sample_count, first_seen_at, last_seen_at,
+      analysis_status, persona_fit, resident
+    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, 'ready', 1, 1)
+    ON CONFLICT(file_unique_id) DO UPDATE SET
+      latest_file_id = excluded.latest_file_id,
+      set_name = COALESCE(excluded.set_name, set_name),
+      emoji = COALESCE(excluded.emoji, emoji),
+      sticker_format = CASE WHEN excluded.sticker_format != 'unknown' THEN excluded.sticker_format ELSE sticker_format END,
+      last_seen_at = excluded.last_seen_at,
+      analysis_status = 'ready',
+      persona_fit = 1,
+      resident = 1
+  `).run(meta.fileUniqueId, meta.fileId, meta.setName, meta.emoji, meta.format, now, now);
+  return info.changes > 0 && info.lastInsertRowid !== 0;
+}
 
 export function recordStickerUsage(
   meta: StickerMeta,
@@ -319,6 +354,25 @@ interface ReadyStickerRow {
   emotion_tags: string | null;
   mood_map: string | null;
   user_score: number;
+  resident?: number;
+}
+
+/** 常驻贴纸打分:无标签也保底入选(基础分),有意图匹配再叠加。 */
+function scoreResidentRows(
+  rows: ReadyStickerRow[],
+  intents: string[],
+): Array<{ fileId: string; fileUniqueId: string; score: number }> {
+  return rows.map((row) => {
+    const emotionTags = safeJsonParse<string[]>(row.emotion_tags, null) ?? [];
+    const moodMap = safeJsonParse<Record<string, number>>(row.mood_map, null) ?? {};
+    const userScore = row.user_score ?? 1.0;
+    const intentScore = Math.max(0, ...intents.map((i) => scoreIntentMatch(i, emotionTags, moodMap)));
+    return {
+      fileId: row.latest_file_id,
+      fileUniqueId: row.file_unique_id,
+      score: (RESIDENT_BASE_SCORE + intentScore) * userScore,
+    };
+  });
 }
 
 function scoreReadyRows(
@@ -349,7 +403,7 @@ export function getReadyStickersByIntent(
   const intents = Array.isArray(intent) ? intent : [intent];
 
   const rows = getDb().prepare(`
-    SELECT file_unique_id, latest_file_id, emotion_tags, mood_map, user_score
+    SELECT file_unique_id, latest_file_id, emotion_tags, mood_map, user_score, resident
     FROM sticker_items
     WHERE analysis_status = 'ready'
       AND (persona_fit IS NULL OR persona_fit != 0)
@@ -357,8 +411,20 @@ export function getReadyStickersByIntent(
       AND user_score > 0.1
   `).all() as ReadyStickerRow[];
 
+  // 常驻贴纸预留多数槽位(用户指定的主力包),其余给意图匹配的普通贴纸。
+  // 无常驻贴纸时退化为原行为(普通占满 top-N)。
+  const residentRows = rows.filter((r) => r.resident === 1);
+  const normalRows = rows.filter((r) => r.resident !== 1);
+
+  const residentCands = scoreResidentRows(residentRows, intents)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, RESIDENT_SLOTS);
+  const normalCands = scoreReadyRows(normalRows, intents)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, STICKER_TOPN - residentCands.length);
+
   // #6: score → sort DESC → cap to top N. Weighted-random downstream only sees this slice.
-  let candidates = scoreReadyRows(rows, intents)
+  let candidates = [...residentCands, ...normalCands]
     .sort((a, b) => b.score - a.score)
     .slice(0, STICKER_TOPN);
 

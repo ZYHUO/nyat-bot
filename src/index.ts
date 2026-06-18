@@ -218,6 +218,14 @@ async function main(): Promise<void> {
   // 12. Start cron jobs
   if (ownership.cron) {
     startCronJobs({ cleanupDeps: { redis, allowlistConfig } });
+
+    // 12.0 常驻贴纸包 seed(幂等,fire-and-forget):把配置的主力贴纸包灌进库
+    if (env().RESIDENT_STICKER_PACKS) {
+      import('./knowledge/sticker/resident.js')
+        .then(({ seedResidentPacks }) => seedResidentPacks())
+        .then((n) => logger.info({ seeded: n }, 'Resident sticker packs seeded'))
+        .catch((err) => logger.warn({ err }, 'Resident sticker seed failed (non-critical)'));
+    }
   } else {
     logger.info({ ownership }, 'Skipping cron startup in non-owner process');
   }

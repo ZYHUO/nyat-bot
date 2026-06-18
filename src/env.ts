@@ -349,6 +349,9 @@ const envSchema = z.object({
   PM_NUDGE_EXHAUST_PENALTY: z.coerce.number().default(15),       // 催满未果扣好感
   PM_NUDGE_COOLDOWN_DAYS: z.coerce.number().default(30),         // exhausted 后冷却
 
+  // 常驻贴纸包(逗号分隔的贴纸包 set_name):作为 bot 主力贴纸,选择时占多数候选槽。
+  RESIDENT_STICKER_PACKS: z.string().optional(),
+
   // ── School schedule (功能 A) ──
   // 16 岁上学人设:确定性周课表 + school_overrides 特殊日,注入 self-state。
   // 默认关。睡眠硬门优先级高于上课。
