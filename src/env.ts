@@ -282,9 +282,6 @@ const envSchema = z.object({
   BOT_COMMAND_LEARN_ENABLED: booleanFromEnv.default(false),
   // 学习扫描间隔(分钟)
   BOT_COMMAND_LEARN_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
-  // 贴纸对战(E):群里连发贴纸时本喵带"战力评分"入场。reactive,默认关。
-  STICKER_BATTLE_ENABLED: booleanFromEnv.default(false),
-
   // C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。
   NETWORK_BURST_ENABLED: booleanFromEnv.default(false),
 
