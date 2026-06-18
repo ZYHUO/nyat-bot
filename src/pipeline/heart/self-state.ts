@@ -31,7 +31,7 @@ export interface SelfState {
 export async function composeSelfState(chatId: number): Promise<SelfState> {
   // 四个独立异步源并行取;组装仍按固定顺序(life → mood → focus →
   // social → thought → stance → obsession),叙述与旧版逐字一致。
-  const [moodPart, focusVal, socialPart, mindData, obsessionPart] = await Promise.all([
+  const [moodPart, focusVal, socialPart, mindData, obsessionPart, schoolNarrative] = await Promise.all([
     (async (): Promise<string | null> => {
       try {
         const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
@@ -79,6 +79,20 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
         return flavor || null;
       } catch (err) {
         logger.debug({ err, chatId }, 'self-state: obsession source failed');
+        return null;
+      }
+    })(),
+    // A3:今日感想(每日 cron 生成的一句碎碎念,Redis 缓存)
+    (async (): Promise<string | null> => {
+      try {
+        const { env } = await import('../../env.js');
+        if (!env().SCHOOL_SCHEDULE_ENABLED) return null;
+        const { getRedis } = await import('../../db/redis.js');
+        const { schoolNarrativeKey } = await import('../../cron/school-day-plan.js');
+        const date = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+        return (await getRedis().get(schoolNarrativeKey(date))) || null;
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: school narrative source failed');
         return null;
       }
     })(),
@@ -140,6 +154,9 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
 
   // 本周执念
   if (obsessionPart) after.push(obsessionPart);
+
+  // A3:今日感想(睡着时不提,免得跟"困得不行"打架)
+  if (schoolNarrative && !lifeSleeping) after.push(`今天你心里念叨着:「${schoolNarrative}」`);
 
   const make = (withThought: boolean): string => {
     const all = [...before, ...(withThought && thoughtPart ? [thoughtPart] : []), ...after];

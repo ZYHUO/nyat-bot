@@ -135,6 +135,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // 功能 A3:每日「今日感想」生成(每小时跑,内部按 BJ 日去重,只生成一次)。
+  if (env().SCHOOL_SCHEDULE_ENABLED) {
+    tasks.push(schedule('40 * * * *', () => {
+      void safeRun('school-day-plan', async () => {
+        const { runSchoolDayPlan } = await import('./school-day-plan.js');
+        await runSchoolDayPlan();
+      });
+    }));
+  }
+
   // G7(语言生命)群共同经历 — 每 2 小时为活跃群提炼 0-2 条"群里发生的事"
   tasks.push(schedule('37 */2 * * *', () => {
     void safeRun('group-episodes', async () => {

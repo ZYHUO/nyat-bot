@@ -188,3 +188,30 @@ export function getSchoolState(now: Date = new Date()): SchoolState {
 export function getSchoolSelfStateLine(now: Date = new Date()): string | null {
   return getSchoolState(now).selfLine;
 }
+
+/**
+ * A2:上学注意力系数(供主动发言意愿调制)。上课 0.2~0.3 → bot 上课基本不主动插话;
+ * 放学/周末 1.0。SCHOOL_SCHEDULE_ENABLED 关 → 1(无影响)。
+ */
+export function getSchoolAttentionFactor(now: Date = new Date()): number {
+  return getSchoolState(now).attentionFactor;
+}
+
+/**
+ * A3:今天安排的客观描述(喂给 LLM 生成「今日感想」;LLM 不许改日期/课表,只写感想)。
+ * 返回 isSchoolDay + 一句事实陈述。SCHOOL_SCHEDULE_ENABLED 关 → null。
+ */
+export function getDaySummary(now: Date = new Date()): { isSchoolDay: boolean; text: string } | null {
+  if (!env().SCHOOL_SCHEDULE_ENABLED) return null;
+  const { date, dow, minutes: _m } = beijing(now);
+  void _m;
+  const ov = getOverride(date);
+  if (ov?.kind === 'holiday') return { isSchoolDay: false, text: `今天放假${ov.note ? `(${ov.note})` : ''},不用上学` };
+  let effectiveDow = dow;
+  if (ov?.kind === 'makeup' && ov.makeupDow) effectiveDow = ov.makeupDow;
+  if (effectiveDow === 0 || effectiveDow === 6) return { isSchoolDay: false, text: '今天周末,不用上学,自由' };
+  const dowName = ['日', '一', '二', '三', '四', '五', '六'][effectiveDow];
+  const subjects = (SUBJECTS_BY_DOW[effectiveDow] ?? SUBJECTS_BY_DOW[1]!).join('、');
+  const extra = ov?.kind === 'exam' ? `,今天有考试(${ov.note || ''})` : ov?.kind === 'makeup' ? '(周末补课)' : ov?.kind === 'early_off' ? ',今天提早放学' : '';
+  return { isSchoolDay: true, text: `工作日(周${dowName})${extra},今天的课:${subjects};晚自习 19:00-21:30` };
+}

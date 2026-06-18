@@ -248,7 +248,9 @@ export async function runProactiveScan(): Promise<void> {
       // 4b. State-conditioned willingness (loneliness × mood × crowd closeness) —
       // chime in more when it's been quiet + people are friendly, less right after
       // talking / in a bad mood / among a chilly crowd. Cheap pre-filter before the LLM.
-      const willingness = await proactiveWillingness(chatId, recent);
+      // A2:上课时压低主动插话意愿(attentionFactor:上课 0.2~0.3 → 基本不主动开口)
+      const { getSchoolAttentionFactor } = await import('../tracking/school-state.js');
+      const willingness = (await proactiveWillingness(chatId, recent)) * getSchoolAttentionFactor();
       if (Math.random() > willingness) {
         logger.info({ chatId, willingness: +willingness.toFixed(2) }, 'Proactive scan: low willingness, skip');
         continue;

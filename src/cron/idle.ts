@@ -124,7 +124,9 @@ export async function runIdleCheck(): Promise<void> {
 
       // Roll the dice — base probability scaled by state-conditioned willingness
       // (mood × crowd closeness; loneliness is already high after a long silence).
-      const willingness = await proactiveWillingness(chatId, recent);
+      // A2:上课压低主动意愿
+      const { getSchoolAttentionFactor } = await import('../tracking/school-state.js');
+      const willingness = (await proactiveWillingness(chatId, recent)) * getSchoolAttentionFactor();
       if (Math.random() > e.IDLE_TRIGGER_PROBABILITY * willingness) continue;
 
       logger.info({ chatId, silenceSec }, 'Idle check: generating proactive message');

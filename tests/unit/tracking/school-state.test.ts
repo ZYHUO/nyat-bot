@@ -10,7 +10,7 @@ vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => ({ prepare: () => ({ get: () => undefined }) }),
 }));
 
-import { getSchoolState } from '../../../src/tracking/school-state.js';
+import { getSchoolState, getSchoolAttentionFactor, getDaySummary } from '../../../src/tracking/school-state.js';
 
 // helper: build a Date that is the given Beijing weekday + HH:MM.
 // 2026-06-15 is a Monday (UTC). We pick UTC times and add nothing — getSchoolState
@@ -80,6 +80,28 @@ describe('getSchoolState', () => {
   it('late night after evening study → free', () => {
     const s = getSchoolState(bjDate('2026-06-15T22:30'));
     expect(s.phase).toBe('free');
+  });
+
+  it('A2: getSchoolAttentionFactor low in class, 1 after school', () => {
+    expect(getSchoolAttentionFactor(bjDate('2026-06-15T08:10'))).toBeLessThanOrEqual(0.3); // in class
+    expect(getSchoolAttentionFactor(bjDate('2026-06-15T17:30'))).toBe(1); // after school
+    expect(getSchoolAttentionFactor(bjDate('2026-06-13T10:00'))).toBe(1); // weekend
+  });
+
+  it('A3: getDaySummary describes weekday classes / weekend without inventing times', () => {
+    const wd = getDaySummary(bjDate('2026-06-15T08:10'));
+    expect(wd?.isSchoolDay).toBe(true);
+    expect(wd?.text).toContain('工作日');
+    expect(wd?.text).toContain('语文'); // Monday subjects
+    const we = getDaySummary(bjDate('2026-06-13T10:00'));
+    expect(we?.isSchoolDay).toBe(false);
+    expect(we?.text).toContain('周末');
+  });
+
+  it('A2/A3 disabled → factor 1, summary null', () => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: false });
+    expect(getSchoolAttentionFactor(bjDate('2026-06-15T08:10'))).toBe(1);
+    expect(getDaySummary(bjDate('2026-06-15T08:10'))).toBeNull();
   });
 });
 
