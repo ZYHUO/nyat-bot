@@ -51,6 +51,7 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   reply:            { label: 'main',     backups: [],         timeout: 60_000 },
   reply_pro:        { label: 'claude',   backups: [],         timeout: 90_000 },
   vision:           { label: 'vision',   backups: [],         timeout: 30_000 },
+  audio:            { label: 'vision',   backups: [],         timeout: 30_000 },
   judge:            { label: 'main',     backups: [],         timeout: 30_000, maxTokens: 200,  temperature: 0 },
   planner:          { label: 'main',     backups: [],         timeout: 30_000, maxTokens: 300,  temperature: 0 },
   summarize:        { label: 'main',     backups: [],         timeout: 120_000 },

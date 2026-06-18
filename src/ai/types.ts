@@ -35,10 +35,11 @@ export interface HedgeConfig {
   hedgeDelayMs: number;
 }
 
-/** Multimodal content part for vision models */
+/** Multimodal content part for vision/audio models */
 export type ContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; image: string }; // data URL or URL
+  | { type: 'image'; image: string } // data URL or URL
+  | { type: 'audio'; audio: string; format: string }; // raw base64 (no data: prefix) + container format (wav/mp3/ogg/m4a)
 
 export interface AICallOptions {
   usage: string;

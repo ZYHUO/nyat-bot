@@ -39,6 +39,38 @@ describe('callModel', () => {
     vi.clearAllMocks();
   });
 
+  it('serializes audio parts as input_audio and uses the raw fetch path', async () => {
+    let capturedBody: any;
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return Promise.resolve(new Response(
+        JSON.stringify({ choices: [{ message: { content: '一段猫叫' } }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+    }));
+
+    const label: AILabel = {
+      name: 'audio',
+      endpoint: 'https://audio.example/v1',
+      apiKeys: ['audio-key'],
+      model: 'gpt-4o-audio-preview',
+    };
+
+    const result = await callModel(label, [{
+      role: 'user',
+      content: [
+        { type: 'audio', audio: 'QkFTRTY0', format: 'ogg' },
+        { type: 'text', text: '这是什么?' },
+      ],
+    }], { maxTokens: 50 });
+
+    expect(result.content).toBe('一段猫叫');
+    // audio must NOT go through the AI SDK generateText path — raw fetch only
+    expect(fetch).toHaveBeenCalledOnce();
+    const part = capturedBody.messages[0].content[0];
+    expect(part).toEqual({ type: 'input_audio', input_audio: { data: 'QkFTRTY0', format: 'ogg' } });
+  });
+
   it('returns stream token usage for stream-only providers', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
       makeSseResponse(['<thinking>internal</thinking>', 'hello'])

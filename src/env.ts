@@ -83,6 +83,12 @@ const envSchema = z.object({
   JUDGE_KNOWLEDGE_PERMANENT: booleanFromEnv.default(true),
   JUDGE_KNOWLEDGE_GROUP: booleanFromEnv.default(true),
 
+  // 语音/音频转写:默认关。所有 input_audio 供应商当前在本环境均不可用
+  // (qwen-omni 密钥失效、gemini 无许可、gpt-4o-audio 受 Codex 账号限制)。
+  // 关 → describeAudio 直接返回中性占位,不发那通注定失败的调用。
+  // 接上可用 audio 模型后:置 true + AI_USAGE_AUDIO_LABEL=<模型> 即生效。
+  AUDIO_TRANSCRIBE_ENABLED: booleanFromEnv.default(false),
+
   // Join verification
   VERIFY_ENABLED: booleanFromEnv.default(false),
   VERIFY_DEFAULT_TIMEOUT: z.coerce.number().int().default(300),

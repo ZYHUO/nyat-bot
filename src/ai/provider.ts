@@ -138,9 +138,11 @@ async function callClaude(
 
 // ── OpenAI-compatible message serialization ───────────────────────
 
-/** Check if any message contains image content parts */
-function hasImageContent(messages: Array<{ content: string | ContentPart[] }>): boolean {
-  return messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image'));
+/** Check if any message carries non-text media (image/audio) — forces the raw fetch path */
+function hasMediaContent(messages: Array<{ content: string | ContentPart[] }>): boolean {
+  return messages.some(
+    m => Array.isArray(m.content) && m.content.some(p => p.type === 'image' || p.type === 'audio'),
+  );
 }
 
 /** Convert internal ContentPart[] to OpenAI-compatible format */
@@ -148,6 +150,7 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
   if (typeof content === 'string') return content;
   return content.map(p => {
     if (p.type === 'text') return { type: 'text', text: p.text };
+    if (p.type === 'audio') return { type: 'input_audio', input_audio: { data: p.audio, format: p.format } };
     return { type: 'image_url', image_url: { url: p.image } };
   });
 }
@@ -322,7 +325,7 @@ export async function callModel(
   // Use raw fetch for vision (image content), stream-only endpoints, or
   // reasoning-enabled labels (AI SDK generateText 不透传 reasoning_effort —
   // 只有 raw 路径会把 body.reasoning_effort 发出去)。
-  if (hasImageContent(messages) || label.stream || label.reasoningEffort) {
+  if (hasMediaContent(messages) || label.stream || label.reasoningEffort) {
     try {
       return await callOpenAIRaw(label, messages, {
         ...opts,

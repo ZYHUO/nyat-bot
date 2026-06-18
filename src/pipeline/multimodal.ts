@@ -4,6 +4,7 @@
 
 import { getBot } from '../bot/bot.js';
 import { callWithFallback } from '../ai/fallback.js';
+import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import type { FormattedMessage } from '../shared/types.js';
 
@@ -40,25 +41,38 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: ArrayBuff
   }
 }
 
+/** Telegram audio MIME → OpenAI input_audio container format */
+function audioFormatFromMime(mime: string): string {
+  const sub = mime.split('/')[1]?.split(';')[0]?.toLowerCase() ?? 'ogg';
+  if (sub === 'mpeg' || sub === 'mp3') return 'mp3';
+  if (sub === 'x-m4a' || sub === 'mp4' || sub === 'aac') return 'm4a';
+  if (sub === 'wav' || sub === 'x-wav' || sub === 'wave') return 'wav';
+  if (sub === 'opus' || sub === 'ogg') return 'ogg';
+  return sub;
+}
+
 async function describeAudio(fileId: string, label: string): Promise<string> {
   const downloaded = await downloadTelegramFile(fileId);
   // 下不动(多半文件太大)≠ 内容不存在:文件已在群里、别人收得到。用中性占位,
   // 别写"无法下载"——否则 bot 会把别的 bot 发来的歌/语音误读成"失败了"。
   if (!downloaded) return `[${label}]`;
 
+  // 默认不转写:当前所有 input_audio 供应商在本环境都不可用,发出去必 400/超时,
+  // 白白吃满 timeout + 双 backup 重试 + 刷日志。开关关 → 直接中性占位,不发调用。
+  // (旧实现把 audio/ogg 当 image 丢给 GPT vision,每条语音都注定失败 —— 已根治。)
+  if (!env().AUDIO_TRANSCRIBE_ENABLED) return `[${label}]`;
+
   try {
     const base64 = Buffer.from(downloaded.buffer).toString('base64');
-    // Use ogg/m4a as voice, mp3/m4a as audio — treat as generic audio
-    const mimeType = downloaded.mimeType.startsWith('audio/') ? downloaded.mimeType : 'audio/ogg';
-    const dataUrl = `data:${mimeType};base64,${base64}`;
+    const format = audioFormatFromMime(downloaded.mimeType);
 
     const result = await callWithFallback({
-      usage: 'vision', // gemini supports audio via vision endpoint
+      usage: 'audio',
       messages: [
         {
           role: 'user',
           content: [
-            { type: 'image', image: dataUrl },
+            { type: 'audio', audio: base64, format },
             { type: 'text', text: '请转录并简要描述这段音频的内容。如果是语音消息，直接转录文字；如果是音乐或其他音频，描述内容。用中文回答，简洁。' },
           ],
         },
@@ -69,7 +83,8 @@ async function describeAudio(fileId: string, label: string): Promise<string> {
     return `[${label}内容：${result.content.trim()}]`;
   } catch (err) {
     logger.warn({ fileId, err }, 'Audio description failed');
-    return `[${label}：无法识别]`;
+    // 失败也用中性占位,别写"无法识别"——以免把别人的语音误读成 bot 出错。
+    return `[${label}]`;
   }
 }
 
