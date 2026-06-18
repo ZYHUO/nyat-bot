@@ -35,6 +35,7 @@ import { peekPendingQuestion } from '../../tracking/curiosity.js';
 import { getChatStyle } from '../../tracking/chat-style.js';
 import { checkNearDuplicate } from './anti-repeat.js';
 import { buildInstructionHint } from './instruction.js';
+import { assembleBurstHint, type CtxPart } from './burst-hint.js';
 
 const MAX_DUPLICATE_RETRIES = 1;
 const MAX_MULTI_REPLY_RETRIES = 1;
@@ -355,44 +356,63 @@ export async function generateReply(
 
   // ── 此刻的你:一段叙述代替五六个状态标签块(心流层同源,S13)──
   // 判断"接不接"的我和决定"怎么说"的我读的是同一份自我状态。
-  // P4:状态块带优先级,最终按预算合成(指令类永不裁,氛围类按序让位)
-  const ctxParts: Array<[number, string]> = [];
+  // 顺序重排(三家评审共识):每块带两个独立的键 ——
+  //   order = 在 burstHint 里的文本位置(升序=越靠前=离 CURRENT_MESSAGE 越远);
+  //   keep  = 预算裁剪时的重要度(升序=越先保;<10 必留,永不被裁)。
+  // 旧设计一个 priority 同时管"位置"和"重要度",导致"念头(最重要)"被
+  // 排到块最前(离当前消息最远)——正好和"顺着念头开笔"的意图相反。
+  // 拆开后:重要度照旧裁剪,文本顺序按 recency 重排(念头压轴、贴 CURRENT_MESSAGE)。
+  const ctxParts: CtxPart[] = [];
   const stateParts = {
-    push: (t: string) => ctxParts.push([50, t]),
-    pushP: (p: number, t: string) => ctxParts.push([p, t]),
+    push: (t: string) => ctxParts.push({ order: 50, keep: 50, text: t }),
+    pushP: (order: number, keep: number, t: string) => ctxParts.push({ order, keep, text: t }),
   };
   if (chatId < 0) {
     // P2:自我状态只进群聊 —— DM 里"注意收着点/半挂机"这类群语境叙述很怪
+    // 顺序:此刻的你(含回复规律)放靠后(order=50),贴近写作点;念头(order=99)压轴。
     try {
       // heartWhy 在场时不再读 mind.lastThought —— 那是同一个念头,
       // [你的念头] 已注入,自我状态里再写一遍是双倍复读(review #14)。
       // 心流分支已拼装过 → 直接复用快照(审计 #38:不再二次取 4 个源)
       const self = callOpts?.selfState ?? await composeSelfState(chatId);
       const narration = callOpts?.heartWhy ? self.narrationNoThought : self.narration;
-      stateParts.pushP(20, `[此刻的你] ${narration}`);
+      // P1:自我反思(长期回复规律)并入「此刻的你」——两者都是"当下的我"的
+      // 底色,语义重叠;合并后不再在静态块顶端单列一块离 CURRENT_MESSAGE 老远。
+      let selfBlock = `[此刻的你] ${narration}`;
+      if (selfReflection) selfBlock += `\n(你最近的回复规律:${selfReflection.slice(0, 160)})`;
+      stateParts.pushP(50, 20, selfBlock);
     } catch { /* non-critical */ }
     try {
-      // B 选择性注入:当前消息谈到 infra(机场/VPS/线路)就先注 infra 黑话,
-      // 全局高频补齐;无域命中时退化为取全部高频。
-      const jargons = getTopJargonsForContext(chatId, queryText, 5);
-      if (jargons.length > 0) {
-        const lines = jargons.map((j) => `${j.content} = ${j.meaning.slice(0, 40)}`).join('；');
-        stateParts.pushP(40, `[本群黑话] ${lines}\n(这些是群里的梗,语境合适时可以自然用上,别滥用)`);
+      // 黑话合并(三家共识):消息里命中的黑话(理解侧,置顶看懂)+ 语境高频黑话
+      // (表达侧,B 选择性注入,infra 话题先注 infra 域)→ 单块去重,不再分两块重复。
+      const matched = searchJargonsInText(chatId, queryText, 3);
+      const top = getTopJargonsForContext(chatId, queryText, 5);
+      const seen = new Set<string>();
+      const merged: Array<{ content: string; meaning: string }> = [];
+      for (const j of [...matched, ...top]) {
+        if (seen.has(j.content)) continue;
+        seen.add(j.content);
+        merged.push({ content: j.content, meaning: j.meaning });
+        if (merged.length >= 6) break;
+      }
+      if (merged.length > 0) {
+        const lines = merged.map((j) => `${j.content} = ${j.meaning.slice(0, 40)}`).join('；');
+        stateParts.pushP(14, 10, `[本群黑话] ${lines}\n(群里的梗/行话:消息里出现的看懂它,语境合适时也能自然用上,别滥用)`);
       }
     } catch { /* non-critical */ }
     if (!message.isBot && !message.isAnonymous) {
       try {
         const rel = getRelationship(chatId, message.uid);
         const newcomer = newcomerPromptHint(rel.count);
-        if (newcomer) stateParts.pushP(15, newcomer);
-        else if (rel.lastSummary) stateParts.pushP(30, `[你和TA] ${rel.lastSummary.slice(0, 100)}`);
+        if (newcomer) stateParts.pushP(22, 15, newcomer);
+        else if (rel.lastSummary) stateParts.pushP(32, 30, `[你和TA] ${rel.lastSummary.slice(0, 100)}`);
       } catch { /* non-critical */ }
     }
     // 微反应群提示(千雪对标):本群说话都很短 → bot 也要敢发 2-10 字
     try {
       const style = await getChatStyle(chatId);
       if (style?.microStyle) {
-        stateParts.pushP(18, `[本群节奏] 这个群说话都很短(中位 ${style.medianChars} 字)。你的回复也照这个长度来:多数时候 2-10 字的微反应("对对对""笑死""这么强")就是最像群友的;**不要**每条都写成 20 字的完整句子。`);
+        stateParts.pushP(18, 18, `[本群节奏] 这个群说话都很短(中位 ${style.medianChars} 字)。你的回复也照这个长度来:多数时候 2-10 字的微反应("对对对""笑死""这么强")就是最像群友的;**不要**每条都写成 20 字的完整句子。`);
       }
     } catch { /* non-critical */ }
     // 复读链检测:≥2 个不同群友连发同一句短话 → 跟一句就是最自然的参与
@@ -408,7 +428,7 @@ export async function generateReply(
             else break;
           }
           if (echoers.size >= 2) {
-            stateParts.pushP(12, `[复读链] 群里 ${echoers.size} 个人在复读「${lastText.slice(0, 12)}」。跟着原样复读一句(或微变体)是最自然的参与方式;不想跟就正常回。`);
+            stateParts.pushP(10, 12, `[复读链] 群里 ${echoers.size} 个人在复读「${lastText.slice(0, 12)}」。跟着原样复读一句(或微变体)是最自然的参与方式;不想跟就正常回。`);
           }
         }
       }
@@ -420,7 +440,7 @@ export async function generateReply(
         // 生成被打断/迟到抑制/静默时惦记保留,下次 TA 出现还能追
         const pendingQ = await peekPendingQuestion(chatId, message.uid);
         if (pendingQ) {
-          stateParts.pushP(13, `[惦记] 你之前问过TA:「${pendingQ}」,一直没等到回答。现在TA出现了——语境合适的话顺口追一下(真群友会记得自己好奇过什么);TA这条消息正好在回答的话就自然接上。`);
+          stateParts.pushP(34, 13, `[惦记] 你之前问过TA:「${pendingQ}」,一直没等到回答。现在TA出现了——语境合适的话顺口追一下(真群友会记得自己好奇过什么);TA这条消息正好在回答的话就自然接上。`);
         }
       } catch { /* non-critical */ }
     }
@@ -428,21 +448,14 @@ export async function generateReply(
     try {
       const episodes = recallEpisodes(chatId, queryText, 2);
       if (episodes.length > 0) {
-        stateParts.pushP(35, `[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
-      }
-    } catch { /* non-critical */ }
-    // G8 黑话理解侧:入站消息里出现已学会的黑话 → 含义随消息注入,
-    // bot 不再对群内梗一脸茫然(MaiBot query_jargon 的注入式对标)
-    try {
-      const matched = searchJargonsInText(chatId, queryText, 3);
-      if (matched.length > 0) {
-        stateParts.pushP(10, `[消息里的黑话] ${matched.map((j) => `${j.content}=${j.meaning.slice(0, 30)}`).join('；')}`);
+        stateParts.pushP(30, 35, `[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
       }
     } catch { /* non-critical */ }
   }
 
-  // L1: 内心独白放最后(离 CURRENT_MESSAGE 最近) —— 写手顺着决定接话的
-  // 那个念头开笔,而不是失忆后重新猜一个角度。
+  // L1: 内心独白压轴(order=99,离 CURRENT_MESSAGE 最近) —— 写手顺着决定
+  // 接话的那个念头开笔,而不是失忆后重新猜一个角度。keep=2(必留,永不被裁)。
+  // (旧 bug:念头用 priority 2 入列被排到块最前,正好和这条意图相反。)
   const heartPart = callOpts?.heartWhy
     ? `[你的念头] 你看到这条消息时心里想的是:「${callOpts.heartWhy}」。顺着这个念头说,别另起炉灶。`
     : undefined;
@@ -450,23 +463,19 @@ export async function generateReply(
   const catchupPart = callOpts?.sleepCatchup
     ? '[补觉回复] 这条消息是你睡觉时错过的,刚睡醒(或半夜迷迷糊糊摸到手机)才看到,现在补个回复。开头自然带一句"刚睡醒看到""昨晚睡了才看到喵"之类,轻描淡写;如果话题明显已经翻篇/不需要回了,就输出 {"action":"silent"}。'
     : undefined;
-  // 指令/念头/迟到/连发是行为指令(p<10,永不裁);其余按优先级进预算
-  if (instructionPart) ctxParts.push([1, instructionPart]);
-  if (heartPart) ctxParts.push([2, heartPart]);
-  if (catchupPart) ctxParts.push([3, catchupPart]);
-  else if (callOpts?.latenessHint) ctxParts.push([3, callOpts.latenessHint]);
-  if (burstPart) ctxParts.push([4, burstPart]);
-  if (revisitPart) ctxParts.push([45, revisitPart]);
+  // 行为指令(指令/念头/补觉/连发):keep<10 必留;文本位置(order)按 recency
+  // 排在氛围块之后、紧贴 CURRENT_MESSAGE —— 越是"怎么写这条"的指令越贴近消息。
+  if (instructionPart) stateParts.pushP(80, 1, instructionPart);
+  if (heartPart) stateParts.pushP(99, 2, heartPart);
+  if (catchupPart) stateParts.pushP(72, 3, catchupPart);
+  else if (callOpts?.latenessHint) stateParts.pushP(72, 3, callOpts.latenessHint);
+  if (burstPart) stateParts.pushP(70, 4, burstPart);
+  if (revisitPart) stateParts.pushP(40, 45, revisitPart);
+  // 两遍合成(burst-hint.ts):① 按 keep 升序做预算裁剪(keep<10 必留);
+  // ② 保留下来的再按 order 升序渲染。重要度与位置解耦 —— 念头最重要(keep=2)
+  // 且最靠近 CURRENT_MESSAGE(order=99)不再矛盾。
   const CTX_BUDGET_CHARS = 1400;
-  let used = 0;
-  const kept: string[] = [];
-  for (const [prio, text] of ctxParts.sort((a, b) => a[0] - b[0])) {
-    if (prio < 10 || used + text.length <= CTX_BUDGET_CHARS) {
-      kept.push(text);
-      used += text.length;
-    }
-  }
-  const burstHint = kept.join('\n\n') || undefined;
+  const burstHint = assembleBurstHint(ctxParts, CTX_BUDGET_CHARS);
 
   // G13: LLM-driven expression selection (MaiBot maisaka_expression_selector
   // port — was dead code, now wired). Rich-context replies pick style snippets

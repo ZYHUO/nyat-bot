@@ -667,6 +667,20 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         judgeResult = heart.judgeResult;
         job.turnContext.gateBypass = true; // 心流就是 gate,别再问一遍
         job.turnContext.heartWhy = heart.why; // L1:写手顺着同一个念头开笔
+        // P2 决策流安全网:心流判 chat(→direct,无工具),但消息有明确检索意图
+        // (查/搜/价格/点歌/带链接…)→ 升级 planned。心流偶尔低估"需要查"的
+        // 信号,direct 路径就查不了;关键词兜底用与 L0 路由同一套 needsLookup。
+        if (
+          judgeResult.action === "REPLY" &&
+          judgeResult.replyPath === "direct" &&
+          needsLookup(formatted.textContent || formatted.captionContent || "")
+        ) {
+          judgeResult.replyPath = "planned";
+          logger.info(
+            { chatId: job.chatId, why: heart.why },
+            "heart=chat upgraded to planned (explicit lookup intent)",
+          );
+        }
       }
     } else {
       judgeResult = await judge({

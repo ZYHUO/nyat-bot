@@ -146,7 +146,7 @@ export function buildMessages(
   botKnowledge?: string,
   userProfile?: string,
   userPreferences?: string,
-  selfReflection?: string,
+  _selfReflection?: string, // P1:已并入 [此刻的你],保留位以维持位置参数兼容
   toolResults?: string,
   replyShapeHint?: ReplyShapeHint,
   chatId?: number,
@@ -182,9 +182,9 @@ export function buildMessages(
     userParts.push(`[群组Bot知识]\n${botKnowledge}`);
   }
 
-  if (selfReflection) {
-    userParts.push(`[自我反思·回复规律]\n${selfReflection}`);
-  }
+  // 自我反思(回复规律)已并入 reply.ts 的 [此刻的你] 状态块(P1:语义重叠,
+  // 且不再单列在静态块顶端离 CURRENT_MESSAGE 老远)。此处保留入参兼容签名,
+  // 但不再单独渲染。
 
   // Expression injection (Stage D)
   // G13: 语境匹配的 LLM 选择结果(expression-selector)优先于静态 top-N
@@ -209,7 +209,22 @@ export function buildMessages(
     }
   }
 
-  // Person aliases / 外号 injection (group chats) — compact durable memory of nicknames
+  if (toolResults) {
+    userParts.push(toolResults);
+  }
+
+  if (replyShapeHint?.exactReplyCount && replyShapeHint.exactReplyCount > 1) {
+    userParts.push(
+      `[REPLY_COUNT_REQUIREMENT]\n必须输出恰好 ${replyShapeHint.exactReplyCount} 条消息，并使用 JSON 数组返回，不能合并成一条。`,
+    );
+  }
+
+  const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
+  userParts.push(`[${contextLabel}]\n${context}`);
+
+  // P1:谁是谁(外号/角色/关系)紧跟对话历史 —— 模型读完对话、识别出人名后,
+  // 紧接着查"谁是谁"做消歧,聚类最紧。旧位置(对话之前老远)是"先背花名册
+  // 再看对话",名字对不上号(recency 衰减)。
   if (chatId !== undefined && chatId < 0) {
     try {
       const aliasBlock = buildAliasInjection(chatId);
@@ -226,19 +241,6 @@ export function buildMessages(
       if (socialBlock) userParts.push(`[群友关系]\n${socialBlock}`);
     } catch { /* non-critical */ }
   }
-
-  if (toolResults) {
-    userParts.push(toolResults);
-  }
-
-  if (replyShapeHint?.exactReplyCount && replyShapeHint.exactReplyCount > 1) {
-    userParts.push(
-      `[REPLY_COUNT_REQUIREMENT]\n必须输出恰好 ${replyShapeHint.exactReplyCount} 条消息，并使用 JSON 数组返回，不能合并成一条。`,
-    );
-  }
-
-  const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
-  userParts.push(`[${contextLabel}]\n${context}`);
 
   // G4(语言生命):学到的群语言放在 CURRENT_MESSAGE 紧前 —— 最高 recency,
   // 模型真正"带着群的腔调"开口,而不是被埋在状态提示堆里。
