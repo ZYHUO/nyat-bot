@@ -7,7 +7,7 @@ vi.mock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn(), info
 
 const { markDmEver, hasDmEver, listDmEverUids, getPmNudge, upsertPmNudge, markPmDmOpen } =
   await import('../../../src/tracking/dm-state.js');
-const { enqueueDmPending, countDmPending, takeDmPending } = await import('../../../src/tracking/dm-pending.js');
+const { enqueueDmPending, countDmPending, peekDmPending, markDmPendingFlushed } = await import('../../../src/tracking/dm-pending.js');
 
 function initSchema(db: Database.Database): void {
   db.exec(`
@@ -78,22 +78,25 @@ describe('dm-state: pm_nudge machine', () => {
 });
 
 describe('dm-pending: 攒话队列', () => {
-  it('enqueue + count + gradual take marks flushed', () => {
+  it('peek does NOT flush; markDmPendingFlushed does (data-loss-safe)', () => {
     enqueueDmPending(7, '想跟TA说梦到TA了', '昨晚');
     enqueueDmPending(7, '想问TA周末干嘛');
     enqueueDmPending(7, '想分享一首歌');
     expect(countDmPending(7)).toBe(3);
 
-    const first = takeDmPending(7, 2); // gradual: 2 at a time
-    expect(first).toHaveLength(2);
-    expect(first[0]!.intent).toContain('梦到');
-    expect(countDmPending(7)).toBe(1); // 2 flushed
+    const peeked = peekDmPending(7, 2); // gradual: 2 at a time, NOT marked
+    expect(peeked).toHaveLength(2);
+    expect(peeked[0]!.intent).toContain('梦到');
+    expect(countDmPending(7)).toBe(3); // peek did not flush — survives send failure
 
-    const second = takeDmPending(7, 2);
-    expect(second).toHaveLength(1);
+    markDmPendingFlushed(peeked.map((l) => l.id)); // only after a successful send
+    expect(countDmPending(7)).toBe(1);
+
+    const next = peekDmPending(7, 2);
+    expect(next).toHaveLength(1);
+    markDmPendingFlushed(next.map((l) => l.id));
     expect(countDmPending(7)).toBe(0);
-
-    expect(takeDmPending(7, 2)).toEqual([]); // empty now
+    expect(peekDmPending(7, 2)).toEqual([]);
   });
 
   it('caps at 5 unflushed per user (rolls oldest)', () => {
@@ -101,11 +104,11 @@ describe('dm-pending: 攒话队列', () => {
     expect(countDmPending(7)).toBe(5);
   });
 
-  it('expired lines are not counted or taken', () => {
+  it('expired lines are not counted or peeked', () => {
     enqueueDmPending(7, 'old line');
     testDb.prepare('UPDATE dm_pending_lines SET expires_at = ? WHERE uid = 7').run(Math.floor(Date.now() / 1000) - 10);
     expect(countDmPending(7)).toBe(0);
-    expect(takeDmPending(7)).toEqual([]);
+    expect(peekDmPending(7)).toEqual([]);
   });
 
   it('blank intent is ignored', () => {

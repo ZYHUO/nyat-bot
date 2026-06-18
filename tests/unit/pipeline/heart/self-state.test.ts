@@ -22,6 +22,9 @@ vi.mock('../../../../src/pipeline/turn/focus.js', () => ({ getFocus: mocks.getFo
 vi.mock('../../../../src/tracking/social-needs.js', () => ({ socialStateHint: mocks.socialStateHint }));
 vi.mock('../../../../src/pipeline/heart/mind.js', () => ({ getMind: mocks.getMind }));
 vi.mock('../../../../src/tracking/obsessions.js', () => ({ getObsession: mocks.getObsession }));
+// 上学日程源(A0/A3)与本组「源顺序」用例无关 —— 关掉,保持叙述确定性
+vi.mock('../../../../src/tracking/school-state.js', () => ({ getSchoolSelfStateLine: () => null }));
+vi.mock('../../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: false }) }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));

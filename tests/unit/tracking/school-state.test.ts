@@ -106,6 +106,20 @@ describe('getSchoolState', () => {
 });
 
 describe('getSchoolState with overrides', () => {
+  it('early_off override → after the cutoff is after_school, not in_class (review #3)', async () => {
+    vi.resetModules();
+    vi.doMock('../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: true }) }));
+    vi.doMock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn() } }));
+    vi.doMock('../../../src/db/sqlite.js', () => ({
+      getDb: () => ({ prepare: () => ({ get: () => ({ kind: 'early_off', makeup_dow: null, end_min: 900, note: '运动会' }) }) }),
+    }));
+    const mod = await import('../../../src/tracking/school-state.js');
+    // Monday 15:20 (920) — period 6 is 14:55-15:40 (895-940), early_off at 15:00 (900)
+    const s = mod.getSchoolState(bjDate('2026-06-15T15:20'));
+    expect(s.phase).toBe('after_school');
+    expect(s.selfLine).toContain('放学');
+  });
+
   it('holiday override → not a school day, holiday line', async () => {
     vi.resetModules();
     vi.doMock('../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: true }) }));

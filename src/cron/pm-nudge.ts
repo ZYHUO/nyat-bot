@@ -25,17 +25,15 @@ import { applyRelationshipEvent } from '../tracking/relationship.js';
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
-function getLatestUsername(uid: number): string | null {
+/** 实时取该 uid 在群里的当前 @handle(避免存档 username 过期 @ 错人)。失败/无 handle → null。 */
+async function getLiveUsername(chatId: number, uid: number): Promise<string | null> {
   try {
-    const row = getDb()
-      .prepare(
-        `SELECT username FROM user_profiles WHERE uid = ? AND username IS NOT NULL AND username != ''
-          ORDER BY updated_at DESC LIMIT 1`,
-      )
-      .get(uid) as { username: string } | undefined;
-    return row?.username ?? null;
+    const { getBot } = await import('../bot/bot.js');
+    const member = await getBot().api.getChatMember(chatId, uid);
+    const uname = member?.user?.username;
+    return uname && uname.length > 0 ? uname : null;
   } catch {
-    return null;
+    return null; // 不在群/取不到 → 不催
   }
 }
 
@@ -134,25 +132,33 @@ export async function runPmNudge(): Promise<void> {
     if (e.ALLOWLIST_ENABLED !== false && !(await isGroupAllowed(redis, allowConf, chat))) continue;
     if (getMuteLevel(chat, uid) > 0) continue; // 被禁言/降权的人不去@
     if (!(await recheckDeliverySafety(uid, chat))) continue; // ban + 群成员校验
-    const username = getLatestUsername(uid);
+    // 实时取当前 @handle(改名/注销会让存档 username 过期,公开@错人;review #4)。
+    const username = await getLiveUsername(chat, uid);
     if (!username) continue; // 没 @handle 不催(别 @uid 裸号像 spam)
 
     let text: string | null;
     try {
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
+      // intent **不让模型自己 @**(否则与下面前缀的 @ 叠成双@像刷屏;review #2)。
       text = await generatePersonaProactiveText(
         chat,
         getBotUid(),
-        `[想让TA来私聊] 你跟 @${username} 在群里挺熟了但TA从没私聊过你,你有点想跟TA单独说说话。在群里@TA、撒娇喊TA来私聊本喵(像"@xx 来pm本喵嘛"这种),极短一句,别命令、别解释原因`,
+        `[想让TA来私聊] 群里有个你挺熟但从没私聊过你的人,你有点想跟TA单独说说话。撒娇喊TA来私聊本喵(像"来pm本喵嘛""有空私我呀"这种),极短一句,别命令、别解释原因、**别带@和名字**(本喵会自己@TA)`,
       );
     } catch (err) {
       logger.debug({ err, uid, chat }, 'pm-nudge generate failed');
       continue;
     }
-    if (!text) continue;
+    // silent/失败 → 不催:退避 12h,免得每 3h cron 反复重算重调 LLM(review #5)
+    if (!text) {
+      upsertPmNudge(uid, { state: 'nudging', primaryChatId: chat, nextNudgeAt: t + 12 * 3600 });
+      continue;
+    }
+    // 兜底剥掉模型可能仍自带的开头 @handle,避免双@
+    const clean = text.replace(/^(?:\s*@\S+)+\s*/, '').trim() || text;
 
     try {
-      await sendMessage(chat, `@${username} ${text}`);
+      await sendMessage(chat, `@${username} ${clean}`);
     } catch (err) {
       logger.debug({ err, uid, chat }, 'pm-nudge send failed (likely not in group)');
       continue;

@@ -50,24 +50,39 @@ export function countDmPending(uid: number): number {
   }
 }
 
-/** 取最多 max 条未 flush 未过期的攒话,并标记 flushed(渐进释放:默认 2 条)。 */
-export function takeDmPending(uid: number, max = 2): DmPendingLine[] {
+export interface DmPendingRow extends DmPendingLine {
+  id: number;
+}
+
+/**
+ * 预览最多 max 条未 flush 未过期的攒话(渐进释放:默认 2 条)。**不标记 flushed** ——
+ * 由调用方在确实发出后再 markDmPendingFlushed,避免生成/发送失败时攒话被吞掉(数据丢失)。
+ */
+export function peekDmPending(uid: number, max = 2): DmPendingRow[] {
   try {
-    const db = getDb();
     const t = nowSec();
-    const rows = db
+    const rows = getDb()
       .prepare(
         `SELECT id, intent, context FROM dm_pending_lines
            WHERE uid = ? AND flushed_at IS NULL AND expires_at > ?
            ORDER BY created_at ASC LIMIT ?`,
       )
       .all(uid, t, max) as { id: number; intent: string; context: string }[];
-    if (rows.length === 0) return [];
-    const ids = rows.map((r) => r.id);
-    db.prepare(`UPDATE dm_pending_lines SET flushed_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(t, ...ids);
-    return rows.map((r) => ({ intent: r.intent, context: r.context }));
+    return rows.map((r) => ({ id: r.id, intent: r.intent, context: r.context }));
   } catch (err) {
-    logger.debug({ err, uid }, 'takeDmPending failed (non-critical)');
+    logger.debug({ err, uid }, 'peekDmPending failed (non-critical)');
     return [];
+  }
+}
+
+/** 标记已发(发送成功后调用)。 */
+export function markDmPendingFlushed(ids: number[]): void {
+  if (ids.length === 0) return;
+  try {
+    getDb()
+      .prepare(`UPDATE dm_pending_lines SET flushed_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`)
+      .run(nowSec(), ...ids);
+  } catch (err) {
+    logger.debug({ err }, 'markDmPendingFlushed failed (non-critical)');
   }
 }

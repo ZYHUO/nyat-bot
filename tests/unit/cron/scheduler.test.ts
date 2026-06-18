@@ -77,11 +77,9 @@ describe('CronScheduler', () => {
   it('should register cron jobs on start', () => {
     startCronJobs();
 
-    // VERIFY/PROACTIVE/LEARNER disabled in this env. Unconditional jobs:
-    // model-check, daily-report, cleanup, scheduled-messages, relay-expiry,
-    // scheduled-relays, note-guess-game, knowledge-sync, user-profile-sync,
-    // idle-check, channel-sync, stats-flush, behavioral-roles, memory-dream, expression-gate = 15
-    expect(mockSchedule).toHaveBeenCalledTimes(17);
+    // 计数依赖 .env 的 flag-gated job(读真实 env)。当前含 pm-nudge(PM_NUDGE_ENABLED)
+    // 与 school-day-plan(SCHOOL_SCHEDULE_ENABLED)两个新条件 job → 在原基础上 +2。
+    expect(mockSchedule).toHaveBeenCalledTimes(19);
     expect(isStarted()).toBe(true);
   });
 
@@ -89,14 +87,14 @@ describe('CronScheduler', () => {
     startCronJobs();
     startCronJobs(); // second call should be no-op
 
-    expect(mockSchedule).toHaveBeenCalledTimes(17);
+    expect(mockSchedule).toHaveBeenCalledTimes(19);
   });
 
   it('should stop all jobs on stopCronJobs', () => {
     startCronJobs();
     stopCronJobs();
 
-    expect(mockStop).toHaveBeenCalledTimes(17);
+    expect(mockStop).toHaveBeenCalledTimes(19);
     expect(isStarted()).toBe(false);
   });
 

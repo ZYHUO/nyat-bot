@@ -152,7 +152,9 @@ export function getSchoolState(now: Date = new Date()): SchoolState {
   // 上午/下午课:命中某节 → in_class;两节之间 → break
   for (let i = 0; i < periods.length; i++) {
     const p = periods[i]!;
-    if (minutes >= p.start && minutes < p.end) {
+    // early_off:夹断跨越提早放学点的那节课,放学点后不再算上课(review #3)
+    const pEnd = Math.min(p.end, afternoonEnd);
+    if (minutes >= p.start && minutes < pEnd) {
       const verb = examNote ? `在考${p.subject}` : `在上${p.subject}课`;
       return {
         isSchoolDay: true, phase: 'in_class', currentSubject: p.subject, attentionFactor: examNote ? 0.2 : 0.3,
