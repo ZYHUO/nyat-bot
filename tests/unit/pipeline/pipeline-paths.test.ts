@@ -298,27 +298,8 @@ describe("processPipeline path branching", () => {
     expect(sendDirect).toHaveBeenCalled();
   });
 
-  it("stores natural-language soft mute as temporary mute", async () => {
-    mockJudge.mockResolvedValue({
-      action: "REPLY",
-      replyPath: "direct",
-      replyTier: "normal",
-      rule: "mute_soft_request",
-      level: "L0_RULE",
-      latencyMs: 0,
-    });
-
-    await processPipeline(makeJob());
-
-    expect(mockMuteUser).toHaveBeenCalledWith(-100123, 1001, 1, {
-      temporary: true,
-    });
-    expect(sendDirect).toHaveBeenCalledWith(
-      -100123,
-      "好的，本喵不会主动找你说话了喵~",
-      42,
-    );
-  });
+  // NL 软禁言(别理我/闭嘴)的关键词拦截已下线 —— 改由 directive.ts(回复前 LLM 分类)
+  // 静默执行,不再产生 mute_soft_request 规则。
 
   it("clears temporary mute on next direct mention before continuing reply flow", async () => {
     mockJudge.mockResolvedValue({

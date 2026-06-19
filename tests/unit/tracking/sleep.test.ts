@@ -148,7 +148,8 @@ describe('sleepStageAVerdict', () => {
 
 describe('sleepWakeDecision (升级式吵醒 + 入队)', () => {
   it('豁免规则 → pass,不碰 Redis', async () => {
-    for (const rule of ['whitelisted_command', 'remember_request', 'forget_request', 'sticker_dislike', 'unmute_request']) {
+    // mute/remember/forget/unmute 关键词规则已下线(改 directive.ts);剩余豁免规则:
+    for (const rule of ['whitelisted_command', 'self_mute_request', 'self_unmute_request', 'sticker_dislike']) {
       expect(await sleepWakeDecision(-100, 1001, rule, 'night')).toBe('pass');
     }
     expect(redisMock.incr).not.toHaveBeenCalled();

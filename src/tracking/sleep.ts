@@ -128,13 +128,6 @@ const STAGE_B_EXEMPT_RULES = new Set([
   'whitelisted_command',
   'self_mute_request',
   'self_unmute_request',
-  'mute_hard_request',
-  'mute_soft_request',
-  'mute_timed_request',
-  'unmute_request',
-  'remember_request',
-  'view_prefs_request',
-  'forget_request',
   'sticker_dislike',
 ]);
 

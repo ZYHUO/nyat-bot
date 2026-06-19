@@ -155,6 +155,32 @@ export async function generateAndSendReplies(args: {
 
   let maxPlaceholderMsgId: number | undefined;
   try {
+    // 6.0 控制指令(别理我/别理@某人/可以说话了/记住X/忘掉X):在 typing 之前用 LLM
+    // 听懂(取代旧 L0 关键词)。命中 → 静默执行 + emoji ack,不 typing、不回复。
+    // 只在群里、点名/回复本喵、短消息时分类,避免给长对话/普通消息加成本。
+    if (
+      e.CONTROL_DIRECTIVE_ENABLED && !formatted.isAnonymous &&
+      ((job.chatId < 0 && isDirectInteraction) || job.chatId > 0) // 群里点名本喵,或私聊
+    ) {
+      const dtext = (formatted.textContent || formatted.captionContent || "").trim();
+      if (dtext.length > 0 && dtext.length <= 40) {
+        try {
+          const { classifyDirective } = await import("../directive.js");
+          const action = await classifyDirective(dtext);
+          if (action) {
+            const { executeControlActions } = await import("../control-actions.js");
+            const ok = await executeControlActions([action], job.chatId, formatted.uid, formatted.messageId);
+            if (ok) {
+              logger.info({ chatId: job.chatId, action: action.action, target: action.controlTarget ?? "self" }, "Pipeline complete (control directive, silent)");
+              return;
+            }
+          }
+        } catch (err) {
+          logger.debug({ err, chatId: job.chatId }, "directive classify failed (non-critical)");
+        }
+      }
+    }
+
     // 6. reply_max: quota check + thinking placeholder
     if (effectiveReplyTier === "max") {
       const remaining = getRemainingMaxQuota(formatted.uid);

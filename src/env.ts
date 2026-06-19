@@ -352,6 +352,10 @@ const envSchema = z.object({
   // 常驻贴纸包(逗号分隔的贴纸包 set_name):作为 bot 主力贴纸,选择时占多数候选槽。
   RESIDENT_STICKER_PACKS: z.string().optional(),
 
+  // 控制指令(别理我/别理某人/可以说话了/记住X/忘掉X):typing 前用 LLM 听懂 →
+  // 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。
+  CONTROL_DIRECTIVE_ENABLED: booleanFromEnv.default(false),
+
   // ── School schedule (功能 A) ──
   // 16 岁上学人设:确定性周课表 + school_overrides 特殊日,注入 self-state。
   // 默认关。睡眠硬门优先级高于上课。

@@ -207,7 +207,8 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.rule).toBe("mute_soft_request");
+    // mute 关键词已不在 L0 路由 → 落到 reply_to_self,由 directive.ts(回复前 LLM)接管。
+    expect(result!.rule).toBe("reply_to_self");
   });
 
   it("reply to self mentioning mute keyword in negated context → normal direct reply", () => {
@@ -248,7 +249,7 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("reply_to_self");
   });
 
-  it("mention self with exact mute phrase → mute_soft_request", () => {
+  it("mention self with exact mute phrase → mention_self (directive layer handles mute)", () => {
     const ctx = makeCtx({
       chatId: -100123,
       message: makeMsg({ textContent: "啾咪囝 闭嘴" }),
@@ -256,7 +257,8 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.rule).toBe("mute_soft_request");
+    // mute 关键词已不在 L0 路由 → mention_self,由 directive.ts(回复前 LLM)接管。
+    expect(result!.rule).toBe("mention_self");
   });
 
   it("mention self with unmute phrase → normal direct reply", () => {
@@ -596,30 +598,5 @@ describe("L0 Rules — Proactive Engagement (Stage B)", () => {
   });
 });
 
-describe("looksLikeForgetRequest pattern", () => {
-  it("matches explicit forget commands", async () => {
-    const { looksLikeForgetRequest } = await import("../../../src/pipeline/judge/rules.js");
-    expect(looksLikeForgetRequest("帮我忘掉那个")).toBe(true);
-    expect(looksLikeForgetRequest("帮俺忘了")).toBe(true);
-    expect(looksLikeForgetRequest("忘掉:我喜欢猫")).toBe(true);
-    expect(looksLikeForgetRequest("忘掉：我说错了")).toBe(true);
-    expect(looksLikeForgetRequest("忘了，刚才那个")).toBe(true);
-    expect(looksLikeForgetRequest("忘记，xxx")).toBe(true);
-    expect(looksLikeForgetRequest("忘掉 我之前说的")).toBe(true);
-    expect(looksLikeForgetRequest("别记了")).toBe(true);
-    expect(looksLikeForgetRequest("不用记了")).toBe(true);
-    expect(looksLikeForgetRequest("forget: foo")).toBe(true);
-    expect(looksLikeForgetRequest("forget about that")).toBe(true);
-  });
-
-  it("does NOT match casual complaints / declarative usage", async () => {
-    const { looksLikeForgetRequest } = await import("../../../src/pipeline/judge/rules.js");
-    // 这是 user 实际报告的误判：用户在抱怨 bot，不是要求忘记记忆
-    expect(looksLikeForgetRequest("忘掉你没脑子")).toBe(false);
-    expect(looksLikeForgetRequest("我忘记了")).toBe(false);
-    expect(looksLikeForgetRequest("他忘了那件事")).toBe(false);
-    expect(looksLikeForgetRequest("忘性大的人")).toBe(false);
-    expect(looksLikeForgetRequest("forget 单词怎么背")).toBe(false);
-    expect(looksLikeForgetRequest("说不定他忘记了呢")).toBe(false);
-  });
-});
+// looksLikeForgetRequest 已下线 —— 记住/忘掉改由 directive.ts(回复前 LLM 指令分类)
+// 结合上下文听懂,不再用关键词 regex。相关误判(「忘掉你没脑子」等)由 LLM 语义判断规避。

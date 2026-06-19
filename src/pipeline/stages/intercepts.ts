@@ -7,10 +7,6 @@
 import type { FormattedMessage, JudgeResult } from "../../shared/types.js";
 import { sender, ADDRESSED_RULES } from "../shared.js";
 import {
-  saveUserPreference,
-  getUserPreferences,
-  getUserProfilePrompt,
-  deleteUserPreference,
   muteUser,
   unmuteUser,
 } from "../../tracking/user-profile.js";
@@ -26,7 +22,6 @@ import { detectConsentReply, setConsent } from "../dm-relay/consent.js";
 import { isMaster } from "../../admin/auth.js";
 import { env } from "../../env.js";
 import { logger } from "../../shared/logger.js";
-import { parseMuteTimedRequest } from "../judge/rules.js";
 import { addWatch, removeWatch, listWatches } from "../../tracking/topic-watch.js";
 import { applyMoodEvent } from "../../tracking/mood.js";
 import { startGame, stopGame } from "../games/manager.js";
@@ -51,43 +46,8 @@ export async function tryMuteCommandIntercepts(
 
   const rule = judgeResult.rule;
 
-  if (rule === "mute_hard_request") {
-    muteUser(chatId, formatted.uid, 2);
-    applyMoodEvent(chatId, -20, "mute_hard_request");
-    await sender.sendDirect(chatId, "好的，本喵完全闭嘴喵~", formatted.messageId);
-    logger.info({ chatId, uid: formatted.uid, level: 2 }, "User hard-muted bot");
-    return true;
-  }
-
-  if (rule === "mute_soft_request") {
-    muteUser(chatId, formatted.uid, 1, { temporary: true });
-    applyMoodEvent(chatId, -8, "mute_soft_request");
-    await sender.sendDirect(chatId, "好的，本喵不会主动找你说话了喵~", formatted.messageId);
-    logger.info({ chatId, uid: formatted.uid, level: 1 }, "User soft-muted bot");
-    return true;
-  }
-
-  if (rule === "mute_timed_request") {
-    const text = formatted.textContent || formatted.captionContent || "";
-    const durationMs = parseMuteTimedRequest(text);
-    if (durationMs && durationMs > 0) {
-      muteUser(chatId, formatted.uid, 1, { temporary: true, durationMs });
-      applyMoodEvent(chatId, -8, "mute_timed_request");
-      const minutes = Math.round(durationMs / 60_000);
-      await sender.sendDirect(chatId, `好的，本喵安静 ${minutes} 分钟喵~`, formatted.messageId);
-      logger.info({ chatId, uid: formatted.uid, durationMs }, "User timed-muted bot");
-      return true;
-    }
-    return false;
-  }
-
-  if (rule === "unmute_request") {
-    unmuteUser(chatId, formatted.uid);
-    applyMoodEvent(chatId, 5, "unmute_request");
-    await sender.sendDirect(chatId, "嗯！本喵又可以说话啦喵~", formatted.messageId);
-    logger.info({ chatId, uid: formatted.uid }, "User unmuted bot");
-    return true;
-  }
+  // mute/unmute 的关键词拦截已下线 —— 改由 directive.ts(回复前 LLM 指令分类)静默执行。
+  // 仅保留 /muteme /unmuteme 显式斜杠命令。
 
   if (rule === "self_mute_request") {
     muteUser(chatId, formatted.uid, 2);
@@ -277,52 +237,8 @@ export async function tryPostMuteIntercepts(
     }
   }
 
-  // Remember request
-  if (judgeResult.rule === "remember_request" && !formatted.isAnonymous) {
-    const text = (formatted.textContent || formatted.captionContent || "").trim();
-    const content = text
-      .replace(/^(?:帮[我俺]?记(?:住|一下|下来?)|记(?:住|下来?)(?:一下)?[：:，,]\s*|keep\s+in\s+mind[：:，,\s]*|记得(?:一下)?[：:，,]\s*)/i, "")
-      .trim();
-    if (content) {
-      try {
-        saveUserPreference(chatId, formatted.uid, content);
-        logger.info({ chatId, uid: formatted.uid, content }, "User preference saved");
-        await sender.sendDirect(chatId, "记住啦喵~", formatted.messageId);
-        return true;
-      } catch (err) {
-        logger.warn({ err, chatId }, "saveUserPreference failed");
-      }
-    }
-  }
-
-  // View preferences request
-  if (judgeResult.rule === "view_prefs_request" && !formatted.isAnonymous) {
-    const prefs = getUserPreferences(chatId, formatted.uid);
-    const profile = getUserProfilePrompt(chatId, formatted.uid);
-    const parts: string[] = [];
-    if (profile) parts.push(`🧠 本喵对你的印象：\n${profile}`);
-    if (prefs) parts.push(`📝 你让本喵记住的：\n${prefs}`);
-    const reply = parts.length > 0 ? parts.join('\n\n') : '本喵还没记住什么呢喵~';
-    await sender.sendDirect(chatId, reply, formatted.messageId);
-    return true;
-  }
-
-  // Forget preference request
-  if (judgeResult.rule === "forget_request" && !formatted.isAnonymous) {
-    const text = (formatted.textContent || "").trim();
-    const keyword = text
-      .replace(/^(?:忘(?:掉|了|记)?[：:，,\s]*|别记了[：:，,\s]*|不用记了[：:，,\s]*|forget\s*)/i, "")
-      .trim();
-    if (keyword) {
-      const deleted = deleteUserPreference(chatId, formatted.uid, keyword);
-      await sender.sendDirect(
-        chatId,
-        deleted ? `已经忘掉「${deleted}」了喵~` : "没找到相关的记忆喵~",
-        formatted.messageId,
-      );
-      return true;
-    }
-  }
+  // 记住/查看/忘掉偏好的关键词拦截已下线 —— remember/forget 改由 directive.ts
+  // (回复前 LLM 指令分类)静默执行 + emoji ack。
 
   // DM relay intercept (private chat only) — always run AI intent detection
   if (chatId > 0 && judgeResult.rule === "private_chat") {
