@@ -169,6 +169,14 @@ async function main(): Promise<void> {
   // 10. Start Hono HTTP server (health check + admin API)
   const app = new Hono();
   app.get('/health', (c) => c.json({ status: 'ok', uptime: process.uptime() }));
+  // Prometheus metrics(借鉴 CGM:LLM token/缓存/延迟按用途可见)— flag-gated。
+  if (config.METRICS_ENABLED) {
+    const { initLlmMetrics } = await import('./metrics/llm-collector.js');
+    const { renderMetrics } = await import('./metrics/registry.js');
+    initLlmMetrics();
+    app.get('/metrics', (c) => c.text(renderMetrics()));
+    logger.info('Prometheus /metrics enabled');
+  }
   app.get('/miniapp', (c) => c.redirect('/miniapp/'));
   app.use('/miniapp/*', serveStatic({ root: './' }));
 

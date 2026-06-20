@@ -5,6 +5,7 @@
 import type { AICallOptions, AICallResult } from './types.js';
 import { callModel } from './provider.js';
 import { getUsage, getLabel } from './labels.js';
+import { emitLlmResult } from './events.js';
 import { CooldownTracker } from './cooldown.js';
 import { AIError } from '../shared/errors.js';
 import { isCallerAbort } from '../shared/abort.js';
@@ -58,10 +59,13 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         hedgeTriedLabel = labelNames[1]!;
         const hedgeLabel = getLabel(hedgeTriedLabel);
         const result = await hedgedCall(label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown);
+        emitLlmResult(options.usage, result);
         return result;
       }
 
-      return await callModel(label, options.messages, callOpts);
+      const result = await callModel(label, options.messages, callOpts);
+      emitLlmResult(options.usage, result);
+      return result;
     } catch (err) {
       errors.push(err instanceof Error ? err : new Error(String(err)));
 

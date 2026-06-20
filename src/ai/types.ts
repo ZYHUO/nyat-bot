@@ -70,7 +70,7 @@ export interface AICallOptions {
 
 export interface AICallResult {
   content: string;
-  tokenUsage: { prompt: number; completion: number; total: number };
+  tokenUsage: { prompt: number; completion: number; total: number; cached?: number };
   model: string;
   label: string;
   latencyMs: number;
