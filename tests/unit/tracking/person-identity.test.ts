@@ -26,11 +26,24 @@ describe('person-identity (cross-group)', () => {
     mockProfile.mockReturnValue('喜欢猫、住在浙江、爱打游戏');
   });
 
-  it('does NOT create an identity for someone seen in only one group', async () => {
+  it('writes a throttle tombstone (no impression) for someone seen in only one group', async () => {
     mockGroups.mockResolvedValue([-100]);
     const row = await refreshPersonIdentity(7);
-    expect(row).toBeNull();
-    expect(getPersonIdentity(7)).toBeNull();
+    expect(row).not.toBeNull();
+    expect(row!.impression).toBeNull();          // tombstone — nothing to inject
+    expect(row!.chat_count).toBe(1);
+    expect(getPersonIdentity(7)?.updated_at).toBeGreaterThan(0); // updated_at advanced → stale gate throttles
+    expect(buildCrossGroupInjection(7, -100)).toBeNull();
+  });
+
+  it('dedups concurrent refreshes for the same uid', async () => {
+    let resolveGroups: (g: number[]) => void = () => {};
+    mockGroups.mockReturnValue(new Promise((r) => { resolveGroups = r; }));
+    const p1 = refreshPersonIdentity(8);
+    const p2 = refreshPersonIdentity(8); // in-flight → should not start a second getUserGroups
+    resolveGroups([-1, -2]);
+    await Promise.all([p1, p2]);
+    expect(mockGroups).toHaveBeenCalledTimes(1);
   });
 
   it('aggregates the primary (highest-affinity) group profile as the cross-group impression', async () => {

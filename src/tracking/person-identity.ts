@@ -34,33 +34,49 @@ export function getPersonIdentity(uid: number): PersonIdentityRow | null {
   }
 }
 
+// In-flight dedup:同一个 uid 在刷新进行中(getUserGroups 的 Redis 往返窗口内)不重复刷,
+// 避免连发用户在该窗口里 spawn N 个并发刷新。
+const _refreshing = new Set<number>();
+
+function upsertIdentity(uid: number, impression: string | null, primary: number | null, chatCount: number, now: number): void {
+  getDb().prepare(
+    `INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(uid) DO UPDATE SET
+       impression = excluded.impression,
+       primary_chat_id = excluded.primary_chat_id,
+       chat_count = excluded.chat_count,
+       updated_at = excluded.updated_at`,
+  ).run(uid, impression, primary, chatCount, now);
+}
+
 /**
  * Recompute the cross-group impression from the person's groups.
  * Deterministic + cheap: primary = highest-affinity group, its profile = the cross-group impression.
- * Returns null (and stores nothing) for people seen in ≤1 group — cross-group identity is meaningless then.
+ * 单群用户也写一行 tombstone(impression=null)——这样 updated_at 推进,stale 闸才能把刷新
+ * 节流到每 STALE_SEC 一次,否则单群用户(最常见)会每条回复都白刷一次 Redis+SQLite。
  */
 export async function refreshPersonIdentity(uid: number): Promise<PersonIdentityRow | null> {
-  if (!uid) return null;
+  if (!uid || _refreshing.has(uid)) return getPersonIdentity(uid);
+  _refreshing.add(uid);
   try {
     const groups = await getUserGroups(uid).catch(() => [] as number[]);
-    if (groups.length <= 1) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (groups.length <= 1) {
+      // tombstone:更新时间戳以节流;impression=null → buildCrossGroupInjection 返回 null
+      upsertIdentity(uid, null, null, groups.length, now);
+      return { uid, impression: null, primary_chat_id: null, chat_count: groups.length, updated_at: now };
+    }
     const agg = getAggregatedAffinity(uid);
     const primary = agg.primaryChatId ?? groups[0]!;
     const impression = getUserProfilePrompt(primary, uid);
-    const now = Math.floor(Date.now() / 1000);
-    getDb().prepare(
-      `INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(uid) DO UPDATE SET
-         impression = excluded.impression,
-         primary_chat_id = excluded.primary_chat_id,
-         chat_count = excluded.chat_count,
-         updated_at = excluded.updated_at`,
-    ).run(uid, impression, primary, groups.length, now);
+    upsertIdentity(uid, impression, primary, groups.length, now);
     return { uid, impression, primary_chat_id: primary, chat_count: groups.length, updated_at: now };
   } catch (err) {
     logger.debug({ err, uid }, 'refreshPersonIdentity failed (non-critical)');
     return null;
+  } finally {
+    _refreshing.delete(uid);
   }
 }
 
