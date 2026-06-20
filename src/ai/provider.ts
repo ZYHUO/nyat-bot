@@ -232,10 +232,27 @@ async function callOpenAIRaw(
   } else {
     const json = await res.json() as {
       choices?: Array<{ message?: { content?: string } }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      usage?: {
+        prompt_tokens?: number; completion_tokens?: number; total_tokens?: number;
+        // DeepSeek-specific automatic prefix-cache accounting
+        prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number;
+        // OpenAI-style cached-token accounting
+        prompt_tokens_details?: { cached_tokens?: number };
+      };
     };
     fullText = json.choices?.[0]?.message?.content ?? '';
     const latencyMs = Math.round(performance.now() - start);
+    // Prompt-cache visibility (DeepSeek auto prefix-cache / OpenAI cached_tokens).
+    // Lets us confirm the stable-system-prefix design is actually paying off.
+    const u = json.usage;
+    const cacheHit = u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0;
+    if (cacheHit > 0 || u?.prompt_cache_miss_tokens !== undefined) {
+      const prompt = u?.prompt_tokens ?? 0;
+      logger.debug(
+        { label: label.name, cacheHit, cacheMiss: u?.prompt_cache_miss_tokens ?? Math.max(0, prompt - cacheHit), prompt, hitRate: prompt ? +(cacheHit / prompt).toFixed(2) : 0 },
+        'prompt cache',
+      );
+    }
     const text = fullText
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')

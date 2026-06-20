@@ -46,7 +46,7 @@ function loadPersonaForUser(userId: number | undefined): string {
  * @param userId — optional; loads prompts/persona/{userId}.md|.txt when present (PHP PersonaManager parity).
  * @param chatId — optional; used for per-chat mood injection (Stage E).
  */
-export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: number, chatId?: number): string {
+export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: number, _chatId?: number): string {
   const layers: string[] = [];
 
   // L1: Identity
@@ -78,37 +78,11 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
   }
   layers.push(contractExplanation);
 
-  // L4: Style
-  let styleLayer = loadCachedPrompt('style/tone.md');
-  // Stage E mood hint:已并入 [此刻的你] 自我状态叙述(self-state.ts),
-  // 这里不再重复注入(P2 双注入修复)。
-  // Stage F: relationship narrative hint appended to style layer
-  if (chatId !== undefined && userId !== undefined && env().RELATIONSHIP_ENABLED) {
-    try {
-      const rel = getRelationship(chatId, userId);
-      const hint = relationshipPromptHint(rel);
-      if (hint) styleLayer = `${styleLayer}\n\n${hint}`;
-    } catch {
-      /* non-critical */
-    }
-  }
-  // Stage F: self-history hint appended to style layer
-  if (chatId !== undefined && userId !== undefined && env().SELF_HISTORY_ENABLED) {
-    try {
-      const e = env();
-      const replies = getRecentSelfReplies(
-        chatId,
-        userId,
-        e.SELF_HISTORY_INJECT_LIMIT,
-        e.SELF_HISTORY_WINDOW_DAYS,
-      );
-      const section = selfHistoryPromptSection(replies);
-      if (section) styleLayer = `${styleLayer}\n\n${section}`;
-    } catch {
-      /* non-critical */
-    }
-  }
-  layers.push(styleLayer);
+  // L4: Style — 纯 tone.md。
+  // ⚠️ DeepSeek/Claude prompt 前缀缓存:per-user 的 relationship hint 与 self-history
+  // 以前拼在这里 → system 前缀随 (chat,user) 变动 → 自动前缀缓存几乎永不命中。
+  // 已迁到 user turn(见 buildPersonalContext / buildMessages),system 前缀保持逐字节稳定。
+  layers.push(loadCachedPrompt('style/tone.md'));
 
   // L5: Task — reply.md 是基座(目标选择/事实纪律/命令等硬规则),
   // pro/max 是叠加的"差异附录"。旧的替换式装配让 pro/max 模式下连
@@ -131,6 +105,31 @@ function sanitizeSenderString(s: string, maxLen = 64): string {
 
 export interface ReplyShapeHint {
   exactReplyCount?: number;
+}
+
+/**
+ * Per-user volatile context (relationship narrative + self-history) that USED to live
+ * in the system style layer. Moved to the user turn so the system prefix stays
+ * byte-identical across users/turns → DeepSeek/Claude auto prefix-cache actually hits.
+ */
+function buildPersonalContext(chatId: number | undefined, userId: number | undefined): string | undefined {
+  if (chatId === undefined || !userId) return undefined;
+  const e = env();
+  const parts: string[] = [];
+  if (e.RELATIONSHIP_ENABLED) {
+    try {
+      const hint = relationshipPromptHint(getRelationship(chatId, userId));
+      if (hint) parts.push(hint);
+    } catch { /* non-critical */ }
+  }
+  if (e.SELF_HISTORY_ENABLED) {
+    try {
+      const replies = getRecentSelfReplies(chatId, userId, e.SELF_HISTORY_INJECT_LIMIT, e.SELF_HISTORY_WINDOW_DAYS);
+      const section = selfHistoryPromptSection(replies);
+      if (section) parts.push(section);
+    } catch { /* non-critical */ }
+  }
+  return parts.length ? parts.join('\n\n') : undefined;
 }
 
 /**
@@ -307,6 +306,11 @@ export function buildMessages(
     currentMsgBlock += `\n用户偏好记录:\n${userPreferences}`;
   }
   currentMsgBlock += `\n内容: ${msgText}`;
+  // Per-user volatile context (relationship + self-history) — in the user turn, not the
+  // system prefix, so the system prompt stays cache-stable. High recency (just before CURRENT).
+  const personalContext = buildPersonalContext(chatId, latestMessage.uid);
+  if (personalContext) userParts.push(personalContext);
+
   userParts.push(currentMsgBlock);
 
   return [
