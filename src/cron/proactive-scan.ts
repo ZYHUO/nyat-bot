@@ -7,6 +7,7 @@ import { getRedis } from '../db/redis.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { runRewardGate } from '../pipeline/reward/reward-model.js';
 import { proactiveWillingness, markBotSpoke } from '../tracking/social-needs.js';
+import { rankByPressure, markOffered, markActioned } from '../tracking/chat-pressure.js';
 import { StreamingSender } from '../bot/sender/streaming.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
@@ -193,7 +194,6 @@ export async function runProactiveScan(): Promise<void> {
   // 而非随机洗牌。flag 关时退回旧行为。
   let candidates: number[];
   if (e.PROACTIVE_PRESSURE_ENABLED) {
-    const { rankByPressure } = await import('../tracking/chat-pressure.js');
     const ranked = await rankByPressure(allChats, e.PROACTIVE_SCAN_MAX_CHATS_PER_TICK);
     candidates = ranked.map((r) => r.chatId);
     logger.info({ totalChats: allChats.length, ranked: ranked.map((r) => ({ c: r.chatId, p: +r.pressure.toFixed(2) })) }, 'Proactive scan: tick start (pressure-ranked)');
@@ -206,11 +206,6 @@ export async function runProactiveScan(): Promise<void> {
 
   for (const chatId of candidates) {
     try {
-      // pressure:先记「瞄过」(没开口就累积 ignored,下次降权);真开口了下面会清零
-      if (e.PROACTIVE_PRESSURE_ENABLED) {
-        const { markOffered } = await import('../tracking/chat-pressure.js');
-        await markOffered(chatId);
-      }
       // 1. allowlist
       if (e.ALLOWLIST_ENABLED !== false) {
         const allowlistConfig: AllowlistConfig = {
@@ -255,6 +250,13 @@ export async function runProactiveScan(): Promise<void> {
       if (humanCount < e.PROACTIVE_SCAN_MIN_HUMAN_MSGS) {
         logger.info({ chatId, humanCount, min: e.PROACTIVE_SCAN_MIN_HUMAN_MSGS }, 'Proactive scan: skip — not enough humans');
         continue;
+      }
+
+      // pressure:此刻这个群是「真有得聊、本喵也够格开口」的候选(已过 allowlist/RUNNING/
+      // 节流/人数门)。先记「瞄过了」——若下面决定不开口就累积 ignored(下次降权);
+      // 真开口了在发送后 markActioned 清零。放在节流门之后,避免「刚回过的热群」被误罚。
+      if (e.PROACTIVE_PRESSURE_ENABLED) {
+        await markOffered(chatId);
       }
 
       // 4b. State-conditioned willingness (loneliness × mood × crowd closeness) —
@@ -316,7 +318,6 @@ export async function runProactiveScan(): Promise<void> {
       await markBotSpoke(chatId);
       // pressure:真开口了 → 清零 ignored
       if (e.PROACTIVE_PRESSURE_ENABLED) {
-        const { markActioned } = await import('../tracking/chat-pressure.js');
         await markActioned(chatId);
       }
       // G9: 主动插话同样拉升 focus(bumpFocus 在 flag off 时自身 no-op)

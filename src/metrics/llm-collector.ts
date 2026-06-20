@@ -16,7 +16,8 @@ export function initLlmMetrics(): void {
   if (inited) return;
   inited = true;
   llmEvents.on('result', (e: LlmResultEvent) => {
-    incrCounter('llm_requests_total', { usage: e.usage, label: e.label });
+    incrCounter('llm_requests_total', { usage: e.usage, label: e.label, outcome: e.outcome });
+    if (e.outcome === 'error') return; // failed attempt: only the request counter, no tokens/latency
     incrCounter('llm_tokens_total', { usage: e.usage, kind: 'prompt' }, e.promptTokens);
     incrCounter('llm_tokens_total', { usage: e.usage, kind: 'completion' }, e.completionTokens);
     if (e.cachedTokens > 0) incrCounter('llm_tokens_total', { usage: e.usage, kind: 'cached' }, e.cachedTokens);

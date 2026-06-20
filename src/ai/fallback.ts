@@ -5,7 +5,7 @@
 import type { AICallOptions, AICallResult } from './types.js';
 import { callModel } from './provider.js';
 import { getUsage, getLabel } from './labels.js';
-import { emitLlmResult } from './events.js';
+import { emitLlmResult, emitLlmError } from './events.js';
 import { CooldownTracker } from './cooldown.js';
 import { AIError } from '../shared/errors.js';
 import { isCallerAbort } from '../shared/abort.js';
@@ -88,6 +88,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         await cooldown.setCooldown(label.model);
       }
 
+      // Metrics: this attempt failed (visible per-label so retries/429 storms show up).
+      emitLlmError(options.usage, labelName, label.model);
       logger.warn({ label: labelName, err: errors.at(-1)?.message }, 'Label failed, trying next');
     }
   }

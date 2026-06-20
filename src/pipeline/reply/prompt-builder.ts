@@ -42,9 +42,12 @@ function loadPersonaForUser(userId: number | undefined): string {
 }
 
 /**
- * Build the 5-layer system prompt.
- * @param userId — optional; loads prompts/persona/{userId}.md|.txt when present (PHP PersonaManager parity).
- * @param chatId — optional; used for per-chat mood injection (Stage E).
+ * Build the 5-layer system prompt. Kept a near-pure function of (replyTier) so the prefix
+ * stays byte-stable for DeepSeek/Claude auto prefix-cache. Per-user volatile data
+ * (relationship / self-history) lives in the user turn now — see buildPersonalContext.
+ * @param userId — optional; only used to load a per-user persona override
+ *   (prompts/persona/{userId}.md|.txt) when present — rare, intentionally busts cache for that user.
+ * @param _chatId — deprecated/unused (kept for call-site signature compatibility).
  */
 export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: number, _chatId?: number): string {
   const layers: string[] = [];
