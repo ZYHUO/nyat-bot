@@ -189,16 +189,28 @@ export async function runProactiveScan(): Promise<void> {
     return;
   }
 
-  const candidates = pickCandidates(allChats, e.PROACTIVE_SCAN_MAX_CHATS_PER_TICK);
-  logger.info(
-    { totalChats: allChats.length, candidates },
-    'Proactive scan: tick start',
-  );
+  // Attention pressure(借鉴 CGM):按 pressure 排序挑 Top-N(熟人/活跃/久未理 优先),
+  // 而非随机洗牌。flag 关时退回旧行为。
+  let candidates: number[];
+  if (e.PROACTIVE_PRESSURE_ENABLED) {
+    const { rankByPressure } = await import('../tracking/chat-pressure.js');
+    const ranked = await rankByPressure(allChats, e.PROACTIVE_SCAN_MAX_CHATS_PER_TICK);
+    candidates = ranked.map((r) => r.chatId);
+    logger.info({ totalChats: allChats.length, ranked: ranked.map((r) => ({ c: r.chatId, p: +r.pressure.toFixed(2) })) }, 'Proactive scan: tick start (pressure-ranked)');
+  } else {
+    candidates = pickCandidates(allChats, e.PROACTIVE_SCAN_MAX_CHATS_PER_TICK);
+    logger.info({ totalChats: allChats.length, candidates }, 'Proactive scan: tick start');
+  }
   const now = Math.floor(Date.now() / 1000);
   const redis = getRedis();
 
   for (const chatId of candidates) {
     try {
+      // pressure:先记「瞄过」(没开口就累积 ignored,下次降权);真开口了下面会清零
+      if (e.PROACTIVE_PRESSURE_ENABLED) {
+        const { markOffered } = await import('../tracking/chat-pressure.js');
+        await markOffered(chatId);
+      }
       // 1. allowlist
       if (e.ALLOWLIST_ENABLED !== false) {
         const allowlistConfig: AllowlistConfig = {
@@ -302,6 +314,11 @@ export async function runProactiveScan(): Promise<void> {
       // 8. send
       await sender.sendDirect(chatId, text);
       await markBotSpoke(chatId);
+      // pressure:真开口了 → 清零 ignored
+      if (e.PROACTIVE_PRESSURE_ENABLED) {
+        const { markActioned } = await import('../tracking/chat-pressure.js');
+        await markActioned(chatId);
+      }
       // G9: 主动插话同样拉升 focus(bumpFocus 在 flag off 时自身 no-op)
       import('../pipeline/turn/focus.js').then(({ bumpFocus }) => bumpFocus(chatId, 'bot_spoke')).catch(() => {});
       await redis.set(PROACTIVE_LAST_PREFIX + chatId, String(now), 'EX', e.PROACTIVE_SCAN_MIN_INTERVAL_SEC * 2);
