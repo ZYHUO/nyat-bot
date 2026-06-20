@@ -57,8 +57,11 @@ export function observeTopic(chatId: number, rawLabel: string, now = Math.floor(
 export function tickLifecycle(chatId: number, now = Math.floor(Date.now() / 1000)): void {
   try {
     const db = getDb();
-    db.prepare(`UPDATE chat_topics SET state='cooling' WHERE chat_id=? AND state='active'  AND last_active < ?`).run(chatId, now - COOLING_SEC);
+    // dead-transition FIRST (only rows ALREADY cooling), THEN active→cooling — so a long-idle
+    // 'active' topic (e.g. after a scan/downtime gap) passes through cooling this tick and only
+    // dies next tick, never skipping cooling in a single pass.
     db.prepare(`UPDATE chat_topics SET state='dead'    WHERE chat_id=? AND state='cooling' AND last_active < ?`).run(chatId, now - DEAD_SEC);
+    db.prepare(`UPDATE chat_topics SET state='cooling' WHERE chat_id=? AND state='active'  AND last_active < ?`).run(chatId, now - COOLING_SEC);
     db.prepare(`DELETE FROM chat_topics WHERE chat_id=? AND state='dead' AND last_active < ?`).run(chatId, now - PRUNE_SEC);
     // 防爆:每群 live 话题超过上限时,把最旧的降级为 dead(只保留最近活跃的)
     const live = db.prepare(`SELECT id FROM chat_topics WHERE chat_id=? AND state IN ('active','cooling') ORDER BY last_active DESC`).all(chatId) as Array<{ id: number }>;
@@ -68,6 +71,19 @@ export function tickLifecycle(chatId: number, now = Math.floor(Date.now() / 1000
     }
   } catch (err) {
     logger.debug({ err, chatId }, 'tickLifecycle failed (non-critical)');
+  }
+}
+
+/**
+ * Global prune of dead topics across ALL chats — catches dead rows in chats that went silent
+ * and dropped out of the active set (tickLifecycle only runs for currently-active chats, so
+ * those would otherwise leak forever). Cheap single DELETE; call periodically.
+ */
+export function pruneDeadTopics(now = Math.floor(Date.now() / 1000)): void {
+  try {
+    getDb().prepare(`DELETE FROM chat_topics WHERE state='dead' AND last_active < ?`).run(now - PRUNE_SEC);
+  } catch (err) {
+    logger.debug({ err }, 'pruneDeadTopics failed (non-critical)');
   }
 }
 

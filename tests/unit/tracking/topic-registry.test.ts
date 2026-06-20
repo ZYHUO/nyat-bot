@@ -39,6 +39,14 @@ describe('topic-registry lifecycle', () => {
     expect(remaining.c).toBe(0);
   });
 
+  it('a long-idle active topic passes through cooling (never skips straight to dead in one tick)', () => {
+    observeTopic(C, '内存条', T0);
+    tickLifecycle(C, T0 + 200 * MIN); // idle > DEAD threshold at FIRST tick (e.g. after a scan gap)
+    expect(getActiveTopics(C)[0]!.state).toBe('cooling'); // not dead — passes through cooling
+    tickLifecycle(C, T0 + 400 * MIN); // still idle next tick → now dead
+    expect(getActiveTopics(C)).toHaveLength(0);
+  });
+
   it('re-observing a cooling topic reactivates it', () => {
     observeTopic(C, '火锅', T0);
     tickLifecycle(C, T0 + 21 * MIN);

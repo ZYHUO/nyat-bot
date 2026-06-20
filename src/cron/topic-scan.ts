@@ -10,7 +10,7 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { discoverActiveGroupChats } from './proactive-scan.js';
-import { observeTopic, tickLifecycle, getActiveTopics } from '../tracking/topic-registry.js';
+import { observeTopic, tickLifecycle, getActiveTopics, pruneDeadTopics } from '../tracking/topic-registry.js';
 import { callWithFallback } from '../ai/fallback.js';
 
 const MAX_CHATS_PER_TICK = 20;
@@ -68,5 +68,6 @@ export async function runTopicScan(): Promise<void> {
       logger.debug({ err, chatId }, 'topic-scan: chat failed');
     }
   }
+  pruneDeadTopics(); // global sweep:清掉已沉寂群里的 dead 话题(tick 只覆盖活跃群)
   if (chats.length) logger.info({ chats: chats.length, observed }, 'Topic scan tick');
 }
