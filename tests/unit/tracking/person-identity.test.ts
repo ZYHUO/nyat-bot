@@ -1,0 +1,60 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Database from 'better-sqlite3';
+
+const testDb = new Database(':memory:');
+testDb.exec(`CREATE TABLE person_identity (
+  uid INTEGER PRIMARY KEY, impression TEXT, primary_chat_id INTEGER,
+  chat_count INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)`);
+
+const mockGroups = vi.fn();
+const mockAgg = vi.fn();
+const mockProfile = vi.fn();
+
+vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
+vi.mock('../../../src/env.js', () => ({ env: () => ({ PERSON_IDENTITY_ENABLED: true }) }));
+vi.mock('../../../src/pipeline/context/manager.js', () => ({ getUserGroups: (...a: unknown[]) => mockGroups(...a) }));
+vi.mock('../../../src/tracking/user-affinity.js', () => ({ getAggregatedAffinity: (...a: unknown[]) => mockAgg(...a) }));
+vi.mock('../../../src/tracking/user-profile.js', () => ({ getUserProfilePrompt: (...a: unknown[]) => mockProfile(...a) }));
+
+import { refreshPersonIdentity, getPersonIdentity, buildCrossGroupInjection } from '../../../src/tracking/person-identity.js';
+
+describe('person-identity (cross-group)', () => {
+  beforeEach(() => {
+    testDb.exec('DELETE FROM person_identity');
+    vi.clearAllMocks();
+    mockAgg.mockReturnValue({ primaryChatId: -100, affinity: 50 });
+    mockProfile.mockReturnValue('喜欢猫、住在浙江、爱打游戏');
+  });
+
+  it('does NOT create an identity for someone seen in only one group', async () => {
+    mockGroups.mockResolvedValue([-100]);
+    const row = await refreshPersonIdentity(7);
+    expect(row).toBeNull();
+    expect(getPersonIdentity(7)).toBeNull();
+  });
+
+  it('aggregates the primary (highest-affinity) group profile as the cross-group impression', async () => {
+    mockGroups.mockResolvedValue([-100, -200, -300]);
+    const row = await refreshPersonIdentity(7);
+    expect(row).not.toBeNull();
+    expect(row!.chat_count).toBe(3);
+    expect(row!.primary_chat_id).toBe(-100);
+    expect(row!.impression).toContain('喜欢猫');
+    expect(mockProfile).toHaveBeenCalledWith(-100, 7); // pulled from the primary group
+  });
+
+  it('injects the cross-group block in OTHER groups, but not in the primary group', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (?,?,?,?,?)')
+      .run(7, '喜欢猫、爱打游戏', -100, 3, now);
+    const inOther = buildCrossGroupInjection(7, -999);
+    expect(inOther).toContain('别的群也认识');
+    expect(inOther).toContain('喜欢猫');
+    const inPrimary = buildCrossGroupInjection(7, -100);
+    expect(inPrimary).toBeNull(); // primary group already has its own per-group profile
+  });
+
+  it('returns null when no identity exists yet', () => {
+    expect(buildCrossGroupInjection(999, -1)).toBeNull();
+  });
+});

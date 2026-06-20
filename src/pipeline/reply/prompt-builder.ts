@@ -16,6 +16,7 @@ import { env } from '../../env.js';
 import { getTopExpressions, reinforceExpressions } from '../../learners/expression-learner.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
+import { buildCrossGroupInjection } from '../../tracking/person-identity.js';
 import { buildProfileInjection } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
@@ -130,6 +131,13 @@ function buildPersonalContext(chatId: number | undefined, userId: number | undef
       const replies = getRecentSelfReplies(chatId, userId, e.SELF_HISTORY_INJECT_LIMIT, e.SELF_HISTORY_WINDOW_DAYS);
       const section = selfHistoryPromptSection(replies);
       if (section) parts.push(section);
+    } catch { /* non-critical */ }
+  }
+  // C3:跨群身份——在别的群也认识这个人时,带上跨群整体印象(同步读,陈旧时后台刷新)
+  if (e.PERSON_IDENTITY_ENABLED) {
+    try {
+      const xg = buildCrossGroupInjection(userId, chatId);
+      if (xg) parts.push(xg);
     } catch { /* non-critical */ }
   }
   return parts.length ? parts.join('\n\n') : undefined;
