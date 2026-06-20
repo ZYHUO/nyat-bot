@@ -323,9 +323,9 @@ export async function callModel(
   }
 
   // Use raw fetch for vision (image content), stream-only endpoints, or
-  // reasoning-enabled labels (AI SDK generateText 不透传 reasoning_effort —
-  // 只有 raw 路径会把 body.reasoning_effort 发出去)。
-  if (hasMediaContent(messages) || label.stream || label.reasoningEffort) {
+  // reasoning/thinking 控制(AI SDK generateText 不透传 reasoning_effort /
+  // thinking —— 只有 raw 路径会把这些 body 字段发出去)。
+  if (hasMediaContent(messages) || label.stream || label.reasoningEffort || label.disableThinking) {
     try {
       return await callOpenAIRaw(label, messages, {
         ...opts,
