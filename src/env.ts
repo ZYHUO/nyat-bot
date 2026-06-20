@@ -187,6 +187,9 @@ const envSchema = z.object({
   METRICS_ENABLED: booleanFromEnv.default(false),
   // 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。
   PERSON_IDENTITY_ENABLED: booleanFromEnv.default(false),
+  // 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。
+  TOPIC_REGISTRY_ENABLED: booleanFromEnv.default(false),
+  TOPIC_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(8),
   PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
   PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
   PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),

@@ -228,6 +228,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // Topic scan — extract per-chat current topic + advance topic lifecycle (D1)
+  if (env().TOPIC_REGISTRY_ENABLED) {
+    tasks.push(schedule(`*/${env().TOPIC_SCAN_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('topic-scan', async () => {
+        const { runTopicScan } = await import('./topic-scan.js');
+        await runTopicScan();
+      });
+    }));
+  }
+
   // Learner scan — expression + jargon extraction (Stage D)
   if (env().LEARNER_ENABLED) {
     tasks.push(schedule(`*/${env().LEARNER_SCAN_INTERVAL_MIN} * * * *`, () => {

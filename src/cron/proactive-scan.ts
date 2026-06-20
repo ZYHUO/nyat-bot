@@ -35,7 +35,7 @@ export function isWithinActiveHours(start: number, end: number): boolean {
   return hour >= start && hour < end;
 }
 
-async function discoverActiveGroupChats(): Promise<number[]> {
+export async function discoverActiveGroupChats(): Promise<number[]> {
   const redis = getRedis();
   const now = Math.floor(Date.now() / 1000);
   await redis.zremrangebyscore('xxb:active_groups', '-inf', now - ACTIVE_GROUPS_MAX_AGE).catch(() => {});

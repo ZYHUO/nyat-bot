@@ -17,6 +17,7 @@ import { getTopExpressions, reinforceExpressions } from '../../learners/expressi
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildCrossGroupInjection } from '../../tracking/person-identity.js';
+import { getTopicLine } from '../../tracking/topic-registry.js';
 import { buildProfileInjection } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
@@ -317,6 +318,14 @@ export function buildMessages(
     currentMsgBlock += `\n用户偏好记录:\n${userPreferences}`;
   }
   currentMsgBlock += `\n内容: ${msgText}`;
+  // D1:当前话题(话题生命周期注册表)——让写手知道此刻群里在聊什么、有哪些渐冷话题可回捞。
+  if (chatId !== undefined && env().TOPIC_REGISTRY_ENABLED) {
+    try {
+      const line = getTopicLine(chatId);
+      if (line) userParts.push(`[当前话题] ${line}`);
+    } catch { /* non-critical */ }
+  }
+
   // Per-user volatile context (relationship + self-history) — in the user turn, not the
   // system prefix, so the system prompt stays cache-stable. High recency (just before CURRENT).
   const personalContext = buildPersonalContext(chatId, latestMessage.uid);
