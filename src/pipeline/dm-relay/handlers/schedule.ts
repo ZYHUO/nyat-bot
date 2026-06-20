@@ -7,6 +7,7 @@ import { getRedis } from '../../../db/redis.js';
 import { sendMessage, sendChatAction } from '../../../bot/sender/telegram.js';
 import { StreamingSender } from '../../../bot/sender/streaming.js';
 import { logger } from '../../../shared/logger.js';
+import { env } from '../../../env.js';
 import type { FormattedMessage } from '../../../shared/types.js';
 
 const sender = new StreamingSender();
@@ -367,8 +368,26 @@ export async function executeScheduledMessages(): Promise<number> {
         continue;
       }
 
-      // Send the message to the group
-      await sendMessage(row.group_id, `⏰ 定时提醒：${row.content}`);
+      // B2(借鉴 CGM):到点提醒**唤醒 LLM** 用群里新鲜上下文、用自己的语气说出来,
+      // 而非机械念稿「⏰定时提醒:X」。SCHEDULE_LLM_WAKE 关 → 退回固定字符串;生成失败也退回。
+      let reminderSent = false;
+      if (env().SCHEDULE_LLM_WAKE) {
+        try {
+          const { generatePersonaProactiveText } = await import('../../turn/proactive-turn.js');
+          const { getBotUid } = await import('../../../bot/bot.js');
+          const intent = `[到点提醒] 你之前答应到点提醒大家这件事:「${row.content}」。现在到点了,用你自己的语气自然地说出来——别像闹钟念稿、别加"⏰定时提醒"这种前缀,就像突然想起来要提醒大家一样。`;
+          const text = await generatePersonaProactiveText(row.group_id, getBotUid(), intent);
+          if (text) {
+            await sendMessage(row.group_id, text);
+            reminderSent = true;
+          }
+        } catch (err) {
+          logger.debug({ err, id: row.id }, 'schedule LLM wake failed, falling back to canned reminder');
+        }
+      }
+      if (!reminderSent) {
+        await sendMessage(row.group_id, `⏰ 定时提醒：${row.content}`);
+      }
 
       // Update: success
       db.prepare(`

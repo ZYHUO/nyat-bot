@@ -181,6 +181,8 @@ const envSchema = z.object({
   PROACTIVE_SCAN_MAX_CHATS_PER_TICK: z.coerce.number().int().positive().default(3),
   // Attention pressure(借鉴 CGM):主动扫群按 pressure 排序挑 Top-N,而非随机。默认关。
   PROACTIVE_PRESSURE_ENABLED: booleanFromEnv.default(false),
+  // 到点提醒唤醒 LLM(用群里上下文、自己的语气说),而非念稿「⏰定时提醒:X」。默认关。
+  SCHEDULE_LLM_WAKE: booleanFromEnv.default(false),
   PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
   PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
   PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
