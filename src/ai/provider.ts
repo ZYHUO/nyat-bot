@@ -249,7 +249,9 @@ async function callOpenAIRaw(
     const cacheHit = u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0;
     if (cacheHit > 0 || u?.prompt_cache_miss_tokens !== undefined) {
       const prompt = u?.prompt_tokens ?? 0;
-      logger.debug(
+      // info(非 debug):LOG_LEVEL=info 下也能看到缓存命中率,否则等于盲调。
+      // 只在 provider 返回缓存字段时触发(主要是 DeepSeek 回复路径),量可控。
+      logger.info(
         { label: label.name, cacheHit, cacheMiss: u?.prompt_cache_miss_tokens ?? Math.max(0, prompt - cacheHit), prompt, hitRate: prompt ? +(cacheHit / prompt).toFixed(2) : 0 },
         'prompt cache',
       );

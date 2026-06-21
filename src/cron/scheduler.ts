@@ -238,6 +238,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // Prompt-cache warmup — keep the static reply system prefix hot on DeepSeek
+  if (env().CACHE_WARMUP_ENABLED) {
+    tasks.push(schedule(`*/${env().CACHE_WARMUP_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('cache-warmup', async () => {
+        const { runCacheWarmup } = await import('./cache-warmup.js');
+        await runCacheWarmup();
+      });
+    }));
+  }
+
   // Learner scan — expression + jargon extraction (Stage D)
   if (env().LEARNER_ENABLED) {
     tasks.push(schedule(`*/${env().LEARNER_SCAN_INTERVAL_MIN} * * * *`, () => {

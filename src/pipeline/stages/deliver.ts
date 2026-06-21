@@ -276,7 +276,11 @@ export async function generateAndSendReplies(args: {
     // 7. 4-way context retrieval
     const t4 = performance.now();
     const retrievalMode = effectiveReplyPath === "planned" ? "planned" : "direct";
-    const retrievedContext = await retrieveContext(job.chatId, formatted, botUid, { mode: retrievalMode });
+    // direct 模式收窄最近窗口(原默认 50)——上下文是不可缓存的体积大头,砍它直接降 token/延迟。
+    const retrievalCfg = retrievalMode === "direct"
+      ? { mode: "direct" as const, recentWindow: e.REPLY_DIRECT_RECENT_WINDOW }
+      : { mode: "planned" as const };
+    const retrievedContext = await retrieveContext(job.chatId, formatted, botUid, retrievalCfg);
     timings["retrieval"] = Math.round(performance.now() - t4);
 
     // 8. Generate reply (interruptible when invoked by the turn actor — G3;

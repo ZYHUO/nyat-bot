@@ -57,6 +57,8 @@ process.env['SLEEP_SCHEDULE_ENABLED'] = 'false';
 process.env['BOT_COMMAND_LEARN_ENABLED'] = 'false';
 process.env['PM_NUDGE_ENABLED'] = 'false';
 process.env['SCHOOL_SCHEDULE_ENABLED'] = 'false';
+process.env['TOPIC_REGISTRY_ENABLED'] = 'false';
+process.env['CACHE_WARMUP_ENABLED'] = 'false';
 process.env['RESIDENT_STICKER_PACKS'] = '';
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(

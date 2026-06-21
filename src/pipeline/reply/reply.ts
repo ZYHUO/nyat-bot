@@ -47,20 +47,40 @@ const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
   max: 100_000,
 };
 
+const MAX_EMPTY_RETRIES = 2;
+const stripThinking = (s: string): string => s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
 async function generateReplyModelOutput(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   usage: string,
   opts?: { temperatureOverride?: number; signal?: AbortSignal },
 ) {
-  const result = await callWithFallback({
+  let result = await callWithFallback({
     usage,
     messages,
     temperature: opts?.temperatureOverride,
     signal: opts?.signal,
   });
+  let content = stripThinking(result.content);
 
-  // Strip thinking blocks from models that emit them (e.g. gemini thinking tags)
-  const content = result.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  // DeepSeek V4 Flash 偶发返回空 content(~1/5,官方文档承认需客户端兜)。空响应不报错 →
+  // 以前那一轮回复被默默吞成静默。这里带约束重试(略升温打破确定性空输出),
+  // 把空回复率从 ~21% 压到个位数。
+  for (let attempt = 0; attempt < MAX_EMPTY_RETRIES && !content; attempt++) {
+    logger.warn({ usage, attempt }, 'Empty model output, retrying with constraint');
+    const constrained = messages.map((m, idx) =>
+      idx === messages.length - 1 && m.role === 'user'
+        ? { ...m, content: `${m.content}\n\n[RETRY] 上次输出为空。你必须输出合法的 reply JSON(replyContent 非空),不允许空响应。` }
+        : m,
+    );
+    result = await callWithFallback({
+      usage,
+      messages: constrained,
+      temperature: opts?.temperatureOverride ?? 0.5,
+      signal: opts?.signal,
+    });
+    content = stripThinking(result.content);
+  }
 
   return {
     ...result,

@@ -216,6 +216,17 @@ describe('generateReply', () => {
     expect(result.replies[0]!.targetMessageId).toBe(196230); // 明确委托 → 保留
   });
 
+  it('retries on empty model output and recovers (DeepSeek empty-response mitigation)', async () => {
+    mockCallWithFallback
+      .mockResolvedValueOnce({ content: '', tokenUsage: { prompt: 10, completion: 0, total: 10 }, model: 'm', label: 'reply', latencyMs: 5 })
+      .mockResolvedValueOnce({ content: 'recovered reply', tokenUsage: { prompt: 12, completion: 4, total: 16 }, model: 'm', label: 'reply', latencyMs: 8 });
+
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
+
+    expect(mockCallWithFallback).toHaveBeenCalledTimes(2); // 1 empty + 1 constrained retry
+    expect(result.replies[0]!.replyContent).toBe('recovered reply');
+  });
+
   it('uses direct execution without tools when replyPath is direct', async () => {
     const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
 

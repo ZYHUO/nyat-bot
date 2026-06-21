@@ -190,6 +190,11 @@ const envSchema = z.object({
   // 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。
   TOPIC_REGISTRY_ENABLED: booleanFromEnv.default(false),
   TOPIC_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(8),
+  // 优化:direct 模式只取最近 N 条(原 50)——砍掉不可缓存的上下文体积,降 token/延迟。
+  REPLY_DIRECT_RECENT_WINDOW: z.coerce.number().int().positive().default(30),
+  // 优化:缓存预热——定时拿静态 system 前缀 ping 回复模型,保持 DeepSeek 前缀缓存热(默认关)。
+  CACHE_WARMUP_ENABLED: booleanFromEnv.default(false),
+  CACHE_WARMUP_INTERVAL_MIN: z.coerce.number().int().positive().default(4),
   PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
   PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
   PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
