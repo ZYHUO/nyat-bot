@@ -195,6 +195,10 @@ const envSchema = z.object({
   // 优化:缓存预热——定时拿静态 system 前缀 ping 回复模型,保持 DeepSeek 前缀缓存热(默认关)。
   CACHE_WARMUP_ENABLED: booleanFromEnv.default(false),
   CACHE_WARMUP_INTERVAL_MIN: z.coerce.number().int().positive().default(4),
+  // DM↔群联动:睡着时收到私聊 → 全局临时唤醒(群里也醒、正常处理消息),窗口内每条 DM 续期,
+  // 静默后到点自动继续睡。默认关。
+  SLEEP_WAKE_ON_DM_ENABLED: booleanFromEnv.default(false),
+  SLEEP_WAKE_WINDOW_MIN: z.coerce.number().int().positive().default(20),
   PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
   PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
   PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),

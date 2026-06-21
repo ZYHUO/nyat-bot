@@ -38,6 +38,22 @@ const NIGHT_JUDGE_BUDGET = 30;              // 每 chat 每晚 judge 调用上�
 
 const DISTURB_KEY = (chatId: number): string => `xxb:sleep:disturb:${chatId}`;
 const GROGGY_KEY = (chatId: number): string => `xxb:sleep:groggy:${chatId}`;
+// DM↔群联动:全局临时唤醒(私聊唤醒后群里也醒)。TTL 即唤醒窗口,每条 DM 续期。
+const GLOBAL_WAKE_KEY = 'xxb:sleep:global_wake';
+
+/**
+ * 私聊唤醒:睡着时收到 DM → 设一个全局临时唤醒键(TTL=窗口),令 getSleepPhase 在睡眠时段
+ * 也返回 awake(群里、私聊、cron 都按醒处理)。每次调用刷新 TTL(滑动窗口)→ 聊着不睡,
+ * 静默满一个窗口后键过期 → 自动继续睡。flag SLEEP_WAKE_ON_DM_ENABLED 关 → no-op。
+ */
+export async function pokeGlobalWake(reason = 'dm'): Promise<void> {
+  if (!env().SLEEP_WAKE_ON_DM_ENABLED) return;
+  try {
+    await getRedis().set(GLOBAL_WAKE_KEY, reason, 'EX', env().SLEEP_WAKE_WINDOW_MIN * 60);
+  } catch (err) {
+    logger.debug({ err, reason }, 'pokeGlobalWake failed (non-critical)');
+  }
+}
 const JUDGE_COOL_KEY = (chatId: number): string => `xxb:sleep:jcool:${chatId}`;
 const JUDGE_BUDGET_KEY = (chatId: number, nightDate: string): string =>
   `xxb:sleep:jbudget:${chatId}:${nightDate}`;
@@ -61,6 +77,14 @@ export async function getSleepPhase(now: Date = new Date()): Promise<SleepPhase>
   }
   const ls = getLifeState(now);
   if (ls.state !== 'sleeping') return 'awake';
+  // 排程说该睡了 —— 此时(且仅此时)才查全局临时唤醒键,避免给白天每次调用加 redis 往返。
+  if (env().SLEEP_WAKE_ON_DM_ENABLED) {
+    try {
+      if (await getRedis().get(GLOBAL_WAKE_KEY)) return 'awake'; // DM 唤醒窗口内 → 全局当醒
+    } catch (err) {
+      logger.debug({ err }, 'sleep: global-wake read failed, falling back to schedule');
+    }
+  }
   return ls.nap ? 'nap' : 'night';
 }
 

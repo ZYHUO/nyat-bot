@@ -61,7 +61,7 @@ import { needsLookup } from "./heart/path-heuristic.js";
 import { setWaitAnchor } from "./turn/buffer.js";
 import { getFocus as getChatFocus } from "./turn/focus.js";
 import { getLifeState } from "../tracking/life-state.js";
-import { getSleepPhase, sleepStageAVerdict, sleepWakeDecision } from "../tracking/sleep.js";
+import { getSleepPhase, sleepStageAVerdict, sleepWakeDecision, pokeGlobalWake } from "../tracking/sleep.js";
 import { pushSleepPending, clearSleepPending } from "../tracking/sleep-queue.js";
 
 
@@ -502,6 +502,11 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // (REPLY 会在 Stage B 入队),预算外静默。补回回放(sleepCatchup)
     // 绕过整个睡眠门 —— 防半夜补回被再次入队死循环。
     const sleepBypass = job.turnContext?.sleepCatchup === true;
+    // DM↔群联动:私聊来消息 → 全局临时唤醒(令本条 DM 及随后群消息都按醒处理,窗口内每条 DM 续期)。
+    // 必须在下面 getSleepPhase 之前 poke,这条 DM 自己才不被睡眠门拦。flag 关 → no-op。
+    if (e.SLEEP_WAKE_ON_DM_ENABLED && job.chatId > 0 && !sleepBypass) {
+      await pokeGlobalWake('dm');
+    }
     const sleepPhaseA = sleepBypass ? "awake" : await getSleepPhase();
     if (sleepPhaseA !== "awake") {
       const l0 = l0Rule({

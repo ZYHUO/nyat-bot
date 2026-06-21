@@ -42,7 +42,7 @@ vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 const { _testEnvValues: envValues } = (await import('../../../src/env.js')) as unknown as {
   _testEnvValues: Record<string, unknown>;
 };
-const { getSleepPhase, isAsleep, nightDateStr, sleepStageAVerdict, sleepWakeDecision } = await import(
+const { getSleepPhase, isAsleep, nightDateStr, sleepStageAVerdict, sleepWakeDecision, pokeGlobalWake } = await import(
   '../../../src/tracking/sleep.js'
 );
 const { daySchedule, _resetBedtimeShifts } = await import('../../../src/tracking/life-state.js');
@@ -57,6 +57,8 @@ beforeEach(() => {
   store.clear();
   overrideValue = null;
   envValues['SLEEP_SCHEDULE_ENABLED'] = true;
+  envValues['SLEEP_WAKE_ON_DM_ENABLED'] = false;
+  envValues['SLEEP_WAKE_WINDOW_MIN'] = 20;
   envValues['MASTER_UID'] = 7777;
   _resetBedtimeShifts();
   vi.clearAllMocks(); // 只清调用记录;vi.fn(impl) 的实现保留
@@ -201,5 +203,32 @@ describe('sleepWakeDecision (升级式吵醒 + 入队)', () => {
   it('Redis 故障 → fail-open(pass,别吞点名)', async () => {
     redisMock.get.mockRejectedValueOnce(new Error('redis down'));
     expect(await sleepWakeDecision(-100, 1001, 'mention_self', 'night')).toBe('pass');
+  });
+});
+
+describe('DM↔群联动:全局临时唤醒 (SLEEP_WAKE_ON_DM_ENABLED)', () => {
+  it('夜里 poke 一下 → getSleepPhase 翻成 awake(私聊唤醒,群里也醒)', async () => {
+    envValues['SLEEP_WAKE_ON_DM_ENABLED'] = true;
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('night'); // 排程该睡
+    await pokeGlobalWake('dm');
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('awake'); // 临时唤醒窗口内
+    expect(await isAsleep(bj('2026-06-08', 3, 0))).toBe(false);
+  });
+
+  it('flag 关 → poke 是 no-op,继续睡', async () => {
+    envValues['SLEEP_WAKE_ON_DM_ENABLED'] = false;
+    await pokeGlobalWake('dm');
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('night');
+  });
+
+  it('没 poke 过 → 夜里照常睡', async () => {
+    envValues['SLEEP_WAKE_ON_DM_ENABLED'] = true;
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('night');
+  });
+
+  it('白天本来就醒 → 不受影响(也不查唤醒键)', async () => {
+    envValues['SLEEP_WAKE_ON_DM_ENABLED'] = true;
+    await pokeGlobalWake('dm');
+    expect(await getSleepPhase(bj('2026-06-08', 17, 0))).toBe('awake');
   });
 });
