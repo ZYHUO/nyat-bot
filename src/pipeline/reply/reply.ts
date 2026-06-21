@@ -47,7 +47,7 @@ const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
   max: 100_000,
 };
 
-const MAX_EMPTY_RETRIES = 2;
+const MAX_EMPTY_RETRIES = 1; // 1 retry:大多空响应一次即恢复;避免和下游 6 个 regen 分支叠乘放大调用数
 const stripThinking = (s: string): string => s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
 async function generateReplyModelOutput(
@@ -66,7 +66,7 @@ async function generateReplyModelOutput(
   // DeepSeek V4 Flash 偶发返回空 content(~1/5,官方文档承认需客户端兜)。空响应不报错 →
   // 以前那一轮回复被默默吞成静默。这里带约束重试(略升温打破确定性空输出),
   // 把空回复率从 ~21% 压到个位数。
-  for (let attempt = 0; attempt < MAX_EMPTY_RETRIES && !content; attempt++) {
+  for (let attempt = 0; attempt < MAX_EMPTY_RETRIES && !content && !opts?.signal?.aborted; attempt++) {
     logger.warn({ usage, attempt }, 'Empty model output, retrying with constraint');
     const constrained = messages.map((m, idx) =>
       idx === messages.length - 1 && m.role === 'user'
@@ -76,7 +76,8 @@ async function generateReplyModelOutput(
     result = await callWithFallback({
       usage,
       messages: constrained,
-      temperature: opts?.temperatureOverride ?? 0.5,
+      // 略升温打破确定性空输出;Math.max 保证即便 caller 传了 temperatureOverride:0 也会升到 0.5
+      temperature: Math.max(opts?.temperatureOverride ?? 0, 0.5),
       signal: opts?.signal,
     });
     content = stripThinking(result.content);
@@ -640,9 +641,11 @@ export async function generateReply(
       const merged = await generateReplyWithTools({
         messages, usage, chatId, userId: message.uid, signal: interruptSignal,
       });
-      if (!merged.failed && merged.content) {
+      // strip <think> 后再判空:think-only 响应原始 content 非空但剥完是空,以前会漏过空兜底变静默
+      const mergedContent = merged.content ? stripThinking(merged.content) : '';
+      if (!merged.failed && mergedContent) {
         result = {
-          content: merged.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim(),
+          content: mergedContent,
           toolsUsed: merged.toolsUsed,
           tokenUsage: merged.tokenUsage,
           model: merged.model,
@@ -651,7 +654,7 @@ export async function generateReply(
         } as Awaited<ReturnType<typeof generateReplyModelOutput>>;
         toolsUsed = merged.toolsUsed;
       } else {
-        // 合并写手挂了 → 退回纯文本写手(无工具数据,best-effort)
+        // 合并写手挂了/空 → 退回纯文本写手(自带空响应重试,best-effort)
         result = await generateReplyModelOutput(messages, usage, { signal: interruptSignal });
         result.toolsUsed = toolsUsed;
       }
@@ -734,8 +737,10 @@ export async function generateReply(
         });
         result.toolsUsed = toolsUsed;
         const regenerated = parseReplyResponse(result.content, message.messageId);
-        // 重写后仍复读 → 保留第一版(已尽力,别为了不复读发更差的)
-        if (regenerated[0] && !(await checkNearDuplicate(chatId, regenerated[0].replyContent)).isNearDuplicate) {
+        // 重写后仍复读 → 保留第一版(已尽力,别为了不复读发更差的)。
+        // 同样:regen 若返回空/「…」占位(DeepSeek 空响应),别用占位覆盖掉本来不错的第一版 → 那会变静默。
+        const regenContent = regenerated[0]?.replyContent?.trim();
+        if (regenContent && regenContent !== '…' && !(await checkNearDuplicate(chatId, regenerated[0]!.replyContent)).isNearDuplicate) {
           parsedReplies = regenerated;
         }
       }

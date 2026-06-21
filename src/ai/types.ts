@@ -66,6 +66,11 @@ export interface AICallOptions {
    * maxTimeoutMs) — callers on latency-sensitive paths should keep this tight.
    */
   maxTimeoutMs?: number;
+  /**
+   * Skip LLM metrics emission for this call (llmEvents). Used by synthetic/diagnostic
+   * traffic (e.g. cache warmup) so it doesn't pollute the per-usage metrics it's meant to observe.
+   */
+  suppressMetrics?: boolean;
 }
 
 export interface AICallResult {

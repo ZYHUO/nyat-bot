@@ -59,12 +59,12 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         hedgeTriedLabel = labelNames[1]!;
         const hedgeLabel = getLabel(hedgeTriedLabel);
         const result = await hedgedCall(label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown);
-        emitLlmResult(options.usage, result);
+        if (!options.suppressMetrics) emitLlmResult(options.usage, result);
         return result;
       }
 
       const result = await callModel(label, options.messages, callOpts);
-      emitLlmResult(options.usage, result);
+      if (!options.suppressMetrics) emitLlmResult(options.usage, result);
       return result;
     } catch (err) {
       errors.push(err instanceof Error ? err : new Error(String(err)));
@@ -89,7 +89,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       }
 
       // Metrics: this attempt failed (visible per-label so retries/429 storms show up).
-      emitLlmError(options.usage, labelName, label.model);
+      if (!options.suppressMetrics) emitLlmError(options.usage, labelName, label.model);
       logger.warn({ label: labelName, err: errors.at(-1)?.message }, 'Label failed, trying next');
     }
   }

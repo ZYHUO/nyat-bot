@@ -16,8 +16,14 @@ import { buildSystemPrompt } from '../pipeline/reply/prompt-builder.js';
 
 export async function runCacheWarmup(): Promise<void> {
   if (!env().CACHE_WARMUP_ENABLED) return;
+  // 睡着时没有回复流量,预热无意义且白花钱 —— 和其它主动 cron 一样跳过(idle/proactive-scan 同款)。
   try {
-    // 与真实 normal 回复同一份 system 前缀(DeepSeek 自动缓存最长公共前缀 = 这段 system)
+    const { isAsleep } = await import('../tracking/sleep.js');
+    if (await isAsleep()) return;
+  } catch { /* non-critical */ }
+  try {
+    // 与**主流 normal 档、默认人设**回复同一份 system 前缀(DeepSeek 自动缓存最长公共前缀 = 这段 system)。
+    // 注:pro/max 档、per-user persona、merged-tools 的 system 前缀不同,预热不覆盖那些少数路径。
     const system = buildSystemPrompt('normal');
     await callWithFallback({
       usage: 'reply',
@@ -26,6 +32,7 @@ export async function runCacheWarmup(): Promise<void> {
         { role: 'user', content: 'ping(系统预热,忽略,只回 ok)' },
       ],
       maxTokens: 8,
+      suppressMetrics: true, // 别把预热合成流量混进它本要观测的 reply 指标
     });
     logger.debug('cache warmup ping sent');
   } catch (err) {
