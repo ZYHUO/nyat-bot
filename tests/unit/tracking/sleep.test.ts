@@ -211,8 +211,10 @@ describe('DM↔群联动:全局临时唤醒 (SLEEP_WAKE_ON_DM_ENABLED)', () => {
     envValues['SLEEP_WAKE_ON_DM_ENABLED'] = true;
     expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('night'); // 排程该睡
     await pokeGlobalWake('dm');
-    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('awake'); // 临时唤醒窗口内
-    expect(await isAsleep(bj('2026-06-08', 3, 0))).toBe(false);
+    // 收消息路径(getSleepPhase 默认 respectGlobalWake)→ 醒;但 isAsleep(排程口径,给主动 cron 用)
+    // 仍判睡 → 半夜被 DM 唤醒不会触发 idle/proactive 等主动外联(Fix 1 的拆分)。
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('awake');
+    expect(await isAsleep(bj('2026-06-08', 3, 0))).toBe(true);
   });
 
   it('flag 关 → poke 是 no-op,继续睡', async () => {

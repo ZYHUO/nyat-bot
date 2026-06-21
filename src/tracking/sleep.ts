@@ -64,7 +64,7 @@ export type SleepPhase = 'awake' | 'night' | 'nap';
  * 当前睡眠相位。flag 关 → 永远 awake;运行时 override 的 force 优先于
  * 作息表(force asleep 按夜睡处理);override 读取失败 fail-soft 按表走。
  */
-export async function getSleepPhase(now: Date = new Date()): Promise<SleepPhase> {
+export async function getSleepPhase(now: Date = new Date(), respectGlobalWake = true): Promise<SleepPhase> {
   if (!env().SLEEP_SCHEDULE_ENABLED) return 'awake';
   try {
     const ov = await loadOverrideCached(getRedis());
@@ -78,9 +78,11 @@ export async function getSleepPhase(now: Date = new Date()): Promise<SleepPhase>
   const ls = getLifeState(now);
   if (ls.state !== 'sleeping') return 'awake';
   // 排程说该睡了 —— 此时(且仅此时)才查全局临时唤醒键,避免给白天每次调用加 redis 往返。
-  if (env().SLEEP_WAKE_ON_DM_ENABLED) {
+  // respectGlobalWake=false(走 isAsleep 的调用,即各主动 cron)忽略临时唤醒:DM 唤醒只让 bot
+  // **回应群里来消息**,不应让半夜的 DM 触发 idle/proactive/pm-nudge 等主动外联(评审 Finding 1)。
+  if (respectGlobalWake && env().SLEEP_WAKE_ON_DM_ENABLED) {
     try {
-      if (await getRedis().get(GLOBAL_WAKE_KEY)) return 'awake'; // DM 唤醒窗口内 → 全局当醒
+      if (await getRedis().get(GLOBAL_WAKE_KEY)) return 'awake'; // DM 唤醒窗口内 → 收消息路径当醒
     } catch (err) {
       logger.debug({ err }, 'sleep: global-wake read failed, falling back to schedule');
     }
@@ -88,8 +90,13 @@ export async function getSleepPhase(now: Date = new Date()): Promise<SleepPhase>
   return ls.nap ? 'nap' : 'night';
 }
 
+/**
+ * 是否在睡(排程口径,**不含** DM 临时唤醒)。主动 cron(idle/proactive-scan/pm-nudge/
+ * network-burst/reactions/self-continue 等)用这个 → 半夜被 DM 唤醒时也不会去主动外联。
+ * 「回应群里来消息」的睡眠门走 pipeline 的 getSleepPhase()(默认 respectGlobalWake=true)。
+ */
 export async function isAsleep(now: Date = new Date()): Promise<boolean> {
-  return (await getSleepPhase(now)) !== 'awake';
+  return (await getSleepPhase(now, false)) !== 'awake';
 }
 
 /** "这一晚"归属的北京日期:中午 12 点前算昨晚(与 prevSched 投影一致) */
