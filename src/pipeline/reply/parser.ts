@@ -321,9 +321,16 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
  */
 export function salvageReplyContent(raw: string): string | null {
   if (!/[{[]/.test(raw) || !/reply_?[cC]ontent/.test(raw)) return null;
-  const m = raw.match(/"reply_?[cC]ontent"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (m?.[1] !== undefined) {
-    try { return JSON.parse(`"${m[1]}"`) as string; } catch { return m[1]; }
+  // 标准 JSON:双引号 key + 双引号 value
+  const dq = raw.match(/"reply_?[cC]ontent"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (dq?.[1] !== undefined) {
+    try { return JSON.parse(`"${dq[1]}"`) as string; } catch { return dq[1]; }
+  }
+  // 模型偶发吐 Python 风格 dict:{'replyContent': '...'}(单引号)→ JSON.parse 失败,
+  // 以前直接把整坨原样发出去。这里把单引号(或混引号)的 replyContent 抠出来。
+  const sq = raw.match(/['"]reply_?[cC]ontent['"]\s*:\s*'((?:[^'\\]|\\.)*)'/);
+  if (sq?.[1] !== undefined) {
+    return sq[1].replace(/\\'/g, "'").replace(/\\n/g, '\n').replace(/\\t/g, '\t');
   }
   return null;
 }

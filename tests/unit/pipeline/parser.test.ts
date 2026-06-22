@@ -257,3 +257,20 @@ describe('isBlankReply (空回复/省略号占位识别)', () => {
     }
   });
 });
+
+describe('single-quoted / Python-dict salvage (DeepSeek quirk)', () => {
+  it('parseReplyResponse extracts replyContent, never sends the raw blob', () => {
+    const raw = "{'replyContent': '大A日常表演高开低走，习惯就好喵', 'targetMessageId': 578557}";
+    const result = parseReplyResponse(raw, 999);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.replyContent).toBe('大A日常表演高开低走，习惯就好喵');
+    expect(result[0]!.replyContent).not.toContain('replyContent');
+    expect(result[0]!.replyContent).not.toContain('{');
+  });
+  it('salvageReplyContent handles single, double, and mixed quotes', () => {
+    expect(salvageReplyContent("{'replyContent': 'hi喵', 'targetMessageId': 1}")).toBe('hi喵');
+    expect(salvageReplyContent('{"replyContent": "hi喵", "targetMessageId": 1}')).toBe('hi喵');
+    expect(salvageReplyContent("{'reply_content': '换皮也行喵'}")).toBe('换皮也行喵');
+    expect(salvageReplyContent('not a dict')).toBeNull();
+  });
+});
