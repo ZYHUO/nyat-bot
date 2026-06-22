@@ -10,6 +10,16 @@ import { normalizeReactionEmoji } from './reaction-emoji.js';
 
 const STICKER_INTENTS = new Set<StickerIntent>(ALLOWED_INTENTS);
 
+/**
+ * True for content that's never worth sending: empty / whitespace / 纯省略号或点号
+ * (空响应兜底的 '…' 占位、模型直接吐 "..."/"。。。" 等)。各发送点都用它兜底,避免把 '…' 发出去。
+ */
+export function isBlankReply(text: string | undefined | null): boolean {
+  const t = (text ?? '').trim();
+  if (!t) return true;
+  return /^[.。．·•…‥\s]+$/.test(t);
+}
+
 /** Normalize stickerIntent: accept string or string[], return string[] | undefined */
 function normalizeStickerIntent(raw: unknown): string[] | undefined {
   if (!raw) return undefined;

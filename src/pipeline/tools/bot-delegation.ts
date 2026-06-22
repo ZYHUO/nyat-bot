@@ -195,7 +195,7 @@ async function answerFromDelegation(
   const { slimContextForAI } = await import('../context/slim.js');
   const { buildSystemPrompt } = await import('../reply/prompt-builder.js');
   const { callWithFallback } = await import('../../ai/fallback.js');
-  const { parseReplyResponse } = await import('../reply/parser.js');
+  const { parseReplyResponse, isBlankReply } = await import('../reply/parser.js');
 
   const recent = await getRecent(chatId, 15);
   if (recent.length === 0) return;
@@ -218,7 +218,7 @@ async function answerFromDelegation(
   });
   const parsed = parseReplyResponse(result.content, current.messageId);
   if (parsed.some((p) => p.action === 'silent')) return;
-  const text = parsed.filter((p) => !p.action || p.action === 'reply').map((p) => p.replyContent.trim()).find((t) => t.length >= 1);
+  const text = parsed.filter((p) => !p.action || p.action === 'reply').map((p) => p.replyContent.trim()).find((t) => !isBlankReply(t));
   if (!text) return;
   const mid = await sendMessage(chatId, text.slice(0, 500));
   if (mid) await addAssistant(chatId, { textContent: text.slice(0, 500), messageId: mid });

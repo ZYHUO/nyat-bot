@@ -34,7 +34,10 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
 vi.mock('../../../src/pipeline/context/slim.js', () => ({ slimContextForAI: () => 'CTX' }));
 vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({ buildSystemPrompt: () => 'SYS' }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: vi.fn(async () => ({ content: '{"replyContent":"查到啦,8.8.8.8 在美国喵"}' })) }));
-vi.mock('../../../src/pipeline/reply/parser.js', () => ({ parseReplyResponse: () => [{ replyContent: '查到啦,8.8.8.8 在美国喵' }] }));
+vi.mock('../../../src/pipeline/reply/parser.js', () => ({
+  parseReplyResponse: () => [{ replyContent: '查到啦,8.8.8.8 在美国喵' }],
+  isBlankReply: (t: string) => { const s = (t ?? '').trim(); return !s || /^[.。．·•…‥\s]+$/.test(s); },
+}));
 
 const { _e: envVals } = (await import('../../../src/env.js')) as unknown as { _e: Record<string, unknown> };
 const { executeUseBotCommand, tryHandleDelegationReceipt, maybeRegisterTypedDelegation, PENDING_KEY } = await import('../../../src/pipeline/tools/bot-delegation.js');

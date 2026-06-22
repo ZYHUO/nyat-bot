@@ -16,7 +16,7 @@ import { similarityRatio } from '../reply/anti-repeat.js';
 import { slimContextForAI } from '../context/slim.js';
 import { buildSystemPrompt } from '../reply/prompt-builder.js';
 import { callWithFallback } from '../../ai/fallback.js';
-import { parseReplyResponse } from '../reply/parser.js';
+import { parseReplyResponse, isBlankReply } from '../reply/parser.js';
 import { sendMessage, sendChatAction, sendSticker } from '../../bot/sender/telegram.js';
 import { getReadyStickersByIntent, recordStickerSent } from '../../knowledge/sticker/store.js';
 import { pendingCount } from './buffer.js';
@@ -191,7 +191,10 @@ async function runSelfContinue(chatId: number, botUid: number): Promise<void> {
     clearGeneration(chatId, controller, false);
 
     const parsed = parseReplyResponse(content, current.messageId);
-    const speakable = parsed.filter((p) => !p.action || p.action === 'reply' || p.action === 'sticker');
+    // 贴纸算可说;文字部分必须非空白(过滤掉空响应兜底的 '…' / 纯点号,别把它当自我接话发出去)
+    const speakable = parsed.filter((p) =>
+      p.action === 'sticker' || ((!p.action || p.action === 'reply') && !isBlankReply(p.replyContent)),
+    );
     if (speakable.length === 0 || parsed.some((p) => p.action === 'silent')) {
       logger.debug({ chatId, round }, 'Self-continuation: model chose silence');
       return;

@@ -53,6 +53,7 @@ vi.mock('../../../src/ai/fallback.js', () => ({
 
 vi.mock('../../../src/pipeline/reply/parser.js', () => ({
   parseReplyResponse: (...args: unknown[]) => mockParseReplyResponse(...args),
+  isBlankReply: (t: string) => { const s = (t ?? '').trim(); return !s || /^[.。．·•…‥\s]+$/.test(s); },
 }));
 
 vi.mock('../../../src/pipeline/context/manager.js', () => ({

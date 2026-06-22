@@ -11,7 +11,7 @@ import { buildSystemPrompt, buildMessages } from './prompt-builder.js';
 import { slimContextForAI } from '../context/slim.js';
 import { searchKnowledge } from '../../knowledge/manager.js';
 import { getToolNames } from '../tools/registry.js';
-import { parseReplyResponse } from './parser.js';
+import { parseReplyResponse, isBlankReply } from './parser.js';
 import { segmentReply, type SegmenterConfig } from './segmenter.js';
 import { getRecent, getGroupMembers } from '../context/manager.js';
 import { doCheckin, getCheckinStats } from '../checkin.js';
@@ -739,8 +739,7 @@ export async function generateReply(
         const regenerated = parseReplyResponse(result.content, message.messageId);
         // 重写后仍复读 → 保留第一版(已尽力,别为了不复读发更差的)。
         // 同样:regen 若返回空/「…」占位(DeepSeek 空响应),别用占位覆盖掉本来不错的第一版 → 那会变静默。
-        const regenContent = regenerated[0]?.replyContent?.trim();
-        if (regenContent && regenContent !== '…' && !(await checkNearDuplicate(chatId, regenerated[0]!.replyContent)).isNearDuplicate) {
+        if (regenerated[0] && !isBlankReply(regenerated[0].replyContent) && !(await checkNearDuplicate(chatId, regenerated[0].replyContent)).isNearDuplicate) {
           parsedReplies = regenerated;
         }
       }
@@ -786,8 +785,8 @@ export async function generateReply(
         }
       }
     }
-    // 占位过滤:空输出的字面 '…' 兜底不算内容(直接发出去很蠢)
-    if (texts.length > 0 && texts.every((p) => !p.action && p.replyContent.trim() === '…')) {
+    // 占位过滤:空输出兜底的 '…'、或模型直接吐的纯点号/省略号,都不算内容(发出去很蠢)
+    if (texts.length > 0 && texts.every((p) => !p.action && isBlankReply(p.replyContent))) {
       texts = [];
     }
     return texts;

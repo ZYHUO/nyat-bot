@@ -12,7 +12,7 @@ import { getRecent } from '../context/manager.js';
 import { slimContextForAI } from '../context/slim.js';
 import { buildSystemPrompt } from '../reply/prompt-builder.js';
 import { callWithFallback } from '../../ai/fallback.js';
-import { parseReplyResponse } from '../reply/parser.js';
+import { parseReplyResponse, isBlankReply } from '../reply/parser.js';
 import { logger } from '../../shared/logger.js';
 
 /**
@@ -55,7 +55,7 @@ export async function generatePersonaProactiveText(
     const text = parsed
       .filter((p) => !p.action || p.action === 'reply')
       .map((p) => p.replyContent.trim())
-      .find((t) => t.length >= 2);
+      .find((t) => t.length >= 2 && !isBlankReply(t));
     if (!text) return null;
     return text.replace(/^["「『]|["」』]$/g, '').slice(0, 120);
   } catch (err) {

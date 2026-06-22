@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseReplyResponse, salvageReplyContent } from '../../../src/pipeline/reply/parser.js';
+import { parseReplyResponse, salvageReplyContent, isBlankReply } from '../../../src/pipeline/reply/parser.js';
 
 function parseSingle(raw: string, fallbackId: number) {
   const result = parseReplyResponse(raw, fallbackId);
@@ -242,5 +242,18 @@ describe('Reply Parser', () => {
         stickerIntent: ['cute'],
       });
     });
+  });
+});
+
+describe('isBlankReply (空回复/省略号占位识别)', () => {
+  it('true for empty / whitespace / dots-or-ellipsis-only', () => {
+    for (const s of ['', '   ', '\n\t', '…', '...', '。。。', '. . .', '·', '•••', '… …', null, undefined]) {
+      expect(isBlankReply(s as string)).toBe(true);
+    }
+  });
+  it('false for real content (even short)', () => {
+    for (const s of ['在', 'ok', '喵', '好的喵', '?', '哈哈…']) {
+      expect(isBlankReply(s)).toBe(false);
+    }
   });
 });
