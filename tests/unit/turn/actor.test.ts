@@ -325,6 +325,33 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     expect(replanned.turnContext.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('commands interrupting a turn each get their receipt, non-interruptibly (几个人同窗 /checkin)', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(1)]; // a chat message starts the turn
+
+    processPipelineMock.mockImplementationOnce(async () => {
+      // mid-generation: two people /checkin + a chat msg land
+      bufferState.pending = [cmdEntry(2, '/checkin'), cmdEntry(3, '/checkin'), entry(4)];
+      throw aborted();
+    });
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const byId = (id: number) => processPipelineMock.mock.calls.find((c) => (c[0] as { messageId: number }).messageId === id);
+    // BOTH checkins must be processed (not collapsed to one anchor)
+    expect(byId(2)).toBeDefined();
+    expect(byId(3)).toBeDefined();
+    // commands run non-interruptibly (no signal) + gate bypassed
+    for (const id of [2, 3]) {
+      const tc = (byId(id)![0] as { turnContext?: { signal?: unknown; gateBypass?: boolean } }).turnContext;
+      expect(tc?.signal).toBeUndefined();
+      expect(tc?.gateBypass).toBe(true);
+    }
+    // the chat message (4) is still the replan anchor (interruptible → has a signal)
+    const anchorTc = (byId(4)![0] as { turnContext?: { signal?: unknown } }).turnContext;
+    expect(anchorTc?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('replan anchors on the direct entry, not the newest interjection', async () => {
     // 修复:用户 reply bot(direct)后别人紧跟插话,replan 无条件取
     // fresh.at(-1) 会把点名挤掉,bot 跑去回应插话话题(2026-06-12 反馈,

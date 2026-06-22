@@ -101,6 +101,44 @@ async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number
 }
 
 /**
+ * Run a slash-command entry as a transaction: it MUST produce its receipt and must
+ * never be interrupted/replanned away (几个人同窗 /checkin → 每个人都要拿到自己的签到)。
+ * 不注册可打断生成、不进重规划循环 —— 跑一遍 processPipeline 就完。
+ */
+async function runCommandEntry(
+  chatId: number,
+  entry: PendingEntry,
+  batchSize: number,
+  epoch: number,
+  burstMessageIds: number[],
+): Promise<void> {
+  try {
+    await processPipeline({
+      type: 'message',
+      chatId,
+      messageId: entry.messageId,
+      update: entry.update,
+      enqueuedAt: entry.enqueuedAt,
+      coalesce: {
+        batchSize,
+        isLastInBatch: true,
+        flushReason: entry.direct ? 'direct_interaction' : 'window',
+      },
+      turnContext: {
+        // 无 signal → 不可打断;命令本就直接交互、跳 gate
+        epoch,
+        gateBypass: true,
+        isReplan: false,
+        sleepCatchup: entry.sleepCatchup === true,
+        burstMessageIds: burstMessageIds.length > 1 ? burstMessageIds : undefined,
+      },
+    });
+  } catch (err) {
+    logger.error({ err, chatId, messageId: entry.messageId }, 'Turn: command entry failed');
+  }
+}
+
+/**
  * Run a judged entry with G3 interrupt semantics: register an interruptible
  * generation; on AI_ABORTED wait the quiet period, ingest the messages that
  * caused the interrupt, then replan anchored on the newest one with the
@@ -114,6 +152,11 @@ async function runJudgedEntry(
   burstMessageIds: number[],
 ): Promise<void> {
   const e = env();
+  // 命令是事务 → 非打断单跑,绝不进重规划锚点逻辑(否则同窗多命令被单锚点吞掉)
+  if (isCommandEntry(entry, e.BOT_USERNAME)) {
+    await runCommandEntry(chatId, entry, batchSize, epoch, burstMessageIds);
+    return;
+  }
   let current = entry;
   let currentBatch = batchSize;
   let currentBurstIds = burstMessageIds;
@@ -172,32 +215,39 @@ async function runJudgedEntry(
       // burst 视野扩展为「原 burst + 打断新增」(都已在上下文里)
       const fresh = await drainPending(chatId);
       if (fresh.length > 0) {
+        // 命令不当聊天锚点 —— 它们逐条出回执(事务),不被单锚点吞掉
+        const isCmd = fresh.map((f) => isCommandEntry(f, e.BOT_USERNAME));
         let anchorIdx = -1;
         for (let i = fresh.length - 1; i >= 0; i--) {
-          if (fresh[i]!.direct === true) {
+          if (fresh[i]!.direct === true && !isCmd[i]) {
             anchorIdx = i;
             break;
           }
         }
         if (anchorIdx === -1) {
           for (let i = fresh.length - 1; i >= 0; i--) {
-            if (fresh[i]!.isEdit !== true) {
+            if (fresh[i]!.isEdit !== true && !isCmd[i]) {
               anchorIdx = i;
               break;
             }
           }
         }
-        if (anchorIdx === -1) anchorIdx = fresh.length - 1;
         for (let i = 0; i < fresh.length; i++) {
-          if (i === anchorIdx) continue;
-          await trackEntry(chatId, fresh[i]!, fresh.length, false);
+          if (isCmd[i]) {
+            await runCommandEntry(chatId, fresh[i]!, fresh.length, epoch, currentBurstIds); // 命令逐条出回执
+          } else if (i !== anchorIdx) {
+            await trackEntry(chatId, fresh[i]!, fresh.length, false);
+          }
         }
-        current = fresh[anchorIdx]!;
-        currentBatch = fresh.length;
         currentBurstIds = [
           ...currentBurstIds,
           ...fresh.map((f) => f.messageId).filter((id): id is number => id !== undefined),
         ];
+        // 有新的聊天锚点 → 重规划到它;打断全来自命令(anchorIdx===-1)→ 保留原 current 重试原回复
+        if (anchorIdx !== -1) {
+          current = fresh[anchorIdx]!;
+          currentBatch = fresh.length;
+        }
       }
       // 无论是否有新消息,重规划都跳过 gate(打断已证明此刻该说话)
       gateBypass = true;
