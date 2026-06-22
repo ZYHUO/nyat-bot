@@ -161,7 +161,7 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
 async function callOpenAIRaw(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean; signal?: AbortSignal },
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean; signal?: AbortSignal; jsonMode?: boolean },
 ): Promise<AICallResult> {
   const start = performance.now();
   const apiKey = label.apiKeys[0]!;
@@ -178,6 +178,17 @@ async function callOpenAIRaw(
   if (opts.stream) body['stream'] = true;
   if (label.reasoningEffort) body['reasoning_effort'] = label.reasoningEffort;
   if (label.disableThinking) body['thinking'] = { type: 'disabled' };
+  // 强制合法 JSON(DeepSeek/OpenAI json_object)——根治单引号/Python-dict 之类的脏输出。
+  // DeepSeek 要求 prompt 里出现 "json" 字样,否则硬报错 → 只在 prompt 含 json 时才开;
+  // 顶层数组(多条回复)实测被允许,不影响多气泡。
+  if (opts.jsonMode) {
+    const hasJson = messages.some((m) =>
+      typeof m.content === 'string'
+        ? /json/i.test(m.content)
+        : m.content.some((p) => p.type === 'text' && /json/i.test(p.text)),
+    );
+    if (hasJson) body['response_format'] = { type: 'json_object' };
+  }
 
   const res = await fetch(chatUrl, {
     method: 'POST',
@@ -298,7 +309,7 @@ async function callOpenAIRaw(
 export async function callModel(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } = {},
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean } = {},
 ): Promise<AICallResult> {
   // MaiBot 借鉴:纯空白片段会让部分供应商返回 400/422(格式错)。
   // 文本消息空白 → 整条丢弃;内容数组里空白 text part → 滤掉该 part,

@@ -199,6 +199,8 @@ const envSchema = z.object({
   // 静默后到点自动继续睡。默认关。
   SLEEP_WAKE_ON_DM_ENABLED: booleanFromEnv.default(false),
   SLEEP_WAKE_WINDOW_MIN: z.coerce.number().int().positive().default(20),
+  // 回复写手强制合法 JSON(DeepSeek/OpenAI json_object)——根治单引号/Python-dict 脏输出。默认关。
+  REPLY_JSON_MODE: booleanFromEnv.default(false),
   PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
   PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
   PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),

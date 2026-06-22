@@ -71,6 +71,12 @@ export interface AICallOptions {
    * traffic (e.g. cache warmup) so it doesn't pollute the per-usage metrics it's meant to observe.
    */
   suppressMetrics?: boolean;
+  /**
+   * Request strict JSON output (OpenAI/DeepSeek response_format json_object). Only takes effect
+   * on the openai-format raw path AND when the prompt contains "json" (DeepSeek requirement);
+   * ignored otherwise. Used by the reply writer to eliminate malformed/single-quoted output.
+   */
+  jsonMode?: boolean;
 }
 
 export interface AICallResult {

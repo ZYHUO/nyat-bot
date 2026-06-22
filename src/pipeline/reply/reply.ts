@@ -55,11 +55,13 @@ async function generateReplyModelOutput(
   usage: string,
   opts?: { temperatureOverride?: number; signal?: AbortSignal },
 ) {
+  const jsonMode = env().REPLY_JSON_MODE;
   let result = await callWithFallback({
     usage,
     messages,
     temperature: opts?.temperatureOverride,
     signal: opts?.signal,
+    jsonMode,
   });
   let content = stripThinking(result.content);
 
@@ -79,6 +81,7 @@ async function generateReplyModelOutput(
       // 略升温打破确定性空输出;Math.max 保证即便 caller 传了 temperatureOverride:0 也会升到 0.5
       temperature: Math.max(opts?.temperatureOverride ?? 0, 0.5),
       signal: opts?.signal,
+      jsonMode,
     });
     content = stripThinking(result.content);
   }

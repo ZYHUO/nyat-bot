@@ -30,6 +30,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       ? Math.min(usage.timeout, options.maxTimeoutMs)
       : usage.timeout,
     signal: options.signal,
+    jsonMode: options.jsonMode,
   };
 
   const errors: Error[] = [];

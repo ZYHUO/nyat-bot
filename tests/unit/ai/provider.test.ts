@@ -95,4 +95,34 @@ describe('callModel', () => {
       })
     );
   });
+
+  it('jsonMode sets response_format when the prompt contains "json"', async () => {
+    let capturedBody: any;
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return Promise.resolve(new Response(
+        JSON.stringify({ choices: [{ message: { content: '{"replyContent":"hi","targetMessageId":1}' } }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+    }));
+    const label: AILabel = { name: 'deepseek', endpoint: 'https://ds.example/v1', apiKeys: ['k'], model: 'deepseek-v4-flash', disableThinking: true };
+
+    await callModel(label, [{ role: 'system', content: '只输出 JSON' }, { role: 'user', content: 'hi' }], { maxTokens: 50, jsonMode: true });
+    expect(capturedBody.response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('jsonMode does NOT set response_format when the prompt lacks "json" (avoids DeepSeek hard-error)', async () => {
+    let capturedBody: any;
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return Promise.resolve(new Response(
+        JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+    }));
+    const label: AILabel = { name: 'deepseek', endpoint: 'https://ds.example/v1', apiKeys: ['k'], model: 'deepseek-v4-flash', disableThinking: true };
+
+    await callModel(label, [{ role: 'user', content: '回复:你好' }], { maxTokens: 50, jsonMode: true });
+    expect(capturedBody.response_format).toBeUndefined();
+  });
 });
