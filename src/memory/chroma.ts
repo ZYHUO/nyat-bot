@@ -367,7 +367,8 @@ async function _searchMemoryByUserInner(
   // R1 读隔离:剔除跨界私密(DM private / 敏感群来源)。
   const { kept, dropped } = scrubMemoryHits(raw, boundChatId);
   if (dropped > 0) {
-    logger.debug({ uid, boundChatId, dropped, kept: kept.length }, 'per-user memory scrubbed cross-context private');
+    // info 级:隐私防线真的挡下了跨界私密(DM/敏感群)内容 —— 生产可观测。
+    logger.info({ uid, boundChatId, dropped, kept: kept.length }, 'per-user memory scrubbed cross-context private');
   }
   return kept.slice(0, topK);
 }
