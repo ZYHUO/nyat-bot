@@ -124,6 +124,23 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // token 记账日报 — 每天把昨天/今天各 provider 的 token 消耗打进 info 日志
+  // (StepFun 用了多少一目了然)。持久化在 llm_token_daily,重启不丢。
+  tasks.push(schedule('3 0 * * *', () => {
+    void safeRun('token-report', async () => {
+      const { getTokenReport } = await import('../metrics/token-ledger.js');
+      const now = new Date();
+      const yday = new Date(now.getTime() - 86400_000).toISOString().slice(0, 10);
+      for (const d of [yday, now.toISOString().slice(0, 10)]) {
+        const r = getTokenReport(d);
+        logger.info(
+          { date: r.date, total: r.total.total, byLabel: r.byLabel.map((x) => ({ label: x.label, total: x.total, cached: x.cached })) },
+          'token ledger daily report',
+        );
+      }
+    });
+  }));
+
   // 机制5:LLM 全局画像合并 — 每天低频把跨上下文(群+DM)的人各场景画像提炼成
   // 全局 traits/interests/relation,写回 person_identity 全局列。默认关灰度。
   if (env().PROFILE_MERGE_ENABLED) {

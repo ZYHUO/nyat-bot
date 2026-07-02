@@ -167,6 +167,10 @@ async function main(): Promise<void> {
   }
 
   // 10. Start Hono HTTP server (health check + admin API)
+  // 持久化 token 记账(重启不清零;补 Prometheus 内存计数器之短)。无 flag,始终开。
+  const { initTokenLedger } = await import('./metrics/token-ledger.js');
+  initTokenLedger();
+
   const app = new Hono();
   app.get('/health', (c) => c.json({ status: 'ok', uptime: process.uptime() }));
   // Prometheus metrics(借鉴 CGM:LLM token/缓存/延迟按用途可见)— flag-gated。
@@ -284,6 +288,8 @@ async function main(): Promise<void> {
       await stopBot();
       await closeQueue();
       stopCronJobs();
+      // token 记账最后 flush 一次(别丢最后一分钟的账),需在 closeDb 之前。
+      try { const { stopTokenLedger } = await import('./metrics/token-ledger.js'); stopTokenLedger(); } catch { /* non-critical */ }
       await closeRedis();
       closeDb();
       freeEncoder();
