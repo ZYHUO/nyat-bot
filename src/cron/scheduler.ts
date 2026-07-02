@@ -124,6 +124,17 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
+  // 机制5:LLM 全局画像合并 — 每天低频把跨上下文(群+DM)的人各场景画像提炼成
+  // 全局 traits/interests/relation,写回 person_identity 全局列。默认关灰度。
+  if (env().PROFILE_MERGE_ENABLED) {
+    tasks.push(schedule('31 6 * * *', () => {
+      void safeRun('profile-merge', async () => {
+        const { runProfileMerge } = await import('./profile-merge.js');
+        await runProfileMerge();
+      });
+    }));
+  }
+
   // 功能 B3:@催pm 扫描(默认关灰度)。内部还有好感门/递增间隔/全局每日上限/
   // allowlist+mute+成员+isAsleep 安全门;每 3 小时扫一次,实际发送受日上限封顶。
   if (env().PM_NUDGE_ENABLED) {
