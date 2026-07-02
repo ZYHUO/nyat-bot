@@ -98,11 +98,18 @@ export async function enqueueDeferResume(
     update: {} as MessageJobData['update'],
     deferResume: { scheduledAt, entries },
   };
+  // review #5/#6:job 载荷是这批消息在窗口期的**唯一副本**(不在 pending
+  // 里),原来的 removeOnFail:true + 队列默认 attempts:1 意味着 resume 那
+  // 一刻任何瞬时 Redis 抖动都会让消息连同载荷一起彻底消失、无重试无痕迹
+  // ——比修复前的"冷却期静默丢弃"更隐蔽(日志显示"已排程"却再也不会触发)。
+  // 加重试自愈瞬时故障;去掉 removeOnFail 覆盖,失败 job 落回队列默认
+  // (retain{count:5000},与 wait_resume 一致)方便运维发现并手动回放。
   const job = await queue.add('defer_resume', data, {
     jobId,
     delay: delayMs,
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 2000 },
     removeOnComplete: true,
-    removeOnFail: true,
   });
   logger.debug({ chatId, delayMs, jobId: job.id, entryCount: entries.length }, 'Defer-resume job scheduled');
   return job.id;

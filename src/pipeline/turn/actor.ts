@@ -139,6 +139,12 @@ function isCommandEntry(entry: PendingEntry, botUsername: string): boolean {
 /** Run one entry through the pipeline as tracking-only bookkeeping. */
 async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number, suppressed: boolean): Promise<void> {
   try {
+    // review #4:一条 wait/defer 回放条目若在 drain 时恰好落进 WAIT 抑制
+    // (per-person waitTriggerUids 命中,或 suppressAll/STOP),会被路由到这里
+    // 而不是 runJudgedEntry —— 首轮已经跑过完整 bookkeeping,这里必须显式
+    // 跳过,否则 addMessage(无 messageId 去重的 RPUSH)会把同一条消息第二次
+    // 写进上下文,写手看到"重复发言",活跃度/统计计数也翻倍。
+    const isReplay = entry.waitReplay === true || entry.deferReplay === true;
     await processPipeline({
       type: 'message',
       chatId,
@@ -151,6 +157,9 @@ async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number
         flushReason: entry.direct ? 'direct_interaction' : 'window',
       },
       skipReply: suppressed ? true : undefined,
+      turnContext: isReplay
+        ? { isWaitReplay: entry.waitReplay === true, isDeferReplay: entry.deferReplay === true }
+        : undefined,
     });
   } catch (err) {
     logger.error({ err, chatId, messageId: entry.messageId }, 'Turn: tracking entry failed');
@@ -259,10 +268,16 @@ async function runJudgedEntry(
           // P0-B 注意:deferReplay **不**跳过 gate —— defer 的意义就是到点重评。
           gateBypass: gateBypass || current.waitReplay === true,
           isReplan: replans > 0,
-          // deferReplay 与 waitReplay 同享"跳过 bookkeeping+judge"(首轮已
-          // 入册、已判过 REPLY;MaiBot 的 delayed re-check 也是阈值→gate→
-          // planner,不回头重跑 judge)。
-          isWaitReplay: current.waitReplay === true || current.deferReplay === true,
+          // isWaitReplay 只跳过 bookkeeping**和 judge**(gate 选 WAIT 而非
+          // NO_ACTION 时已经隐含 REPLY 成立,只是节奏未到)。
+          isWaitReplay: current.waitReplay === true,
+          // review #10(critical):defer 曾误共用 isWaitReplay,导致强制
+          // REPLY(rule=turn_replan∈DIRECT_INTERACTION_RULES)→ isDirectInteraction
+          // → gate 在 cooldown 检查前就 short-circuit,heart/judge 全被跳过——
+          // defer 变成"无条件延迟回复",把这轮修复的节流意图整个废掉。
+          // isDeferReplay 只跳 bookkeeping(首轮已入册),judge/heart 照常全跑,
+          // 这才是"到点重评"的本意。
+          isDeferReplay: current.deferReplay === true,
           sleepCatchup: current.sleepCatchup === true,
           deferCount: current.deferCount,
           waitResume: opts?.waitResume,
@@ -387,25 +402,29 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   // P2-F: wait 回访元数据 —— 提示写手"你刚才决定等了 N 秒,期间有/无新消息"。
   // 锚点被新消息挤掉时提示挂到新锚点上(对齐 MaiBot 把 wait-completed 标记
   // 写进共享历史:谁接棒谁看得见)。
-  // review #7/#8 修正:仅 wait_timeout 触发的回合才算 wait 回访(睡眠补回
-  // 也复用 waitReplay 标记,误判会给写手互相矛盾的指令);"期间有无新消息"
-  // 不能只看本回合 drain 批 —— 窗口期消息早被中间回合消化,要对照 activity
-  // 时间线(wait 开始之后群里有没有人说过话)。
+  // review #8 修正:睡眠补回也复用 waitReplay 标记,靠 sleepCatchup 排除
+  // (不靠 trigger)。review #2/#8 再修正:曾经加过 `turnPayload?.trigger
+  // === 'wait_timeout'` 这道闸,但 handleWaitResume 排的 scheduleTurn 不带
+  // forceNew ——若此刻已有 delayed 回合,changeDelay(0) 复用它、trigger 仍是
+  // 原来的 'message';若有 active 回合,markDirty 收尾重排的 trigger 是
+  // 'message'/'direct'。两种情况都会让 trigger 检查判假,回访提示在"群里
+  // 一直有人说话"这个 P2-F 最该生效的场景反而失效。改回直接认条目自身的
+  // waitReplay 标记,不看触发它的 turn 是靠什么 trigger 排的。
+  // "期间有无新消息"不能只看本回合 drain 批 —— 窗口期消息早被中间回合
+  // 消化,要对照 activity 时间线(wait 开始之后群里有没有人说过话)。
   let waitResumeInfo: { waitSec?: number; hadNewMessages: boolean } | undefined;
-  if (turnPayload?.trigger === 'wait_timeout') {
-    const waitReplayEntry = drained.find((en) => en.waitReplay === true && en.sleepCatchup !== true);
-    if (waitReplayEntry !== undefined) {
-      let hadNewMessages = hasFresh;
-      if (!hadNewMessages && waitReplayEntry.waitStartedAt !== undefined) {
-        try {
-          const { getRecentTimestamps } = await import('../../tracking/activity.js');
-          const windowSec = Math.ceil((Date.now() - waitReplayEntry.waitStartedAt) / 1000) + 5;
-          const timestamps = await getRecentTimestamps(chatId, windowSec);
-          hadNewMessages = timestamps.some((ts) => ts * 1000 > waitReplayEntry.waitStartedAt!);
-        } catch { /* 保守沿用 hasFresh */ }
-      }
-      waitResumeInfo = { waitSec: waitReplayEntry.waitSec, hadNewMessages };
+  const waitReplayEntry = drained.find((en) => en.waitReplay === true && en.sleepCatchup !== true);
+  if (waitReplayEntry !== undefined) {
+    let hadNewMessages = hasFresh;
+    if (!hadNewMessages && waitReplayEntry.waitStartedAt !== undefined) {
+      try {
+        const { getRecentTimestamps } = await import('../../tracking/activity.js');
+        const windowSec = Math.ceil((Date.now() - waitReplayEntry.waitStartedAt) / 1000) + 5;
+        const timestamps = await getRecentTimestamps(chatId, windowSec);
+        hadNewMessages = timestamps.some((ts) => ts * 1000 > waitReplayEntry.waitStartedAt!);
+      } catch { /* 保守沿用 hasFresh */ }
     }
+    waitResumeInfo = { waitSec: waitReplayEntry.waitSec, hadNewMessages };
   }
 
   // 积压保护:调度故障/停机恢复后 pending 可能上千条;一个 turn job 顺序

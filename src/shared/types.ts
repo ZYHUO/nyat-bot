@@ -164,9 +164,24 @@ export interface ChatJob {
     /**
      * G5: wait-resume replay — the anchor entry already went through all
      * bookkeeping stages on first processing; skip context-save/tracking
-     * side-effects and go straight to judge→reply.
+     * side-effects **and** skip judge (gate already established REPLY was
+     * warranted when it chose WAIT over NO_ACTION — only the rhythm was in
+     * question). Do NOT set this for defer replays — see isDeferReplay.
      */
     isWaitReplay?: boolean;
+    /**
+     * review #10 (critical): defer replay — bookkeeping already ran on the
+     * first pass (skip it, same as isWaitReplay), but **nothing has ever
+     * approved a reply**: defer fires when gate/heart declined to decide
+     * (cooldown/threshold not met), not after a REPLY verdict. Reusing
+     * isWaitReplay here was the bug — it forced a synthetic REPLY tagged
+     * 'turn_replan' (a DIRECT_INTERACTION_RULES member), which short-circuited
+     * the timing gate via isDirectInteraction and skipped heart/judge
+     * entirely, turning every deferred message into a guaranteed reply with
+     * zero re-arbitration (the opposite of "defer = re-evaluate at gate
+     * time"). isDeferReplay skips ONLY bookkeeping; judge/heart run fresh.
+     */
+    isDeferReplay?: boolean;
     /**
      * 作息 v2:睡眠队列补回的回放回合 —— 绕过睡眠门(防再入队死循环),
      * 写手收到"[补觉回复]"注记(刚睡醒/半夜刷手机语气,别当刚聊到一半)。

@@ -562,15 +562,20 @@ describe('runChatTurn — G3 interrupt/replan', () => {
 });
 
 describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
-  it('defer 回放条目:跳过 bookkeeping+judge 但**不** gateBypass,deferCount 透传', async () => {
+  it('review R2#10(critical):defer 回放条目只跳 bookkeeping,**不**跳 judge/heart(isWaitReplay 必须是 false,否则会被强制 REPLY 绕过全部节流),不 gateBypass,deferCount 透传', async () => {
     bufferState.pending = [{ ...entry(1), deferReplay: true, deferCount: 1 }];
 
     await runChatTurn(turnJob(), 'turn-1');
 
     const judged = processPipelineMock.mock.calls[0]![0] as {
-      turnContext?: { isWaitReplay?: boolean; gateBypass?: boolean; deferCount?: number };
+      turnContext?: { isWaitReplay?: boolean; isDeferReplay?: boolean; gateBypass?: boolean; deferCount?: number };
     };
-    expect(judged.turnContext?.isWaitReplay).toBe(true);
+    // isWaitReplay=false 是关键不变量:true 会让 pipeline 把这条消息强制
+    // 判成 REPLY(rule=turn_replan∈DIRECT_INTERACTION_RULES)并跳过
+    // judge/heart,gate 也会因 isDirectInteraction 直接放行——defer 存在
+    // 的意义(到点重新裁决)就整个失效了(review #10,曾经的真实回归)。
+    expect(judged.turnContext?.isWaitReplay).toBe(false);
+    expect(judged.turnContext?.isDeferReplay).toBe(true);
     expect(judged.turnContext?.gateBypass).toBe(false);
     expect(judged.turnContext?.deferCount).toBe(1);
   });
@@ -647,18 +652,21 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
     expect(judged.turnContext?.waitResume).toBeUndefined();
   });
 
-  it('review #8:非 wait_timeout 触发的回合不构造 waitResume(如普通 message 回合)', async () => {
+  it('review R2#2/R2#8:waitResume 判定不依赖回合 trigger(handleWaitResume 的 scheduleTurn 不带 forceNew,回合被合并/复用时 trigger 会变成 message/direct,曾经的 trigger 门槛会让提示在最该生效的活跃群里失效)', async () => {
     bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30 }];
 
+    // 即使触发这个回合的 trigger 是 'message'(coalesce 复用/markDirty 收尾
+    // 重排都会产生这个 trigger),drain 出来的条目自身带 waitReplay=true,
+    // 就该构造 waitResume —— 判定依据是条目本身,不是触发回合的 trigger。
     await runChatTurn(turnJob('message'), 'turn-1');
 
     const judged = processPipelineMock.mock.calls[0]![0] as {
-      turnContext?: { waitResume?: unknown };
+      turnContext?: { waitResume?: { waitSec?: number; hadNewMessages: boolean } };
     };
-    expect(judged.turnContext?.waitResume).toBeUndefined();
+    expect(judged.turnContext?.waitResume).toEqual({ waitSec: 30, hadNewMessages: false });
   });
 
-  it('review #10:回合开始的 timing 快照透传给每个 judged entry', async () => {
+  it('review R1#10:回合开始的 timing 快照透传给每个 judged entry', async () => {
     envState.TIMING_GATE_ENABLED = true;
     chatState = { state: 'RUNNING' };
     bufferState.pending = [entry(1)];
@@ -669,5 +677,52 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
       turnContext?: { timingStateSnapshot?: unknown };
     };
     expect(judged.turnContext?.timingStateSnapshot).toBe(chatState);
+  });
+
+  it('review R2#4:defer 回放条目落进 WAIT per-person 抑制(trackEntry 路径)时也要跳过 bookkeeping,防止 addMessage 把同一条消息第二次写进上下文', async () => {
+    envState.TIMING_GATE_ENABLED = true;
+    envState.TURN_WAIT_PER_PERSON = true as never;
+    chatState = { state: 'WAIT', waitTriggerUids: [101] };
+    bufferState.pending = [
+      {
+        update: { message: { message_id: 1, chat: { id: CHAT, type: 'supergroup' }, from: { id: 101, first_name: 'A' }, text: '重放条目' } } as never,
+        chatId: CHAT,
+        messageId: 1,
+        enqueuedAt: Date.now(),
+        deferReplay: true,
+        deferCount: 1,
+      },
+    ];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const tracked = processPipelineMock.mock.calls[0]![0] as {
+      skipReply?: boolean;
+      turnContext?: { isWaitReplay?: boolean; isDeferReplay?: boolean };
+    };
+    // 走的是 trackEntry(非 judged)路径,但首轮已经入过账 —— 必须显式
+    // 跳过 bookkeeping,否则这条消息会在 Redis 上下文列表里出现两次。
+    expect(tracked.skipReply).toBe(true);
+    expect(tracked.turnContext?.isWaitReplay).toBe(false);
+    expect(tracked.turnContext?.isDeferReplay).toBe(true);
+  });
+
+  it('review R2#4:普通(非回放)条目落进 trackEntry 时不带 turnContext(维持原行为,不误伤既有路径)', async () => {
+    envState.TIMING_GATE_ENABLED = true;
+    envState.TURN_WAIT_PER_PERSON = true as never;
+    chatState = { state: 'WAIT', waitTriggerUids: [101] };
+    bufferState.pending = [
+      {
+        update: { message: { message_id: 1, chat: { id: CHAT, type: 'supergroup' }, from: { id: 101, first_name: 'A' }, text: '老话题继续' } } as never,
+        chatId: CHAT,
+        messageId: 1,
+        enqueuedAt: Date.now(),
+      },
+    ];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const tracked = processPipelineMock.mock.calls[0]![0] as { turnContext?: unknown };
+    expect(tracked.turnContext).toBeUndefined();
   });
 });

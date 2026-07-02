@@ -158,8 +158,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // bookkeeping stage on first processing; skip context-save + tracking
     // side-effects and go straight to judge→reply.
     const isWaitReplay = job.turnContext?.isWaitReplay === true;
+    // review #10: defer replay also skips bookkeeping(已在首轮记过账),但
+    // **不**跳 judge/heart —— 与 isWaitReplay 分开变量,防止再被合流进
+    // "跳过 judge、强制 REPLY" 那条分支(那正是 #10 的根因)。
+    const isDeferReplay = job.turnContext?.isDeferReplay === true;
 
-    if (!isWaitReplay) {
+    if (!isWaitReplay && !isDeferReplay) {
     // 3. Save to context
     const t2 = performance.now();
     await addMessage(job.chatId, formatted);
@@ -311,7 +315,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     });
 
     // 3.55 P1-C talk_value:攒消息计数(gate 真实评估/bot 回复时清零)。
-    // 在 !isWaitReplay 的入册块里 → defer/wait 回放不会重复计数。
+    // 在 !isWaitReplay && !isDeferReplay 的入册块里 → defer/wait 回放不会重复计数。
     if (e.TIMING_GATE_ENABLED && !formatted.isBot) {
       bumpGatePendingCount(job.chatId).catch(() => {});
     }
@@ -426,7 +430,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         return;
       }
     }
-    } // end !isWaitReplay bookkeeping block (G5)
+    } // end !isWaitReplay && !isDeferReplay bookkeeping block (G5/P0-B)
 
     // 3.96 代发回执:这条 bot 消息是不是我们代发命令的结果?是则消费它并
     // 用结果另起一条回复答原问题(否则它会在 judge 被当普通 bot 消息忽略)。
@@ -659,6 +663,10 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       if (l0) {
         judgeResult = l0;
       } else {
+        // review #9:冷却 defer 预算耗尽/排程失败后"穿透给心流裁决"必须是
+        // 真裁决——若紧接着又被下面的参与预算硬阈无 LLM 判决地拦掉,#1 的
+        // "预算耗尽→多烧一次 LLM 而非丢消息"承诺在心流路径就是句空话。
+        let bypassEngagementHardPass = false;
         const cooldownRemainingMs =
           job.turnContext?.skipGateCooldown || heartContinuation
             ? 0
@@ -682,6 +690,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
                 chatId: job.chatId,
                 messageId: formatted.messageId,
                 enqueuedAt: job.enqueuedAt,
+                // review #3/#7:必须与 gate 路径(:1029-1036)同样保留 obligation
+                // 字段——非 @ 的问句(QUESTION_RE)也会带 strong obligation,
+                // 掉了这三个字段会让重评时保护性 wait 判不出来,债务被静默丢弃。
+                obligationId: job.turnContext.obligationId,
+                obligationTargetUid: job.turnContext.obligationTargetUid,
+                obligationStrong: job.turnContext.obligationStrong,
               },
               deferCount: job.turnContext.deferCount ?? 0,
               retryAfterMs: cooldownRemainingMs,
@@ -695,11 +709,13 @@ export async function processPipeline(job: ChatJob): Promise<void> {
               return;
             }
             logger.warn({ chatId: job.chatId }, "Heart cooldown defer reschedule failed, falling through to heart");
+            bypassEngagementHardPass = true;
           } else {
             logger.info(
               { chatId: job.chatId, deferCount: job.turnContext.deferCount },
               "Heart cooldown defer budget exhausted, falling through to heart",
             );
+            bypassEngagementHardPass = true;
           }
         }
         // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
@@ -707,7 +723,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // P0-A:连续免检窗口内跳过硬阈 —— 对话进行中 bot 占比天然偏高,
         // 硬阈恰好会造成"聊两句就蒸发";让心流自己决定去留。
         const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
-        if (!heartContinuation && engagement.budget <= HARD_PASS_BUDGET) {
+        if (!heartContinuation && !bypassEngagementHardPass && engagement.budget <= HARD_PASS_BUDGET) {
           await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
           logger.info(
             { chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors },
