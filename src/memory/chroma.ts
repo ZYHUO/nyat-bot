@@ -13,13 +13,19 @@ import { createHash } from 'node:crypto';
 import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
+import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility } from './visibility.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
  * Qdrant returns cosine similarity directly (normalized embeddings ⇒ ~[0,1]); we
  * clamp it to [0,1]. Optional so callers that don't need it can ignore it.
  */
-export type ScoredMessage = FormattedMessage & { score?: number };
+export type ScoredMessage = FormattedMessage & {
+  score?: number;
+  /** 机制1:记忆级 visibility 与来源会话(跨上下文召回时 scrub 用)。 */
+  visibility?: MemoryVisibility;
+  sourceChatId?: number | null;
+};
 
 const QDRANT_HOST = process.env['QDRANT_HOST'] ?? '127.0.0.1';
 const QDRANT_PORT = parseInt(process.env['QDRANT_PORT'] ?? '6333', 10);
@@ -121,7 +127,7 @@ function client(): QdrantClient {
   return _client;
 }
 
-/** Ensure the collection (+ chatId payload index) exists; returns the client. */
+/** Ensure the collection (+ payload indexes) exists; returns the client. */
 function getStore(): Promise<QdrantClient> {
   if (_ready) return _ready;
   _ready = (async () => {
@@ -143,6 +149,10 @@ function getStore(): Promise<QdrantClient> {
       });
       logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection created');
     }
+    // 机制1/4:uid index 支撑 per-user 跨上下文检索(searchMemoryByUser)。
+    // 幂等——已存在的 collection(首建分支不跑)也要补建;createPayloadIndex
+    // 对已有 index 是 no-op,包 try/catch 防并发/竞态噪声。
+    await ensurePayloadIndex(c, 'uid', 'integer');
     logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection ready');
     return c;
   })().catch((err) => {
@@ -150,6 +160,21 @@ function getStore(): Promise<QdrantClient> {
     throw err;
   });
   return _ready;
+}
+
+/** 幂等建 payload index(已存在则 no-op;失败仅告警,不阻断)。 */
+async function ensurePayloadIndex(
+  c: QdrantClient,
+  field: string,
+  schema: 'integer' | 'keyword',
+): Promise<void> {
+  try {
+    await c.createPayloadIndex(COLLECTION_NAME, {
+      field_name: field, field_schema: schema, wait: true,
+    });
+  } catch (err) {
+    logger.debug({ err, field }, 'createPayloadIndex non-fatal (likely already exists)');
+  }
 }
 
 // ── Public API ────────────────────────────────────────────
@@ -161,6 +186,8 @@ function getStore(): Promise<QdrantClient> {
 export async function memorizeMessage(
   chatId: number,
   msg: FormattedMessage,
+  /** 机制1:覆盖默认 visibility(如频道帖显式传 'public');默认按会话私密性推断。 */
+  visibilityOverride?: MemoryVisibility,
 ): Promise<void> {
   const text = msg.textContent || msg.captionContent || '';
   if (!text.trim() || msg.isBot) return;
@@ -171,6 +198,9 @@ export async function memorizeMessage(
     if (!vector) return;
 
     const mid = `${chatId}_${msg.messageId}`;
+    // 机制1:无条件写 visibility + sourceChatId(前向兼容,让数据先积累;
+    // scrub 由 MEMORY_VISIBILITY_ENABLED 门控,不影响默认锁 chatId 的检索)。
+    const visibility: MemoryVisibility = visibilityOverride ?? defaultVisibilityForChat(chatId);
     await store.upsert(COLLECTION_NAME, {
       wait: false,
       points: [{
@@ -186,6 +216,8 @@ export async function memorizeMessage(
           timestamp: msg.timestamp,
           role: msg.role,
           text,
+          visibility,
+          sourceChatId: chatId,
         },
       }],
     });
@@ -246,29 +278,96 @@ async function _searchMemoryInner(
 
   const messages: ScoredMessage[] = [];
   for (const hit of hits) {
-    const meta = (hit.payload ?? {}) as Record<string, unknown>;
-    const doc = meta['text'] as string | undefined;
-    if (!doc) continue;
-
-    // Qdrant Cosine returns similarity directly (higher = closer); clamp to [0,1].
-    const score = typeof hit.score === 'number'
-      ? Math.max(0, Math.min(1, hit.score))
-      : undefined;
-
-    messages.push({
-      role: (meta['role'] as 'user' | 'assistant') ?? 'user',
-      uid: (meta['uid'] as number) ?? 0,
-      username: (meta['username'] as string) ?? '',
-      fullName: (meta['fullName'] as string) ?? '',
-      timestamp: (meta['timestamp'] as number) ?? 0,
-      messageId: (meta['messageId'] as number) ?? 0,
-      textContent: doc,
-      isForwarded: false,
-      score,
-    });
+    const m = hitToMessage(hit);
+    if (m) messages.push(m);
   }
 
   return messages;
+}
+
+/** Qdrant hit → ScoredMessage(带 visibility/sourceChatId);无文本返回 null。 */
+function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: number }): ScoredMessage | null {
+  const meta = (hit.payload ?? {}) as Record<string, unknown>;
+  const doc = meta['text'] as string | undefined;
+  if (!doc) return null;
+  // Qdrant Cosine returns similarity directly (higher = closer); clamp to [0,1].
+  const score = typeof hit.score === 'number'
+    ? Math.max(0, Math.min(1, hit.score))
+    : undefined;
+  const rawVis = meta['visibility'];
+  const visibility = (rawVis === 'private' || rawVis === 'contextual' || rawVis === 'public')
+    ? rawVis
+    : undefined;
+  return {
+    role: (meta['role'] as 'user' | 'assistant') ?? 'user',
+    uid: (meta['uid'] as number) ?? 0,
+    username: (meta['username'] as string) ?? '',
+    fullName: (meta['fullName'] as string) ?? '',
+    timestamp: (meta['timestamp'] as number) ?? 0,
+    messageId: (meta['messageId'] as number) ?? 0,
+    textContent: doc,
+    isForwarded: false,
+    score,
+    visibility,
+    sourceChatId: (meta['sourceChatId'] as number) ?? (meta['chatId'] as number) ?? null,
+  };
+}
+
+/**
+ * 机制4:per-uid 跨上下文记忆检索(旁路,不锁 chatId)。filter 改按 uid,
+ * 返回**强制过 scrubMemoryHits(boundChatId)**——默认带 public + 非私密来源
+ * contextual,private 一律剔除。仅 MEMORY_CROSS_CONTEXT_ENABLED &&
+ * MEMORY_VISIBILITY_ENABLED 同开时才应由调用方启用(fail-closed 见 retriever)。
+ */
+export async function searchMemoryByUser(
+  uid: number,
+  query: string,
+  boundChatId: number,
+  topK = 8,
+  timeoutMs = 500,
+): Promise<ScoredMessage[]> {
+  if (!query.trim() || !uid) return [];
+  try {
+    return await Promise.race([
+      _searchMemoryByUserInner(uid, query, boundChatId, topK),
+      new Promise<ScoredMessage[]>((resolve) => setTimeout(() => resolve([]), timeoutMs)),
+    ]);
+  } catch (err) {
+    logger.debug({ err, uid }, 'per-user memory search failed (non-critical)');
+    return [];
+  }
+}
+
+async function _searchMemoryByUserInner(
+  uid: number,
+  query: string,
+  boundChatId: number,
+  topK: number,
+): Promise<ScoredMessage[]> {
+  const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
+  const [vector] = await embed([query]);
+  if (!vector) return [];
+
+  // 多取一些候选,scrub 掉跨界私密后仍够 topK。
+  const hits = await store.search(COLLECTION_NAME, {
+    vector,
+    limit: topK * 3,
+    filter: { must: [{ key: 'uid', match: { value: uid } }] },
+    with_payload: true,
+    params: { quantization: { rescore: true, oversampling: 2.0 } },
+  });
+
+  const raw: ScoredMessage[] = [];
+  for (const hit of hits) {
+    const m = hitToMessage(hit);
+    if (m) raw.push(m);
+  }
+  // R1 读隔离:剔除跨界私密(DM private / 敏感群来源)。
+  const { kept, dropped } = scrubMemoryHits(raw, boundChatId);
+  if (dropped > 0) {
+    logger.debug({ uid, boundChatId, dropped, kept: kept.length }, 'per-user memory scrubbed cross-context private');
+  }
+  return kept.slice(0, topK);
 }
 
 /** Delete memory entries by their string id (`${chatId}_${messageId}`). */

@@ -28,7 +28,8 @@ export async function runChannelSync(): Promise<void> {
         };
         // Use negative hash as chatId so channel posts are searchable
         const channelChatId = -(Math.abs(hashCode(username)) || username.split('').reduce((a, c) => a + c.charCodeAt(0), 1));
-        await memorizeMessage(channelChatId, fakeMsg);
+        // 机制1:公开频道帖 → visibility='public',可跨上下文自由引用。
+        await memorizeMessage(channelChatId, fakeMsg, 'public');
       }
       if (posts.length > 0) {
         logger.info({ username, count: posts.length }, 'Channel sync complete');

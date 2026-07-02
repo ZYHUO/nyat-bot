@@ -188,6 +188,40 @@ const envSchema = z.object({
   METRICS_ENABLED: booleanFromEnv.default(false),
   // 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。
   PERSON_IDENTITY_ENABLED: booleanFromEnv.default(false),
+  // ── DM↔群记忆连结(借鉴 CyberGroupmate 以人为中心统一记忆;docs/dm-group-memory-*.md)──
+  // 机制1 隐私 visibility 兜底:记忆/画像跨上下文返回前按 private/contextual/public
+  // 逐条 scrub(DM 默认 private,群默认 contextual)。是机制3/4 跨上下文共享的前置门,
+  // 关闭时跨上下文入口一律 fail-closed 拒绝返回。默认关。
+  MEMORY_VISIBILITY_ENABLED: booleanFromEnv.default(false),
+  // 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 由 DM_AUTO_PRIVATE 自动判定。
+  MEMORY_SENSITIVE_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  // DM 是否自动判为私密会话(CGM dmAutoPrivate)。默认 true。
+  DM_AUTO_PRIVATE: booleanFromEnv.default(true),
+  // 机制5 LLM 全局画像合并 cron:低频把某人各上下文(群+DM)画像喂便宜模型提炼成
+  // 全局 traits/interests/relation,写回 person_identity 全局列。默认关。
+  PROFILE_MERGE_ENABLED: booleanFromEnv.default(false),
+  // 合并灰度群列表(逗号分隔 chatId,群为负数),空 = 对所有上下文生效。
+  PROFILE_MERGE_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  // 全局画像合并走哪个便宜模型 usage 路由。
+  PROFILE_MERGE_USAGE: z.string().default('summarize'),
+  // 机制4 跨上下文记忆召回:per-uid 旁路检索(不锁 chatId),返回强制过 visibility
+  // scrub(默认带 public + 非私密来源 contextual,private 一律剔除)。
+  // **必须** MEMORY_VISIBILITY_ENABLED 也开才生效(fail-closed)。默认关。
+  MEMORY_CROSS_CONTEXT_ENABLED: booleanFromEnv.default(false),
   // 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。
   TOPIC_REGISTRY_ENABLED: booleanFromEnv.default(false),
   TOPIC_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(8),
