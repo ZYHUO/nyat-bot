@@ -63,7 +63,7 @@ export async function runRelationshipSummarize(): Promise<void> {
           },
           { role: 'user', content: `对话片段:\n${lines}\n\n一句话概括你和TA:` },
         ],
-        maxTokens: 80,
+        maxTokens: 2000, // step-3.7-flash 是推理模型:留足预算让思考完+出content(原80被截断成空)
         temperature: 0.6,
       });
 

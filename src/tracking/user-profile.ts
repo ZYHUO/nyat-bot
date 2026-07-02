@@ -591,7 +591,7 @@ ${tagLine}${existingBlock}最新发言(${pending.length}条):\n${messagesBlock}`
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },
         ],
-        maxTokens: 500,
+        maxTokens: 2500, // 推理模型留足预算(原500被截断成空)
         temperature: 0.3,
       });
 

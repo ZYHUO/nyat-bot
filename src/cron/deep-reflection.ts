@@ -42,15 +42,20 @@ export async function reflectChat(chatId: number): Promise<number> {
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `群最近 ${msgs.length} 条聊天:\n${lines}\n\n输出「本群近况」简报:` },
       ],
-      maxTokens: 400,
+      maxTokens: 2500, // 推理模型留足预算(原400被截断成空)
       temperature: 0.4,
     });
     digest = result.content.trim().slice(0, 600);
   } catch (err) {
-    logger.debug({ err, chatId }, 'deep-reflection: LLM failed');
+    // info 级(只在失败时打,不刷屏):灰度排障要能看见 LLM 到底为啥没产出。
+    const em = err instanceof Error ? err.message : String(err);
+    logger.info({ chatId, msgs: msgs.length, err: em.slice(0, 120) }, 'deep-reflection: LLM failed');
     return 0;
   }
-  if (digest.length < 10) return 0;
+  if (digest.length < 10) {
+    logger.info({ chatId, msgs: msgs.length, digestLen: digest.length }, 'deep-reflection: digest too short, skipped');
+    return 0;
+  }
 
   const now = Math.floor(Date.now() / 1000);
   getDb().prepare(

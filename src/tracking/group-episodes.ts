@@ -74,7 +74,7 @@ export async function summarizeEpisodes(chatId: number): Promise<number> {
         },
         { role: 'user', content: lines },
       ],
-      maxTokens: 300,
+      maxTokens: 2000, // 推理模型留足预算(原300被截断成空)
       temperature: 0.3,
     });
     content = result.content;
