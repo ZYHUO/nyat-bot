@@ -54,7 +54,8 @@ import {
   transitionToRunning,
   recordGateContinue,
   getChatState,
-  isInGateCooldown,
+  getGateCooldownRemainingMs,
+  isInContinuation,
 } from "./timing/chat-runtime.js";
 import { loadCachedPrompt } from "../shared/config.js";
 import { composeSelfState } from "./heart/self-state.js";
@@ -646,17 +647,51 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       if (!l0) {
         try { tstate = await getChatState(job.chatId); } catch { /* non-critical */ }
       }
+      // P0-A 连续对话免检(心流路径版):bot 刚回复过/心流刚放行过的窗口内,
+      // 跳过冷却丢弃与参与预算硬阈,让心流自己决定 —— 心流≈MaiBot 的
+      // planner,连续 Planner 状态下消息直达 planner 不过闸。心流一旦 pass
+      // (负向决策更新 lastGateAt)免检立刻失效,自限不会永动。
+      const heartContinuation =
+        e.TURN_GATE_CONTINUATION && tstate !== undefined && isInContinuation(tstate);
       if (l0) {
         judgeResult = l0;
-      } else if (!job.turnContext?.skipGateCooldown && await isInGateCooldown(job.chatId, tstate, formatted.uid)) {
-        // 冷却短路:刚 pass/wait 过(15s 内)→ 不再为每条消息烧一次心流调用
-        logger.debug({ chatId: job.chatId, uid: formatted.uid, lastGateUid: tstate?.lastGateUid }, "Heart skipped (cooldown), pass");
-        return;
       } else {
+        const cooldownRemainingMs =
+          job.turnContext?.skipGateCooldown || heartContinuation
+            ? 0
+            : await getGateCooldownRemainingMs(job.chatId, tstate, formatted.uid);
+        if (cooldownRemainingMs > 0) {
+          // 冷却短路:刚 pass/wait 过 → 不再为每条消息烧一次心流调用。
+          // P0-B:defer 语义下不丢消息 —— 重排到冷却结束带完整语境重评
+          // (MaiBot delayed-task);flag 关/重排失败回落旧静默丢弃。
+          if (e.TURN_GATE_DEFER_COOLDOWN && isTurnActorChat(job.chatId)) {
+            const rescheduled = await scheduleGateDeferReeval({
+              chatId: job.chatId,
+              entry: {
+                update: job.update,
+                chatId: job.chatId,
+                messageId: formatted.messageId,
+                enqueuedAt: job.enqueuedAt,
+              },
+              deferCount: job.turnContext.deferCount ?? 0,
+              retryAfterMs: cooldownRemainingMs,
+              reason: 'heart_cooldown_defer',
+            }).catch(() => false);
+            logger.info(
+              { chatId: job.chatId, uid: formatted.uid, rescheduled, cooldownRemainingMs },
+              rescheduled ? "Heart cooldown → timed re-eval scheduled" : "Heart skipped (cooldown), pass",
+            );
+            return;
+          }
+          logger.debug({ chatId: job.chatId, uid: formatted.uid, lastGateUid: tstate?.lastGateUid }, "Heart skipped (cooldown), pass");
+          return;
+        }
         // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
         // 硬阈以下确定性 pass(不烧心流调用);中间带给心流一句体感注记。
+        // P0-A:连续免检窗口内跳过硬阈 —— 对话进行中 bot 占比天然偏高,
+        // 硬阈恰好会造成"聊两句就蒸发";让心流自己决定去留。
         const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
-        if (engagement.budget <= HARD_PASS_BUDGET) {
+        if (!heartContinuation && engagement.budget <= HARD_PASS_BUDGET) {
           await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
           logger.info(
             { chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors },
