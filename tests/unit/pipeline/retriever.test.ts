@@ -7,6 +7,12 @@ const mockGetAll = vi.fn<(chatId: number) => Promise<FormattedMessage[]>>();
 const mockSearchMemory = vi.fn<
   (chatId: number, query: string, topK: number, timeoutMs: number) => Promise<FormattedMessage[]>
 >();
+const mockSearchMemoryByUser = vi.fn<
+  (uid: number, query: string, boundChatId: number, topK: number, timeoutMs: number) => Promise<Array<FormattedMessage & { sourceChatId?: number | null }>>
+>();
+
+const envValues: Record<string, unknown> = { MEMORY_CROSS_CONTEXT_ENABLED: false, MEMORY_VISIBILITY_ENABLED: false };
+vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getRecent: (...args: Parameters<typeof mockGetRecent>) => mockGetRecent(...args),
@@ -18,9 +24,8 @@ vi.mock('../../../src/ai/token-counter.js', () => ({
 }));
 
 vi.mock('../../../src/memory/chroma.js', () => ({
-  searchMemory: (
-    ...args: Parameters<typeof mockSearchMemory>
-  ) => mockSearchMemory(...args),
+  searchMemory: (...args: Parameters<typeof mockSearchMemory>) => mockSearchMemory(...args),
+  searchMemoryByUser: (...args: Parameters<typeof mockSearchMemoryByUser>) => mockSearchMemoryByUser(...args),
 }));
 
 import { retrieveContext } from '../../../src/pipeline/context/retriever.js';
@@ -46,6 +51,9 @@ describe('Context Retriever', () => {
     mockGetRecent.mockResolvedValue([]);
     mockGetAll.mockResolvedValue([]);
     mockSearchMemory.mockResolvedValue([]);
+    mockSearchMemoryByUser.mockResolvedValue([]);
+    envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = false;
+    envValues['MEMORY_VISIBILITY_ENABLED'] = false;
   });
 
   it('returns recent window messages', async () => {
@@ -290,5 +298,49 @@ describe('Context Retriever', () => {
     );
 
     expect(mockGetAll).toHaveBeenCalled();
+  });
+
+  describe('机制4:跨上下文人物记忆', () => {
+    it('flag 关(默认)→ 不调 searchMemoryByUser', async () => {
+      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1 })]);
+      await retrieveContext(1, makeMsg({ messageId: 3, uid: 1001, textContent: '我上次说的那个' }), 9999);
+      expect(mockSearchMemoryByUser).not.toHaveBeenCalled();
+    });
+
+    it('两 flag 同开 → 调 searchMemoryByUser 并把跨上下文记忆并进 merged', async () => {
+      envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
+      envValues['MEMORY_VISIBILITY_ENABLED'] = true;
+      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1, timestamp: 1700000001 })]);
+      mockSearchMemoryByUser.mockResolvedValue([
+        { ...makeMsg({ messageId: 50, timestamp: 1700000050, textContent: '别的群里说过的公开事' }), sourceChatId: -2002 },
+      ]);
+      const result = await retrieveContext(
+        1, makeMsg({ messageId: 3, uid: 1001, textContent: '我上次说的那个' }), 9999,
+        { mode: 'direct' } as never,
+      );
+      expect(mockSearchMemoryByUser).toHaveBeenCalledWith(1001, expect.any(String), 1, expect.any(Number), expect.any(Number));
+      expect(result.crossContext).toHaveLength(1);
+      expect(result.merged.some((m) => m.textContent === '别的群里说过的公开事')).toBe(true);
+    });
+
+    it('只开 CROSS_CONTEXT 不开 VISIBILITY → fail-closed 不召回', async () => {
+      envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
+      envValues['MEMORY_VISIBILITY_ENABLED'] = false;
+      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1 })]);
+      await retrieveContext(1, makeMsg({ messageId: 3, uid: 1001 }), 9999, { mode: 'direct' } as never);
+      expect(mockSearchMemoryByUser).not.toHaveBeenCalled();
+    });
+
+    it('剔除与当前会话同 sourceChatId 的命中(避免与 semantic 重复)', async () => {
+      envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
+      envValues['MEMORY_VISIBILITY_ENABLED'] = true;
+      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1 })]);
+      mockSearchMemoryByUser.mockResolvedValue([
+        { ...makeMsg({ messageId: 51, textContent: '本会话的' }), sourceChatId: 1 },
+        { ...makeMsg({ messageId: 52, textContent: '别会话的' }), sourceChatId: -2002 },
+      ]);
+      const result = await retrieveContext(1, makeMsg({ messageId: 3, uid: 1001 }), 9999, { mode: 'direct' } as never);
+      expect(result.crossContext?.map((m) => m.textContent)).toEqual(['别会话的']);
+    });
   });
 });

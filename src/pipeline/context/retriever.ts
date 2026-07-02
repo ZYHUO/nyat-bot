@@ -11,7 +11,8 @@ import type { FormattedMessage, RetrievedContext } from '../../shared/types.js';
 import { getRecent, getAll } from './manager.js';
 import { countTokens } from '../../ai/token-counter.js';
 import { slimContextForAI, slimSingleMessage } from './slim.js';
-import { searchMemory, type ScoredMessage } from '../../memory/chroma.js';
+import { searchMemory, searchMemoryByUser, type ScoredMessage } from '../../memory/chroma.js';
+import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
 // ── Semantic relevance gating ────────────────────────────────
@@ -158,6 +159,26 @@ async function retrieveSemantic(
 }
 
 /**
+ * 机制4:跨上下文人物记忆 —— 召回**锚点用户**在别的场景(群/DM)说过的、经
+ * visibility scrub 后可跨界的内容(默认 public + 非私密来源 contextual)。
+ * fail-closed:必须 MEMORY_CROSS_CONTEXT_ENABLED && MEMORY_VISIBILITY_ENABLED 同开。
+ */
+async function retrieveCrossContext(
+  chatId: number,
+  message: FormattedMessage,
+  query: string,
+  topK: number,
+): Promise<FormattedMessage[]> {
+  const e = env();
+  if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) return [];
+  if (!message.uid || message.isBot) return [];
+  // searchMemoryByUser 内部已按 uid 检索 + 强制 scrubMemoryHits(boundChatId=chatId)。
+  const raw = await searchMemoryByUser(message.uid, query, chatId, topK, 500);
+  // 只要"别的场景"的:同 chat 的已由 semantic 路覆盖,这里剔除同 chat 避免重复。
+  return raw.filter((m) => m.sourceChatId !== chatId);
+}
+
+/**
  * Path 3: Thread trace — follow reply_to chain backwards.
  */
 async function retrieveThread(
@@ -280,11 +301,16 @@ export async function retrieveContext(
     const recent = await retrieveRecent(chatId, cfg.recentWindow);
     const recentContextStr = slimContextForAI(recent, message, botUid);
     const recentTokens = countTokens(recentContextStr);
-    const semantic = recentTokens >= cfg.totalTokenBudget
-      ? []
-      : await retrieveSemantic(chatId, queryText, cfg.semanticTopK);
-    const merged = semantic.length > 0
-      ? appendExtrasWithinBudget(recent, semantic, message, botUid, cfg.totalTokenBudget)
+    const overBudget = recentTokens >= cfg.totalTokenBudget;
+    const [semantic, crossContext] = await Promise.all([
+      overBudget ? Promise.resolve([] as FormattedMessage[]) : retrieveSemantic(chatId, queryText, cfg.semanticTopK),
+      // 机制4:DM(direct 模式常是私聊)里也召回该用户在别处说过的可跨界内容
+      // (如"我上次在群里说的那个X")。gated + 已 scrub。
+      overBudget ? Promise.resolve([] as FormattedMessage[]) : retrieveCrossContext(chatId, message, queryText, cfg.semanticTopK),
+    ]);
+    const extras = [...semantic, ...crossContext];
+    const merged = extras.length > 0
+      ? appendExtrasWithinBudget(recent, extras, message, botUid, cfg.totalTokenBudget)
       : recent;
     const contextStr = slimContextForAI(merged, message, botUid);
     const tokenCount = countTokens(contextStr);
@@ -294,6 +320,7 @@ export async function retrieveContext(
       mode: cfg.mode,
       recent: recent.length,
       semantic: semantic.length,
+      crossContext: crossContext.length,
       thread: 0,
       entity: 0,
       merged: merged.length,
@@ -305,6 +332,7 @@ export async function retrieveContext(
       semantic,
       thread: [],
       entity: [],
+      crossContext,
       merged,
       tokenCount,
       contextStr,
@@ -344,14 +372,16 @@ export async function retrieveContext(
   const needsAllMessages = !!message.replyTo || (queryText.match(/@\w+/g) ?? []).length > 0;
   const allMessages = needsAllMessages ? await getAll(chatId) : [];
 
-  const [semantic, thread, entity] = await Promise.all([
+  const [semantic, thread, entity, crossContext] = await Promise.all([
     retrieveSemantic(chatId, queryText, cfg.semanticTopK),
     retrieveThread(chatId, message, cfg.threadMaxDepth, allMessages),
     retrieveEntity(chatId, message, cfg.entityMaxMessages, allMessages),
+    retrieveCrossContext(chatId, message, queryText, cfg.semanticTopK),
   ]);
 
-  // Merge with priority: thread > recent > semantic > entity
-  const allMerged = [...thread, ...recent, ...semantic, ...entity];
+  // Merge with priority: thread > recent > semantic > entity > crossContext
+  // (跨上下文记忆优先级最低——是"补充"而非"主线",预算紧时先让位)。
+  const allMerged = [...thread, ...recent, ...semantic, ...entity, ...crossContext];
   const deduped = deduplicateMessages(allMerged);
 
   // Sort by timestamp
@@ -369,9 +399,10 @@ export async function retrieveContext(
     semantic: semantic.length,
     thread: thread.length,
     entity: entity.length,
+    crossContext: crossContext.length,
     merged: merged.length,
     tokenCount,
   }, 'Context retrieved');
 
-  return { recent, semantic, thread, entity, merged, tokenCount, contextStr };
+  return { recent, semantic, thread, entity, crossContext, merged, tokenCount, contextStr };
 }

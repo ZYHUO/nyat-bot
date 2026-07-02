@@ -91,6 +91,8 @@ export interface RetrievedContext {
   semantic: FormattedMessage[];
   thread: FormattedMessage[];
   entity: FormattedMessage[];
+  /** 机制4:跨上下文人物记忆(锚点用户在别的场景说过的、经 visibility scrub 的内容)。 */
+  crossContext?: FormattedMessage[];
   merged: FormattedMessage[];
   tokenCount: number;
   /**
