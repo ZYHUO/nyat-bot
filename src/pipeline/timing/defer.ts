@@ -20,7 +20,7 @@ import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { enqueueDeferResume } from '../../queue/producer.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
-import { appendPending } from '../turn/buffer.js';
+import { reinjectDeferEntries } from '../turn/buffer.js';
 import type { PendingEntry } from '../turn/types.js';
 
 export const DEFER_MIN_DELAY_MS = 3_000;
@@ -66,19 +66,25 @@ export async function scheduleGateDeferReeval(args: {
  * defer-resume job 到点(worker 调):把暂存条目重注入 pending 并排即时
  * 回合。**不** forceNew:若此刻恰有 active 回合,markDirty 由其收尾重排
  * (条目已在 pending,不会丢);若有 delayed 回合,changeDelay 提前到现在。
+ *
+ * review R3#1:重注入走 reinjectDeferEntries(dedupToken)——BullMQ attempts:5
+ * 重试同一 job 时,令牌门控保证 exactly-once 注入(append 成功、scheduleTurn
+ * 失败的重试不会二次 RPUSH → 不重复回复)。scheduleTurn 幂等(forceNew 未设,
+ * 复用/changeDelay),重试重排无害。dedupToken 用 job.id(每个 defer job 唯一)。
  */
 export async function handleDeferResume(args: {
   chatId: number;
+  dedupToken: string;
   deferResume?: { scheduledAt: number; entries: PendingEntry[] };
 }): Promise<void> {
   const entries = args.deferResume?.entries ?? [];
   if (entries.length === 0) return;
-  for (const entry of entries) {
-    await appendPending(entry);
-  }
+  const injected = await reinjectDeferEntries(args.chatId, args.dedupToken, entries);
   await scheduleTurn(args.chatId, { trigger: 'gate_defer', delayMsOverride: 0 });
   logger.info(
-    { chatId: args.chatId, entryCount: entries.length },
-    'defer-resume fired → entries re-injected, gate_defer turn scheduled',
+    { chatId: args.chatId, entryCount: entries.length, injected, dedupToken: args.dedupToken },
+    injected === -1
+      ? 'defer-resume retry: entries already injected (dedup), turn re-scheduled'
+      : 'defer-resume fired → entries re-injected, gate_defer turn scheduled',
   );
 }

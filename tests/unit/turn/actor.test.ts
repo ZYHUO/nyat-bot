@@ -10,6 +10,9 @@ const envState = {
   TURN_INTERRUPT_MAX_CONSECUTIVE: 3,
   TURN_INTERRUPT_QUIET_MS: 0,
   TURN_MAX_INTERNAL_ROUNDS: 4,
+  // review R3#4:per-person 抑制开关必须有初值 + 在 beforeEach 复位,否则
+  // 设过它的用例会把 true 泄漏给后续用例,悄悄翻转 WAIT 抑制分支。
+  TURN_WAIT_PER_PERSON: false as boolean,
 };
 
 const { processPipelineMock, scheduleTurnMock, transitionToRunningMock } = vi.hoisted(() => ({
@@ -112,6 +115,7 @@ beforeEach(() => {
   envState.TURN_ACTOR_CHAT_IDS = [];
   envState.TIMING_GATE_ENABLED = false;
   envState.TURN_ABORT_ENABLED = false;
+  envState.TURN_WAIT_PER_PERSON = false;
   _resetAbortRegistry();
 });
 

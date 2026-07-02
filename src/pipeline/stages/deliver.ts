@@ -989,10 +989,15 @@ export async function generateAndSendReplies(args: {
     // G6: bounded self-continuation — the bot may follow up its own line a
     // beat later ("对了…"/sticker). Fire-and-forget; yields instantly to any
     // new user message via pending check + abort registry.
+    // review R3#2:defer 回放也要抑制自我接话 —— 这条回复本身是被节流后
+    // 延迟裁决出来的,再叠一条主动"对了…"跟进正好和节流意图相反。拆分
+    // isWaitReplay/isDeferReplay 后 defer 回放的 isWaitReplay=false,必须
+    // 显式带上 isDeferReplay,否则等于在最该收着的路径上多话。
     if (
       e.TURN_SELF_FOLLOWUP_ENABLED &&
       job.turnContext &&
       !job.turnContext.isWaitReplay &&
+      !job.turnContext.isDeferReplay &&
       job.chatId < 0 &&
       sentMessages.length > 0
     ) {

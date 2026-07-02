@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const { appendPendingMock, scheduleTurnMock, enqueueDeferResumeMock } = vi.hoisted(() => ({
-  appendPendingMock: vi.fn(async () => ({ count: 1, firstPendingAt: 0 })),
+const { reinjectDeferEntriesMock, scheduleTurnMock, enqueueDeferResumeMock } = vi.hoisted(() => ({
+  reinjectDeferEntriesMock: vi.fn(async (): Promise<number> => 1),
   scheduleTurnMock: vi.fn(async () => {}),
   enqueueDeferResumeMock: vi.fn(async () => 'defer-job-id'),
 }));
-vi.mock('../../../src/pipeline/turn/buffer.js', () => ({ appendPending: appendPendingMock }));
+vi.mock('../../../src/pipeline/turn/buffer.js', () => ({ reinjectDeferEntries: reinjectDeferEntriesMock }));
 vi.mock('../../../src/queue/turn-scheduler.js', () => ({ scheduleTurn: scheduleTurnMock }));
 vi.mock('../../../src/queue/producer.js', () => ({ enqueueDeferResume: enqueueDeferResumeMock }));
 vi.mock('../../../src/shared/logger.js', () => ({
@@ -32,7 +32,8 @@ const entry: PendingEntry = {
 };
 
 beforeEach(() => {
-  appendPendingMock.mockClear();
+  reinjectDeferEntriesMock.mockClear();
+  reinjectDeferEntriesMock.mockResolvedValue(1);
   scheduleTurnMock.mockClear();
   enqueueDeferResumeMock.mockClear();
   envValues['TURN_GATE_DEFER_MAX_REPLAYS'] = 1;
@@ -58,9 +59,10 @@ describe('scheduleGateDeferReeval — 载荷即暂存(review #1 重做)', () => 
     expect(enqueueDeferResumeMock).toHaveBeenCalledWith(-100, 15_000, [
       { ...entry, deferReplay: true, deferCount: 1 },
     ]);
-    // 关键不变量:defer 期间条目**不在** pending(否则回合收尾自我重排会
-    // 提前 drain),也不新建 turn job(否则覆写 meta.scheduledJobId)
-    expect(appendPendingMock).not.toHaveBeenCalled();
+    // 关键不变量:defer 期间条目只在延迟 job 载荷里(不进 pending、不新建
+    // turn job)——避免回合收尾自我重排提前 drain / 覆写 meta.scheduledJobId。
+    // 重注入(reinjectDeferEntries)只发生在 job 到点的 handleDeferResume。
+    expect(reinjectDeferEntriesMock).not.toHaveBeenCalled();
     expect(scheduleTurnMock).not.toHaveBeenCalled();
   });
 
@@ -80,24 +82,38 @@ describe('scheduleGateDeferReeval — 载荷即暂存(review #1 重做)', () => 
   });
 });
 
-describe('handleDeferResume — 到点重注入', () => {
-  it('条目重注入 pending + 排即时回合(不 forceNew:active 回合走 markDirty 收尾重排)', async () => {
+describe('handleDeferResume — 到点重注入(review R3#1 幂等)', () => {
+  it('条目经 reinjectDeferEntries(带 dedupToken)重注入 + 排即时回合(不 forceNew)', async () => {
     const stashed = { ...entry, deferReplay: true, deferCount: 1 };
     await handleDeferResume({
       chatId: -100,
+      dedupToken: 'defer-job-xyz',
       deferResume: { scheduledAt: 1, entries: [stashed] },
     });
-    expect(appendPendingMock).toHaveBeenCalledWith(stashed);
+    expect(reinjectDeferEntriesMock).toHaveBeenCalledWith(-100, 'defer-job-xyz', [stashed]);
     expect(scheduleTurnMock).toHaveBeenCalledWith(-100, {
       trigger: 'gate_defer',
       delayMsOverride: 0,
     });
   });
 
+  it('BullMQ 重试:令牌已注入(reinject 返回 -1)→ 不重复注入,仍重排 turn', async () => {
+    reinjectDeferEntriesMock.mockResolvedValue(-1);
+    const stashed = { ...entry, deferReplay: true, deferCount: 1 };
+    await handleDeferResume({
+      chatId: -100,
+      dedupToken: 'defer-job-xyz',
+      deferResume: { scheduledAt: 1, entries: [stashed] },
+    });
+    // reinject 被调用(它内部原子跳过),返回 -1;turn 仍排(幂等,复用/changeDelay)
+    expect(reinjectDeferEntriesMock).toHaveBeenCalledTimes(1);
+    expect(scheduleTurnMock).toHaveBeenCalledTimes(1);
+  });
+
   it('空载荷 → 静默返回', async () => {
-    await handleDeferResume({ chatId: -100, deferResume: { scheduledAt: 1, entries: [] } });
-    await handleDeferResume({ chatId: -100 });
-    expect(appendPendingMock).not.toHaveBeenCalled();
+    await handleDeferResume({ chatId: -100, dedupToken: 't', deferResume: { scheduledAt: 1, entries: [] } });
+    await handleDeferResume({ chatId: -100, dedupToken: 't' });
+    expect(reinjectDeferEntriesMock).not.toHaveBeenCalled();
     expect(scheduleTurnMock).not.toHaveBeenCalled();
   });
 });

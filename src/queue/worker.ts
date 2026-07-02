@@ -32,10 +32,13 @@ async function processMessage(job: Job<MessageJobData>): Promise<void> {
     return;
   }
 
-  // P0-B: defer-resume — 被 gate/心流 defer 的条目到点重注入 + 排即时回合
+  // P0-B: defer-resume — 被 gate/心流 defer 的条目到点重注入 + 排即时回合。
+  // job.id 作为幂等令牌:BullMQ 重试同一 job 时令牌不变,reinjectDeferEntries
+  // 据此保证 exactly-once 注入(review R3#1)。
   if (job.data.type === 'defer_resume') {
     await handleDeferResume({
       chatId: job.data.chatId,
+      dedupToken: job.id ?? `defer-${job.data.chatId}-${job.data.enqueuedAt}`,
       deferResume: job.data.deferResume,
     });
     return;

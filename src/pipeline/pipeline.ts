@@ -2,8 +2,9 @@
 // Pipeline Orchestrator — full message pipeline
 // ────────────────────────────────────────
 
-import type { ChatJob, JudgeResult } from "../shared/types.js";
+import type { ChatJob, FormattedMessage, JudgeResult } from "../shared/types.js";
 import { resolveReplyPath, resolveReplyTier } from "../shared/types.js";
+import type { PendingEntry } from "./turn/types.js";
 import { formatMessage } from "./formatter.js";
 import { addMessage, getRecent } from "./context/manager.js";
 import { judge, l0Rule } from "./judge/judge.js";
@@ -70,6 +71,21 @@ import { hasDmEver } from "../tracking/dm-state.js";
 import { isMaster } from "../admin/auth.js";
 import { pushSleepPending, clearSleepPending } from "../tracking/sleep-queue.js";
 
+
+// review R3#5:gate 路径与心流路径的 defer 暂存条目曾各自手写、字段漂移过
+// (R2#3/#7 就是心流那份漏了 obligation)。抽成单一构造点,新增字段只改这里,
+// 两条 defer 路径永远同构。
+function buildDeferEntry(job: ChatJob, formatted: FormattedMessage): PendingEntry {
+  return {
+    update: job.update,
+    chatId: job.chatId,
+    messageId: formatted.messageId,
+    enqueuedAt: job.enqueuedAt,
+    obligationId: job.turnContext?.obligationId,
+    obligationTargetUid: job.turnContext?.obligationTargetUid,
+    obligationStrong: job.turnContext?.obligationStrong,
+  };
+}
 
 // ── Main pipeline orchestrator ──────────────────────────────────────
 
@@ -685,18 +701,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           if (hasDeferBudget(job.turnContext.deferCount)) {
             const rescheduled = await scheduleGateDeferReeval({
               chatId: job.chatId,
-              entry: {
-                update: job.update,
-                chatId: job.chatId,
-                messageId: formatted.messageId,
-                enqueuedAt: job.enqueuedAt,
-                // review #3/#7:必须与 gate 路径(:1029-1036)同样保留 obligation
-                // 字段——非 @ 的问句(QUESTION_RE)也会带 strong obligation,
-                // 掉了这三个字段会让重评时保护性 wait 判不出来,债务被静默丢弃。
-                obligationId: job.turnContext.obligationId,
-                obligationTargetUid: job.turnContext.obligationTargetUid,
-                obligationStrong: job.turnContext.obligationStrong,
-              },
+              // review R3#5:与 gate 路径共用 buildDeferEntry,obligation 字段
+              // (非 @ 问句的 strong obligation)不再靠两处手写同步,永不漂移。
+              entry: buildDeferEntry(job, formatted),
               deferCount: job.turnContext.deferCount ?? 0,
               retryAfterMs: cooldownRemainingMs,
               reason: 'heart_cooldown_defer',
@@ -757,17 +764,28 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
         import("./heart/mind.js").then(({ noteThought }) => noteThought(job.chatId, heart.why)).catch(() => {});
         if (heart.act === 'wait') {
-          // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)
+          // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)。
+          // review R3(被 verifier 误判 refuted,经代码对比确认真实):必须与
+          // gate=wait 路径(:setWaitAnchor/:transitionToWait)一样保留
+          // obligation 字段 + waitStartedAt,否则非 @ 问句的强债务在心流 wait
+          // 回访时判不出保护性 wait,债务被静默丢弃(与 R2#3/#7 同 bug 类)。
           const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
           if (e.TURN_WAIT_RESUME_ENABLED) {
             try {
               await setWaitAnchor(job.chatId, {
                 update: job.update, chatId: job.chatId,
                 messageId: formatted.messageId, enqueuedAt: job.enqueuedAt, waitReplay: true,
+                waitStartedAt: Date.now(),
+                obligationId: job.turnContext.obligationId,
+                obligationTargetUid: job.turnContext.obligationTargetUid,
+                obligationStrong: job.turnContext.obligationStrong,
               }, waitSec + 120);
             } catch { /* non-critical */ }
           }
-          await transitionToWait(job.chatId, waitSec, formatted.messageId, formatted.uid);
+          await transitionToWait(
+            job.chatId, waitSec, formatted.messageId, formatted.uid,
+            job.turnContext.obligationId,
+          );
           logger.info({ chatId: job.chatId, why: heart.why, triggerUid: formatted.uid }, "Pipeline complete (heart=wait)");
           return;
         }
@@ -1034,36 +1052,48 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // P0-B:actor 路径不再丢消息 —— 重新入 pending 并排 gate_defer 回合,
         // 到点(冷却已过/消息攒够)带完整语境重评(MaiBot delayed-task 语义)。
         if (gateDecision.deferOnly) {
+          const canReschedule = !!job.turnContext && isTurnActorChat(job.chatId);
           let rescheduled = false;
-          if (job.turnContext && isTurnActorChat(job.chatId)) {
+          if (canReschedule && job.turnContext) {
             rescheduled = await scheduleGateDeferReeval({
               chatId: job.chatId,
-              entry: {
-                update: job.update,
-                chatId: job.chatId,
-                messageId: formatted.messageId,
-                enqueuedAt: job.enqueuedAt,
-                obligationId: job.turnContext.obligationId,
-                obligationTargetUid: job.turnContext.obligationTargetUid,
-                obligationStrong: job.turnContext.obligationStrong,
-              },
+              entry: buildDeferEntry(job, formatted),
               deferCount: job.turnContext.deferCount ?? 0,
               retryAfterMs: gateDecision.retryAfterMs ?? e.TIMING_GATE_COOLDOWN_SEC * 1000,
               reason: gateDecision.reason,
             }).catch((err) => {
-              logger.warn({ err, chatId: job.chatId }, "scheduleGateDeferReeval failed (falling back to drop)");
+              logger.warn({ err, chatId: job.chatId }, "scheduleGateDeferReeval failed");
               return false;
             });
           }
-          const totalMs = Math.round(performance.now() - start);
-          logger.info(
-            { chatId: job.chatId, totalMs, reason: gateDecision.reason, rescheduled, retryAfterMs: gateDecision.retryAfterMs, triggerUid: formatted.uid, timings },
-            rescheduled
-              ? "Pipeline complete (gate defer → timed re-eval)"
-              : "Pipeline complete (gate cooldown defer, no reply)",
-          );
-          return;
-        }
+          if (rescheduled) {
+            const totalMs = Math.round(performance.now() - start);
+            logger.info(
+              { chatId: job.chatId, totalMs, reason: gateDecision.reason, retryAfterMs: gateDecision.retryAfterMs, triggerUid: formatted.uid, timings },
+              "Pipeline complete (gate defer → timed re-eval)",
+            );
+            return;
+          }
+          if (canReschedule) {
+            // review R3#3:actor chat 但重排失败 —— judge 早已判 REPLY,
+            // 这里"烧一次"(照常回复)而不是静默丢弃,与心流路径的
+            // bypassEngagementHardPass 同一"burn 而非 drop"契约(R2#9)。
+            // 不 return,穿透到下方 continue 路径的 recordGateContinue + 回复。
+            logger.warn(
+              { chatId: job.chatId, reason: gateDecision.reason, triggerUid: formatted.uid },
+              "gate defer reschedule failed, burning (reply now) instead of drop",
+            );
+          } else {
+            // 非 actor chat:无 pending 缓冲可回放,defer 只能退化为静默丢弃
+            // (旧 TURN_GATE_DEFER_COOLDOWN 语义,未变)。
+            const totalMs = Math.round(performance.now() - start);
+            logger.info(
+              { chatId: job.chatId, totalMs, reason: gateDecision.reason, triggerUid: formatted.uid, timings },
+              "Pipeline complete (gate cooldown defer, no reply — non-actor)",
+            );
+            return;
+          }
+        } else {
         if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
           import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
         }
@@ -1083,6 +1113,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           "Pipeline complete (gate=no_action, no reply)",
         );
         return;
+        } // end else (regular no_action drop; deferOnly-burn falls through to reply)
       }
 
       // continue → record + transition (no-op if already RUNNING) and fall through。

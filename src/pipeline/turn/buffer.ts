@@ -56,6 +56,74 @@ export async function appendPending(entry: PendingEntry): Promise<{ count: numbe
   return { count: result[0] ?? 0, firstPendingAt: Number(result[1] ?? now) };
 }
 
+// review R3#1:defer_resume job 现在有 attempts:5 重试,handleDeferResume 的
+// "append 再 scheduleTurn"不是幂等的——重试若发生在 append 成功、scheduleTurn
+// 失败之后,会把同一批 entries 二次 RPUSH → 重复回复。这里用 job 令牌门控:
+// 令牌已在集合里 → 说明上一次尝试已成功注入,直接跳过(不重复);令牌不在 →
+// 干净注入(Lua 原子:SADD 与 RPUSH 同一脚本内完成,要么都做要么都不做)。
+// KEYS: [1]=pending [2]=meta [3]=dedupSet
+// ARGV: [1]=token [2]=ttlSec [3]=nowMs [4]=itemsJson([{json,messageId,direct}])
+const REINJECT_DEFER_LUA = `
+if redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1 then
+  return -1
+end
+local items = cjson.decode(ARGV[4])
+for i, it in ipairs(items) do
+  redis.call('RPUSH', KEYS[1], it.json)
+  local msgId = tonumber(it.messageId)
+  if msgId and msgId > 0 then
+    local hwm = tonumber(redis.call('HGET', KEYS[2], 'highWatermark') or '0')
+    if msgId > hwm then
+      redis.call('HSET', KEYS[2], 'highWatermark', tostring(msgId))
+    end
+  end
+  if it.direct then
+    redis.call('HSET', KEYS[2], 'pendingDirect', '1')
+  end
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+redis.call('HSETNX', KEYS[2], 'firstPendingAt', ARGV[3])
+redis.call('HSET', KEYS[2], 'lastMsgAt', ARGV[3])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+redis.call('SADD', KEYS[3], ARGV[1])
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[2]))
+return #items
+`;
+
+const DEFER_DEDUP_KEY = (chatId: number) => `xxb:turn:deferinj:${chatId}`;
+
+/**
+ * P0-B / review R3#1:幂等地把一批被 defer 的条目重注入 pending。
+ * `dedupToken` 唯一标识这次 defer 注入(用 defer_resume 的 jobId)——BullMQ
+ * 重试同一 job 时令牌相同,第二次起原子跳过,保证 exactly-once 注入。
+ * 返回注入的条目数;-1 表示该令牌已注入过(本次跳过,非错误)。
+ */
+export async function reinjectDeferEntries(
+  chatId: number,
+  dedupToken: string,
+  entries: PendingEntry[],
+): Promise<number> {
+  if (entries.length === 0) return 0;
+  const redis = getRedis();
+  const items = entries.map((e) => ({
+    json: JSON.stringify(e),
+    messageId: e.messageId ?? 0,
+    direct: e.direct === true,
+  }));
+  const result = (await redis.eval(
+    REINJECT_DEFER_LUA,
+    3,
+    PENDING_KEY(chatId),
+    META_KEY(chatId),
+    DEFER_DEDUP_KEY(chatId),
+    dedupToken,
+    String(KEY_TTL_SEC),
+    String(Date.now()),
+    JSON.stringify(items),
+  )) as number;
+  return result;
+}
+
 export async function drainPending(chatId: number): Promise<PendingEntry[]> {
   const redis = getRedis();
   const pendingKey = PENDING_KEY(chatId);
