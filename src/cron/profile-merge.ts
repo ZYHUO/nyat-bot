@@ -70,7 +70,8 @@ function parseMergeJson(raw: string): MergeOutput | null {
  * 可被 cron 批量调,也可被 person-identity on-read 后台触发(dynamic import 防循环)。
  */
 export async function mergeGlobalProfile(uid: number): Promise<boolean> {
-  if (!uid) return false;
+  // 负数 uid = sender_chat(匿名管理员/频道),不是真实的人,不合并全局画像。
+  if (!uid || uid <= 0) return false;
   try {
     const contexts = await getUserContexts(uid).catch(() => [] as number[]);
     if (contexts.length <= 1) return false; // 单上下文无需"跨上下文"合并

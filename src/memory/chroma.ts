@@ -326,7 +326,8 @@ export async function searchMemoryByUser(
   topK = 8,
   timeoutMs = 500,
 ): Promise<ScoredMessage[]> {
-  if (!query.trim() || !uid) return [];
+  // 负数 uid = sender_chat(匿名管理员/频道),不是真实的人,不做 per-person 检索。
+  if (!query.trim() || !uid || uid <= 0) return [];
   try {
     return await Promise.race([
       _searchMemoryByUserInner(uid, query, boundChatId, topK),

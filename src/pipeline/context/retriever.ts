@@ -171,7 +171,10 @@ async function retrieveCrossContext(
 ): Promise<ScoredMessage[]> {
   const e = env();
   if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) return [];
-  if (!message.uid || message.isBot) return [];
+  // 只对**真实用户**做 per-person 跨上下文召回。负数 uid 是 Telegram sender_chat
+  // (匿名管理员 / 频道身份发言)——它把不同的匿名管理员、链接频道全塞进同一个
+  // "uid" 桶,当成"同一个人"跨群召回是错的(实况观察发现)。真实用户 uid 恒为正。
+  if (!message.uid || message.uid <= 0 || message.isBot) return [];
   // searchMemoryByUser 内部已按 uid 检索 + 剔除同会话(#7)+ 强制 scrubMemoryHits。
   const hits = await searchMemoryByUser(message.uid, query, chatId, topK, 500);
   // 可观测性:这条特性只在真正召回到"别处说过的"内容时才 info 打点(不刷屏),

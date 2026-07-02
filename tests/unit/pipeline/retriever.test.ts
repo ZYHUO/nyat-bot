@@ -329,6 +329,14 @@ describe('Context Retriever', () => {
       expect(result.contextStr).not.toContain('#50');
     });
 
+    it('负数 uid(sender_chat:匿名管理员/频道)→ 不做 per-person 跨上下文召回', async () => {
+      envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
+      envValues['MEMORY_VISIBILITY_ENABLED'] = true;
+      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1 })]);
+      await retrieveContext(1, makeMsg({ messageId: 3, uid: -1003950122280, textContent: 'x' }), 9999, { mode: 'direct' } as never);
+      expect(mockSearchMemoryByUser).not.toHaveBeenCalled();
+    });
+
     it('只开 CROSS_CONTEXT 不开 VISIBILITY → fail-closed 不召回', async () => {
       envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
       envValues['MEMORY_VISIBILITY_ENABLED'] = false;
