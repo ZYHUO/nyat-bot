@@ -12,7 +12,7 @@
 import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { getUserGroups } from '../pipeline/context/manager.js';
+import { getUserContexts } from '../pipeline/context/manager.js';
 import { getAggregatedAffinity } from './user-affinity.js';
 import { getUserProfilePrompt } from './user-profile.js';
 
@@ -24,6 +24,15 @@ export interface PersonIdentityRow {
   primary_chat_id: number | null;
   chat_count: number;
   updated_at: number;
+  // 机制2 全局 PersonProfile 列(0047;由机制5 LLM 合并 cron 产出,可空)
+  traits?: string | null;             // JSON string[]
+  interests?: string | null;          // JSON string[]
+  comm_style?: string | null;
+  relation_to_bot?: string | null;
+  stable_patterns?: string | null;    // JSON string[]
+  source_context_ids?: string | null; // JSON number[]
+  confidence?: number;
+  last_merged_at?: number | null;
 }
 
 export function getPersonIdentity(uid: number): PersonIdentityRow | null {
@@ -60,24 +69,106 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
   if (!uid || _refreshing.has(uid)) return getPersonIdentity(uid);
   _refreshing.add(uid);
   try {
-    const groups = await getUserGroups(uid).catch(() => [] as number[]);
+    // 机制2:上下文 = 群 ∪ DM(不再只数群)。纯 DM / 单群但也私聊过的人
+    // 也算 >1 上下文,能拿到跨上下文连结。
+    const contexts = await getUserContexts(uid).catch(() => [] as number[]);
     const now = Math.floor(Date.now() / 1000);
-    if (groups.length <= 1) {
+    if (contexts.length <= 1) {
       // tombstone:更新时间戳以节流;impression=null → buildCrossGroupInjection 返回 null
-      upsertIdentity(uid, null, null, groups.length, now);
-      return { uid, impression: null, primary_chat_id: null, chat_count: groups.length, updated_at: now };
+      upsertIdentity(uid, null, null, contexts.length, now);
+      return { uid, impression: null, primary_chat_id: null, chat_count: contexts.length, updated_at: now };
     }
     const agg = getAggregatedAffinity(uid);
-    const primary = agg.primaryChatId ?? groups[0]!;
+    const primary = agg.primaryChatId ?? contexts[0]!;
+    // impression 兜底仍取 primary 上下文画像;全局结构化列(traits/interests/…)
+    // 由机制5 LLM 合并 cron 产出,这里保留已有值不覆盖。
     const impression = getUserProfilePrompt(primary, uid);
-    upsertIdentity(uid, impression, primary, groups.length, now);
-    return { uid, impression, primary_chat_id: primary, chat_count: groups.length, updated_at: now };
+    upsertIdentity(uid, impression, primary, contexts.length, now);
+    const existing = getPersonIdentity(uid);
+    return { ...(existing ?? {} as PersonIdentityRow), uid, impression, primary_chat_id: primary, chat_count: contexts.length, updated_at: now };
   } catch (err) {
     logger.debug({ err, uid }, 'refreshPersonIdentity failed (non-critical)');
     return null;
   } finally {
     _refreshing.delete(uid);
   }
+}
+
+/** 机制2:结构化全局画像(解析 JSON 列)。 */
+export interface GlobalProfile {
+  traits: string[];
+  interests: string[];
+  commStyle: string;
+  relationToBot: string;
+  stablePatterns: string[];
+  sourceContextIds: number[];
+  confidence: number;
+  lastMergedAt: number | null;
+}
+
+function parseJsonArray<T>(raw: string | null | undefined): T[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return Array.isArray(v) ? (v as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function getGlobalProfile(uid: number): GlobalProfile | null {
+  const row = getPersonIdentity(uid);
+  if (!row) return null;
+  return {
+    traits: parseJsonArray<string>(row.traits),
+    interests: parseJsonArray<string>(row.interests),
+    commStyle: row.comm_style ?? '',
+    relationToBot: row.relation_to_bot ?? '',
+    stablePatterns: parseJsonArray<string>(row.stable_patterns),
+    sourceContextIds: parseJsonArray<number>(row.source_context_ids),
+    confidence: row.confidence ?? 0,
+    lastMergedAt: row.last_merged_at ?? null,
+  };
+}
+
+/**
+ * 机制5:写回 LLM 合并出的全局画像列(**成功才更新 last_merged_at**)。
+ * 只更新全局结构化列,不动 impression/primary_chat_id/chat_count(那些由 refresh 维护)。
+ * 若该 uid 尚无行,先建一行(chat_count 由后续 refresh 校正)。
+ */
+export function setGlobalProfile(uid: number, p: {
+  traits: string[];
+  interests: string[];
+  commStyle: string;
+  relationToBot: string;
+  stablePatterns: string[];
+  sourceContextIds: number[];
+  confidence: number;
+}): void {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().prepare(
+    `INSERT INTO person_identity (uid, chat_count, updated_at, traits, interests, comm_style, relation_to_bot, stable_patterns, source_context_ids, confidence, last_merged_at)
+     VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(uid) DO UPDATE SET
+       traits = excluded.traits,
+       interests = excluded.interests,
+       comm_style = excluded.comm_style,
+       relation_to_bot = excluded.relation_to_bot,
+       stable_patterns = excluded.stable_patterns,
+       source_context_ids = excluded.source_context_ids,
+       confidence = excluded.confidence,
+       last_merged_at = excluded.last_merged_at`,
+  ).run(
+    uid, now,
+    JSON.stringify(p.traits ?? []),
+    JSON.stringify(p.interests ?? []),
+    p.commStyle ?? '',
+    p.relationToBot ?? '',
+    JSON.stringify(p.stablePatterns ?? []),
+    JSON.stringify(p.sourceContextIds ?? []),
+    Math.max(0, Math.min(1, p.confidence ?? 0)),
+    now,
+  );
 }
 
 /**

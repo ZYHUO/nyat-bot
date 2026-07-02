@@ -10,6 +10,9 @@ import { logger } from '../../shared/logger.js';
 const CTX_PREFIX = 'xxb:ctx:';
 const MEMBERS_PREFIX = 'xxb:members:';
 const USER_GROUPS_PREFIX = 'xxb:user:groups:';
+// 机制2:DM 反向索引单独一个 key —— 不污染 xxb:user:groups(其下游 dm-relay
+// group-resolver/fate/relay-queue/profile 的语义必须保持"纯群")。
+const USER_DMS_PREFIX = 'xxb:user:dms:';
 const TRUNCATE_SIZE = 50;
 const MEMBERS_TTL = 30 * 86400; // 30 days
 const CTX_TTL = 7 * 86400; // 7 days rolling TTL
@@ -74,6 +77,12 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
         const userGroupsKey = USER_GROUPS_PREFIX + message.uid;
         await redis.sadd(userGroupsKey, String(chatId));
         await redis.expire(userGroupsKey, MEMBERS_TTL);
+      } else if (chatId > 0) {
+        // 机制2:DM 也进反向索引(独立 key),供 getUserContexts 把私聊算作
+        // 一个上下文——让"只在一个群但也私聊过"的人也能拿到跨上下文连结。
+        const userDmsKey = USER_DMS_PREFIX + message.uid;
+        await redis.sadd(userDmsKey, String(chatId));
+        await redis.expire(userDmsKey, MEMBERS_TTL);
       }
     } catch (err) {
       logger.debug({ err, chatId }, 'Member tracking failed (non-critical)');
@@ -147,4 +156,20 @@ export async function getUserGroups(uid: number): Promise<number[]> {
   const redis = getRedis();
   const raw = await redis.smembers(USER_GROUPS_PREFIX + uid);
   return raw.map(Number).filter((n) => !Number.isNaN(n));
+}
+
+/** 机制2:该用户私聊过的 DM chatId(正数;通常只有一个 = uid)。 */
+export async function getUserDMs(uid: number): Promise<number[]> {
+  const redis = getRedis();
+  const raw = await redis.smembers(USER_DMS_PREFIX + uid);
+  return raw.map(Number).filter((n) => !Number.isNaN(n));
+}
+
+/**
+ * 机制2:该用户出现过的**所有上下文**(群 ∪ DM)。全局画像/跨上下文连结用此,
+ * 而非 getUserGroups(后者保持纯群,供 dm-relay 定向转达)。
+ */
+export async function getUserContexts(uid: number): Promise<number[]> {
+  const [groups, dms] = await Promise.all([getUserGroups(uid), getUserDMs(uid)]);
+  return [...groups, ...dms];
 }

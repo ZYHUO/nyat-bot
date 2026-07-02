@@ -12,7 +12,11 @@ const mockProfile = vi.fn();
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
 vi.mock('../../../src/env.js', () => ({ env: () => ({ PERSON_IDENTITY_ENABLED: true }) }));
-vi.mock('../../../src/pipeline/context/manager.js', () => ({ getUserGroups: (...a: unknown[]) => mockGroups(...a) }));
+// 机制2:refreshPersonIdentity 改用 getUserContexts(群 ∪ DM);mockGroups 现表示"上下文集合"。
+vi.mock('../../../src/pipeline/context/manager.js', () => ({
+  getUserGroups: (...a: unknown[]) => mockGroups(...a),
+  getUserContexts: (...a: unknown[]) => mockGroups(...a),
+}));
 vi.mock('../../../src/tracking/user-affinity.js', () => ({ getAggregatedAffinity: (...a: unknown[]) => mockAgg(...a) }));
 vi.mock('../../../src/tracking/user-profile.js', () => ({ getUserProfilePrompt: (...a: unknown[]) => mockProfile(...a) }));
 
