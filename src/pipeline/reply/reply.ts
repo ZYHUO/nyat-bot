@@ -30,7 +30,7 @@ import { getCachedRoster, setCachedRoster } from './member-cache.js';
 import { composeSelfState } from '../heart/self-state.js';
 import { getTopJargonsForContext, searchJargonsInText } from '../../learners/jargon-miner.js';
 import { getRelationship, newcomerPromptHint } from '../../tracking/relationship.js';
-import { recallEpisodes } from '../../tracking/group-episodes.js';
+import { recallEpisodes, type GroupEpisode } from '../../tracking/group-episodes.js';
 import { peekPendingQuestion } from '../../tracking/curiosity.js';
 import { getChatStyle } from '../../tracking/chat-style.js';
 import { checkNearDuplicate } from './anti-repeat.js';
@@ -156,6 +156,17 @@ async function isDuplicateReply(chatId: number, replyContent: string): Promise<b
 }
 
 /**
+ * P2-F:[等待结束] 回访提示 —— MaiBot 在 wait 到点时往共享历史注入
+ * "wait 已完成(有/无新消息)"标记的写手侧等价物。纯函数可单测。
+ */
+export function buildWaitResumeHint(w: { waitSec?: number; hadNewMessages: boolean }): string {
+  const dur = w.waitSec ? `${w.waitSec} 秒` : '一会儿';
+  return w.hadNewMessages
+    ? `[等待结束] 你刚才决定先等${dur}再说,现在等完了,期间群里有新消息(都在上方上下文里)。结合新信息回应,别当没等过。`
+    : `[等待结束] 你刚才决定先等${dur}再说,现在等完了,期间**没有**新消息——TA没接着说。把你想说的说完,或自然接回刚才的话头;确实没必要说就输出 {"action":"silent"}。`;
+}
+
+/**
  * Generate a reply using AI with proper context.
  */
 export async function generateReply(
@@ -179,10 +190,31 @@ export async function generateReply(
     latenessHint?: string;
     /** 作息 v2:睡眠队列补回 — "刚睡醒看到"语气 + 允许 silent 反悔 */
     sleepCatchup?: boolean;
+    /** P2-F:wait 回访 — "你刚等了 N 秒,期间有/无新消息"提示 */
+    waitResume?: { waitSec?: number; hadNewMessages: boolean };
     /** L1: 心流的内心独白 — 决定与写作是同一个念头 */
     heartWhy?: string;
     /** 审计 #38:心流分支算好的自我状态快照,同回合直接复用 */
     selfState?: { narration: string; narrationNoThought: string; energy: number };
+    /** Multi-Agent:编排器已并行跑完专家(研究员等)gather 的结果块。提供时
+     *  跳过内部 planner/merged-tools(避免重复跑工具),直接当 toolResults 注入。 */
+    prebuiltToolResults?: string;
+    /** Multi-Agent:编排器已做过"要不要工具"的决策(研究员跑过,无论是否用到
+     *  工具)。true 时跳过内部 planner/merged-tools(纯文本写手),避免研究员
+     *  说"不需要工具"后写手又重新决策一遍(double LLM)。仅在研究员 failed
+     *  时留 false,让写手回退到自己的工具决策兜底。 */
+    toolDecisionHandled?: boolean;
+    /** Multi-Agent 记忆员产出(独立通道)。拼到 knowledge 里随 [知识库] 注入,
+     *  不抢占研究员的 toolResults 槽 —— 这样 researcher 失败时写手仍能走 web
+     *  兜底,同时带着记忆员的召回。 */
+    memoryFindings?: string;
+    /** Multi-Agent 导演专家产出:[导演定调] 情绪/姿态/切入点块,紧贴念头注入。 */
+    directorHint?: string;
+    /** Multi-Agent 上下文理解专家产出:[现在在聊] digest 块,帮写手抓重点。 */
+    contextDigest?: string;
+    /** Multi-Agent 预取的群往事(best-of-N 时复用,避免 recallEpisodes 的
+     *  recall_count 被多稿各调一次而 ×N 失真)。提供时跳过内部 recallEpisodes。 */
+    prefetchedEpisodes?: GroupEpisode[];
   },
 ): Promise<{
   replies: ReplyOutput[];
@@ -252,6 +284,13 @@ export async function generateReply(
         }, 'Knowledge truncated due to budget');
       }
     }
+  }
+
+  // Multi-Agent 记忆员产出(独立通道):拼到 knowledge 里随 [知识库] 注入,
+  // 不占研究员的 web 工具决策槽 —— researcher 失败时写手仍可走 web 兜底,
+  // 同时带着记忆员的召回。
+  if (callOpts?.memoryFindings) {
+    knowledge = (knowledge ? knowledge + '\n\n' : '') + callOpts.memoryFindings;
   }
 
   // 3.5 Checkin data injection — minimal real data, AI creates the rest
@@ -472,8 +511,10 @@ export async function generateReply(
       } catch { /* non-critical */ }
     }
     // G7 群共同经历:消息命中往事关键词 → callback("上次群里那件事…")
+    // best-of-N 时编排器预取 episodes 复用,避免多稿各调 recallEpisodes 使
+    // recall_count ×N 失真(callOpts.prefetchedEpisodes 在场则跳过内部调用)。
     try {
-      const episodes = recallEpisodes(chatId, queryText, 2);
+      const episodes = callOpts?.prefetchedEpisodes ?? recallEpisodes(chatId, queryText, 2);
       if (episodes.length > 0) {
         stateParts.pushP(30, 35, `[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
       }
@@ -490,12 +531,22 @@ export async function generateReply(
   const catchupPart = callOpts?.sleepCatchup
     ? '[补觉回复] 这条消息是你睡觉时错过的,刚睡醒(或半夜迷迷糊糊摸到手机)才看到,现在补个回复。开头自然带一句"刚睡醒看到""昨晚睡了才看到喵"之类,轻描淡写;如果话题明显已经翻篇/不需要回了,就输出 {"action":"silent"}。'
     : undefined;
+  // P2-F:wait 回访提示 —— MaiBot wait-completed 标记的写手侧等价物
+  const waitPart = callOpts?.waitResume
+    ? buildWaitResumeHint(callOpts.waitResume)
+    : undefined;
   // 行为指令(指令/念头/补觉/连发):keep<10 必留;文本位置(order)按 recency
   // 排在氛围块之后、紧贴 CURRENT_MESSAGE —— 越是"怎么写这条"的指令越贴近消息。
   if (instructionPart) stateParts.pushP(80, 1, instructionPart);
   if (heartPart) stateParts.pushP(99, 2, heartPart);
+  // Multi-Agent 导演/上下文理解专家产出:keep 调到 6/10 —— 是"建议"非硬约束,
+  // 预算紧时让位于念头/指令/对话上下文,别挤掉真正必要的块(M7)。
+  if (callOpts?.directorHint) stateParts.pushP(98, 6, callOpts.directorHint);
+  if (callOpts?.contextDigest) stateParts.pushP(35, 10, callOpts.contextDigest);
   if (catchupPart) stateParts.pushP(72, 3, catchupPart);
   else if (callOpts?.latenessHint) stateParts.pushP(72, 3, callOpts.latenessHint);
+  // P2-F:order=71 落在连发(70)与迟到/补觉(72)之间;keep=4 与连发同级可裁。
+  if (waitPart) stateParts.pushP(71, 4, waitPart);
   if (burstPart) stateParts.pushP(70, 4, burstPart);
   if (revisitPart) stateParts.pushP(40, 45, revisitPart);
   // 两遍合成(burst-hint.ts):① 按 keep 升序做预算裁剪(keep<10 必留);
@@ -529,7 +580,10 @@ export async function generateReply(
   }
 
   // 4. Build messages array
-  let toolResultsBlock: string | undefined;
+  // Multi-Agent:编排器预跑的专家结果优先;有则跳过内部 planner/merged-tools。
+  let toolResultsBlock: string | undefined = callOpts?.prebuiltToolResults;
+  // 编排器已做工具决策(研究员跑过)→ 写手纯文本,不再自己调工具/重新决策。
+  const orchestratorHandled = callOpts?.toolDecisionHandled === true;
   const usage = effectiveReplyTier === 'max' ? 'reply_max'
     : effectiveReplyTier === 'pro' ? 'reply_pro'
     : 'reply';
@@ -538,9 +592,10 @@ export async function generateReply(
 
   // 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段。
   // 启用时跳过下面的预跑工具块(工具由写手自己边写边调),toolResultsBlock 留空。
-  const mergedToolsActive = effectiveReplyPath === 'planned' && env().REPLY_MERGED_TOOLS_ENABLED;
+  // prebuiltToolResults 在场 / orchestratorHandled 时禁用 merged(编排器已收口)。
+  const mergedToolsActive = effectiveReplyPath === 'planned' && env().REPLY_MERGED_TOOLS_ENABLED && !toolResultsBlock && !orchestratorHandled;
 
-  if (effectiveReplyPath === 'planned' && !mergedToolsActive) {
+  if (effectiveReplyPath === 'planned' && !mergedToolsActive && !toolResultsBlock && !orchestratorHandled) {
     // ── Agentic 循环(MaiBot Maisaka 借鉴):多轮 plan→act,失败回退旧路 ──
     let legacyPlannerNeeded = true;
     if (env().PLANNER_AGENTIC_ENABLED) {
@@ -753,7 +808,7 @@ export async function generateReply(
 
   // ── P5 归一化管线:动作拆分 ∘ 目标守卫 ∘ 占位过滤(幂等,所有 regen 必经)──
   // 此前 regen 路径(exactReplyCount 等)绕过这些守卫 → 整类数据丢失/逃逸 bug。
-  const delegationMarkers = /(回复|回应|怼|评价|告诉|转告|提醒|@)/;
+  const delegationMarkers = /(回复|回应|怼|评价|告诉|转告|提醒|帮我回|替我回|替我说|帮我和|代我)/;
   const userDelegated = delegationMarkers.test(message.textContent || '');
   let reactions: Array<{ targetMessageId: number; emoji: string }> | undefined;
   let modelSilent: boolean | undefined;
@@ -778,10 +833,16 @@ export async function generateReply(
       for (const p of texts) {
         if (!p.action && p.targetMessageId !== message.messageId) {
           const target = retrievedContext.merged.find((m) => m.messageId === p.targetMessageId);
-          if (target && (target.isBot || target.isAnonymous)) {
+          const targetIsOtherHuman =
+            !!target &&
+            !target.isBot &&
+            !target.isAnonymous &&
+            target.uid !== message.uid &&
+            target.messageId !== message.replyTo?.messageId;
+          if (target && (target.isBot || target.isAnonymous || targetIsOtherHuman)) {
             logger.info(
               { chatId, badTarget: p.targetMessageId, retargeted: message.messageId },
-              'Reply targeted a channel/bot message without delegation, retargeting to the asker',
+              'Reply targeted a non-asker message without delegation, retargeting to the asker',
             );
             p.targetMessageId = message.messageId;
           }
@@ -877,6 +938,10 @@ export async function generateReply(
     toolsUsed: result.toolsUsed,
     replyCount: parsedReplies.length,
     replyLength: parsedReplies.map(r => r.replyContent.length),
+    contextMessages: retrievedContext.merged.length,
+    contextTokens,
+    knowledgeChars: knowledge?.length ?? 0,
+    burstCount: callOpts?.burstIds?.length ?? 0,
   }, `Reply generated (${parsedReplies.length} message(s))`);
 
   return {

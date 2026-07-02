@@ -22,7 +22,14 @@ import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
-import { isInGateCooldown } from './chat-runtime.js';
+import {
+  getChatState,
+  getGateCooldownRemainingMs,
+  isInContinuation,
+  type ChatTimingState,
+} from './chat-runtime.js';
+import { checkTalkValueThreshold } from './talk-value.js';
+import { appendGateHistory, formatGateHistoryBlock, getGateHistory } from './gate-history.js';
 
 export type GateAction = 'continue' | 'wait' | 'no_action';
 
@@ -41,6 +48,16 @@ export interface GateDecision {
    * STOP 状态——对齐 MaiBot 的"no_action 后拖时间"语义,而不是放行。
    */
   deferOnly?: boolean;
+  /**
+   * P0-B/P1-C:deferOnly 时的建议重评延迟(冷却剩余 / 预计攒够阈值的时间)。
+   * pipeline 据此排 gate_defer 回合,到点带着这条消息重新评估。
+   */
+  retryAfterMs?: number;
+  /**
+   * P0-A:连续对话免检短路。pipeline 据此**跳过** recordGateContinue —— 免检
+   * 本身不续窗,窗口只由真实 LLM continue 和真实 bot 回复刷新,防自续永动。
+   */
+  continuation?: boolean;
 }
 
 export interface GateInput {
@@ -63,6 +80,22 @@ export interface GateInput {
   signal?: AbortSignal;
   /** bot 上次发言距今秒数(在场感:刚说过话就别突然消失) */
   lastSpokeSecAgo?: number;
+  triggerUid?: number;
+  obligationId?: string;
+  obligationTargetUid?: number;
+  obligationStrong?: boolean;
+  /** 审计 #38 风格:pipeline 已读过 timing state,传入避免 gate 内重复 HGETALL。 */
+  prefetchedState?: ChatTimingState;
+  /**
+   * 多锚点同场兄弟:跳过 cooldown/talk-value 短路(与 turnContext.skipGateCooldown
+   * 同源)。否则组1 的决策写入 lastGateAction 后组2 会被冷却误伤。
+   */
+  skipShortCircuits?: boolean;
+  /**
+   * true = 调用方(turn actor)支持 defer 延迟重评(P0-B);false 时 talk_value
+   * 阈值层不生效 —— 未达阈值又无法重排等于丢消息。
+   */
+  canDefer?: boolean;
 }
 
 const VALID_ACTIONS = new Set<GateAction>(['continue', 'wait', 'no_action']);
@@ -170,6 +203,10 @@ export function parseGateResponse(raw: string): GateDecision | null {
   };
 }
 
+function shouldProtectStrongObligation(input: GateInput): boolean {
+  return input.obligationStrong === true && !!input.obligationId && !input.isDirectInteraction;
+}
+
 function clampWaitSec(raw: number | undefined): number {
   const e = env();
   const n = raw ?? Math.floor((e.TIMING_WAIT_MIN_SEC + e.TIMING_WAIT_MAX_SEC) / 2);
@@ -196,15 +233,45 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   if (input.judgeResult.replyTier === 'max') {
     return makeShortCircuit('continue', 'reply_tier_max_bypass', start);
   }
+
+  // 后续短路都要读 timing state:优先用 pipeline 预读快照(审计 #38),没有再读。
+  let state: ChatTimingState | undefined = input.prefetchedState;
+  if (state === undefined) {
+    try {
+      state = await getChatState(input.chatId);
+    } catch (err) {
+      logger.debug({ err, chatId: input.chatId }, 'gate state read failed (non-critical)');
+    }
+  }
+
+  // P0-A 连续对话免检(MaiBot 连续 Planner):刚 continue 过 / bot 刚回复过的
+  // 窗口内直接放行,不烧 LLM。proactive 不享受(主动插话不是"对话中")。
+  // 注意在 cooldown 检查**之前**:比 bot 回复更旧的 no_action 冷却不该拦住
+  // 对话中的接话。
+  if (
+    e.TURN_GATE_CONTINUATION &&
+    !input.proactiveMode &&
+    state &&
+    isInContinuation(state)
+  ) {
+    return {
+      ...makeShortCircuit('continue', 'continuation_window', start),
+      continuation: true,
+    };
+  }
+
   // Cooldown: previous gate decision was wait/no_action and TTL not elapsed.
   // 默认(legacy)语义是 bypass→continue(放行);TURN_GATE_DEFER_COOLDOWN 把它
-  // 改向为 MaiBot 语义:冷却期内不重判,这条先不回(拖时间,不放行)。
+  // 改向为 MaiBot 语义:冷却期内不重判,这条先不回。P0-B 后 defer 不再是
+  // 丢弃 —— 带 retryAfterMs 由 pipeline 排 gate_defer 回合到点重评。
   try {
-    if (await isInGateCooldown(input.chatId)) {
+    const remainingMs = await getGateCooldownRemainingMs(input.chatId, state, input.triggerUid);
+    if (remainingMs > 0 && !input.skipShortCircuits) {
       if (e.TURN_GATE_DEFER_COOLDOWN) {
         return {
           ...makeShortCircuit('no_action', 'cooldown_defer', start),
           deferOnly: true,
+          retryAfterMs: remainingMs,
         };
       }
       return makeShortCircuit('continue', 'cooldown_bypass', start);
@@ -213,14 +280,40 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     logger.debug({ err, chatId: input.chatId }, 'gate cooldown check failed (non-critical)');
   }
 
+  // P1-C talk_value 频率阈值(MaiBot runtime.py:636-669/1451-1504):确定性攒
+  // 消息,未达阈值不烧 LLM,defer 到预计凑够的时刻。仅 canDefer(actor)生效
+  // —— 否则未达阈值等于丢消息。连续免检(P0-A)优先于本层。
+  if (input.canDefer && !input.proactiveMode && !input.skipShortCircuits && state) {
+    try {
+      const verdict = await checkTalkValueThreshold({ chatId: input.chatId, state });
+      if (!verdict.pass) {
+        logger.info(
+          { chatId: input.chatId, threshold: verdict.threshold, count: verdict.count, equivalent: verdict.equivalent, retryAfterMs: verdict.retryAfterMs },
+          'gate talk-value below threshold, defer',
+        );
+        return {
+          ...makeShortCircuit('no_action', 'talk_value_below_threshold', start),
+          deferOnly: true,
+          retryAfterMs: verdict.retryAfterMs,
+        };
+      }
+    } catch (err) {
+      logger.debug({ err, chatId: input.chatId }, 'talk-value check failed (fail-open to LLM gate)');
+    }
+  }
+
   // ── LLM call ──
   let systemPrompt = '';
   try {
     systemPrompt = loadCachedPrompt('task/timing-gate.md');
     if (!systemPrompt) throw new Error('timing-gate prompt not found');
+    const obligationBlock = shouldProtectStrongObligation(input)
+      ? `## 未完成回复债务(obligation)\n当前存在一笔明确的未完成回复义务: obligationId=${input.obligationId}, targetUid=${input.obligationTargetUid ?? 'unknown'}。\n这意味着: \n- 不要因为群里后来出现别人的普通插话,就把这笔义务判成 no_action。\n- 若后续消息只是背景噪音/路人闲聊,优先 continue 或短 wait,而不是放弃这笔义务。\n- 只有在这笔义务明显已经翻篇、被同样明确的更高优先 direct 互动取代、或用户自己不需要回答了,才可 no_action。`
+      : '';
     const modeBlock = input.proactiveMode
       ? `## 当前模式:主动插话(proactive)\n这次没有人 @ ${input.botName},是 ${input.botName} 自己看到群里在聊,想主动搭一句。判断标准和默认模式不同:\n- **不要**因为"没人点名"就 no_action——群友插话本来就不需要被点名,这正是本模式存在的意义。\n- **wait**:两个人正在密集一来一回(30 秒内连续互怼/互聊),现在挤进去是打断,等这波过去。\n- **no_action**:在吵架、在宣泄负面情绪、聊严肃敏感话题;或最近一条就是 ${input.botName} 自己发的。\n- **continue**:群里在闲聊/玩梗/分享/提问,且没有密集的二人对话——想加入就加入,自然得像群友。\n- 倾向 continue:后面还有写手最后一道把关,这里只看时机。`
       : '';
+    systemPrompt = [systemPrompt, obligationBlock].filter(Boolean).join('\n\n');
     systemPrompt = systemPrompt
       .replace(/\{bot_name\}/g, input.botName)
       .replace(/\{bot_persona\}/g, input.botPersona || `${input.botName} 是群聊里的成员`)
@@ -234,6 +327,14 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
   const ctxStr = slimContextForAI(input.recentMessages, input.message, input.botUid);
   const judgeSummary = `judge.action=${input.judgeResult.action} judge.rule=${input.judgeResult.rule ?? 'n/a'} judge.tier=${input.judgeResult.replyTier ?? 'normal'}`;
+  // P1-D gate 有状态化(MaiBot:gate 与 planner 共享历史,看得到自己过往节奏
+  // 判断):把最近几次真实 LLM 决策注入,防反复横跳/连续 wait 拖延。
+  let historyBlock: string | undefined;
+  if (e.TIMING_GATE_HISTORY_ENABLED) {
+    try {
+      historyBlock = formatGateHistoryBlock(await getGateHistory(input.chatId));
+    } catch { /* non-critical */ }
+  }
   // 在场感:刚参与过对话(≤3 分钟)→ 聊到一半突然消失非常突兀。
   // gate 历史上的 no_action 理由清一色"保持高傲/与我无关" —— 高傲是
   // 人设,但对话中途蒸发不是高傲,是故障。
@@ -242,7 +343,9 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     : '';
   const userMsg =
     `[最近聊天上下文]\n${ctxStr}\n\n` +
-    `[Judge 决策]\n${judgeSummary}\n${presenceBlock}\n` +
+    `[Judge 决策]\n${judgeSummary}\n` +
+    (historyBlock ? `\n${historyBlock}\n` : '') +
+    `${presenceBlock}\n` +
     `请基于以上信息判断节奏，输出符合 schema 的 JSON。`;
 
   const timeoutMs = e.TIMING_GATE_TIMEOUT_MS;
@@ -297,6 +400,23 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     } catch { /* 重试失败走下面的 fail-open */ }
   }
   if (!parsed) {
+    // P2-E (MaiBot reasoning_engine.py:607-615):全部尝试失败 → 按 no_action
+    // 处理。fail-closed:宁可沉默,不要在本该沉默的时机插嘴。direct 已在
+    // 上游 short-circuit(永远到不了这里);llm_call_failed(网络/超时)仍
+    // fail-open——那是基础设施故障,不是模型说"我判不了"。
+    if (e.TIMING_GATE_FAIL_CLOSED) {
+      logger.warn(
+        { chatId: input.chatId, rawSnippet: raw.slice(0, 200) },
+        'gate parse failed, fail-closed no_action',
+      );
+      return {
+        action: 'no_action',
+        reason: 'parse_failed_closed',
+        shortCircuited: false,
+        latencyMs: Math.round(performance.now() - start),
+        raw: raw.slice(0, 500),
+      };
+    }
     logger.warn(
       { chatId: input.chatId, rawSnippet: raw.slice(0, 200) },
       'gate parse failed, fail-open continue',
@@ -310,14 +430,35 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     };
   }
 
+  let action: GateAction = parsed.action;
+  let waitSec = parsed.action === 'wait' ? clampWaitSec(parsed.waitSec) : undefined;
+  let reason = parsed.reason || 'llm';
+
+  if (parsed.action === 'no_action' && shouldProtectStrongObligation(input)) {
+    action = 'wait';
+    waitSec = clampWaitSec(parsed.waitSec ?? Math.max(env().TIMING_WAIT_MIN_SEC, 8));
+    reason = (`protected_strong_obligation:${reason}`).slice(0, 200);
+  }
+
   const decision: GateDecision = {
-    action: parsed.action,
-    waitSec: parsed.action === 'wait' ? clampWaitSec(parsed.waitSec) : undefined,
-    reason: parsed.reason || 'llm',
+    action,
+    waitSec: action === 'wait' ? waitSec : undefined,
+    reason,
     shortCircuited: false,
     latencyMs: Math.round(performance.now() - start),
     raw: raw.slice(0, 500),
   };
+
+  // P1-D:只记真实解析成功的 LLM 决策(短路/合成 no_action 不记),对齐
+  // MaiBot"共享历史里只有 gate 自己真正说过的话"。fire-and-forget。
+  if (e.TIMING_GATE_HISTORY_ENABLED) {
+    void appendGateHistory(input.chatId, {
+      action: decision.action,
+      waitSec: decision.waitSec,
+      reason: decision.reason,
+      ts: Date.now(),
+    }).catch(() => {});
+  }
 
   logger.info(
     {
@@ -326,6 +467,10 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
       waitSec: decision.waitSec,
       reason: decision.reason,
       latencyMs: decision.latencyMs,
+      triggerUid: input.triggerUid,
+      obligationId: input.obligationId,
+      obligationTargetUid: input.obligationTargetUid,
+      obligationStrong: input.obligationStrong,
     },
     'Timing gate decision',
   );

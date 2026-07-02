@@ -68,6 +68,29 @@ export async function getActivityDescription(chatId: number): Promise<string> {
   return `[群活跃度: ${stats.activityLevel}] 最近1分钟${stats.messages1min}条, 5分钟${stats.messages5min}条, ${stats.activeUsers5min}人活跃`;
 }
 
+/**
+ * P1-C:最近 windowSec 秒内消息的时间戳(epoch 秒,升序)。talk_value 空闲
+ * 补偿用(平均消息间隔估计)。窗口受 zset 保留期(1h)天然限制。
+ */
+export async function getRecentTimestamps(chatId: number, windowSec: number): Promise<number[]> {
+  const redis = getRedis();
+  const key = KEY_PREFIX + chatId;
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const flat = await redis.zrangebyscore(key, String(now - windowSec), '+inf', 'WITHSCORES');
+    const out: number[] = [];
+    // WITHSCORES 返回 [member, score, member, score, ...],取奇数位分数
+    for (let i = 1; i < flat.length; i += 2) {
+      const n = Number(flat[i]);
+      if (Number.isFinite(n)) out.push(n);
+    }
+    return out;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'getRecentTimestamps failed (non-critical)');
+    return [];
+  }
+}
+
 export function classifyActivity(msg5min: number): ActivitySummary['activityLevel'] {
   if (msg5min >= 20) return '热聊';
   if (msg5min >= 10) return '活跃';

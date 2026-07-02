@@ -35,8 +35,19 @@ export interface ChatTimingState {
   lastUserMsgAt?: number;
   lastGateAt?: number;
   lastGateAction?: 'continue' | 'wait' | 'no_action';
+  lastGateUid?: number;
   /** 连续 no_action 次数(指数退避用;continue/回复后清零)。MaiBot 借鉴。 */
   noActionCount?: number;
+  /** 触发 WAIT 的发送者 uid 集合(per-person 抑制用;TURN_WAIT_PER_PERSON)。
+   *  同一回合多锚点可能多人同时触发 wait → 用集合而非单值,所有人都被抑制。 */
+  waitTriggerUids?: number[];
+  /** WAIT 关联的话题 key(per-person 抑制的话题细化;actor 读,当前无写入方,
+   *  缺失时按 legacy 整人抑制)。补类型修 actor.ts 的既有 TS2339。 */
+  waitTopicKey?: string;
+  /** P1-C:自上次 gate 真实评估/bot 回复以来攒下的用户消息数(talk_value 阈值用)。 */
+  gatePendingCount?: number;
+  /** P1-C:开始攒这批消息的时刻(epoch_ms;空闲补偿的基准点)。 */
+  gatePendingSince?: number;
 }
 
 const KEY_PREFIX = 'xxb:timing:state:';
@@ -80,9 +91,38 @@ function parseState(raw: Record<string, string>): ChatTimingState {
   ) {
     out.lastGateAction = gateAction;
   }
+  if (raw['lastGateUid']) {
+    const n = Number(raw['lastGateUid']);
+    if (Number.isFinite(n)) out.lastGateUid = n;
+  }
   if (raw['noActionCount']) {
     const n = Number(raw['noActionCount']);
     if (Number.isFinite(n) && n > 0) out.noActionCount = n;
+  }
+  if (raw['waitTriggerUids']) {
+    out.waitTriggerUids = parseUidList(raw['waitTriggerUids']);
+  }
+  if (raw['waitTopicKey']) out.waitTopicKey = raw['waitTopicKey'];
+  if (raw['gatePendingCount']) {
+    const n = Number(raw['gatePendingCount']);
+    if (Number.isFinite(n) && n > 0) out.gatePendingCount = n;
+  }
+  if (raw['gatePendingSince']) {
+    const n = Number(raw['gatePendingSince']);
+    if (Number.isFinite(n)) out.gatePendingSince = n;
+  }
+  return out;
+}
+
+/** P1-C:gate 真实评估/对话推进时清零攒数(折进各写入点的 persist patch)。 */
+const GATE_PENDING_RESET = { gatePendingCount: '0' } as const;
+
+/** 逗号分隔的 uid 列表 → number[](非数字段被忽略)。 */
+function parseUidList(raw: string): number[] {
+  const out: number[] = [];
+  for (const part of raw.split(',')) {
+    const n = Number(part);
+    if (Number.isFinite(n)) out.push(Math.trunc(n));
   }
   return out;
 }
@@ -146,19 +186,22 @@ export async function enterRunning(chatId: number): Promise<void> {
   await persist(
     chatId,
     { state: 'RUNNING' },
-    ['waitUntil', 'waitJobId', 'waitAnchorMid'],
+    ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids'],
   );
 }
 
-export async function enterStop(chatId: number): Promise<void> {
+export async function enterStop(chatId: number, triggerUid?: number): Promise<void> {
   await persist(
     chatId,
     {
       state: 'STOP',
       lastGateAt: Date.now(),
       lastGateAction: 'no_action',
+      ...(triggerUid !== undefined ? { lastGateUid: triggerUid } : {}),
+      ...GATE_PENDING_RESET,
+      gatePendingSince: Date.now(),
     },
-    ['waitUntil', 'waitJobId', 'waitAnchorMid'],
+    ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids'],
   );
 }
 
@@ -167,15 +210,33 @@ export async function enterWait(
   waitSec: number,
   anchorMessageId?: number,
   waitJobId?: string,
+  triggerUid?: number,
 ): Promise<void> {
   const patch: Record<string, string | number> = {
     state: 'WAIT',
     waitUntil: Date.now() + waitSec * 1000,
     lastGateAt: Date.now(),
     lastGateAction: 'wait',
+    ...GATE_PENDING_RESET,
+    gatePendingSince: Date.now(),
   };
   if (anchorMessageId !== undefined) patch['waitAnchorMid'] = anchorMessageId;
   if (waitJobId) patch['waitJobId'] = waitJobId;
+  if (triggerUid !== undefined) {
+    patch['lastGateUid'] = triggerUid;
+    // 集合化(L1):同一回合多锚点可能多人触发 wait,append 到现有集合(去重),
+    // 而非覆盖。read-modify-write —— wait 不高频,多一次 HGET 可接受。
+    let existing: number[] = [];
+    try {
+      const raw = await getRedis().hget(key(chatId), 'waitTriggerUids');
+      if (typeof raw === 'string') existing = parseUidList(raw);
+    } catch (err) {
+      logger.debug({ err, chatId }, 'read waitTriggerUids for append failed (non-critical)');
+    }
+    const set = new Set(existing);
+    set.add(triggerUid);
+    patch['waitTriggerUids'] = [...set].join(',');
+  }
   await persist(chatId, patch);
 }
 
@@ -183,11 +244,17 @@ export async function recordContinue(chatId: number): Promise<void> {
   await persist(chatId, {
     lastGateAt: Date.now(),
     lastGateAction: 'continue',
-  }, ['noActionCount']);
+    ...GATE_PENDING_RESET,
+    gatePendingSince: Date.now(),
+  }, ['noActionCount', 'lastGateUid']);
 }
 
 export async function recordBotReply(chatId: number): Promise<void> {
-  await persist(chatId, { lastBotReplyAt: Date.now() }, ['noActionCount']);
+  await persist(chatId, {
+    lastBotReplyAt: Date.now(),
+    ...GATE_PENDING_RESET,
+    gatePendingSince: Date.now(),
+  }, ['noActionCount']);
 }
 
 export async function recordUserMessage(chatId: number): Promise<void> {
@@ -214,14 +281,36 @@ export const _internal = { key, parseState };
  * 同时 HINCRBY noActionCount(指数退避;MaiBot base*2^(n-start) 语义),
  * continue/真实回复时清零。
  */
-export async function recordGateNoAction(chatId: number): Promise<void> {
+export async function recordGateNoAction(chatId: number, triggerUid?: number): Promise<void> {
   await persist(chatId, {
     lastGateAt: Date.now(),
     lastGateAction: 'no_action',
+    ...(triggerUid !== undefined ? { lastGateUid: triggerUid } : {}),
+    ...GATE_PENDING_RESET,
+    gatePendingSince: Date.now(),
   });
   try {
     await getRedis().hincrby(key(chatId), 'noActionCount', 1);
   } catch (err) {
     logger.debug({ err, chatId }, 'noActionCount incr failed (non-critical)');
+  }
+}
+
+/**
+ * P1-C:每条真实处理的用户消息 +1(HINCRBY 原子,非 read-modify-write)。
+ * gatePendingSince 只在缺失时补(HSETNX 语义):它是"这批消息开始攒"的时刻。
+ */
+export async function bumpGatePendingCount(chatId: number): Promise<void> {
+  const redis = getRedis();
+  const k = key(chatId);
+  const ttl = env().TIMING_STATE_TTL_SEC;
+  try {
+    const pipeline = redis.pipeline();
+    pipeline.hincrby(k, 'gatePendingCount', 1);
+    pipeline.hsetnx(k, 'gatePendingSince', String(Date.now()));
+    if (ttl > 0) pipeline.expire(k, ttl);
+    await pipeline.exec();
+  } catch (err) {
+    logger.debug({ err, chatId }, 'bumpGatePendingCount failed (non-critical)');
   }
 }

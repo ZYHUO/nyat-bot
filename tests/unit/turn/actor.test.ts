@@ -26,7 +26,7 @@ const bufferState: {
   postDrainPendingCount: number;
 } = { pending: [], dirty: false, epoch: 0, clearedJobs: [], postDrainPendingCount: 0 };
 
-let chatState: { state: 'RUNNING' | 'WAIT' | 'STOP' } = { state: 'RUNNING' };
+let chatState: { state: 'RUNNING' | 'WAIT' | 'STOP'; waitTriggerUids?: number[]; waitTopicKey?: string } = { state: 'RUNNING' };
 
 vi.mock('../../../src/env.js', () => ({ env: () => envState }));
 vi.mock('../../../src/shared/logger.js', () => ({
@@ -229,6 +229,48 @@ describe('runChatTurn', () => {
       expect(job.skipReply).toBe(true);
       expect(job.coalesce.isLastInBatch).toBe(false);
     }
+  });
+
+  it('WAIT per-person suppression does not swallow a new topic from the same uid', async () => {
+    envState.TIMING_GATE_ENABLED = true;
+    envState.TURN_WAIT_PER_PERSON = true as never;
+    // wait 时锚定了话题 key,新消息话题不同 → 不被吞。(无 topicKey 的
+    // WAIT 按 legacy 整人抑制,见下一个用例。)
+    chatState = { state: 'WAIT', waitTriggerUids: [101], waitTopicKey: 'r0:上一个话题' };
+    bufferState.pending = [
+      {
+        update: { message: { message_id: 1, chat: { id: CHAT, type: 'supergroup' }, from: { id: 101, first_name: 'A' }, text: '新话题怎么搞' } } as never,
+        chatId: CHAT,
+        messageId: 1,
+        enqueuedAt: Date.now(),
+      },
+    ];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as { skipReply?: boolean; coalesce: { isLastInBatch: boolean } };
+    expect(judged.skipReply).toBeUndefined();
+    expect(judged.coalesce.isLastInBatch).toBe(true);
+  });
+
+  it('WAIT per-person suppression still suppresses the same uid', async () => {
+    envState.TIMING_GATE_ENABLED = true;
+    envState.TURN_WAIT_PER_PERSON = true as never;
+    chatState = { state: 'WAIT', waitTriggerUids: [101] };
+    bufferState.pending = [
+      {
+        update: { message: { message_id: 1, chat: { id: CHAT, type: 'supergroup' }, from: { id: 101, first_name: 'A' }, text: '老话题继续' } } as never,
+        chatId: CHAT,
+        messageId: 1,
+        enqueuedAt: Date.now(),
+      },
+    ];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const tracked = processPipelineMock.mock.calls[0]![0] as { skipReply?: boolean; coalesce: { isLastInBatch: boolean } };
+    expect(tracked.skipReply).toBe(true);
+    expect(tracked.coalesce.isLastInBatch).toBe(false);
   });
 
   it('a direct entry wakes a WAIT chat and is judged', async () => {
@@ -511,5 +553,66 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     };
     expect(lastCall.messageId).toBe(3);
     expect(lastCall.turnContext?.burstMessageIds).toEqual([1, 2, 3]);
+  });
+});
+
+describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
+  it('defer 回放条目:跳过 bookkeeping+judge 但**不** gateBypass,deferCount 透传', async () => {
+    bufferState.pending = [{ ...entry(1), deferReplay: true, deferCount: 1 }];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      turnContext?: { isWaitReplay?: boolean; gateBypass?: boolean; deferCount?: number };
+    };
+    expect(judged.turnContext?.isWaitReplay).toBe(true);
+    expect(judged.turnContext?.gateBypass).toBe(false);
+    expect(judged.turnContext?.deferCount).toBe(1);
+  });
+
+  it('defer 回放遇到更新的真实消息 → 让位(新消息当锚点,defer id 留在 burst 窗口)', async () => {
+    bufferState.pending = [
+      { ...entry(1), deferReplay: true, deferCount: 1 },
+      entry(2),
+    ];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      messageId: number;
+      turnContext?: { burstMessageIds?: number[]; deferCount?: number };
+    };
+    expect(judged.messageId).toBe(2);
+    expect(judged.turnContext?.burstMessageIds).toEqual([1, 2]);
+    // 新锚点不是 defer 条目,不继承 deferCount
+    expect(judged.turnContext?.deferCount).toBeUndefined();
+  });
+
+  it('wait 回放(无新消息)→ waitResume={waitSec, hadNewMessages:false} + gateBypass', async () => {
+    bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30 }];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      turnContext?: { waitResume?: { waitSec?: number; hadNewMessages: boolean }; gateBypass?: boolean };
+    };
+    expect(judged.turnContext?.waitResume).toEqual({ waitSec: 30, hadNewMessages: false });
+    expect(judged.turnContext?.gateBypass).toBe(true);
+  });
+
+  it('wait 回放被新消息挤掉 → 提示挂到新锚点,hadNewMessages:true', async () => {
+    bufferState.pending = [
+      { ...entry(1), waitReplay: true, waitSec: 45 },
+      entry(2),
+    ];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      messageId: number;
+      turnContext?: { waitResume?: { waitSec?: number; hadNewMessages: boolean } };
+    };
+    expect(judged.messageId).toBe(2);
+    expect(judged.turnContext?.waitResume).toEqual({ waitSec: 45, hadNewMessages: true });
   });
 });

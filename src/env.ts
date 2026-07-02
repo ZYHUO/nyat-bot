@@ -47,7 +47,8 @@ const envSchema = z.object({
   SKILLS_DIR: z.string().default('./data/skills'),
   SEARXNG_URL: z.string().url().optional(),
   XAI_API_KEY: z.string().optional(),
-  XAI_SEARCH_MODEL: z.string().default('grok-4-0709'),
+  XAI_SEARCH_BASE_URL: z.string().url().default('https://new-api-zhcm.onrender.com/v1'),
+  XAI_SEARCH_MODEL: z.string().default('grok-4.3-fast'),
   // Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。
   // 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2.5-flash-lite 免费可用。
   GEMINI_API_KEY: z.string().optional(),
@@ -231,6 +232,24 @@ const envSchema = z.object({
   // 回复清零计数。
   NO_ACTION_BACKOFF_START_COUNT: z.coerce.number().int().nonnegative().default(2),
   NO_ACTION_BACKOFF_CAP_SEC: z.coerce.number().int().positive().default(300),
+  // P0-A 连续对话免检:gate continue / bot 回复后 N 秒内的后续消息跳过 gate LLM
+  // (对齐 MaiBot 连续 Planner 状态)。更新的 wait/no_action 负向决策自动终止免检。
+  TURN_GATE_CONTINUATION: booleanFromEnv.default(false),
+  TIMING_CONTINUATION_WINDOW_SEC: z.coerce.number().int().positive().default(180),
+  // P0-B defer=延迟重评:同一条消息最多被 defer 重排几次(超限按旧语义静默丢弃)。
+  TURN_GATE_DEFER_MAX_REPLAYS: z.coerce.number().int().nonnegative().default(1),
+  // P1-C talk_value 频率阈值(0..1]:1.0 = 该层关闭(no-op)。<1 时非直接消息需攒
+  // ceil(1/有效值) 条才评一次 gate,未达阈值 → defer 延迟重评;有空闲补偿兜底。
+  // per-chat Redis 覆盖:xxb:timing:talkvalue:{chatId}。
+  TIMING_TALK_VALUE: z.coerce.number().min(0.01).max(1).default(1.0),
+  // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
+  // gate 与 planner 共享历史、看得到自己过往节奏判断)。
+  TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(true),
+  // P2-E 解析失败方向:true = fail-closed 按 no_action 处理(MaiBot 语义:宁可
+  // 沉默不插嘴;direct 已在上游 bypass)。llm_call_failed(网络)仍 fail-open。
+  TIMING_GATE_FAIL_CLOSED: booleanFromEnv.default(true),
+  // P2-F wait 到点回访时注入 [等待结束] 提示(仅 TURN_WAIT_RESUME_ENABLED 路径)。
+  TIMING_WAIT_HINT_ENABLED: booleanFromEnv.default(true),
 
   // ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ──
   // 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。
@@ -295,6 +314,17 @@ const envSchema = z.object({
   // G13: 发送前反重复守卫（与自己最近消息相似度 > 阈值时带约束重生成一次）。
   ANTI_REPEAT_ENABLED: booleanFromEnv.default(false),
   ANTI_REPEAT_THRESHOLD: z.coerce.number().min(0).max(1).default(0.85),
+  // 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。
+  // 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人
+  // burst(groups.size===1)走原单锚点逻辑,零回归。
+  TURN_MULTI_ANCHOR_ENABLED: booleanFromEnv.default(true),
+  // 每回合最多回几个人(多锚点预算上限,direct 也算在内)。注意:多锚点会让
+  // 单回合最多跑 N 次心流调用 + 发 N 条回复(L7 成本/速率),靠此值约束。
+  TURN_MULTI_ANCHOR_MAX: z.coerce.number().int().positive().default(3),
+  // per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人
+  // 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。
+  // 同回合多人触发 wait → 都进集合,都被抑制(L1)。
+  TURN_WAIT_PER_PERSON: booleanFromEnv.default(true),
 
   // ── Learner (Expression + Jargon, Stage D) ──
   LEARNER_ENABLED: booleanFromEnv.default(false),
@@ -342,6 +372,66 @@ const envSchema = z.object({
   // (默认关,灰度;失败自动回退老两段路径)
   REPLY_MERGED_TOOLS_ENABLED: booleanFromEnv.default(false),
   REPLY_TOOLS_MAX_STEPS: z.coerce.number().int().min(2).max(6).default(4),
+
+  // ── Multi-Agent 协调(Orchestrator + 专家 + Writer)──
+  // 把"一个 agent 拿所有工具"拆成"几个专职专家并行 + Writer 收口"。
+  // Router 复用 judge.replyPath(direct→chat 跳过专家,planned→lookup/deep 进专家),
+  // 专家并行 fan-out,Writer 永远是唯一出口(persona 不分裂)。默认全开;灰度列表空=全群。
+  MULTI_AGENT_ENABLED: booleanFromEnv.default(true),
+  // 灰度群列表(逗号分隔 chatId)。空 = 对所有群生效;非空 = 仅列出的群走多智能体。
+  MULTI_AGENT_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  // 专家超时预算(与 turn 打断信号合并;超时→该专家 failed→Writer 回退内部 planner)
+  MULTI_AGENT_RESEARCHER_TIMEOUT_MS: z.coerce.number().int().positive().default(20000),
+  MULTI_AGENT_RESEARCHER_MAX_STEPS: z.coerce.number().int().positive().default(6),
+  // Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。
+  MULTI_AGENT_MEMORY_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_MEMORY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  MULTI_AGENT_MEMORY_MAX_STEPS: z.coerce.number().int().positive().default(3),
+  // Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、
+  // 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。
+  MULTI_AGENT_PERSONA_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_PERSONA_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
+  MULTI_AGENT_PERSONA_MAX_STEPS: z.coerce.number().int().positive().default(3),
+  // 导演专家(写手前):读上下文+念头,产出"情绪/姿态/切入点"块喂写手。全路由并行。
+  MULTI_AGENT_DIRECTOR_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_DIRECTOR_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  // 上下文理解专家:忙群(最近消息数 ≥ 阈值)先把最近 N 条 digest 成"现在在聊啥"
+  // 给写手,降写手 prompt 噪音 + 多吃一次 token。全路由并行。
+  MULTI_AGENT_CONTEXT_DIGEST_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_CONTEXT_DIGEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  MULTI_AGENT_CONTEXT_DIGEST_MIN_MSGS: z.coerce.number().int().positive().default(12),
+  // chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token;
+  // 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。
+  MULTI_AGENT_CHAT_SPECIALISTS: booleanFromEnv.default(true),
+  // Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。
+  MULTI_AGENT_CHECKER_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_CHECKER_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  // Phase 4 Critic:草稿二审,不行回炉(deep 总是跑;lookup 默认关)。回炉轮数上限。
+  MULTI_AGENT_CRITIC_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_CRITIC_ON_LOOKUP: booleanFromEnv.default(false),
+  MULTI_AGENT_CRITIC_MAX_ROUNDS: z.coerce.number().int().positive().default(2),
+  MULTI_AGENT_CRITIC_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  // 人设一致性 Critic:每条回复都查"有没有叫错主人/破人设/破关系",有问题回炉 1 次。
+  // 跟深度 Critic(查事实/跑题)分工:这个专攻人设/关系,全路由跑。
+  MULTI_AGENT_PERSONA_CRITIC_ENABLED: booleanFromEnv.default(true),
+  MULTI_AGENT_PERSONA_CRITIC_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
+  // Best-of-N 写手:生成 N 稿,选择器挑最贴的发。N=1 关闭。写手 token ×N。
+  WRITER_BEST_OF_N: z.coerce.number().int().positive().default(2),
+  WRITER_SELECTOR_ENABLED: booleanFromEnv.default(true),
+  WRITER_SELECTOR_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
+  // 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。
+  // 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。
+  REALTIME_LEARN_ENABLED: booleanFromEnv.default(true),
+  REALTIME_LEARN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  // ASI 回复自评抽样率:1.0 = 全量(每条回复都自评),0.5 = 抽一半。
+  ASI_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1),
 
   // P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户"
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),

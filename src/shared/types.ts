@@ -130,6 +130,7 @@ export interface ChatJob {
     scheduledAt: number;
     waitSec: number;
     anchorMessageId?: number;
+    obligationId?: string;
   };
   /**
    * Turn actor in-process context (NEVER serialized into BullMQ — the actor
@@ -138,12 +139,21 @@ export interface ChatJob {
    * forced-continue after interrupt); epoch: cognition-turn generation id.
    */
   turnContext?: {
+    obligationId?: string;
+    obligationTargetUid?: number;
+    obligationStrong?: boolean;
     signal?: AbortSignal;
     epoch?: number;
     gateBypass?: boolean;
     isReplan?: boolean;
     /** G4: messageIds of the whole drained burst (oldest→newest) — judge/reply treat it as one thought */
     burstMessageIds?: number[];
+    /**
+     * G4 辅助:burstMessageIds 对应的发送者 uid 去重列表(actor 算好直接传,
+     * 不依赖 pipeline 侧 recentMessages 的 30 条窗口 —— 老消息掉出窗口时
+     * 也能正确判多人)。多锚点模式下每组只含 1 个 uid。
+     */
+    burstUids?: number[];
     /** L1: 心流决定接话时的内心独白 — 写手顺着同一个念头开笔 */
     heartWhy?: string;
     /**
@@ -162,5 +172,15 @@ export interface ChatJob {
      * 写手收到"[补觉回复]"注记(刚睡醒/半夜刷手机语气,别当刚聊到一半)。
      */
     sleepCatchup?: boolean;
+    /**
+     * 多锚点回合里同场兄弟:跳过心流冷却短路(isInGateCooldown)。否则组1
+     * pass/wait 写完 lastGateAction 后,组2 会被冷却误判为"刚 pass 过"而
+     * 被跳过 → 多锚点只有第一组能回。
+     */
+    skipGateCooldown?: boolean;
+    /** P0-B:该条消息已被 gate defer 的次数(actor 从 PendingEntry 带入)。 */
+    deferCount?: number;
+    /** P2-F:wait 回访元数据(actor 在 drain 时算好,写手提示用)。 */
+    waitResume?: { waitSec?: number; hadNewMessages: boolean };
   };
 }

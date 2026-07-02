@@ -7,7 +7,8 @@
 import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath, ReplyTier } from "../../shared/types.js";
 import { getRecent, addAssistant } from "../context/manager.js";
 import { retrieveContext } from "../context/retriever.js";
-import { generateReply } from "../reply/reply.js";
+import { runWriterRoute } from "../multiagent/writer-selector.js";
+import { isMultiAgentChat } from "../multiagent/flags.js";
 import { calculateTypingDelay, type SegmenterConfig } from "../reply/segmenter.js";
 import { sampleHumanDelay } from "../reply/latency-model.js";
 import {
@@ -52,10 +53,16 @@ import { env } from "../../env.js";
 import { logger } from "../../shared/logger.js";
 import { recordBotReply } from "../../tracking/stats.js";
 import { recordBotReply as recordTimingBotReply } from "../timing/state-store.js";
+import { updateObligationState } from '../turn/obligation-store.js';
 import { recordSelfReply } from "../../tracking/self-history.js";
-import { getChatState } from "../timing/chat-runtime.js";
+import { getChatState, transitionToStop } from "../timing/chat-runtime.js";
 import { pickRevisitCandidates } from "../turn/answered-store.js";
 import { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay, type ChatStyle } from "../../tracking/chat-style.js";
+
+function isNoSendPermissionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('not enough rights to send text messages to the chat') || msg.includes('SEND_PERMISSION_DENIED');
+}
 
 // P2:贴纸冷却/去重 per-chat 化 —— 旧的模块级全局让 A 群发贴纸重置 B 群
 // 的冷却(跨群共享状态,行为相互污染)。
@@ -107,6 +114,7 @@ export async function generateAndSendReplies(args: {
     effectiveReplyPath, effectiveReplyTier,
     e, start, timings, lockState, releaseHeldChatLock,
   } = args;
+  let sendPermissionDenied = false;
 
   // 指令服从层:点名/回复 bot/私聊语境下的自然语言指令 → prompt 强注入 +
   // 禁止沉默 + 关闭 humanizer 内容篡改(指令产物要保真)。
@@ -312,17 +320,30 @@ export async function generateAndSendReplies(args: {
           heartWhy: job.turnContext?.heartWhy,
           selfState: job.turnContext?.selfState,
           sleepCatchup: job.turnContext?.sleepCatchup,
+          // P2-F:wait 回访元数据 → 写手 [等待结束] 提示
+          waitResume: e.TIMING_WAIT_HINT_ENABLED ? job.turnContext?.waitResume : undefined,
           latenessHint: latenessSec !== undefined
             ? '[迟到回复] 你刚才没在看这个群(在忙别的),过了好一会儿才看到这条消息。回复**开头**自然带一句迟到的语气("刚没看到""才看到喵"之类),轻描淡写就好,不用正式道歉。'
             : undefined,
         }
       : undefined;
     const genStartMs = Date.now();
-    const replyResult = await generateReply(
-      formatted, retrievedContext, judgeResult.action,
-      job.chatId, botUid, effectiveReplyPath, effectiveReplyTier,
-      segmenterConfig,
-      turnCallOpts,
+    // Multi-Agent:flag + 灰度群命中时走编排器(Router+专家并行+Writer),否则原写手。
+    // 路由接缝抽到 writer-selector.ts(可单测);两者返回同型 ReplyResult,下游不变。
+    // flag 关时 isMultiAgentChat 恒 false,零影响。
+    const replyResult = await runWriterRoute(
+      {
+        message: formatted,
+        retrievedContext,
+        action: judgeResult.action,
+        chatId: job.chatId,
+        botUid,
+        replyPath: effectiveReplyPath,
+        replyTier: effectiveReplyTier,
+        segmenterConfig,
+        turnCallOpts,
+      },
+      isMultiAgentChat(job.chatId),
     );
     const replies = replyResult.replies;
     timings["reply"] = Math.round(performance.now() - t5);
@@ -858,11 +879,17 @@ export async function generateAndSendReplies(args: {
 
         _stickerState(job.chatId).repliesSince++;
         try { recordBotReply(job.chatId); } catch { /* non-critical */ }
+        if (job.turnContext?.obligationId) {
+          void updateObligationState(job.chatId, job.turnContext.obligationId, 'fulfilled').catch(() => {});
+        }
         // Persist lastBotReplyAt to timing state (read by proactive-scan); the
         // tracking recordBotReply above does NOT write it, and the timing-gate one
         // is gated off by default.
         void recordTimingBotReply(job.chatId).catch(() => { /* non-critical */ });
       } catch (err) {
+        if (isNoSendPermissionError(err)) {
+          sendPermissionDenied = true;
+        }
         logger.error(
           { chatId: job.chatId, targetMessageId: reply.targetMessageId, err },
           "Failed to send reply in multi-reply sequence",
@@ -873,6 +900,9 @@ export async function generateAndSendReplies(args: {
 
     if (sentMessages.length === 0) {
       if (maxPlaceholderMsgId) await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+      if (sendPermissionDenied) {
+        throw new Error("SEND_PERMISSION_DENIED");
+      }
       throw new Error("All replies failed to send");
     }
 
@@ -926,6 +956,32 @@ export async function generateAndSendReplies(args: {
             await commitPendingQuestion(job.chatId, formatted.uid);
             await noteAskedQuestion(job.chatId, formatted.uid, lastSent);
           })
+          .catch(() => {});
+      }
+    }
+
+    // L1+L3:实时学习 + 发送时全量自评(群聊 + 私聊都跑;fire-and-forget)。
+    // 这轮一来一回有没有值得回忆的事 + 刷新关系叙事 + ASI 自评滚 EMA/调人设器。
+    if (!formatted.isBot && !formatted.isAnonymous && sentMessages.length > 0) {
+      const triggerText = formatted.textContent || formatted.captionContent || '';
+      const replyText = sentMessages.map((s) => s.text).filter(Boolean).join('\n');
+      import("../../tracking/realtime-learn.js")
+        .then(({ learnFromReply }) => learnFromReply({
+          chatId: job.chatId,
+          userId: formatted.uid,
+          triggerText,
+          replyText,
+        }))
+        .catch(() => {});
+      // L3:每条回复发出后都自评(替代抽样 ASI)。signal 用当前已知(发送时通常无 followup → 中性)。
+      if (e.ASI_SAMPLE_RATE > 0 && Math.random() <= e.ASI_SAMPLE_RATE) {
+        import("../../tracking/asi-scoring.js")
+          .then(({ scoreReplyAtSend }) => scoreReplyAtSend({
+            chatId: job.chatId,
+            triggerText,
+            replyText,
+            signal: 'sent',
+          }))
           .catch(() => {});
       }
     }
@@ -1040,7 +1096,7 @@ export async function generateAndSendReplies(args: {
       (err instanceof Error && err.name === "TurnInterrupt") ||
       (err instanceof AIError && err.code === "AI_ABORTED")
     ) {
-      logger.info(
+      logger.debug(
         { chatId: job.chatId, messageId: formatted.messageId },
         "Reply generation interrupted by new message, propagating for replan",
       );
@@ -1052,6 +1108,17 @@ export async function generateAndSendReplies(args: {
       { chatId: job.chatId, messageId: formatted.messageId, action: judgeResult.action, totalMs, timings, err },
       "Pipeline reply/send failed",
     );
+
+    if (job.chatId < 0 && isNoSendPermissionError(err)) {
+      try {
+        await transitionToStop(job.chatId, formatted.uid);
+      } catch { /* non-critical */ }
+      logger.warn(
+        { chatId: job.chatId, triggerUid: formatted.uid },
+        'Chat put into STOP due to missing send permission; waiting for a future direct wake-up',
+      );
+      return;
+    }
 
     try {
       await sender.sendDirect(job.chatId, "喵呜...本喵出了点小故障，稍后再试试吧 >_<");

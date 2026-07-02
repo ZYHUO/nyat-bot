@@ -48,14 +48,18 @@ export async function isChatSuppressed(chatId: number): Promise<boolean> {
 }
 
 /**
- * True when a recent gate decision was wait/no_action and we should NOT call
- * the gate LLM again immediately (cooldown). Returns false when feature off.
+ * P0-B:gate 冷却剩余毫秒(0 = 不在冷却)。指数退避逻辑与旧 isInGateCooldown
+ * 完全一致,只是把布尔换成剩余时长 —— defer 延迟重评需要知道"还要等多久"。
  */
-export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingState): Promise<boolean> {
+export async function getGateCooldownRemainingMs(
+  chatId: number,
+  prefetched?: ChatTimingState,
+  triggerUid?: number,
+): Promise<number> {
   const e = env();
-  if (!e.TIMING_GATE_ENABLED) return false;
+  if (!e.TIMING_GATE_ENABLED) return 0;
   const baseMs = e.TIMING_GATE_COOLDOWN_SEC * 1000;
-  if (baseMs <= 0) return false;
+  if (baseMs <= 0) return 0;
   // 审计 #38:心流分支一回合读同一 timing hash 3-4 次 → 调用方可传入
   // 已读快照,冷却判断与 lastSpokeSecAgo 共用一份
   const s = prefetched ?? await storeGetChatState(chatId);
@@ -63,6 +67,9 @@ export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingSt
     s.lastGateAction === 'wait' ||
     s.lastGateAction === 'no_action'
   ) {
+    if (triggerUid !== undefined && s.lastGateUid !== undefined && s.lastGateUid !== triggerUid) {
+      return 0;
+    }
     // 指数退避(MaiBot 借鉴):连续 no_action 时窗口 base*2^(n-start),
     // 封顶 CAP —— 沉默群里 gate 不再每 15s 白烧一次 LLM。wait 不参与
     // 退避(它有自己的 waitUntil 节奏)。direct 消息在 runTimingGate 的
@@ -72,11 +79,40 @@ export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingSt
       const over = Math.max(0, (s.noActionCount ?? 0) - e.NO_ACTION_BACKOFF_START_COUNT);
       cooldownMs = Math.min(baseMs * Math.pow(2, over), e.NO_ACTION_BACKOFF_CAP_SEC * 1000);
     }
-    if (s.lastGateAt && Date.now() - s.lastGateAt < cooldownMs) {
-      return true;
+    if (s.lastGateAt) {
+      return Math.max(0, s.lastGateAt + cooldownMs - Date.now());
     }
   }
-  return false;
+  return 0;
+}
+
+/**
+ * True when a recent gate decision was wait/no_action and we should NOT call
+ * the gate LLM again immediately (cooldown). Returns false when feature off.
+ */
+export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingState, triggerUid?: number): Promise<boolean> {
+  return (await getGateCooldownRemainingMs(chatId, prefetched, triggerUid)) > 0;
+}
+
+/**
+ * P0-A 连续对话免检(MaiBot 连续 Planner 状态):gate continue / bot 真实回复后
+ * 窗口内的后续消息跳过 gate LLM —— 已经在对话中,不该反复自问"该不该说话"。
+ * 纯函数:最新信号是正向(continue / bot 回复)且在窗口内才生效;更新的
+ * wait/no_action 负向决策自动终止免检(no_action 后必须重新过闸)。
+ */
+export function isInContinuation(s: ChatTimingState, nowMs: number = Date.now()): boolean {
+  const e = env();
+  if (!e.TURN_GATE_CONTINUATION) return false;
+  const windowMs = e.TIMING_CONTINUATION_WINDOW_SEC * 1000;
+  const gateTs = s.lastGateAt ?? 0;
+  const replyTs = s.lastBotReplyAt ?? 0;
+  const newest = Math.max(gateTs, replyTs);
+  if (newest <= 0 || nowMs - newest >= windowMs) return false;
+  // 最新信号是负向 gate 决策 → 免检不生效
+  if (gateTs >= replyTs && (s.lastGateAction === 'wait' || s.lastGateAction === 'no_action')) {
+    return false;
+  }
+  return true;
 }
 
 export async function transitionToRunning(chatId: number): Promise<void> {
@@ -84,10 +120,10 @@ export async function transitionToRunning(chatId: number): Promise<void> {
   await enterRunning(chatId);
 }
 
-export async function transitionToStop(chatId: number): Promise<void> {
+export async function transitionToStop(chatId: number, triggerUid?: number): Promise<void> {
   if (!env().TIMING_GATE_ENABLED) return;
-  await enterStop(chatId);
-  logger.info({ chatId }, 'Chat transitioned to STOP (gate=no_action)');
+  await enterStop(chatId, triggerUid);
+  logger.info({ chatId, triggerUid }, 'Chat transitioned to STOP (gate=no_action)');
 }
 
 /**
@@ -98,6 +134,8 @@ export async function transitionToWait(
   chatId: number,
   waitSec: number,
   anchorMessageId?: number,
+  triggerUid?: number,
+  obligationId?: string,
 ): Promise<void> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) return;
@@ -112,14 +150,14 @@ export async function transitionToWait(
   // wakeup (direct interaction).
   let waitJobId: string | undefined;
   try {
-    waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId);
+    waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
   } catch (err) {
     logger.warn({ err, chatId, bounded }, 'enqueueWaitResume failed; entering WAIT without scheduled resume');
   }
 
-  await enterWait(chatId, bounded, anchorMessageId, waitJobId);
+  await enterWait(chatId, bounded, anchorMessageId, waitJobId, triggerUid);
   logger.info(
-    { chatId, waitSec: bounded, anchorMessageId, waitJobId },
+    { chatId, waitSec: bounded, anchorMessageId, waitJobId, triggerUid },
     'Chat transitioned to WAIT (gate=wait)',
   );
 }
@@ -155,7 +193,7 @@ export async function recordUserMessage(chatId: number): Promise<void> {
  */
 export async function handleWaitResume(args: {
   chatId: number;
-  waitResume?: { scheduledAt: number; waitSec: number; anchorMessageId?: number };
+  waitResume?: { scheduledAt: number; waitSec: number; anchorMessageId?: number; obligationId?: string };
 }): Promise<void> {
   if (!env().TIMING_GATE_ENABLED) return;
 
@@ -193,12 +231,18 @@ export async function handleWaitResume(args: {
     try {
       const anchor = await takeWaitAnchor(chatId);
       if (anchor) {
-        await appendPending(anchor);
+        await appendPending({
+          ...anchor,
+          obligationId: waitResume?.obligationId ?? anchor.obligationId,
+          // P2-F:把实际等待秒数盖到回放条目上,写手侧提示"你刚等了 N 秒"
+          waitSec: waitResume?.waitSec ?? anchor.waitSec,
+        });
       }
       await scheduleTurn(chatId, {
         trigger: 'wait_timeout',
         delayMsOverride: 0,
         anchorMessageId: waitResume?.anchorMessageId,
+        obligationId: waitResume?.obligationId,
       });
       logger.info(
         { chatId, anchorMessageId: waitResume?.anchorMessageId, replayed: !!anchor },

@@ -184,6 +184,13 @@ describe('chat-runtime state machine', () => {
     expect(await runtime.isInGateCooldown(-100)).toBe(false);
   });
 
+  it('isInGateCooldown does not suppress a different user', async () => {
+    const ss = await import('../../../src/pipeline/timing/state-store.js');
+    await ss.recordGateNoAction(-100, 7);
+    expect(await runtime.isInGateCooldown(-100, undefined, 8)).toBe(false);
+    expect(await runtime.isInGateCooldown(-100, undefined, 7)).toBe(true);
+  });
+
   it('no_action 指数退避:连续 no_action 拉长冷却窗口,封顶 CAP', async () => {
     // MaiBot 借鉴:window = base * 2^max(0, count - START_COUNT), cap 300s
     const ss = await import('../../../src/pipeline/timing/state-store.js');
@@ -258,16 +265,19 @@ describe('chat-runtime state machine', () => {
       chatId: -100,
       waitResume: { scheduledAt: Date.now(), waitSec: 5, anchorMessageId: 42 },
     });
+    // 复位必须在断言之前:断言一挂,后置复位不执行,旗标泄漏进下一个用例
+    envValues['TURN_WAIT_RESUME_ENABLED'] = false;
+    envValues['TURN_ACTOR_ENABLED'] = false;
 
     expect((await runtime.getChatState(-100)).state).toBe('RUNNING');
-    expect(appendPendingMock).toHaveBeenCalledWith(anchor);
+    // P2-F:回放条目盖上实际等待秒数(写手 [等待结束] 提示用)
+    expect(appendPendingMock).toHaveBeenCalledWith({ ...anchor, obligationId: undefined, waitSec: 5 });
     expect(scheduleTurnMock).toHaveBeenCalledWith(-100, {
       trigger: 'wait_timeout',
       delayMsOverride: 0,
       anchorMessageId: 42,
+      obligationId: undefined,
     });
-    envValues['TURN_WAIT_RESUME_ENABLED'] = false;
-    envValues['TURN_ACTOR_ENABLED'] = false;
   });
 
   it('G5: legacy path (flag off) only unblocks, no replay', async () => {
@@ -289,5 +299,75 @@ describe('chat-runtime state machine', () => {
     expect(await runtime.isChatSuppressed(-100)).toBe(true);
     await runtime.transitionToRunning(-100);
     expect(await runtime.isChatSuppressed(-100)).toBe(false);
+  });
+
+  it('P0-B: getGateCooldownRemainingMs 返回剩余毫秒且与布尔壳一致', async () => {
+    const ss = await import('../../../src/pipeline/timing/state-store.js');
+    await ss.recordGateNoAction(-100, 7);
+    const remaining = await runtime.getGateCooldownRemainingMs(-100, undefined, 7);
+    expect(remaining).toBeGreaterThan(13_000);
+    expect(remaining).toBeLessThanOrEqual(15_000);
+    expect(await runtime.isInGateCooldown(-100, undefined, 7)).toBe(true);
+    // 不同触发者不受冷却
+    expect(await runtime.getGateCooldownRemainingMs(-100, undefined, 8)).toBe(0);
+  });
+});
+
+describe('P0-A isInContinuation 真值表', () => {
+  const NOW = 1_000_000_000_000;
+  const WINDOW = 180_000;
+  let runtime: typeof import('../../../src/pipeline/timing/chat-runtime.js');
+
+  beforeEach(async () => {
+    envValues['TURN_GATE_CONTINUATION'] = true;
+    envValues['TIMING_CONTINUATION_WINDOW_SEC'] = 180;
+    runtime = await import('../../../src/pipeline/timing/chat-runtime.js');
+  });
+
+  it('flag 关 → 永远 false', async () => {
+    envValues['TURN_GATE_CONTINUATION'] = false;
+    expect(runtime.isInContinuation({ state: 'RUNNING', lastBotReplyAt: NOW - 1000 }, NOW)).toBe(false);
+  });
+
+  it('bot 刚回复(窗口内)→ true', () => {
+    expect(runtime.isInContinuation({ state: 'RUNNING', lastBotReplyAt: NOW - 10_000 }, NOW)).toBe(true);
+  });
+
+  it('gate 刚 continue(窗口内)→ true', () => {
+    expect(runtime.isInContinuation(
+      { state: 'RUNNING', lastGateAt: NOW - 10_000, lastGateAction: 'continue' }, NOW,
+    )).toBe(true);
+  });
+
+  it('窗口过期 → false', () => {
+    expect(runtime.isInContinuation({ state: 'RUNNING', lastBotReplyAt: NOW - WINDOW }, NOW)).toBe(false);
+  });
+
+  it('更新的 no_action/wait 负向决策杀免检', () => {
+    expect(runtime.isInContinuation({
+      state: 'RUNNING',
+      lastBotReplyAt: NOW - 60_000,
+      lastGateAt: NOW - 5_000,
+      lastGateAction: 'no_action',
+    }, NOW)).toBe(false);
+    expect(runtime.isInContinuation({
+      state: 'RUNNING',
+      lastBotReplyAt: NOW - 60_000,
+      lastGateAt: NOW - 5_000,
+      lastGateAction: 'wait',
+    }, NOW)).toBe(false);
+  });
+
+  it('bot 回复比负向决策新 → 免检恢复', () => {
+    expect(runtime.isInContinuation({
+      state: 'RUNNING',
+      lastBotReplyAt: NOW - 5_000,
+      lastGateAt: NOW - 60_000,
+      lastGateAction: 'no_action',
+    }, NOW)).toBe(true);
+  });
+
+  it('无任何信号 → false', () => {
+    expect(runtime.isInContinuation({ state: 'RUNNING' }, NOW)).toBe(false);
   });
 });

@@ -30,8 +30,18 @@ import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { getChatState, transitionToRunning } from '../timing/chat-runtime.js';
 import type { PendingEntry } from './types.js';
 import { AIError } from '../../shared/errors.js';
+import { selectActiveObligation } from './obligation-select.js';
+import { expireStaleObligations } from './obligation-store.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import {
+  pickMultiAnchorGroups,
+  entryUid,
+  entryDate,
+  type AnchorCandidate,
+} from './anchor-select.js';
+import { formatMessage } from '../formatter.js';
+import { deriveTopicKey } from './obligation-detect.js';
 
 export { isTurnActorChat } from './flags.js';
 
@@ -44,6 +54,53 @@ function maxReplans(): number {
   const rounds = Number(env().TURN_MAX_INTERNAL_ROUNDS);
   const base = Number.isFinite(rounds) ? rounds - 2 : 2;
   return Math.min(4, Math.max(1, base));
+}
+
+
+function buildActiveObligationContext(entries: PendingEntry[]): {
+  obligationId?: string;
+  obligationTargetUid?: number;
+  obligationStrong?: boolean;
+} {
+  const candidates = entries
+    .filter((e) => e.obligationId)
+    .map((e) => ({
+      id: e.obligationId!,
+      targetUid: e.obligationTargetUid ?? 0,
+      mustReplyStrong: e.obligationStrong === true,
+      directInteraction: e.direct === true,
+      priority: e.obligationStrong ? 100 : 50,
+      state: 'pending' as const,
+      chatId: e.chatId,
+      anchorMessageId: e.messageId ?? 0,
+      anchorUid: e.obligationTargetUid ?? 0,
+      anchorFullName: '',
+      targetFullName: '',
+      kind: 'judge_reply' as const,
+      createdAt: e.enqueuedAt,
+      updatedAt: e.enqueuedAt,
+      relatedMessageIds: e.messageId ? [e.messageId] : [],
+      triggerUids: e.obligationTargetUid ? [e.obligationTargetUid] : [],
+    }));
+  const selected = selectActiveObligation(candidates).active;
+  if (!selected) return {};
+  const source = entries.find((e) => e.obligationId === selected.id);
+  return {
+    obligationId: selected.id,
+    obligationTargetUid: source?.obligationTargetUid,
+    obligationStrong: source?.obligationStrong === true,
+  };
+}
+
+function mergeObligationContext(
+  base: { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean },
+  fallback?: { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean },
+): { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean } {
+  return {
+    obligationId: base.obligationId ?? fallback?.obligationId,
+    obligationTargetUid: base.obligationTargetUid ?? fallback?.obligationTargetUid,
+    obligationStrong: base.obligationStrong ?? fallback?.obligationStrong,
+  };
 }
 
 function isAbortError(err: unknown): boolean {
@@ -111,6 +168,7 @@ async function runCommandEntry(
   batchSize: number,
   epoch: number,
   burstMessageIds: number[],
+  obligationCtx?: { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean },
 ): Promise<void> {
   try {
     await processPipeline({
@@ -127,6 +185,9 @@ async function runCommandEntry(
       turnContext: {
         // 无 signal → 不可打断;命令本就直接交互、跳 gate
         epoch,
+        obligationId: obligationCtx?.obligationId ?? entry.obligationId,
+        obligationTargetUid: obligationCtx?.obligationTargetUid ?? entry.obligationTargetUid,
+        obligationStrong: obligationCtx?.obligationStrong ?? entry.obligationStrong,
         gateBypass: true,
         isReplan: false,
         sleepCatchup: entry.sleepCatchup === true,
@@ -150,11 +211,18 @@ async function runJudgedEntry(
   batchSize: number,
   epoch: number,
   burstMessageIds: number[],
+  opts?: {
+    skipGateCooldown?: boolean;
+    burstUids?: number[];
+    obligationCtx?: { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean };
+    /** P2-F:wait 回访元数据(写手提示"你刚等了 N 秒"用)。 */
+    waitResume?: { waitSec?: number; hadNewMessages: boolean };
+  },
 ): Promise<void> {
   const e = env();
   // 命令是事务 → 非打断单跑,绝不进重规划锚点逻辑(否则同窗多命令被单锚点吞掉)
   if (isCommandEntry(entry, e.BOT_USERNAME)) {
-    await runCommandEntry(chatId, entry, batchSize, epoch, burstMessageIds);
+    await runCommandEntry(chatId, entry, batchSize, epoch, burstMessageIds, opts?.obligationCtx);
     return;
   }
   let current = entry;
@@ -182,12 +250,25 @@ async function runJudgedEntry(
         turnContext: {
           signal: controller.signal,
           epoch,
-          // wait 回访跳过 gate:刚因 wait 沉默过,再问 gate 多半又是沉默
+          obligationId: opts?.obligationCtx?.obligationId ?? current.obligationId,
+          obligationTargetUid: opts?.obligationCtx?.obligationTargetUid ?? current.obligationTargetUid,
+          obligationStrong: opts?.obligationCtx?.obligationStrong ?? current.obligationStrong,
+          // wait 回访跳过 gate:刚因 wait 沉默过,再问 gate 多半又是沉默。
+          // P0-B 注意:deferReplay **不**跳过 gate —— defer 的意义就是到点重评。
           gateBypass: gateBypass || current.waitReplay === true,
           isReplan: replans > 0,
-          isWaitReplay: current.waitReplay === true,
+          // deferReplay 与 waitReplay 同享"跳过 bookkeeping+judge"(首轮已
+          // 入册、已判过 REPLY;MaiBot 的 delayed re-check 也是阈值→gate→
+          // planner,不回头重跑 judge)。
+          isWaitReplay: current.waitReplay === true || current.deferReplay === true,
           sleepCatchup: current.sleepCatchup === true,
+          deferCount: current.deferCount,
+          waitResume: opts?.waitResume,
           burstMessageIds: currentBurstIds.length > 1 ? currentBurstIds : undefined,
+          // 多锚点同场兄弟:跳过心流冷却,否则组2+ 会被组1 的 no_action 冷却误杀。
+          skipGateCooldown: opts?.skipGateCooldown ?? false,
+          // burstUid 集合(actor 算好直传,不靠 pipeline 侧 30 条窗口)。
+          burstUids: opts?.burstUids,
         },
       });
       return;
@@ -239,15 +320,22 @@ async function runJudgedEntry(
             await trackEntry(chatId, fresh[i]!, fresh.length, false);
           }
         }
-        currentBurstIds = [
-          ...currentBurstIds,
-          ...fresh.map((f) => f.messageId).filter((id): id is number => id !== undefined),
-        ];
         // 有新的聊天锚点 → 重规划到它;打断全来自命令(anchorIdx===-1)→ 保留原 current 重试原回复
         if (anchorIdx !== -1) {
           current = fresh[anchorIdx]!;
           currentBatch = fresh.length;
         }
+        // L6: 只把与当前锚点同 uid 的 fresh id 并入本组 burstIds,避免跨人
+        // replan 时写手 reply_to 指到别人消息上(多锚点场景)。锚点若切到
+        // 别人(direct 优先),则以新锚点 uid 为准 —— 写手最可能回最新锚点。
+        const anchorUid = entryUid(current);
+        currentBurstIds = [
+          ...currentBurstIds,
+          ...fresh
+            .filter((f) => entryUid(f) === anchorUid)
+            .map((f) => f.messageId)
+            .filter((id): id is number => id !== undefined),
+        ];
       }
       // 无论是否有新消息,重规划都跳过 gate(打断已证明此刻该说话)
       gateBypass = true;
@@ -284,14 +372,22 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     return;
   }
 
-  // G5: wait 回访让位 — 若同批里有比锚点更新的真实消息,旧锚点退位
+  // G5: wait/defer 回访让位 — 若同批里有比锚点更新的真实消息,旧锚点退位
   // (它的内容早已在上下文里;MaiBot timeout-with-new-messages 重锚定语义),
-  // 但它的 id 仍留在 burst 窗口里供模型选目标。
-  const hasFresh = drained.some((en) => !en.waitReplay);
+  // 但它的 id 仍留在 burst 窗口里供模型选目标。P0-B 的 deferReplay 同语义。
+  const hasFresh = drained.some((en) => !en.waitReplay && !en.deferReplay);
   const displacedReplayIds = hasFresh
-    ? drained.filter((en) => en.waitReplay).map((en) => en.messageId).filter((id): id is number => id !== undefined)
+    ? drained.filter((en) => en.waitReplay || en.deferReplay).map((en) => en.messageId).filter((id): id is number => id !== undefined)
     : [];
-  let entries = hasFresh ? drained.filter((en) => !en.waitReplay) : drained;
+  let entries = hasFresh ? drained.filter((en) => !en.waitReplay && !en.deferReplay) : drained;
+
+  // P2-F: wait 回访元数据 —— 提示写手"你刚才决定等了 N 秒,期间有/无新消息"。
+  // 锚点被新消息挤掉时提示挂到新锚点上(对齐 MaiBot 把 wait-completed 标记
+  // 写进共享历史:谁接棒谁看得见)。
+  const waitReplayEntry = drained.find((en) => en.waitReplay === true);
+  const waitResumeInfo = waitReplayEntry !== undefined
+    ? { waitSec: waitReplayEntry.waitSec, hadNewMessages: hasFresh }
+    : undefined;
 
   // 积压保护:调度故障/停机恢复后 pending 可能上千条;一个 turn job 顺序
   // 消化会超过 BullMQ lockDuration → stalled 重跑 → 重复处理。只保最新
@@ -328,27 +424,51 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   const e = env();
   const hasDirect = entries.some((entry) => entry.direct);
 
-  // ── WAIT/STOP suppression (legacy ingress parity) ──
-  // direct 在场 → 唤醒;否则整批 tracking-only,等 direct/wait 到期唤醒。
-  let suppressed = false;
+  // ── WAIT/STOP suppression ──
+  // per-person(TURN_WAIT_PER_PERSON):WAIT 只抑制触发者集合(waitTriggerUids)的
+  // 后续,别人的条目不抑制、正常进多锚点 judge。心流 wait 本意就是"等TA
+  // 说完",抑制整群是过度抑制。STOP 仍 legacy 整批抑制(actor 模式极少进
+  // STOP)。direct 在场 → 唤醒整群(保留原逃生口)。
+  // L5 guard:部署前已存在的 WAIT 无 waitTriggerUids → 落到 else 的 legacy
+  // 整批抑制,等老 wait 自然过期;只有新 wait(带 uid 集合)走 per-person。
+  let suppressedUidSet: Set<number> | undefined;
+  let waitTopicKey: string | undefined;
+  let suppressAll = false;
   if (e.TIMING_GATE_ENABLED) {
     try {
       const chatState = await getChatState(chatId);
       if (chatState.state === 'WAIT' || chatState.state === 'STOP') {
         if (hasDirect) {
           await transitionToRunning(chatId);
+        } else if (chatState.state === 'WAIT' && e.TURN_WAIT_PER_PERSON && chatState.waitTriggerUids !== undefined) {
+          suppressedUidSet = new Set(chatState.waitTriggerUids);
+          waitTopicKey = chatState.waitTopicKey;
         } else {
-          suppressed = true;
+          suppressAll = true;
         }
       }
     } catch (err) {
       logger.warn({ err, chatId }, 'Turn: getChatState failed, treating as RUNNING');
     }
   }
+  const isEntrySuppressed = (entry: PendingEntry): boolean => {
+    if (suppressAll) return true;
+    if (suppressedUidSet !== undefined) {
+      if (!suppressedUidSet.has(entryUid(entry))) return false;
+      if (!waitTopicKey) return true;
+      const formatted = formatMessage(entry.update);
+      const entryTopicKey = formatted ? deriveTopicKey(formatted) : undefined;
+      return entryTopicKey === waitTopicKey;
+    }
+    return false;
+  };
+
+  await expireStaleObligations(chatId).catch(() => {});
 
   logger.debug(
     {
-      chatId, epoch, burstSize: entries.length, hasDirect, suppressed,
+      chatId, epoch, burstSize: entries.length, hasDirect, suppressAll,
+      suppressedUidSet: suppressedUidSet ? [...suppressedUidSet] : undefined,
       trigger: turnPayload?.trigger, directPriority: turnPayload?.directPriority,
     },
     'Turn started',
@@ -360,37 +480,85 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     ...entries.map((en) => en.messageId).filter((id): id is number => id !== undefined),
   ];
 
-  // 斜杠命令是**事务性请求**,每条都必须有回执:两个人同窗 /checkin,
-  // 单锚点会吞掉前一个人的签到(命令回执只在 judged 路径触发 —— L0
-  // whitelisted_command → 拦截器,tracking-only 永远到不了)。命令逐条
-  // judged,确定性拦截无 LLM 浪费;"每回合一个锚点"的预算只约束聊天式回复。
+  // 斜杠命令是**事务性请求**,每条都必须有回执:逐条 judged,不参与锚点预算。
   const judgedIdx = new Set<number>();
-  // 聊天式锚点:有 direct 取最后一条 direct,否则取末尾最新的**非编辑**
-  // 条目。(旧 debounce 语义会让 direct 和末尾各判一次 → 同回合可能双回复;
-  // burst 窗口已让模型看到整波,单锚点足够。)
-  // 编辑永不当默认锚点:锚到一条改旧消息上,bot 会把陈年消息当成刚发的
-  // 接话(review P1 #0/#3)。改出 @bot 的编辑带 direct,走上面的 direct 扫描。
-  // 全是被动编辑的回合 → 无锚点,整批 tracking-only 纯入册。
-  if (!suppressed) {
-    for (let i = 0; i < entries.length; i++) {
-      if (isCommandEntry(entries[i]!, e.BOT_USERNAME)) judgedIdx.add(i);
+  const obligationCtx = mergeObligationContext(buildActiveObligationContext(entries), {
+    obligationId: turnPayload?.obligationId,
+    obligationTargetUid: turnPayload?.obligationTargetUid,
+    obligationStrong: turnPayload?.obligationStrong,
+  });
+  for (let i = 0; i < entries.length; i++) {
+    if (isCommandEntry(entries[i]!, e.BOT_USERNAME)) judgedIdx.add(i);
+  }
+
+  // 候选锚点条目:非命令、且未被 per-person 抑制。
+  const candidateIdx: number[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    if (!judgedIdx.has(i) && !isEntrySuppressed(entries[i]!)) candidateIdx.push(i);
+  }
+
+  // burst 是否多人 → 走多锚点还是单锚点。单人 burst 走原单锚点逻辑(零回归)。
+  let multiAnchor = false;
+  if (e.TURN_MULTI_ANCHOR_ENABLED && candidateIdx.length > 0 && !suppressAll) {
+    const uids = new Set<number>();
+    for (const i of candidateIdx) {
+      uids.add(entryUid(entries[i]!));
+      if (uids.size > 1) break;
     }
-    let anchorIndex = -1;
-    for (let i = entries.length - 1; i >= 0; i--) {
-      if (entries[i]!.direct === true && !judgedIdx.has(i)) {
-        anchorIndex = i;
-        break;
+    multiAnchor = uids.size > 1;
+  }
+
+  // 每发送者的 messageId 列表(多锚点给每组 runJudgedEntry 传本组 burstIds,
+  // 写手 reply_to 自然落在本人消息上 → 治"回错人")。只收候选(非命令、非抑制)
+  // 条目,排除命令 messageId 混入 burstIds 导致回复挂到命令消息下。
+  const idsByUid = new Map<number, number[]>();
+  if (multiAnchor) {
+    for (const i of candidateIdx) {
+      const en = entries[i]!;
+      if (en.messageId === undefined) continue;
+      const uid = entryUid(en);
+      let arr = idsByUid.get(uid);
+      if (!arr) { arr = []; idsByUid.set(uid, arr); }
+      arr.push(en.messageId);
+    }
+  }
+
+  if (!suppressAll) {
+    if (multiAnchor) {
+      const candidates: AnchorCandidate[] = candidateIdx.map((i) => {
+        const en = entries[i]!;
+        return {
+          idx: i,
+          uid: entryUid(en),
+          direct: en.direct === true,
+          isEdit: en.isEdit === true,
+          ts: entryDate(en),
+        };
+      });
+      const budget = e.TURN_MULTI_ANCHOR_MAX;
+      // direct 优先 + 最新时间倒序,总共取前 budget 组(direct 也受预算约束,
+      // 超过 budget 人 @bot 时只回最新的 budget 个,兑现"每回合最多回 N 人")。
+      const picked = pickMultiAnchorGroups(candidates, budget);
+      for (const idx of picked) judgedIdx.add(idx);
+      logger.debug(
+        { chatId, multiAnchor: true, groups: new Set(candidates.map((c) => c.uid)).size, judged: judgedIdx.size, budget },
+        'Turn: multi-anchor groups selected',
+      );
+    } else if (candidateIdx.length > 0) {
+      // 单锚点(原逻辑):最后一条 direct,否则最后一条非编辑。
+      let anchorIndex = -1;
+      for (let i = candidateIdx.length - 1; i >= 0; i--) {
+        const idx = candidateIdx[i]!;
+        if (entries[idx]!.direct === true) { anchorIndex = idx; break; }
       }
-    }
-    if (anchorIndex === -1) {
-      for (let i = entries.length - 1; i >= 0; i--) {
-        if (entries[i]!.isEdit !== true && !judgedIdx.has(i)) {
-          anchorIndex = i;
-          break;
+      if (anchorIndex === -1) {
+        for (let i = candidateIdx.length - 1; i >= 0; i--) {
+          const idx = candidateIdx[i]!;
+          if (entries[idx]!.isEdit !== true) { anchorIndex = idx; break; }
         }
       }
+      if (anchorIndex !== -1) judgedIdx.add(anchorIndex);
     }
-    if (anchorIndex !== -1) judgedIdx.add(anchorIndex);
   }
 
   for (let i = 0; i < entries.length; i++) {
@@ -398,9 +566,22 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
 
     try {
       if (judgedIdx.has(i)) {
-        await runJudgedEntry(chatId, entry, entries.length, epoch, burstMessageIds);
+        const groupBurstIds = multiAnchor
+          ? (idsByUid.get(entryUid(entry)) ?? burstMessageIds)
+          : burstMessageIds;
+        // burstUid 集合(L3):多锚点 → 本组单人 [uid];单锚点 → 整 burst 去重 uid。
+        // actor 直传,不依赖 pipeline 侧 recentMessages 的 30 条窗口。
+        const groupBurstUids = multiAnchor
+          ? [entryUid(entry)]
+          : [...new Set(entries.map((en) => entryUid(en)))];
+        await runJudgedEntry(chatId, entry, entries.length, epoch, groupBurstIds, {
+          skipGateCooldown: multiAnchor,
+          burstUids: groupBurstUids,
+          obligationCtx,
+          waitResume: waitResumeInfo,
+        });
       } else {
-        await trackEntry(chatId, entry, entries.length, suppressed);
+        await trackEntry(chatId, entry, entries.length, isEntrySuppressed(entry));
       }
     } catch (err) {
       // One bad entry must not kill the rest of the burst.

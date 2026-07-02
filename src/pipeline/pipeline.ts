@@ -13,7 +13,7 @@ import { sender, TEMP_MUTE_CLEAR_RULES, DIRECT_INTERACTION_RULES } from "./share
 import { tryMuteCommandIntercepts, tryPreMuteIntercepts, tryPostMuteIntercepts } from "./stages/intercepts.js";
 import { generateAndSendReplies, type ChatLockState } from "./stages/deliver.js";
 import { sendMessage } from "../bot/sender/telegram.js";
-import { getBotUid } from "../bot/bot.js";
+import { getBotUid, getBotIdentity, getBotDisplayName } from "../bot/bot.js";
 import { recordMessage as recordActivity, getActivitySummary } from "../tracking/activity.js";
 import { getBotTracker } from "../tracking/interaction.js";
 import { tryGenerateDigest } from "../tracking/bot-digest.js";
@@ -42,7 +42,10 @@ import { env } from "../env.js";
 import { logger } from "../shared/logger.js";
 import { checkWatches } from "../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage } from "../tracking/stats.js";
-import { recordGateNoAction } from "./timing/state-store.js";
+import { recordGateNoAction, bumpGatePendingCount } from "./timing/state-store.js";
+import { scheduleGateDeferReeval } from "./timing/defer.js";
+import { isTurnActorChat } from "./turn/flags.js";
+import { updateObligationState } from './turn/obligation-store.js';
 import { playGame, hasActiveGame } from "./games/manager.js";
 import { runTimingGate } from "./timing/gate.js";
 import {
@@ -124,8 +127,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       timings["media"] = Math.round(performance.now() - tmedia);
     }
 
-    const e = env();
-    const botUid = getBotUid();
+  const e = env();
+  const botUid = getBotUid();
+  const botIdentity = getBotIdentity();
 
     // 3.0 bot 消息分类(地基,shadow:只打标 + 日志,不改行为)。其他 bot
     // 的入站消息打 botClass,供后续 A 互动 / D 降噪 / 命令学习共用一个判定。
@@ -305,6 +309,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       logger.debug({ err, chatId: job.chatId }, "Activity tracking failed (non-critical)");
     });
 
+    // 3.55 P1-C talk_value:攒消息计数(gate 真实评估/bot 回复时清零)。
+    // 在 !isWaitReplay 的入册块里 → defer/wait 回放不会重复计数。
+    if (e.TIMING_GATE_ENABLED && !formatted.isBot) {
+      bumpGatePendingCount(job.chatId).catch(() => {});
+    }
+
     // 3.51 Stats (fire-and-forget)
     if (!formatted.isBot) {
       try { recordStatMessage(job.chatId, formatted.uid); } catch (err) { logger.debug({ err, chatId: job.chatId }, 'recordStatMessage failed'); }
@@ -376,7 +386,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     // 3.7 Check reply outcomes + trigger self-reflection
     if (e.OUTCOME_TRACKING_ENABLED) {
-      checkOutcome(job.chatId, formatted, e.BOT_USERNAME).then(({ needsReflection }) => {
+      checkOutcome(job.chatId, formatted, botIdentity.username).then(({ needsReflection }) => {
         if (needsReflection) {
           generateReflection(job.chatId, async (prompt) => {
             try {
@@ -517,7 +527,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     if (sleepPhaseA !== "awake") {
       const l0 = l0Rule({
         message: formatted, recentMessages, botUid,
-        botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        botUsername: botIdentity.username, botNicknames: botIdentity.nicknames,
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
       });
       const verdictA = await sleepStageAVerdict(job.chatId, l0, sleepPhaseA);
@@ -550,8 +560,24 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // G4: burst-aware judging — when the turn actor drained a multi-message
     // burst, tell the judge to treat the whole burst as one thought.
     const burstIds = e.TURN_BURST_JUDGE_ENABLED ? (job.turnContext?.burstMessageIds ?? []) : [];
+    // burst 是否多人。优先用 actor 直传的 burstUids(L3:不依赖 recentMessages
+    // 的 30 条窗口,老消息掉出窗口也能正确判多人);没有则回退到用 recentMessages
+    // 把 id 映射成 uid(非 actor 路径兜底)。多锚点模式下每组 burstUids 只 1 个 uid。
+    const burstUidSet = new Set<number>();
+    const burstUidsFromCtx = job.turnContext?.burstUids;
+    if (burstUidsFromCtx && burstUidsFromCtx.length > 0) {
+      for (const u of burstUidsFromCtx) burstUidSet.add(u);
+    } else if (burstIds.length > 1) {
+      for (const id of burstIds) {
+        const m = recentMessages.find((rm) => rm.messageId === id);
+        if (m) burstUidSet.add(m.uid);
+        if (burstUidSet.size > 1) break;
+      }
+    }
     const burstHint = burstIds.length > 1
-      ? `[连发提示] 最新的 ${burstIds.length} 条消息（${burstIds.map((id) => `#${id}`).join('、')}）是同一波连发，很可能是一个完整的念头分几条打出来的。请把整波作为一个整体来判断（回不回、值不值得回），不要只盯最后一条——重点经常在前面几条里。`
+      ? burstUidSet.size > 1
+        ? `[多人提示] 最近的 ${burstIds.length} 条消息来自不同的人（约 ${burstUidSet.size} 位，${burstIds.map((id) => `#${id}`).join('、')}），不是同一个人的连发。请只针对你真正要回的那个人/那条来判断，reply 指向那个人的消息，别把别人的话算到锚点人头上。`
+        : `[连发提示] 最新的 ${burstIds.length} 条消息（${burstIds.map((id) => `#${id}`).join('、')}）是同一波连发，很可能是一个完整的念头分几条打出来的。请把整波作为一个整体来判断（回不回、值不值得回），不要只盯最后一条——重点经常在前面几条里。`
       : undefined;
 
     // G9: per-chat focus level modulates the judge's REPLY acceptance bar
@@ -575,7 +601,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // 让它们失配。engagement 仍然强制 REPLY(除非 L0 明确 REJECT)。
       const l0 = l0Rule({
         message: formatted, recentMessages, botUid,
-        botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        botUsername: botIdentity.username, botNicknames: botIdentity.nicknames,
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
       });
       if (l0?.action === "REJECT") {
@@ -602,7 +628,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // (它就是 gate,后面的 gate 块对 heart 路径跳过)。
       const l0Raw = l0Rule({
         message: formatted, recentMessages, botUid,
-        botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        botUsername: botIdentity.username, botNicknames: botIdentity.nicknames,
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
       });
       // "对话热度"类 L0 规则(bot 刚说过话 → 骰子自动 REPLY)在心流模式
@@ -622,16 +648,16 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       }
       if (l0) {
         judgeResult = l0;
-      } else if (await isInGateCooldown(job.chatId, tstate)) {
+      } else if (!job.turnContext?.skipGateCooldown && await isInGateCooldown(job.chatId, tstate, formatted.uid)) {
         // 冷却短路:刚 pass/wait 过(15s 内)→ 不再为每条消息烧一次心流调用
-        logger.debug({ chatId: job.chatId }, "Heart skipped (cooldown), pass");
+        logger.debug({ chatId: job.chatId, uid: formatted.uid, lastGateUid: tstate?.lastGateUid }, "Heart skipped (cooldown), pass");
         return;
       } else {
         // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
         // 硬阈以下确定性 pass(不烧心流调用);中间带给心流一句体感注记。
         const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
         if (engagement.budget <= HARD_PASS_BUDGET) {
-          await recordGateNoAction(job.chatId).catch(() => {});
+          await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
           logger.info(
             { chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors },
             "Heart skipped (engagement budget), pass",
@@ -650,7 +676,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           recentMessages,
           botUid,
           // 显示名而非 @handle:"你是hunhebi_bot"和下面 persona 的"我是啾咪囝"打架
-          botName: e.BOT_NICKNAMES[0] || e.BOT_USERNAME,
+          botName: getBotDisplayName(),
           selfState,
           lastSpokeSecAgo,
           burstNote: [
@@ -674,16 +700,16 @@ export async function processPipeline(job: ChatJob): Promise<void> {
               }, waitSec + 120);
             } catch { /* non-critical */ }
           }
-          await transitionToWait(job.chatId, waitSec, formatted.messageId);
-          logger.info({ chatId: job.chatId, why: heart.why }, "Pipeline complete (heart=wait)");
+          await transitionToWait(job.chatId, waitSec, formatted.messageId, formatted.uid);
+          logger.info({ chatId: job.chatId, why: heart.why, triggerUid: formatted.uid }, "Pipeline complete (heart=wait)");
           return;
         }
         if (heart.act === 'pass') {
           if (e.TURN_FOCUS_ENABLED) {
             import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
           }
-          await recordGateNoAction(job.chatId).catch(() => {});
-          logger.info({ chatId: job.chatId, why: heart.why }, "Pipeline complete (heart=pass, still present)");
+          await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
+          logger.info({ chatId: job.chatId, why: heart.why, triggerUid: formatted.uid }, "Pipeline complete (heart=pass, still present)");
           return;
         }
         judgeResult = heart.judgeResult;
@@ -708,7 +734,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       judgeResult = await judge({
         message: formatted, recentMessages,
         recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),
-        botUid, botUsername: e.BOT_USERNAME, botNicknames: e.BOT_NICKNAMES,
+        botUid, botUsername: botIdentity.username, botNicknames: botIdentity.nicknames,
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
         burstHint,
         focus: focusLevel,
@@ -850,11 +876,16 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       const tg = performance.now();
       let botPersona = '';
       try { botPersona = loadCachedPrompt('identity/persona.md'); } catch { /* non-fatal */ }
-      // 在场感:bot 上次发言距今(供 gate 抗"中途蒸发")
+      // 预读 timing state(审计 #38:一份快照供 lastSpokeSecAgo + gate 内
+      // 连续免检/冷却/talk_value 共用,避免重复 HGETALL)。读失败 → undefined,
+      // gate 内自行兜底。
+      let prefetchedState: Awaited<ReturnType<typeof getChatState>> | undefined;
       let lastSpokeSecAgo: number | undefined;
       try {
-        const ts = await getChatState(job.chatId);
-        if (ts.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - ts.lastBotReplyAt) / 1000;
+        prefetchedState = await getChatState(job.chatId);
+        if (prefetchedState.lastBotReplyAt) {
+          lastSpokeSecAgo = (Date.now() - prefetchedState.lastBotReplyAt) / 1000;
+        }
       } catch { /* non-critical */ }
       const gateDecision = await runTimingGate({
         chatId: job.chatId,
@@ -862,11 +893,20 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         recentMessages,
         judgeResult,
         botUid,
-        botName: e.BOT_NICKNAMES[0] || e.BOT_USERNAME,
+        botName: getBotDisplayName(),
         botPersona,
         isDirectInteraction: isDirect,
         signal: job.turnContext?.signal,
         lastSpokeSecAgo,
+        triggerUid: formatted.uid,
+        obligationId: job.turnContext?.obligationId,
+        obligationTargetUid: job.turnContext?.obligationTargetUid,
+        obligationStrong: job.turnContext?.obligationStrong,
+        prefetchedState,
+        skipShortCircuits: job.turnContext?.skipGateCooldown,
+        // P0-B/P1-C:仅 turn actor 路径支持 defer 延迟重评(非 actor 无 pending
+        // 缓冲可回放,defer 会退化成丢消息 → 不开)。
+        canDefer: !!job.turnContext && isTurnActorChat(job.chatId),
       });
       timings["timing_gate"] = Math.round(performance.now() - tg);
 
@@ -893,6 +933,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
                 messageId: formatted.messageId,
                 enqueuedAt: job.enqueuedAt,
                 waitReplay: true,
+                obligationId: job.turnContext?.obligationId,
+                obligationTargetUid: job.turnContext?.obligationTargetUid,
+                obligationStrong: job.turnContext?.obligationStrong,
               },
               waitSecBounded + 120,
             );
@@ -904,22 +947,49 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           job.chatId,
           waitSecBounded,
           formatted.messageId,
+          formatted.uid,
+          job.turnContext?.obligationId,
         );
         const totalMs = Math.round(performance.now() - start);
-        logger.info(
-          { chatId: job.chatId, totalMs, waitSec: gateDecision.waitSec, reason: gateDecision.reason, timings },
-          "Pipeline complete (gate=wait, no reply)",
-        );
+          logger.info(
+            { chatId: job.chatId, totalMs, waitSec: gateDecision.waitSec, reason: gateDecision.reason, triggerUid: formatted.uid, timings },
+            "Pipeline complete (gate=wait, no reply)",
+          );
         return;
       }
 
       if (gateDecision.action === 'no_action') {
-        // 冷却期延后:这条不回,但保持 RUNNING(不锁死整个 chat)
+        // 冷却期/阈值未达延后:这条不回,但保持 RUNNING(不锁死整个 chat)。
+        // P0-B:actor 路径不再丢消息 —— 重新入 pending 并排 gate_defer 回合,
+        // 到点(冷却已过/消息攒够)带完整语境重评(MaiBot delayed-task 语义)。
         if (gateDecision.deferOnly) {
+          let rescheduled = false;
+          if (job.turnContext && isTurnActorChat(job.chatId)) {
+            rescheduled = await scheduleGateDeferReeval({
+              chatId: job.chatId,
+              entry: {
+                update: job.update,
+                chatId: job.chatId,
+                messageId: formatted.messageId,
+                enqueuedAt: job.enqueuedAt,
+                obligationId: job.turnContext.obligationId,
+                obligationTargetUid: job.turnContext.obligationTargetUid,
+                obligationStrong: job.turnContext.obligationStrong,
+              },
+              deferCount: job.turnContext.deferCount ?? 0,
+              retryAfterMs: gateDecision.retryAfterMs ?? e.TIMING_GATE_COOLDOWN_SEC * 1000,
+              reason: gateDecision.reason,
+            }).catch((err) => {
+              logger.warn({ err, chatId: job.chatId }, "scheduleGateDeferReeval failed (falling back to drop)");
+              return false;
+            });
+          }
           const totalMs = Math.round(performance.now() - start);
           logger.info(
-            { chatId: job.chatId, totalMs, reason: gateDecision.reason, timings },
-            "Pipeline complete (gate cooldown defer, no reply)",
+            { chatId: job.chatId, totalMs, reason: gateDecision.reason, rescheduled, retryAfterMs: gateDecision.retryAfterMs, triggerUid: formatted.uid, timings },
+            rescheduled
+              ? "Pipeline complete (gate defer → timed re-eval)"
+              : "Pipeline complete (gate cooldown defer, no reply)",
           );
           return;
         }
@@ -929,21 +999,28 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // actor 模式:no_action = 这条不接,但**人还在场**(只记冷却,不 STOP)。
         // 旧 enterStop 会把 chat 锁死到被 @ 才醒 → "说几下就跑了"。
         if (job.turnContext) {
-          await recordGateNoAction(job.chatId).catch(() => {});
+          await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
+          if (job.turnContext.obligationId) {
+            await updateObligationState(job.chatId, job.turnContext.obligationId, 'dropped', { reason: gateDecision.reason || 'gate_no_action' }).catch(() => {});
+          }
         } else {
-          await transitionToStop(job.chatId);
+          await transitionToStop(job.chatId, formatted.uid);
         }
         const totalMs = Math.round(performance.now() - start);
         logger.info(
-          { chatId: job.chatId, totalMs, reason: gateDecision.reason, timings },
+          { chatId: job.chatId, totalMs, reason: gateDecision.reason, triggerUid: formatted.uid, timings },
           "Pipeline complete (gate=no_action, no reply)",
         );
         return;
       }
 
-      // continue → record + transition (no-op if already RUNNING) and fall through
-      await recordGateContinue(job.chatId);
-      await transitionToRunning(job.chatId);
+      // continue → record + transition (no-op if already RUNNING) and fall through。
+      // P0-A:连续免检短路**不**记 continue —— 免检自己续窗会变永动机,窗口
+      // 只由真实 LLM continue 和真实 bot 回复刷新。
+      if (!gateDecision.continuation) {
+        await recordGateContinue(job.chatId);
+        await transitionToRunning(job.chatId);
+      }
     }
 
     // 5.5-5.7 Post-mute-gate intercepts

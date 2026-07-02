@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FormattedMessage, RetrievedContext } from '../../../src/shared/types.js';
+import { logger } from '../../../src/shared/logger.js';
 
 const mockBuildSystemPrompt = vi.fn();
 const mockBuildMessages = vi.fn();
@@ -18,6 +19,10 @@ const mockGetReflection = vi.fn();
 const mockPlanReply = vi.fn();
 const mockExecuteToolPlan = vi.fn();
 const mockSegmentReply = vi.fn();
+
+vi.mock('../../../src/shared/logger.js', () => ({
+  logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
 
 vi.mock('../../../src/tracking/life-state.js', () => ({
   getLifeState: vi.fn(() => ({ state: 'normal', energy: 0.85, hint: null, speedFactor: 1, lazyDay: false })),
@@ -217,6 +222,45 @@ describe('generateReply', () => {
     expect(result.replies[0]!.targetMessageId).toBe(196230); // 明确委托 → 保留
   });
 
+  it('retargets a reply aimed at another human when there was no delegation', async () => {
+    mockParseReplyResponse.mockImplementation(() => ([
+      { replyContent: '我回你', targetMessageId: 196230 },
+    ]));
+    const ctx = makeContext();
+    ctx.merged = [
+      { role: 'user', uid: 777, fullName: 'Bob', username: 'bob', timestamp: 1700000000, messageId: 196230, textContent: '我先说一句', isForwarded: false } as never,
+    ];
+
+    const result = await generateReply(
+      makeMessage({ messageId: 196242, uid: 1001, textContent: '我觉得不是这样' }),
+      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+    );
+
+    expect(result.replies[0]!.targetMessageId).toBe(196242);
+  });
+
+  it('keeps reply-to target when the user is explicitly replying to that person', async () => {
+    mockParseReplyResponse.mockImplementation(() => ([
+      { replyContent: '接你这句说', targetMessageId: 196230 },
+    ]));
+    const ctx = makeContext();
+    ctx.merged = [
+      { role: 'user', uid: 777, fullName: 'Bob', username: 'bob', timestamp: 1700000000, messageId: 196230, textContent: '我先说一句', isForwarded: false } as never,
+    ];
+
+    const result = await generateReply(
+      makeMessage({
+        messageId: 196242,
+        uid: 1001,
+        textContent: '不是，我是回复他这句',
+        replyTo: { messageId: 196230, uid: 777, fullName: 'Bob', textSnippet: '我先说一句' },
+      }),
+      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+    );
+
+    expect(result.replies[0]!.targetMessageId).toBe(196230);
+  });
+
   it('retries on empty model output and recovers (DeepSeek empty-response mitigation)', async () => {
     mockCallWithFallback
       .mockResolvedValueOnce({ content: '', tokenUsage: { prompt: 10, completion: 0, total: 10 }, model: 'm', label: 'reply', latencyMs: 5 })
@@ -249,6 +293,24 @@ describe('generateReply', () => {
       toolsUsed: [],
       toolExecutionFailed: false,
     });
+  });
+
+  it('logs context size fields on reply generation', async () => {
+    await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
+    const [payload, msg] = (logger.info as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
+      (call) => call[1] === 'Reply generated (1 message(s))',
+    ) ?? [];
+    expect(msg).toBe('Reply generated (1 message(s))');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextMessages: 0,
+        contextTokens: expect.any(Number),
+        knowledgeChars: 0,
+        burstCount: 0,
+      }),
+      'Reply generated (1 message(s))',
+    );
+    expect((payload as Record<string, unknown>).contextTokens).toBeGreaterThanOrEqual(0);
   });
 
   it('uses planner + explicit tool execution when replyPath is planned', async () => {
@@ -492,5 +554,23 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
       { replyContent: '收到啦主人', targetMessageId: 42 },
       { replyContent: '不听也有你一份', targetMessageId: 42, replyQuote: false },
     ]);
+  });
+});
+
+describe('buildWaitResumeHint (P2-F)', () => {
+  it('有新消息:提示结合新信息回应', async () => {
+    const { buildWaitResumeHint } = await import('../../../src/pipeline/reply/reply.js');
+    const hint = buildWaitResumeHint({ waitSec: 30, hadNewMessages: true });
+    expect(hint).toContain('[等待结束]');
+    expect(hint).toContain('30 秒');
+    expect(hint).toContain('有新消息');
+  });
+
+  it('无新消息:提示接回话头或 silent 反悔', async () => {
+    const { buildWaitResumeHint } = await import('../../../src/pipeline/reply/reply.js');
+    const hint = buildWaitResumeHint({ hadNewMessages: false });
+    expect(hint).toContain('一会儿');
+    expect(hint).toContain('没有');
+    expect(hint).toContain('silent');
   });
 });
