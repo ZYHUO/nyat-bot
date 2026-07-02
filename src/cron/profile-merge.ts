@@ -22,9 +22,9 @@ import { getAggregatedAffinity } from '../tracking/user-affinity.js';
 import { setGlobalProfile } from '../tracking/person-identity.js';
 import { isPrivateChat } from '../memory/visibility.js';
 
-const MAX_UIDS_PER_TICK = 8;
-/** 距上次合并至少这么久才重跑(节流 LLM 成本)。 */
-const REMERGE_AFTER_SEC = 3 * 86400;
+// C:改为可配(PROFILE_MERGE_MAX_UIDS / PROFILE_MERGE_STALE_HOURS),默认更勤。
+function maxUidsPerTick(): number { return env().PROFILE_MERGE_MAX_UIDS; }
+function remergeAfterSec(): number { return env().PROFILE_MERGE_STALE_HOURS * 3600; }
 
 const SYSTEM_PROMPT =
   '你是群聊 bot 的长期记忆整理器。下面给出同一个人在多个聊天场景(群/私聊)里的分场景画像。' +
@@ -140,7 +140,7 @@ export async function runProfileMerge(): Promise<void> {
 
   let uids: number[];
   try {
-    const cutoff = Math.floor(Date.now() / 1000) - REMERGE_AFTER_SEC;
+    const cutoff = Math.floor(Date.now() / 1000) - remergeAfterSec();
     // review #4:不再以 chat_count>1 为硬 SQL 条件(chat_count 由另一 flag 的
     // refreshPersonIdentity 维护,可能为 0)。改为按 last_merged_at 陈旧 + 近期活跃
     // 取候选,>1 上下文的判定放到运行时 getUserContexts(权威、含 DM)。
@@ -149,7 +149,7 @@ export async function runProfileMerge(): Promise<void> {
         WHERE last_merged_at IS NULL OR last_merged_at < ?
         ORDER BY updated_at DESC
         LIMIT ?`,
-    ).all(cutoff, MAX_UIDS_PER_TICK * 3) as Array<{ uid: number }>;
+    ).all(cutoff, maxUidsPerTick() * 3) as Array<{ uid: number }>;
     uids = rows.map((r) => r.uid);
   } catch (err) {
     logger.warn({ err }, 'profile-merge: candidate query failed');
@@ -162,7 +162,7 @@ export async function runProfileMerge(): Promise<void> {
   let merged = 0;
   let processed = 0;
   for (const uid of uids) {
-    if (processed >= MAX_UIDS_PER_TICK) break;
+    if (processed >= maxUidsPerTick()) break;
     const contexts = await getUserContexts(uid).catch(() => [] as number[]);
     if (contexts.length <= 1) continue; // 运行时权威判定"跨上下文"
     if (graylist.length > 0 && !contexts.some((c) => graylist.includes(c))) continue;

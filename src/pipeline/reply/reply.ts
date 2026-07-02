@@ -519,6 +519,14 @@ export async function generateReply(
         stateParts.pushP(30, 35, `[群里的往事] ${episodes.map((ep) => ep.summary).join('；')}\n(和当前话题相关时可以自然提起,像老群友翻旧账;无关就忽略)`);
       }
     } catch { /* non-critical */ }
+    // A 深度反思:注入"本群近况"——bot 像老群友一样了解群里最近的状态。
+    if (env().REFLECTION_ENABLED) {
+      try {
+        const { getChatReflection } = await import('../../cron/deep-reflection.js');
+        const digest = getChatReflection(chatId);
+        if (digest) stateParts.pushP(28, 30, `[本群近况] ${digest}`);
+      } catch { /* non-critical */ }
+    }
   }
 
   // L1: 内心独白压轴(order=99,离 CURRENT_MESSAGE 最近) —— 写手顺着决定

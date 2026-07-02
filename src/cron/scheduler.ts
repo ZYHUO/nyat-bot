@@ -141,13 +141,24 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }));
 
-  // 机制5:LLM 全局画像合并 — 每天低频把跨上下文(群+DM)的人各场景画像提炼成
-  // 全局 traits/interests/relation,写回 person_identity 全局列。默认关灰度。
+  // 机制5:LLM 全局画像合并。C:从每天一次改为**每 2 小时**(配 PROFILE_MERGE_STALE_HOURS
+  // 水位线 + PROFILE_MERGE_MAX_UIDS 批量),全局画像更新更勤 + 更充分消耗配额。默认关灰度。
   if (env().PROFILE_MERGE_ENABLED) {
-    tasks.push(schedule('31 6 * * *', () => {
+    tasks.push(schedule('31 */2 * * *', () => {
       void safeRun('profile-merge', async () => {
         const { runProfileMerge } = await import('./profile-merge.js');
         await runProfileMerge();
+      });
+    }));
+  }
+
+  // 深度反思(A)—— 对活跃群提炼"本群近况"注入回复;吞吐可调(REFLECTION_*),
+  // 把 StepFun 配额花在"让 bot 记住群里发生过什么"。默认关。
+  if (env().REFLECTION_ENABLED) {
+    tasks.push(schedule(`*/${env().REFLECTION_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('deep-reflection', async () => {
+        const { runDeepReflection } = await import('./deep-reflection.js');
+        await runDeepReflection();
       });
     }));
   }

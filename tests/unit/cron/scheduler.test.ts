@@ -60,6 +60,8 @@ process.env['SCHOOL_SCHEDULE_ENABLED'] = 'false';
 process.env['TOPIC_REGISTRY_ENABLED'] = 'false';
 process.env['CACHE_WARMUP_ENABLED'] = 'false';
 process.env['RESIDENT_STICKER_PACKS'] = '';
+process.env['PROFILE_MERGE_ENABLED'] = 'false';
+process.env['REFLECTION_ENABLED'] = 'false';
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'
@@ -84,7 +86,7 @@ describe('CronScheduler', () => {
 
     // 顶部已把所有 flag-gated job(proactive/verify/learner/sleep/bot-cmd/pm-nudge/
     // school/resident-sticker)显式关掉,计数确定为无条件 job 数,不随 .env 漂移。
-    expect(mockSchedule).toHaveBeenCalledTimes(17);
+    expect(mockSchedule).toHaveBeenCalledTimes(18);
     expect(isStarted()).toBe(true);
   });
 
@@ -92,14 +94,14 @@ describe('CronScheduler', () => {
     startCronJobs();
     startCronJobs(); // second call should be no-op
 
-    expect(mockSchedule).toHaveBeenCalledTimes(17);
+    expect(mockSchedule).toHaveBeenCalledTimes(18);
   });
 
   it('should stop all jobs on stopCronJobs', () => {
     startCronJobs();
     stopCronJobs();
 
-    expect(mockStop).toHaveBeenCalledTimes(17);
+    expect(mockStop).toHaveBeenCalledTimes(18);
     expect(isStarted()).toBe(false);
   });
 

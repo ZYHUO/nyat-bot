@@ -276,6 +276,18 @@ const envSchema = z.object({
   // ceil(1/有效值) 条才评一次 gate,未达阈值 → defer 延迟重评;有空闲补偿兜底。
   // per-chat Redis 覆盖:xxb:timing:talkvalue:{chatId}。
   TIMING_TALK_VALUE: z.coerce.number().min(0.01).max(1).default(1.0),
+  // ── 深度反思(A:把 StepFun 配额花在"让 bot 记住群里发生过什么")──
+  // 后台 cron 对活跃群喂大窗口历史 → 产出每群"近况摘要"注入回复。吞吐可调:
+  // token/天 ≈ CHATS_PER_TICK × (WINDOW×~15) × (1440/INTERVAL_MIN)。默认关。
+  REFLECTION_ENABLED: booleanFromEnv.default(false),
+  REFLECTION_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  REFLECTION_CHATS_PER_TICK: z.coerce.number().int().positive().default(20),
+  REFLECTION_WINDOW_MSGS: z.coerce.number().int().positive().default(250),
+  REFLECTION_USAGE: z.string().default('summarize'),
+  // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
+  // 直接影响全局画像刷新频率与 token 消耗。
+  PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),
+  PROFILE_MERGE_MAX_UIDS: z.coerce.number().int().positive().default(8),
   // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
   // gate 与 planner 共享历史、看得到自己过往节奏判断)。
   TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(false),
