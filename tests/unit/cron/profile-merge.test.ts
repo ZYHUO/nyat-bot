@@ -6,10 +6,12 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-const { callWithFallbackMock, getUserContextsMock, getUserProfilePromptMock, getAggregatedAffinityMock, setGlobalProfileMock, isPrivateChatMock } = vi.hoisted(() => ({
+const { callWithFallbackMock, getUserContextsMock, getUserProfilePromptMock, buildProfileInjectionMock, getRelationshipMock, getAggregatedAffinityMock, setGlobalProfileMock, isPrivateChatMock } = vi.hoisted(() => ({
   callWithFallbackMock: vi.fn(),
   getUserContextsMock: vi.fn(async (): Promise<number[]> => []),
   getUserProfilePromptMock: vi.fn((): string | null => null),
+  buildProfileInjectionMock: vi.fn((): string | null => null),
+  getRelationshipMock: vi.fn(() => ({ lastSummary: '' })),
   getAggregatedAffinityMock: vi.fn(() => ({ affinity: 50, bucket: '熟', interactionTotal: 20, chatCount: 2, primaryChatId: -1001 })),
   setGlobalProfileMock: vi.fn(),
   isPrivateChatMock: vi.fn((chatId: number) => chatId > 0),
@@ -17,8 +19,9 @@ const { callWithFallbackMock, getUserContextsMock, getUserProfilePromptMock, get
 
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: callWithFallbackMock }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getUserContexts: getUserContextsMock }));
-vi.mock('../../../src/tracking/user-profile.js', () => ({ getUserProfilePrompt: getUserProfilePromptMock }));
+vi.mock('../../../src/tracking/user-profile.js', () => ({ getUserProfilePrompt: getUserProfilePromptMock, buildProfileInjection: buildProfileInjectionMock }));
 vi.mock('../../../src/tracking/user-affinity.js', () => ({ getAggregatedAffinity: getAggregatedAffinityMock }));
+vi.mock('../../../src/tracking/relationship.js', () => ({ getRelationship: getRelationshipMock }));
 vi.mock('../../../src/tracking/person-identity.js', () => ({ setGlobalProfile: setGlobalProfileMock }));
 vi.mock('../../../src/memory/visibility.js', () => ({ isPrivateChat: isPrivateChatMock }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => ({ prepare: () => ({ all: () => [] }) }) }));
@@ -30,6 +33,8 @@ beforeEach(() => {
   Object.assign(envValues, { PROFILE_MERGE_ENABLED: true, PROFILE_MERGE_USAGE: 'summarize', PROFILE_MERGE_CHAT_IDS: [] });
   vi.clearAllMocks();
   getUserProfilePromptMock.mockReturnValue(null);
+  buildProfileInjectionMock.mockReturnValue(null);
+  getRelationshipMock.mockReturnValue({ lastSummary: '' });
   getAggregatedAffinityMock.mockReturnValue({ affinity: 50, bucket: '熟', interactionTotal: 20, chatCount: 2, primaryChatId: -1001 });
   isPrivateChatMock.mockImplementation((chatId: number) => chatId > 0);
 });
@@ -55,6 +60,17 @@ describe('mergeGlobalProfile', () => {
       sourceContextIds: [-1001, 42],
       confidence: 0.8,
     }));
+  });
+
+  it('profile_prompt 全空,但关系叙事(last_summary)够料 → 仍能合并(修复饿死)', async () => {
+    getUserContextsMock.mockResolvedValue([-1001, -1002]);
+    getUserProfilePromptMock.mockReturnValue(null);   // legacy 画像空
+    buildProfileInjectionMock.mockReturnValue(null);  // 结构化画像也空
+    getRelationshipMock.mockImplementation((chatId: number) => ({ lastSummary: `在群${chatId}里常和你互怼、半夜活跃` }));
+    callWithFallbackMock.mockResolvedValue({ content: '{"traits":["毒舌"],"interests":[],"comm_style":"","relation_to_bot":"熟人","stable_patterns":[],"confidence":0.6}' });
+    const ok = await mergeGlobalProfile(42);
+    expect(ok).toBe(true);
+    expect(callWithFallbackMock).toHaveBeenCalled();
   });
 
   it('单上下文 → 不合并(不调 LLM)', async () => {

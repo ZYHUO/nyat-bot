@@ -17,10 +17,28 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { getUserContexts } from '../pipeline/context/manager.js';
-import { getUserProfilePrompt } from '../tracking/user-profile.js';
+import { getUserProfilePrompt, buildProfileInjection } from '../tracking/user-profile.js';
 import { getAggregatedAffinity } from '../tracking/user-affinity.js';
+import { getRelationship } from '../tracking/relationship.js';
 import { setGlobalProfile } from '../tracking/person-identity.js';
 import { isPrivateChat } from '../memory/visibility.js';
+
+/**
+ * 某上下文里关于该用户的可用素材(多料源合并,防被单一空的 profile_prompt 饿死)。
+ * 料源:结构化画像 sections / legacy profile_prompt(二选一)+ 关系叙事 last_summary。
+ * 全空 → null。填充率:profile_prompt~133 行 vs 关系摘要~493 行,合并后覆盖大得多。
+ */
+function contextMaterial(chatId: number, uid: number): string | null {
+  const parts: string[] = [];
+  const prof = buildProfileInjection(chatId, uid) ?? getUserProfilePrompt(chatId, uid);
+  if (prof && prof.trim().length >= 8) parts.push(prof.trim());
+  try {
+    const rel = getRelationship(chatId, uid);
+    if (rel.lastSummary && rel.lastSummary.trim().length >= 6) parts.push(`你和TA:${rel.lastSummary.trim()}`);
+  } catch { /* non-critical */ }
+  const s = parts.join('\n');
+  return s.length >= 8 ? s.slice(0, 500) : null;
+}
 
 // C:改为可配(PROFILE_MERGE_MAX_UIDS / PROFILE_MERGE_STALE_HOURS),默认更勤。
 function maxUidsPerTick(): number { return env().PROFILE_MERGE_MAX_UIDS; }
@@ -78,10 +96,10 @@ export async function mergeGlobalProfile(uid: number): Promise<boolean> {
 
     const blocks: string[] = [];
     for (const chatId of contexts) {
-      const prompt = getUserProfilePrompt(chatId, uid);
-      if (!prompt || prompt.trim().length < 8) continue;
+      const material = contextMaterial(chatId, uid);
+      if (!material) continue;
       const kind = isPrivateChat(chatId) ? '私聊' : '群';
-      blocks.push(`【${kind}场景 ${chatId}】\n${prompt.slice(0, 400)}`);
+      blocks.push(`【${kind}场景 ${chatId}】\n${material}`);
     }
     if (blocks.length < 2) return false; // 至少两个有料场景才值得跨场景提炼
 
