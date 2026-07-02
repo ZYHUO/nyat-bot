@@ -15,6 +15,8 @@ import { logger } from '../shared/logger.js';
 import { getUserContexts } from '../pipeline/context/manager.js';
 import { getAggregatedAffinity } from './user-affinity.js';
 import { getUserProfilePrompt } from './user-profile.js';
+import { isGroup } from '../shared/chat.js';
+import { isPrivateChat } from '../memory/visibility.js';
 
 const STALE_SEC = 6 * 3600;
 
@@ -182,9 +184,39 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   const now = Math.floor(Date.now() / 1000);
   if (!row || now - row.updated_at > STALE_SEC) {
     void refreshPersonIdentity(uid).catch(() => { /* fire-and-forget */ });
+    // 机制5:全局画像久未合并且开了合并 → 后台补一次 LLM 合并(dynamic import 防循环)。
+    if (env().PROFILE_MERGE_ENABLED && (!row?.last_merged_at || now - row.last_merged_at > STALE_SEC)) {
+      void import('../cron/profile-merge.js')
+        .then(({ mergeGlobalProfile }) => mergeGlobalProfile(uid))
+        .catch(() => { /* fire-and-forget */ });
+    }
   }
-  if (!row || !row.impression) return null;
-  if (row.chat_count <= 1) return null;
-  if (row.primary_chat_id === currentChatId) return null; // 当前群即主群 → 群内画像已覆盖,不重复
-  return `[这个人你在别的群也认识] 你和 TA 在 ${row.chat_count} 个群有交集。你对 TA 的整体印象(跨群):\n${row.impression.slice(0, 400)}`;
+  // 机制3:上下文数(含 DM)≤1 不注入(chat_count 现为"上下文数")。
+  if (!row || row.chat_count <= 1) return null;
+
+  // 机制2/3 优先:全局结构化画像(LLM 合并产出)——safe-by-construction
+  // (合并 prompt 已排除私聊具体隐私),可注入群/私聊任意场景,无需按来源 scrub。
+  const g = getGlobalProfile(uid);
+  if (g && g.lastMergedAt && (g.traits.length || g.interests.length || g.relationToBot)) {
+    const bits: string[] = [];
+    if (g.traits.length) bits.push(`性格:${g.traits.slice(0, 6).join('、')}`);
+    if (g.interests.length) bits.push(`兴趣:${g.interests.slice(0, 6).join('、')}`);
+    if (g.commStyle) bits.push(`说话:${g.commStyle}`);
+    if (g.relationToBot) bits.push(`和你的关系:${g.relationToBot}`);
+    if (g.stablePatterns.length) bits.push(`习惯:${g.stablePatterns.slice(0, 4).join('、')}`);
+    return `[这个人你在别的地方也认识] 跨 ${row.chat_count} 个场景对 TA 的整体印象:\n${bits.join(';')}`;
+  }
+
+  // 回退:primary 上下文的原始画像摘要。**scrub-on-inject**:注入进群时,若该
+  // 摘要来自私密会话(DM/敏感群)且非当前会话 → 剔除(防私聊内容裸泄进群)。
+  if (!row.impression) return null;
+  if (row.primary_chat_id === currentChatId) return null; // 当前会话即主上下文 → 群内画像已覆盖
+  if (
+    isGroup(currentChatId) &&
+    row.primary_chat_id !== null &&
+    isPrivateChat(row.primary_chat_id)
+  ) {
+    return null; // 群里不注入来自私聊/敏感会话的原始画像(等 LLM 合并出安全的全局画像再注)
+  }
+  return `[这个人你在别的地方也认识] 你和 TA 在 ${row.chat_count} 个场景有交集。你对 TA 的整体印象:\n${row.impression.slice(0, 400)}`;
 }

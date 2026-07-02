@@ -11,7 +11,13 @@ const mockAgg = vi.fn();
 const mockProfile = vi.fn();
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
-vi.mock('../../../src/env.js', () => ({ env: () => ({ PERSON_IDENTITY_ENABLED: true }) }));
+vi.mock('../../../src/env.js', () => ({ env: () => ({
+  PERSON_IDENTITY_ENABLED: true,
+  PROFILE_MERGE_ENABLED: false,
+  MEMORY_VISIBILITY_ENABLED: true,
+  MEMORY_SENSITIVE_CHAT_IDS: [] as number[],
+  DM_AUTO_PRIVATE: true,
+}) }));
 // 机制2:refreshPersonIdentity 改用 getUserContexts(群 ∪ DM);mockGroups 现表示"上下文集合"。
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getUserGroups: (...a: unknown[]) => mockGroups(...a),
@@ -65,7 +71,7 @@ describe('person-identity (cross-group)', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (?,?,?,?,?)')
       .run(7, '喜欢猫、爱打游戏', -100, 3, now);
     const inOther = buildCrossGroupInjection(7, -999);
-    expect(inOther).toContain('别的群也认识');
+    expect(inOther).toContain('别的地方也认识'); // 机制3:文案从"群"改"地方(含DM)"
     expect(inOther).toContain('喜欢猫');
     const inPrimary = buildCrossGroupInjection(7, -100);
     expect(inPrimary).toBeNull(); // primary group already has its own per-group profile

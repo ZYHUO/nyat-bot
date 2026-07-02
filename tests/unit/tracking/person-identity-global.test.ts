@@ -22,8 +22,23 @@ vi.mock('../../../src/db/redis.js', () => ({
   }),
 }));
 
-const { getGlobalProfile, setGlobalProfile, getPersonIdentity } = await import('../../../src/tracking/person-identity.js');
+const envValues: Record<string, unknown> = {
+  PERSON_IDENTITY_ENABLED: true,
+  PROFILE_MERGE_ENABLED: false,
+  MEMORY_VISIBILITY_ENABLED: true,
+  MEMORY_SENSITIVE_CHAT_IDS: [] as number[],
+  DM_AUTO_PRIVATE: true,
+};
+vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
+vi.mock('../../../src/tracking/user-affinity.js', () => ({ getAggregatedAffinity: () => ({ affinity: 0, bucket: '', interactionTotal: 0, chatCount: 0, primaryChatId: null }) }));
+vi.mock('../../../src/tracking/user-profile.js', () => ({ getUserProfilePrompt: () => 'DM 里透露的隐私画像' }));
+
+const { getGlobalProfile, setGlobalProfile, getPersonIdentity, buildCrossGroupInjection } = await import('../../../src/tracking/person-identity.js');
 const { getUserContexts } = await import('../../../src/pipeline/context/manager.js');
+
+const GROUP_A = -1001;
+const GROUP_B = -1002;
+const DM = 42;
 
 function initSchema(db: Database.Database): void {
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/0044_person_identity.sql'), 'utf-8'));
@@ -95,5 +110,39 @@ describe('全局画像 setGlobalProfile / getGlobalProfile(机制2 schema)', () 
     setGlobalProfile(42, { traits: ['x'], interests: [], commStyle: '', relationToBot: '', stablePatterns: [], sourceContextIds: [], confidence: 0.3 });
     expect(getPersonIdentity(42)!.impression).toBe('老印象');
     expect(getGlobalProfile(42)!.traits).toEqual(['x']);
+  });
+});
+
+describe('buildCrossGroupInjection(机制3:全局画像优先 + 群内 scrub 私聊来源)', () => {
+  const fresh = () => Math.floor(Date.now() / 1000);
+
+  it('有全局画像 → 优先注入结构化全局印象(可注群,safe-by-construction)', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, ?, ?, 2, ?)')
+      .run('原始印象', GROUP_A, fresh());
+    setGlobalProfile(42, { traits: ['毒舌'], interests: ['猫'], commStyle: '短句', relationToBot: '老熟人', stablePatterns: [], sourceContextIds: [GROUP_A, DM], confidence: 0.8 });
+    const out = buildCrossGroupInjection(42, GROUP_B);
+    expect(out).toContain('别的地方也认识');
+    expect(out).toContain('毒舌');
+    expect(out).toContain('老熟人');
+  });
+
+  it('无全局画像 + impression 来自 DM(私密)+ 注入进群 → scrub 掉(返回 null)', () => {
+    // primary 是 DM(正数,私密),注入目标是群 → 不能裸泄私聊画像
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (7, ?, ?, 2, ?)')
+      .run('DM 里的私密印象', DM, fresh());
+    expect(buildCrossGroupInjection(7, GROUP_B)).toBeNull();
+  });
+
+  it('无全局画像 + impression 来自群(shared)+ 注入进另一个群 → 放行', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (8, ?, ?, 2, ?)')
+      .run('群A里的公开印象', GROUP_A, fresh());
+    const out = buildCrossGroupInjection(8, GROUP_B);
+    expect(out).toContain('群A里的公开印象');
+  });
+
+  it('上下文数 ≤1 → 不注入', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (9, ?, ?, 1, ?)')
+      .run('只在一个地方', GROUP_A, fresh());
+    expect(buildCrossGroupInjection(9, GROUP_B)).toBeNull();
   });
 });
