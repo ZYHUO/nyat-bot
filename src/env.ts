@@ -288,6 +288,19 @@ const envSchema = z.object({
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),
   PROFILE_MERGE_MAX_UIDS: z.coerce.number().int().positive().default(8),
+  // 每 tick 处理多少个"有 pending 消息"的用户画像。默认 20;调大可更快榨干
+  // 积压的 pending backlog(有意义的真实工作),也提高 StepFun 消耗。
+  PROFILE_SYNC_BATCH_SIZE: z.coerce.number().int().positive().default(20),
+  // ── StepFun 配额消费引擎(用户选:滚动深反思)──────────────────────────
+  // 专用后台引擎:在 10 并发/2000RPM 内,持续对全量群做大窗口深反思 + 跨上下文
+  // 画像合并,把 8000M/月订阅用起来(冲 ~100M/天)。默认关。
+  // 日调用数 ≈ CALLS_PER_TICK × 1440(每分钟一 tick);token/天 ≈ 日调用数 × 单调用token。
+  STEPFUN_CONSUMER_ENABLED: booleanFromEnv.default(false),
+  STEPFUN_CONSUMER_CALLS_PER_TICK: z.coerce.number().int().positive().default(30),
+  STEPFUN_CONSUMER_CONCURRENCY: z.coerce.number().int().positive().default(6),
+  // 群深反思在工作池里的权重(重复入池次数):群内容真实演化、最不浪费,给更高权重。
+  STEPFUN_CONSUMER_REFLECT_WEIGHT: z.coerce.number().int().positive().default(3),
+  STEPFUN_CONSUMER_USAGE: z.string().default('summarize'),
   // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
   // gate 与 planner 共享历史、看得到自己过往节奏判断)。
   TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(false),

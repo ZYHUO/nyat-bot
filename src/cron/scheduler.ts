@@ -163,6 +163,17 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // StepFun 配额消费引擎(滚动深反思)—— 每分钟拉一批全池工作项(群反思+跨上下文合并)
+  // 并发跑,把订阅配额用起来(冲 ~100M/天)。速率/并发/权重全可调,默认关。
+  if (env().STEPFUN_CONSUMER_ENABLED) {
+    tasks.push(schedule('* * * * *', () => {
+      void safeRun('stepfun-consumer', async () => {
+        const { runStepfunConsumer } = await import('./stepfun-consumer.js');
+        await runStepfunConsumer();
+      });
+    }));
+  }
+
   // 功能 B3:@催pm 扫描(默认关灰度)。内部还有好感门/递增间隔/全局每日上限/
   // allowlist+mute+成员+isAsleep 安全门;每 3 小时扫一次,实际发送受日上限封顶。
   if (env().PM_NUDGE_ENABLED) {

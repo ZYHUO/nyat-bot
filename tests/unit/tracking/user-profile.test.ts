@@ -20,7 +20,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 }));
 
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({}),
+  env: () => ({ PROFILE_SYNC_BATCH_SIZE: 20 }),
 }));
 
 const {

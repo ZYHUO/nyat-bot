@@ -62,6 +62,7 @@ process.env['CACHE_WARMUP_ENABLED'] = 'false';
 process.env['RESIDENT_STICKER_PACKS'] = '';
 process.env['PROFILE_MERGE_ENABLED'] = 'false';
 process.env['REFLECTION_ENABLED'] = 'false';
+process.env['STEPFUN_CONSUMER_ENABLED'] = 'false';
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'

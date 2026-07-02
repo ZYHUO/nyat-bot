@@ -7,8 +7,7 @@
 import { getDb } from '../db/sqlite.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { logger } from '../shared/logger.js';
-
-const PROFILE_SYNC_BATCH_SIZE = 20;
+import { env } from '../env.js';
 const MAX_PENDING = 50;      // 积累多少条消息再总结
 const MIN_PENDING_TO_SUMMARIZE = 8;
 const MAX_PROMPT_CHARS = 600;
@@ -526,7 +525,7 @@ export async function runUserProfileSync(): Promise<void> {
       ELSE 0
     END
     LIMIT ?
-  `).all(PROFILE_SYNC_BATCH_SIZE) as ProfileRow[];
+  `).all(env().PROFILE_SYNC_BATCH_SIZE) as ProfileRow[];
 
   if (rows.length === 0) {
     logger.debug('User profile sync: no pending messages');
