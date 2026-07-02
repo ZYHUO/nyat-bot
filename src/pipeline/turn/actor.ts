@@ -217,6 +217,8 @@ async function runJudgedEntry(
     obligationCtx?: { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean };
     /** P2-F:wait 回访元数据(写手提示"你刚等了 N 秒"用)。 */
     waitResume?: { waitSec?: number; hadNewMessages: boolean };
+    /** review #10:回合开始时的 timing state 快照(多锚点各组共用)。 */
+    timingSnapshot?: Awaited<ReturnType<typeof getChatState>>;
   },
 ): Promise<void> {
   const e = env();
@@ -264,6 +266,7 @@ async function runJudgedEntry(
           sleepCatchup: current.sleepCatchup === true,
           deferCount: current.deferCount,
           waitResume: opts?.waitResume,
+          timingStateSnapshot: opts?.timingSnapshot,
           burstMessageIds: currentBurstIds.length > 1 ? currentBurstIds : undefined,
           // 多锚点同场兄弟:跳过心流冷却,否则组2+ 会被组1 的 no_action 冷却误杀。
           skipGateCooldown: opts?.skipGateCooldown ?? false,
@@ -384,10 +387,26 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   // P2-F: wait 回访元数据 —— 提示写手"你刚才决定等了 N 秒,期间有/无新消息"。
   // 锚点被新消息挤掉时提示挂到新锚点上(对齐 MaiBot 把 wait-completed 标记
   // 写进共享历史:谁接棒谁看得见)。
-  const waitReplayEntry = drained.find((en) => en.waitReplay === true);
-  const waitResumeInfo = waitReplayEntry !== undefined
-    ? { waitSec: waitReplayEntry.waitSec, hadNewMessages: hasFresh }
-    : undefined;
+  // review #7/#8 修正:仅 wait_timeout 触发的回合才算 wait 回访(睡眠补回
+  // 也复用 waitReplay 标记,误判会给写手互相矛盾的指令);"期间有无新消息"
+  // 不能只看本回合 drain 批 —— 窗口期消息早被中间回合消化,要对照 activity
+  // 时间线(wait 开始之后群里有没有人说过话)。
+  let waitResumeInfo: { waitSec?: number; hadNewMessages: boolean } | undefined;
+  if (turnPayload?.trigger === 'wait_timeout') {
+    const waitReplayEntry = drained.find((en) => en.waitReplay === true && en.sleepCatchup !== true);
+    if (waitReplayEntry !== undefined) {
+      let hadNewMessages = hasFresh;
+      if (!hadNewMessages && waitReplayEntry.waitStartedAt !== undefined) {
+        try {
+          const { getRecentTimestamps } = await import('../../tracking/activity.js');
+          const windowSec = Math.ceil((Date.now() - waitReplayEntry.waitStartedAt) / 1000) + 5;
+          const timestamps = await getRecentTimestamps(chatId, windowSec);
+          hadNewMessages = timestamps.some((ts) => ts * 1000 > waitReplayEntry.waitStartedAt!);
+        } catch { /* 保守沿用 hasFresh */ }
+      }
+      waitResumeInfo = { waitSec: waitReplayEntry.waitSec, hadNewMessages };
+    }
+  }
 
   // 积压保护:调度故障/停机恢复后 pending 可能上千条;一个 turn job 顺序
   // 消化会超过 BullMQ lockDuration → stalled 重跑 → 重复处理。只保最新
@@ -434,9 +453,14 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
   let suppressedUidSet: Set<number> | undefined;
   let waitTopicKey: string | undefined;
   let suppressAll = false;
+  // review #10:回合开始时的 timing state 快照,传给本回合所有组共用 ——
+  // 组1 中途写入的 no_action/wait 不会误伤组2(替代旧 skipGateCooldown
+  // 整层旁路);回合开始前已存在的冷却/退避/阈值对所有组照常生效。
+  let timingSnapshot: Awaited<ReturnType<typeof getChatState>> | undefined;
   if (e.TIMING_GATE_ENABLED) {
     try {
       const chatState = await getChatState(chatId);
+      timingSnapshot = chatState;
       if (chatState.state === 'WAIT' || chatState.state === 'STOP') {
         if (hasDirect) {
           await transitionToRunning(chatId);
@@ -575,10 +599,10 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
           ? [entryUid(entry)]
           : [...new Set(entries.map((en) => entryUid(en)))];
         await runJudgedEntry(chatId, entry, entries.length, epoch, groupBurstIds, {
-          skipGateCooldown: multiAnchor,
           burstUids: groupBurstUids,
           obligationCtx,
           waitResume: waitResumeInfo,
+          timingSnapshot,
         });
       } else {
         await trackEntry(chatId, entry, entries.length, isEntrySuppressed(entry));

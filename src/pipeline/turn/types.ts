@@ -28,6 +28,10 @@ export interface PendingEntry {
   deferCount?: number;
   /** P2-F:wait 锚点携带的等待秒数(回访提示"你刚等了 N 秒"用)。 */
   waitSec?: number;
+  /** P2-F:wait 开始时刻(epoch_ms)。回访时对照 activity 时间线判断
+   *  "期间有没有新消息" —— 只看 resume 回合 drain 批是骗人的:窗口期
+   *  消息早被中间回合消化掉了(review #7)。 */
+  waitStartedAt?: number;
 }
 
 export interface TurnJobPayload {

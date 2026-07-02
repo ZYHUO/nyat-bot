@@ -182,5 +182,11 @@ export interface ChatJob {
     deferCount?: number;
     /** P2-F:wait 回访元数据(actor 在 drain 时算好,写手提示用)。 */
     waitResume?: { waitSec?: number; hadNewMessages: boolean };
+    /**
+     * 回合开始时读的 timing state 快照(review #10):同回合多锚点各组共用,
+     * 组1 中途写入的决策不会误伤组2 的冷却/阈值判断;而回合开始**前**就
+     * 存在的冷却/退避对所有组照常生效(旧 skipGateCooldown 整层旁路的修正)。
+     */
+    timingStateSnapshot?: import('../pipeline/timing/state-store.js').ChatTimingState;
   };
 }

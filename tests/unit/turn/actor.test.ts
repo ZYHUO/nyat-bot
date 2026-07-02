@@ -38,6 +38,11 @@ vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
   getChatState: vi.fn(async () => chatState),
   transitionToRunning: transitionToRunningMock,
 }));
+// P2-F:wait 回访对照 activity 时间线判断窗口期有无新消息
+const { getRecentTimestampsMock } = vi.hoisted(() => ({
+  getRecentTimestampsMock: vi.fn(async (): Promise<number[]> => []),
+}));
+vi.mock('../../../src/tracking/activity.js', () => ({ getRecentTimestamps: getRecentTimestampsMock }));
 vi.mock('../../../src/pipeline/turn/buffer.js', () => ({
   drainPending: vi.fn(async () => {
     const out = bufferState.pending;
@@ -83,7 +88,7 @@ function cmdEntry(messageId: number, text: string): PendingEntry {
   };
 }
 
-function turnJob(trigger: 'message' | 'direct' = 'message') {
+function turnJob(trigger: 'message' | 'direct' | 'wait_timeout' = 'message') {
   return {
     type: 'chat_turn' as const,
     chatId: CHAT,
@@ -588,10 +593,11 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
     expect(judged.turnContext?.deferCount).toBeUndefined();
   });
 
-  it('wait 回放(无新消息)→ waitResume={waitSec, hadNewMessages:false} + gateBypass', async () => {
-    bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30 }];
+  it('wait 回放(期间彻底沉默)→ waitResume={waitSec, hadNewMessages:false} + gateBypass', async () => {
+    getRecentTimestampsMock.mockResolvedValue([]);
+    bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30, waitStartedAt: Date.now() - 30_000 }];
 
-    await runChatTurn(turnJob(), 'turn-1');
+    await runChatTurn(turnJob('wait_timeout'), 'turn-1');
 
     const judged = processPipelineMock.mock.calls[0]![0] as {
       turnContext?: { waitResume?: { waitSec?: number; hadNewMessages: boolean }; gateBypass?: boolean };
@@ -600,13 +606,27 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
     expect(judged.turnContext?.gateBypass).toBe(true);
   });
 
+  it('review #7:窗口期消息被中间回合消化 → activity 时间线仍能判出 hadNewMessages:true', async () => {
+    const waitStartedAt = Date.now() - 30_000;
+    // wait 开始后 10s 群里有人说话(该消息已被中间回合 trackEntry,不在本批)
+    getRecentTimestampsMock.mockResolvedValue([Math.floor((waitStartedAt + 10_000) / 1000)]);
+    bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30, waitStartedAt }];
+
+    await runChatTurn(turnJob('wait_timeout'), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      turnContext?: { waitResume?: { waitSec?: number; hadNewMessages: boolean } };
+    };
+    expect(judged.turnContext?.waitResume).toEqual({ waitSec: 30, hadNewMessages: true });
+  });
+
   it('wait 回放被新消息挤掉 → 提示挂到新锚点,hadNewMessages:true', async () => {
     bufferState.pending = [
       { ...entry(1), waitReplay: true, waitSec: 45 },
       entry(2),
     ];
 
-    await runChatTurn(turnJob(), 'turn-1');
+    await runChatTurn(turnJob('wait_timeout'), 'turn-1');
 
     const judged = processPipelineMock.mock.calls[0]![0] as {
       messageId: number;
@@ -614,5 +634,40 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
     };
     expect(judged.messageId).toBe(2);
     expect(judged.turnContext?.waitResume).toEqual({ waitSec: 45, hadNewMessages: true });
+  });
+
+  it('review #8:睡眠补回条目(waitReplay+sleepCatchup)不误判为 wait 回访', async () => {
+    bufferState.pending = [{ ...entry(1), waitReplay: true, sleepCatchup: true }];
+
+    await runChatTurn(turnJob('wait_timeout'), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      turnContext?: { waitResume?: unknown };
+    };
+    expect(judged.turnContext?.waitResume).toBeUndefined();
+  });
+
+  it('review #8:非 wait_timeout 触发的回合不构造 waitResume(如普通 message 回合)', async () => {
+    bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30 }];
+
+    await runChatTurn(turnJob('message'), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      turnContext?: { waitResume?: unknown };
+    };
+    expect(judged.turnContext?.waitResume).toBeUndefined();
+  });
+
+  it('review #10:回合开始的 timing 快照透传给每个 judged entry', async () => {
+    envState.TIMING_GATE_ENABLED = true;
+    chatState = { state: 'RUNNING' };
+    bufferState.pending = [entry(1)];
+
+    await runChatTurn(turnJob(), 'turn-1');
+
+    const judged = processPipelineMock.mock.calls[0]![0] as {
+      turnContext?: { timingStateSnapshot?: unknown };
+    };
+    expect(judged.turnContext?.timingStateSnapshot).toBe(chatState);
   });
 });

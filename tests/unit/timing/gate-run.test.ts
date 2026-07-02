@@ -10,6 +10,11 @@ const { callWithFallbackMock, checkTalkValueMock, appendHistMock, getHistMock } 
 
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: callWithFallbackMock }));
 vi.mock('../../../src/pipeline/timing/talk-value.js', () => ({ checkTalkValueThreshold: checkTalkValueMock }));
+// defer.js 引 bullmq producer 链,mock 掉;hasDeferBudget 保持真实语义
+vi.mock('../../../src/pipeline/timing/defer.js', () => ({
+  hasDeferBudget: (deferCount?: number) =>
+    (deferCount ?? 0) < ((envValues['TURN_GATE_DEFER_MAX_REPLAYS'] as number) ?? 1),
+}));
 vi.mock('../../../src/pipeline/timing/gate-history.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../../src/pipeline/timing/gate-history.js')>();
   return { ...orig, appendGateHistory: appendHistMock, getGateHistory: getHistMock };
@@ -52,6 +57,7 @@ function baseEnv(): void {
     TIMING_WAIT_MAX_SEC: 120,
     TIMING_GATE_COOLDOWN_SEC: 15,
     TURN_GATE_DEFER_COOLDOWN: true,
+    TURN_GATE_DEFER_MAX_REPLAYS: 1,
     TURN_GATE_CONTINUATION: false,
     TIMING_CONTINUATION_WINDOW_SEC: 180,
     TIMING_GATE_HISTORY_ENABLED: false,
@@ -119,6 +125,18 @@ describe('runTimingGate — P2-E fail-closed', () => {
     callWithFallbackMock.mockResolvedValue({ content: '???not json???' });
     await runTimingGate(input());
     expect(appendHistMock).not.toHaveBeenCalled();
+  });
+
+  it('review #2:强债务在场时 fail-closed 转保护性 wait,不吞债务', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: '???not json???' });
+    const d = await runTimingGate(input({
+      obligationId: 'ob-1',
+      obligationTargetUid: 7,
+      obligationStrong: true,
+    }));
+    expect(d.action).toBe('wait');
+    expect(d.reason).toBe('parse_failed_closed_protected');
+    expect(d.waitSec).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -198,6 +216,20 @@ describe('runTimingGate — P0-B cooldown defer 带 retryAfterMs', () => {
     expect(d.deferOnly).toBeUndefined();
     expect(callWithFallbackMock).toHaveBeenCalled();
   });
+
+  it('review #1/#3:defer 预算耗尽 → 冷却中也穿透给 LLM(不丢消息)', async () => {
+    cooldownRemainingMock.mockResolvedValue(12_345);
+    const d = await runTimingGate(input({ canDefer: true, deferCount: 1 }));
+    expect(d.deferOnly).toBeUndefined();
+    expect(d.action).toBe('continue');
+    expect(callWithFallbackMock).toHaveBeenCalled();
+  });
+
+  it('非 actor(canDefer=false)冷却中仍 deferOnly(旧丢弃语义,pipeline 侧不重排)', async () => {
+    cooldownRemainingMock.mockResolvedValue(12_345);
+    const d = await runTimingGate(input({ canDefer: false, deferCount: 5 }));
+    expect(d.deferOnly).toBe(true);
+  });
 });
 
 describe('runTimingGate — P1-C talk_value 阈值层', () => {
@@ -234,6 +266,14 @@ describe('runTimingGate — P1-C talk_value 阈值层', () => {
     }));
     expect(d.reason).toBe('continuation_window');
     expect(checkTalkValueMock).not.toHaveBeenCalled();
+  });
+
+  it('review #3:defer 预算耗尽 → 跳过阈值层直接 LLM(低 talk_value 慢群不变永不回复区)', async () => {
+    checkTalkValueMock.mockResolvedValue({ pass: false, threshold: 20, count: 1, equivalent: 16, retryAfterMs: 0 });
+    const d = await runTimingGate(input({ canDefer: true, deferCount: 1 }));
+    expect(d.action).toBe('continue');
+    expect(checkTalkValueMock).not.toHaveBeenCalled();
+    expect(callWithFallbackMock).toHaveBeenCalled();
   });
 });
 

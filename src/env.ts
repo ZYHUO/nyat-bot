@@ -244,12 +244,13 @@ const envSchema = z.object({
   TIMING_TALK_VALUE: z.coerce.number().min(0.01).max(1).default(1.0),
   // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
   // gate 与 planner 共享历史、看得到自己过往节奏判断)。
-  TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(true),
+  TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(false),
   // P2-E 解析失败方向:true = fail-closed 按 no_action 处理(MaiBot 语义:宁可
-  // 沉默不插嘴;direct 已在上游 bypass)。llm_call_failed(网络)仍 fail-open。
-  TIMING_GATE_FAIL_CLOSED: booleanFromEnv.default(true),
+  // 沉默不插嘴;direct 已在上游 bypass;强债务转保护性 wait)。llm_call_failed
+  // (网络)仍 fail-open。与仓库约定一致:行为变化默认关,.env 显式开。
+  TIMING_GATE_FAIL_CLOSED: booleanFromEnv.default(false),
   // P2-F wait 到点回访时注入 [等待结束] 提示(仅 TURN_WAIT_RESUME_ENABLED 路径)。
-  TIMING_WAIT_HINT_ENABLED: booleanFromEnv.default(true),
+  TIMING_WAIT_HINT_ENABLED: booleanFromEnv.default(false),
 
   // ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ──
   // 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。

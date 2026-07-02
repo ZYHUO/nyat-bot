@@ -54,7 +54,6 @@ export async function isChatSuppressed(chatId: number): Promise<boolean> {
 export async function getGateCooldownRemainingMs(
   chatId: number,
   prefetched?: ChatTimingState,
-  triggerUid?: number,
 ): Promise<number> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) return 0;
@@ -67,9 +66,10 @@ export async function getGateCooldownRemainingMs(
     s.lastGateAction === 'wait' ||
     s.lastGateAction === 'no_action'
   ) {
-    if (triggerUid !== undefined && s.lastGateUid !== undefined && s.lastGateUid !== triggerUid) {
-      return 0;
-    }
+    // 冷却是 per-chat 的(MaiBot 语义;review #5):曾有 per-uid 豁免
+    // (lastGateUid !== triggerUid → 0),但多人群里发言者交替时互相豁免,
+    // 指数退避形同虚设 → 每条消息都烧 LLM。per-person 的"等TA说完"语义
+    // 由 actor 层 waitTriggerUids 抑制承担,不在冷却层重复。
     // 指数退避(MaiBot 借鉴):连续 no_action 时窗口 base*2^(n-start),
     // 封顶 CAP —— 沉默群里 gate 不再每 15s 白烧一次 LLM。wait 不参与
     // 退避(它有自己的 waitUntil 节奏)。direct 消息在 runTimingGate 的
@@ -90,8 +90,8 @@ export async function getGateCooldownRemainingMs(
  * True when a recent gate decision was wait/no_action and we should NOT call
  * the gate LLM again immediately (cooldown). Returns false when feature off.
  */
-export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingState, triggerUid?: number): Promise<boolean> {
-  return (await getGateCooldownRemainingMs(chatId, prefetched, triggerUid)) > 0;
+export async function isInGateCooldown(chatId: number, prefetched?: ChatTimingState): Promise<boolean> {
+  return (await getGateCooldownRemainingMs(chatId, prefetched)) > 0;
 }
 
 /**
@@ -234,8 +234,11 @@ export async function handleWaitResume(args: {
         await appendPending({
           ...anchor,
           obligationId: waitResume?.obligationId ?? anchor.obligationId,
-          // P2-F:把实际等待秒数盖到回放条目上,写手侧提示"你刚等了 N 秒"
+          // P2-F:把实际等待秒数与开始时刻盖到回放条目上 —— 写手侧提示
+          // "你刚等了 N 秒";开始时刻供 actor 对照 activity 判断窗口期
+          // 有没有人说话(review #7)。
           waitSec: waitResume?.waitSec ?? anchor.waitSec,
+          waitStartedAt: waitResume?.scheduledAt ?? anchor.waitStartedAt,
         });
       }
       await scheduleTurn(chatId, {

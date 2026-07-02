@@ -125,10 +125,13 @@ export async function checkTalkValueThreshold(args: {
       return { pass: true, threshold, count, equivalent };
     }
 
-    const retryAfterMs = Math.max(
-      0,
-      Math.round(((threshold - count) * avgIntervalSec - idleSec) * 1000),
-    );
+    // review #3:重评时刻必须夹在"可达"范围内 —— idleSec 有 30min 封顶,
+    // 低 talk_value 慢群里 (threshold-count)*avg 可能超过封顶,按原式排的
+    // 重评永远不可能满足阈值。夹到可达视界后,重评要么真的凑够了,要么
+    // 很快耗尽 defer 预算穿透给 LLM 裁决(gate 短路层的 hasDeferBudget)。
+    const neededIdleSec = (threshold - count) * avgIntervalSec;
+    const reachableIdleSec = Math.min(neededIdleSec, IDLE_WINDOW_SEC);
+    const retryAfterMs = Math.max(0, Math.round((reachableIdleSec - idleSec) * 1000));
     return { pass: false, threshold, count, equivalent, retryAfterMs };
   } catch (err) {
     logger.debug({ err, chatId: args.chatId }, 'checkTalkValueThreshold failed (fail-open)');

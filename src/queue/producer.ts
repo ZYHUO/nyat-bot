@@ -5,6 +5,7 @@
 import { Queue } from 'bullmq';
 import { QUEUE_NAME } from './jobs.js';
 import type { MessageJobData } from './jobs.js';
+import type { PendingEntry } from '../pipeline/turn/types.js';
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
 
@@ -74,6 +75,36 @@ export async function enqueueWaitResume(
     { chatId, waitSec, jobId: job.id, anchorMessageId, obligationId },
     'Wait-resume job scheduled',
   );
+  return job.id;
+}
+
+/**
+ * P0-B: 调度一个 defer-resume 延迟 job。被 defer 的条目放在 job 载荷里
+ * (不进 pending)—— 窗口期内不会被别的回合提前 drain,也不碰 turn 调度
+ * 指针;到点由 worker 的 handleDeferResume 重注入 + 排即时回合。
+ */
+export async function enqueueDeferResume(
+  chatId: number,
+  delayMs: number,
+  entries: PendingEntry[],
+): Promise<string | undefined> {
+  const queue = getQueue();
+  const scheduledAt = Date.now();
+  const jobId = `defer-${chatId}-${scheduledAt}-${_waitSeq++}`;
+  const data: MessageJobData = {
+    type: 'defer_resume',
+    chatId,
+    enqueuedAt: scheduledAt,
+    update: {} as MessageJobData['update'],
+    deferResume: { scheduledAt, entries },
+  };
+  const job = await queue.add('defer_resume', data, {
+    jobId,
+    delay: delayMs,
+    removeOnComplete: true,
+    removeOnFail: true,
+  });
+  logger.debug({ chatId, delayMs, jobId: job.id, entryCount: entries.length }, 'Defer-resume job scheduled');
   return job.id;
 }
 

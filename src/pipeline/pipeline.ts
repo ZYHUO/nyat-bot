@@ -43,7 +43,7 @@ import { logger } from "../shared/logger.js";
 import { checkWatches } from "../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage } from "../tracking/stats.js";
 import { recordGateNoAction, bumpGatePendingCount } from "./timing/state-store.js";
-import { scheduleGateDeferReeval } from "./timing/defer.js";
+import { scheduleGateDeferReeval, hasDeferBudget } from "./timing/defer.js";
 import { isTurnActorChat } from "./turn/flags.js";
 import { updateObligationState } from './turn/obligation-store.js';
 import { playGame, hasActiveGame } from "./games/manager.js";
@@ -643,8 +643,11 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       const l0 = demoteReply || demoteIgnore ? null : l0Raw;
       // 审计 #38 slice 3:timing 状态一回合只读一次 —— 冷却判断与
       // lastSpokeSecAgo 共用同一份快照(旧码同一 hash 读 2 次)。
-      let tstate: Awaited<ReturnType<typeof getChatState>> | undefined;
-      if (!l0) {
+      // review #10:优先用 actor 回合开始时的快照(多锚点各组共用,组1 的
+      // 中途写入不误伤组2;回合前已有的冷却对所有组照常生效)。
+      let tstate: Awaited<ReturnType<typeof getChatState>> | undefined =
+        job.turnContext.timingStateSnapshot;
+      if (!l0 && tstate === undefined) {
         try { tstate = await getChatState(job.chatId); } catch { /* non-critical */ }
       }
       // P0-A 连续对话免检(心流路径版):bot 刚回复过/心流刚放行过的窗口内,
@@ -659,12 +662,19 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         const cooldownRemainingMs =
           job.turnContext?.skipGateCooldown || heartContinuation
             ? 0
-            : await getGateCooldownRemainingMs(job.chatId, tstate, formatted.uid);
+            : await getGateCooldownRemainingMs(job.chatId, tstate);
         if (cooldownRemainingMs > 0) {
           // 冷却短路:刚 pass/wait 过 → 不再为每条消息烧一次心流调用。
           // P0-B:defer 语义下不丢消息 —— 重排到冷却结束带完整语境重评
-          // (MaiBot delayed-task);flag 关/重排失败回落旧静默丢弃。
-          if (e.TURN_GATE_DEFER_COOLDOWN && isTurnActorChat(job.chatId)) {
+          // (MaiBot delayed-task)。重放预算耗尽/排程失败 → **穿透给心流
+          // 裁决**(review #1:兜底方向是多烧一次 LLM,不是丢消息);
+          // flag 关保持旧静默丢弃。
+          const deferMode = e.TURN_GATE_DEFER_COOLDOWN && isTurnActorChat(job.chatId);
+          if (!deferMode) {
+            logger.debug({ chatId: job.chatId, uid: formatted.uid, lastGateUid: tstate?.lastGateUid }, "Heart skipped (cooldown), pass");
+            return;
+          }
+          if (hasDeferBudget(job.turnContext.deferCount)) {
             const rescheduled = await scheduleGateDeferReeval({
               chatId: job.chatId,
               entry: {
@@ -677,14 +687,20 @@ export async function processPipeline(job: ChatJob): Promise<void> {
               retryAfterMs: cooldownRemainingMs,
               reason: 'heart_cooldown_defer',
             }).catch(() => false);
+            if (rescheduled) {
+              logger.info(
+                { chatId: job.chatId, uid: formatted.uid, cooldownRemainingMs },
+                "Heart cooldown → timed re-eval scheduled",
+              );
+              return;
+            }
+            logger.warn({ chatId: job.chatId }, "Heart cooldown defer reschedule failed, falling through to heart");
+          } else {
             logger.info(
-              { chatId: job.chatId, uid: formatted.uid, rescheduled, cooldownRemainingMs },
-              rescheduled ? "Heart cooldown → timed re-eval scheduled" : "Heart skipped (cooldown), pass",
+              { chatId: job.chatId, deferCount: job.turnContext.deferCount },
+              "Heart cooldown defer budget exhausted, falling through to heart",
             );
-            return;
           }
-          logger.debug({ chatId: job.chatId, uid: formatted.uid, lastGateUid: tstate?.lastGateUid }, "Heart skipped (cooldown), pass");
-          return;
         }
         // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
         // 硬阈以下确定性 pass(不烧心流调用);中间带给心流一句体感注记。
@@ -914,10 +930,13 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       // 预读 timing state(审计 #38:一份快照供 lastSpokeSecAgo + gate 内
       // 连续免检/冷却/talk_value 共用,避免重复 HGETALL)。读失败 → undefined,
       // gate 内自行兜底。
-      let prefetchedState: Awaited<ReturnType<typeof getChatState>> | undefined;
+      let prefetchedState: Awaited<ReturnType<typeof getChatState>> | undefined =
+        job.turnContext?.timingStateSnapshot;
       let lastSpokeSecAgo: number | undefined;
       try {
-        prefetchedState = await getChatState(job.chatId);
+        if (prefetchedState === undefined) {
+          prefetchedState = await getChatState(job.chatId);
+        }
         if (prefetchedState.lastBotReplyAt) {
           lastSpokeSecAgo = (Date.now() - prefetchedState.lastBotReplyAt) / 1000;
         }
@@ -942,6 +961,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // P0-B/P1-C:仅 turn actor 路径支持 defer 延迟重评(非 actor 无 pending
         // 缓冲可回放,defer 会退化成丢消息 → 不开)。
         canDefer: !!job.turnContext && isTurnActorChat(job.chatId),
+        deferCount: job.turnContext?.deferCount,
       });
       timings["timing_gate"] = Math.round(performance.now() - tg);
 

@@ -10,6 +10,7 @@ import { getRedis } from "../db/redis.js";
 import { processPipeline } from "../pipeline/pipeline.js";
 import { runChatTurn } from "../pipeline/turn/actor.js";
 import { handleWaitResume } from "../pipeline/timing/chat-runtime.js";
+import { handleDeferResume } from "../pipeline/timing/defer.js";
 import { logger } from "../shared/logger.js";
 import { env } from "../env.js";
 
@@ -27,6 +28,15 @@ async function processMessage(job: Job<MessageJobData>): Promise<void> {
     await handleWaitResume({
       chatId: job.data.chatId,
       waitResume: job.data.waitResume,
+    });
+    return;
+  }
+
+  // P0-B: defer-resume — 被 gate/心流 defer 的条目到点重注入 + 排即时回合
+  if (job.data.type === 'defer_resume') {
+    await handleDeferResume({
+      chatId: job.data.chatId,
+      deferResume: job.data.deferResume,
     });
     return;
   }

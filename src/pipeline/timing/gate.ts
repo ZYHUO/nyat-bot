@@ -29,6 +29,7 @@ import {
   type ChatTimingState,
 } from './chat-runtime.js';
 import { checkTalkValueThreshold } from './talk-value.js';
+import { hasDeferBudget } from './defer.js';
 import { appendGateHistory, formatGateHistoryBlock, getGateHistory } from './gate-history.js';
 
 export type GateAction = 'continue' | 'wait' | 'no_action';
@@ -96,6 +97,11 @@ export interface GateInput {
    * 阈值层不生效 —— 未达阈值又无法重排等于丢消息。
    */
   canDefer?: boolean;
+  /**
+   * P0-B:该条消息已被 defer 的次数。预算耗尽时短路层不再 defer,直接
+   * 放行给 LLM 裁决(兜底是"多烧一次 LLM",不是丢消息)。
+   */
+  deferCount?: number;
 }
 
 const VALID_ACTIONS = new Set<GateAction>(['continue', 'wait', 'no_action']);
@@ -263,18 +269,24 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   // Cooldown: previous gate decision was wait/no_action and TTL not elapsed.
   // 默认(legacy)语义是 bypass→continue(放行);TURN_GATE_DEFER_COOLDOWN 把它
   // 改向为 MaiBot 语义:冷却期内不重判,这条先不回。P0-B 后 defer 不再是
-  // 丢弃 —— 带 retryAfterMs 由 pipeline 排 gate_defer 回合到点重评。
+  // 丢弃 —— 带 retryAfterMs 由 pipeline 排 defer-resume 到点重评;重放预算
+  // 耗尽的条目不再 defer,**放行给 LLM 裁决**(review #1/#3:兜底方向是
+  // 多烧一次 LLM,不是丢消息)。
   try {
-    const remainingMs = await getGateCooldownRemainingMs(input.chatId, state, input.triggerUid);
+    const remainingMs = await getGateCooldownRemainingMs(input.chatId, state);
     if (remainingMs > 0 && !input.skipShortCircuits) {
       if (e.TURN_GATE_DEFER_COOLDOWN) {
-        return {
-          ...makeShortCircuit('no_action', 'cooldown_defer', start),
-          deferOnly: true,
-          retryAfterMs: remainingMs,
-        };
+        if (!input.canDefer || hasDeferBudget(input.deferCount)) {
+          return {
+            ...makeShortCircuit('no_action', 'cooldown_defer', start),
+            deferOnly: true,
+            retryAfterMs: remainingMs,
+          };
+        }
+        // 预算耗尽 → 穿透到 LLM
+      } else {
+        return makeShortCircuit('continue', 'cooldown_bypass', start);
       }
-      return makeShortCircuit('continue', 'cooldown_bypass', start);
     }
   } catch (err) {
     logger.debug({ err, chatId: input.chatId }, 'gate cooldown check failed (non-critical)');
@@ -282,8 +294,10 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
   // P1-C talk_value 频率阈值(MaiBot runtime.py:636-669/1451-1504):确定性攒
   // 消息,未达阈值不烧 LLM,defer 到预计凑够的时刻。仅 canDefer(actor)生效
-  // —— 否则未达阈值等于丢消息。连续免检(P0-A)优先于本层。
-  if (input.canDefer && !input.proactiveMode && !input.skipShortCircuits && state) {
+  // —— 否则未达阈值等于丢消息。连续免检(P0-A)优先于本层;defer 预算耗尽
+  // 的条目跳过本层直接给 LLM(review #3:低 talk_value 的慢群否则会变成
+  // 确定性永不回复区)。
+  if (input.canDefer && hasDeferBudget(input.deferCount) && !input.proactiveMode && !input.skipShortCircuits && state) {
     try {
       const verdict = await checkTalkValueThreshold({ chatId: input.chatId, state });
       if (!verdict.pass) {
@@ -405,6 +419,23 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     // 上游 short-circuit(永远到不了这里);llm_call_failed(网络/超时)仍
     // fail-open——那是基础设施故障,不是模型说"我判不了"。
     if (e.TIMING_GATE_FAIL_CLOSED) {
+      // review #2:合成 no_action 必须与 LLM no_action 同享强债务保护 ——
+      // 否则解析失败会把 must-reply 债务直接标 dropped,用户永远等不到回复。
+      if (shouldProtectStrongObligation(input)) {
+        const waitSec = clampWaitSec(Math.max(e.TIMING_WAIT_MIN_SEC, 8));
+        logger.warn(
+          { chatId: input.chatId, obligationId: input.obligationId, rawSnippet: raw.slice(0, 200) },
+          'gate parse failed, fail-closed → protected wait (strong obligation)',
+        );
+        return {
+          action: 'wait',
+          waitSec,
+          reason: 'parse_failed_closed_protected',
+          shortCircuited: false,
+          latencyMs: Math.round(performance.now() - start),
+          raw: raw.slice(0, 500),
+        };
+      }
       logger.warn(
         { chatId: input.chatId, rawSnippet: raw.slice(0, 200) },
         'gate parse failed, fail-closed no_action',

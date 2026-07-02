@@ -3,7 +3,7 @@
 // ────────────────────────────────────────
 
 import type { UpdateLike } from '../shared/types.js';
-import type { TurnJobPayload } from '../pipeline/turn/types.js';
+import type { PendingEntry, TurnJobPayload } from '../pipeline/turn/types.js';
 
 export const QUEUE_NAME = 'xxb-messages';
 
@@ -19,7 +19,7 @@ export interface CoalesceInfo {
 }
 
 export interface MessageJobData {
-  type: 'message' | 'allowlist_review' | 'wait_resume' | 'chat_turn';
+  type: 'message' | 'allowlist_review' | 'wait_resume' | 'chat_turn' | 'defer_resume';
   chatId: number;
   messageId?: number;
   isEdit?: boolean;
@@ -45,4 +45,13 @@ export interface MessageJobData {
   };
   /** Turn actor: payload for type='chat_turn' (per-chat cognition turn) */
   turn?: TurnJobPayload;
+  /**
+   * P0-B: defer-resume payload (only for type='defer_resume')。被 gate/心流
+   * defer 的条目**存在 job 载荷里**而非 pending —— 窗口期内不会被别的回合
+   * 提前 drain,也不污染 turn 调度指针(review finding #1 的根修)。
+   */
+  deferResume?: {
+    scheduledAt: number;
+    entries: PendingEntry[];
+  };
 }

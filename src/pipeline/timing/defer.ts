@@ -3,16 +3,22 @@
 // ────────────────────────────────────────
 //
 // MaiBot 在退避/未达阈值时不丢消息:挂 delayed task 到点带着 pending 消息
-// 重新走完整评估(runtime.py:1096-1101/1494-1504)。旧 TURN_GATE_DEFER_COOLDOWN
-// 的 deferOnly 是"这条不回了"—— 静默丢弃。这里把它升级成:把条目重新 append
-// 进 pending,并在 retryAfterMs 后排一个 gate_defer 回合;到点冷却已过/消息
-// 已攒够,gate 全新评估(judge 首轮已判过 REPLY,回放跳过)。
+// 重新走完整评估(runtime.py:1096-1101/1494-1504)。
 //
-// 防死循环:deferCount 存在条目 JSON 里(appendPending Lua 原子,无共享计数
-// 竞态),超 TURN_GATE_DEFER_MAX_REPLAYS 次按旧语义丢弃。
+// 设计(review finding #1 后重做,对齐 wait-resume 的"载荷即暂存"):
+//   被 defer 的条目存进**专用延迟 job 的载荷**,而不是立刻 append 回
+//   pending —— 否则回合收尾的 stillPending>0 自我重排会在 ~2s 后提前
+//   drain 它(冷却/阈值仍未满足 → 烧光重放预算 → 消息照旧丢),且
+//   scheduleTurn(forceNew) 会覆写 meta.scheduledJobId 留下孤儿延迟回合。
+//   到点后 worker 调 handleDeferResume:重注入 pending + 排即时回合。
+//
+// 防死循环:deferCount 存在条目 JSON 里,超 TURN_GATE_DEFER_MAX_REPLAYS 次
+// 时调用方(gate/心流短路层)不再 defer,直接放行给 LLM 裁决 —— 预算耗尽
+// 的兜底是"多烧一次 LLM",不是丢消息。
 
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { enqueueDeferResume } from '../../queue/producer.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { appendPending } from '../turn/buffer.js';
 import type { PendingEntry } from '../turn/types.js';
@@ -20,9 +26,14 @@ import type { PendingEntry } from '../turn/types.js';
 export const DEFER_MIN_DELAY_MS = 3_000;
 export const DEFER_MAX_DELAY_MS = 600_000;
 
+/** 调用方短路层用:该条目是否还有 defer 预算(没有 → 放行给 LLM)。 */
+export function hasDeferBudget(deferCount: number | undefined): boolean {
+  return (deferCount ?? 0) < env().TURN_GATE_DEFER_MAX_REPLAYS;
+}
+
 /**
- * 把被 defer 的消息重排到 retryAfterMs 后重评。
- * 返回 false = 重放预算耗尽,调用方按旧语义静默丢弃。
+ * 把被 defer 的消息暂存进延迟 job,到点重评。
+ * 返回 false = 重放预算耗尽(调用方应放行给 LLM,而不是丢弃)。
  */
 export async function scheduleGateDeferReeval(args: {
   chatId: number;
@@ -32,31 +43,42 @@ export async function scheduleGateDeferReeval(args: {
   retryAfterMs: number;
   reason: string;
 }): Promise<boolean> {
-  const e = env();
-  if (args.deferCount >= e.TURN_GATE_DEFER_MAX_REPLAYS) {
+  if (!hasDeferBudget(args.deferCount)) {
     logger.info(
       { chatId: args.chatId, deferCount: args.deferCount, reason: args.reason },
-      'gate defer budget exhausted, dropping',
+      'gate defer budget exhausted (caller should fall through to LLM)',
     );
     return false;
   }
 
   const delayMs = Math.min(Math.max(args.retryAfterMs, DEFER_MIN_DELAY_MS), DEFER_MAX_DELAY_MS);
-  await appendPending({
-    ...args.entry,
-    deferReplay: true,
-    deferCount: args.deferCount + 1,
-  });
-  await scheduleTurn(args.chatId, {
-    trigger: 'gate_defer',
-    delayMsOverride: delayMs,
-    // forceNew 必须:此刻 meta.scheduledJobId 指向**当前 active 回合**,复用
-    // 分支只会 markDirty → 收尾立即重排(不带延迟)→ defer 语义失效。
-    forceNew: true,
-  });
+  await enqueueDeferResume(args.chatId, delayMs, [
+    { ...args.entry, deferReplay: true, deferCount: args.deferCount + 1 },
+  ]);
   logger.info(
     { chatId: args.chatId, delayMs, deferCount: args.deferCount + 1, reason: args.reason },
     'gate defer → timed re-eval scheduled',
   );
   return true;
+}
+
+/**
+ * defer-resume job 到点(worker 调):把暂存条目重注入 pending 并排即时
+ * 回合。**不** forceNew:若此刻恰有 active 回合,markDirty 由其收尾重排
+ * (条目已在 pending,不会丢);若有 delayed 回合,changeDelay 提前到现在。
+ */
+export async function handleDeferResume(args: {
+  chatId: number;
+  deferResume?: { scheduledAt: number; entries: PendingEntry[] };
+}): Promise<void> {
+  const entries = args.deferResume?.entries ?? [];
+  if (entries.length === 0) return;
+  for (const entry of entries) {
+    await appendPending(entry);
+  }
+  await scheduleTurn(args.chatId, { trigger: 'gate_defer', delayMsOverride: 0 });
+  logger.info(
+    { chatId: args.chatId, entryCount: entries.length },
+    'defer-resume fired → entries re-injected, gate_defer turn scheduled',
+  );
 }
