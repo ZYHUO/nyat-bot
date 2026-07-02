@@ -60,6 +60,9 @@ export interface ScheduleTurnOptions {
   direct?: boolean;
   /** wait 回合锚点 */
   anchorMessageId?: number;
+  obligationId?: string;
+  obligationTargetUid?: number;
+  obligationStrong?: boolean;
   /** G4: 最新一条消息看起来没打完(无终止标点)→ 延长去抖窗口 */
   stillTyping?: boolean;
   /**
@@ -107,7 +110,14 @@ export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): P
           if (opts.direct && !job.data.turn?.directPriority) {
             await job.updateData({
               ...job.data,
-              turn: { ...job.data.turn!, directPriority: true, trigger: 'direct' },
+              turn: {
+                ...job.data.turn!,
+                directPriority: true,
+                trigger: 'direct',
+                obligationId: opts.obligationId ?? job.data.turn?.obligationId,
+                obligationTargetUid: opts.obligationTargetUid ?? job.data.turn?.obligationTargetUid,
+                obligationStrong: opts.obligationStrong ?? job.data.turn?.obligationStrong,
+              },
             });
           }
           // BullMQ changeDelay(delay) = "delay milliseconds FROM NOW,
@@ -150,6 +160,9 @@ export async function scheduleTurn(chatId: number, opts: ScheduleTurnOptions): P
       scheduledAt: Date.now(),
       directPriority: opts.direct ?? false,
       anchorMessageId: opts.anchorMessageId,
+      obligationId: opts.obligationId,
+      obligationTargetUid: opts.obligationTargetUid,
+      obligationStrong: opts.obligationStrong,
     },
   };
 

@@ -10,7 +10,8 @@ import type { ReplyOutcome } from './types.js';
 import { applyMoodEvent } from './mood.js';
 import { applyRelationshipEvent } from './relationship.js';
 import { NEGATIVE_PATTERNS, REPAIR_PATTERNS, POSITIVE_PATTERNS, countMatches } from './behavior-patterns.js';
-import { scoreReplyQuality, ASI_ENABLED, ASI_SAMPLE_RATE } from './asi-scoring.js';
+import { persistReplyOutcomeScores, ASI_ENABLED, ASI_SAMPLE_RATE } from './asi-scoring.js';
+import { env } from '../env.js';
 
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
@@ -271,20 +272,21 @@ export async function checkOutcome(
         })();
       }
 
-      // #2: fire-and-forget ASI scoring for rows that got a followup.
+      // #2: followup 到了 → 持久化行分数(EMA 已在发送时滚过,这里只存行)。
       if (ASI_ENABLED) {
+        const sampleRate = env().ASI_SAMPLE_RATE ?? ASI_SAMPLE_RATE;
         for (const c of scoreCandidates) {
           const rowId = insertedRowIds[c.insertIdx];
           if (rowId === undefined) continue;
-          if (Math.random() > ASI_SAMPLE_RATE) continue;
-          void scoreReplyQuality({
+          if (Math.random() > sampleRate) continue;
+          void persistReplyOutcomeScores({
             chatId,
             rowId,
             triggerText: c.triggerText,
             replyText: c.replyText,
             signal: c.signal,
           }).catch((err) => {
-            logger.debug({ err, chatId, rowId }, 'ASI scoreReplyQuality failed (non-critical)');
+            logger.debug({ err, chatId, rowId }, 'ASI persistReplyOutcomeScores failed (non-critical)');
           });
         }
       }

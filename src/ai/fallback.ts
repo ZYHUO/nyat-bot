@@ -65,6 +65,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       }
 
       const result = await callModel(label, options.messages, callOpts);
+      if (options.rejectEmpty && !result.content.trim()) {
+        throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
+      }
       if (!options.suppressMetrics) emitLlmResult(options.usage, result);
       return result;
     } catch (err) {

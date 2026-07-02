@@ -504,6 +504,28 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("at_others");
   });
 
+  it("mentioning another @user right after bot should still IGNORE", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "在吗？" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "@alice 你怎么看" }),
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+    });
+    const result = evaluateRules(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+  });
+
+  it("ASCII nickname only matches as standalone token", () => {
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "@xxb123 你怎么看" }),
+    });
+    const result = evaluateRules(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("at_others");
+  });
+
   it("normal message (no rule hit) → null", () => {
     const ctx = makeCtx({
       message: makeMsg({ textContent: "今天天气真好" }),

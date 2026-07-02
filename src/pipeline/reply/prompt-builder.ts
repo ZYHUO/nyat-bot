@@ -18,11 +18,12 @@ import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/s
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildCrossGroupInjection } from '../../tracking/person-identity.js';
 import { getTopicLine } from '../../tracking/topic-registry.js';
-import { buildProfileInjection } from '../../tracking/user-profile.js';
+import { buildProfileInjection, getBotTagForAddressing } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
 import { buildRoleHint } from '../../tracking/behavioral-roles.js';
 import { getBotUid } from '../../bot/bot.js';
+import { isMaster } from '../../admin/auth.js';
 
 const SECTION_SEP = '\n\n---\n\n';
 
@@ -62,7 +63,7 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
 
   // L3: Contract — explain JSON output format from the schema
   const schemaRaw = loadCachedPrompt('contract/reply-schema.json');
-  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下 JSON Schema 输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。`;
+  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下 JSON Schema 输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。\n\n⚠️ 输出一个**符合** schema 的 JSON 实例(也就是你的回复),**绝对不要**把上面的 schema 定义本身(\`$schema\`/\`title\`/\`oneOf\`/\`$defs\` 那些东西)原样输出回来。\n\n正确示例(单条):\n\`\`\`json\n{"replyContent":"对对对笑死","targetMessageId":123}\n\`\`\`\n正确示例(多条短泡泡):\n\`\`\`json\n[{"replyContent":"嗯?","targetMessageId":120},{"replyContent":"原来是这样","targetMessageId":123}]\n\`\`\``;
 
   // G2 统一动作空间:回复不再只有"发文字"一种形态
   if (env().TURN_ACTION_PLANNER_ENABLED) {
@@ -166,43 +167,16 @@ export function buildMessages(
   midTermMemory?: string,
 ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
   const userParts: string[] = [];
-
-  // Runtime context: current time (kept in user turn so system prompt stays stable for caching)
-  const now = new Date();
-  const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'full', timeStyle: 'short' });
-  userParts.push(`# 当前时间\n\n${timeStr}（北京时间）`);
-
-  if (knowledge) {
-    userParts.push(`[知识库]\n${knowledge}`);
-  }
-
-  // 中期记忆(MaiBot 借鉴):滚出窗口的旧对话压缩摘要,pinned 背景
-  if (midTermMemory) {
-    userParts.push(`[中期记忆] 更早对话的压缩摘要(背景参考,别逐句复述):\n${midTermMemory}`);
-  }
-
-  if (checkinData) {
-    userParts.push(checkinData);
-  }
-
-  if (memberRoster) {
-    userParts.push(`[群成员]\n${memberRoster}`);
-  }
-
-  if (botKnowledge) {
-    userParts.push(`[群组Bot知识]\n${botKnowledge}`);
-  }
+  const stablePrefixParts: string[] = [];
+  const volatileParts: string[] = [];
 
   // 自我反思(回复规律)已并入 reply.ts 的 [此刻的你] 状态块(P1:语义重叠,
   // 且不再单列在静态块顶端离 CURRENT_MESSAGE 老远)。此处保留入参兼容签名,
   // 但不再单独渲染。
 
   // Expression injection (Stage D)
-  // G13: 语境匹配的 LLM 选择结果(expression-selector)优先于静态 top-N
-  // G3 软性习惯框架 + G4 高 recency:不再是干巴数据表;素材块在本函数
-  // 末尾(CURRENT_MESSAGE 紧前)推入,埋中间会被几千 token 稀释掉。
-  // L4:风格示例化 —— 指令表("当X时可以说Y")会让模型先写正常回复再
-  // 生硬缝一句"学来的话",留下接缝;few-shot 原句让它靠模仿吸收腔调。
+  // G13: 语境匹配的 LLM 选择结果(expression-selector)优先于静态 top-N。
+  // 同时把相对稳定的群味素材尽量前置,让 user turn 也能吃到前缀缓存。
   const EXPR_HEADER = '[群味] 本群平时说话的味道(感受语感就好,不用照搬原句):';
   const formatExprLine = (_situation: string, style: string): string => `「${style}」`;
   let expressionBlock: string | undefined;
@@ -221,17 +195,14 @@ export function buildMessages(
   }
 
   if (toolResults) {
-    userParts.push(toolResults);
+    volatileParts.push(toolResults);
   }
 
   if (replyShapeHint?.exactReplyCount && replyShapeHint.exactReplyCount > 1) {
-    userParts.push(
+    stablePrefixParts.push(
       `[REPLY_COUNT_REQUIREMENT]\n必须输出恰好 ${replyShapeHint.exactReplyCount} 条消息，并使用 JSON 数组返回，不能合并成一条。`,
     );
   }
-
-  const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
-  userParts.push(`[${contextLabel}]\n${context}`);
 
   // P1:谁是谁(外号/角色/关系)紧跟对话历史 —— 模型读完对话、识别出人名后,
   // 紧接着查"谁是谁"做消歧,聚类最紧。旧位置(对话之前老远)是"先背花名册
@@ -239,34 +210,28 @@ export function buildMessages(
   if (chatId !== undefined && chatId < 0) {
     try {
       const aliasBlock = buildAliasInjection(chatId);
-      if (aliasBlock) userParts.push(`[群友外号]\n${aliasBlock}`);
+      if (aliasBlock) stablePrefixParts.push(`[群友外号]\n${aliasBlock}`);
     } catch { /* non-critical */ }
     // Behavioral roles — compact group-persona hint
     try {
       const roleBlock = buildRoleHint(chatId);
-      if (roleBlock) userParts.push(`[群友角色]\n${roleBlock}`);
+      if (roleBlock) stablePrefixParts.push(`[群友角色]\n${roleBlock}`);
     } catch { /* non-critical */ }
     // Social graph — who interacts with whom (read the room)
     try {
       const socialBlock = buildSocialInjection(chatId);
-      if (socialBlock) userParts.push(`[群友关系]\n${socialBlock}`);
+      if (socialBlock) stablePrefixParts.push(`[群友关系]\n${socialBlock}`);
     } catch { /* non-critical */ }
   }
 
-  // G4(语言生命):学到的群语言放在 CURRENT_MESSAGE 紧前 —— 最高 recency,
-  // 模型真正"带着群的腔调"开口,而不是被埋在状态提示堆里。
+  // G4(语言生命):这块通常按群缓慢变化,前置后既保留风格指导,也更利于前缀缓存。
   if (expressionBlock) {
-    userParts.push(expressionBlock);
-  }
-
-  // G4: burst-aware reply — answer the whole multi-message thought
-  if (burstHint) {
-    userParts.push(burstHint);
+    stablePrefixParts.push(expressionBlock);
   }
 
   // DM mode: inject private chat style and capabilities hint
   if (chatId !== undefined && chatId > 0) {
-    userParts.push(`[私聊模式]\n这是一对一私聊,没有旁观者:可以更亲近、更松弛,回复也可以适当长一点。\n私聊里你能做的事:记住偏好("记住xxx")、报已记住的内容("你记住了什么")、忘掉某条("忘掉xxx")、看群里在聊什么("看看群里在聊什么")、替对方去群里传话。`);
+    stablePrefixParts.push(`[私聊模式]\n这是一对一私聊,没有旁观者:可以更亲近、更松弛,回复也可以适当长一点。\n私聊里你能做的事:记住偏好("记住xxx")、报已记住的内容("你记住了什么")、忘掉某条("忘掉xxx")、看群里在聊什么("看看群里在聊什么")、替对方去群里传话。`);
   }
 
   const stickerDesc = (latestMessage.sticker as { description?: string } | undefined)?.description;
@@ -288,6 +253,14 @@ export function buildMessages(
   let currentMsgBlock = `[CURRENT_MESSAGE_TO_REPLY]\nmessage_id: ${latestMessage.messageId}\n发送者: ${senderLabel}`;
   if (latestMessage.senderTag) {
     currentMsgBlock += `\n用户Tag: ${latestMessage.senderTag}`;
+  }
+  // bot 对当前发送者的称呼(bot_tag,可私聊"叫我X"纠正)——优先于群外号,
+  // 让写手用它叫人。主人由 persona 处理,这里跳过避免重复/冲突。
+  if (chatId !== undefined && !latestMessage.isAnonymous && !isMaster(latestMessage.uid, env().MASTER_UID)) {
+    try {
+      const botTag = getBotTagForAddressing(chatId, latestMessage.uid);
+      if (botTag) currentMsgBlock += `\n你对他的称呼: ${botTag}`;
+    } catch { /* non-critical */ }
   }
   // ★ replyTo 显式注入:此前只在上下文行里以「→回复 …」可见,replan 换锚
   // 或长上下文时模型经常感知不到"这条是在对我说话",回出来的内容跑题
@@ -322,20 +295,55 @@ export function buildMessages(
   if (chatId !== undefined && env().TOPIC_REGISTRY_ENABLED) {
     try {
       const line = getTopicLine(chatId);
-      if (line) userParts.push(`[当前话题] ${line}`);
+      if (line) stablePrefixParts.push(`[当前话题] ${line}`);
     } catch { /* non-critical */ }
   }
 
   // Per-user volatile context (relationship + self-history) — in the user turn, not the
   // system prefix, so the system prompt stays cache-stable. High recency (just before CURRENT).
   const personalContext = buildPersonalContext(chatId, latestMessage.uid);
-  if (personalContext) userParts.push(personalContext);
+  if (personalContext) volatileParts.push(personalContext);
 
-  userParts.push(currentMsgBlock);
+  const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
+  volatileParts.push(`[${contextLabel}]\n${context}`);
+
+  if (knowledge) {
+    volatileParts.push(`[知识库]\n${knowledge}`);
+  }
+
+  // 中期记忆(MaiBot 借鉴):滚出窗口的旧对话压缩摘要,pinned 背景
+  if (midTermMemory) {
+    volatileParts.push(`[中期记忆] 更早对话的压缩摘要(背景参考,别逐句复述):\n${midTermMemory}`);
+  }
+
+  if (checkinData) {
+    volatileParts.push(checkinData);
+  }
+
+  if (memberRoster) {
+    volatileParts.push(`[群成员]\n${memberRoster}`);
+  }
+
+  if (botKnowledge) {
+    volatileParts.push(`[群组Bot知识]\n${botKnowledge}`);
+  }
+
+  // G4: burst-aware reply — answer the whole multi-message thought
+  if (burstHint) {
+    volatileParts.push(burstHint);
+  }
+
+  // Runtime context: current time lives in the user turn, but keep it close to CURRENT_MESSAGE
+  // so earlier user-turn prefix can stay cache-friendly.
+  const now = new Date();
+  const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'full', timeStyle: 'short' });
+  volatileParts.push(`# 当前时间\n\n${timeStr}（北京时间）`);
+
+  volatileParts.push(currentMsgBlock);
 
   return [
     { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: userParts.join('\n\n') },
+    { role: 'user' as const, content: [...stablePrefixParts, ...volatileParts].join('\n\n') },
   ];
 }
 

@@ -49,6 +49,7 @@ export async function enqueueWaitResume(
   chatId: number,
   waitSec: number,
   anchorMessageId?: number,
+  obligationId?: string,
 ): Promise<string | undefined> {
   const queue = getQueue();
   const scheduledAt = Date.now();
@@ -62,6 +63,7 @@ export async function enqueueWaitResume(
       scheduledAt,
       waitSec,
       anchorMessageId,
+      obligationId,
     },
   };
   const job = await queue.add('wait_resume', data, {
@@ -69,7 +71,7 @@ export async function enqueueWaitResume(
     delay: waitSec * 1000,
   });
   logger.debug(
-    { chatId, waitSec, jobId: job.id, anchorMessageId },
+    { chatId, waitSec, jobId: job.id, anchorMessageId, obligationId },
     'Wait-resume job scheduled',
   );
   return job.id;

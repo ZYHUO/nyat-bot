@@ -30,6 +30,9 @@ const {
   buildProfileInjection,
   runUserProfileSync,
   muteUser,
+  getBotTagForAddressing,
+  setBotTag,
+  clearBotTag,
   _flushAllBuffers,
 } = await import('../../../src/tracking/user-profile.js');
 
@@ -40,6 +43,7 @@ function initSchema(db: Database.Database): void {
     'migrations/0008_mute_dedup.sql',
     'migrations/0011_mute_expires.sql',
     'migrations/0025_profile_sections.sql',
+    'migrations/0046_bot_tag.sql',
   ];
   for (const migration of migrations) {
     db.exec(readFileSync(resolve(process.cwd(), migration), 'utf-8'));
@@ -282,5 +286,62 @@ describe('user-profile', () => {
     expect(args.messages[0]?.content).toContain('只输出 JSON 对象');
     expect(args.messages[1]?.content).toContain('用户标签(Tag): 威严满满');
     expect(args.messages[1]?.content).toContain('最新发言(8条)');
+  });
+});
+
+describe('bot_tag — bot 对用户本人的称呼(per-chat, DM 默认回退)', () => {
+  beforeEach(() => {
+    testDb = new Database(':memory:');
+    initSchema(testDb);
+    mockCallWithFallback.mockReset();
+  });
+  afterEach(() => { testDb.close(); });
+
+  it('setBotTag 在已存在行上设值,getBotTagForAddressing 读回', () => {
+    recordUserMessage(-1001, 42, 'alice', 'Alice', null, 'hi');
+    _flushAllBuffers();
+    setBotTag(-1001, 42, '猫哥');
+    expect(getBotTagForAddressing(-1001, 42)).toBe('猫哥');
+  });
+
+  it('setBotTag 在无行时 upsert 建行(不抛错)', () => {
+    setBotTag(999, 888, '阿强');
+    expect(getBotTagForAddressing(999, 888)).toBe('阿强');
+  });
+
+  it('群行无 bot_tag → 回退 DM 默认行 (uid,uid) 的 bot_tag', () => {
+    // DM 里设的称呼(chat_id=uid)作跨群默认
+    setBotTag(777, 777, '猫哥');
+    // 群行存在但没 bot_tag
+    recordUserMessage(-1001, 777, 'u', 'U', null, 'msg');
+    _flushAllBuffers();
+    expect(getBotTagForAddressing(-1001, 777)).toBe('猫哥');
+  });
+
+  it('群行有 bot_tag → 优先于 DM 默认行', () => {
+    setBotTag(777, 777, '猫哥'); // DM 默认
+    setBotTag(-1001, 777, '群里的猫哥'); // 群行覆盖
+    expect(getBotTagForAddressing(-1001, 777)).toBe('群里的猫哥');
+  });
+
+  it('都没有 bot_tag → null', () => {
+    recordUserMessage(-1001, 42, 'alice', 'Alice', '群外号', 'hi');
+    _flushAllBuffers();
+    expect(getBotTagForAddressing(-1001, 42)).toBeNull();
+  });
+
+  it('clearBotTag 清掉群行 bot_tag → 回退到 DM 默认', () => {
+    setBotTag(777, 777, '猫哥');
+    setBotTag(-1001, 777, '群里的猫哥');
+    clearBotTag(-1001, 777);
+    expect(getBotTagForAddressing(-1001, 777)).toBe('猫哥');
+  });
+
+  it('setBotTag 截 32 字 + trim', () => {
+    const long = '  猫'.repeat(40);
+    setBotTag(1, 1, long);
+    const got = getBotTagForAddressing(1, 1)!;
+    expect(got.length).toBeLessThanOrEqual(32);
+    expect(got.startsWith('猫')).toBe(true);
   });
 });

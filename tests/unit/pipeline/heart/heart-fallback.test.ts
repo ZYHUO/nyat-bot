@@ -86,6 +86,19 @@ describe('heart fallback signal hygiene (#34)', () => {
     expect(d.judgeResult.action).toBe('REPLY');
   });
 
+  it('empty primary response is treated as failure and backup can recover it', async () => {
+    callModelMock
+      .mockResolvedValueOnce(ok(''))
+      .mockResolvedValueOnce(ok('{"act":"reply","path":"chat","why":"backup ok"}'));
+
+    const d = await heartDecision(baseInput());
+
+    expect(callModelMock).toHaveBeenCalledTimes(2);
+    expect(callModelMock.mock.calls[1]![0].name).toBe('lite');
+    expect(d.act).toBe('reply');
+    expect(d.why).toBe('backup ok');
+  });
+
   it('every attempt gets the 8s budget as a per-attempt timeout cap, with an unpoisoned signal', async () => {
     callModelMock
       .mockRejectedValueOnce(timeoutError())

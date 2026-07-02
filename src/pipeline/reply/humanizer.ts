@@ -80,7 +80,7 @@ export interface HumanizerConfig {
 
 const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   typoEnabled: true,
-  typoRate: 0.1,
+  typoRate: 0.05,
   typoCorrectionRate: 1.0,
   typoCorrectionDelay: 1.5,
 

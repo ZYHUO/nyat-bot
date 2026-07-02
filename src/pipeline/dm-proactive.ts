@@ -13,24 +13,39 @@ import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
 import { hasDmEver } from '../tracking/dm-state.js';
 import { peekDmPending, markDmPendingFlushed } from '../tracking/dm-pending.js';
-import { getAggregatedUserTag } from '../tracking/user-profile.js';
+import { getAggregatedUserTag, getBotTagForAddressing } from '../tracking/user-profile.js';
 import { getAggregatedAffinity } from '../tracking/user-affinity.js';
+import { isMaster } from '../admin/auth.js';
 
-/** 跨群外号 → 注入片段(无外号则空) */
-function nicknameHint(uid: number): string {
-  const tag = getAggregatedUserTag(uid);
+/**
+ * 称呼注入:主人 → 「主人」(优先于学来的跨群外号)。persona 明确对主人会
+ * 软下来/听话/黏,但学来的 sender_tag 可能是「妹妹」之类(被某群语境学歪),
+ * 直注会把主人喊成妹妹 → 主人关系必须压过外号。其他人用跨群外号(无则空)。
+ */
+export function nicknameHint(uid: number): string {
+  if (isMaster(uid, env().MASTER_UID)) {
+    return `(对方是你的主人,你叫TA「主人」,对主人你会软下来、听话、有点黏)`;
+  }
+  // bot 对他的称呼(bot_tag,可私聊"叫我X"纠正)优先于群里外号(sender_tag)。
+  const tag = getBotTagForAddressing(uid, uid) ?? getAggregatedUserTag(uid);
   return tag ? `(对方你私下叫TA「${tag}」)` : '';
+}
+
+/** 称呼标签(用于兜底池前缀):主人 → 「主人」,否则 bot_tag 优先于群里外号。 */
+function addressLabel(uid: number): string | null {
+  if (isMaster(uid, env().MASTER_UID)) return '主人';
+  return getBotTagForAddressing(uid, uid) ?? getAggregatedUserTag(uid);
 }
 
 // generatePersonaProactiveText 依赖 getRecent(uid) 上下文,DM ctx 仅 7 天 TTL,
 // 而问候候选窗口 90 天 → 久未私聊的人会拿到 null。给一个固定兜底池保证能发出。
 const GOODNIGHT_POOL = ['晚安喵~', '本喵要睡啦,你也早点睡哦', '困死了…晚安', '睡了睡了,梦里见喵'];
 const MORNING_POOL = ['起床啦喵~', '早安!本喵醒咯', '早上好呀,睡得好吗', '喵…刚醒,早安'];
-function fallbackGreeting(kind: 'goodnight' | 'morning', uid: number): string {
-  const tag = getAggregatedUserTag(uid);
+export function fallbackGreeting(kind: 'goodnight' | 'morning', uid: number): string {
+  const label = addressLabel(uid);
   const pool = kind === 'goodnight' ? GOODNIGHT_POOL : MORNING_POOL;
   const line = pool[Math.abs(uid) % pool.length]!;
-  return tag ? `${tag}, ${line}` : line;
+  return label ? `${label}, ${line}` : line;
 }
 
 /**

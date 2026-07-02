@@ -54,6 +54,12 @@ export async function classifyDirective(text: string): Promise<ControlAction | n
       if (!content) return null;
       return { action: dir, controlContent: content.slice(0, 200) };
     }
+    if (dir === 'call_me') {
+      // content = 新称呼;纯「别叫我X」不带替代时 content 为空 → 清掉称呼。
+      // 与 remember/forget 不同:允许空 content。
+      const content = (d.content ?? '').trim();
+      return { action: 'call_me', controlContent: content.slice(0, 32) };
+    }
     return null; // none / 未知
   } catch (err) {
     logger.debug({ err }, 'classifyDirective failed (non-critical)');

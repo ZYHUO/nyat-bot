@@ -67,6 +67,14 @@ function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why:
   }
 }
 
+function summarizeHeartRaw(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return 'empty';
+  const cleaned = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  if (!/[{}]/.test(cleaned)) return `non_json:${cleaned.slice(0, 60)}`;
+  return `jsonish:${cleaned.slice(0, 60)}`;
+}
+
 function toJudgeResult(act: HeartAct, path: 'chat' | 'lookup', latencyMs: number): JudgeResult {
   if (act === 'pass') {
     return { action: 'IGNORE', level: 'L2_AI', rule: 'heart', confidence: 1, latencyMs };
@@ -123,13 +131,14 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   let raw: string;
   try {
     const result = await callWithFallback({
-      usage: e.TIMING_GATE_USAGE,
+      usage: 'heart',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ],
       maxTokens: 120,
       temperature: 0,
+      rejectEmpty: true,
       // 只传原始打断信号。8s 预算改为 per-attempt cap(maxTimeoutMs):
       // 旧写法把 AbortSignal.timeout 烧进共享 signal,主标签一旦超时,
       // 所有 backup 的合并信号天生已 aborted → 心流在慢主模型下没有任何
@@ -151,10 +160,35 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
     return { act: 'pass', path: 'chat', why: 'llm_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 
-  const parsed = parseHeart(raw);
+  let parsed = parseHeart(raw);
+  if ((!parsed || !raw.trim()) && !input.signal?.aborted) {
+    try {
+      const retry = await callWithFallback({
+        usage: 'heart',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMsg },
+          { role: 'assistant', content: raw.slice(0, 300) },
+          { role: 'user', content: '上面的输出为空或不是合法 JSON。只输出一个非空 JSON 对象，字段必须只有 act/path/why。act 只能是 reply/wait/pass。' },
+        ],
+        maxTokens: 120,
+        temperature: 0,
+        rejectEmpty: true,
+        signal: input.signal,
+        maxTimeoutMs: e.TIMING_GATE_TIMEOUT_MS,
+      });
+      raw = retry.content;
+      parsed = parseHeart(raw);
+    } catch (err) {
+      if (isCallerAbort(input.signal) || (err instanceof AIError && err.code === 'AI_ABORTED')) {
+        throw err;
+      }
+      logger.debug({ err, chatId: input.chatId }, 'heart parse-retry failed');
+    }
+  }
   const latencyMs = Math.round(performance.now() - start);
   if (!parsed) {
-    logger.warn({ chatId: input.chatId, raw: raw.slice(0, 120) }, 'heart parse failed, fail-closed pass');
+    logger.warn({ chatId: input.chatId, rawSummary: summarizeHeartRaw(raw) }, 'heart parse failed, fail-closed pass');
     return { act: 'pass', path: 'chat', why: 'parse_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 

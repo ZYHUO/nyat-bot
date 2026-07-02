@@ -78,6 +78,8 @@ vi.mock('../../../src/bot/sender/streaming.js', () => ({
 
 vi.mock('../../../src/bot/bot.js', () => ({
   getBotUid: () => 123456,
+  getBotIdentity: () => ({ uid: 123456, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '啾咪'] }),
+  getBotDisplayName: () => '啾咪囝',
 }));
 
 vi.mock('../../../src/shared/config.js', () => ({
@@ -216,6 +218,17 @@ describe('ProactiveScan', () => {
     await runProactiveScan();
     expect(mockSendDirect).not.toHaveBeenCalled();
     expect(mockRunTimingGate).not.toHaveBeenCalled();
+  });
+
+  it('retries once when chime verdict is not valid JSON', async () => {
+    mockCallWithFallback
+      .mockResolvedValueOnce({ content: '随便说点话' })
+      .mockResolvedValueOnce({ content: '{"join": true, "topic": "补救话题", "reason": "补救成功"}' })
+      .mockResolvedValueOnce({ content: '那我插一句' });
+
+    await runProactiveScan();
+    expect(mockCallWithFallback).toHaveBeenCalledTimes(3);
+    expect(mockSendDirect).toHaveBeenCalledWith(-1001, '那我插一句');
   });
 
   it('not enough human messages → skips', async () => {

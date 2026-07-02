@@ -187,6 +187,31 @@ describe('Reply Parser', () => {
       expect(result.targetMessageId).toBe(fallbackId);
     });
 
+    it('schema 反刍 → 降级 silent,绝不把 schema 当文本发出(stepfun 偶发)', () => {
+      const raw = JSON.stringify({
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        title: 'ReplyOutput',
+        oneOf: [{ $ref: '#/$defs/singleReply' }],
+        $defs: { singleReply: { type: 'object', required: ['replyContent', 'targetMessageId'], properties: { replyContent: { type: 'string' } } } },
+      });
+      const result = parseSingle(raw, fallbackId);
+      expect(result.action).toBe('silent');
+      expect(result.replyContent).toBe('');
+    });
+
+    it('schema 反刍(带 ```json 围栏)→ 仍降级 silent', () => {
+      const raw = '```json\n{"$schema":"http://json-schema.org/draft-07/schema#","title":"ReplyOutput","oneOf":[...],"$defs":{}}\n```';
+      const result = parseSingle(raw, fallbackId);
+      expect(result.action).toBe('silent');
+    });
+
+    it('正常回复里偶尔出现 "title" 字样不会被误判为 schema', () => {
+      const raw = '{"replyContent":"这个title不错","targetMessageId":123}';
+      const result = parseSingle(raw, fallbackId);
+      expect(result.replyContent).toBe('这个title不错');
+      expect(result.action).toBeUndefined();
+    });
+
     it('rejects invalid stickerIntent in JSON', () => {
       const raw = '{"replyContent": "test", "targetMessageId": 1, "stickerIntent": "invalid"}';
       const result = parseSingle(raw, fallbackId);
@@ -214,6 +239,16 @@ describe('Reply Parser', () => {
       const r = parseSingle('{"replyContent": "你好喵~", "targetMessage', 42);
       expect(r.replyContent).toBe('你好喵~');
       expect(r.replyContent).not.toContain('{');
+    });
+    it('recovers replyContent when maxTokens cuts off mid-string (no closing quote)', () => {
+      const r = parseSingle('{"replyContent":"唔…早安喵', 42);
+      expect(r.replyContent).toBe('唔…早安喵');
+      expect(r.replyContent).not.toContain('replyContent');
+    });
+    it('recovers replyContent from truncated ```json fence', () => {
+      const r = parseSingle('```json\n{\n  "replyContent": "猪肉包啊笨', 42);
+      expect(r.replyContent).toBe('猪肉包啊笨');
+      expect(r.replyContent).not.toContain('```');
     });
     it('unescapes within the salvaged string', () => {
       expect(salvageReplyContent('{"replyContent":"行\\"吧\\"喵"} oops')).toBe('行"吧"喵');

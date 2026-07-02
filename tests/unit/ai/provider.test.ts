@@ -20,6 +20,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 }));
 
 const { callModel } = await import('../../../src/ai/provider.js');
+const { generateText } = await import('ai');
 
 function makeSseResponse(chunks: string[], usage?: { prompt_tokens: number; completion_tokens: number }) {
   const lines: string[] = chunks.map(c =>
@@ -124,5 +125,44 @@ describe('callModel', () => {
 
     await callModel(label, [{ role: 'user', content: '回复:你好' }], { maxTokens: 50, jsonMode: true });
     expect(capturedBody.response_format).toBeUndefined();
+  });
+
+  it('classifies StepFun raw HTTP 451 censorship_blocked as content rejection', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            message: 'The content you provided or machine outputted is blocked.',
+            type: 'censorship_blocked',
+          },
+        }),
+        { status: 451, headers: { 'Content-Type': 'application/json' } },
+      ),
+    ));
+    const label: AILabel = {
+      name: 'stepfun',
+      endpoint: 'https://api.stepfun.com/step_plan/v1',
+      apiKeys: ['k'],
+      model: 'step-3.7-flash',
+      reasoningEffort: 'medium',
+    };
+
+    await expect(callModel(label, [{ role: 'user', content: 'hi' }]))
+      .rejects.toMatchObject({ code: 'AI_CONTENT_REJECTED', provider: 'stepfun' });
+  });
+
+  it('classifies StepFun SDK blocked text as content rejection', async () => {
+    vi.mocked(generateText).mockRejectedValueOnce(
+      new Error('The content you provided or machine outputted is blocked.'),
+    );
+    const label: AILabel = {
+      name: 'stepfunjudge',
+      endpoint: 'https://api.stepfun.com/step_plan/v1',
+      apiKeys: ['k'],
+      model: 'step-3.5-flash',
+    };
+
+    await expect(callModel(label, [{ role: 'user', content: 'hi' }]))
+      .rejects.toMatchObject({ code: 'AI_CONTENT_REJECTED', provider: 'stepfunjudge' });
   });
 });

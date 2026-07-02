@@ -15,14 +15,8 @@ import type { PendingEntry, TurnMeta } from './types.js';
 
 const PENDING_KEY = (chatId: number) => `xxb:turn:pending:${chatId}`;
 const META_KEY = (chatId: number) => `xxb:turn:meta:${chatId}`;
-
-/** pending/meta TTL:防止已退群/死群的缓冲永久残留 */
 const KEY_TTL_SEC = 24 * 60 * 60;
 
-// Atomic append:RPUSH + 双 TTL + meta 簿记 + highWatermark max,单次往返。
-// (同 context/manager.ts 的 RPUSH_TRIM_LUA 模式。)
-// 旧实现是 1 次 multi + 3 次串行 RTT(hget/hset/hget),每条入站消息 4 RTT,
-// 且 highWatermark 的 read-modify-write 有竞态;Lua 里的 compare-set 是原子的。
 // KEYS: [1]=pendingKey [2]=metaKey
 // ARGV: [1]=entryJson [2]=nowMs [3]=ttlSec [4]=direct('1'/'0') [5]=messageId('0'=无)
 const APPEND_PENDING_LUA = `
@@ -44,18 +38,9 @@ redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
 return {count, redis.call('HGET', KEYS[2], 'firstPendingAt')}
 `;
 
-/**
- * Append one inbound update to the chat's pending buffer.
- * Returns the new buffer length and the (possibly just-set) firstPendingAt.
- *
- * 单条 Lua 原子完成全部簿记(P1 的 direct 位持久化语义保留:回合活跃期间
- * 到达的 @/回复 bot 走 markDirty 路径会丢失 direct 性,收尾再排程时被罚
- * 整整一个去抖窗口)。
- */
 export async function appendPending(entry: PendingEntry): Promise<{ count: number; firstPendingAt: number }> {
   const redis = getRedis();
   const now = Date.now();
-
   const result = (await redis.eval(
     APPEND_PENDING_LUA,
     2,
@@ -71,10 +56,6 @@ export async function appendPending(entry: PendingEntry): Promise<{ count: numbe
   return { count: result[0] ?? 0, firstPendingAt: Number(result[1] ?? now) };
 }
 
-/**
- * Atomically take the entire pending burst (and reset the debounce anchor).
- * Malformed entries are dropped with a warning.
- */
 export async function drainPending(chatId: number): Promise<PendingEntry[]> {
   const redis = getRedis();
   const pendingKey = PENDING_KEY(chatId);
@@ -120,7 +101,6 @@ export async function setScheduledJob(chatId: number, jobId: string): Promise<vo
   await redis.expire(META_KEY(chatId), KEY_TTL_SEC);
 }
 
-/** Clear scheduledJobId, but only if it still points at `jobId` (avoid clobbering a newer schedule). */
 export async function clearScheduledJob(chatId: number, jobId?: string): Promise<void> {
   const redis = getRedis();
   if (jobId) {
@@ -139,7 +119,6 @@ export async function clearDirty(chatId: number): Promise<boolean> {
   return removed > 0;
 }
 
-/** Bump the turn epoch (new cognition turn starting). Returns the new epoch. */
 export async function bumpEpoch(chatId: number): Promise<number> {
   const redis = getRedis();
   const epoch = await redis.hincrby(META_KEY(chatId), 'epoch', 1);
@@ -157,21 +136,15 @@ export async function getLastMsgAt(chatId: number): Promise<number | undefined> 
   return raw ? Number(raw) : undefined;
 }
 
-// ── G5: wait 锚点暂存 ───────────────────────────────────────────────
-// gate=wait 时把触发条目(原始 update)存起来;wait 到期后重注入 pending,
-// 让回合带着完整语境重新决策——"等一下再回"终于真的会回。
-
 const WAIT_ANCHOR_KEY = (chatId: number) => `xxb:turn:waitanchor:${chatId}`;
 
 export async function setWaitAnchor(chatId: number, entry: PendingEntry, ttlSec: number): Promise<void> {
   await getRedis().set(WAIT_ANCHOR_KEY(chatId), JSON.stringify(entry), 'EX', Math.max(ttlSec, 30));
 }
 
-/** Atomically fetch-and-delete the stashed wait anchor (GETDEL). */
 export async function takeWaitAnchor(chatId: number): Promise<PendingEntry | null> {
   const redis = getRedis();
   const raw = await redis.getdel(WAIT_ANCHOR_KEY(chatId)).catch(async () => {
-    // Redis < 6.2 fallback
     const v = await redis.get(WAIT_ANCHOR_KEY(chatId));
     if (v) await redis.del(WAIT_ANCHOR_KEY(chatId));
     return v;
@@ -185,7 +158,6 @@ export async function takeWaitAnchor(chatId: number): Promise<PendingEntry | nul
   }
 }
 
-/** 缓冲中是否有 direct 条目(回合收尾再排程时恢复即时开火用) */
 export async function hasPendingDirect(chatId: number): Promise<boolean> {
   const v = await getRedis().hget(META_KEY(chatId), 'pendingDirect');
   return v === '1';

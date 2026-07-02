@@ -22,9 +22,42 @@ interface ActiveGeneration {
   startedAt: number;
 }
 
+interface InterruptStat {
+  count: number;
+  firstAt: number;
+  lastAt: number;
+  reasons: Record<string, number>;
+}
+
 const active = new Map<number, ActiveGeneration>();
 /** 每 chat 连续打断计数;生成无打断走完即重置 */
 const consecutiveInterrupts = new Map<number, number>();
+const interruptStats = new Map<number, InterruptStat>();
+
+function noteInterrupt(chatId: number, reason: string): InterruptStat {
+  const now = Date.now();
+  const stat = interruptStats.get(chatId) ?? { count: 0, firstAt: now, lastAt: now, reasons: {} };
+  stat.count++;
+  stat.lastAt = now;
+  stat.reasons[reason] = (stat.reasons[reason] ?? 0) + 1;
+  interruptStats.set(chatId, stat);
+  return stat;
+}
+
+function flushInterruptSummary(chatId: number): void {
+  const stat = interruptStats.get(chatId);
+  if (!stat || stat.count === 0) return;
+  logger.info(
+    {
+      chatId,
+      interrupts: stat.count,
+      windowMs: stat.lastAt - stat.firstAt,
+      reasons: stat.reasons,
+    },
+    'In-flight generation interrupt summary',
+  );
+  interruptStats.delete(chatId);
+}
 
 /** Caller-intent abort error — isCallerAbort() 白名单识别这个 name。 */
 function turnInterruptError(reason: string): Error {
@@ -80,6 +113,7 @@ export function clearGeneration(chatId: number, controller: AbortController, int
   }
   if (!interrupted && isCurrent) {
     consecutiveInterrupts.delete(chatId);
+    flushInterruptSummary(chatId);
   }
 }
 
@@ -107,11 +141,14 @@ export function interruptGeneration(chatId: number, reason: string): boolean {
   }
 
   consecutiveInterrupts.set(chatId, count + 1);
+  const stat = noteInterrupt(chatId, reason);
   current.controller.abort(turnInterruptError(reason));
-  logger.info(
-    { chatId, reason, epoch: current.epoch, inFlightMs: Date.now() - current.startedAt, consecutive: count + 1 },
-    'In-flight generation interrupted by new message',
-  );
+  if (stat.count === 1) {
+    logger.debug(
+      { chatId, reason, epoch: current.epoch, inFlightMs: Date.now() - current.startedAt, consecutive: count + 1 },
+      'In-flight generation interrupted by new message',
+    );
+  }
   return true;
 }
 
@@ -119,4 +156,5 @@ export function interruptGeneration(chatId: number, reason: string): boolean {
 export function _resetAbortRegistry(): void {
   active.clear();
   consecutiveInterrupts.clear();
+  interruptStats.clear();
 }

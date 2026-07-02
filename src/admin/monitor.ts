@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import type { Bot } from 'grammy';
 import type { Env } from '../env.js';
 import { timingSafeEqual } from 'crypto';
+import { listObligationSnapshots } from './obligations.js';
 
 interface MonitorDeps {
   redis: Redis;
@@ -83,6 +84,16 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
     const raw = await deps.redis.lrange(`xxb:ctx:${chatId}`, -limit, -1);
     const messages = raw.map((r) => JSON.parse(r));
     return c.json({ ok: true, messages });
+  });
+
+  api.get('/obligations', async (c) => {
+    const rawChatId = c.req.query('chat_id');
+    const chatId = rawChatId ? Number(rawChatId) : undefined;
+    if (rawChatId && !Number.isFinite(chatId)) {
+      return c.json({ ok: false, error: 'invalid chat_id' }, 400);
+    }
+    const snapshots = await listObligationSnapshots(deps.redis, chatId);
+    return c.json({ ok: true, snapshots });
   });
 
   // File proxy (server-side fetch, no token exposure)

@@ -52,6 +52,16 @@ describe('detectDmIntent — regex fast path', () => {
     expect(r.type).toBe('schedule');
   });
 
+  it('does not treat a bare date word as a schedule trigger', () => {
+    const r = detectDmIntent('今天是不是也要上学', BOT);
+    expect(r.type).toBe('normal_chat');
+  });
+
+  it('still detects complete time-prefix schedule forms', () => {
+    expect(detectDmIntent('每天上午10点 打卡签到', BOT).type).toBe('schedule');
+    expect(detectDmIntent('30分钟后 该喝水了', BOT).type).toBe('schedule');
+  });
+
   it('detects profile tags', () => {
     const r = detectDmIntent('给张三打标签 程序员,北京', BOT);
     expect(r.type).toBe('set_profile_tags');

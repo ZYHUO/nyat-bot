@@ -7,6 +7,7 @@
 // 不可代发 → 返回原因,让模型改"教用户自己发"。绝不同步阻塞等回执。
 
 import { getRedis } from '../../db/redis.js';
+import { getBotUsername } from '../../bot/bot.js';
 import { sendMessage } from '../../bot/sender/telegram.js';
 import { getCommandProfile, whyNotInvocable } from '../../learners/bot-command-store.js';
 import { env } from '../../env.js';
@@ -111,7 +112,7 @@ export async function maybeRegisterTypedDelegation(chatId: number, text: string,
   if (!m) return;
   const cmd = m[1]!.toLowerCase();
   const bot = m[2]!;
-  if (bot.toLowerCase() === env().BOT_USERNAME.toLowerCase()) return; // 别认成自己
+  if (bot.toLowerCase() === getBotUsername().toLowerCase()) return; // 别认成自己
   try {
     const redis = getRedis();
     if (await redis.get(PENDING_KEY(chatId))) return; // 已有 pending,不覆盖

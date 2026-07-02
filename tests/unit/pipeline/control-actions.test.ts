@@ -4,6 +4,8 @@ const mockMuteUser = vi.fn();
 const mockUnmuteUser = vi.fn();
 const mockSavePref = vi.fn();
 const mockDeletePref = vi.fn();
+const mockSetBotTag = vi.fn();
+const mockClearBotTag = vi.fn();
 const mockApplyMood = vi.fn();
 const mockReact = vi.fn().mockResolvedValue(true);
 const mockGetMembers = vi.fn();
@@ -13,6 +15,8 @@ vi.mock('../../../src/tracking/user-profile.js', () => ({
   unmuteUser: (...a: unknown[]) => mockUnmuteUser(...a),
   saveUserPreference: (...a: unknown[]) => mockSavePref(...a),
   deleteUserPreference: (...a: unknown[]) => mockDeletePref(...a),
+  setBotTag: (...a: unknown[]) => mockSetBotTag(...a),
+  clearBotTag: (...a: unknown[]) => mockClearBotTag(...a),
 }));
 vi.mock('../../../src/tracking/mood.js', () => ({
   applyMoodEvent: (...a: unknown[]) => mockApplyMood(...a),
@@ -97,6 +101,28 @@ describe('executeControlActions', () => {
     const ok = await executeControlActions([{ action: 'remember', controlContent: 'x' }], DM, REQ, MSG);
     expect(ok).toBe(true);
     expect(mockSavePref).toHaveBeenCalledWith(DM, REQ, 'x');
+  });
+
+  it('call_me in DM with new tag → setBotTag(DM,req,tag) + ✍ ack', async () => {
+    const ok = await executeControlActions([{ action: 'call_me', controlContent: '猫哥' }], DM, REQ, MSG);
+    expect(ok).toBe(true);
+    expect(mockSetBotTag).toHaveBeenCalledWith(DM, REQ, '猫哥');
+    expect(mockClearBotTag).not.toHaveBeenCalled();
+    expect(mockReact).toHaveBeenCalledWith(DM, MSG, '✍');
+  });
+
+  it('call_me in DM with empty content → clearBotTag (回退群里外号)', async () => {
+    const ok = await executeControlActions([{ action: 'call_me', controlContent: '' }], DM, REQ, MSG);
+    expect(ok).toBe(true);
+    expect(mockClearBotTag).toHaveBeenCalledWith(DM, REQ);
+    expect(mockSetBotTag).not.toHaveBeenCalled();
+  });
+
+  it('call_me is DM-only — skipped in group', async () => {
+    const ok = await executeControlActions([{ action: 'call_me', controlContent: '猫哥' }], GROUP, REQ, MSG);
+    expect(ok).toBe(false);
+    expect(mockSetBotTag).not.toHaveBeenCalled();
+    expect(mockClearBotTag).not.toHaveBeenCalled();
   });
 
   it('empty action list → false, no side effects', async () => {

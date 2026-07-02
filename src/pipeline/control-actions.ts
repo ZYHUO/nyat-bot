@@ -7,24 +7,24 @@
 // 控制类(mute/unmute)**静默执行 + 一个 emoji reaction**(已读感),不发文字。
 // 偏好类(remember/forget)同样静默 + reaction。
 
-import { muteUser, unmuteUser, saveUserPreference, deleteUserPreference } from '../tracking/user-profile.js';
+import { muteUser, unmuteUser, saveUserPreference, deleteUserPreference, setBotTag, clearBotTag } from '../tracking/user-profile.js';
 import { applyMoodEvent } from '../tracking/mood.js';
 import { getGroupMembers } from './context/manager.js';
 import { reactToMessage } from '../bot/sender/telegram.js';
 import { logger } from '../shared/logger.js';
 
 export interface ControlAction {
-  action: 'mute' | 'unmute' | 'remember' | 'forget';
+  action: 'mute' | 'unmute' | 'remember' | 'forget' | 'call_me';
   /** mute/unmute 目标:'self'=发出者(默认)| 'user'=controlContent 指的那个人 */
   controlTarget?: 'self' | 'user';
-  /** remember/forget 的内容,或 target='user' 时的 @用户名/名字 */
+  /** remember/forget 的内容,或 target='user' 时的 @用户名/名字,或 call_me 的新称呼(空=清掉) */
   controlContent?: string;
   /** mute 限时(分钟);省略=长期 */
   muteMinutes?: number;
 }
 
 const ACK_EMOJI: Record<string, string> = {
-  mute: '👌', unmute: '👌', remember: '✍', forget: '👌',
+  mute: '👌', unmute: '👌', remember: '✍', forget: '👌', call_me: '✍',
 };
 
 /** @用户名/名字 → uid(群成员表里查;查不到返回 null) */
@@ -83,6 +83,12 @@ export async function executeControlActions(
       } else if (a.action === 'forget') {
         if (!a.controlContent) continue;
         deleteUserPreference(chatId, requesterUid, a.controlContent);
+      } else if (a.action === 'call_me') {
+        // 仅私聊生效(DM 里设的是跨群默认称呼)。有新称呼 → 设;空 → 清掉回退群里外号。
+        if (chatId <= 0) continue;
+        const tag = (a.controlContent ?? '').trim();
+        if (tag) setBotTag(chatId, requesterUid, tag);
+        else clearBotTag(chatId, requesterUid);
       } else {
         continue;
       }

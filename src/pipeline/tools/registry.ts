@@ -8,6 +8,7 @@ import { tool } from 'ai';
 import type { Tool } from 'ai';
 import { executeSearch } from './search.js';
 import { executeFetch } from './web-fetch.js';
+import { executeRecall } from './recall.js';
 import { executeIpQuality } from './ip-quality.js';
 import { addTimer, listTimers, deleteTimer } from './timer.js';
 import { queryBotKnowledge } from './bot-knowledge.js';
@@ -73,6 +74,20 @@ function buildSchemasAndTools(
       description: '抓取并读取指定URL的网页内容。当用户分享链接或需要读取特定网页时使用。',
       parameters: fetchSchema,
       execute: async ({ url }) => executeFetch(url),
+    }),
+  );
+
+  const recallSchema = z.object({
+    query: z.string().describe('回忆检索关键词:某个人的名字/某件旧事/某个话题'),
+    topK: z.number().int().min(1).max(20).optional().describe('召回条数,默认8'),
+  });
+  register(
+    'RECALL',
+    recallSchema,
+    tool({
+      description: '从长期记忆里语义检索本群过去的对话(谁说过什么、某旧事的来龙去脉)。当用户提到某人/某旧事/某话题需要回忆时使用。可多次调用细化查询。',
+      parameters: recallSchema,
+      execute: async ({ query, topK }) => executeRecall(chatId, query, topK),
     }),
   );
 
@@ -247,8 +262,20 @@ function buildSchemasAndTools(
   return { tools, schemas };
 }
 
-export function buildToolSet(chatId: number, userId: number): Record<string, Tool> {
-  return buildSchemasAndTools(chatId, userId).tools;
+export function buildToolSet(
+  chatId: number,
+  userId: number,
+  only?: string[],
+): Record<string, Tool> {
+  const all = buildSchemasAndTools(chatId, userId).tools;
+  if (!only || only.length === 0) return all;
+  // 专家工具子集:只保留 allow 名单里的工具(研究员拿 SEARCH/FETCH 等)。
+  const allow = new Set(only);
+  const out: Record<string, Tool> = {};
+  for (const [name, t] of Object.entries(all)) {
+    if (allow.has(name)) out[name] = t;
+  }
+  return out;
 }
 
 /**

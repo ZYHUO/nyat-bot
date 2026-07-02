@@ -3,7 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Mock env
 vi.mock('../../../../src/env.js', () => ({
   env: () => ({
+    GEMINI_API_KEY: process.env['TEST_GEMINI_API_KEY'],
+    GEMINI_SEARCH_MODEL: 'gemini-test',
+    GEMINI_SEARCH_PROXY: undefined,
     XAI_API_KEY: process.env['TEST_XAI_API_KEY'],
+    XAI_SEARCH_BASE_URL: 'https://new-api.test/v1',
     XAI_SEARCH_MODEL: 'grok-test',
     SEARXNG_URL: 'http://searxng:8080',
   }),
@@ -21,6 +25,7 @@ describe('executeSearch', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env['TEST_GEMINI_API_KEY'];
     delete process.env['TEST_XAI_API_KEY'];
   });
 
@@ -96,39 +101,30 @@ describe('executeSearch', () => {
     expect(result).not.toContain('Result 5');
   });
 
-  it('normalizes xAI web_search wrapper output before returning it to the final writer', async () => {
-    process.env['TEST_XAI_API_KEY'] = 'xai-key';
+  it('returns Gemini grounding content + 来源 list (primary route)', async () => {
+    process.env['TEST_GEMINI_API_KEY'] = 'gemini-key';
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        output: [{
-          type: 'message',
-          content: [{
-            type: 'output_text',
-            text: `<web_search>
-Search results for "Cloudflare NET stock 2026 year performance YTD":
-
-1. Title: **Cloudflare (NET) Stock Price History 2019-2026**
-   URL: https://stockanalysis.com/stocks/net/history/
-
-2. Title: **Cloudflare Q1 Results Beat Expectations**
-   Published: 21 May 2026 01:07:57
-   URL: https://finance.yahoo.com/news/net-q1.html
-   Cloudflare had climbed over 30% YTD heading into earnings.
-</web_search>`,
-          }],
+        candidates: [{
+          content: {
+            parts: [{ text: 'Cloudflare (NET) 2026 年至今涨超 30%,Q1 财报超预期。' }],
+          },
+          groundingMetadata: {
+            groundingChunks: [
+              { web: { title: 'Cloudflare (NET) Stock Price History 2019-2026', uri: 'https://stockanalysis.com/stocks/net/history/' } },
+              { web: { title: 'Cloudflare Q1 Results Beat Expectations', uri: 'https://finance.yahoo.com/news/net-q1.html' } },
+            ],
+          },
         }],
       }),
     }) as unknown as typeof fetch;
 
     const result = await executeSearch('Cloudflare NET stock 2026 year performance YTD');
 
-    expect(result).toContain('关于"Cloudflare NET stock 2026 year performance YTD"的搜索结果：');
+    expect(result).toContain('Cloudflare (NET) 2026');
+    expect(result).toContain('来源');
     expect(result).toContain('Cloudflare (NET) Stock Price History 2019-2026');
     expect(result).toContain('Cloudflare Q1 Results Beat Expectations');
-    expect(result).toContain('https://stockanalysis.com/stocks/net/history/');
-    expect(result).not.toContain('<web_search>');
-    expect(result).not.toContain('</web_search>');
-    expect(result).not.toContain('Search results for');
   });
 });

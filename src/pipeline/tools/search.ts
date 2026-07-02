@@ -1,5 +1,5 @@
 // ────────────────────────────────────────
-// Web search tool — xAI Responses API (primary) + DDG Lite fallback
+// Web search tool — Gemini grounding (primary) + new-api grok + SearxNG + DDG Lite fallback
 // ────────────────────────────────────────
 
 import { ProxyAgent } from 'undici';
@@ -29,21 +29,21 @@ export async function executeSearch(query: string): Promise<string> {
     }
   }
 
-  // Route 2: xAI Responses API with web_search
+  // Route 2: new-api grok search via search_parameters (fallback)
   if (e.XAI_API_KEY) {
     try {
-      return await xaiSearch(query, e.XAI_API_KEY, e.XAI_SEARCH_MODEL);
+      return await xaiSearch(query, e.XAI_API_KEY, e.XAI_SEARCH_BASE_URL, e.XAI_SEARCH_MODEL);
     } catch (err) {
-      logger.warn({ err, query }, 'xAI search failed, falling back');
+      logger.warn({ err, query }, 'new-api search failed, falling back');
     }
   }
 
-  // Route 2: SearxNG if configured
+  // Route 3: SearxNG if configured
   if (e.SEARXNG_URL) {
     return searxngSearch(query, e.SEARXNG_URL);
   }
 
-  // Route 3: DDG Lite (always available)
+  // Route 4: DDG Lite (always available)
   return ddgLiteSearch(query);
 }
 
@@ -103,18 +103,28 @@ async function geminiSearch(query: string, apiKey: string, model: string, proxyU
   return out;
 }
 
-// ── xAI Responses API search ──
+// ── new-api grok search (OpenAI-compatible chat/completions + search_parameters) ──
 
-interface XaiResponse {
-  output?: Array<{
-    type: string;
-    content?: Array<{ type: string; text?: string }>;
+interface ChatCompletionResponse {
+  choices?: Array<{
+    message?: { content?: string };
   }>;
-  error?: string;
+  search_sources?: Array<{ url?: string; title?: string }>;
+  annotations?: Array<{
+    type?: string;
+    url_citation?: { url?: string; title?: string };
+  }>;
+  error?: { message?: string } | string;
 }
 
-async function xaiSearch(query: string, apiKey: string, model: string): Promise<string> {
-  const res = await fetch('https://api.x.ai/v1/responses', {
+async function xaiSearch(
+  query: string,
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+): Promise<string> {
+  const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -122,31 +132,60 @@ async function xaiSearch(query: string, apiKey: string, model: string): Promise<
     },
     body: JSON.stringify({
       model,
-      input: query,
-      tools: [{ type: 'web_search' }],
-      max_output_tokens: 500,
+      messages: [{ role: 'user', content: query }],
+      search_parameters: { mode: 'on', return_citations: true },
+      stream: false,
+      max_tokens: 800,
     }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(45_000),
   });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`xAI API ${res.status}: ${errText.slice(0, 200)}`);
+    throw new Error(`new-api search ${res.status}: ${errText.slice(0, 200)}`);
   }
 
-  const data = (await res.json()) as XaiResponse;
+  const data = (await res.json()) as ChatCompletionResponse;
 
-  for (const item of data.output ?? []) {
-    if (item.type === 'message' && item.content) {
-      for (const block of item.content) {
-        if (block.type === 'output_text' && block.text) {
-          return normalizeXaiSearchOutput(query, block.text);
-        }
-      }
+  if (data.error) {
+    const msg = typeof data.error === 'string' ? data.error : data.error.message;
+    throw new Error(`new-api search error: ${msg ?? 'unknown'}`);
+  }
+
+  const content = data.choices?.[0]?.message?.content?.trim();
+  if (!content) return `没有找到与"${query}"相关的结果。`;
+
+  const sources = collectSearchSources(data);
+  if (sources.length === 0) return content;
+
+  let output = `${content}\n\n来源：\n`;
+  for (const s of sources.slice(0, MAX_RESULTS)) {
+    output += `- ${s.title ?? s.url}\n  ${s.url}\n`;
+  }
+  return output;
+}
+
+function collectSearchSources(
+  data: ChatCompletionResponse,
+): Array<{ url: string; title?: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ url: string; title?: string }> = [];
+
+  for (const a of data.annotations ?? []) {
+    const u = a.url_citation?.url;
+    if (u && !seen.has(u)) {
+      seen.add(u);
+      out.push({ url: u, title: a.url_citation?.title });
     }
   }
-
-  return `没有找到与"${query}"相关的结果。`;
+  for (const s of data.search_sources ?? []) {
+    const u = s.url;
+    if (u && !seen.has(u)) {
+      seen.add(u);
+      out.push({ url: u, title: s.title });
+    }
+  }
+  return out;
 }
 
 // ── DuckDuckGo Lite search ──
@@ -259,73 +298,4 @@ async function searxngSearch(query: string, apiUrl: string): Promise<string> {
 
 function stripTags(html: string): string {
   return html.replace(/<[^>]*>/g, '');
-}
-
-function normalizeXaiSearchOutput(query: string, rawText: string): string {
-  const unwrapped = rawText
-    .replace(/^\s*<web_search>\s*/i, '')
-    .replace(/\s*<\/web_search>\s*$/i, '')
-    .trim();
-
-  const withoutHeader = unwrapped
-    .replace(new RegExp(`^Search results for\\s+"${escapeRegExp(query)}"\\s*:\\s*`, 'i'), '')
-    .replace(/^Search results for\s+["“][\s\S]*?["”]\s*:\s*/i, '')
-    .trim();
-
-  const parsed = parseNumberedSearchResults(withoutHeader);
-  if (parsed.length === 0) {
-    return `关于"${query}"的搜索结果：\n${withoutHeader}`;
-  }
-
-  let output = `关于"${query}"的搜索结果：\n`;
-  for (const item of parsed.slice(0, MAX_RESULTS)) {
-    output += `- ${item.title}\n`;
-    if (item.published) output += `  发布时间：${item.published}\n`;
-    if (item.snippet) output += `  ${item.snippet}\n`;
-    output += `  ${item.url}\n`;
-  }
-  return output;
-}
-
-function parseNumberedSearchResults(text: string): SearchResult[] {
-  const normalized = text.replace(/\r\n/g, '\n');
-  const blocks = normalized
-    .split(/\n(?=\d+\.\s+Title:\s*)/g)
-    .map((block) => block.trim())
-    .filter(Boolean);
-
-  const results: SearchResult[] = [];
-  for (const block of blocks) {
-    const title = block.match(/^\d+\.\s+Title:\s*(.+)$/im)?.[1]
-      ?.replace(/^\*\*(.*)\*\*$/, '$1')
-      .trim();
-    const url = block.match(/^\s*URL:\s*(\S+)/im)?.[1]?.trim();
-    if (!title || !url) continue;
-
-    const published = block.match(/^\s*Published:\s*(.+)$/im)?.[1]?.trim();
-    const snippet = block
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) =>
-        line
-        && !/^\d+\.\s+Title:/i.test(line)
-        && !/^URL:/i.test(line)
-        && !/^Published:/i.test(line)
-      )
-      .join(' ')
-      .trim();
-
-    results.push({
-      title,
-      url,
-      snippet: snippet.replace(/^\*\*(.*)\*\*$/, '$1'),
-      published,
-    });
-  }
-
-  return results;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

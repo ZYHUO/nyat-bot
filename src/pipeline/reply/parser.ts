@@ -307,6 +307,14 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
     return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
   }
 
+  // 3.9 Schema 反刍安全网:模型把输出契约的 JSON Schema 原样吐了回来
+  // (stepfun 偶发 —— prompt 里贴了完整 schema,模型有时复制它而非产出实例)。
+  // 绝不把 schema 当纯文本发给用户 → 降级沉默 + warn 留痕。
+  if (looksLikeReplySchema(trimmed)) {
+    logger.warn({ rawHead: trimmed.slice(0, 120) }, 'AI regurgitated the reply schema — degrading to silent');
+    return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
+  }
+
   // 4. Plain text fallback — treat entire response as reply content
   logger.debug('Using plain text fallback for AI response');
   return truncateReply({
@@ -315,22 +323,53 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
   });
 }
 
+/** 检测模型是否把 reply-schema 的定义本身当成了输出(而非一个实例)。 */
+function looksLikeReplySchema(s: string): boolean {
+  // 真回复的 replyContent 是 string 值,不会出现 "$schema": / "title": / "oneOf" / "$defs" 这种 JSON 键
+  if (!/"(?:\$schema|title)"\s*:\s*"/.test(s)) return false;
+  return /"oneOf"|"properties"|"\$defs"/.test(s);
+}
+
 /**
  * Best-effort recovery of replyContent from JSON-looking text that failed to parse.
  * Returns the extracted string, or null if the text doesn't look like attempted JSON.
  */
-export function salvageReplyContent(raw: string): string | null {
-  if (!/[{[]/.test(raw) || !/reply_?[cC]ontent/.test(raw)) return null;
-  // 标准 JSON:双引号 key + 双引号 value
-  const dq = raw.match(/"reply_?[cC]ontent"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (dq?.[1] !== undefined) {
-    try { return JSON.parse(`"${dq[1]}"`) as string; } catch { return dq[1]; }
+function stripLeadingCodeFence(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  // 允许缺 closing fence(maxTokens 截断在 value 中间时常见)
+  return trimmed.replace(/^```(?:json)?\s*\n?/i, '').trim();
+}
+
+function unescapeSalvagedString(value: string, quote: '"' | "'"): string {
+  if (quote === '"') {
+    try { return JSON.parse(`"${value}"`) as string; } catch { return value; }
   }
-  // 模型偶发吐 Python 风格 dict:{'replyContent': '...'}(单引号)→ JSON.parse 失败,
-  // 以前直接把整坨原样发出去。这里把单引号(或混引号)的 replyContent 抠出来。
-  const sq = raw.match(/['"]reply_?[cC]ontent['"]\s*:\s*'((?:[^'\\]|\\.)*)'/);
+  return value.replace(/\\'/g, "'").replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
+export function salvageReplyContent(raw: string): string | null {
+  const s = stripLeadingCodeFence(raw);
+  if (!/[{[]/.test(s) || !/reply_?[cC]ontent/.test(s)) return null;
+
+  // 标准 JSON:双引号 key + 双引号 value(完整闭合)
+  const dq = s.match(/"reply_?[cC]ontent"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (dq?.[1] !== undefined) {
+    return unescapeSalvagedString(dq[1], '"');
+  }
+  // 模型偶发吐 Python 风格 dict:{'replyContent': '...'}(单引号,完整闭合)
+  const sq = s.match(/['"]reply_?[cC]ontent['"]\s*:\s*'((?:[^'\\]|\\.)*)'/);
   if (sq?.[1] !== undefined) {
-    return sq[1].replace(/\\'/g, "'").replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    return unescapeSalvagedString(sq[1], "'");
+  }
+  // maxTokens 截断在 value 中间 —— 引号开了但没关上(日志里 sleep/proactive 泄漏的主因)
+  const openDq = s.match(/"reply_?[cC]ontent"\s*:\s*"((?:[^"\\]|\\.)*)$/);
+  if (openDq?.[1] !== undefined && openDq[1].length >= 2) {
+    return unescapeSalvagedString(openDq[1], '"');
+  }
+  const openSq = s.match(/['"]reply_?[cC]ontent['"]\s*:\s*'((?:[^'\\]|\\.)*)$/);
+  if (openSq?.[1] !== undefined && openSq[1].length >= 2) {
+    return unescapeSalvagedString(openSq[1], "'");
   }
   return null;
 }

@@ -16,6 +16,11 @@ function throwIfExternallyAborted(label: AILabel, signal?: AbortSignal): void {
   }
 }
 
+function isContentSafetyRejection(message: string): boolean {
+  return /content_policy|content[-_ ]?filter|safety|inappropriate|high risk|censorship_blocked|敏感内容|不安全/i.test(message)
+    || /\b(?:content|output|outputted|machine outputted)\b[\s\S]{0,120}\bblocked\b/i.test(message);
+}
+
 // ── Claude native API (/v1/messages) ──────────────────────────────
 
 interface ClaudeMessage {
@@ -91,7 +96,7 @@ async function callClaude(
       throw new AIError(`Rate limited: ${errText}`, label.name, label.model, 'AI_RATE_LIMIT');
     }
     // Detect content safety rejection
-    if (errText.includes('high risk') || errText.includes('content_policy')) {
+    if (isContentSafetyRejection(errText)) {
       throw new AIError(`Content rejected: ${errText}`, label.name, label.model, 'AI_CONTENT_REJECTED');
     }
     throw new AIError(`HTTP ${res.status}: ${errText}`, label.name, label.model);
@@ -100,8 +105,7 @@ async function callClaude(
   const data = await res.json() as ClaudeResponse;
   if (data.error) {
     // Check for content safety errors in structured response
-    if (data.error.type === 'invalid_request_error' &&
-        (data.error.message.includes('high risk') || data.error.message.includes('content_policy'))) {
+    if (data.error.type === 'invalid_request_error' && isContentSafetyRejection(data.error.message)) {
       throw new AIError(data.error.message, label.name, label.model, 'AI_CONTENT_REJECTED');
     }
     throw new AIError(data.error.message, label.name, label.model);
@@ -152,7 +156,9 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
   return content.map(p => {
     if (p.type === 'text') return { type: 'text', text: p.text };
     if (p.type === 'audio') return { type: 'input_audio', input_audio: { data: p.audio, format: p.format } };
-    return { type: 'image_url', image_url: { url: p.image } };
+    // detail 默认 high:stepfun step-3.7-flash 识图必须带 detail=high(否则返回空);
+    // OpenAI 系(sub2gpt54mini 等)也兼容 detail 字段,无副作用。
+    return { type: 'image_url', image_url: { url: p.image, detail: p.detail ?? 'high' } };
   });
 }
 
@@ -201,7 +207,7 @@ async function callOpenAIRaw(
     const errText = await res.text().catch(() => '');
     if (res.status === 429) throw new AIError(`Rate limited: ${errText}`, label.name, label.model, 'AI_RATE_LIMIT');
     // Detect content safety rejection in OpenAI-compatible endpoints
-    if (errText.includes('content_policy') || errText.includes('safety') || errText.includes('inappropriate')) {
+    if (res.status === 451 || isContentSafetyRejection(errText)) {
       throw new AIError(`Content rejected: ${errText}`, label.name, label.model, 'AI_CONTENT_REJECTED');
     }
     throw new AIError(`HTTP ${res.status}: ${errText}`, label.name, label.model);
@@ -260,12 +266,15 @@ async function callOpenAIRaw(
     const cacheHit = u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0;
     if (cacheHit > 0 || u?.prompt_cache_miss_tokens !== undefined) {
       const prompt = u?.prompt_tokens ?? 0;
-      // info(非 debug):LOG_LEVEL=info 下也能看到缓存命中率,否则等于盲调。
-      // 只在 provider 返回缓存字段时触发(主要是 DeepSeek 回复路径),量可控。
-      logger.info(
-        { label: label.name, cacheHit, cacheMiss: u?.prompt_cache_miss_tokens ?? Math.max(0, prompt - cacheHit), prompt, hitRate: prompt ? +(cacheHit / prompt).toFixed(2) : 0 },
-        'prompt cache',
-      );
+      const cacheMiss = u?.prompt_cache_miss_tokens ?? Math.max(0, prompt - cacheHit);
+      const hitRate = prompt ? +(cacheHit / prompt).toFixed(2) : 0;
+      const payload = { label: label.name, cacheHit, cacheMiss, prompt, hitRate };
+      // 高频观测默认走 debug；只有大 prompt 且命中率差时才升到 info，便于排查真正浪费。
+      if (prompt >= 4000 && hitRate < 0.2) {
+        logger.info(payload, 'prompt cache');
+      } else {
+        logger.debug(payload, 'prompt cache');
+      }
     }
     const text = fullText
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -417,7 +426,7 @@ export async function callModel(
     if (message.includes('abort') || message.includes('timeout') || message.includes('TimeoutError')) {
       throw new AIError(`Timeout after ${latencyMs}ms: ${message}`, label.name, label.model, 'AI_TIMEOUT');
     }
-    if (message.includes('content_policy') || message.includes('safety') || message.includes('inappropriate')) {
+    if (isContentSafetyRejection(message)) {
       throw new AIError(`Content rejected: ${message}`, label.name, label.model, 'AI_CONTENT_REJECTED');
     }
 

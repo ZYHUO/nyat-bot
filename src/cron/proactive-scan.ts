@@ -60,6 +60,17 @@ interface ChimeVerdict {
   reason: string;
 }
 
+function parseChimeVerdict(raw: string): Record<string, unknown> | null {
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    return JSON.parse(m[0]) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 export async function shouldChimeIn(
   chatId: number,
   recent: FormattedMessage[],
@@ -96,13 +107,33 @@ export async function shouldChimeIn(
       ),
     ]);
 
-    const raw = result.content.trim();
-    let obj: Record<string, unknown> | null = null;
-    try {
-      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) obj = JSON.parse(m[0]) as Record<string, unknown>;
-    } catch { /* parse failed */ }
+    let raw = result.content.trim();
+    let obj = parseChimeVerdict(raw);
+
+    if (!obj) {
+      try {
+        const retry = await Promise.race([
+          callWithFallback({
+            usage: e.PROACTIVE_SCAN_USAGE,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: contextLines },
+              { role: 'assistant', content: raw.slice(0, 300) },
+              { role: 'user', content: '上面的输出不是合法 JSON。只输出一个 JSON 对象，字段必须是 join/topic/reason。' },
+            ],
+            maxTokens: 150,
+            temperature: 0,
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('chime_timeout')), e.PROACTIVE_SCAN_CHIME_TIMEOUT_MS),
+          ),
+        ]);
+        raw = retry.content.trim();
+        obj = parseChimeVerdict(raw);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'shouldChimeIn parse-retry failed');
+      }
+    }
 
     if (!obj) return { join: false, topic: '', reason: 'parse_failed' };
 
@@ -272,7 +303,11 @@ export async function runProactiveScan(): Promise<void> {
 
       // 5. LLM: should I chime in?
       const verdict = await shouldChimeIn(chatId, recent, e);
-      logger.info({ chatId, verdict }, 'Proactive scan: chime verdict');
+      if (verdict.reason === 'parse_failed') {
+        logger.debug({ chatId, verdict }, 'Proactive scan: chime verdict');
+      } else {
+        logger.info({ chatId, verdict }, 'Proactive scan: chime verdict');
+      }
       if (!verdict.join) continue;
 
       // 6. timing gate (isDirectInteraction=false → gate truly evaluates)

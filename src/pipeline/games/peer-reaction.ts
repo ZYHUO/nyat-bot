@@ -16,6 +16,7 @@
 //   - cmd_result 仅对"有媒体的成功结果"反应(不对进度/失败吐槽)。
 
 import { getRedis } from '../../db/redis.js';
+import { getBotIdentity } from '../../bot/bot.js';
 import { acquireChatLock } from '../../queue/chat-lock.js';
 import { sendMessage } from '../../bot/sender/telegram.js';
 import { addAssistant } from '../context/manager.js';
@@ -49,13 +50,14 @@ function hasMedia(m: FormattedMessage): boolean {
 export async function maybePeerReaction(chatId: number, peer: FormattedMessage, botUid: number): Promise<void> {
   try {
     const e = env();
+    const botIdentity = getBotIdentity();
     if (!e.PEER_REACTION_ENABLED || chatId >= 0 || !peer.isBot || !peer.username) return;
     const botClass = peer.botClass;
     if (botClass !== 'chat' && botClass !== 'cmd_result') return;
     // 下载/解析类:只对"有媒体的成功结果"尾刀,不对"解析中/失败"吐槽
     if (botClass === 'cmd_result' && !hasMedia(peer)) return;
     // @/回复我 → 让正常回复路径接(别双答)
-    if (mentionsOrRepliesSelf(peer, botUid, e.BOT_USERNAME, e.BOT_NICKNAMES)) return;
+    if (mentionsOrRepliesSelf(peer, botUid, botIdentity.username, botIdentity.nicknames)) return;
     if (await isAsleep()) return;
 
     const redis = getRedis();

@@ -76,6 +76,26 @@ describe('heart decision (S13 心流)', () => {
     expect(d.act).toBe('pass');
   });
 
+  it('retries once when first output is not valid JSON', async () => {
+    callMock
+      .mockResolvedValueOnce({ content: '喵喵喵?' })
+      .mockResolvedValueOnce({ content: '{"act":"reply","path":"chat","why":"补救成功"}' });
+    const d = await heartDecision(baseInput);
+    expect(callMock).toHaveBeenCalledTimes(2);
+    expect(d.act).toBe('reply');
+    expect(d.why).toBe('补救成功');
+  });
+
+  it('retries once when first output is empty', async () => {
+    callMock
+      .mockResolvedValueOnce({ content: '' })
+      .mockResolvedValueOnce({ content: '{"act":"pass","path":"chat","why":"空输出补救"}' });
+    const d = await heartDecision(baseInput);
+    expect(callMock).toHaveBeenCalledTimes(2);
+    expect(d.act).toBe('pass');
+    expect(d.why).toBe('空输出补救');
+  });
+
   it('presence line included when bot spoke recently', async () => {
     callMock.mockResolvedValue({ content: '{"act":"reply","path":"chat","why":"还在聊"}' });
     await heartDecision({ ...baseInput, lastSpokeSecAgo: 45 });

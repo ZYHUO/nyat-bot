@@ -68,6 +68,11 @@ describe('looksLikeDirectInteraction', () => {
     expect(looksLikeDirectInteraction(update({ text: 'xxb 看看' }), ctx)).toBe(true);
   });
 
+  it('does not treat nickname substring inside another handle as mention', () => {
+    expect(looksLikeDirectInteraction(update({ text: '@xxb123 你来看看' }), ctx)).toBe(false);
+    expect(looksLikeDirectInteraction(update({ text: 'abxxbcd 这个串里有字母' }), ctx)).toBe(false);
+  });
+
   it('reply to bot → true', () => {
     expect(
       looksLikeDirectInteraction(

@@ -3,7 +3,11 @@ import { buildSystemPrompt, buildMessages, _resetPromptCache } from '../../../sr
 import type { FormattedMessage } from '../../../src/shared/types.js';
 
 // replyTo 注入需要 botUid 来区分"回复 bot"和"回复他人"
-vi.mock('../../../src/bot/bot.js', () => ({ getBotUid: () => 8888 }));
+vi.mock('../../../src/bot/bot.js', () => ({
+  getBotUid: () => 8888,
+  getBotIdentity: () => ({ uid: 8888, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '啾咪'] }),
+  getBotDisplayName: () => '啾咪囝',
+}));
 
 // Mock the config module to provide a known prompts directory
 vi.mock('../../../src/shared/config.js', () => {

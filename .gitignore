@@ -6,6 +6,7 @@ dist/
 *.db-journal
 data/
 logs/
+*.log
 coverage/
 .turbo/
 .tsup/

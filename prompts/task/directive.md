@@ -5,11 +5,13 @@
 - **unmute**:让本喵恢复说话(「可以说话了」「你可以理我了」「解禁」)。
 - **remember**:让本喵记住某事(「记住我喜欢猫」「记一下我是浙江的」)。
 - **forget**:让本喵忘掉某事(「忘掉我刚说的」「别记我的生日了」)。
+- **call_me**:让本喵换个称呼叫你(「以后叫我小明」「叫我猫哥」「别叫我妹妹了,叫我猫哥」)。content 填**新称呼**(只一个词/短语,不带「叫我」二字);纯「别叫我X」不带替代 → content 留空字符串(表示清掉这个称呼、回退群里外号)。
 - 其它一切(普通聊天、提问、吐槽、夸你、骂你)→ **none**。
 
 严格只输出一个 JSON,不要多余文字:
 ```json
-{"directive":"mute|unmute|remember|forget|none","target":"self 或 @用户名/名字(仅 mute/unmute 针对别人时)","content":"要记/忘的内容(仅 remember/forget)","minutes":数字(仅限时 mute)}
+{"directive":"mute|unmute|remember|forget|call_me|none","target":"self 或 @用户名/名字(仅 mute/unmute 针对别人时)","content":"要记/忘的内容(remember/forget)或新称呼(call_me,纯「别叫我X」则留空)","minutes":数字(仅限时 mute)}
 ```
 - 不确定、或更像闲聊 → `{"directive":"none"}`。宁可放过(none),也别把普通聊天误当指令。
 - mute/unmute 默认 target="self";只有明确指向另一个人时才填那个人的 @用户名或名字。
+- call_me 的 content 只放称呼本身(「猫哥」),不要放整句("叫我猫哥"❌ → "猫哥"✅)。

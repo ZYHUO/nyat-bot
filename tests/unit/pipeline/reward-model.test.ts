@@ -2,7 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: vi.fn() }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ set: vi.fn().mockResolvedValue('OK') }) }));
-vi.mock('../../../src/bot/bot.js', () => ({ getBotUid: () => 999 }));
+vi.mock('../../../src/bot/bot.js', () => ({
+  getBotUid: () => 999,
+  getBotIdentity: () => ({ uid: 999, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '啾咪'] }),
+  getBotDisplayName: () => '啾咪囝',
+}));
 vi.mock('../../../src/shared/logger.js', () => ({
   logger: { child: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }) },
 }));

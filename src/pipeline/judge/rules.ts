@@ -69,7 +69,15 @@ function isMentioningSelf(
   const lower = text.toLowerCase();
   if (lower.includes(`@${botUsername.toLowerCase()}`)) return true;
   for (const nick of botNicknames) {
-    if (nick && lower.includes(nick.toLowerCase())) return true;
+    if (!nick) continue;
+    const nickLower = nick.toLowerCase();
+    if (!nickLower) continue;
+    if (/[a-z0-9_]/i.test(nickLower)) {
+      const pattern = new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRegex(nickLower)}([^\\p{L}\\p{N}_]|$)`, 'iu');
+      if (pattern.test(lower)) return true;
+      continue;
+    }
+    if (lower.includes(nickLower)) return true;
   }
   return false;
 }
@@ -135,6 +143,20 @@ function mentionsOtherUser(text: string, botUsername: string): boolean {
   const matches = text.match(/@(\w+)/g);
   if (!matches) return false;
   return matches.some((m) => m.toLowerCase() !== `@${botUsername.toLowerCase()}`);
+}
+
+function mentionsAnyOtherAddressing(text: string, botUsername: string, botNicknames: string[]): boolean {
+  if (mentionsOtherUser(text, botUsername)) return true;
+  const lowered = text.toLowerCase();
+  for (const nick of botNicknames) {
+    if (!nick) continue;
+    const nickLower = nick.toLowerCase();
+    if (!nickLower) continue;
+    if (isMentioningSelf(text, botUsername, botNicknames)) return false;
+    if (/[a-z0-9_]/i.test(nickLower)) continue;
+    if (lowered.includes(nickLower)) return true;
+  }
+  return false;
 }
 
 // ── Active-conversation window ───────────────────────────────────────────────
@@ -320,7 +342,7 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     lastBotReplyIndex < ACTIVE_CONV_MAX_INDEX &&
     calm &&
     hasContent &&
-    !mentionsOtherUser(text, botUsername);
+    !mentionsAnyOtherAddressing(text, botUsername, botNicknames);
 
   if (inActiveExchange) {
     const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];

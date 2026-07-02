@@ -13,7 +13,8 @@ import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 
 export const ASI_ENABLED = true; // tunable
-export const ASI_SAMPLE_RATE = 0.5; // tunable — fraction of eligible rows to score
+// 抽样率现由 env().ASI_SAMPLE_RATE 控制(默认 1.0 = 全量自评);此常量保留作兜底默认。
+export const ASI_SAMPLE_RATE = 1.0; // tunable — fraction of eligible rows to score
 
 const EMA_ALPHA = 0.3; // tunable — weight of the newest sample in the rolling EMA
 const ASI_KEY_PREFIX = 'xxb:reply:asi:';
@@ -27,14 +28,22 @@ const UNCANNY_RECOVER_THRESHOLD = 0.4; // tunable — below this, nudge back tow
 const TUNE_STEP = 0.02; // tunable — how much each rate moves per scored followup
 
 // Default rates the override recovers toward (must match humanizer defaults).
-const HUMANIZER_DEFAULTS = { typoRate: 0.1, emojiReplyRate: 0.15, thinkingInterjectionRate: 0.1 };
+const HUMANIZER_DEFAULTS = { typoRate: 0.05, emojiReplyRate: 0.15, thinkingInterjectionRate: 0.1 };
 
 export interface ScoreReplyQualityArgs {
   chatId: number;
   rowId: number;
   triggerText: string;
   replyText: string;
-  /** The behavior signal that finalized this row (explicit_positive/negative, repair_loop, user_replied, ...) */
+  /** The behavior signal that finalized this row (explicit_positive_negative, repair_loop, user_replied, ...) */
+  signal: string;
+}
+
+/** 发送时自评参数(无 rowId —— 不写 reply_outcomes,只滚 EMA + 调人设器)。 */
+export interface ScoreReplyAtSendArgs {
+  chatId: number;
+  triggerText: string;
+  replyText: string;
   signal: string;
 }
 
@@ -239,12 +248,21 @@ function round3(x: number): number {
 }
 
 export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<void> {
-  const { chatId, rowId, triggerText, replyText, signal } = args;
+  // 保留兼容:等价于"持久化行分数 + 滚 EMA + 调人设器"。
+  // 新链路:发送时 scoreReplyAtSend(滚 EMA),followup 到了 persistReplyOutcomeScores(只持久化)。
+  const { eff, asi, explicitNegative, repairLoop } = await computeReplyScores(args.chatId, args.triggerText, args.replyText, args.signal);
+  await persistRowScores(args.chatId, args.rowId, eff, asi, explicitNegative, repairLoop);
+  await rollAsiEmas(args.chatId, eff, asi);
+}
 
+/** 共用:跑 rubric LLM + 算 ASI。失败回中性 rubric。 */
+async function computeReplyScores(
+  chatId: number,
+  triggerText: string,
+  replyText: string,
+  signal: string,
+): Promise<{ eff: Rubric; asi: number; explicitNegative: number; repairLoop: number }> {
   const { behavior, relational, explicitNegative, repairLoop } = deriveBehaviorScore(signal);
-
-  // Internal rubric LLM call (low temperature). On failure, fall back to a
-  // neutral rubric so behavior+friction still produce a usable ASI.
   let rubric: Rubric | null = null;
   try {
     const result = await callWithFallback({
@@ -255,9 +273,8 @@ export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<vo
     });
     rubric = parseRubric(result.content);
   } catch (err) {
-    logger.debug({ err, chatId, rowId }, 'ASI: rubric LLM call failed, using neutral rubric');
+    logger.debug({ err, chatId }, 'ASI: rubric LLM call failed, using neutral rubric');
   }
-
   const eff: Rubric = rubric ?? {
     social_presence: 0.5,
     warmth: 0.5,
@@ -265,7 +282,6 @@ export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<vo
     appropriateness: 0.5,
     uncanny_risk: explicitNegative ? 0.5 : 0.2,
   };
-
   const asi = computeAsi({
     behavior,
     relational,
@@ -273,8 +289,18 @@ export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<vo
     repairLoop,
     uncannyRisk: eff.uncanny_risk,
   });
+  return { eff, asi, explicitNegative, repairLoop };
+}
 
-  // Persist per-row scores.
+/** 持久化到 reply_outcomes 行(followup 到了之后调)。 */
+async function persistRowScores(
+  chatId: number,
+  rowId: number,
+  eff: Rubric,
+  asi: number,
+  explicitNegative = 0,
+  repairLoop = 0,
+): Promise<void> {
   try {
     getDb()
       .prepare(
@@ -303,8 +329,10 @@ export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<vo
   } catch (err) {
     logger.debug({ err, chatId, rowId }, 'ASI: UPDATE reply_outcomes failed (non-critical)');
   }
+}
 
-  // Roll the per-chat EMAs.
+/** 滚 per-chat EMA + 自调人设器(每条回复发送时调一次)。 */
+async function rollAsiEmas(chatId: number, eff: Rubric, asi: number): Promise<void> {
   const asiKey = ASI_KEY_PREFIX + chatId;
   const uncannyKey = UNCANNY_KEY_PREFIX + chatId;
   const prevAsi = await loadEma(asiKey);
@@ -313,7 +341,27 @@ export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<vo
   const nextUncanny = nextEma(prevUncanny, eff.uncanny_risk);
   await saveEma(asiKey, nextAsi);
   await saveEma(uncannyKey, nextUncanny);
-
   // #4 — self-tune the humanizer off the rolling uncanny EMA.
   await adjustHumanizerOverride(chatId, nextUncanny.avg);
+}
+
+/**
+ * followup 到了之后:只持久化行分数(EMA 已在发送时滚过,不重复)。
+ * 替代 resolve 阶段的 scoreReplyQuality,避免 followed 回复 EMA 滚两次。
+ */
+export async function persistReplyOutcomeScores(args: ScoreReplyQualityArgs): Promise<void> {
+  const { eff, asi, explicitNegative, repairLoop } = await computeReplyScores(
+    args.chatId, args.triggerText, args.replyText, args.signal,
+  );
+  await persistRowScores(args.chatId, args.rowId, eff, asi, explicitNegative, repairLoop);
+}
+
+/**
+ * 发送时全量自评(L3):每条回复发出后 fire-and-forget 调一次,跑 rubric +
+ * 滚 per-chat EMA + 自调人设器。不写 reply_outcomes(那由 followup 阶段补)。
+ * signal 用当前已知的行为信号(发送时通常无 followup → 中性)。
+ */
+export async function scoreReplyAtSend(args: ScoreReplyAtSendArgs): Promise<void> {
+  const { eff, asi } = await computeReplyScores(args.chatId, args.triggerText, args.replyText, args.signal);
+  await rollAsiEmas(args.chatId, eff, asi);
 }

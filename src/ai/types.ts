@@ -38,7 +38,7 @@ export interface HedgeConfig {
 /** Multimodal content part for vision/audio models */
 export type ContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; image: string } // data URL or URL
+  | { type: 'image'; image: string; detail?: 'low' | 'high' | 'auto' } // data URL or URL; detail 默认 high(stepfun 识图需要)
   | { type: 'audio'; audio: string; format: string }; // raw base64 (no data: prefix) + container format (wav/mp3/ogg/m4a)
 
 export interface AICallOptions {
@@ -77,6 +77,12 @@ export interface AICallOptions {
    * ignored otherwise. Used by the reply writer to eliminate malformed/single-quoted output.
    */
   jsonMode?: boolean;
+  /**
+   * Treat an empty/blank model response as a failed attempt and continue the fallback chain.
+   * Useful for low-frequency structured calls like heart/gate where an empty string is not
+   * a meaningful success.
+   */
+  rejectEmpty?: boolean;
 }
 
 export interface AICallResult {

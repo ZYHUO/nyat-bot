@@ -41,6 +41,7 @@ export interface MessageJobData {
     waitSec: number;
     /** Anchor messageId — the last message at time of wait decision */
     anchorMessageId?: number;
+    obligationId?: string;
   };
   /** Turn actor: payload for type='chat_turn' (per-chat cognition turn) */
   turn?: TurnJobPayload;

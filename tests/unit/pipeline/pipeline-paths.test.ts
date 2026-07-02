@@ -40,6 +40,7 @@ const mockEnv = vi.fn();
 const mockApplyChatPathPolicy = vi.fn();
 const mockReflectChatPathPolicy = vi.fn();
 const mockAcquireChatLock = vi.fn();
+const mockTransitionToStop = vi.fn();
 
 const { mockLogger, sendDirect } = vi.hoisted(() => {
   const logger: Record<string, unknown> = {
@@ -109,6 +110,8 @@ vi.mock("../../../src/bot/sender/telegram.js", () => ({
 
 vi.mock("../../../src/bot/bot.js", () => ({
   getBotUid: (...args: unknown[]) => mockGetBotUid(...args),
+  getBotIdentity: () => ({ uid: 9999, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '啾咪'] }),
+  getBotDisplayName: () => '啾咪囝',
 }));
 
 vi.mock("../../../src/tracking/activity.js", () => ({
@@ -179,6 +182,15 @@ vi.mock("../../../src/pipeline/path-policy.js", () => ({
 
 vi.mock("../../../src/queue/chat-lock.js", () => ({
   acquireChatLock: (...args: unknown[]) => mockAcquireChatLock(...args),
+}));
+
+vi.mock("../../../src/pipeline/timing/chat-runtime.js", () => ({
+  getChatState: vi.fn(async () => ({ state: 'RUNNING' })),
+  isInGateCooldown: vi.fn(async () => false),
+  transitionToWait: vi.fn(async () => {}),
+  transitionToStop: (...args: unknown[]) => mockTransitionToStop(...args),
+  transitionToRunning: vi.fn(async () => {}),
+  recordGateContinue: vi.fn(async () => {}),
 }));
 
 import { processPipeline } from "../../../src/pipeline/pipeline.js";
@@ -269,6 +281,7 @@ describe("processPipeline path branching", () => {
     );
     mockReflectChatPathPolicy.mockResolvedValue(undefined);
     mockAcquireChatLock.mockResolvedValue(vi.fn().mockResolvedValue(undefined));
+    mockTransitionToStop.mockReset();
     mockEnv.mockReturnValue({
       BOT_USERNAME: "xxb_bot",
       BOT_NICKNAMES: ["xxb"],
@@ -529,6 +542,18 @@ describe("processPipeline path branching", () => {
     await processPipeline(makeJob());
 
     expect(mockReflectChatPathPolicy).not.toHaveBeenCalled();
+  });
+
+  it("puts the chat into STOP when Telegram says the bot lacks send rights", async () => {
+    sendDirect.mockRejectedValueOnce(new Error("400: Bad Request: not enough rights to send text messages to the chat"));
+
+    await processPipeline(makeJob());
+
+    expect(mockTransitionToStop).toHaveBeenCalledWith(-100123, 1001);
+    const fallbackSent = sendDirect.mock.calls.some(
+      (c: unknown[]) => typeof c[1] === "string" && (c[1] as string).includes("故障"),
+    );
+    expect(fallbackSent).toBe(false);
   });
 
   it("sends multiple replies when reply generator returns multiple messages", async () => {

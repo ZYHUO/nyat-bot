@@ -157,7 +157,7 @@ export async function describeImage(fileId: string): Promise<string> {
           ],
         },
       ],
-      maxTokens: 200,
+      maxTokens: 300,
     });
 
     const description = result.content.trim();

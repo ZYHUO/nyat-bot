@@ -38,6 +38,10 @@ export interface AgenticPlanInput {
   userId: number;
   /** turn-actor 打断信号:循环中途被打断时随 AbortError 浮出 */
   signal?: AbortSignal;
+  /** 工具子集白名单(多智能体专家用);undefined = 全部工具(旧行为)。 */
+  toolFilter?: string[];
+  /** 覆盖 maxSteps(多智能体专家自定预算);undefined = 用 PLANNER_MAX_STEPS。 */
+  maxStepsOverride?: number;
 }
 
 function buildUserPrompt(input: AgenticPlanInput): string {
@@ -53,7 +57,7 @@ export async function runAgenticPlanner(input: AgenticPlanInput): Promise<Agenti
   const config = getConfig();
   const usage = getUsage('planner');
   const systemPrompt = loadPrompt('task/planner-agentic.md', config.promptsDir);
-  const tools = buildToolSet(input.chatId, input.userId);
+  const tools = buildToolSet(input.chatId, input.userId, input.toolFilter);
   const start = performance.now();
 
   // 简化版 fallback:按 usage 的 label 链逐个试(agentic 必须走 AI SDK
@@ -86,7 +90,7 @@ export async function runAgenticPlanner(input: AgenticPlanInput): Promise<Agenti
         system: systemPrompt,
         messages: [{ role: 'user', content: buildUserPrompt(input) }],
         tools,
-        maxSteps: e.PLANNER_MAX_STEPS,
+        maxSteps: input.maxStepsOverride ?? e.PLANNER_MAX_STEPS,
         temperature: 0,
         abortSignal: mergeAbortSignals(usage.timeout, input.signal),
       });

@@ -236,6 +236,53 @@ export function getAggregatedUserTag(uid: number): string | null {
   }
 }
 
+// ── bot 对用户本人的称呼(bot_tag)──────────────────────────
+// 优先级:主人(见 dm-proactive) > bot_tag > 群里外号(sender_tag)。
+// per-(chat,user);DM 行(chat_id=uid)作跨群默认,群行可覆盖。
+// 读取:当前 chat 的 bot_tag → 回退 DM 默认行。fail-soft 返回 null。
+
+/**
+ * 取 bot 对 (chatId,uid) 的称呼。先看当前 chat 的 bot_tag,没有则回退到
+ * DM 默认行 (uid,uid) 的 bot_tag(私聊里"叫我X"设的就是这行,跨群生效)。
+ */
+export function getBotTagForAddressing(chatId: number, uid: number): string | null {
+  try {
+    const db = getDb();
+    const cur = db.prepare(
+      'SELECT bot_tag FROM user_profiles WHERE chat_id = ? AND uid = ?',
+    ).get(chatId, uid) as { bot_tag: string | null } | undefined;
+    if (cur?.bot_tag && cur.bot_tag.trim()) return cur.bot_tag.trim();
+    if (chatId !== uid) {
+      const dm = db.prepare(
+        'SELECT bot_tag FROM user_profiles WHERE chat_id = ? AND uid = ?',
+      ).get(uid, uid) as { bot_tag: string | null } | undefined;
+      if (dm?.bot_tag && dm.bot_tag.trim()) return dm.bot_tag.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 设置 bot 对 (chatId,uid) 的称呼(纠正/起名)。tag 去空白截 32 字。 */
+export function setBotTag(chatId: number, uid: number, tag: string): void {
+  const clean = tag.trim().slice(0, 32);
+  if (!clean) return;
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO user_profiles (chat_id, uid, bot_tag, pending_messages, updated_at)
+    VALUES (?, ?, ?, '[]', unixepoch())
+    ON CONFLICT(chat_id, uid) DO UPDATE SET bot_tag = excluded.bot_tag, updated_at = unixepoch()
+  `).run(chatId, uid, clean);
+}
+
+/** 清掉 bot 对 (chatId,uid) 的称呼(回退到群里外号)。 */
+export function clearBotTag(chatId: number, uid: number): void {
+  const db = getDb();
+  db.prepare('UPDATE user_profiles SET bot_tag = NULL WHERE chat_id = ? AND uid = ?')
+    .run(chatId, uid);
+}
+
 // ── 用户偏好 CRUD ──────────────────────────────────────
 
 const MAX_PREFS_PER_USER = 20; // 每人最多保留多少条偏好
