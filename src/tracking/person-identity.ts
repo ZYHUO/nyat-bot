@@ -49,6 +49,20 @@ export function getPersonIdentity(uid: number): PersonIdentityRow | null {
 // 避免连发用户在该窗口里 spawn N 个并发刷新。
 const _refreshing = new Set<number>();
 
+// review #10:on-read 后台 LLM 合并的节流 —— refreshPersonIdentity 是 fire-and-forget
+// 不 await,stale 窗口在 updated_at 写回前一直开着,busy chat 里该用户每条消息都会
+// 再触发一次 mergeGlobalProfile(每次一发 LLM 调用)。这里按 uid 记最近触发时刻,
+// MERGE_TRIGGER_COOLDOWN 内不重复触发。
+const _mergeTriggeredAt = new Map<number, number>();
+const MERGE_TRIGGER_COOLDOWN_SEC = 300;
+
+function shouldTriggerMerge(uid: number, nowSec: number): boolean {
+  const last = _mergeTriggeredAt.get(uid) ?? 0;
+  if (nowSec - last < MERGE_TRIGGER_COOLDOWN_SEC) return false;
+  _mergeTriggeredAt.set(uid, nowSec);
+  return true;
+}
+
 function upsertIdentity(uid: number, impression: string | null, primary: number | null, chatCount: number, now: number): void {
   getDb().prepare(
     `INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at)
@@ -185,7 +199,8 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   if (!row || now - row.updated_at > STALE_SEC) {
     void refreshPersonIdentity(uid).catch(() => { /* fire-and-forget */ });
     // 机制5:全局画像久未合并且开了合并 → 后台补一次 LLM 合并(dynamic import 防循环)。
-    if (env().PROFILE_MERGE_ENABLED && (!row?.last_merged_at || now - row.last_merged_at > STALE_SEC)) {
+    // review #10:加 in-flight 节流,否则 stale 窗口内该用户每条消息都 spawn 一次 LLM 合并。
+    if (env().PROFILE_MERGE_ENABLED && (!row?.last_merged_at || now - row.last_merged_at > STALE_SEC) && shouldTriggerMerge(uid, now)) {
       void import('../cron/profile-merge.js')
         .then(({ mergeGlobalProfile }) => mergeGlobalProfile(uid))
         .catch(() => { /* fire-and-forget */ });
@@ -193,26 +208,35 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   }
   // 机制3:上下文数(含 DM)≤1 不注入(chat_count 现为"上下文数")。
   if (!row || row.chat_count <= 1) return null;
+  // review #8:当前会话即主上下文 → 群内画像已覆盖,全局/回退两路都不重复注入
+  // (旧 dedup 守卫曾被全局分支跳过,导致在 home 群也注入"别的地方也认识")。
+  if (row.primary_chat_id === currentChatId) return null;
 
-  // 机制2/3 优先:全局结构化画像(LLM 合并产出)——safe-by-construction
-  // (合并 prompt 已排除私聊具体隐私),可注入群/私聊任意场景,无需按来源 scrub。
+  // 机制2/3 优先:全局结构化画像(LLM 合并产出)。合并 prompt 已排除私聊具体隐私
+  // (safe-by-construction,残余风险=LLM 自觉)。review #2:把这条**跨上下文共享**
+  // 路径与隐私开关耦合 —— 注入进群且全局画像含私密来源时,要求 MEMORY_VISIBILITY_ENABLED
+  // 已开(运维已进入隐私感知模式);否则退回下方按来源 scrub 的 impression 路,不裸注
+  // 可能含 DM 提炼物的全局画像进群。
   const g = getGlobalProfile(uid);
   if (g && g.lastMergedAt && (g.traits.length || g.interests.length || g.relationToBot)) {
-    const bits: string[] = [];
-    if (g.traits.length) bits.push(`性格:${g.traits.slice(0, 6).join('、')}`);
-    if (g.interests.length) bits.push(`兴趣:${g.interests.slice(0, 6).join('、')}`);
-    if (g.commStyle) bits.push(`说话:${g.commStyle}`);
-    if (g.relationToBot) bits.push(`和你的关系:${g.relationToBot}`);
-    if (g.stablePatterns.length) bits.push(`习惯:${g.stablePatterns.slice(0, 4).join('、')}`);
-    return `[这个人你在别的地方也认识] 跨 ${row.chat_count} 个场景对 TA 的整体印象:\n${bits.join(';')}`;
+    const derivedFromPrivate = g.sourceContextIds.some((c) => isPrivateChat(c));
+    const okToInject = !isGroup(currentChatId) || !derivedFromPrivate || env().MEMORY_VISIBILITY_ENABLED;
+    if (okToInject) {
+      const bits: string[] = [];
+      if (g.traits.length) bits.push(`性格:${g.traits.slice(0, 6).join('、')}`);
+      if (g.interests.length) bits.push(`兴趣:${g.interests.slice(0, 6).join('、')}`);
+      if (g.commStyle) bits.push(`说话:${g.commStyle}`);
+      if (g.relationToBot) bits.push(`和你的关系:${g.relationToBot}`);
+      if (g.stablePatterns.length) bits.push(`习惯:${g.stablePatterns.slice(0, 4).join('、')}`);
+      return `[这个人你在别的地方也认识] 跨 ${row.chat_count} 个场景对 TA 的整体印象:\n${bits.join(';')}`;
+    }
   }
 
-  // 回退:primary 上下文的原始画像摘要。**scrub-on-inject**:注入进群时,若该
-  // 摘要来自私密会话(DM/敏感群)且非当前会话 → 剔除(防私聊内容裸泄进群)。
+  // 回退:primary 上下文的原始画像摘要。**scrub-on-inject**(review #9:不限
+  // 群目标)——只要该摘要来自私密会话(DM/敏感群)且非当前会话,无论注入目标是
+  // 群还是私聊,一律剔除(敏感群内容也不该在别处裸泄;DM 内容不该进群)。
   if (!row.impression) return null;
-  if (row.primary_chat_id === currentChatId) return null; // 当前会话即主上下文 → 群内画像已覆盖
   if (
-    isGroup(currentChatId) &&
     row.primary_chat_id !== null &&
     isPrivateChat(row.primary_chat_id)
   ) {

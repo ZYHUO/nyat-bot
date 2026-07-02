@@ -168,14 +168,30 @@ async function retrieveCrossContext(
   message: FormattedMessage,
   query: string,
   topK: number,
-): Promise<FormattedMessage[]> {
+): Promise<ScoredMessage[]> {
   const e = env();
   if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) return [];
   if (!message.uid || message.isBot) return [];
-  // searchMemoryByUser 内部已按 uid 检索 + 强制 scrubMemoryHits(boundChatId=chatId)。
-  const raw = await searchMemoryByUser(message.uid, query, chatId, topK, 500);
-  // 只要"别的场景"的:同 chat 的已由 semantic 路覆盖,这里剔除同 chat 避免重复。
-  return raw.filter((m) => m.sourceChatId !== chatId);
+  // searchMemoryByUser 内部已按 uid 检索 + 剔除同会话(#7)+ 强制 scrubMemoryHits。
+  return searchMemoryByUser(message.uid, query, chatId, topK, 500);
+}
+
+/**
+ * review #3/#5/#6:跨上下文命中**绝不进 merged**(那会带着别的会话的 per-chat
+ * messageId 进当前会话的消息流 → 与本会话 id 碰撞被 dedup 静默丢弃、被模型选作
+ * reply/react 目标、被当成本会话发言参与复读链等启发式)。改渲染成一个**独立、
+ * 无 #id、明确"别处说的仅参考"** 的块,追加到 contextStr;模型看得到但无法 quote。
+ */
+function formatCrossContextBlock(hits: ScoredMessage[], botUid: number): string | undefined {
+  const rows = hits
+    .filter((m) => (m.textContent || '').trim() && m.uid !== botUid)
+    .slice(0, 6)
+    .map((m) => `- ${m.fullName || m.username || 'TA'}(在别的群/私聊):${(m.textContent || '').slice(0, 80)}`);
+  if (rows.length === 0) return undefined;
+  return (
+    `[TA在别处说过的 · 仅供你了解这个人,不是本场景的消息,**不要**引用/回复这些条目]\n` +
+    rows.join('\n')
+  );
 }
 
 /**
@@ -308,11 +324,14 @@ export async function retrieveContext(
       // (如"我上次在群里说的那个X")。gated + 已 scrub。
       overBudget ? Promise.resolve([] as FormattedMessage[]) : retrieveCrossContext(chatId, message, queryText, cfg.semanticTopK),
     ]);
-    const extras = [...semantic, ...crossContext];
-    const merged = extras.length > 0
-      ? appendExtrasWithinBudget(recent, extras, message, botUid, cfg.totalTokenBudget)
+    // crossContext 不进 merged(同 planned 模式);作为独立参考块追加。
+    const merged = semantic.length > 0
+      ? appendExtrasWithinBudget(recent, semantic, message, botUid, cfg.totalTokenBudget)
       : recent;
-    const contextStr = slimContextForAI(merged, message, botUid);
+    const crossBlock = formatCrossContextBlock(crossContext, botUid);
+    const contextStr = crossBlock
+      ? `${slimContextForAI(merged, message, botUid)}\n\n${crossBlock}`
+      : slimContextForAI(merged, message, botUid);
     const tokenCount = countTokens(contextStr);
 
     logger.debug({
@@ -379,9 +398,10 @@ export async function retrieveContext(
     retrieveCrossContext(chatId, message, queryText, cfg.semanticTopK),
   ]);
 
-  // Merge with priority: thread > recent > semantic > entity > crossContext
-  // (跨上下文记忆优先级最低——是"补充"而非"主线",预算紧时先让位)。
-  const allMerged = [...thread, ...recent, ...semantic, ...entity, ...crossContext];
+  // Merge with priority: thread > recent > semantic > entity。
+  // 注意:crossContext **不进** allMerged(见 formatCrossContextBlock,防 id 碰撞/
+  // 误当回复目标/污染复读链启发式),而是作为独立参考块追加到 contextStr 末尾。
+  const allMerged = [...thread, ...recent, ...semantic, ...entity];
   const deduped = deduplicateMessages(allMerged);
 
   // Sort by timestamp
@@ -389,7 +409,10 @@ export async function retrieveContext(
 
   // Truncate to token budget
   const merged = appendExtrasWithinBudget(recent, deduped, message, botUid, cfg.totalTokenBudget);
-  const contextStr = slimContextForAI(merged, message, botUid);
+  const crossBlock = formatCrossContextBlock(crossContext, botUid);
+  const contextStr = crossBlock
+    ? `${slimContextForAI(merged, message, botUid)}\n\n${crossBlock}`
+    : slimContextForAI(merged, message, botUid);
   const tokenCount = countTokens(contextStr);
 
   logger.debug({

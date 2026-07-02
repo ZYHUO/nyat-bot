@@ -307,7 +307,7 @@ describe('Context Retriever', () => {
       expect(mockSearchMemoryByUser).not.toHaveBeenCalled();
     });
 
-    it('两 flag 同开 → 调 searchMemoryByUser 并把跨上下文记忆并进 merged', async () => {
+    it('两 flag 同开 → 调 searchMemoryByUser,渲染成独立参考块进 contextStr(review #3/#5/#6:不进 merged、无 #id、不可 quote)', async () => {
       envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
       envValues['MEMORY_VISIBILITY_ENABLED'] = true;
       mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1, timestamp: 1700000001 })]);
@@ -320,7 +320,13 @@ describe('Context Retriever', () => {
       );
       expect(mockSearchMemoryByUser).toHaveBeenCalledWith(1001, expect.any(String), 1, expect.any(Number), expect.any(Number));
       expect(result.crossContext).toHaveLength(1);
-      expect(result.merged.some((m) => m.textContent === '别的群里说过的公开事')).toBe(true);
+      // 关键:跨上下文命中**不进 merged**(否则带外来 messageId 进当前会话流,会被
+      // dedup 碰撞丢弃 / 被模型选作回复目标)。
+      expect(result.merged.some((m) => m.textContent === '别的群里说过的公开事')).toBe(false);
+      // 而是渲染成带"不要引用"标注的独立块、无 #id 前缀。
+      expect(result.contextStr).toContain('别的群里说过的公开事');
+      expect(result.contextStr).toContain('不要');
+      expect(result.contextStr).not.toContain('#50');
     });
 
     it('只开 CROSS_CONTEXT 不开 VISIBILITY → fail-closed 不召回', async () => {
@@ -331,16 +337,20 @@ describe('Context Retriever', () => {
       expect(mockSearchMemoryByUser).not.toHaveBeenCalled();
     });
 
-    it('剔除与当前会话同 sourceChatId 的命中(避免与 semantic 重复)', async () => {
+    it('planned 模式同样把跨上下文渲染为独立块、不进 merged', async () => {
       envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
       envValues['MEMORY_VISIBILITY_ENABLED'] = true;
-      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1 })]);
+      mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1, timestamp: 1700000001 })]);
+      mockGetAll.mockResolvedValue([]);
       mockSearchMemoryByUser.mockResolvedValue([
-        { ...makeMsg({ messageId: 51, textContent: '本会话的' }), sourceChatId: 1 },
-        { ...makeMsg({ messageId: 52, textContent: '别会话的' }), sourceChatId: -2002 },
+        { ...makeMsg({ messageId: 12345, textContent: '别处的旧发言' }), sourceChatId: -2002 },
       ]);
-      const result = await retrieveContext(1, makeMsg({ messageId: 3, uid: 1001 }), 9999, { mode: 'direct' } as never);
-      expect(result.crossContext?.map((m) => m.textContent)).toEqual(['别会话的']);
+      const result = await retrieveContext(
+        1, makeMsg({ messageId: 3, uid: 1001, textContent: 'hi' }), 9999, { mode: 'planned' } as never,
+      );
+      expect(result.crossContext).toHaveLength(1);
+      expect(result.merged.some((m) => m.messageId === 12345)).toBe(false);
+      expect(result.contextStr).toContain('别处的旧发言');
     });
   });
 });

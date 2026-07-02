@@ -360,7 +360,9 @@ async function _searchMemoryByUserInner(
   const raw: ScoredMessage[] = [];
   for (const hit of hits) {
     const m = hitToMessage(hit);
-    if (m) raw.push(m);
+    // review #7:同会话命中由 semantic 路覆盖,这里只要"别的场景"的 —— 在
+    // scrub/slice **之前**就剔除,否则本会话记忆挤占 topK 预算、跨上下文召回饿死。
+    if (m && m.sourceChatId !== boundChatId) raw.push(m);
   }
   // R1 读隔离:剔除跨界私密(DM private / 敏感群来源)。
   const { kept, dropped } = scrubMemoryHits(raw, boundChatId);

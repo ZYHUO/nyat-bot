@@ -130,17 +130,25 @@ export async function mergeGlobalProfile(uid: number): Promise<boolean> {
 export async function runProfileMerge(): Promise<void> {
   const e = env();
   if (!e.PROFILE_MERGE_ENABLED) return;
+  // review #4:candidate 表 person_identity 靠 refreshPersonIdentity 填充,后者
+  // 只在 PERSON_IDENTITY_ENABLED 时跑。没它这张表基本是空的,合并会静默无产出——
+  // 明确告警而不是悄悄空转。
+  if (!e.PERSON_IDENTITY_ENABLED) {
+    logger.warn({}, 'profile-merge: PERSON_IDENTITY_ENABLED off → person_identity 候选表不被填充,合并无候选(请同时开启 PERSON_IDENTITY_ENABLED)');
+  }
 
   let uids: number[];
   try {
     const cutoff = Math.floor(Date.now() / 1000) - REMERGE_AFTER_SEC;
+    // review #4:不再以 chat_count>1 为硬 SQL 条件(chat_count 由另一 flag 的
+    // refreshPersonIdentity 维护,可能为 0)。改为按 last_merged_at 陈旧 + 近期活跃
+    // 取候选,>1 上下文的判定放到运行时 getUserContexts(权威、含 DM)。
     const rows = getDb().prepare(
       `SELECT uid FROM person_identity
-        WHERE chat_count > 1
-          AND (last_merged_at IS NULL OR last_merged_at < ?)
+        WHERE last_merged_at IS NULL OR last_merged_at < ?
         ORDER BY updated_at DESC
         LIMIT ?`,
-    ).all(cutoff, MAX_UIDS_PER_TICK) as Array<{ uid: number }>;
+    ).all(cutoff, MAX_UIDS_PER_TICK * 3) as Array<{ uid: number }>;
     uids = rows.map((r) => r.uid);
   } catch (err) {
     logger.warn({ err }, 'profile-merge: candidate query failed');
@@ -151,12 +159,14 @@ export async function runProfileMerge(): Promise<void> {
   // 灰度:PROFILE_MERGE_CHAT_IDS 非空时,只合并"至少出现在某个灰度群"的人。
   const graylist = e.PROFILE_MERGE_CHAT_IDS;
   let merged = 0;
+  let processed = 0;
   for (const uid of uids) {
-    if (graylist.length > 0) {
-      const contexts = await getUserContexts(uid).catch(() => [] as number[]);
-      if (!contexts.some((c) => graylist.includes(c))) continue;
-    }
+    if (processed >= MAX_UIDS_PER_TICK) break;
+    const contexts = await getUserContexts(uid).catch(() => [] as number[]);
+    if (contexts.length <= 1) continue; // 运行时权威判定"跨上下文"
+    if (graylist.length > 0 && !contexts.some((c) => graylist.includes(c))) continue;
+    processed++;
     if (await mergeGlobalProfile(uid)) merged++;
   }
-  logger.info({ candidates: uids.length, merged }, 'profile-merge tick complete');
+  logger.info({ candidates: uids.length, processed, merged }, 'profile-merge tick complete');
 }
