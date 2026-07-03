@@ -30,22 +30,47 @@ interface WorkItem {
  */
 function buildPool(): WorkItem[] {
   const db = getDb();
-  const pool: WorkItem[] = [];
+  const groups: WorkItem[] = [];
+  const merges: WorkItem[] = [];
   try {
-    const groups = db
+    const groupRows = db
       .prepare('SELECT DISTINCT chat_id FROM user_profiles WHERE chat_id < 0')
       .all() as Array<{ chat_id: number }>;
     const weight = Math.max(1, env().STEPFUN_CONSUMER_REFLECT_WEIGHT);
-    for (const g of groups) {
-      for (let i = 0; i < weight; i++) pool.push({ kind: 'group', id: g.chat_id });
+    for (const g of groupRows) {
+      for (let i = 0; i < weight; i++) groups.push({ kind: 'group', id: g.chat_id });
     }
     const people = db
       .prepare('SELECT uid FROM person_identity WHERE uid > 0 ORDER BY updated_at DESC')
       .all() as Array<{ uid: number }>;
-    for (const p of people) pool.push({ kind: 'merge', id: p.uid });
+    for (const p of people) merges.push({ kind: 'merge', id: p.uid });
   } catch (err) {
     logger.warn({ err }, 'stepfun-consumer: pool build failed');
+    return [];
   }
+  return interleave(groups, merges);
+}
+
+/**
+ * 交错编织两类工作项,让**任意连续游标窗口**都保持稳定的 群/合并 混合比例。
+ * 否则(简单拼接)游标会整段落进"只有合并项(多为无产出秒退)"的区间 → token 速率忽高忽低。
+ * 以较长的一方为基准,按均匀步长把较短一方插入其间。
+ */
+function interleave(a: WorkItem[], b: WorkItem[]): WorkItem[] {
+  const [long, short] = a.length >= b.length ? [a, b] : [b, a];
+  if (short.length === 0) return long;
+  const pool: WorkItem[] = [];
+  const step = long.length / short.length;
+  let si = 0;
+  let nextInsert = step;
+  for (let i = 0; i < long.length; i++) {
+    pool.push(long[i]!);
+    if (i + 1 >= nextInsert && si < short.length) {
+      pool.push(short[si++]!);
+      nextInsert += step;
+    }
+  }
+  while (si < short.length) pool.push(short[si++]!);
   return pool;
 }
 

@@ -80,6 +80,18 @@ describe('runStepfunConsumer', () => {
     expect(setMock).toHaveBeenCalledWith('xxb:stepfun_consumer:cursor', '2');
   });
 
+  it('交错编织:半池窗口拿到均衡的群/合并(而非旧布局的整段全群或全合并)', async () => {
+    groupsRows.push({ chat_id: -1 }, { chat_id: -2 }, { chat_id: -3 }, { chat_id: -4 });
+    peopleRows.push({ uid: 1 }, { uid: 2 }, { uid: 3 }, { uid: 4 });
+    envValues['STEPFUN_CONSUMER_REFLECT_WEIGHT'] = 1; // 4 群 + 4 合并 = 池 8
+    envValues['STEPFUN_CONSUMER_CALLS_PER_TICK'] = 4; // 前半池窗口
+    getMock.mockResolvedValue('0'); // 游标从头
+    await runStepfunConsumer();
+    // 交错后前 4 项应是 群/合并 各半(旧布局会是 4 群 0 合并)
+    expect(reflectChatMock).toHaveBeenCalledTimes(2);
+    expect(mergeGlobalProfileMock).toHaveBeenCalledTimes(2);
+  });
+
   it('单项抛错不影响整批(容错)', async () => {
     groupsRows.push({ chat_id: -1001 }); // ×3 = 3 项
     envValues['STEPFUN_CONSUMER_CALLS_PER_TICK'] = 3;
