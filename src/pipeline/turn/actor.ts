@@ -228,6 +228,10 @@ async function runJudgedEntry(
     waitResume?: { waitSec?: number; hadNewMessages: boolean };
     /** review #10:回合开始时的 timing state 快照(多锚点各组共用)。 */
     timingSnapshot?: Awaited<ReturnType<typeof getChatState>>;
+    /** 分人回复修复:回合开始时刻(ms),仅多锚点回合设置。 */
+    turnStartedAt?: number;
+    /** 分人回复修复:本回合是否多锚点。 */
+    isMultiAnchorTurn?: boolean;
   },
 ): Promise<void> {
   const e = env();
@@ -282,6 +286,8 @@ async function runJudgedEntry(
           deferCount: current.deferCount,
           waitResume: opts?.waitResume,
           timingStateSnapshot: opts?.timingSnapshot,
+          turnStartedAt: opts?.turnStartedAt,
+          isMultiAnchorTurn: opts?.isMultiAnchorTurn,
           burstMessageIds: currentBurstIds.length > 1 ? currentBurstIds : undefined,
           // 多锚点同场兄弟:跳过心流冷却,否则组2+ 会被组1 的 no_action 冷却误杀。
           skipGateCooldown: opts?.skipGateCooldown ?? false,
@@ -550,6 +556,9 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
     }
     multiAnchor = uids.size > 1;
   }
+  // 分人回复修复:回合开始时刻,给多锚点各组的 engagement 计算当"回合前"基准
+  // (见 runJudgedEntry opts.turnStartedAt 用法 / pipeline.ts engagement 过滤)。
+  const turnStartedAtMs = Date.now();
 
   // 每发送者的 messageId 列表(多锚点给每组 runJudgedEntry 传本组 burstIds,
   // 写手 reply_to 自然落在本人消息上 → 治"回错人")。只收候选(非命令、非抑制)
@@ -583,7 +592,8 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
       // 超过 budget 人 @bot 时只回最新的 budget 个,兑现"每回合最多回 N 人")。
       const picked = pickMultiAnchorGroups(candidates, budget);
       for (const idx of picked) judgedIdx.add(idx);
-      logger.debug(
+      // info 级(原 debug 从未在生产记到过,分人回复问题排障需要看多锚点触发频率)
+      logger.info(
         { chatId, multiAnchor: true, groups: new Set(candidates.map((c) => c.uid)).size, judged: judgedIdx.size, budget },
         'Turn: multi-anchor groups selected',
       );
@@ -622,6 +632,8 @@ export async function runChatTurn(data: MessageJobData, jobId?: string): Promise
           obligationCtx,
           waitResume: waitResumeInfo,
           timingSnapshot,
+          turnStartedAt: multiAnchor ? turnStartedAtMs : undefined,
+          isMultiAnchorTurn: multiAnchor,
         });
       } else {
         await trackEntry(chatId, entry, entries.length, isEntrySuppressed(entry));

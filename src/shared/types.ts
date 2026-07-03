@@ -205,5 +205,16 @@ export interface ChatJob {
      * 存在的冷却/退避对所有组照常生效(旧 skipGateCooldown 整层旁路的修正)。
      */
     timingStateSnapshot?: import('../pipeline/timing/state-store.js').ChatTimingState;
+    /**
+     * 分人回复修复:多锚点回合开始时刻(ms)。组1 的回复经 addAssistant 写入
+     * 共享 Redis 上下文后,组2/3 若用实时 recentMessages 算 engagement(占比/
+     * replies5m),会被组1 刚发的这条推高、直接命中硬阈静默 pass —— 表现为
+     * "无论几个人问,永远只回一句"。用这个时刻过滤掉本回合内兄弟组已发的
+     * assistant 消息,只让"回合开始前"的真实状态计入预算;回合开始前就存在
+     * 的历史 bot 消息仍正常计入(跨回合防刷不受影响)。仅多锚点回合设置。
+     */
+    turnStartedAt?: number;
+    /** 分人回复修复:本回合是否多锚点(≥2 人各自独立处理)。给心流 burstNote 提示用。 */
+    isMultiAnchorTurn?: boolean;
   };
 }

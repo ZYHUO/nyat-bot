@@ -6,7 +6,7 @@ vi.mock('../../../src/tracking/life-state.js', () => ({
   getLifeState: () => ({ state: 'normal', energy: lifeState.energy, hint: null, speedFactor: 1, lazyDay: false }),
 }));
 
-import { computeEngagement, HARD_PASS_BUDGET } from '../../../src/pipeline/heart/engagement.js';
+import { computeEngagement, filterForTurnStart, HARD_PASS_BUDGET } from '../../../src/pipeline/heart/engagement.js';
 
 const BOT = 9999;
 const now = () => Math.floor(Date.now() / 1000);
@@ -92,5 +92,55 @@ describe('computeEngagement', () => {
     msgs.push(...Array.from({ length: 6 }, () => msg('user')));
     const s = computeEngagement(msgs, BOT, 5);
     expect(s.note).toBeNull();
+  });
+});
+
+describe('filterForTurnStart(分人回复修复)', () => {
+  const turnStartedAt = (now() - 50) * 1000; // 回合开始于 50 秒前
+
+  it('turnStartedAt 为 undefined → 原样返回,零行为变化', () => {
+    const msgs = [msg('user'), msg('assistant')];
+    expect(filterForTurnStart(msgs, BOT, undefined)).toEqual(msgs);
+  });
+
+  it('回合开始后才发的 bot 消息(本回合兄弟组的回复)→ 过滤掉', () => {
+    const msgs = [msg('user', 60), msg('assistant', 10)]; // bot 消息 10s 前发,晚于回合开始(50s 前)
+    const filtered = filterForTurnStart(msgs, BOT, turnStartedAt);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.role).toBe('user');
+  });
+
+  it('回合开始前就存在的历史 bot 消息 → 保留(跨回合防刷不受影响)', () => {
+    const msgs = [msg('assistant', 100), msg('user', 60)]; // bot 消息 100s 前,早于回合开始
+    const filtered = filterForTurnStart(msgs, BOT, turnStartedAt);
+    expect(filtered).toHaveLength(2);
+  });
+
+  it('用户消息无论何时都保留', () => {
+    const msgs = [msg('user', 10), msg('user', 100)];
+    expect(filterForTurnStart(msgs, BOT, turnStartedAt)).toHaveLength(2);
+  });
+
+  it('端到端:组1 刚发的回复会让组2 误触硬阈,过滤后组2 恢复正常参与', () => {
+    // 复刻 bug 场景:5 分钟窗口内已有 3 轮历史 user+assistant(share=25%/
+    // replies5m=3,均在软带、未到硬阈),组1 在回合开始(50s 前)之后又发
+    // 一条回复 → 实时口径 share=33%(4/12)+replies5m=4,双双命中硬阈;
+    // 过滤掉组1 这条回合开始后发的回复 → 组2 看到的仍是 3 轮历史,正常参与。
+    const msgs: FormattedMessage[] = [
+      msg('user', 280),
+      msg('assistant', 270), msg('user', 260),
+      msg('assistant', 250), msg('user', 240),
+      msg('assistant', 230), // 3 轮历史(回合开始前),均在 5 分钟窗内
+      msg('user', 100), msg('user', 90), msg('user', 80), msg('user', 70), msg('user', 60),
+      msg('user', 50), // 本回合:另一个人的独立提问
+      msg('assistant', 10), // 组1 刚发的回复(回合开始后,10s 前)
+    ];
+
+    const live = computeEngagement(msgs, BOT, 5);
+    expect(live.budget).toBe(0); // 未过滤:组2 会被组1 的回复误判硬阈(share=33%/replies5m=4)
+
+    const filtered = filterForTurnStart(msgs, BOT, turnStartedAt);
+    const fixed = computeEngagement(filtered, BOT, 5);
+    expect(fixed.budget).toBeGreaterThan(HARD_PASS_BUDGET); // 过滤后:组2 恢复正常参与(软带,非硬阈)
   });
 });

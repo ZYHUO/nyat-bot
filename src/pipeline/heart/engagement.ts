@@ -32,6 +32,27 @@ export const HARD_PASS_BUDGET = 0.12;
 /** 群速 ≥ 此值 → firehose,确定性闭嘴(旧 hot_chat ≥60 必跳过的等价物) */
 const FIREHOSE_5MIN = 60;
 
+/**
+ * 分人回复修复:多锚点回合里,组1 的回复经 addAssistant 写入共享上下文后,
+ * 组2/3 若直接用实时 recentMessages 算 engagement,会被组1 刚发的这条推高
+ * share/replies5m、命中硬阈静默 pass——"无论几个人问,永远只回一句"的主因。
+ * 过滤掉 turnStartedAt 之后才出现的 bot 消息(本回合内兄弟组已发的回复),
+ * 只让"回合开始前"的真实状态计入预算;用户消息与回合开始前的历史 bot 消息
+ * 不受影响,跨回合防刷照常生效。turnStartedAt 为 undefined(非多锚点回合)
+ * 时原样返回,零行为变化。
+ */
+export function filterForTurnStart(
+  recentMessages: FormattedMessage[],
+  botUid: number,
+  turnStartedAt: number | undefined,
+): FormattedMessage[] {
+  if (turnStartedAt === undefined) return recentMessages;
+  return recentMessages.filter((m) => {
+    const isBotMsg = m.role === 'assistant' || m.uid === botUid;
+    return !isBotMsg || m.timestamp * 1000 < turnStartedAt;
+  });
+}
+
 export function computeEngagement(
   recentMessages: FormattedMessage[],
   botUid: number,

@@ -61,7 +61,7 @@ import {
 import { loadCachedPrompt } from "../shared/config.js";
 import { composeSelfState } from "./heart/self-state.js";
 import { heartDecision } from "./heart/decision.js";
-import { computeEngagement, HARD_PASS_BUDGET } from "./heart/engagement.js";
+import { computeEngagement, filterForTurnStart, HARD_PASS_BUDGET } from "./heart/engagement.js";
 import { needsLookup } from "./heart/path-heuristic.js";
 import { setWaitAnchor } from "./turn/buffer.js";
 import { getFocus as getChatFocus } from "./turn/focus.js";
@@ -729,11 +729,21 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // 硬阈以下确定性 pass(不烧心流调用);中间带给心流一句体感注记。
         // P0-A:连续免检窗口内跳过硬阈 —— 对话进行中 bot 占比天然偏高,
         // 硬阈恰好会造成"聊两句就蒸发";让心流自己决定去留。
-        const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
+        // 分人回复修复:多锚点回合里,组1 的回复经 addAssistant 写入共享上下文
+        // 后,组2/3 若直接用实时 recentMessages 算 engagement,会被组1 刚发的
+        // 这条推高 share/replies5m,命中硬阈静默 pass ——"永远只回一句"的主因。
+        // 过滤掉 turnStartedAt(回合开始)之后才出现的 bot 消息(即本回合内
+        // 兄弟组已发的回复),只让"回合开始前"的真实状态计入预算;用户消息
+        // 与回合开始前就存在的历史 bot 消息不受影响,跨回合防刷照常生效。
+        const engagementMessages = filterForTurnStart(recentMessages, botUid, job.turnContext?.turnStartedAt);
+        const engagement = computeEngagement(engagementMessages, botUid, messagesLast5Min);
         if (!heartContinuation && !bypassEngagementHardPass && engagement.budget <= HARD_PASS_BUDGET) {
           await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
           logger.info(
-            { chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors },
+            {
+              chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors,
+              isMultiAnchorTurn: job.turnContext?.isMultiAnchorTurn ?? false,
+            },
             "Heart skipped (engagement budget), pass",
           );
           return;
@@ -756,6 +766,12 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           burstNote: [
             heartBurstIds.length > 1
               ? `(★ 是一波 ${heartBurstIds.length} 条连发的末尾,把整波当一个完整念头来评估)`
+              : undefined,
+            // 分人回复修复:多锚点回合里心流仍读实时上下文,可能看到兄弟组
+            // 刚发的回复而理性地觉得"刚说过话了"从而 pass——这是给★这个人
+            // 的独立回复,提醒它别因为回过别人就对这条也沉默。
+            job.turnContext?.isMultiAnchorTurn
+              ? '(本轮群里有好几个人各自问了不同的问题,你可能刚回过/正要回复其他人——这条★是另一个人的独立提问,不要因为刚回过别人就对这条也 pass)'
               : undefined,
             engagement.note ?? undefined,
           ].filter(Boolean).join('\n') || undefined,
