@@ -55,7 +55,7 @@ export async function runRelationshipSummarize(): Promise<void> {
       if (lines.length < 60) continue; // 素材太少,这轮跳过
 
       const result = await callWithFallback({
-        usage: 'summarize',
+        usage: 'summarize_deep',
         messages: [
           {
             role: 'system',
@@ -63,7 +63,7 @@ export async function runRelationshipSummarize(): Promise<void> {
           },
           { role: 'user', content: `对话片段:\n${lines}\n\n一句话概括你和TA:` },
         ],
-        maxTokens: 2000, // step-3.7-flash 是推理模型:留足预算让思考完+出content(原80被截断成空)
+        maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
         temperature: 0.6,
       });
 

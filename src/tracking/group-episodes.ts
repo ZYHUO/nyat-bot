@@ -63,7 +63,7 @@ export async function summarizeEpisodes(chatId: number): Promise<number> {
   let content: string;
   try {
     const result = await callWithFallback({
-      usage: 'summarize',
+      usage: 'summarize_deep',
       messages: [
         {
           role: 'system',
@@ -74,7 +74,7 @@ export async function summarizeEpisodes(chatId: number): Promise<number> {
         },
         { role: 'user', content: lines },
       ],
-      maxTokens: 2000, // 推理模型留足预算(原300被截断成空)
+      maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
       temperature: 0.3,
     });
     content = result.content;

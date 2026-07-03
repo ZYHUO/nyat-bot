@@ -115,7 +115,7 @@ export async function mergeGlobalProfile(uid: number): Promise<boolean> {
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: user },
       ],
-      maxTokens: 2500, // 推理模型留足预算(原400被截断成空)
+      maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
       temperature: 0,
     });
 

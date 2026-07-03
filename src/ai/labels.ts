@@ -55,6 +55,9 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   heart:            { label: 'stepfunjudge',  backups: ['longcat'],      timeout: 30_000, maxTokens: 120,  temperature: 0 },
   planner:          { label: 'sub2gpt54mini', backups: ['sub2gpt55'],     timeout: 60_000, maxTokens: 300,  temperature: 0 },
   summarize:        { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 120_000 },
+  // 后台深度摘要:high 推理(stepfunthink),只给配额消费 cron 用,不碰用户可见路径。
+  // stepfunthink 缺失时回退 stepfun(medium),不致命。
+  summarize_deep:   { label: 'stepfunthink',  backups: ['stepfun'],      timeout: 180_000 },
   path_reflection:  { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 20_000, maxTokens: 200,  temperature: 0 },
   allowlist_review: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
   reply_splitter:   { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 500,  temperature: 0 },

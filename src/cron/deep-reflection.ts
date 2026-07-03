@@ -42,7 +42,7 @@ export async function reflectChat(chatId: number): Promise<number> {
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `群最近 ${msgs.length} 条聊天:\n${lines}\n\n输出「本群近况」简报:` },
       ],
-      maxTokens: 2500, // 推理模型留足预算(原400被截断成空)
+      maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
       temperature: 0.4,
     });
     digest = result.content.trim().slice(0, 600);

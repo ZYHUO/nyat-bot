@@ -585,12 +585,12 @@ export async function runUserProfileSync(): Promise<void> {
 ${tagLine}${existingBlock}最新发言(${pending.length}条):\n${messagesBlock}`;
 
       const result = await callWithFallback({
-        usage: 'summarize',
+        usage: 'summarize_deep',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },
         ],
-        maxTokens: 2500, // 推理模型留足预算(原500被截断成空)
+        maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
         temperature: 0.3,
       });
 
