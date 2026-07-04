@@ -44,3 +44,24 @@ export function isCallerAbort(signal?: AbortSignal): boolean {
   const reason = signal.reason as { name?: string } | undefined;
   return reason?.name === 'TurnInterrupt' || reason?.name === 'Shutdown';
 }
+
+/**
+ * Abort 感知的 sleep:signal 触发时**立即 resolve**(不抛)。调用方睡醒后
+ * 自查 signal.aborted 决定 return/break。裸 setTimeout 的 humanizer 延迟
+ * (最长 ~40s 迟到已读)曾是关机卡死的挂点之一 —— 关机广播必须能叫醒它们。
+ */
+export function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((r) => {
+    if (signal?.aborted) {
+      r();
+      return;
+    }
+    const done = (): void => {
+      signal?.removeEventListener('abort', done);
+      clearTimeout(t);
+      r();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}

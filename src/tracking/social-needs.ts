@@ -39,6 +39,16 @@ export async function markBotSpoke(chatId: number): Promise<void> {
   } catch { /* non-critical */ }
 }
 
+/** bot 上次在该 chat 发言的 epoch 秒(无记录/读失败 → null)。 */
+export async function getLastSpokeTs(chatId: number): Promise<number | null> {
+  try {
+    const raw = await getRedis().get(LAST_SPOKE_PREFIX + chatId);
+    return raw ? parseInt(raw, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Loneliness ∈ [0,1]: 0 = just spoke, 1 = silent for ≥ SOCIAL_NEED_FULL_HOURS. */
 export async function getSocialNeed(chatId: number): Promise<number> {
   try {

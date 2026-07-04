@@ -25,6 +25,8 @@ import {
 } from "../reply/humanizer.js";
 import { reflectChatPathPolicy } from "../path-policy.js";
 import { sender, DIRECT_INTERACTION_RULES } from "../shared.js";
+import { sleepWithAbort, mergeAbortSignals } from "../../shared/abort.js";
+import { getShutdownSignal } from "../turn/abort-registry.js";
 import { scheduleDeferredTypoFix, shouldSuppressStaleReply } from "./stale-reply.js";
 import {
   sendChatAction,
@@ -432,7 +434,8 @@ export async function generateAndSendReplies(args: {
           if (ghostSec > 5) {
             setTimeout(() => sendChatAction(job.chatId, 'typing').catch(() => {}), 4500);
           }
-          await new Promise((r) => setTimeout(r, ghostSec * 1000));
+          // 关机可中止:ghost 本来就什么都不发,提前醒直接走 return
+          await sleepWithAbort(ghostSec * 1000, getShutdownSignal());
           if (e.TURN_FOCUS_ENABLED) {
             import("../turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'model_silent')).catch(() => {});
           }
@@ -519,16 +522,20 @@ export async function generateAndSendReplies(args: {
       const typingLead = Math.min(readDelay, 2 + Math.random());
       const silentPart = readDelay - typingLead;
       logger.debug({ chatId: job.chatId, readDelay, silentPart, incomingLength }, 'Humanizer: read delay');
+      // 关机可中止:迟到分支单次可睡 ~40s,曾独自超过强杀计时器(关机
+      // 卡死挂点之一)。turn 打断与 Shutdown 都能叫醒;醒后自查抛
+      // AI_ABORTED → actor 走 shutdown requeue(此刻尚未发送,重放安全)。
+      const readAbort = mergeAbortSignals(undefined, job.turnContext?.signal, getShutdownSignal());
       if (silentPart > 0) {
-        await new Promise((resolve) => setTimeout(resolve, silentPart * 1000));
+        await sleepWithAbort(silentPart * 1000, readAbort);
         // 静默期内被打断 → 还没"看到",直接重规划
-        if (job.turnContext?.signal?.aborted) {
+        if (job.turnContext?.signal?.aborted || getShutdownSignal().aborted) {
           throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
         }
       }
       await sendChatAction(job.chatId, 'typing');
-      await new Promise((resolve) => setTimeout(resolve, typingLead * 1000));
-      if (job.turnContext?.signal?.aborted) {
+      await sleepWithAbort(typingLead * 1000, readAbort);
+      if (job.turnContext?.signal?.aborted || getShutdownSignal().aborted) {
         throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
       }
     }
@@ -571,6 +578,23 @@ export async function generateAndSendReplies(args: {
 
     for (let replyIdx = 0; replyIdx < replies.length; replyIdx++) {
       const reply = replies[replyIdx]!;
+
+      // 关机广播:首段之前 → 抛 AI_ABORTED(尚未发送,actor requeue 重放
+      // 安全);已发出至少一段 → **break 而非 throw**(已发出的段落保留,
+      // requeue 重放会双发,真人被打断也是把话咽回去而不是重说一遍)。
+      if (getShutdownSignal().aborted) {
+        if (replyIdx === 0) {
+          if (maxPlaceholderMsgId) {
+            await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+          }
+          throw new AIError("Shutdown before send", "send", "send", "AI_ABORTED");
+        }
+        logger.info(
+          { chatId: job.chatId, sent: sentMessages.length, dropped: replies.length - replyIdx },
+          'Shutdown mid-send — remaining segments dropped',
+        );
+        break;
+      }
 
       // ── Humanizer: ack prefix (send before first reply) ──
       // Skip for DM — users expect instant response in private chat.
@@ -617,7 +641,9 @@ export async function generateAndSendReplies(args: {
           floorSec: 0.2,
         });
         await sendChatAction(job.chatId, 'typing');
-        await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+        // 关机可中止(多段 ×8s 会叠加):提前醒后本段照发,下一轮循环顶部
+        // 的 shutdown guard 负责收尾 —— 不在这里 break,保持"这句话发完"。
+        await sleepWithAbort(delay * 1000, getShutdownSignal());
       }
 
       // ── G10: model-owned hesitation — the model marked THIS line as one it

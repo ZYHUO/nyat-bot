@@ -259,37 +259,60 @@ async function main(): Promise<void> {
 
     logger.info({ signal }, 'Shutting down…');
 
-    // Force exit after 30 seconds if graceful shutdown hangs
+    // Force exit if graceful shutdown hangs. 25s(不是 30s):systemd
+    // TimeoutStopSec=30 也在倒数,必须抢在 SIGKILL 之前自己退出留日志
+    // (status=9/KILL 会跳过 WAL checkpoint / token 记账 / BullMQ 锁释放)。
     const forceTimer = setTimeout(() => {
       logger.error('Forced exit after shutdown timeout');
       process.exit(1);
-    }, 30_000);
+    }, 25_000);
     forceTimer.unref();
 
+    // 分步日志:此前 'Shutting down…' 到 'Forced exit' 之间零日志,挂点
+    // 无法归因(2026-07-04 诊断,restart 1 静默 30 秒)。
+    const step = (name: string): void => logger.info({ step: name }, 'shutdown step');
+
     try {
+      // 顺序契约(2026-07-04 重排):先断"新工作的来源"(cron/ingress),再掐
+      // 在飞生成,最后才等 worker —— 旧顺序 closeWorker 在前,关机窗口内
+      // 新消息持续打断→replan→起新 LLM 生成,30s 必然等不完。
+      step('cron');
+      stopCronJobs();
+      // 关机广播先于 stopBot:中止全部在飞主回合生成(actor 收到 Shutdown
+      // abort 后把锚点条目回 pending 供重启重放)—— TG 链路挂死时 stopBot
+      // 可能拖延,不能让它推迟广播(review 加固 #1)。广播是同步的,窗口内
+      // 新注册的生成拿到的是预中止信号。
+      step('abort-generations');
+      try {
+        const { abortAllGenerations } = await import('./pipeline/turn/abort-registry.js');
+        abortAllGenerations();
+      } catch { /* non-critical */ }
+      try {
+        const { drainSelfContinuations } = await import('./pipeline/turn/self-continue.js');
+        await drainSelfContinuations();
+      } catch { /* non-critical */ }
+      // grammY stop() 只中止 getUpdates 长轮询并保存 offset,bot.api 仍可用
+      // —— 在飞 job 的 sendMessage 不受影响(旧注释"worker 先关,job 还要
+      // 用 bot 发消息"的前提不成立)。窗口内到达的消息停在 TG 服务端队列,
+      // 重启后原样送达。
+      step('ingress');
+      await stopBot();
+      step('http+buffers');
       server?.close();
       // Flush user-profile write buffers before closing DB
       try {
         const { _flushAllBuffers } = await import('./tracking/user-profile.js');
         _flushAllBuffers();
       } catch { /* non-critical */ }
-      // (debounce 内存缓冲已拆除 —— P1 单一入口后 pending 在 Redis,重启无损)
-      // 审计 #41:游离的自我接话不归 BullMQ 管 —— 先掐中止信号并排干,
-      // 否则它们可能在 teardown 之后 sendMessage / 留下孤儿 chat 锁。
-      // 信号掐下后,closeWorker 期间收尾的 job 再触发 maybeSelfContinue
-      // 也会在入口直接 no-op。
-      try {
-        const { drainSelfContinuations } = await import('./pipeline/turn/self-continue.js');
-        await drainSelfContinuations();
-      } catch { /* non-critical */ }
-      // Close worker FIRST — waits for in-progress jobs to finish
-      // (they still need bot for sendMessage). Then stop bot.
+      // 在飞 job 的 LLM fetch 已被 abort、deliver 睡眠挂了 shutdown 信号
+      // → 秒级收尾,worker.close 不再无限期等。
+      step('worker');
       await closeWorker();
-      await stopBot();
+      step('queue');
       await closeQueue();
-      stopCronJobs();
       // token 记账最后 flush 一次(别丢最后一分钟的账),需在 closeDb 之前。
       try { const { stopTokenLedger } = await import('./metrics/token-ledger.js'); stopTokenLedger(); } catch { /* non-critical */ }
+      step('redis+db');
       await closeRedis();
       closeDb();
       freeEncoder();

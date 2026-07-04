@@ -303,6 +303,12 @@ const envSchema = z.object({
   STEPFUN_CONSUMER_CONCURRENCY: z.coerce.number().int().positive().default(4),
   // 群深反思在工作池里的权重(重复入池次数):群内容真实演化、最不浪费,给更高权重。
   STEPFUN_CONSUMER_REFLECT_WEIGHT: z.coerce.number().int().positive().default(3),
+  // ── Mundo「难题攻坚」部门(可选,默认关)────────────────────────────────
+  // 第三方自建端点上的深推理模型(qwen3.6/映射 Mundo AI),擅长硬算法/并发/调试,
+  // 但延迟高、极耗 token、可能空转、端点自签证书不稳定 —— 只适合离线非关键任务且
+  // 输出必须人工/对拍复核。关时零足迹;开时 `mundo` usage 可被显式路由(设某
+  // AI_USAGE_X_LABEL=mundo,或 Redis 运行时路由覆盖),自带兜底链降级到可靠模型。
+  MUNDO_ENABLED: booleanFromEnv.default(false),
   // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
   // gate 与 planner 共享历史、看得到自己过往节奏判断)。
   TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(false),
@@ -335,6 +341,11 @@ const envSchema = z.object({
   TURN_INTERRUPT_QUIET_MS: z.coerce.number().int().nonnegative().default(1000),
   // 回合内内部轮次预算（reply + 自我接话 + 余量；MaiBot 是 10，保守起步）。
   TURN_MAX_INTERNAL_ROUNDS: z.coerce.number().int().positive().default(4),
+  // G12 执行期互斥:runChatTurn 入口 per-chat Redis 锁,堵死"多生产者并发
+  // scheduleTurn 造出双回合 → registerGeneration supersede 互杀 → replan
+  // 预算白烧"的竞态(2026-07-04 诊断:毫秒级成对 replanning 实锤)。
+  TURN_EXEC_LOCK_ENABLED: booleanFromEnv.default(false),
+  TURN_EXEC_LOCK_TTL_MS: z.coerce.number().int().positive().default(120_000),
   // ── Agentic planner（MaiBot 1.0.0 Maisaka 多轮 plan→act 借鉴）──
   // 开了之后 planned 路径用 generateText({tools,maxSteps}) 原生工具循环,
   // 工具结果回写 LLM 历史,可自适应换工具/重查;失败自动回退旧 JSON 计划。
@@ -506,6 +517,9 @@ const envSchema = z.object({
   SLEEP_SCHEDULE_ENABLED: booleanFromEnv.default(false),
   // 到点睡觉/起床时向最近活跃的群发晚安/早安(固定短句池,无 LLM)
   SLEEP_ANNOUNCE_ENABLED: booleanFromEnv.default(false),
+  // 晚安时机守卫:就寝边沿若 bot 5 分钟内在活跃群说过话(对话中),推迟
+  // 入睡相位 10 分钟,每晚最多 3 次 —— 治"自己刚回完话 50 秒就道晚安蒸发"。
+  SLEEP_BEDTIME_GUARD_ENABLED: booleanFromEnv.default(false),
 
   // ── DM 好感主动私聊 (功能 B) ──
   // B1:睡前/起床给「已私聊过 bot 的高好感用户」发悄悄话(带跨群外号)。默认关。
@@ -596,6 +610,7 @@ export interface EnvProvider {
   stream?: boolean;
   reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
   disableThinking?: boolean;
+  insecureTLS?: boolean;
 }
 
 export interface EnvUsage {
@@ -795,7 +810,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -823,6 +838,7 @@ export function getProviders(): Map<string, EnvProvider> {
       stream: readBool(fields['STREAM']),
       reasoningEffort: fields['REASONING'] as 'none' | 'low' | 'medium' | 'high' | undefined,
       disableThinking: fields['THINKING'] === 'disabled',
+      insecureTLS: readBool(fields['INSECURE']),
     });
   }
 

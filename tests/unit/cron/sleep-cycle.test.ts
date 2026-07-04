@@ -16,7 +16,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
 
-// Redis:get/set(NX)/del/zrange/mget
+// Redis:get/set(NX)/del/incr/zrange/mget
 const store = new Map<string, string>();
 let activeGroups: number[] = [];
 const redisMock = {
@@ -27,25 +27,37 @@ const redisMock = {
     return 'OK';
   }),
   del: vi.fn(async (k: string) => { store.delete(k); return 1; }),
+  incr: vi.fn(async (k: string) => {
+    const v = parseInt(store.get(k) ?? '0', 10) + 1;
+    store.set(k, String(v));
+    return v;
+  }),
+  expire: vi.fn(async () => 1),
   zrange: vi.fn(async () => activeGroups.map(String)),
   mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
 };
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 
-// 睡眠相位可控
+// 睡眠相位可控(hoisted:Fix C 需要断言 getSleepPhase 的 respectGlobalWake 实参)
+const { getSleepPhaseMock } = vi.hoisted(() => ({ getSleepPhaseMock: vi.fn() }));
 let phase: 'awake' | 'night' | 'nap' = 'awake';
 vi.mock('../../../src/tracking/sleep.js', () => ({
-  getSleepPhase: vi.fn(async () => phase),
+  getSleepPhase: getSleepPhaseMock,
   nightDateStr: vi.fn(() => '2026-06-12'),
+  holdBedtime: vi.fn(async () => { store.set('xxb:sleep:bedtime_hold', '1'); }),
+  isBedtimeHeld: vi.fn(async () => store.has('xxb:sleep:bedtime_hold')),
 }));
 
-// 睡眠队列可控
+// 睡眠队列可控(take 返回全量数组:一条闲聊 + 一条更晚的点名)
 let queues: { chatId: number; lastTs: number; hasAddressed: boolean }[] = [];
 const takeSleepPending = vi.fn(async (chatId: number) => {
   const idx = queues.findIndex((q) => q.chatId === chatId);
-  if (idx < 0) return null;
+  if (idx < 0) return [];
   queues.splice(idx, 1);
-  return { entry: { update: {}, chatId, messageId: 42, enqueuedAt: 0 }, rule: 'mention_self', ts: 1 };
+  return [
+    { entry: { update: {}, chatId, messageId: 41, enqueuedAt: 0 }, rule: 'heart', ts: 0 },
+    { entry: { update: {}, chatId, messageId: 42, enqueuedAt: 0 }, rule: 'mention_self', ts: 1 },
+  ];
 });
 const clearSleepPending = vi.fn(async (chatId: number) => {
   const idx = queues.findIndex((q) => q.chatId === chatId);
@@ -55,6 +67,11 @@ vi.mock('../../../src/tracking/sleep-queue.js', () => ({
   peekSleepQueues: vi.fn(async () => [...queues]),
   takeSleepPending: (chatId: number) => takeSleepPending(chatId),
   clearSleepPending: (chatId: number) => clearSleepPending(chatId),
+  ADDRESSED_RULES_FOR_PRIORITY: new Set([
+    'mention_self', 'mention_self_lookup',
+    'reply_to_self', 'reply_to_self_lookup', 'reply_to_self_followup_lookup',
+    'private_chat',
+  ]),
 }));
 
 const appendPending = vi.fn(async () => ({ count: 1, firstPendingAt: 0 }));
@@ -85,7 +102,11 @@ const sendMessage = vi.fn(async () => 555);
 vi.mock('../../../src/bot/sender/telegram.js', () => ({
   sendMessage: (...a: unknown[]) => sendMessage(...a),
 }));
-vi.mock('../../../src/tracking/social-needs.js', () => ({ markBotSpoke: vi.fn(async () => {}) }));
+const lastSpokeByChat = new Map<number, number>();
+vi.mock('../../../src/tracking/social-needs.js', () => ({
+  markBotSpoke: vi.fn(async () => {}),
+  getLastSpokeTs: vi.fn(async (chatId: number) => lastSpokeByChat.get(chatId) ?? null),
+}));
 vi.mock('../../../src/allowlist/allowlist.js', () => ({ isGroupAllowed: vi.fn(async () => true) }));
 
 const { _testEnvValues: envValues } = (await import('../../../src/env.js')) as unknown as {
@@ -101,14 +122,17 @@ const NOW_SEC = Math.floor(Date.now() / 1000);
 beforeEach(() => {
   store.clear();
   lastTsByChat.clear();
+  lastSpokeByChat.clear();
   activeGroups = [];
   queues = [];
   phase = 'awake';
   actorChat = true;
   envValues['SLEEP_SCHEDULE_ENABLED'] = true;
   envValues['SLEEP_ANNOUNCE_ENABLED'] = true;
+  envValues['SLEEP_BEDTIME_GUARD_ENABLED'] = false;
   _resetBedtimeShifts();
   vi.clearAllMocks();
+  getSleepPhaseMock.mockImplementation(async () => phase);
 });
 
 describe('runSleepCycle', () => {
@@ -159,32 +183,91 @@ describe('runSleepCycle', () => {
     const greeted = sendMessage.mock.calls.map((c) => c[0]);
     expect(greeted).toContain(-300);
     expect(greeted).toContain(-100);
-    // 同一 tick 的排水步骤立即开始补回(唯一欠账群即回放完毕,额度键随之清掉)
-    expect(appendPending).toHaveBeenCalledTimes(1);
+    // 同一 tick 的排水步骤立即开始补回:全量注入(2 条),额度键随之清掉
+    expect(appendPending).toHaveBeenCalledTimes(2);
     expect((appendPending.mock.calls[0]![0] as { chatId: number }).chatId).toBe(-300);
     expect(store.has('xxb:sleep:drain')).toBe(false);
+    // Fix C:边沿检测必须用排程相位(respectGlobalWake=false),否则 DM 临时
+    // 唤醒键会抖出半夜假早安 + 提前排空睡眠队列
+    expect(getSleepPhaseMock).toHaveBeenCalledWith(expect.any(Date), false);
   });
 
-  it('补回排水:每 tick 回放一个 chat,额度递减,清空即停', async () => {
+  it('补回排水:每 tick 回放一个 chat 的全部欠账,点名锚点+direct 标记,额度递减,清空即停', async () => {
     store.set('xxb:sleep:laststate', 'awake');
     store.set('xxb:sleep:drain', '5');
     queues = [
       { chatId: -1, lastTs: 100, hasAddressed: true },
       { chatId: -2, lastTs: 200, hasAddressed: false },
     ];
-    await runSleepCycle(); // 回放 -1(点名优先)
-    expect(appendPending).toHaveBeenCalledTimes(1);
-    expect((appendPending.mock.calls[0]![0] as { chatId: number; sleepCatchup?: boolean }).chatId).toBe(-1);
-    expect((appendPending.mock.calls[0]![0] as { sleepCatchup?: boolean }).sleepCatchup).toBe(true);
+    await runSleepCycle(); // 回放 -1(点名优先):2 条全量注入
+    expect(appendPending).toHaveBeenCalledTimes(2);
+    const first = appendPending.mock.calls[0]![0] as { chatId: number; messageId: number; sleepCatchup?: boolean; direct?: boolean };
+    const second = appendPending.mock.calls[1]![0] as { messageId: number; direct?: boolean };
+    expect(first.chatId).toBe(-1);
+    expect(first.sleepCatchup).toBe(true);
+    expect(first.direct).toBe(false);     // heart 闲聊条目不标 direct
+    expect(second.direct).toBe(true);     // mention_self 点名条目标 direct
     expect(scheduleTurn).toHaveBeenCalledTimes(1);
+    // 锚点 = 点名池里最新一条(#42),不是随便取最后
+    expect((scheduleTurn.mock.calls[0]![1] as { anchorMessageId?: number }).anchorMessageId).toBe(42);
     expect(store.get('xxb:sleep:drain')).toBe('4');
 
     await runSleepCycle(); // 回放 -2,队列空 → 额度键删除
-    expect(appendPending).toHaveBeenCalledTimes(2);
+    expect(appendPending).toHaveBeenCalledTimes(4);
     expect(store.has('xxb:sleep:drain')).toBe(false);
 
     await runSleepCycle(); // 没额度键 → 不再回放
-    expect(appendPending).toHaveBeenCalledTimes(2);
+    expect(appendPending).toHaveBeenCalledTimes(4);
+  });
+
+  it('晚安守卫:对话进行中 → 推迟入睡相位,不发晚安,计数 +1', async () => {
+    envValues['SLEEP_BEDTIME_GUARD_ENABLED'] = true;
+    store.set('xxb:sleep:laststate', 'awake');
+    phase = 'night';
+    activeGroups = [-100];
+    lastTsByChat.set(-100, NOW_SEC - 60);          // 群活跃(进 pickActiveChats)
+    lastSpokeByChat.set(-100, NOW_SEC - 50);       // bot 50 秒前刚说过话 = 对话中
+    await runSleepCycle();
+    expect(sendMessage).not.toHaveBeenCalled();                 // 不发晚安
+    expect(store.get('xxb:sleep:laststate')).toBe('awake');    // 不做入睡转换
+    expect(store.has('xxb:sleep:bedtime_hold')).toBe(true);    // hold 已设(消息路径当醒)
+    expect(store.get('xxb:sleep:postpone:2026-06-12')).toBe('1');
+  });
+
+  it('晚安守卫:hold 生效中 → 跳过转换且不重复计数', async () => {
+    envValues['SLEEP_BEDTIME_GUARD_ENABLED'] = true;
+    store.set('xxb:sleep:laststate', 'awake');
+    store.set('xxb:sleep:bedtime_hold', '1');
+    phase = 'night';
+    await runSleepCycle();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(store.get('xxb:sleep:laststate')).toBe('awake');
+    expect(store.has('xxb:sleep:postpone:2026-06-12')).toBe(false); // 没走 INCR
+  });
+
+  it('晚安守卫:每晚推迟上限 3 次 → 第 4 次照常入睡("先撤"是合理道别)', async () => {
+    envValues['SLEEP_BEDTIME_GUARD_ENABLED'] = true;
+    store.set('xxb:sleep:laststate', 'awake');
+    store.set('xxb:sleep:postpone:2026-06-12', '3'); // 已推迟 3 次
+    phase = 'night';
+    activeGroups = [-100];
+    lastTsByChat.set(-100, NOW_SEC - 60);
+    lastSpokeByChat.set(-100, NOW_SEC - 50);        // 仍在对话中
+    await runSleepCycle();
+    expect(store.get('xxb:sleep:laststate')).toBe('asleep'); // 上限到 → 转换发生
+    expect(sendMessage).toHaveBeenCalledTimes(1);            // 晚安照发
+  });
+
+  it('晚安守卫:bot 早无发言 → 不推迟,按表入睡', async () => {
+    envValues['SLEEP_BEDTIME_GUARD_ENABLED'] = true;
+    store.set('xxb:sleep:laststate', 'awake');
+    phase = 'night';
+    activeGroups = [-100];
+    lastTsByChat.set(-100, NOW_SEC - 60);           // 群里有人说话
+    lastSpokeByChat.set(-100, NOW_SEC - 900);       // 但 bot 15 分钟没吭声 ≠ 对话中
+    await runSleepCycle();
+    expect(store.get('xxb:sleep:laststate')).toBe('asleep');
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('补回排水:非 turn-actor 群残留 → 先清队列再跳过(不假装回放,不卡死)', async () => {

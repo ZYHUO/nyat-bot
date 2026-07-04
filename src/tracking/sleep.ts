@@ -77,17 +77,44 @@ export async function getSleepPhase(now: Date = new Date(), respectGlobalWake = 
   }
   const ls = getLifeState(now);
   if (ls.state !== 'sleeping') return 'awake';
-  // 排程说该睡了 —— 此时(且仅此时)才查全局临时唤醒键,避免给白天每次调用加 redis 往返。
+  // 排程说该睡了 —— 此时(且仅此时)才查各临时唤醒键,避免给白天每次调用加 redis 往返。
   // respectGlobalWake=false(走 isAsleep 的调用,即各主动 cron)忽略临时唤醒:DM 唤醒只让 bot
   // **回应群里来消息**,不应让半夜的 DM 触发 idle/proactive/pm-nudge 等主动外联(评审 Finding 1)。
-  if (respectGlobalWake && env().SLEEP_WAKE_ON_DM_ENABLED) {
+  if (respectGlobalWake) {
+    // 就寝推迟 hold(对话进行中晚安守卫):hold 生效期内消息路径当醒。
+    // **必须**独立于 SLEEP_WAKE_ON_DM_ENABLED(默认 false)—— 嵌进那个分支
+    // 会变成"扣住晚安但照样静音",对话中 bot 无声消失还没有道别。
     try {
-      if (await getRedis().get(GLOBAL_WAKE_KEY)) return 'awake'; // DM 唤醒窗口内 → 收消息路径当醒
+      if (await getRedis().get(BEDTIME_HOLD_KEY)) return 'awake';
     } catch (err) {
-      logger.debug({ err }, 'sleep: global-wake read failed, falling back to schedule');
+      logger.debug({ err }, 'sleep: bedtime-hold read failed, falling back to schedule');
+    }
+    if (env().SLEEP_WAKE_ON_DM_ENABLED) {
+      try {
+        if (await getRedis().get(GLOBAL_WAKE_KEY)) return 'awake'; // DM 唤醒窗口内 → 收消息路径当醒
+      } catch (err) {
+        logger.debug({ err }, 'sleep: global-wake read failed, falling back to schedule');
+      }
     }
   }
   return ls.nap ? 'nap' : 'night';
+}
+
+// ── 就寝推迟 hold(晚安时机守卫,sleep-cycle 写/查)─────────────────
+const BEDTIME_HOLD_KEY = 'xxb:sleep:bedtime_hold';
+
+/** 推迟就寝 N 分钟:hold 生效期内消息路径按醒处理、sleep-cycle 不做入睡转换。 */
+export async function holdBedtime(minutes: number): Promise<void> {
+  await getRedis().set(BEDTIME_HOLD_KEY, '1', 'EX', Math.max(60, Math.round(minutes * 60)));
+}
+
+/** hold 是否生效中(sleep-cycle 边沿检测用;读失败按未 hold 处理)。 */
+export async function isBedtimeHeld(): Promise<boolean> {
+  try {
+    return (await getRedis().get(BEDTIME_HOLD_KEY)) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /**

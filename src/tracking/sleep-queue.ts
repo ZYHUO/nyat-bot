@@ -18,7 +18,7 @@ import type { PendingEntry } from '../pipeline/turn/types.js';
 
 const QKEY = (chatId: number): string => `xxb:sleep:pendingq:${chatId}`;
 const INDEX_KEY = 'xxb:sleep:pendingq:chats';
-const MAX_PER_CHAT = 3;       // tunable — 每 chat 攒几条(保最新)
+const MAX_PER_CHAT = 8;       // tunable — 每 chat 攒几条(保最新;曾为 3,48h 实测 52% 欠账被截断丢弃)
 const TTL_SEC = 18 * 3600;    // 攒到次日中午左右自然过期
 
 export interface SleepPendingItem {
@@ -28,8 +28,9 @@ export interface SleepPendingItem {
   ts: number;
 }
 
-/** 点名类规则:补回时优先(@/回 bot/私聊 比闲聊更欠回复) */
-const ADDRESSED_RULES_FOR_PRIORITY = new Set([
+/** 点名类规则:补回时优先(@/回 bot/私聊 比闲聊更欠回复)。导出供
+ *  sleep-cycle 的补回消费方挑锚点/标 direct 用。 */
+export const ADDRESSED_RULES_FOR_PRIORITY = new Set([
   'mention_self', 'mention_self_lookup',
   'reply_to_self', 'reply_to_self_lookup', 'reply_to_self_followup_lookup',
   'private_chat',
@@ -84,11 +85,12 @@ export async function listSleepPendingChats(): Promise<number[]> {
 }
 
 /**
- * 取走某 chat "最值得补"的一条并清空该 chat 队列:点名类规则优先,
- * 其次最新。补回每 chat 只回一条 —— 回放回合自带完整上下文,旧的几条
- * 写手都看得到,逐条硬回反而像机器人。
+ * 取走某 chat 的**全部**欠账并清空队列(时间序,旧→新)。
+ * 曾只返回"最值得补的一条"并销毁其余(48h 实测 52% 欠账被丢):现在
+ * 全量交给消费方 —— 补回仍是一个回合一个念头(actor burst 语义),
+ * 全部条目进 pending 后写手看得到整段欠账,锚点由消费方挑。
  */
-export async function takeSleepPending(chatId: number): Promise<SleepPendingItem | null> {
+export async function takeSleepPending(chatId: number): Promise<SleepPendingItem[]> {
   try {
     const redis = getRedis();
     const raw = await redis.lrange(QKEY(chatId), 0, -1);
@@ -101,13 +103,10 @@ export async function takeSleepPending(chatId: number): Promise<SleepPendingItem
         /* malformed, drop */
       }
     }
-    if (items.length === 0) return null;
-    const addressed = items.filter((i) => ADDRESSED_RULES_FOR_PRIORITY.has(i.rule ?? ''));
-    const pool = addressed.length > 0 ? addressed : items;
-    return pool[pool.length - 1]!; // 各自池里取最新
+    return items;
   } catch (err) {
     logger.debug({ err, chatId }, 'Sleep queue: take failed');
-    return null;
+    return [];
   }
 }
 

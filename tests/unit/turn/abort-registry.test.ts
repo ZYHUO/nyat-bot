@@ -16,8 +16,12 @@ import {
   clearGeneration,
   hasActiveGeneration,
   interruptGeneration,
+  abortAllGenerations,
+  isShuttingDown,
+  getShutdownSignal,
   _resetAbortRegistry,
 } from '../../../src/pipeline/turn/abort-registry.js';
+import { isCallerAbort } from '../../../src/shared/abort.js';
 
 const CHAT = -100600;
 
@@ -116,5 +120,39 @@ describe('abort registry', () => {
     const c = registerGeneration(CHAT, 1);
     interruptGeneration(CHAT, 'new_message');
     expect((c.signal.reason as Error).name).toBe('TurnInterrupt');
+  });
+});
+
+describe('shutdown broadcast (关机契约)', () => {
+  it('abortAllGenerations 中止全部在飞生成,reason=Shutdown(isCallerAbort 白名单生效)', () => {
+    const a = registerGeneration(-1, 1);
+    const b = registerGeneration(-2, 1);
+    expect(isShuttingDown()).toBe(false);
+
+    abortAllGenerations();
+
+    expect(isShuttingDown()).toBe(true);
+    expect(a.signal.aborted).toBe(true);
+    expect(b.signal.aborted).toBe(true);
+    expect((a.signal.reason as Error).name).toBe('Shutdown');
+    expect(isCallerAbort(a.signal)).toBe(true);
+    expect(getShutdownSignal().aborted).toBe(true);
+  });
+
+  it('广播后迟到的注册:register 拿到预中止 controller,weak 直接 null', () => {
+    abortAllGenerations();
+    const late = registerGeneration(-3, 1);
+    expect(late.signal.aborted).toBe(true);
+    expect((late.signal.reason as Error).name).toBe('Shutdown');
+    expect(hasActiveGeneration(-3)).toBe(false); // 不进 active(没有生成好清)
+    expect(registerWeakGeneration(-3, 1)).toBeNull();
+  });
+
+  it('_resetAbortRegistry 复位关机状态(测试间隔离)', () => {
+    abortAllGenerations();
+    _resetAbortRegistry();
+    expect(isShuttingDown()).toBe(false);
+    expect(getShutdownSignal().aborted).toBe(false);
+    expect(registerGeneration(-4, 1).signal.aborted).toBe(false);
   });
 });

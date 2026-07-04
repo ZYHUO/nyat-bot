@@ -13,12 +13,25 @@ const envState = {
   // review R3#4:per-person 抑制开关必须有初值 + 在 beforeEach 复位,否则
   // 设过它的用例会把 true 泄漏给后续用例,悄悄翻转 WAIT 抑制分支。
   TURN_WAIT_PER_PERSON: false as boolean,
+  TURN_EXEC_LOCK_ENABLED: false as boolean,
+  TURN_EXEC_LOCK_TTL_MS: 120_000,
+  TURN_GATE_DEFER_MAX_REPLAYS: 1,
 };
 
-const { processPipelineMock, scheduleTurnMock, transitionToRunningMock } = vi.hoisted(() => ({
+const { processPipelineMock, scheduleTurnMock, transitionToRunningMock, appendPendingMock, acquireLockMock, renewLockMock, releaseLockMock } = vi.hoisted(() => ({
   processPipelineMock: vi.fn(async () => {}),
   scheduleTurnMock: vi.fn(async () => {}),
   transitionToRunningMock: vi.fn(async () => {}),
+  appendPendingMock: vi.fn(async () => ({ count: 1, firstPendingAt: 0 })),
+  acquireLockMock: vi.fn(async () => true),
+  renewLockMock: vi.fn(async () => true),
+  releaseLockMock: vi.fn(async () => {}),
+}));
+
+vi.mock('../../../src/pipeline/turn/turn-lock.js', () => ({
+  acquireTurnLock: acquireLockMock,
+  renewTurnLock: renewLockMock,
+  releaseTurnLock: releaseLockMock,
 }));
 
 const bufferState: {
@@ -64,6 +77,7 @@ vi.mock('../../../src/pipeline/turn/buffer.js', () => ({
   bumpEpoch: vi.fn(async () => ++bufferState.epoch),
   getLastMsgAt: vi.fn(async () => undefined),
   hasPendingDirect: vi.fn(async () => false),
+  appendPending: appendPendingMock,
 }));
 
 import { runChatTurn, isTurnActorChat } from '../../../src/pipeline/turn/actor.js';
@@ -116,6 +130,12 @@ beforeEach(() => {
   envState.TIMING_GATE_ENABLED = false;
   envState.TURN_ABORT_ENABLED = false;
   envState.TURN_WAIT_PER_PERSON = false;
+  envState.TURN_EXEC_LOCK_ENABLED = false;
+  appendPendingMock.mockClear();
+  acquireLockMock.mockClear();
+  acquireLockMock.mockResolvedValue(true);
+  renewLockMock.mockClear();
+  releaseLockMock.mockClear();
   _resetAbortRegistry();
 });
 
@@ -728,5 +748,93 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
 
     const tracked = processPipelineMock.mock.calls[0]![0] as { turnContext?: unknown };
     expect(tracked.turnContext).toBeUndefined();
+  });
+});
+
+describe('G12 执行期互斥锁(TURN_EXEC_LOCK_ENABLED)', () => {
+  it('flag off → 不碰锁,原路径零变化', async () => {
+    bufferState.pending = [entry(1)];
+    await runChatTurn(turnJob(), 'turn-1');
+    expect(acquireLockMock).not.toHaveBeenCalled();
+    expect(processPipelineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('锁忙 → 不 drain(不偷 burst)、排 noReschedule 短延迟重试', async () => {
+    envState.TURN_EXEC_LOCK_ENABLED = true;
+    acquireLockMock.mockResolvedValue(false);
+    bufferState.pending = [entry(1)];
+
+    await runChatTurn(turnJob(), 'turn-loser');
+
+    expect(processPipelineMock).not.toHaveBeenCalled();
+    expect(bufferState.pending.length).toBe(1); // burst 原封不动留给持锁回合
+    expect(scheduleTurnMock).toHaveBeenCalledTimes(1);
+    expect(scheduleTurnMock.mock.calls[0]![1]).toMatchObject({
+      noReschedule: true,
+      delayMsOverride: 2_500,
+    });
+    expect(releaseLockMock).not.toHaveBeenCalled(); // 没拿到就没资格放
+  });
+
+  it('拿到锁 → 跑完回合后 finally 放锁(含收尾 reschedule 之后)', async () => {
+    envState.TURN_EXEC_LOCK_ENABLED = true;
+    bufferState.pending = [entry(1)];
+    bufferState.postDrainPendingCount = 1; // 收尾发现新 pending → forceNew 重排
+
+    const order: string[] = [];
+    scheduleTurnMock.mockImplementation(async () => { order.push('reschedule'); });
+    releaseLockMock.mockImplementation(async () => { order.push('release'); });
+
+    await runChatTurn(turnJob(), 'turn-winner');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(1);
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+    // 放锁必须在收尾 reschedule 之后 —— 唤醒不丢的关键顺序
+    expect(order).toEqual(['reschedule', 'release']);
+  });
+
+  it('回合内部抛错 → finally 仍放锁(锁不泄漏)', async () => {
+    envState.TURN_EXEC_LOCK_ENABLED = true;
+    bufferState.pending = [entry(1)];
+    // drain 级错误会浮出 runChatTurnInner(entry 级错误会被吞)
+    const { drainPending } = await import('../../../src/pipeline/turn/buffer.js');
+    vi.mocked(drainPending).mockRejectedValueOnce(new Error('redis down'));
+
+    await expect(runChatTurn(turnJob(), 'turn-crash')).rejects.toThrow('redis down');
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('关机契约(shutdown requeue)', () => {
+  it('关机广播后被 abort 的锚点条目 → 回 pending(deferReplay)不再 replan,回合正常返回', async () => {
+    const { abortAllGenerations } = await import('../../../src/pipeline/turn/abort-registry.js');
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(7)];
+    abortAllGenerations(); // 先广播:registerGeneration 返回预中止 controller
+    processPipelineMock.mockRejectedValueOnce(
+      Object.assign(new Error('shutdown'), { name: 'Shutdown' }),
+    );
+
+    await runChatTurn(turnJob(), 'turn-shutdown');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(1); // 无 replan 二进宫
+    expect(appendPendingMock).toHaveBeenCalledTimes(1);
+    expect(appendPendingMock.mock.calls[0]![0]).toMatchObject({
+      messageId: 7,
+      deferReplay: true,
+    });
+  });
+
+  it('对照:未关机时同样的 abort 走 replan 重规划(既有语义不回归)', async () => {
+    envState.TURN_ABORT_ENABLED = true;
+    bufferState.pending = [entry(8)];
+    processPipelineMock
+      .mockRejectedValueOnce(Object.assign(new Error('turn_interrupt: x'), { name: 'TurnInterrupt' }))
+      .mockResolvedValueOnce(undefined);
+
+    await runChatTurn(turnJob(), 'turn-replan');
+
+    expect(processPipelineMock).toHaveBeenCalledTimes(2); // replan 后重试
+    expect(appendPendingMock).not.toHaveBeenCalled();
   });
 });

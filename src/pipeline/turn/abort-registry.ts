@@ -13,6 +13,7 @@
 //     放行当前生成,避免高频群把 bot 永久掐死
 //   - 打断成功后调用方应等静默期(quiet-period.ts)再重规划
 
+import { setMaxListeners } from 'node:events';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
@@ -33,6 +34,45 @@ const active = new Map<number, ActiveGeneration>();
 /** 每 chat 连续打断计数;生成无打断走完即重置 */
 const consecutiveInterrupts = new Map<number, number>();
 const interruptStats = new Map<number, InterruptStat>();
+
+// ── 关机契约(2026-07-04):主回合生成的 Shutdown 广播 ──
+// 此前只有 self-continue 有关机信号,主回合生成没人 abort → closeWorker
+// 无限期等在飞 chat_turn(LLM+humanizer 睡眠可跑数分钟)→ 30s 强杀。
+let shuttingDown = false;
+let shutdownController = makeShutdownController();
+
+function makeShutdownController(): AbortController {
+  const c = new AbortController();
+  // 共享信号被 deliver 的每个 sleepWithAbort 挂/摘监听,并发高时会撞
+  // Node 默认 10 listener 上限的误告警 —— 放开(0 = 不限)。
+  try { setMaxListeners(0, c.signal); } catch { /* 非关键 */ }
+  return c;
+}
+
+function shutdownError(): Error {
+  return Object.assign(new Error('shutdown'), { name: 'Shutdown' });
+}
+
+/** index.ts shutdown() 调:中止全部在飞生成,此后新注册直接拿到已中止信号。 */
+export function abortAllGenerations(): void {
+  shuttingDown = true;
+  if (!shutdownController.signal.aborted) shutdownController.abort(shutdownError());
+  for (const [chatId, gen] of active) {
+    if (!gen.controller.signal.aborted) {
+      gen.controller.abort(shutdownError());
+      logger.info({ chatId, epoch: gen.epoch }, 'In-flight generation aborted for shutdown');
+    }
+  }
+}
+
+export function isShuttingDown(): boolean {
+  return shuttingDown;
+}
+
+/** deliver 等长睡眠路径挂这个信号 —— 关机广播能叫醒它们。 */
+export function getShutdownSignal(): AbortSignal {
+  return shutdownController.signal;
+}
 
 function noteInterrupt(chatId: number, reason: string): InterruptStat {
   const now = Date.now();
@@ -73,10 +113,18 @@ function turnInterruptError(reason: string): Error {
  * 直接掐掉旧的 —— 真回复永远优先于跟拍(codex review #2)。
  */
 export function registerGeneration(chatId: number, epoch: number): AbortController {
+  if (shuttingDown) {
+    // 广播之后迟到的注册:第一跳就中止,不进 active(没有生成好清)。
+    const controller = new AbortController();
+    controller.abort(shutdownError());
+    return controller;
+  }
   const prior = active.get(chatId);
   if (prior && !prior.controller.signal.aborted) {
     prior.controller.abort(turnInterruptError('superseded by newer generation'));
-    logger.debug({ chatId, priorEpoch: prior.epoch }, 'Prior in-flight generation superseded');
+    // info 级:TURN_EXEC_LOCK 上线后 supersede 应归零(双回合互杀的直接证据,
+    // debug 级曾让这个竞态在生产隐形了两周)。再现 = 锁失效告警。
+    logger.info({ chatId, priorEpoch: prior.epoch }, 'Prior in-flight generation superseded');
   }
   const controller = new AbortController();
   active.set(chatId, { controller, epoch, startedAt: Date.now() });
@@ -89,6 +137,7 @@ export function registerGeneration(chatId: number, epoch: number): AbortControll
  * 倒挂,review-workflow P1)。
  */
 export function registerWeakGeneration(chatId: number, epoch: number): AbortController | null {
+  if (shuttingDown) return null; // 关机中不再起跟拍
   const prior = active.get(chatId);
   if (prior && !prior.controller.signal.aborted) {
     logger.debug({ chatId }, 'Weak generation yielded to active generation');
@@ -157,4 +206,6 @@ export function _resetAbortRegistry(): void {
   active.clear();
   consecutiveInterrupts.clear();
   interruptStats.clear();
+  shuttingDown = false;
+  shutdownController = makeShutdownController();
 }

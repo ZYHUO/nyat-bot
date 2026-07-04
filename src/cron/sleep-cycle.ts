@@ -18,11 +18,16 @@
 import { getRedis } from '../db/redis.js';
 import { getRecent, addAssistant } from '../pipeline/context/manager.js';
 import { sendMessage } from '../bot/sender/telegram.js';
-import { markBotSpoke } from '../tracking/social-needs.js';
-import { getSleepPhase, nightDateStr } from '../tracking/sleep.js';
+import { markBotSpoke, getLastSpokeTs } from '../tracking/social-needs.js';
+import { getSleepPhase, nightDateStr, holdBedtime, isBedtimeHeld } from '../tracking/sleep.js';
 import { setBedtimeShift, effectiveSleepMin, daySchedule } from '../tracking/life-state.js';
 import { getSpeechCounts, bedtimeShiftFromCount, bjDateStr } from '../tracking/speech-meter.js';
-import { peekSleepQueues, takeSleepPending, clearSleepPending } from '../tracking/sleep-queue.js';
+import {
+  peekSleepQueues,
+  takeSleepPending,
+  clearSleepPending,
+  ADDRESSED_RULES_FOR_PRIORITY,
+} from '../tracking/sleep-queue.js';
 import { appendPending } from '../pipeline/turn/buffer.js';
 import { scheduleTurn } from '../queue/turn-scheduler.js';
 import { isTurnActorChat } from '../pipeline/turn/flags.js';
@@ -45,6 +50,46 @@ const MORNING_ACTIVITY_SEC = 8 * 3600;   // 早安:夜里有动静的群(8h 窗)
 const MORNING_DRAIN_BUDGET = 5;          // 起床后最多补几个 chat(每分钟 1 个)
 const NIGHT_DRAIN_BUDGET = 2;            // 半夜醒最多补几个("一次不能太多")
 const NIGHT_WAKE_PROBABILITY = 0.5;      // 每晚有没有半夜醒(seeded)
+
+// ── 晚安时机守卫(SLEEP_BEDTIME_GUARD_ENABLED)──
+// 生产实锤:bot 自己回复后 50 秒就道晚安,进行中的对话被拦腰静音。
+const BEDTIME_GUARD_SPOKE_SEC = 300;     // bot 5 分钟内在活跃群说过话 = 对话中
+const BEDTIME_POSTPONE_MIN = 10;         // 每次推迟 10 分钟
+const BEDTIME_POSTPONE_MAX = 3;          // 每晚上限 3 次 → 最多推迟 30 分钟
+const POSTPONE_COUNT_KEY = (nightDate: string): string => `xxb:sleep:postpone:${nightDate}`;
+
+/**
+ * 就寝边沿的对话中守卫:返回 true = 本 tick 跳过入睡转换(hold 生效中,
+ * 或刚推迟了一次)。fail-soft:任何异常 → false(按表入睡,现状行为)。
+ * hold 键同时被 getSleepPhase(消息路径)认作醒 —— 推迟的是**相位**,
+ * 不是只扣住晚安(否则静音照旧、还没有道别)。
+ */
+async function shouldPostponeBedtime(now: Date): Promise<boolean> {
+  try {
+    if (await isBedtimeHeld()) return true;
+    const activeChats = await pickActiveChats(GOODNIGHT_ACTIVITY_SEC);
+    let midConversation = false;
+    for (const chatId of activeChats) {
+      const ts = await getLastSpokeTs(chatId);
+      if (ts !== null && Date.now() / 1000 - ts <= BEDTIME_GUARD_SPOKE_SEC) {
+        midConversation = true;
+        break;
+      }
+    }
+    if (!midConversation) return false;
+    const redis = getRedis();
+    const key = POSTPONE_COUNT_KEY(nightDateStr(now));
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, 36 * 3600);
+    if (count > BEDTIME_POSTPONE_MAX) return false; // 上限到 → 照常睡("先撤"是合理道别)
+    await holdBedtime(BEDTIME_POSTPONE_MIN);
+    logger.info({ count, max: BEDTIME_POSTPONE_MAX }, 'Sleep cycle: bedtime postponed (mid-conversation)');
+    return true;
+  } catch (err) {
+    logger.debug({ err }, 'Sleep cycle: bedtime guard failed (fail-soft: sleep on schedule)');
+    return false;
+  }
+}
 
 // 固定短句池 —— persona 生成失败时的回落
 const GOODNIGHT_POOL = [
@@ -185,16 +230,33 @@ async function drainOneChat(): Promise<boolean> {
     logger.info({ chatId }, 'Sleep cycle: chat not on turn actor, queue dropped');
     return queues.length > 1;
   }
-  const item = await takeSleepPending(chatId); // 取最欠回的一条并清空该 chat
-  if (!item) return queues.length > 1;
+  const items = await takeSleepPending(chatId); // 取全部欠账(旧→新)并清空该 chat
+  if (items.length === 0) return queues.length > 1;
   try {
-    await appendPending({ ...item.entry, waitReplay: true, sleepCatchup: true });
+    // 全量注入 pending(曾只回放 1 条、销毁其余 —— 48h 实测 52% 欠账丢失)。
+    // 仍是一个回合一个念头:全部条目带 waitReplay(drain 时 hasFresh=false
+    // 全保留),点名条目标 direct → actor 锚点选择自然落在点名消息上
+    // (最后一条 direct 优先),非锚点条目 tracking-only 但写手经 burstIds
+    // 看得到整段欠账。
+    const addressed = items.filter((i) => ADDRESSED_RULES_FOR_PRIORITY.has(i.rule ?? ''));
+    const anchor = (addressed.length > 0 ? addressed : items).at(-1)!;
+    for (const it of items) {
+      await appendPending({
+        ...it.entry,
+        waitReplay: true,
+        sleepCatchup: true,
+        direct: ADDRESSED_RULES_FOR_PRIORITY.has(it.rule ?? ''),
+      });
+    }
     await scheduleTurn(chatId, {
       trigger: 'wait_timeout',
       delayMsOverride: 0,
-      anchorMessageId: item.entry.messageId,
+      anchorMessageId: anchor.entry.messageId,
     });
-    logger.info({ chatId, messageId: item.entry.messageId, rule: item.rule }, 'Sleep cycle: catch-up replayed');
+    logger.info(
+      { chatId, replayed: items.length, anchorMessageId: anchor.entry.messageId, anchorRule: anchor.rule },
+      'Sleep cycle: catch-up replayed',
+    );
   } catch (err) {
     logger.warn({ err, chatId }, 'Sleep cycle: catch-up replay failed');
   }
@@ -217,10 +279,17 @@ export async function runSleepCycle(): Promise<void> {
   }
 
   // 2. 边沿检测(午睡不算:nap 不说晚安/早安、不触发补回)
-  const phase = await getSleepPhase(now);
+  // respectGlobalWake=false:边沿/半夜醒/排水看**排程**相位 —— DM 临时唤醒
+  // 键曾让这里抖动出半夜假早安(00:37 早安 + 20 分钟后二次晚安),还提前
+  // 触发 morning drain 把睡眠队列半夜排空(补回丢失的放大器,Fix C)。
+  const phase = await getSleepPhase(now, false);
   const cur = phase === 'night' ? 'asleep' : 'awake';
   const prev = await redis.get(LAST_STATE_KEY);
   if (prev !== cur) {
+    // 晚安时机守卫:对话进行中 → 推迟入睡转换(hold 相位,有界 ≤3 次/晚)。
+    if (cur === 'asleep' && prev !== null && e.SLEEP_BEDTIME_GUARD_ENABLED && (await shouldPostponeBedtime(now))) {
+      return;
+    }
     await redis.set(LAST_STATE_KEY, cur);
     if (prev === null) {
       logger.info({ cur }, 'Sleep cycle: state initialized silently');

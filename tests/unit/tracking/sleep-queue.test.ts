@@ -60,11 +60,14 @@ beforeEach(() => {
 });
 
 describe('sleep-queue', () => {
-  it('push 保最新 3 条 + 维护 chat 索引', async () => {
-    for (let i = 1; i <= 5; i++) {
+  it('push 保最新 8 条 + 维护 chat 索引', async () => {
+    for (let i = 1; i <= 10; i++) {
       await pushSleepPending(-100, { entry: entry(i), rule: 'heart', ts: i });
     }
-    expect(lists.get('xxb:sleep:pendingq:-100')!.length).toBe(3);
+    const kept = lists.get('xxb:sleep:pendingq:-100')!;
+    expect(kept.length).toBe(8);
+    // 保最新:1、2 被 LTRIM 掉
+    expect((JSON.parse(kept[0]!) as { entry: { messageId: number } }).entry.messageId).toBe(3);
     expect(await listSleepPendingChats()).toEqual([-100]);
   });
 
@@ -80,25 +83,26 @@ describe('sleep-queue', () => {
     expect(await pushSleepPending(-100, { entry: entry(1), rule: 'heart', ts: 1 })).toBe(true);
   });
 
-  it('take:点名规则优先于更新的闲聊;取后清空', async () => {
+  it('take:返回全部欠账(旧→新)并清空;二次取为空(曾只回放 1 条销毁其余 → 52% 丢失)', async () => {
     await pushSleepPending(-100, { entry: entry(1), rule: 'mention_self', ts: 1 });
     await pushSleepPending(-100, { entry: entry(2), rule: 'heart', ts: 2 });
-    const item = await takeSleepPending(-100);
-    expect(item!.entry.messageId).toBe(1); // 点名优先,尽管 #2 更新
-    expect(await takeSleepPending(-100)).toBeNull();
+    await pushSleepPending(-100, { entry: entry(3), rule: 'turn_replan', ts: 3 });
+    const items = await takeSleepPending(-100);
+    expect(items.map((i) => i.entry.messageId)).toEqual([1, 2, 3]);
+    expect(await takeSleepPending(-100)).toEqual([]);
     expect(await listSleepPendingChats()).toEqual([]);
   });
 
-  it('take:没有点名时取最新', async () => {
-    await pushSleepPending(-100, { entry: entry(1), rule: 'heart', ts: 1 });
-    await pushSleepPending(-100, { entry: entry(2), rule: 'turn_replan', ts: 2 });
-    expect((await takeSleepPending(-100))!.entry.messageId).toBe(2);
+  it('点名规则集合导出给消费方挑锚点/标 direct', async () => {
+    const { ADDRESSED_RULES_FOR_PRIORITY } = await import('../../../src/tracking/sleep-queue.js');
+    expect(ADDRESSED_RULES_FOR_PRIORITY.has('mention_self')).toBe(true);
+    expect(ADDRESSED_RULES_FOR_PRIORITY.has('heart')).toBe(false);
   });
 
   it('clear:被吵醒看过手机 → 欠账清零', async () => {
     await pushSleepPending(-100, { entry: entry(1), rule: 'heart', ts: 1 });
     await clearSleepPending(-100);
-    expect(await takeSleepPending(-100)).toBeNull();
+    expect(await takeSleepPending(-100)).toEqual([]);
     expect(await listSleepPendingChats()).toEqual([]);
   });
 

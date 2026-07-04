@@ -26,7 +26,7 @@ import {
   appendPending,
 } from './buffer.js';
 import { hasDeferBudget } from '../timing/defer.js';
-import { registerGeneration, clearGeneration } from './abort-registry.js';
+import { registerGeneration, clearGeneration, isShuttingDown } from './abort-registry.js';
 import { waitForMessageQuiet } from './quiet-period.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { getChatState, transitionToRunning } from '../timing/chat-runtime.js';
@@ -181,6 +181,13 @@ async function runCommandEntry(
   burstMessageIds: number[],
   obligationCtx?: { obligationId?: string; obligationTargetUid?: number; obligationStrong?: boolean },
 ): Promise<void> {
+  // 命令回执不注册可打断生成、不带 signal —— 关机广播叫不醒它的 LLM 渲染,
+  // 一波命令能吃光 25s 宽限期。预检:关机中直接回 pending,重启后重放出回执。
+  if (isShuttingDown()) {
+    await appendPending({ ...entry, deferReplay: true }).catch(() => {});
+    logger.info({ chatId, messageId: entry.messageId }, 'Turn: shutdown — command re-queued for next boot');
+    return;
+  }
   try {
     await processPipeline({
       type: 'message',
@@ -299,6 +306,18 @@ async function runJudgedEntry(
       });
       return;
     } catch (err) {
+      if (isAbortError(err) && isShuttingDown()) {
+        // 关机中:打断只推迟不取消 —— 条目回 pending(deferReplay 跳过二次
+        // bookkeeping),收尾 forceNew 排的持久 BullMQ job 重启后重放
+        // (runChatTurn 幂等)。不加 deferCount:这不是 gate defer,进程随即
+        // 退出,无循环风险。
+        await appendPending({ ...current, deferReplay: true }).catch(() => {});
+        logger.info(
+          { chatId, messageId: current.messageId },
+          'Turn: shutdown — entry re-queued for next boot',
+        );
+        return;
+      }
       if (!isAbortError(err) || !e.TURN_ABORT_ENABLED || replans >= maxReplans()) {
         if (isAbortError(err)) {
           // 重规划预算耗尽:不再终局丢弃(48h 28 次全灭,且第 3 次 abort 多来自
@@ -396,8 +415,52 @@ async function runJudgedEntry(
  * Run one cognition turn for a chat. Invoked by the BullMQ worker for
  * type='chat_turn' jobs. Idempotent: a duplicate/raced turn drains an
  * empty buffer and exits.
+ *
+ * G12 执行期互斥(TURN_EXEC_LOCK_ENABLED):调度层挡不住多生产者并发
+ * scheduleTurn 造出的双回合(实锤:毫秒级成对 replanning + 同毫秒 4 个
+ * defer-resume),在这里 per-chat Redis 锁串行化。输锁方**不 drain**
+ * (不偷 burst、不触发 supersede),排 noReschedule 短延迟重试兜底
+ * "持锁者崩溃跳过收尾";正常路径下持锁回合收尾的 clearDirty/pendingCount
+ * 在放锁之前执行,pending 条目必被接住 —— 唤醒不丢。
  */
 export async function runChatTurn(data: MessageJobData, jobId?: string): Promise<void> {
+  const e = env();
+  if (!e.TURN_EXEC_LOCK_ENABLED) return runChatTurnInner(data, jobId);
+
+  const chatId = data.chatId;
+  const token = `${jobId ?? 'turn'}:${process.pid}:${Math.random().toString(36).slice(2)}`;
+  const ttl = e.TURN_EXEC_LOCK_TTL_MS;
+  const { acquireTurnLock, renewTurnLock, releaseTurnLock } = await import('./turn-lock.js');
+
+  if (!(await acquireTurnLock(chatId, token, ttl))) {
+    logger.info(
+      { chatId, jobId, trigger: data.turn?.trigger },
+      'Turn lock busy — deferring duplicate turn',
+    );
+    await scheduleTurn(chatId, {
+      trigger: data.turn?.trigger ?? 'message',
+      delayMsOverride: 2_500,
+      noReschedule: true,
+    }).catch(() => {});
+    return;
+  }
+
+  // 长回合(多次 LLM + humanizer 延迟)可超 TTL:定期续期;事件循环被卡到
+  // 续不上 → TTL 过期、第二回合可进 → 退化为现状行为,绝不更糟。
+  const renew = setInterval(() => {
+    renewTurnLock(chatId, token, ttl).catch(() => {});
+  }, Math.max(10_000, Math.floor(ttl / 3)));
+  renew.unref?.();
+
+  try {
+    await runChatTurnInner(data, jobId);
+  } finally {
+    clearInterval(renew);
+    await releaseTurnLock(chatId, token).catch(() => {});
+  }
+}
+
+async function runChatTurnInner(data: MessageJobData, jobId?: string): Promise<void> {
   const chatId = data.chatId;
   const turnPayload = data.turn;
   const start = performance.now();

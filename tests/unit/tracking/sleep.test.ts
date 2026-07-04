@@ -97,6 +97,25 @@ describe('getSleepPhase / isAsleep', () => {
     overrideValue = { sleep_schedule: { enabled: false } };
     expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('awake');
   });
+
+  it('就寝推迟 hold:消息路径当醒(且**独立于** SLEEP_WAKE_ON_DM_ENABLED=false),排程口径照睡', async () => {
+    // review 必改点:hold 嵌进 DM-wake flag 分支会变成"扣住晚安但照样静音"
+    envValues['SLEEP_WAKE_ON_DM_ENABLED'] = false;
+    store.set('xxb:sleep:bedtime_hold', '1');
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('awake');       // 消息路径
+    expect(await getSleepPhase(bj('2026-06-08', 3, 0), false)).toBe('night'); // 主动 cron 口径不受 hold 影响
+    expect(await isAsleep(bj('2026-06-08', 3, 0))).toBe(true);
+  });
+
+  it('holdBedtime 写键带 EX;isBedtimeHeld 读键;读失败 fail-soft false', async () => {
+    const { holdBedtime, isBedtimeHeld } = await import('../../../src/tracking/sleep.js');
+    expect(await isBedtimeHeld()).toBe(false);
+    await holdBedtime(10);
+    expect(store.has('xxb:sleep:bedtime_hold')).toBe(true);
+    expect(await isBedtimeHeld()).toBe(true);
+    redisMock.get.mockRejectedValueOnce(new Error('redis down'));
+    expect(await isBedtimeHeld()).toBe(false);
+  });
 });
 
 describe('nightDateStr', () => {
