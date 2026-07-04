@@ -229,7 +229,7 @@ export async function generateReply(
   // G4: the turn drained a multi-message burst — tell the writer to answer
   // the whole thought and pick the real anchor, not just the newest line.
   const burstPart = callOpts?.burstIds && callOpts.burstIds.length > 1
-    ? `[连发上下文] 这次回复由一波连发触发，共 ${callOpts.burstIds.length} 条：${callOpts.burstIds.map((id) => `#${id}`).join('、')}（按时间顺序，最后一条最新，内容都在上方上下文里）。请把整波连发当作一个完整的念头来回应，不要只回最后一句；targetMessageId 选这一波里真正承载重点的那条（往往是提问/求助的那条，不一定是最后一条）。`
+    ? `[连发上下文] 这次回复由一波连发触发，共 ${callOpts.burstIds.length} 条：${callOpts.burstIds.map((id) => `#${id}`).join('、')}（按时间顺序，最后一条最新，内容都在上方上下文里）。请把整波连发当作一个完整的念头来回应，不要只回最后一句。回复目标怎么选：\n- 整波是同一个念头分几条发 → 输出 1 条，targetMessageId 选真正承载重点的那条（往往是提问/求助的那条，不一定是最后一条）。\n- 这波里有**两个以上互相独立的问题/请求**（同一个人连发的也算）→ 输出数组、每个问题各出一条，各自 targetMessageId 填对应那条的 id，分别回复——别把两个不相干的问题挤进一条、也别只挑一个回。`
     : undefined;
   // G7: surface still-unanswered recent messages so the model can scroll back
   // ("对了你刚才问的那个…") — strictly optional, the model may ignore them.
@@ -836,7 +836,16 @@ export async function generateReply(
     } else {
       texts = raw.filter((r) => r.action === undefined || r.action === 'reply');
     }
-    // 目标守卫:未委托时不许把回复挂到频道身份/bot 消息下(线上事故)
+    // 目标守卫:未委托时不许把回复挂到频道身份/bot 消息下(线上事故)。
+    // 2026-07-04 放宽:本回合 burst 窗口(burstIds)与 G7 回访候选是**明确
+    // 授权的目标集合**——连发里两个独立问题分别回、回访没人接的消息,
+    // 指向它们不构成"回错人";守卫只拦窗口外的漂移目标。此前 G7 注入的
+    // 跨人目标会被这里改写回提问者,回访特性自相矛盾地失效。bot/频道
+    // 身份消息仍无条件改写(那是守卫要防的原始事故)。
+    const allowedTargets = new Set<number>([
+      ...(callOpts?.burstIds ?? []),
+      ...(callOpts?.revisitCandidates?.map((c) => c.messageId) ?? []),
+    ]);
     if (!userDelegated) {
       for (const p of texts) {
         if (!p.action && p.targetMessageId !== message.messageId) {
@@ -846,7 +855,8 @@ export async function generateReply(
             !target.isBot &&
             !target.isAnonymous &&
             target.uid !== message.uid &&
-            target.messageId !== message.replyTo?.messageId;
+            target.messageId !== message.replyTo?.messageId &&
+            !allowedTargets.has(p.targetMessageId);
           if (target && (target.isBot || target.isAnonymous || targetIsOtherHuman)) {
             logger.info(
               { chatId, badTarget: p.targetMessageId, retargeted: message.messageId },

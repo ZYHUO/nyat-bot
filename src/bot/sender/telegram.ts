@@ -87,7 +87,11 @@ export async function sendMessage(
   const messageId = await withRetry(async () => {
     const bot = getBot();
     const md = toMarkdownV2(text);
-    const replyParams = replyToId ? { message_id: replyToId } : undefined;
+    // allow_sending_without_reply:锚点消息被删时 Telegram 直接降级成普通
+    // 发送,不再依赖下面按错误字符串手工重试(MaiBot 适配器同款)。
+    const replyParams = replyToId
+      ? { message_id: replyToId, allow_sending_without_reply: true }
+      : undefined;
 
     // Try MarkdownV2 first, fallback to plain text
     try {

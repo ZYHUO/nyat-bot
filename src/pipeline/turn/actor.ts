@@ -23,7 +23,9 @@ import {
   clearDirty,
   clearScheduledJob,
   bumpEpoch,
+  appendPending,
 } from './buffer.js';
+import { hasDeferBudget } from '../timing/defer.js';
 import { registerGeneration, clearGeneration } from './abort-registry.js';
 import { waitForMessageQuiet } from './quiet-period.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
@@ -299,8 +301,25 @@ async function runJudgedEntry(
     } catch (err) {
       if (!isAbortError(err) || !e.TURN_ABORT_ENABLED || replans >= maxReplans()) {
         if (isAbortError(err)) {
-          // 重规划预算耗尽:静默放弃这一回合的发言(消息已入上下文,
-          // 下一回合会带着完整语境重新决策)。
+          // 重规划预算耗尽:不再终局丢弃(48h 28 次全灭,且第 3 次 abort 多来自
+          // supersede 竞态而非用户打断)。MaiBot 不变量:打断只推迟、不取消 ——
+          // 把当前锚点作为 defer 回放重新入 pending(跳 bookkeeping、照常
+          // judge/heart),回合收尾的 stillPending 检查会自动重排;deferCount
+          // 防无限循环,预算耗尽才真正放弃。
+          if (hasDeferBudget(current.deferCount)) {
+            const requeued = await appendPending({
+              ...current,
+              deferReplay: true,
+              deferCount: (current.deferCount ?? 0) + 1,
+            }).then(() => true).catch(() => false);
+            logger.info(
+              { chatId, replans, messageId: current.messageId, requeued },
+              requeued
+                ? 'Turn: replan budget exhausted, re-queued as defer replay'
+                : 'Turn: replan budget exhausted, re-queue failed — dropping reply',
+            );
+            return;
+          }
           logger.info({ chatId, replans }, 'Turn: replan budget exhausted, dropping reply');
           return;
         }

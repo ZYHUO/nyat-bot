@@ -136,7 +136,10 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ],
-      maxTokens: 120,
+      // maxTokens 不再硬编码(callWithFallback 里显式参数会压过 usage 配置):
+      // step-3.5-flash 是推理模型,思考先烧 token,120 截断成空 → rejectEmpty
+      // throw → 整链耗尽 → fail-closed 吞回复(48h 1263 次)。上限由
+      // AI_USAGE_HEART_MAX_TOKENS 管理。
       temperature: 0,
       rejectEmpty: true,
       // 只传原始打断信号。8s 预算改为 per-attempt cap(maxTimeoutMs):
@@ -171,7 +174,6 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
           { role: 'assistant', content: raw.slice(0, 300) },
           { role: 'user', content: '上面的输出为空或不是合法 JSON。只输出一个非空 JSON 对象，字段必须只有 act/path/why。act 只能是 reply/wait/pass。' },
         ],
-        maxTokens: 120,
         temperature: 0,
         rejectEmpty: true,
         signal: input.signal,

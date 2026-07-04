@@ -660,7 +660,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       const CONVERSATIONAL_L0 = new Set(["followup_to_bot", "active_conv_engage"]);
       // hot_chat 骰子同样降级:P2 用确定性的参与预算(velocity 因子)替代 RNG
       const demoteReply = l0Raw && l0Raw.action === "REPLY" && CONVERSATIONAL_L0.has(l0Raw.rule ?? "");
-      const demoteIgnore = l0Raw && l0Raw.action === "IGNORE" && l0Raw.rule === "hot_chat";
+      // recent_reply 同降:bot 刚说完话后的短追问("?"/"对")是最典型的被吞
+      // 消息类,让心流带人格判,别 0ms 硬丢。
+      const demoteIgnore = l0Raw && l0Raw.action === "IGNORE" && (l0Raw.rule === "hot_chat" || l0Raw.rule === "recent_reply");
       const l0 = demoteReply || demoteIgnore ? null : l0Raw;
       // 审计 #38 slice 3:timing 状态一回合只读一次 —— 冷却判断与
       // lastSpokeSecAgo 共用同一份快照(旧码同一 hash 读 2 次)。
@@ -738,8 +740,18 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         // 与回合开始前就存在的历史 bot 消息不受影响,跨回合防刷照常生效。
         const engagementMessages = filterForTurnStart(recentMessages, botUid, job.turnContext?.turnStartedAt);
         const engagement = computeEngagement(engagementMessages, botUid, messagesLast5Min);
-        if (!heartContinuation && !bypassEngagementHardPass && engagement.budget <= HARD_PASS_BUDGET) {
-          await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
+        // 硬阈三处修正(2026-07-04 吞消息诊断):
+        // (1) defer 回放豁免 —— defer 的意义是"到点让心流重评",回放后作为
+        //     lone entry 再撞确定性硬阈等于白 defer(生产实证 Incident C:
+        //     defer 15s 后 resume,兄弟组已回 4 条 → replies5m=4 → 静默吞)。
+        // (2) 强债务豁免 —— 明确问句(obligationStrong)不该被无 LLM 的份额闸
+        //     确定性吞掉;豁免≠必回,只是把裁决权交还心流。
+        // (3) 不再 recordGateNoAction —— 硬阈是 0 成本确定性判定,不需要冷却
+        //     保护;记 no_action 会喂大指数退避(至 300s),一次静默繁殖出连串
+        //     heart_cooldown_defer,defer 回放又撞硬阈 → 自放大吞消息环。
+        const hardPassExempt =
+          job.turnContext?.isDeferReplay === true || job.turnContext?.obligationStrong === true;
+        if (!heartContinuation && !bypassEngagementHardPass && !hardPassExempt && engagement.budget <= HARD_PASS_BUDGET) {
           logger.info(
             {
               chatId: job.chatId, budget: engagement.budget.toFixed(2), factors: engagement.factors,
@@ -778,6 +790,42 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           ].filter(Boolean).join('\n') || undefined,
           signal: job.turnContext.signal,
         });
+        // 基础设施故障 ≠ 心流决策(gate 同哲学:llm_call_failed fail-open)。
+        // 旧行为 fail-closed pass 终局吞回复(48h 1227 次 vs 总发送 387),且
+        // 走下面 pass 分支 recordGateNoAction 毒化指数退避 → 连锁 defer →
+        // resume 再撞坏链路,恶性循环。改为 MaiBot 不变量:任何"先不回"必须
+        // 物化为会再触发的状态 —— defer 重评(预算内),预算耗尽回退 legacy
+        // judge(judge 用 stepfun 主标签,与 heart 不同链)出真裁决。
+        if (heart.act === 'pass' && heart.why === 'llm_failed') {
+          if (hasDeferBudget(job.turnContext.deferCount)) {
+            const rescheduled = await scheduleGateDeferReeval({
+              chatId: job.chatId,
+              entry: buildDeferEntry(job, formatted),
+              deferCount: job.turnContext.deferCount ?? 0,
+              retryAfterMs: 30_000,
+              reason: 'heart_llm_failed_defer',
+            }).catch(() => false);
+            if (rescheduled) {
+              logger.warn(
+                { chatId: job.chatId, uid: formatted.uid },
+                "Heart infra failure → timed re-eval scheduled",
+              );
+              return;
+            }
+          }
+          logger.warn(
+            { chatId: job.chatId, deferCount: job.turnContext.deferCount },
+            "Heart infra failure, defer budget exhausted → legacy judge fallback",
+          );
+          judgeResult = await judge({
+            message: formatted, recentMessages,
+            recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),
+            botUid, botUsername: botIdentity.username, botNicknames: botIdentity.nicknames,
+            chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
+            burstHint,
+            focus: focusLevel,
+          });
+        } else {
         // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
         import("./heart/mind.js").then(({ noteThought }) => noteThought(job.chatId, heart.why)).catch(() => {});
         if (heart.act === 'wait') {
@@ -831,6 +879,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
             "heart=chat upgraded to planned (explicit lookup intent)",
           );
         }
+        } // ← heart 正常决策分支闭合(llm_failed 走上面的 defer/judge 兜底)
       }
     } else {
       judgeResult = await judge({
