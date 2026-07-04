@@ -213,7 +213,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
 
     // 3.1f 网络事件 burst(C)— 集体喊"挂了/CF炸了"时冒一句(fire-and-forget,
-    // 30s 滑窗 + 10min 冷却 + 作息/抑制门;内部先匹配故障词,非故障消息零开销)。
+    // 30s 滑窗计满 5 条 → 一次廉价 LLM 判定是否集体故障 → 冒一句;判是 10min/
+    // 判否 15min 冷却 + 作息/抑制门。注:已无关键词预过滤,任何消息都计数)。
     if (job.chatId < 0 && !formatted.isBot && env().NETWORK_BURST_ENABLED) {
       import("./games/network-burst.js")
         .then(({ maybeNetworkBurst }) => maybeNetworkBurst(job.chatId, formatted, botUid))

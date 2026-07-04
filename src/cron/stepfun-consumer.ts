@@ -7,7 +7,13 @@
 // (最不浪费),跨上下文合并顺带跑。速率用旋钮控:
 //   日调用 ≈ CALLS_PER_TICK × 1440(每分钟一 tick)。
 //   工作池 ≈ 群数×REFLECT_WEIGHT + person_identity 人数;池越大 → 单项重复率越低。
-// 全部走 STEPFUN_CONSUMER_USAGE(默认 summarize → step-3.7-flash)。默认关。
+// 路由:群反思走 reflectChat → REFLECTION_USAGE;跨上下文合并走 mergeGlobalProfile
+// → PROFILE_MERGE_USAGE(引擎本身不做模型路由,复用这俩已导出函数各自的 usage)。默认关。
+//
+// 内部时限(TICK_DEADLINE_MS):safeRun 的超时用 Promise.race,**不会取消**已在跑的
+// p-limit 任务;若一 tick 因 StepFun 拥塞跑过 60s,下一分钟的 cron tick 会与之重叠、
+// 叠加占用共享的 8 并发账号 → 挤到用户可见的 reply/judge。故引擎自带墙钟时限:超时后
+// 不再启动新工作项,把单 tick 的在飞时间收敛在一个 tick 间隔内,杜绝跨 tick 重叠。
 
 import pLimit from 'p-limit';
 import { env } from '../env.js';
@@ -18,6 +24,9 @@ import { reflectChat } from './deep-reflection.js';
 import { mergeGlobalProfile } from './profile-merge.js';
 
 const CURSOR_KEY = 'xxb:stepfun_consumer:cursor';
+// 单 tick 墙钟时限:超过就不再启动新工作项(已在飞的自然收尾)。略小于 cron 间隔(60s),
+// 确保本 tick 的在飞调用在下一 tick 起跑前基本清空,不叠加占用共享的 8 并发账号。
+const TICK_DEADLINE_MS = 55_000;
 
 interface WorkItem {
   kind: 'group' | 'merge';
@@ -99,13 +108,18 @@ export async function runStepfunConsumer(): Promise<void> {
   } catch { /* 推进失败下 tick 重叠覆盖,非致命 */ }
 
   const limit = pLimit(Math.max(1, e.STEPFUN_CONSUMER_CONCURRENCY));
+  const deadline = Date.now() + TICK_DEADLINE_MS;
   let reflected = 0;
   let merged = 0;
   let approxInputTokens = 0;
+  let skipped = 0;
 
   await Promise.all(
     batch.map((item) =>
       limit(async () => {
+        // 墙钟时限:排队中的任务在轮到自己时若已超时,直接跳过——把单 tick 的在飞
+        // 时间收敛在 TICK_DEADLINE_MS 内,杜绝与下一 tick 重叠挤爆账号并发。
+        if (Date.now() > deadline) { skipped++; return; }
         try {
           if (item.kind === 'group') {
             const t = await reflectChat(item.id);
@@ -133,6 +147,7 @@ export async function runStepfunConsumer(): Promise<void> {
       concurrency: e.STEPFUN_CONSUMER_CONCURRENCY,
       reflected,
       merged,
+      skipped, // 因墙钟时限被跳过的项数;持续 >0 说明 tick 跑不完,该降 CALLS_PER_TICK/CONCURRENCY
       approxInputTokens,
       estTokensPerDay,
       cursorNext: (cursor + perTick) % pool.length,

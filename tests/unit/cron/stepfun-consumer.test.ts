@@ -36,7 +36,6 @@ beforeEach(() => {
     STEPFUN_CONSUMER_CALLS_PER_TICK: 10,
     STEPFUN_CONSUMER_CONCURRENCY: 4,
     STEPFUN_CONSUMER_REFLECT_WEIGHT: 3,
-    STEPFUN_CONSUMER_USAGE: 'summarize',
   });
   vi.clearAllMocks();
   groupsRows.length = 0;

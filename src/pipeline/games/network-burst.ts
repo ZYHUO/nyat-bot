@@ -31,7 +31,10 @@ const WINDOW_SEC = 30;              // 滑窗(收紧:不再靠内容过滤,窗�
 const THRESHOLD = 5;                // 窗内 ≥5 条消息(不筛内容,阈值需更高避免误触发分类)
 const MAX_TEXTS = 8;                // 喂给分类器的最近消息条数上限
 const COOLDOWN_SEC = 600;           // 判定为故障后:10 分钟内不再冒(去重同一波)
-const NEGATIVE_COOLDOWN_SEC = 120;  // 判否:2 分钟短冷却,避免同波热聊把分类器打爆,但不压真故障太久
+// 判否后的冷却:活跃群"5条/30秒"是常态,若冷却太短(如2分钟),稳态下会**每2分钟
+// 对正常闲聊烧一次判定 LLM**(~30次/时/群、纯浪费)。拉长到 15 分钟:真故障是持续的
+// (会在冷却过后的下一个窗口再被抓到),但正常热聊的无谓判定频率降到 ~4次/时/群。
+const NEGATIVE_COOLDOWN_SEC = 900;
 
 const NET_TROUBLE_SYSTEM_PROMPT =
   '你在看一小段群聊消息(群里常聊机场/VPS/代理/服务器话题)。判断这几条**连续**消息是不是' +
@@ -92,13 +95,16 @@ export async function maybeNetworkBurst(
     const count = await redis.zcard(key).catch(() => 0);
     if (count < THRESHOLD) return;
 
-    // 先占坑(防同一波消息把分类器打爆),再判断是否真是故障。
-    const cd = await redis.set(COOLDOWN_KEY(chatId), '1', 'EX', COOLDOWN_SEC, 'NX').catch(() => 'OK');
-    if (cd === null) return;
+    // 睡眠/抑制态:直接不凑,且**不占坑**——否则醒来/解除后冷却仍在,把随后
+    // 真正的故障哀嚎也压掉。这两个都是廉价读、无副作用,放在占坑之前。
     if (await isAsleep()) return; // 睡觉不凑(夜里故障也别炸群)
-
     const { isChatSuppressed } = await import('../timing/chat-runtime.js');
     if (await isChatSuppressed(chatId).catch(() => false)) return;
+
+    // 先占坑(防同一波消息把分类器打爆 / 双发);Redis 出错按"已在冷却"处理
+    // (fail-closed:宁可漏一次也不重复触发)。
+    const cd = await redis.set(COOLDOWN_KEY(chatId), '1', 'EX', COOLDOWN_SEC, 'NX').catch(() => null);
+    if (cd === null) return;
 
     const recentTexts = await redis.lrange(textsKey, 0, -1).catch(() => [] as string[]);
     const isTrouble = await classifyNetworkTrouble(recentTexts.length > 0 ? recentTexts : [text]);

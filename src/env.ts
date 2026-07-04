@@ -292,15 +292,17 @@ const envSchema = z.object({
   // 积压的 pending backlog(有意义的真实工作),也提高 StepFun 消耗。
   PROFILE_SYNC_BATCH_SIZE: z.coerce.number().int().positive().default(20),
   // ── StepFun 配额消费引擎(用户选:滚动深反思)──────────────────────────
-  // 专用后台引擎:在 10 并发/2000RPM 内,持续对全量群做大窗口深反思 + 跨上下文
-  // 画像合并,把 8000M/月订阅用起来(冲 ~100M/天)。默认关。
-  // 日调用数 ≈ CALLS_PER_TICK × 1440(每分钟一 tick);token/天 ≈ 日调用数 × 单调用token。
+  // 专用后台引擎:持续对全量群做大窗口深反思 + 跨上下文画像合并,把 8000M/月订阅
+  // 用起来(冲 ~100M/天)。默认关。日调用数 ≈ CALLS_PER_TICK × 1440(每分钟一 tick)。
+  // 路由不在此配:群反思走 REFLECTION_USAGE、合并走 PROFILE_MERGE_USAGE(引擎复用
+  // reflectChat/mergeGlobalProfile 各自的 usage,不做独立模型路由)。
   STEPFUN_CONSUMER_ENABLED: booleanFromEnv.default(false),
   STEPFUN_CONSUMER_CALLS_PER_TICK: z.coerce.number().int().positive().default(30),
-  STEPFUN_CONSUMER_CONCURRENCY: z.coerce.number().int().positive().default(6),
+  // 并发默认 4:StepFun 账号并发上限=8 且与用户可见的 reply/judge 共享,引擎须留余量
+  // (设过高会 429 拖累实时回复)。
+  STEPFUN_CONSUMER_CONCURRENCY: z.coerce.number().int().positive().default(4),
   // 群深反思在工作池里的权重(重复入池次数):群内容真实演化、最不浪费,给更高权重。
   STEPFUN_CONSUMER_REFLECT_WEIGHT: z.coerce.number().int().positive().default(3),
-  STEPFUN_CONSUMER_USAGE: z.string().default('summarize'),
   // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
   // gate 与 planner 共享历史、看得到自己过往节奏判断)。
   TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(false),
