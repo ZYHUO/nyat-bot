@@ -1,15 +1,16 @@
 // ────────────────────────────────────────
-// Obsessions — bot 的每日执念/爱好轮换(#10)
+// Obsessions — bot 的执念/爱好轮换(#10,每 3 小时)
 // ────────────────────────────────────────
 //
-// 真人有 recurring obsessions:这阵子迷上某番、最近沉迷某游戏,聊天里会
-// 自然地反复提起。bot 此前人格静态,主动发言像随机蹭热度,缺自我动机。
+// 真人有 recurring obsessions:这阵子迷上某番、最近沉迷某游戏,偶尔想到时
+// 会淡淡提一句。bot 此前人格静态,主动发言像随机蹭热度,缺自我动机。
 //
-// 北京日期种子确定性轮换(当天稳定、每天更换),无状态无 cron。
+// 北京 3 小时块种子确定性轮换(块内稳定、每 3 小时更换),无状态无 cron。
 // Redis xxb:obsession:override 可手动钉一个(运营干预)。
 //
-// 分寸:flavor 一律"偶尔提一嘴"而非"逢人安利"—— 执念是自我动机的底色,不是
-// 见谁都推销;硬转话题安利很上头、很烦人(与 tone.md「宁可少说一句」一致)。
+// 分寸:执念只是**自我动机的底色**,不是拿来推销的话题。绝不主动开话题、
+// 绝不逢人就说、绝不反复提——只有别人正好聊到相关话题时才淡淡带一句就够
+// (与 tone.md「宁可少说一句」一致)。
 
 import { getRedis } from '../db/redis.js';
 
@@ -24,10 +25,11 @@ const POOL: Array<{ topic: string; flavor: string }> = [
   { topic: '深夜电台/白噪音', flavor: '最近睡前爱听白噪音和深夜电台,夜里聊到会想提两句' },
 ];
 
-/** 北京时区的日期字符串(BJ 零点翻页),作为"一天一换"的确定性种子。 */
-function dayKeyBJ(d: Date): string {
+/** 北京时区的 3 小时块 key(每 3 小时翻页),作为"3 小时一换"的确定性种子。 */
+function blockKeyBJ(d: Date): string {
   const bj = new Date(d.getTime() + 8 * 3600 * 1000);
-  return `${bj.getUTCFullYear()}-${bj.getUTCMonth() + 1}-${bj.getUTCDate()}`;
+  const block = Math.floor(bj.getUTCHours() / 3); // 0..7,每天 8 块
+  return `${bj.getUTCFullYear()}-${bj.getUTCMonth() + 1}-${bj.getUTCDate()}-${block}`;
 }
 
 export interface Obsession {
@@ -41,11 +43,11 @@ export async function getObsession(now: Date = new Date()): Promise<Obsession> {
   try {
     const override = await getRedis().get('xxb:obsession:override');
     if (override) {
-      return { topic: override, hint: `[最近执念] ${override} —— 聊到相关时自然提一嘴就好,别硬转话题安利。` };
+      return { topic: override, hint: `[最近执念] ${override} —— 只是你私下的小兴趣;别主动提、别逢人就说,只有别人正好聊到时才淡淡带一句。` };
     }
   } catch { /* non-critical */ }
 
-  const seed = dayKeyBJ(now);
+  const seed = blockKeyBJ(now);
   let h = 2166136261;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
@@ -54,6 +56,6 @@ export async function getObsession(now: Date = new Date()): Promise<Obsession> {
   const picked = POOL[(h >>> 0) % POOL.length]!;
   return {
     topic: picked.topic,
-    hint: `[最近执念] ${picked.flavor}。**只有**聊到相关话题时才自然带一嘴,别硬转话题、别逢人安利、别反复提。`,
+    hint: `[最近执念] ${picked.flavor}——但这只是你**私底下**的小兴趣,不是话题。**绝不主动拿它开话头、绝不逢人就说、绝不反复提**;只有别人**正好**聊到相关话题时,偶尔才淡淡带一句就够,不带也完全没关系。`,
   };
 }
