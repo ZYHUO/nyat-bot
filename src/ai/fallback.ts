@@ -81,10 +81,14 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
           : new AIError('Aborted by caller', labelName, label.model, 'AI_ABORTED');
       }
 
-      // Content safety rejection — don't fallback, throw immediately
+      // Content safety rejection — **继续试下一个 provider**,不再一拒就放弃整条链。
+      // StepFun 等中国厂商对机场/VPS/翻墙这类**正常话题**误报"敏感"极频繁,而链里
+      // 后面的 gpt-5.5(sub2api)不受此审查口径约束、通常能正常作答。一误报就短路
+      // 会把厂商的过度审查放大成 bot 级拒答(reply 层弹"这个话题不方便聊")。
+      // 只有**全链都拒**时 errors.at(-1) 仍是 AI_CONTENT_REJECTED → reply 层才弹兜底
+      // 话术(此时才是真被拦)。fall through 到下面的 metrics + "trying next"。
       if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
-        logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter');
-        throw err;
+        logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter, trying next provider');
       }
 
       // Set cooldown on 429
