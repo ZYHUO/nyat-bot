@@ -4,10 +4,20 @@
 
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
+import { Agent } from 'undici';
 import type { AILabel, AICallResult, ContentPart } from './types.js';
 import { AIError } from '../shared/errors.js';
 import { mergeAbortSignals, isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
+
+// 仅供**显式标记 insecureTLS 的供应商**(如自签证书的自建端点)使用的 dispatcher:
+// 跳过证书校验。绝不设为全局 dispatcher —— 其它端点(Claude/StepFun 等)照常
+// 全程验证证书。仅在 label.insecureTLS 为真时按 label 传入这个 dispatcher。
+let _insecureDispatcher: Agent | undefined;
+function insecureDispatcher(): Agent {
+  if (!_insecureDispatcher) _insecureDispatcher = new Agent({ connect: { rejectUnauthorized: false } });
+  return _insecureDispatcher;
+}
 
 /** Throw a normalized AI_ABORTED error when the external signal fired (NOT for timeouts). */
 function throwIfExternallyAborted(label: AILabel, signal?: AbortSignal): void {
@@ -201,7 +211,10 @@ async function callOpenAIRaw(
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify(body),
     signal: mergeAbortSignals(opts.timeout, opts.signal),
-  });
+    // 自签证书端点(insecureTLS)按 label 传 dispatcher 跳过校验;DOM fetch 类型
+    // 无此字段,故 cast(与 src/pipeline/tools/search.ts 一致的写法)。
+    ...(label.insecureTLS ? { dispatcher: insecureDispatcher() } : {}),
+  } as RequestInit & { dispatcher?: Agent });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
@@ -366,7 +379,9 @@ export async function callModel(
   // Use raw fetch for vision (image content), stream-only endpoints, or
   // reasoning/thinking 控制(AI SDK generateText 不透传 reasoning_effort /
   // thinking —— 只有 raw 路径会把这些 body 字段发出去)。
-  if (hasMediaContent(messages) || label.stream || label.reasoningEffort || label.disableThinking) {
+  // insecureTLS 也强制走 raw 路径:AI SDK 的 createOpenAI 内部 fetch 无法注入
+  // per-provider 的 undici dispatcher,只有 raw fetch 能挂上跳过校验的 dispatcher。
+  if (hasMediaContent(messages) || label.stream || label.reasoningEffort || label.disableThinking || label.insecureTLS) {
     try {
       return await callOpenAIRaw(label, messages, {
         ...opts,

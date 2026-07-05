@@ -11,6 +11,8 @@ export interface AILabel {
   apiFormat?: 'openai' | 'claude';
   reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
   disableThinking?: boolean;
+  /** 跳过 TLS 证书校验(仅限自建/自签证书端点;强制走 raw fetch + insecure dispatcher)。 */
+  insecureTLS?: boolean;
   capabilities?: { vision?: boolean; functionCalling?: boolean };
 }
 
