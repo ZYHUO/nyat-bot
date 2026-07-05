@@ -514,6 +514,10 @@ const envSchema = z.object({
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),
   // 每群代发限速(秒):两次代发最小间隔
   BOT_DELEGATION_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(60),
+  // 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、
+  // 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关;
+  // 依赖 BOT_DELEGATION_ENABLED。
+  BOT_COMMAND_ROUTER_ENABLED: booleanFromEnv.default(false),
 
   // ── Sleep schedule(硬作息门):到点真睡觉,睡觉不闲聊,指令照常 ──
   // 直接交互(@/回 bot/私聊)走升级式吵醒,主人必醒;作息表沿用

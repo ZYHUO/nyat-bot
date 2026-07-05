@@ -196,6 +196,13 @@ export async function tryPreMuteIntercepts(
           return true;
         }
       }
+      // 「学习+调用 agent」的调用半:意图明确匹配某条 ready 已学命令 → 代发之(短路)。
+      // 放在 nl-commands(自己的命令)之后:先处理自己的,再看要不要借力别的 bot。
+      // 仅群聊 + 已寻址(addressed)时才走;默认关(BOT_COMMAND_ROUTER_ENABLED)。
+      if (chatId < 0 && env().BOT_COMMAND_ROUTER_ENABLED && env().BOT_DELEGATION_ENABLED) {
+        const { routeLearnedCommand } = await import("../command-router.js");
+        if (await routeLearnedCommand(chatId, formatted)) return true;
+      }
     }
   }
 

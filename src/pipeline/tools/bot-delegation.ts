@@ -41,49 +41,56 @@ const WHY_TEXT: Record<string, string> = {
  * 代发一条其他 bot 的命令。返回给模型的文本(成功=过渡指示;失败=原因 +
  * 建议改教用户)。execute 永不抛(AI SDK v4:抛会整轮 reject)。
  */
-export async function executeUseBotCommand(
+export interface DelegateResult {
+  /** 命令是否真的发出去了(供调用路由判断"是否短路正常回复")。 */
+  sent: boolean;
+  /** 返回给模型/调用方的文本(成功=过渡指示;失败=原因 + 建议改教用户)。 */
+  text: string;
+}
+
+/** 代发核心:返回结构化结果(sent + text)。安全/成熟度/冷却/并发闸全在这。 */
+export async function tryDelegateCommand(
   chatId: number,
   botUsername: string,
   command: string,
   args: string,
-): Promise<string> {
+): Promise<DelegateResult> {
   try {
     const e = env();
     if (!e.BOT_DELEGATION_ENABLED) {
-      return '代发功能没开;可以把命令告诉用户,让 TA 自己发。';
+      return { sent: false, text: '代发功能没开;可以把命令告诉用户,让 TA 自己发。' };
     }
-    if (chatId >= 0) return '私聊里没有其他 bot 可借力。';
+    if (chatId >= 0) return { sent: false, text: '私聊里没有其他 bot 可借力。' };
 
     const bot = botUsername.replace(/^@/, '');
     const cmd = command.trim().toLowerCase().split('@')[0]!;
     if (!/^\/[a-z0-9_]+$/.test(cmd) || !bot) {
-      return '命令格式不对(应是 /xxx 形式 + bot 用户名)。';
+      return { sent: false, text: '命令格式不对(应是 /xxx 形式 + bot 用户名)。' };
     }
 
     const profile = getCommandProfile(bot, cmd);
     const why = whyNotInvocable(profile);
     if (why) {
       const reason = WHY_TEXT[why] ?? '暂时不能代发';
-      // 可读类(url/有语法)仍可教用户自己发
       const teach = profile?.usage_syntax
         ? `要的话可以建议用户自己发:${profile.usage_syntax}@${bot}`
         : '';
-      return `${reason}。${teach}`.trim();
+      return { sent: false, text: `${reason}。${teach}`.trim() };
     }
 
     // 限速:只读检查在前,**不在失败/空操作路径上烧冷却**(review #4)——
     // 真正 armed 放到成功发出之后。
     const redis = getRedis();
-    if (await redis.get(COOLDOWN_KEY(chatId))) return '刚替你问过一次了,缓一下再说,别刷屏。';
+    if (await redis.get(COOLDOWN_KEY(chatId))) return { sent: false, text: '刚替你问过一次了,缓一下再说,别刷屏。' };
 
     // 已有未完成的代发 → 不并发(回执匹配会乱)
     const existing = await redis.get(PENDING_KEY(chatId));
-    if (existing) return '上一条代发还在等回执,先等等。';
+    if (existing) return { sent: false, text: '上一条代发还在等回执,先等等。' };
 
     const cleanArgs = (args || '').trim().slice(0, 120);
     const text = `${cmd}@${bot}${cleanArgs ? ' ' + cleanArgs : ''}`;
     const sentMid = await sendMessage(chatId, text);
-    if (!sentMid) return '代发没发出去,稍后再试。';
+    if (!sentMid) return { sent: false, text: '代发没发出去,稍后再试。' };
 
     const pending: PendingDelegation = {
       bot, command: cmd, args: cleanArgs, sentMid, issuedAt: Math.floor(Date.now() / 1000),
@@ -93,11 +100,24 @@ export async function executeUseBotCommand(
     await redis.set(COOLDOWN_KEY(chatId), '1', 'EX', Math.max(1, e.BOT_DELEGATION_COOLDOWN_SEC)).catch(() => {});
     logger.info({ chatId, bot, cmd }, 'Delegation: command sent, awaiting receipt');
 
-    return `已经替用户向 @${bot} 发了 ${text},正在等它回结果。现在跟用户说一句"我帮你问问~"之类的过渡话,**不要编造结果**,真结果回来后会自动接着回。`;
+    return {
+      sent: true,
+      text: `已经替用户向 @${bot} 发了 ${text},正在等它回结果。现在跟用户说一句"我帮你问问~"之类的过渡话,**不要编造结果**,真结果回来后会自动接着回。`,
+    };
   } catch (err) {
-    logger.warn({ err, chatId }, 'executeUseBotCommand failed');
-    return '代发出了点问题,改成把命令告诉用户让 TA 自己发吧。';
+    logger.warn({ err, chatId }, 'tryDelegateCommand failed');
+    return { sent: false, text: '代发出了点问题,改成把命令告诉用户让 TA 自己发吧。' };
   }
+}
+
+/** AI SDK 工具入口:只返文本(契约不变)。永不抛。 */
+export async function executeUseBotCommand(
+  chatId: number,
+  botUsername: string,
+  command: string,
+  args: string,
+): Promise<string> {
+  return (await tryDelegateCommand(chatId, botUsername, command, args)).text;
 }
 
 /**
