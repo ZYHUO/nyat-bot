@@ -221,6 +221,16 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         .catch(() => {});
     }
 
+    // 3.1g「深想」— @bot 的硬技术问题 → 后台 mundo 深答补发(fire-and-forget,
+    // 正常回复照常;只对直接问 + 廉价判定为硬技术触发;失败/回退/空则不补发)。
+    if (job.chatId < 0 && !formatted.isBot && env().DEEP_THINK_ENABLED && env().MUNDO_ENABLED) {
+      import("./deep-think.js")
+        .then(({ maybeDeepThink }) => maybeDeepThink(job.chatId, job.update as never, formatted, {
+          uid: botUid, username: botIdentity.username, nicknames: botIdentity.nicknames,
+        }))
+        .catch(() => {});
+    }
+
     // 3.34 First-DM onboarding (fire-and-forget) — once per user, then continue
     if (job.chatId > 0 && !formatted.isBot) {
       const redis = getRedis();

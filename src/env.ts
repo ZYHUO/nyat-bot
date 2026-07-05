@@ -309,6 +309,10 @@ const envSchema = z.object({
   // 输出必须人工/对拍复核。关时零足迹;开时 `mundo` usage 可被显式路由(设某
   // AI_USAGE_X_LABEL=mundo,或 Redis 运行时路由覆盖),自带兜底链降级到可靠模型。
   MUNDO_ENABLED: booleanFromEnv.default(false),
+  // 「深想」:群里 @bot / 回复 bot 的**硬技术问题**,正常回复照常,同时后台丢给
+  // mundo 深推理,想好了补发一条「我仔细想了下:…」。只对直接问 + 廉价判定为硬技术
+  // 的触发(低频),失败/回退/空则不补发(静默)。默认关;依赖 MUNDO_ENABLED。
+  DEEP_THINK_ENABLED: booleanFromEnv.default(false),
   // P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot
   // gate 与 planner 共享历史、看得到自己过往节奏判断)。
   TIMING_GATE_HISTORY_ENABLED: booleanFromEnv.default(false),

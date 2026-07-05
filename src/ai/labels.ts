@@ -62,7 +62,7 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // Mundo「难题攻坚」部门(可选,默认关):深推理模型走 mundo,失败/未启用则兜底
   // 到 stepfun(reasoning 模型)。maxTokens 给足(深推理模型截断会返回空 content);
   // timeout 拉长(它想得很久)。仅手动/显式路由使用,不接任何自动热路径。
-  mundo:            { label: 'mundo',          backups: ['stepfun'],      timeout: 180_000, maxTokens: 16_000 },
+  mundo:            { label: 'mundo',          backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
   // 后台深度摘要:high 推理(stepfunthink),只给配额消费 cron 用,不碰用户可见路径。
   // stepfunthink 缺失时回退 stepfun(medium),不致命。
   summarize_deep:   { label: 'stepfunthink',  backups: ['stepfun'],      timeout: 180_000 },
