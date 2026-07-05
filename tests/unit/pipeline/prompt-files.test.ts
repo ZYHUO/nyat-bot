@@ -29,6 +29,13 @@ describe('reply prompt files', () => {
     expect(prompt).toContain('一般最多 2 条');
   });
 
+  it('reply prompt: 多个不同的人问不同的事 → 必须分人各回一条(不揉成一句)', () => {
+    const prompt = readPrompt('task/reply.md');
+    // C:强指令,防被改软回"想圆回去就"
+    expect(prompt).toContain('必须分人各回一条');
+    expect(prompt).toContain('绝对不要把要回给好几个人的话揉进一条');
+  });
+
   it('reply-pro prompt encourages splitting long answers into two short messages', () => {
     const prompt = readPrompt('task/reply-pro.md');
 

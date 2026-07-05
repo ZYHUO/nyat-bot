@@ -932,6 +932,24 @@ export async function generateAndSendReplies(args: {
       throw new Error("All replies failed to send");
     }
 
+    // 观测(A):每次回复的落点 —— 锚点是谁、发了几段、是否多锚点回合、内容预览。
+    // 回复原文本不进日志,排查"该分人回复却揉成一句/只回最后一个人"没法复盘;
+    // 这条补上。deliver 每锚点各跑一次 → 多锚点回合会有多条(每人一条)。
+    logger.info(
+      {
+        chatId: job.chatId,
+        anchorUid: formatted.uid,
+        anchorName: formatted.fullName || formatted.username || String(formatted.uid),
+        anchorMsgId: formatted.messageId,
+        multiAnchor: job.turnContext?.isMultiAnchorTurn ?? false,
+        burstUids: job.turnContext?.burstUids,
+        segments: sentMessages.length,
+        targets: replies.map((r) => r.targetMessageId),
+        preview: sentMessages.map((s) => s.text).filter(Boolean).join(' ¦ ').slice(0, 200),
+      },
+      'Reply sent',
+    );
+
     // 自发代发认领:回复本身就是 `/cmd@bot ...`(模型 direct 路径直接打命令,
     // 没走 USE_BOT_COMMAND 工具)→ 补登记 pending,让对方回执能被接回来。
     if (job.chatId < 0) {
