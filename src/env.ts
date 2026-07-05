@@ -430,6 +430,9 @@ const envSchema = z.object({
   BOT_COMMAND_LEARN_ENABLED: booleanFromEnv.default(false),
   // 学习扫描间隔(分钟)
   BOT_COMMAND_LEARN_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // 学习侧(把观察到的命令提炼成用法/场景)的 LLM 路由。离线 cron、不赶时间、是深
+  // 推理任务 → 正好交给 mundo(qwen3.6);设 'mundo' 需 MUNDO_ENABLED。默认走 summarize。
+  BOT_COMMAND_LEARN_USAGE: z.string().default('summarize'),
   // C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。
   NETWORK_BURST_ENABLED: booleanFromEnv.default(false),
 

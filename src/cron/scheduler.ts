@@ -340,6 +340,8 @@ const CRON_TIMEOUT_MS: Record<string, number> = {
   'idle-check': 60_000,
   'sleep-cycle': 60_000,
   'channel-sync': 10 * 60_000,
+  // 命令学习可路由到 mundo(深推理,单次可达 480s);放宽到 12min 免慢调用撞死 tick。
+  'bot-command-learn': 12 * 60_000,
 };
 const DEFAULT_CRON_TIMEOUT_MS = 5 * 60_000;
 

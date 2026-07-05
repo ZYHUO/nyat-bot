@@ -161,7 +161,10 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
       .replace('{bot_name}', () => name)
       .replace('{samples}', () => samples);
     const res = await callWithFallback({
-      usage: 'summarize',
+      // 离线学习:可路由到 mundo(深推理,把观察提炼成用法/场景更准)。mundo 的
+      // per-provider maxTokens(16000)会盖过下面的 800、防推理模型截断成空;兜底
+      // 模型仍用 800。默认 'summarize' 时行为不变。
+      usage: env().BOT_COMMAND_LEARN_USAGE,
       messages: [{ role: 'user', content: tmpl }],
       maxTokens: 800,
       temperature: 0.2,
