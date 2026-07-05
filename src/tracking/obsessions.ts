@@ -6,6 +6,8 @@
 // 会淡淡提一句。bot 此前人格静态,主动发言像随机蹭热度,缺自我动机。
 //
 // 北京 3 小时块种子确定性轮换(块内稳定、每 3 小时更换),无状态无 cron。
+// **夜间睡觉不轮换**:睡着时锚定到就寝前(BJ 21:00)那一块,整夜同一个执念,
+// 醒来还是睡前那个(有连续性),醒后才恢复 3 小时轮换。
 // Redis xxb:obsession:override 可手动钉一个(运营干预)。
 //
 // 分寸:执念只是**自我动机的底色**,不是拿来推销的话题。绝不主动开话题、
@@ -13,6 +15,7 @@
 // (与 tone.md「宁可少说一句」一致)。
 
 import { getRedis } from '../db/redis.js';
+import { getLifeState } from './life-state.js';
 
 const POOL: Array<{ topic: string; flavor: string }> = [
   { topic: '一部补番中的老动画', flavor: '最近在补一部老番,还挺上头,偶尔想跟人提一嘴' },
@@ -32,6 +35,22 @@ function blockKeyBJ(d: Date): string {
   return `${bj.getUTCFullYear()}-${bj.getUTCMonth() + 1}-${bj.getUTCDate()}-${block}`;
 }
 
+/**
+ * 夜间睡觉不轮换:睡着时把种子时间锚定到"最近的 BJ 21:00"(就寝前那一块),
+ * 整夜同一个执念,醒来还是睡前那个(有连续性),醒后恢复正常 3 小时轮换。
+ * 非睡眠时段原样返回 now。getLifeState 静态 import(避 fake-timer 坑)。
+ */
+function seedTime(now: Date): Date {
+  try {
+    if (getLifeState(now).state !== 'sleeping') return now;
+  } catch { return now; }
+  const bj = new Date(now.getTime() + 8 * 3600 * 1000);
+  const anchor = new Date(bj);
+  anchor.setUTCHours(21, 0, 0, 0);
+  if (bj.getUTCHours() < 21) anchor.setUTCDate(anchor.getUTCDate() - 1); // 凌晨还睡着 → 用昨晚 21 点
+  return new Date(anchor.getTime() - 8 * 3600 * 1000); // 转回 UTC,供 blockKeyBJ 再 +8h
+}
+
 export interface Obsession {
   topic: string;
   /** 注入 prompt 的提示 */
@@ -47,7 +66,7 @@ export async function getObsession(now: Date = new Date()): Promise<Obsession> {
     }
   } catch { /* non-critical */ }
 
-  const seed = blockKeyBJ(now);
+  const seed = blockKeyBJ(seedTime(now));
   let h = 2166136261;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
