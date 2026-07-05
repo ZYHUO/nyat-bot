@@ -28,6 +28,8 @@ export function getLabels(): Map<string, AILabel> {
       reasoningEffort: p.reasoningEffort,
       disableThinking: p.disableThinking,
       insecureTLS: p.insecureTLS,
+      timeout: p.timeout,
+      maxTokens: p.maxTokens,
     });
   }
 

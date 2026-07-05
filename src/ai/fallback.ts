@@ -50,6 +50,20 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       continue;
     }
 
+    // per-label 覆盖:给慢/推理模型(如 mundo,回复链里需几分钟 + 大 maxTokens 防
+    // 推理截断成空)单独放宽,而不动 usage 配置(正常回复的快模型照旧 60s/小 maxTokens)。
+    // 超时仍受调用方 maxTimeoutMs 上限约束(heart/gate 等延迟敏感路径设了 maxTimeoutMs
+    // → 即便落到 mundo 也不会久等,会按上限超时后继续 fallback)。
+    const attemptOpts = (label.timeout === undefined && label.maxTokens === undefined)
+      ? callOpts
+      : {
+          ...callOpts,
+          timeout: label.timeout === undefined
+            ? callOpts.timeout
+            : (options.maxTimeoutMs !== undefined ? Math.min(label.timeout, options.maxTimeoutMs) : label.timeout),
+          maxTokens: label.maxTokens ?? callOpts.maxTokens,
+        };
+
     try {
       // Hedged request: if this is the primary and there's a backup,
       // race with a delayed backup call.
@@ -64,7 +78,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         return result;
       }
 
-      const result = await callModel(label, options.messages, callOpts);
+      const result = await callModel(label, options.messages, attemptOpts);
       if (options.rejectEmpty && !result.content.trim()) {
         throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
       }

@@ -615,6 +615,10 @@ export interface EnvProvider {
   reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
   disableThinking?: boolean;
   insecureTLS?: boolean;
+  /** per-provider 每次尝试超时(ms)覆盖 usage 超时;给慢模型(如 mundo)单独放宽用。 */
+  timeout?: number;
+  /** per-provider maxTokens 覆盖;给推理模型(如 mundo)单独放宽,防被小 maxTokens 截断成空。 */
+  maxTokens?: number;
 }
 
 export interface EnvUsage {
@@ -814,7 +818,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -843,6 +847,8 @@ export function getProviders(): Map<string, EnvProvider> {
       reasoningEffort: fields['REASONING'] as 'none' | 'low' | 'medium' | 'high' | undefined,
       disableThinking: fields['THINKING'] === 'disabled',
       insecureTLS: readBool(fields['INSECURE']),
+      timeout: (() => { const n = fields['TIMEOUT'] ? parseInt(fields['TIMEOUT'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
+      maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
     });
   }
 
