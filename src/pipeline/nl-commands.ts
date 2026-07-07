@@ -47,16 +47,19 @@ export function detectCommandIntent(raw: string): CommandIntent | null {
 
   // ── watch / unwatch / watches ──
   let m: RegExpMatchArray | null;
-  if ((m = t.match(/(?:取消|别再?|不(?:要|想))(?:追踪|关注|盯)\s*(?:话题|关键词)?\s*[「"]?([^"」\s]{1,30})/))) {
+  // 「关注」加负向先行 (?!点|度):「关注点」(焦点)、「关注度」是名词,不是追踪动作。
+  if ((m = t.match(/(?:取消|别再?|不(?:要|想))(?:追踪|关注(?!点|度)|盯)\s*(?:话题|关键词)?\s*[「"]?([^"」\s]{1,30})/))) {
     return { cmd: '/unwatch', arg: m[1]!, kind: 'intercept' };
   }
-  if (/(?:追踪|关注)(?:列表|了(?:啥|什么|哪些))|我(?:追踪|关注)了(?:啥|什么|哪些)|我的(?:追踪|关注)/.test(t)) {
+  if (/(?:追踪|关注)(?:列表|了(?:啥|什么|哪些))|我(?:追踪|关注)了(?:啥|什么|哪些)|我的(?:追踪|关注(?!点|度))/.test(t)) {
     return { cmd: '/watches', arg: '', kind: 'intercept' };
   }
-  if ((m = t.match(/(?:帮我)?(?:追踪|关注|盯着?|留意)\s*(?:一下)?\s*(?:话题|关键词)?\s*[「"]?([^"」\s]{1,30})/))) {
+  if ((m = t.match(/(?:帮我)?(?:追踪|关注(?!点|度)|盯着?|留意)\s*(?:一下)?\s*(?:话题|关键词)?\s*[「"]?([^"」\s]{1,30})/))) {
     const kw = m[1]!.replace(/[「"」]/g, '').trim();
-    // ignore "关注我"/"关注一下" with no real keyword
-    if (kw && kw !== '我' && kw !== '你' && kw !== '一下') {
+    // ignore "关注我"/"关注一下" with no real keyword;并排除整句片段(含语气/比较词
+    // 的多半是「怎么关注点都一样」这类疑问句,不是「关注比特币」这种命令)。
+    const isSentenceFragment = /[都也吗呢吧嘛]|一样|怎么|什么|为什么|如何|一直|大家|你们/.test(kw);
+    if (kw && kw !== '我' && kw !== '你' && kw !== '一下' && !isSentenceFragment) {
       return { cmd: '/watch', arg: kw, kind: 'intercept' };
     }
   }

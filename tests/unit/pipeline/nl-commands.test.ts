@@ -37,6 +37,13 @@ describe('detectCommandIntent', () => {
     expect(detectCommandIntent('帮我留意一下显卡')).toEqual({ cmd: '/watch', arg: '显卡', kind: 'intercept' });
     expect(detectCommandIntent('取消追踪比特币')).toEqual({ cmd: '/unwatch', arg: '比特币', kind: 'intercept' });
     expect(detectCommandIntent('我追踪了什么')).toEqual({ cmd: '/watches', arg: '', kind: 'intercept' });
+    // 关注比特币 仍应触发(关注 作动词)
+    expect(detectCommandIntent('关注比特币')).toEqual({ cmd: '/watch', arg: '比特币', kind: 'intercept' });
+    // 回归:「关注点」「关注度」是名词,疑问句片段不应误触发 /watch
+    expect(detectCommandIntent('怎么关注点都一样')).toBeNull();
+    expect(detectCommandIntent('大家关注点都一样啊')).toBeNull();
+    expect(detectCommandIntent('这个关注度好高')).toBeNull();
+    expect(detectCommandIntent('我的关注点是性能')).toBeNull();
   });
 
   it('party games', () => {
