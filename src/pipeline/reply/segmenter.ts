@@ -32,6 +32,8 @@ export interface SegmenterConfig {
   firstMessageQuoteReply: boolean;
   /** #11 句尾句号去除概率(随群标点习惯漂移) */
   periodDropRate: number;
+  /** 「喵」口癖抑制:分句后把过密的句尾喵稀释到约一半(tone.md「一半消息带上就好」) */
+  thinMeow: boolean;
 }
 
 const DEFAULT_CONFIG: SegmenterConfig = {
@@ -47,7 +49,34 @@ const DEFAULT_CONFIG: SegmenterConfig = {
   typingMaxDelay: 1.2,      // 每条最多等 1.2s（之前 4.0s，是"慢"的主因）
   firstMessageQuoteReply: true,
   periodDropRate: 0.9,
+  thinMeow: true,
 };
+
+// 句尾「喵」口癖:喵(呜)? 后可跟波浪号/单个表情收尾。抓这个尾巴,决定去留时
+// 只摘掉「喵」本体,保留核心话、波浪号和表情。
+const MEOW_TAIL = /^([\s\S]*?)(喵+呜?)([~～]*)(\s*(?:😼|😸|😹|😻|[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}])?)\s*$/u;
+
+/**
+ * 「喵」口癖抑制器:一波回复里句尾喵太密时稀释到约一半。
+ *   - 短促句(核心≤4 字,如「对对对喵」「确实喵」)一律去喵 —— tone.md「越短越不用带」。
+ *   - 其余带喵句隔一个去一个,整体压到 ~50%。
+ *   - 核心为空的纯「喵」/「喵~」保留(是句完整发言,不动)。
+ * 确定性(按出现序,不用随机)→ 可单测。
+ */
+export function thinMeowTic(segments: string[]): string[] {
+  let meowSeen = 0;
+  return segments.map((seg) => {
+    const m = seg.match(MEOW_TAIL);
+    if (!m) return seg;
+    const core = (m[1] ?? '').trim();
+    if (!core) return seg; // 纯「喵」不动
+    meowSeen++;
+    const coreLen = [...core.replace(/[\s\p{P}]/gu, '')].length;
+    const strip = coreLen <= 4 || meowSeen % 2 === 0; // 短句必去 + 其余隔一去一
+    if (!strip) return seg;
+    return (core + (m[3] ?? '') + (m[4] ?? '')).trimEnd();
+  });
+}
 
 // ─── Kaomoji regex ───
 // Matches bracket-wrapped emoticons (must contain non-alnum non-CJK non-space)
@@ -416,9 +445,17 @@ export function segmentReply(text: string, config?: Partial<SegmenterConfig>): S
   }
 
   // 8. Final filter (remove empty)
-  const final = sentences.filter((s) => s.trim());
+  let final = sentences.filter((s) => s.trim());
   if (final.length === 0) {
     return { segments: [cfg.defaultReply], originalText: text };
+  }
+
+  // 9. 「喵」口癖抑制(过密时稀释到约一半)
+  if (cfg.thinMeow) {
+    final = thinMeowTic(final).filter((s) => s.trim());
+    if (final.length === 0) {
+      return { segments: [cfg.defaultReply], originalText: text };
+    }
   }
 
   return { segments: final, originalText: text };

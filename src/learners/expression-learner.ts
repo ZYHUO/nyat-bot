@@ -1,15 +1,15 @@
 import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { isAgreementTail } from './expression-filter.js';
+import { isBannedExpression } from './expression-filter.js';
 import type { LearnerScanResult, ExpressionEntry } from './types.js';
 
 /** G9 程序级硬过滤:别学 bot 自己的话(回音室)、媒体占位符、附和句尾口癖 */
 function isLearnableExpression(situation: string, style: string, botMarkers: string[]): boolean {
   const combined = `${situation} ${style}`;
   if (/\[(?:表情|图片|贴纸|sticker|media|语音|视频)/i.test(combined)) return false;
-  // "…是吧/…对吧"这类附和句尾当标点的口癖不学(否则注入即强化,自激循环)
-  if (isAgreementTail(style)) return false;
+  // "…是吧/…对吧""我勒个X"、光一个填充词等自激口癖不学(否则注入即强化)
+  if (isBannedExpression(style)) return false;
   for (const marker of botMarkers) {
     if (marker && combined.includes(marker)) return false;
   }
@@ -150,7 +150,7 @@ export function getTopExpressions(chatId: number, limit: number): ExpressionEntr
   // (多取一些再过滤,保证滤后仍够 limit 条)。
   const fetch = limit * 3;
   const filter = (rows: ExpressionEntry[]): ExpressionEntry[] =>
-    rows.filter((r) => !isAgreementTail(r.style)).slice(0, limit);
+    rows.filter((r) => !isBannedExpression(r.style)).slice(0, limit);
   // G10 注入池地板:count>=2 的(真被群里反复用的)够多时只从它们里取,
   // 不让 1500+ 条单次噪音稀释注入池(MaiBot weighted_sample from count>1 同义)。
   const reinforced = filter(db.prepare(
