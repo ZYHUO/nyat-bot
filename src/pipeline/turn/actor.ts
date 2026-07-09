@@ -382,22 +382,26 @@ async function runJudgedEntry(
             await trackEntry(chatId, fresh[i]!, fresh.length, false);
           }
         }
+        // 换锚前记下旧锚点 uid,用于判断 replan 是否跨人。
+        const prevAnchorUid = entryUid(current);
         // 有新的聊天锚点 → 重规划到它;打断全来自命令(anchorIdx===-1)→ 保留原 current 重试原回复
         if (anchorIdx !== -1) {
           current = fresh[anchorIdx]!;
           currentBatch = fresh.length;
         }
-        // L6: 只把与当前锚点同 uid 的 fresh id 并入本组 burstIds,避免跨人
-        // replan 时写手 reply_to 指到别人消息上(多锚点场景)。锚点若切到
-        // 别人(direct 优先),则以新锚点 uid 为准 —— 写手最可能回最新锚点。
+        // L6:currentBurstIds 必须只含**当前锚点这个人**的消息,否则写手 reply_to 会
+        // 指到别人、且多锚点提示("这波围绕 CURRENT 这个人")会张冠李戴。
+        //   - 锚点还是同一个人 → 追加该人的 fresh id(原有 id 也是他的,保留)。
+        //   - 锚点切到了别人(direct 优先换人)→ 原 currentBurstIds 是**旧锚点那人**的,
+        //     必须丢弃,只保留新锚点这个人的 fresh id(codex 复审:彻底堵跨人 replan)。
         const anchorUid = entryUid(current);
-        currentBurstIds = [
-          ...currentBurstIds,
-          ...fresh
-            .filter((f) => entryUid(f) === anchorUid)
-            .map((f) => f.messageId)
-            .filter((id): id is number => id !== undefined),
-        ];
+        const freshAnchorIds = fresh
+          .filter((f) => entryUid(f) === anchorUid)
+          .map((f) => f.messageId)
+          .filter((id): id is number => id !== undefined);
+        currentBurstIds = anchorUid === prevAnchorUid
+          ? [...currentBurstIds, ...freshAnchorIds]
+          : freshAnchorIds;
       }
       // 无论是否有新消息,重规划都跳过 gate(打断已证明此刻该说话)
       gateBypass = true;
