@@ -260,6 +260,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // 口头禅自动惩罚闭环(盯自发言,复读超阈值→自动降权+动态拉黑,flag 默认关)
+  if (env().TIC_PENALTY_ENABLED) {
+    tasks.push(schedule(`*/${env().TIC_PENALTY_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('tic-penalty', async () => {
+        const { runTicPenalty } = await import('./tic-penalty.js');
+        await runTicPenalty();
+      });
+    }));
+  }
+
   // 硬作息心跳(v2):动态就寝 shift、晚安/早安边沿、半夜醒、补回排水
   // (问候由 SLEEP_ANNOUNCE_ENABLED 在函数内部单独控制,心跳必须常跑)
   if (env().SLEEP_SCHEDULE_ENABLED) {

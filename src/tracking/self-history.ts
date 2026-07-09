@@ -70,6 +70,29 @@ export function getRecentSelfReplies(
 }
 
 /**
+ * 取某群最近 N 条 bot 自己的发言(不按 uid 过滤)——口头禅自动惩罚闭环的数据源。
+ * 返回 [] when disabled.
+ */
+export function getRecentChatReplies(chatId: number, limit = 60, withinHours = 24): SelfReply[] {
+  if (!env().SELF_HISTORY_ENABLED) return [];
+  try {
+    const db = getDb();
+    const cutoff = Math.floor(Date.now() / 1000) - withinHours * 3600;
+    const rows = db
+      .prepare(
+        `SELECT reply_text AS text, ts FROM self_replies
+         WHERE chat_id = ? AND ts >= ?
+         ORDER BY ts DESC, id DESC LIMIT ?`,
+      )
+      .all(chatId, cutoff, limit) as { text: string; ts: number }[];
+    return rows;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'getRecentChatReplies failed (non-critical)');
+    return [];
+  }
+}
+
+/**
  * Format recent self replies as a prompt section. Returns empty string when no entries
  * or feature off.
  */

@@ -412,6 +412,14 @@ const envSchema = z.object({
   LEARNER_MAX_CHATS_PER_TICK: z.coerce.number().int().positive().default(3),
   EXPRESSION_INJECT_ENABLED: booleanFromEnv.default(false),
   EXPRESSION_INJECT_COUNT: z.coerce.number().int().positive().default(5),
+  // 口头禅自动惩罚闭环:盯 bot 自己发言,句首/句尾短语复读超阈值 → 自动降权 + 带 TTL
+  // 动态拉黑(注入不喂回 + prompt 提示"少说")+ 到期自愈。默认关。
+  TIC_PENALTY_ENABLED: booleanFromEnv.default(false),
+  TIC_PENALTY_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  TIC_PENALTY_WINDOW: z.coerce.number().int().positive().default(60),        // 采样最近 N 条自发言
+  TIC_PENALTY_MIN_MESSAGES: z.coerce.number().int().positive().default(4),   // 至少出现在几条里
+  TIC_PENALTY_MIN_FRACTION: z.coerce.number().min(0).max(1).default(0.35),   // 至少占窗口比例
+  TIC_PENALTY_TTL_SEC: z.coerce.number().int().positive().default(6 * 3600), // 动态拉黑存活时长
   // G1: 首档 4→3,黑话冷启动更快过推断线(重检计数修复后才有意义)
   JARGON_INFERENCE_THRESHOLDS: z.string().default('3,8,25,100'),
   JARGON_QUERY_ENABLED: booleanFromEnv.default(false),

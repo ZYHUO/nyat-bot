@@ -499,6 +499,16 @@ export async function generateReply(
         }
       }
     } catch { /* non-critical */ }
+    // 口头禅惩罚:动态黑名单里的短语是你最近说腻了的口头禅,这条明确提醒别再用
+    try {
+      if (chatId < 0 && env().TIC_PENALTY_ENABLED) {
+        const { getDynamicTicBans } = await import('../../learners/tic-detector.js');
+        const bans = await getDynamicTicBans(chatId);
+        if (bans.length > 0) {
+          stateParts.pushP(6, 14, `[少说口头禅] 你最近老把「${bans.slice(0, 6).join('」「')}」挂嘴边,已经腻了。这几条这次**换个说法或直接不用**,别再复读。`);
+        }
+      }
+    } catch { /* non-critical */ }
     // L5 好奇心延续:之前问 TA 的问题悬着,TA 现在出现了 → 可以追一句
     if (!message.isBot && !message.isAnonymous) {
       try {
