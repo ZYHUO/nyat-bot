@@ -181,6 +181,9 @@ export async function generateReply(
   callOpts?: {
     signal?: AbortSignal;
     burstIds?: number[];
+    /** 本回合是多锚点分人回合(actor 已把不同人拆成各自独立的回复调用)。
+     *  为 true 时:这一条只回 CURRENT_MESSAGE 那个人,别替上下文里别人回话/张冠李戴。 */
+    isMultiAnchor?: boolean;
     revisitCandidates?: Array<{ messageId: number; sender: string; snippet: string }>;
     /** G2: 统一动作空间已启用 — 解析并执行 react/sticker/silent 动作 */
     actionSpace?: boolean;
@@ -228,8 +231,18 @@ export async function generateReply(
   const interruptSignal = callOpts?.signal;
   // G4: the turn drained a multi-message burst — tell the writer to answer
   // the whole thought and pick the real anchor, not just the newest line.
+  // 多锚点分人回合:actor 已把不同人拆成各自独立的调用,这次的 burstIds 只剩
+  // 「CURRENT 这个人」自己的连发 → 不能再走"多个不同人分数组"分支(那会让它又去
+  // 替上下文里别的人回话 = 张冠李戴)。收窄成"这一个人的连发当一个念头回一条"。
   const burstPart = callOpts?.burstIds && callOpts.burstIds.length > 1
-    ? `[连发上下文] 这次回复由一波连发触发，共 ${callOpts.burstIds.length} 条：${callOpts.burstIds.map((id) => `#${id}`).join('、')}（按时间顺序，最后一条最新，内容都在上方上下文里）。请把整波连发当作一个完整的念头来回应，不要只回最后一句。回复目标怎么选：\n- 整波是同一个念头分几条发 → 输出 1 条，targetMessageId 选真正承载重点的那条（往往是提问/求助的那条，不一定是最后一条）。\n- 这波里有**两个以上互相独立的问题/请求**（同一个人连发的也算）→ 输出数组、每个问题各出一条，各自 targetMessageId 填对应那条的 id，分别回复——别把两个不相干的问题挤进一条、也别只挑一个回。`
+    ? (callOpts.isMultiAnchor
+        ? `[连发上下文] 这波连发（${callOpts.burstIds.map((id) => `#${id}`).join('、')}）都是 [CURRENT_MESSAGE_TO_REPLY] **同一个人**发的，当作一个完整念头回一条，targetMessageId 选承载重点的那条（往往是提问那条，不一定是最后一条）。`
+        : `[连发上下文] 这次回复由一波连发触发，共 ${callOpts.burstIds.length} 条：${callOpts.burstIds.map((id) => `#${id}`).join('、')}（按时间顺序，最后一条最新，内容都在上方上下文里）。请把整波连发当作一个完整的念头来回应，不要只回最后一句。回复目标怎么选：\n- 整波是同一个念头分几条发 → 输出 1 条，targetMessageId 选真正承载重点的那条（往往是提问/求助的那条，不一定是最后一条）。\n- 这波里有**两个以上互相独立的问题/请求**（同一个人连发的也算）→ 输出数组、每个问题各出一条，各自 targetMessageId 填对应那条的 id，分别回复——别把两个不相干的问题挤进一条、也别只挑一个回。`)
+    : undefined;
+  // 多锚点硬护栏:不管这个人是不是连发,只要本回合是"分人各回",都提醒写手这条
+  // 只对 CURRENT 这一个人,别把上下文里别人的话题揉进来 / 别张冠李戴。
+  const multiAnchorPart = callOpts?.isMultiAnchor
+    ? `[只回这一个人] 本轮群里好几个人各自说了不同的事，系统已经把他们拆开、分别回复。这一条**只**回 [CURRENT_MESSAGE_TO_REPLY] 那个人那条。群聊上下文里其他人的发言只是背景——**别在这条里替他们回话、别接他们抛的话题、别把别人说的话当成 TA 说的**。其他人各有自己的回复，不用你在这条里一起管。`
     : undefined;
   // G7: surface still-unanswered recent messages so the model can scroll back
   // ("对了你刚才问的那个…") — strictly optional, the model may ignore them.
@@ -566,6 +579,8 @@ export async function generateReply(
   // P2-F:order=71 落在连发(70)与迟到/补觉(72)之间;keep=4 与连发同级可裁。
   if (waitPart) stateParts.pushP(71, 4, waitPart);
   if (burstPart) stateParts.pushP(70, 4, burstPart);
+  // 分人护栏:keep=1 必留、order=79 紧贴 CURRENT(比指令 order=80 稍前),防被预算裁掉
+  if (multiAnchorPart) stateParts.pushP(79, 1, multiAnchorPart);
   if (revisitPart) stateParts.pushP(40, 45, revisitPart);
   // 两遍合成(burst-hint.ts):① 按 keep 升序做预算裁剪(keep<10 必留);
   // ② 保留下来的再按 order 升序渲染。重要度与位置解耦 —— 念头最重要(keep=2)

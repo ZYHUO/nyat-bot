@@ -316,6 +316,7 @@ export async function generateAndSendReplies(args: {
       ? {
           signal: job.turnContext?.signal,
           burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext?.burstMessageIds : undefined,
+          isMultiAnchor: job.turnContext?.isMultiAnchorTurn ?? false,
           revisitCandidates,
           actionSpace: job.turnContext ? e.TURN_ACTION_PLANNER_ENABLED : undefined,
           instruction: instructionInfo ?? undefined,
