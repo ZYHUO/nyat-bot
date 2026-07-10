@@ -194,6 +194,40 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
     return { act: 'pass', path: 'chat', why: 'parse_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 
+  // 心流反思(默认关):只在决定 reply 时,用同一个 heart 模型把「念头」再磨一遍——
+  // 不改决策(act/path 不动)、不换模型,只让流给写手的 [你的念头] 更抓重点。
+  // 只在 reply 轮加这一次调用;失败/空/超时/打断一律保底用原念头(fail-safe)。
+  if (parsed.act === 'reply' && e.HEART_REFLECT_ENABLED && !input.signal?.aborted) {
+    try {
+      const rr = await callWithFallback({
+        usage: 'heart',
+        messages: [
+          {
+            role: 'system',
+            content:
+              `你是${input.botName}。你刚决定接下面 ★ 那条消息,当前念头是「${parsed.why}」。` +
+              `再想半秒:这念头抓到点子了吗?会不会太笼统、没接到重点、或跟你刚说过的重复?` +
+              `给一句**更利落、更抓重点**的念头(≤30字,是你想说话的方向/切入点,不是回复原文)。只输出这一句。`,
+          },
+          { role: 'user', content: `[群聊上下文]\n${ctxStr}\n\n★ 就是你要接的那条。` },
+        ],
+        temperature: 0.3,
+        rejectEmpty: true,
+        signal: input.signal,
+        // 紧超时:反思只是锦上添花,超过 5s 就放弃、用原念头(别拖累回复)
+        maxTimeoutMs: Math.min(e.TIMING_GATE_TIMEOUT_MS, 5000),
+      });
+      const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
+      if (refined.length >= 2) {
+        logger.info({ chatId: input.chatId, from: parsed.why, to: refined }, 'Heart reflect refined 念头');
+        parsed = { ...parsed, why: refined };
+      }
+    } catch (err) {
+      if (isCallerAbort(input.signal) || (err instanceof AIError && err.code === 'AI_ABORTED')) throw err;
+      logger.debug({ err, chatId: input.chatId }, 'heart reflect failed (kept original why)');
+    }
+  }
+
   logger.info(
     { chatId: input.chatId, act: parsed.act, path: parsed.path, why: parsed.why, latencyMs },
     'Heart decision',
