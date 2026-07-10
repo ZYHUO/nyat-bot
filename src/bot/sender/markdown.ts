@@ -40,6 +40,15 @@ export function toMarkdownV2(text: string): string {
     return `\x00BD${idx}\x00`;
   });
 
+  // 3.5 提取剧透 ||...||（Telegram 较新实体，点开才可见）。双竖线 bot 平时不用，
+  // 冲突低；内容非空、不含竖线。用来藏结局/答案/梗，点开才见。
+  const spoilers: string[] = [];
+  remaining = remaining.replace(/\|\|([^|\n]+?)\|\|/g, (_, content: string) => {
+    const idx = spoilers.length;
+    spoilers.push(content);
+    return `\x00SP${idx}\x00`;
+  });
+
   // 4. 提取 URL → 还原时包成 [显示文本](href) 链接实体。
   // 裸 URL 在严格 MarkdownV2 下不合法:URL 里的 . = - + # 等全是必转义
   // 字符,原样保留必然 can't parse entities → 整条消息掉纯文本回退。
@@ -78,6 +87,11 @@ export function toMarkdownV2(text: string): string {
   // 6. 还原粗体
   remaining = remaining.replace(/\x00BD(\d+)\x00/g, (_, idx: string) => {
     return `*${escapeMarkdownV2(bolds[Number(idx)]!)}*`;
+  });
+
+  // 6.5 还原剧透:内容按普通规则全量转义,包在 ||...|| 里
+  remaining = remaining.replace(/\x00SP(\d+)\x00/g, (_, idx: string) => {
+    return `||${escapeMarkdownV2(spoilers[Number(idx)]!)}||`;
   });
 
   // 7. 还原行内代码。code 实体内规范要求 '\' 和 '`' 必须转义

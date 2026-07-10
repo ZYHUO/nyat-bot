@@ -100,3 +100,24 @@ describe('toMarkdownV2 — code-entity escaping (#37)', () => {
     expect(toMarkdownV2('```a `b` c\\d```')).toBe('```\na \\`b\\` c\\\\d\n```');
   });
 });
+
+describe('toMarkdownV2 — spoiler ||...||（Telegram 较新实体）', () => {
+  it('包成剧透实体', () => {
+    expect(toMarkdownV2('答案是||42||喵')).toBe('答案是||42||喵');
+  });
+  it('剧透内容里的特殊字符照常转义', () => {
+    expect(toMarkdownV2('||a.b-c||')).toBe('||a\\.b\\-c||');
+  });
+  it('单竖线不当剧透(仍转义)', () => {
+    expect(toMarkdownV2('|y|')).toBe('\\|y\\|');
+  });
+  it('空剧透不匹配(|| || 里必须有内容)', () => {
+    expect(toMarkdownV2('||||')).toBe('\\|\\|\\|\\|');
+  });
+  it('粗体与剧透并存', () => {
+    expect(toMarkdownV2('**重点**：结局||他领便当||')).toBe('*重点*：结局||他领便当||');
+  });
+  it('剧透不跨行', () => {
+    expect(toMarkdownV2('||第一行\n第二行||')).toBe('\\|\\|第一行\n第二行\\|\\|');
+  });
+});
