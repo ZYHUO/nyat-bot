@@ -200,7 +200,8 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   if (parsed.act === 'reply' && e.HEART_REFLECT_ENABLED && !input.signal?.aborted) {
     try {
       const rr = await callWithFallback({
-        usage: 'heart',
+        // 走 heart_reflect 快模型(sub2gpt54mini),避开 stepfun 并发争用;heart 决策仍 stepfunjudge
+        usage: 'heart_reflect',
         messages: [
           {
             role: 'system',

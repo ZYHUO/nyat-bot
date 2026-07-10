@@ -59,6 +59,8 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   audio:            { label: 'stepfun',       backups: [],               timeout: 30_000 },
   judge:            { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 200,  temperature: 0 },
   heart:            { label: 'stepfunjudge',  backups: ['longcat'],      timeout: 30_000, maxTokens: 120,  temperature: 0 },
+  // 心流「念头」反思(附加、非决策):走快模型避开 stepfun 并发争用,不动 heart 决策模型。
+  heart_reflect:    { label: 'sub2gpt54mini', backups: ['stepfunjudge'], timeout: 15_000, maxTokens: 200,  temperature: 0.3 },
   planner:          { label: 'sub2gpt54mini', backups: ['sub2gpt55'],     timeout: 60_000, maxTokens: 300,  temperature: 0 },
   summarize:        { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 120_000 },
   // Mundo「难题攻坚」部门(可选,默认关):深推理模型走 mundo,失败/未启用则兜底
