@@ -215,8 +215,8 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
         temperature: 0.3,
         rejectEmpty: true,
         signal: input.signal,
-        // 紧超时:反思只是锦上添花,超过 5s 就放弃、用原念头(别拖累回复)
-        maxTimeoutMs: Math.min(e.TIMING_GATE_TIMEOUT_MS, 5000),
+        // 反思模型是 dsv4flash(轻思考,~5-6s),放宽到 10s;超了就放弃、用原念头。
+        maxTimeoutMs: 10_000,
       });
       const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
       if (refined.length >= 2) {
