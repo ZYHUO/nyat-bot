@@ -61,7 +61,7 @@ export async function maybeDeepThink(
 ): Promise<void> {
   try {
     const e = env();
-    if (!e.DEEP_THINK_ENABLED || !e.MUNDO_ENABLED) return;
+    if (!e.DEEP_THINK_ENABLED) return; // 深想已解耦 mundo,改走 deep_think usage(Kimi-K2.7 主)
     if (chatId >= 0 || formatted.isBot) return; // 群聊 only
     const text = (formatted.textContent || formatted.captionContent || '').trim();
     if (text.length < 15) return; // 太短不像真问题
@@ -92,7 +92,7 @@ export async function maybeDeepThink(
     _inflight++;
     try {
       const r = await callWithFallback({
-        usage: 'mundo', maxTokens: 16000, // timeout 走 mundo usage 配置(480s)
+        usage: 'deep_think', maxTokens: 16000, // Kimi-K2.7(火山)主,mundo/stepfunthink 兜底
         messages: [
           {
             role: 'system',
@@ -106,15 +106,17 @@ export async function maybeDeepThink(
       // 只在**确实由 mundo 深答**且内容实在时补发:回退到 stepfun 的不发(避免和
       // 正常回复重复、也不让兜底模型冒充"深答")。
       const ans = r.content.trim();
-      if (r.label !== 'mundo' || ans.length < 20) {
-        logger.info({ chatId, label: r.label, len: ans.length }, 'deep-think: skip follow-up (no mundo answer)');
+      // 只在**确实由深答模型**(Kimi-K2.7 / mundo / stepfunthink,都是深思考)且内容实在时补发;
+      // 落到廉价兜底(stepfun 等)的不发,避免冒充深答/和正常回复重复。
+      if (!['k27code', 'mundo', 'stepfunthink'].includes(r.label) || ans.length < 20) {
+        logger.info({ chatId, label: r.label, len: ans.length }, 'deep-think: skip follow-up (no deep answer)');
         return;
       }
       const body = `我仔细想了下:\n${ans}`.slice(0, 3500);
       const mid = await sendMessage(chatId, body, formatted.messageId);
       if (mid) {
         await addAssistant(chatId, { textContent: body, messageId: mid });
-        logger.info({ chatId, uid: formatted.uid, len: ans.length }, 'deep-think: mundo follow-up sent');
+        logger.info({ chatId, uid: formatted.uid, label: r.label, len: ans.length }, 'deep-think: follow-up sent');
       }
     } finally {
       _inflight--;

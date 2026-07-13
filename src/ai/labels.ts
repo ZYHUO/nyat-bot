@@ -67,6 +67,9 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // 到 stepfun(reasoning 模型)。maxTokens 给足(深推理模型截断会返回空 content);
   // timeout 拉长(它想得很久)。仅手动/显式路由使用,不接任何自动热路径。
   mundo:            { label: 'mundo',          backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
+  // 「深想」异步深答:走火山 coding 的 Kimi-K2.7(强思考,~38s,拍平价免费),
+  // mundo/stepfunthink 兜底。异步补发、不赶时间,慢没关系。
+  deep_think:       { label: 'k27code',        backups: ['mundo', 'stepfunthink'], timeout: 120_000, maxTokens: 16_000 },
   // 后台深度摘要:high 推理(stepfunthink),只给配额消费 cron 用,不碰用户可见路径。
   // stepfunthink 缺失时回退 stepfun(medium),不致命。
   summarize_deep:   { label: 'stepfunthink',  backups: ['stepfun'],      timeout: 180_000 },
