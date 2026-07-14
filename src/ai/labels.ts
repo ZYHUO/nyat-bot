@@ -62,7 +62,7 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // 心流「念头」反思(附加、非决策):火山 DeepSeek-V4-Flash 主(轻思考、念头有料),
   // maxTokens 给足 600 防被推理吃空;gemini-3.1-flash-lite 兜底(都非 GPT,主人要求)。
   // 注意:dsv4flash 反思约 5-6s,decision.ts 的 maxTimeoutMs 已放宽到 10s 配合。
-  heart_reflect:    { label: 'dsv4flash',     backups: ['gemini31lite', 'stepfunjudge'], timeout: 15_000, maxTokens: 600,  temperature: 0.3 },
+  heart_reflect:    { label: 'dsv4pro'  ,     backups: ['gemini31lite', 'stepfunjudge'], timeout: 15_000, maxTokens: 600,  temperature: 0.3 },
   planner:          { label: 'sub2gpt54mini', backups: ['sub2gpt55'],     timeout: 60_000, maxTokens: 300,  temperature: 0 },
   summarize:        { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 120_000 },
   // Mundo「难题攻坚」部门(可选,默认关):深推理模型走 mundo,失败/未启用则兜底
