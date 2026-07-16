@@ -390,6 +390,18 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
     raw = result.content;
   } catch (err) {
+    // codex #4:基础设施故障(超时/网络)不吞消息——但 actor 有重放预算时先 defer
+    // 错峰重评(45s),而非立刻 continue。这样 provider 抖动期不会一超时就放行一串
+    // 主动搭话(压住乱插话);重评时 provider 多半已恢复,恢复不了则预算耗尽 fail-open。
+    // 非 actor / 预算耗尽 → continue(宁可多说不吞)。direct 已上游短路,到不了这里。
+    if (input.canDefer && hasDeferBudget(input.deferCount)) {
+      logger.warn({ err, chatId: input.chatId }, 'gate LLM call failed → defer re-eval (actor)');
+      return {
+        ...makeShortCircuit('no_action', 'gate_llm_failed_defer', start),
+        deferOnly: true,
+        retryAfterMs: 45_000,
+      };
+    }
     logger.warn({ err, chatId: input.chatId }, 'gate LLM call failed, fail-open continue');
     return makeShortCircuit('continue', 'llm_call_failed', start);
   }

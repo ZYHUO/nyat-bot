@@ -1161,11 +1161,14 @@ export async function generateAndSendReplies(args: {
 
     if (job.chatId < 0 && isNoSendPermissionError(err)) {
       try {
-        await transitionToStop(job.chatId, formatted.uid);
+        // codex #5:权限失败 STOP 用短 TTL(20min),而非 state 默认 24h —— 真权限丢失
+        // 仍会在下条消息再次触发 STOP,但**瞬时** 403/误判的白白静默窗口从 24h 砍到 20min
+        // (direct 唤醒仍立即恢复)。
+        await transitionToStop(job.chatId, formatted.uid, 20 * 60);
       } catch { /* non-critical */ }
       logger.warn(
         { chatId: job.chatId, triggerUid: formatted.uid },
-        'Chat put into STOP due to missing send permission; waiting for a future direct wake-up',
+        'Chat put into STOP due to missing send permission; short TTL (recovers on direct wakeup or 20min)',
       );
       return;
     }

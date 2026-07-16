@@ -162,9 +162,10 @@ async function persist(
   chatId: number,
   patch: Record<string, string | number | undefined>,
   remove: string[] = [],
+  ttlOverride?: number,
 ): Promise<void> {
   const redis = getRedis();
-  const ttl = env().TIMING_STATE_TTL_SEC;
+  const ttl = ttlOverride ?? env().TIMING_STATE_TTL_SEC;
   const flat: string[] = [];
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
@@ -190,7 +191,7 @@ export async function enterRunning(chatId: number): Promise<void> {
   );
 }
 
-export async function enterStop(chatId: number, triggerUid?: number): Promise<void> {
+export async function enterStop(chatId: number, triggerUid?: number, ttlSec?: number): Promise<void> {
   await persist(
     chatId,
     {
@@ -202,6 +203,7 @@ export async function enterStop(chatId: number, triggerUid?: number): Promise<vo
       gatePendingSince: Date.now(),
     },
     ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids'],
+    ttlSec,
   );
 }
 

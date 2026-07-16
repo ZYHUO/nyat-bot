@@ -549,7 +549,8 @@ describe("processPipeline path branching", () => {
 
     await processPipeline(makeJob());
 
-    expect(mockTransitionToStop).toHaveBeenCalledWith(-100123, 1001);
+    // 权限失败 STOP 带 20min 短 TTL(codex #5)
+    expect(mockTransitionToStop).toHaveBeenCalledWith(-100123, 1001, 20 * 60);
     const fallbackSent = sendDirect.mock.calls.some(
       (c: unknown[]) => typeof c[1] === "string" && (c[1] as string).includes("故障"),
     );

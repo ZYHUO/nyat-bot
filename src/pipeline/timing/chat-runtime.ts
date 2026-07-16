@@ -120,10 +120,10 @@ export async function transitionToRunning(chatId: number): Promise<void> {
   await enterRunning(chatId);
 }
 
-export async function transitionToStop(chatId: number, triggerUid?: number): Promise<void> {
+export async function transitionToStop(chatId: number, triggerUid?: number, ttlSec?: number): Promise<void> {
   if (!env().TIMING_GATE_ENABLED) return;
-  await enterStop(chatId, triggerUid);
-  logger.info({ chatId, triggerUid }, 'Chat transitioned to STOP (gate=no_action)');
+  await enterStop(chatId, triggerUid, ttlSec);
+  logger.info({ chatId, triggerUid, ttlSec }, 'Chat transitioned to STOP (gate=no_action)');
 }
 
 /**

@@ -113,9 +113,26 @@ describe('runTimingGate — P2-E fail-closed', () => {
     expect(d.reason).toBe('parse_failed');
   });
 
-  it('LLM 调用失败(基础设施)仍 fail-open continue', async () => {
+  it('LLM 调用失败(基础设施)非actor仍 fail-open continue', async () => {
     callWithFallbackMock.mockRejectedValue(new Error('network'));
     const d = await runTimingGate(input());
+    expect(d.action).toBe('continue');
+    expect(d.reason).toBe('llm_call_failed');
+  });
+
+  it('codex #4:LLM 失败时 actor 有预算 → defer 错峰重评(不立刻 continue、不吞)', async () => {
+    callWithFallbackMock.mockRejectedValue(new Error('gate_timeout'));
+    const d = await runTimingGate(input({ canDefer: true, deferCount: 0 }));
+    expect(d.action).toBe('no_action');
+    expect(d.deferOnly).toBe(true);
+    expect(d.reason).toBe('gate_llm_failed_defer');
+    expect(d.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it('codex #4:LLM 失败 + actor 预算耗尽 → 兜底 fail-open continue(不吞)', async () => {
+    envValues['TURN_GATE_DEFER_MAX_REPLAYS'] = 1;
+    callWithFallbackMock.mockRejectedValue(new Error('gate_timeout'));
+    const d = await runTimingGate(input({ canDefer: true, deferCount: 5 }));
     expect(d.action).toBe('continue');
     expect(d.reason).toBe('llm_call_failed');
   });
