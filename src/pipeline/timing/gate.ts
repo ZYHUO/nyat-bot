@@ -276,6 +276,10 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     const remainingMs = await getGateCooldownRemainingMs(input.chatId, state);
     if (remainingMs > 0 && !input.skipShortCircuits) {
       if (e.TURN_GATE_DEFER_COOLDOWN) {
+        // 与下面 talk-value 层的 `canDefer && budget` 故意不同:cooldown 层非 actor
+        // (canDefer=false)→ deferOnly → 静默,是**正确**的("刚说过话,冷却期不该再回";
+        // direct 消息在上游已短路,不受影响)。talk-value 层非 actor 必须穿透 LLM(否则
+        // 慢群"未达阈值=永不回复")。codex #1 误把这个不一致当 bug,实为有意设计。
         if (!input.canDefer || hasDeferBudget(input.deferCount)) {
           return {
             ...makeShortCircuit('no_action', 'cooldown_defer', start),
@@ -283,7 +287,7 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
             retryAfterMs: remainingMs,
           };
         }
-        // 预算耗尽 → 穿透到 LLM
+        // 预算耗尽(actor)→ 穿透到 LLM
       } else {
         return makeShortCircuit('continue', 'cooldown_bypass', start);
       }
@@ -443,6 +447,24 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
       return {
         action: 'no_action',
         reason: 'parse_failed_closed',
+        shortCircuited: false,
+        latencyMs: Math.round(performance.now() - start),
+        raw: raw.slice(0, 500),
+      };
+    }
+    // codex #3:即使 fail-open(FAIL_CLOSED=false),内容审查拒答/空输出这类"模型
+    // 明确判不了"的情况也不该 continue(那正是最不该插嘴的时机)——按 no_action 处理。
+    // 只有真·非 JSON 的乱输出才 fail-open continue。
+    const looksLikeRefusal = !raw.trim() ||
+      /rejected|considered high risk|敏感|违规|无法(回答|处理|提供)|content.{0,12}(policy|filter)/i.test(raw);
+    if (looksLikeRefusal) {
+      logger.warn(
+        { chatId: input.chatId, rawSnippet: raw.slice(0, 200) },
+        'gate refusal/empty → no_action (fail-open path)',
+      );
+      return {
+        action: 'no_action',
+        reason: 'refusal_no_action',
         shortCircuited: false,
         latencyMs: Math.round(performance.now() - start),
         raw: raw.slice(0, 500),

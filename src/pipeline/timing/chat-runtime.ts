@@ -152,7 +152,15 @@ export async function transitionToWait(
   try {
     waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
   } catch (err) {
-    logger.warn({ err, chatId, bounded }, 'enqueueWaitResume failed; entering WAIT without scheduled resume');
+    // 瞬时 Redis/BullMQ 故障 → 重试一次(codex #2:入队失败会让 chat 裸进 WAIT、
+    // 锚点直到 direct 唤醒才replay;重试能救回大部分瞬时故障)。仍失败则退化为
+    // silence-only WAIT(靠 direct 唤醒自愈),提到 error 级好盯。
+    logger.warn({ err, chatId, bounded }, 'enqueueWaitResume failed, retrying once');
+    try {
+      waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
+    } catch (err2) {
+      logger.error({ err: err2, chatId, bounded }, 'enqueueWaitResume failed twice; entering WAIT without scheduled resume (recovers on direct wakeup)');
+    }
   }
 
   await enterWait(chatId, bounded, anchorMessageId, waitJobId, triggerUid);
