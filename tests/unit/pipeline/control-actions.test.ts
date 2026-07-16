@@ -45,10 +45,11 @@ describe('executeControlActions', () => {
     ]);
   });
 
-  it('mute self → level-2 mute on requester + emoji ack, returns true', async () => {
+  it('mute self → level-2 mute on requester, 12h auto-expire + emoji ack, returns true', async () => {
     const ok = await executeControlActions([{ action: 'mute', controlTarget: 'self' }], GROUP, REQ, MSG);
     expect(ok).toBe(true);
-    expect(mockMuteUser).toHaveBeenCalledWith(GROUP, REQ, 2, undefined);
+    // 自我 mute 无时长 → 全静默但 12h 自动解(codex 无关;主人要求)
+    expect(mockMuteUser).toHaveBeenCalledWith(GROUP, REQ, 2, { temporary: true, durationMs: 12 * 60 * 60_000 });
     expect(mockReact).toHaveBeenCalledWith(GROUP, MSG, '👌');
   });
 

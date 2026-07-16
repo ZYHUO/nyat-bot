@@ -54,15 +54,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     // 推理截断成空)单独放宽,而不动 usage 配置(正常回复的快模型照旧 60s/小 maxTokens)。
     // 超时仍受调用方 maxTimeoutMs 上限约束(heart/gate 等延迟敏感路径设了 maxTimeoutMs
     // → 即便落到 mundo 也不会久等,会按上限超时后继续 fallback)。
-    const attemptOpts = (label.timeout === undefined && label.maxTokens === undefined)
-      ? callOpts
-      : {
-          ...callOpts,
-          timeout: label.timeout === undefined
-            ? callOpts.timeout
-            : (options.maxTimeoutMs !== undefined ? Math.min(label.timeout, options.maxTimeoutMs) : label.timeout),
-          maxTokens: label.maxTokens ?? callOpts.maxTokens,
-        };
+    const attemptOpts = attemptOptsFor(label, callOpts, options.maxTimeoutMs);
 
     try {
       // Hedged request: if this is the primary and there's a backup,
@@ -73,7 +65,14 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       if (i === 0 && labelNames.length > 1 && hedgeDelayMs > 0) {
         hedgeTriedLabel = labelNames[1]!;
         const hedgeLabel = getLabel(hedgeTriedLabel);
-        const result = await hedgedCall(label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown);
+        const result = await hedgedCall(
+          label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown,
+          options.rejectEmpty ?? false, options.maxTimeoutMs,
+        );
+        // rejectEmpty 已在 hedgedCall 内对两跳都施加;这里再兜一层,空则落到下个 backup。
+        if (options.rejectEmpty && !result.content.trim()) {
+          throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
+        }
         if (!options.suppressMetrics) emitLlmResult(options.usage, result);
         return result;
       }
@@ -81,6 +80,14 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       const result = await callModel(label, options.messages, attemptOpts);
       if (options.rejectEmpty && !result.content.trim()) {
         throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
+      }
+      // 观测:落到 backup(主模型失败/被拒后换的第 i 跳)成功时记 label+usage+耗时,
+      // 便于盯 fallback 命中(尤其回复链里 mundo)与其真实耗时。只在 fallback 时打。
+      if (i > 0) {
+        logger.info(
+          { usage: options.usage, label: labelName, model: label.model, attempt: i, latencyMs: result.latencyMs },
+          'Fallback label used',
+        );
       }
       if (!options.suppressMetrics) emitLlmResult(options.usage, result);
       return result;
@@ -120,6 +127,23 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   throw lastErr ?? new AIError('All labels exhausted', 'unknown', 'unknown', 'AI_ALL_FAILED');
 }
 
+/** 单跳尝试参数:给有 per-label timeout/maxTokens 覆盖的 label 套上(顺序 fallback 与
+ *  hedge 共用同一逻辑,修 codex #1:原来 hedge 直接用 callOpts、丢了 per-label 覆盖)。 */
+function attemptOptsFor(
+  label: ReturnType<typeof getLabel>,
+  callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  maxTimeoutMs: number | undefined,
+): { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } {
+  if (label.timeout === undefined && label.maxTokens === undefined) return callOpts;
+  return {
+    ...callOpts,
+    timeout: label.timeout === undefined
+      ? callOpts.timeout
+      : (maxTimeoutMs !== undefined ? Math.min(label.timeout, maxTimeoutMs) : label.timeout),
+    maxTokens: label.maxTokens ?? callOpts.maxTokens,
+  };
+}
+
 async function hedgedCall(
   primaryLabel: ReturnType<typeof getLabel>,
   hedgeLabel: ReturnType<typeof getLabel>,
@@ -127,11 +151,24 @@ async function hedgedCall(
   callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
   hedgeDelayMs: number,
   cooldown: CooldownTracker,
+  rejectEmpty: boolean,
+  maxTimeoutMs: number | undefined,
 ): Promise<AICallResult> {
   const toError = (err: unknown) => (err instanceof Error ? err : new Error(String(err)));
 
+  // 单跳:用该 label 自己的 attemptOpts(修 #1:per-label timeout/maxTokens 覆盖);
+  // rejectEmpty 时空内容视为失败**在这里 reject**(修 #1:否则 Promise.any 把空当成功,
+  // heart/gate 解析失败 → fail-open pass → 吞回复)。
+  const attempt = (label: ReturnType<typeof getLabel>): Promise<AICallResult> =>
+    callModel(label, messages, attemptOptsFor(label, callOpts, maxTimeoutMs)).then((r) => {
+      if (rejectEmpty && !r.content.trim()) {
+        throw new AIError('Empty response', label.name, label.model, 'AI_EMPTY');
+      }
+      return r;
+    });
+
   // Wrap each call to handle rate-limit cooldown side-effects and normalize errors
-  const primaryPromise = callModel(primaryLabel, messages, callOpts).catch((err: unknown) => {
+  const primaryPromise = attempt(primaryLabel).catch((err: unknown) => {
     if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
       void cooldown.setCooldown(primaryLabel.model);
     }
@@ -145,7 +182,10 @@ async function hedgedCall(
         reject(new AIError('Hedge skipped (cooldown)', 'unknown', 'unknown', 'AI_HEDGE_FAILED'));
         return;
       }
-      callModel(hedgeLabel, messages, callOpts).then(resolve, (err: unknown) => reject(toError(err)));
+      attempt(hedgeLabel).then(resolve, (err: unknown) => {
+        if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
+        reject(toError(err));
+      });
     }, hedgeDelayMs);
 
     // If primary resolves before the timer fires, cancel the hedge

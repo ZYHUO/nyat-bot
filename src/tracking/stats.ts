@@ -33,9 +33,11 @@ export function flushDailyStats(): void {
       top_users = excluded.top_users
   `);
 
+  const seen = new Set<number>();
   for (const [key, users] of msgCounts) {
     const [chatIdStr] = key.split(':');
     const chatId = Number(chatIdStr);
+    seen.add(chatId);
     const total = [...users.values()].reduce((a, b) => a + b, 0);
     const topUsers = [...users.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -43,6 +45,12 @@ export function flushDailyStats(): void {
       .map(([uid, count]) => ({ uid, count }));
     const botReplies = botReplyCounts.get(chatId) ?? 0;
     stmt.run(chatId, date, total, users.size, botReplies, JSON.stringify(topUsers));
+  }
+  // 只有 bot 回复、没有用户消息的群(主动/idle/晚安/自我接话)也要写入,
+  // 否则它们的 bot_replies 会被 clear 永久丢失(codex #3)。
+  for (const [chatId, botReplies] of botReplyCounts) {
+    if (seen.has(chatId)) continue;
+    stmt.run(chatId, date, 0, 0, botReplies, JSON.stringify([]));
   }
 
   msgCounts.clear();

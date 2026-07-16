@@ -365,6 +365,14 @@ async function safeRun(name: string, fn: () => Promise<void>): Promise<void> {
   _running.add(name);
   const start = performance.now();
   const timeoutMs = CRON_TIMEOUT_MS[name] ?? DEFAULT_CRON_TIMEOUT_MS;
+  // 锁(_running)只在 fn() **真正 settle** 时释放,不在超时时释放(codex #2):
+  // 原来超时后就删锁 → fn 仍在后台跑,下个 tick 会起同名任务并发(重复写库/发消息/
+  // 烧 LLM)。现在超时只记告警,锁一直握到 fn 结束,下个 tick 因锁在被正常跳过。
+  const task = fn().then(
+    () => { logger.debug({ name, durationMs: Math.round(performance.now() - start) }, 'Cron job completed'); },
+    (err) => { logger.error({ err, name, durationMs: Math.round(performance.now() - start) }, 'Cron job failed'); },
+  ).finally(() => { _running.delete(name); });
+
   let timer: NodeJS.Timeout | undefined;
   try {
     const timeout = new Promise<never>((_, reject) => {
@@ -373,14 +381,13 @@ async function safeRun(name: string, fn: () => Promise<void>): Promise<void> {
         timeoutMs,
       );
     });
-    await Promise.race([fn(), timeout]);
-    const durationMs = Math.round(performance.now() - start);
-    logger.debug({ name, durationMs }, 'Cron job completed');
-  } catch (err) {
-    const durationMs = Math.round(performance.now() - start);
-    logger.error({ err, name, durationMs, timeoutMs }, 'Cron job failed');
+    await Promise.race([task, timeout]);
+  } catch {
+    logger.warn(
+      { name, timeoutMs },
+      'Cron job exceeded timeout (仍在后台跑,锁保持到结束,不会并发起同名任务)',
+    );
   } finally {
     if (timer) clearTimeout(timer);
-    _running.delete(name);
   }
 }
