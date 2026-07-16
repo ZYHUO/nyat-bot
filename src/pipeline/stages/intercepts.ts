@@ -50,10 +50,11 @@ export async function tryMuteCommandIntercepts(
   // 仅保留 /muteme /unmuteme 显式斜杠命令。
 
   if (rule === "self_mute_request") {
-    muteUser(chatId, formatted.uid, 2);
+    // 自我 mute:全静默但只 12h,到点自动恢复(免得永久 mute 忘了解)
+    muteUser(chatId, formatted.uid, 2, { temporary: true, durationMs: 12 * 60 * 60_000 });
     applyMoodEvent(chatId, -15, "self_mute_request");
-    await sender.sendDirect(chatId, "好的，以后本喵不回复你的消息了喵~（发 /unmuteme 取消）", formatted.messageId);
-    logger.info({ chatId, uid: formatted.uid }, "User self-muted (level 2)");
+    await sender.sendDirect(chatId, "好的，接下来 12 小时本喵不回复你喵~（到点自动恢复，也可发 /unmuteme 提前取消）", formatted.messageId);
+    logger.info({ chatId, uid: formatted.uid }, "User self-muted (level 2, 12h)");
     return true;
   }
 

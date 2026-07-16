@@ -70,8 +70,15 @@ export async function executeControlActions(
           uid = t;
         }
         if (a.action === 'mute') {
-          const opts = a.muteMinutes ? { temporary: true, durationMs: a.muteMinutes * 60_000 } : undefined;
-          muteUser(chatId, uid, a.muteMinutes ? 1 : 2, opts);
+          // 显式分钟数 → 按时长软静默(L1);自我 mute 无时长 → 全静默(L2)12h 自动解;
+          // 他人 mute 无时长 → 永久(管理行为,保持原样)。
+          const isSelf = uid === requesterUid;
+          let level: 1 | 2;
+          let opts: { temporary: boolean; durationMs: number } | undefined;
+          if (a.muteMinutes) { level = 1; opts = { temporary: true, durationMs: a.muteMinutes * 60_000 }; }
+          else if (isSelf) { level = 2; opts = { temporary: true, durationMs: 12 * 60 * 60_000 }; }
+          else { level = 2; opts = undefined; }
+          muteUser(chatId, uid, level, opts);
           applyMoodEvent(chatId, -10, 'mute_via_action');
         } else {
           unmuteUser(chatId, uid);
