@@ -1,0 +1,7 @@
+[Unit]
+Description=xxb-ts auto-update (align with GitHub origin/main)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/xxb-ts/scripts/auto-update.sh
