@@ -8,6 +8,8 @@ import type { JudgeAction } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
 import { AIError } from '../../shared/errors.js';
 import { buildSystemPrompt, buildMessages } from './prompt-builder.js';
+import { modelStyleNudge } from './model-style.js';
+import { getUsage, getLabel } from '../../ai/labels.js';
 import { slimContextForAI } from '../context/slim.js';
 import { searchKnowledge } from '../../knowledge/manager.js';
 import { getToolNames } from '../tools/registry.js';
@@ -490,6 +492,14 @@ export async function generateReply(
         else if (rel.lastSummary) stateParts.pushP(32, 30, `[你和TA] ${rel.lastSummary.slice(0, 100)}`);
       } catch { /* non-critical */ }
     }
+    // Per-model 风格补丁:按**实际用的 reply 模型**补一段专属提示(grok 天生利落无补丁,
+    // gemini 爱啰嗦→压极简)。keep=2 必留、order=77 紧贴 CURRENT。用主 label 的 model
+    // (fallback 到 backup 的少数情况仍用主模型的补丁,可接受)。
+    try {
+      const replyUsage = effectiveReplyTier === 'pro' ? 'reply_pro' : 'reply';
+      const nudge = modelStyleNudge(getLabel(getUsage(replyUsage).label).model);
+      if (nudge) stateParts.pushP(77, 2, nudge);
+    } catch { /* non-critical:label 解析失败就不补 */ }
     // 微反应群提示(千雪对标):本群说话都很短 → bot 也要敢发 2-10 字
     try {
       const style = await getChatStyle(chatId);
