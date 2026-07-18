@@ -381,7 +381,7 @@ export async function callModel(
   // thinking —— 只有 raw 路径会把这些 body 字段发出去)。
   // insecureTLS 也强制走 raw 路径:AI SDK 的 createOpenAI 内部 fetch 无法注入
   // per-provider 的 undici dispatcher,只有 raw fetch 能挂上跳过校验的 dispatcher。
-  if (hasMediaContent(messages) || label.stream || label.reasoningEffort || label.disableThinking || label.insecureTLS) {
+  if (hasMediaContent(messages) || label.stream || label.reasoningEffort || label.disableThinking || label.insecureTLS || label.forceRaw) {
     try {
       return await callOpenAIRaw(label, messages, {
         ...opts,

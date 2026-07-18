@@ -72,6 +72,35 @@ describe('callModel', () => {
     expect(part).toEqual({ type: 'input_audio', input_audio: { data: 'QkFTRTY0', format: 'ogg' } });
   });
 
+  it('forceRaw + 空 choices → 走 raw fetch、返空不崩(codex/gemini reading-message 修复)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 0 } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    const label: AILabel = {
+      name: 'gemini35low', endpoint: 'http://relay/v1', apiKeys: ['k'],
+      model: 'gemini-3.5-flash-low', forceRaw: true,
+    };
+    const result = await callModel(label, [{ role: 'user', content: 'hi' }], { maxTokens: 50 });
+    expect(result.content).toBe('');            // 空 choices → 安全返空,不抛 reading 'message'
+    expect(fetch).toHaveBeenCalledOnce();        // 走 raw fetch
+    expect(generateText).not.toHaveBeenCalled(); // 没走 AI SDK
+  });
+
+  it('forceRaw + choices[0] 无 message → 同样返空不崩', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ choices: [{ finish_reason: 'content_filter' }] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    const label: AILabel = {
+      name: 'gemini35low', endpoint: 'http://relay/v1', apiKeys: ['k'],
+      model: 'gemini-3.5-flash-low', forceRaw: true,
+    };
+    const result = await callModel(label, [{ role: 'user', content: 'hi' }], { maxTokens: 50 });
+    expect(result.content).toBe('');
+    expect(generateText).not.toHaveBeenCalled();
+  });
+
   it('returns stream token usage for stream-only providers', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
       makeSseResponse(['<thinking>internal</thinking>', 'hello'])

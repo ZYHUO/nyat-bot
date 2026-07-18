@@ -13,6 +13,8 @@ export interface AILabel {
   disableThinking?: boolean;
   /** 跳过 TLS 证书校验(仅限自建/自签证书端点;强制走 raw fetch + insecure dispatcher)。 */
   insecureTLS?: boolean;
+  /** 强制走 raw fetch(而非 AI SDK generateText):裸路径对空/畸形响应返空不崩。 */
+  forceRaw?: boolean;
   /** per-label 每次尝试超时(ms)覆盖 usage 超时(仍受调用方 maxTimeoutMs 上限约束)。 */
   timeout?: number;
   /** per-label maxTokens 覆盖(给推理模型放宽,防截断成空);调用方显式 maxTokens 优先。 */

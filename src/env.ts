@@ -633,6 +633,10 @@ export interface EnvProvider {
   reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
   disableThinking?: boolean;
   insecureTLS?: boolean;
+  /** 强制走 raw fetch 路径(而非 Vercel AI SDK generateText):裸路径对畸形/空响应用
+   *  安全可选链、返空不崩;某些端点(如 gemini)偶尔返回空 choices 会把 SDK 崩成
+   *  "reading 'message'" → 无谓回退。AI_PROVIDER_X_RAW=true 开。 */
+  forceRaw?: boolean;
   /** per-provider 每次尝试超时(ms)覆盖 usage 超时;给慢模型(如 mundo)单独放宽用。 */
   timeout?: number;
   /** per-provider maxTokens 覆盖;给推理模型(如 mundo)单独放宽,防被小 maxTokens 截断成空。 */
@@ -836,7 +840,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'RAW'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -865,6 +869,7 @@ export function getProviders(): Map<string, EnvProvider> {
       reasoningEffort: fields['REASONING'] as 'none' | 'low' | 'medium' | 'high' | undefined,
       disableThinking: fields['THINKING'] === 'disabled',
       insecureTLS: readBool(fields['INSECURE']),
+      forceRaw: readBool(fields['RAW']),
       timeout: (() => { const n = fields['TIMEOUT'] ? parseInt(fields['TIMEOUT'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
       maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
     });
