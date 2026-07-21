@@ -3,6 +3,7 @@ import { logger } from '../shared/logger.js';
 import { getAttentionAccumulator } from './attention.js';
 import { getGlobalState } from './global-state.js';
 import { runMetaSession } from './session.js';
+import type { AttentionItem } from './types.js';
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
@@ -11,13 +12,13 @@ export async function metaTick(): Promise<void> {
   if (ticking) return;
   if (!env().META_SUBAGENT_ENABLED) return;
   ticking = true;
-  let flushed: ReturnType<ReturnType<typeof getAttentionAccumulator>['flush']> = [];
+  let flushed: AttentionItem[] = [];
   try {
     const state = getGlobalState();
-    const callbacks = state.drainCallbacks();
+    const callbacks = await state.drainCallbacks();
     const acc = getAttentionAccumulator();
     for (const cb of callbacks) {
-      acc.ingest({
+      await acc.ingestAsync({
         chatId: cb.chatId,
         layer: 'L1_CALLBACK',
         reason: `callback:${cb.ok ? 'ok' : 'fail'}`,
@@ -26,13 +27,14 @@ export async function metaTick(): Promise<void> {
       });
     }
 
-    if (acc.size() === 0) return;
-    flushed = acc.flush();
+    if ((await acc.size()) === 0) return;
+    flushed = await acc.flush();
+    if (flushed.length === 0 && callbacks.length === 0) return;
     await runMetaSession(flushed, callbacks);
   } catch (err) {
     logger.warn({ err }, 'metaTick failed');
     if (flushed.length) {
-      getAttentionAccumulator().requeue(flushed);
+      await getAttentionAccumulator().requeue(flushed);
     }
   } finally {
     ticking = false;
@@ -53,7 +55,6 @@ export function startMetaLoop(): void {
     (timer as NodeJS.Timeout).unref?.();
   }
   logger.info({ tickMs: ms }, 'Meta+Subagent loop started');
-  // Kick once so L0 during boot window isn't delayed a full tick
   void metaTick();
 }
 

@@ -249,7 +249,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     task.status = endSummary.startsWith('failed') ? 'failed' : 'done';
     task.resultSummary = endSummary || 'done';
     state.putTask(task);
-    state.enqueueCallback({
+    await state.enqueueCallbackAsync({
       id: randomUUID(),
       taskId: task.id,
       chatId: task.chatId,

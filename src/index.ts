@@ -243,11 +243,14 @@ async function main(): Promise<void> {
     logger.info({ ownership }, 'Skipping cron startup in non-owner process');
   }
 
-  // 12.05 Meta+Subagent loop — must co-locate with ingress (Attention is in-process).
-  // Also start on worker/cron for single-process and cron-owned digests; duplicate
-  // loops are gated by `ticking` + empty Attention when split (prefer monolith).
-  if (ownership.botIngress || ownership.worker || ownership.cron) {
+  // 12.05 Meta+Subagent — Attention/callbacks Redis-backed.
+  // Worker (or monolith) runs the loop; ingress-only only writes Redis.
+  if (ownership.worker) {
     startMetaLoop();
+  } else if (ownership.cron && !ownership.botIngress) {
+    startMetaLoop();
+  } else if (ownership.botIngress) {
+    logger.info({ ownership }, 'Meta loop skipped on ingress-only (Redis Attention → worker)');
   }
 
   // 12.1 Warm up ChromaDB + embedder (fire-and-forget) only on processes that use memory-dependent paths

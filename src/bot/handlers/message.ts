@@ -19,6 +19,12 @@ import {
   metaMuteBlocksReply,
   tryMetaIngressIntercepts,
 } from '../../meta/ingress-intercepts.js';
+import { classifyAttentionLayer } from '../../meta/classify-layer.js';
+import {
+  runMetaBookkeepingHooks,
+  metaSleepGate,
+  messageHasMedia,
+} from '../../meta/bookkeeping.js';
 
 async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
@@ -92,71 +98,113 @@ async function handleUpdate(ctx: Context): Promise<void> {
         return;
       }
 
-      try {
-        const { processMedia } = await import('../../pipeline/stages/media.js');
-        await processMedia(formatted);
-      } catch (err) {
-        logger.debug({ err, chatId }, 'Meta path: processMedia failed (non-critical)');
-      }
-
-      try {
-        const { addMessage } = await import('../../pipeline/context/manager.js');
-        await addMessage(chatId, formatted);
-      } catch (err) {
-        logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
-      }
-      void import('../../memory/chroma.js')
-        .then(({ memorizeMessage }) => memorizeMessage(chatId, formatted))
-        .catch(() => {});
-      void import('../../tracking/activity.js')
-        .then(({ recordMessage }) => recordMessage(chatId, formatted.messageId, formatted.uid))
-        .catch(() => {});
-      try {
-        const { recordUserMessage } = await import('../../tracking/user-profile.js');
-        if (formatted.role === 'user' && formatted.uid > 0) {
-          recordUserMessage(
-            chatId,
-            formatted.uid,
-            formatted.username,
-            formatted.fullName,
-            formatted.senderTag,
-            formatted.textContent,
-          );
+      const finishMeta = async (fm: typeof formatted): Promise<'done' | 'legacy'> => {
+        try {
+          const { addMessage } = await import('../../pipeline/context/manager.js');
+          await addMessage(chatId, fm);
+        } catch (err) {
+          logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
         }
-      } catch {
-        /* non-critical */
-      }
+        void import('../../memory/chroma.js')
+          .then(({ memorizeMessage }) => memorizeMessage(chatId, fm))
+          .catch(() => {});
+        void import('../../tracking/activity.js')
+          .then(({ recordMessage }) => recordMessage(chatId, fm.messageId, fm.uid))
+          .catch(() => {});
+        try {
+          const { recordUserMessage } = await import('../../tracking/user-profile.js');
+          if (fm.role === 'user' && fm.uid > 0) {
+            recordUserMessage(
+              chatId,
+              fm.uid,
+              fm.username,
+              fm.fullName,
+              fm.senderTag,
+              fm.textContent,
+            );
+          }
+        } catch {
+          /* non-critical */
+        }
 
-      if (metaMuteBlocksReply(chatId, formatted, isDirect)) {
-        logger.debug({ chatId, uid: formatted.uid }, 'Meta path: muted, skip Attention');
-        return;
-      }
+        runMetaBookkeepingHooks(chatId, fm);
 
-      const intercept = await tryMetaIngressIntercepts(chatId, formatted, { isDirect });
-      if (intercept === 'handled') {
-        logger.info({ chatId, messageId }, 'Meta path: feature intercept handled');
-        return;
-      }
-      if (intercept === 'legacy') {
-        logger.info({ chatId, messageId }, 'Meta path: intercept → legacy (already booked — unexpected)');
-        // fall through (should be rare; prefer metaNeedsLegacyPipeline above)
-      } else {
-        const layer = isDirect || chatId > 0 ? 'L0' : 'L2';
-        if (layer === 'L0') {
+        if (metaMuteBlocksReply(chatId, fm, isDirect)) {
+          logger.debug({ chatId, uid: fm.uid }, 'Meta path: muted, skip Attention');
+          return 'done';
+        }
+
+        const intercept = await tryMetaIngressIntercepts(chatId, fm, { isDirect });
+        if (intercept === 'handled') {
+          logger.info({ chatId, messageId }, 'Meta path: feature intercept handled');
+          return 'done';
+        }
+        if (intercept === 'legacy') return 'legacy';
+
+        const textPreview = (fm.textContent || rawText).slice(0, 200);
+        const layerDec = classifyAttentionLayer({
+          chatId,
+          isDirect,
+          directKind,
+          text: textPreview,
+        });
+
+        const sleep = await metaSleepGate({
+          chatId,
+          formatted: fm,
+          isDirect,
+          layer: layerDec.layer === 'L1_CALLBACK' ? 'L1' : layerDec.layer,
+          update: ctx.update,
+          messageId,
+        });
+        if (sleep === 'silent' || sleep === 'queued') {
+          logger.info({ chatId, messageId, sleep, layer: layerDec.layer }, 'Meta path: asleep');
+          return 'done';
+        }
+
+        if (layerDec.layer === 'L0' || layerDec.layer === 'L1') {
           void import('../../bot/sender/telegram.js')
             .then(({ sendChatAction }) => sendChatAction(chatId, 'typing'))
             .catch(() => {});
         }
-        const textPreview = (formatted.textContent || rawText).slice(0, 200);
-        getAttentionAccumulator().ingest({
+
+        const basePressure =
+          layerDec.layer === 'L0' ? 100 : layerDec.layer === 'L1' ? 60 : 30;
+        await getAttentionAccumulator().ingestAsync({
           chatId,
-          layer,
-          reason: isDirect ? `direct:${directKind}` : 'passive',
+          layer: layerDec.layer,
+          reason: layerDec.reason,
           messageId,
           userId,
           textPreview,
+          pressure: basePressure + (layerDec.pressureBoost ?? 0),
         });
-        logger.info({ chatId, messageId, layer }, 'Meta attention ingested');
+        logger.info({ chatId, messageId, layer: layerDec.layer }, 'Meta attention ingested');
+        return 'done';
+      };
+
+      // Vision/sticker off the grammY hot path — ingest text first when media-heavy.
+      if (messageHasMedia(formatted)) {
+        void (async () => {
+          try {
+            const { processMedia } = await import('../../pipeline/stages/media.js');
+            await processMedia(formatted);
+          } catch (err) {
+            logger.debug({ err, chatId }, 'Meta path: deferred processMedia failed');
+          }
+          const result = await finishMeta(formatted);
+          if (result === 'legacy') {
+            logger.warn({ chatId, messageId }, 'Meta deferred path cannot fall through — drop');
+          }
+        })();
+        return;
+      }
+
+      const result = await finishMeta(formatted);
+      if (result === 'legacy') {
+        logger.info({ chatId, messageId }, 'Meta path: intercept → legacy');
+        // fall through
+      } else {
         return;
       }
     }

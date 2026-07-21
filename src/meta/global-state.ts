@@ -36,17 +36,55 @@ export class GlobalState {
     return chatId === undefined ? all : all.filter((t) => t.chatId === chatId);
   }
 
+  /** Sync fire-and-forget (tests / rare). Prefer enqueueCallbackAsync from CodeAct. */
   enqueueCallback(cb: SubagentCallback): void {
-    this.pendingCallbacks.push(cb);
-    if (this.pendingCallbacks.length > MAX_CALLBACKS) {
-      this.pendingCallbacks.splice(0, this.pendingCallbacks.length - MAX_CALLBACKS);
+    void this.enqueueCallbackAsync(cb);
+  }
+
+  /** Durable enqueue: Redis first so worker Meta can see it; local fail-soft. */
+  async enqueueCallbackAsync(cb: SubagentCallback): Promise<void> {
+    try {
+      await this.mirrorCallback(cb);
+    } catch {
+      this.pendingCallbacks.push(cb);
+      if (this.pendingCallbacks.length > MAX_CALLBACKS) {
+        this.pendingCallbacks.splice(0, this.pendingCallbacks.length - MAX_CALLBACKS);
+      }
     }
   }
 
-  drainCallbacks(): SubagentCallback[] {
-    const out = this.pendingCallbacks;
+  private async mirrorCallback(cb: SubagentCallback): Promise<void> {
+    const { getRedis } = await import('../db/redis.js');
+    const redis = getRedis();
+    await redis
+      .multi()
+      .lpush('xxb:meta:callbacks', JSON.stringify(cb))
+      .ltrim('xxb:meta:callbacks', 0, MAX_CALLBACKS - 1)
+      .exec();
+  }
+
+  async drainCallbacks(): Promise<SubagentCallback[]> {
+    const local = this.pendingCallbacks;
     this.pendingCallbacks = [];
-    return out;
+    const byId = new Map<string, SubagentCallback>();
+    for (const cb of local) byId.set(cb.id, cb);
+    try {
+      const { getRedis } = await import('../db/redis.js');
+      const redis = getRedis();
+      const raw = await redis.lrange('xxb:meta:callbacks', 0, -1);
+      if (raw.length) await redis.del('xxb:meta:callbacks');
+      for (const r of raw) {
+        try {
+          const cb = JSON.parse(r) as SubagentCallback;
+          if (cb?.id) byId.set(cb.id, cb);
+        } catch {
+          /* drop */
+        }
+      }
+    } catch {
+      /* local only */
+    }
+    return Array.from(byId.values());
   }
 }
 

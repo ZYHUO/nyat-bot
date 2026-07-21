@@ -30,12 +30,15 @@ DREAM_JOURNAL_USAGE=reply
 1. Ingress：`isMetaSubagentChat` 为真时，先做 feature 分流再 Attention：
    - `/` 与 NL「签到/排行」→ **legacy pipeline**（要 reply 注入）
    - NL 图鉴/心愿/游戏/追踪、猜数字进行中、DM relay/树洞/选群、consent → **Meta ingress intercept**（`src/meta/ingress-intercepts.ts`）
-   - mute 用户 → 丢弃；其余写入 Redis ctx + Attention（L0=直接/@ /DM，L2=旁观）
-2. `startMetaLoop`（与 ingress 同进程）每 `META_TICK_MS` flush Attention → `runMetaSession`。
+   - mute / 睡眠门 → 丢弃或入 sleep-queue；其余写入 Redis ctx
+   - Attention 写入 Redis list `xxb:meta:attention`（ingress↔worker 可拆）
+   - L0=直接/@/DM，L1=旁观疑问句，L2=其它旁观；媒体 `processMedia` 异步不堵 grammY
+2. Worker 上 `startMetaLoop` 每 `META_TICK_MS` 从 Redis flush Attention + callbacks → `runMetaSession`。
 3. Meta LLM 写 JS，调用 `dispatch.taskToGroup`；L0 未调度会 gap-fill 自动 dispatch。
-4. Subagent CodeAct：完整人格层 + host API；`sendText` 写回 ctx/Qdrant；群聊软截断。
-5. 完成后 callback 回 Attention（L1_CALLBACK）。
-6. 日记 cron 用**真实聊天记录**作证据（Meta digests 仅参考）。
+4. Subagent CodeAct：完整人格层 + host API；`sendText` 写回 ctx/Qdrant；CJK 友好软截断。
+5. 完成后 callback 进 Redis `xxb:meta:callbacks`。
+6. 日记 cron 用**真实聊天记录**作证据；起床补回对 Meta 群重投 Attention。
+7. Side effects：topic-watch、on_speak 捎话、DM affinity / 唤醒 poke。
 
 ## Context Engine
 

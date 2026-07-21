@@ -46,11 +46,13 @@ export function createHostApi(
         let clean = String(text ?? '').trim();
         if (!clean) throw new Error('empty text');
         assertNotBanned(clean);
-        // Soft cap: CodeAct 偶发小作文时截断，保住「像发微信」
+        // Soft cap: CodeAct 偶发小作文时截断（CJK 友好，避免拦腰切断汉字）
         const maxLen = chatId > 0 ? 280 : 120;
         if (clean.length > maxLen) {
-          logger.info({ chatId, from: clean.length, to: maxLen }, 'host sendText truncated');
-          clean = clean.slice(0, maxLen).replace(/\s+\S*$/, '') || clean.slice(0, maxLen);
+          const { softTruncate } = await import('../shared/soft-truncate.js');
+          const next = softTruncate(clean, maxLen);
+          logger.info({ chatId, from: clean.length, to: next.length }, 'host sendText truncated');
+          clean = next || clean.slice(0, maxLen);
         }
         await sendChatAction(chatId, 'typing');
         const replyTo = replyToMessageId ?? opts.defaultReplyTo;
