@@ -40,13 +40,28 @@ export function createHostApi(
     if (hit) throw new Error(`banned_word:${hit}`);
   };
 
+  /** Resolve reply anchor: prefer task quote; never let model pass 0/NaN/garbage. */
+  const resolveReplyTo = (replyToMessageId?: number): number | undefined => {
+    const raw = replyToMessageId ?? opts.defaultReplyTo;
+    const n = typeof raw === 'string' ? Number(raw) : Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return opts.defaultReplyTo;
+    // Model sometimes invents ids — in groups always stick to the task anchor when present.
+    if (chatId < 0 && opts.defaultReplyTo && n !== opts.defaultReplyTo) {
+      logger.info(
+        { chatId, modelReplyTo: n, forced: opts.defaultReplyTo },
+        'host sendText: force defaultReplyTo (ignore model replyTo)',
+      );
+      return opts.defaultReplyTo;
+    }
+    return n;
+  };
+
   return {
     telegram: {
       async sendText(text: string, replyToMessageId?: number) {
         let clean = String(text ?? '').trim();
         if (!clean) throw new Error('empty text');
         assertNotBanned(clean);
-        // Soft cap: CodeAct 偶发小作文时截断（CJK 友好，避免拦腰切断汉字）
         const maxLen = chatId > 0 ? 280 : 120;
         if (clean.length > maxLen) {
           const { softTruncate } = await import('../shared/soft-truncate.js');
@@ -55,7 +70,12 @@ export function createHostApi(
           clean = next || clean.slice(0, maxLen);
         }
         await sendChatAction(chatId, 'typing');
-        const replyTo = replyToMessageId ?? opts.defaultReplyTo;
+        const replyTo = resolveReplyTo(replyToMessageId);
+        if (chatId < 0 && !replyTo) {
+          logger.warn({ chatId }, 'host sendText: group send without reply_to anchor');
+        } else {
+          logger.info({ chatId, replyTo }, 'host sendText');
+        }
         const messageId = await sendMessage(chatId, clean, replyTo);
         // Meta 不走 deliver.ts，必须自己写回 Redis 上下文，否则 recentContext/日记看不到本喵说过的话。
         void import('../pipeline/context/manager.js')

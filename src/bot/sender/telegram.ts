@@ -87,23 +87,28 @@ export async function sendMessage(
   const messageId = await withRetry(async () => {
     const bot = getBot();
     const md = toMarkdownV2(text);
-    // allow_sending_without_reply:锚点消息被删时 Telegram 直接降级成普通
-    // 发送,不再依赖下面按错误字符串手工重试(MaiBot 适配器同款)。
-    const replyParams = replyToId
-      ? { message_id: replyToId, allow_sending_without_reply: true }
+    const anchor =
+      typeof replyToId === 'number' && Number.isFinite(replyToId) && replyToId > 0
+        ? Math.floor(replyToId)
+        : undefined;
+    // Prefer modern reply_parameters; also set deprecated reply_to_message_id for
+    // older Bot API relays that ignore reply_parameters.
+    const replyParams = anchor
+      ? { message_id: anchor, allow_sending_without_reply: true as const }
       : undefined;
+    const legacyReply = anchor ? { reply_to_message_id: anchor } : {};
 
-    // Try MarkdownV2 first, fallback to plain text
     try {
       const result = await bot.api.sendMessage(chatId, md, {
         parse_mode: 'MarkdownV2',
         reply_parameters: replyParams,
+        ...legacyReply,
       });
       return result.message_id;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // If reply target invalid, retry without reply_to
-      if (replyToId && (msg.includes('replied message not found') || msg.includes('message to be replied not found'))) {
+      if (anchor && (msg.includes('replied message not found') || msg.includes('message to be replied not found'))) {
+        logger.warn({ chatId, replyToId: anchor }, 'sendMessage: reply anchor missing, send plain');
         try {
           const result = await bot.api.sendMessage(chatId, md, { parse_mode: 'MarkdownV2' });
           return result.message_id;
@@ -112,16 +117,17 @@ export async function sendMessage(
           return result.message_id;
         }
       }
-      // If markdown parse error, fallback to plain text
       if (msg.includes("can't parse entities") || msg.includes('parse')) {
         logger.debug({ chatId }, 'MarkdownV2 parse failed, falling back to plain text');
-        const result = await bot.api.sendMessage(chatId, text, { reply_parameters: replyParams });
+        const result = await bot.api.sendMessage(chatId, text, {
+          reply_parameters: replyParams,
+          ...legacyReply,
+        });
         return result.message_id;
       }
       throw err;
     }
   }, 'sendMessage');
-  // 作息 v2:发言计数(动态就寝的"累"度量;fire-and-forget)
   recordSpeech();
   return messageId;
 }

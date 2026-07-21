@@ -107,8 +107,21 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   let endSummary = '';
   let ended = false;
+
+  // Ensure we always have a reply anchor in groups: quotes → parse from direction → none.
+  let replyAnchor = task.quoteMessageIds?.[0];
+  if (!replyAnchor || replyAnchor <= 0) {
+    const m = task.contentDirection.match(/#(\d{1,12})/);
+    if (m?.[1]) replyAnchor = Number(m[1]);
+  }
+  if (replyAnchor && replyAnchor > 0) {
+    task.quoteMessageIds = [replyAnchor];
+  } else if (task.chatId < 0) {
+    logger.warn({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
+  }
+
   const host = createHostApi(task.chatId, {
-    defaultReplyTo: task.quoteMessageIds?.[0],
+    defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
     onEnd: (summary) => {
       ended = true;
       endSummary = summary;

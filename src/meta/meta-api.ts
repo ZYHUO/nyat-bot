@@ -50,9 +50,17 @@ export function buildMetaApiContext(opts?: {
       let quotes = (args.quotes ?? [])
         .map((q) => (typeof q === 'string' ? Number(q.replace(/^msg:/, '')) : Number(q)))
         .filter((n) => Number.isFinite(n) && n > 0);
-      // Always prefer anchoring to the triggering message (Heart/Judge did reply_to).
       const fallbackQuote = opts?.defaultQuotes?.get(cid);
-      if (!quotes.length && fallbackQuote) quotes = [fallbackQuote];
+      // Groups: always prefer Attention anchor (model often omits/wrong quotes).
+      if (cid < 0 && fallbackQuote) {
+        quotes = [fallbackQuote];
+      } else if (!quotes.length && fallbackQuote) {
+        quotes = [fallbackQuote];
+      }
+      if (!quotes.length) {
+        const m = args.contentDirection.match(/#(\d{1,12})/);
+        if (m?.[1]) quotes = [Number(m[1])];
+      }
 
       const task: DispatchTask = {
         id: randomUUID(),
