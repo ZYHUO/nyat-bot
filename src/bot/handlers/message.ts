@@ -14,6 +14,11 @@ import { formatMessage } from '../../pipeline/formatter.js';
 import { detectReplyObligation, isObligationCancelMessage } from '../../pipeline/turn/obligation-detect.js';
 import { saveObligation, setActiveObligation, supersedeActiveObligation, getActiveObligationId, getObligation, updateObligationState } from '../../pipeline/turn/obligation-store.js';
 import { isMetaSubagentChat, getAttentionAccumulator } from '../../meta/index.js';
+import {
+  metaNeedsLegacyPipeline,
+  metaMuteBlocksReply,
+  tryMetaIngressIntercepts,
+} from '../../meta/ingress-intercepts.js';
 
 async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
@@ -64,7 +69,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
   };
 
   // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
-  // Slash commands fall through to legacy so /checkin etc still work until CodeAct tools cover them.
+  // Slash / checkin·stats NL → legacy. Gacha/game/DM-relay → Meta ingress intercepts.
   if (isMetaSubagentChat(chatId) && !isEdit) {
     const botIdentity = getBotIdentity();
     const directKind = detectDirectInteraction(ctx.update, {
@@ -74,20 +79,37 @@ async function handleUpdate(ctx: Context): Promise<void> {
       editByContentOnly: true,
     });
     const isDirect = directKind !== null;
-    const textPreview = (msg.text ?? msg.caption ?? '').slice(0, 200);
-    const isSlashCommand = /^\s*\//.test(msg.text ?? '');
+    const rawText = msg.text ?? msg.caption ?? '';
 
-    const formatted = formatMessage(ctx.update);
-    if (formatted) {
+    // Fall through BEFORE Meta bookkeeping to avoid duplicate Redis/Qdrant writes.
+    if (metaNeedsLegacyPipeline(chatId, rawText, isDirect)) {
+      logger.info({ chatId, messageId }, 'Meta path: slash/checkin-stats → legacy pipeline');
+      // fall through
+    } else {
+      const formatted = formatMessage(ctx.update);
+      if (!formatted) {
+        logger.debug({ chatId, messageId }, 'Meta path: formatMessage empty, drop');
+        return;
+      }
+
+      try {
+        const { processMedia } = await import('../../pipeline/stages/media.js');
+        await processMedia(formatted);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta path: processMedia failed (non-critical)');
+      }
+
       try {
         const { addMessage } = await import('../../pipeline/context/manager.js');
         await addMessage(chatId, formatted);
       } catch (err) {
         logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
       }
-      // Keep vector memory / profile warm even when Meta owns the reply.
       void import('../../memory/chroma.js')
         .then(({ memorizeMessage }) => memorizeMessage(chatId, formatted))
+        .catch(() => {});
+      void import('../../tracking/activity.js')
+        .then(({ recordMessage }) => recordMessage(chatId, formatted.messageId, formatted.uid))
         .catch(() => {});
       try {
         const { recordUserMessage } = await import('../../tracking/user-profile.js');
@@ -104,22 +126,39 @@ async function handleUpdate(ctx: Context): Promise<void> {
       } catch {
         /* non-critical */
       }
-    }
 
-    if (isSlashCommand) {
-      logger.info({ chatId, messageId }, 'Meta path: slash command → legacy pipeline');
-      // fall through
-    } else {
-      getAttentionAccumulator().ingest({
-        chatId,
-        layer: isDirect || chatId > 0 ? 'L0' : 'L2',
-        reason: isDirect ? `direct:${directKind}` : 'passive',
-        messageId,
-        userId,
-        textPreview,
-      });
-      logger.info({ chatId, messageId, layer: isDirect || chatId > 0 ? 'L0' : 'L2' }, 'Meta attention ingested');
-      return;
+      if (metaMuteBlocksReply(chatId, formatted, isDirect)) {
+        logger.debug({ chatId, uid: formatted.uid }, 'Meta path: muted, skip Attention');
+        return;
+      }
+
+      const intercept = await tryMetaIngressIntercepts(chatId, formatted, { isDirect });
+      if (intercept === 'handled') {
+        logger.info({ chatId, messageId }, 'Meta path: feature intercept handled');
+        return;
+      }
+      if (intercept === 'legacy') {
+        logger.info({ chatId, messageId }, 'Meta path: intercept → legacy (already booked — unexpected)');
+        // fall through (should be rare; prefer metaNeedsLegacyPipeline above)
+      } else {
+        const layer = isDirect || chatId > 0 ? 'L0' : 'L2';
+        if (layer === 'L0') {
+          void import('../../bot/sender/telegram.js')
+            .then(({ sendChatAction }) => sendChatAction(chatId, 'typing'))
+            .catch(() => {});
+        }
+        const textPreview = (formatted.textContent || rawText).slice(0, 200);
+        getAttentionAccumulator().ingest({
+          chatId,
+          layer,
+          reason: isDirect ? `direct:${directKind}` : 'passive',
+          messageId,
+          userId,
+          textPreview,
+        });
+        logger.info({ chatId, messageId, layer }, 'Meta attention ingested');
+        return;
+      }
     }
   }
 

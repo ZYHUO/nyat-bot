@@ -7,15 +7,20 @@ vi.mock('../../../src/env.js', () => ({
     DREAM_JOURNAL_DM: false,
     DREAM_JOURNAL_CHAT_ID: 0,
     DREAM_JOURNAL_USAGE: 'summarize',
-    MASTER_UID: 0,
+    MASTER_UID: 7624515600,
   }),
 }));
 
 vi.mock('../../../src/ai/fallback.js', () => ({
-  callWithFallback: vi.fn(async () => ({
-    content: '今天本喵在群里划水，顺便嫌弃了两句笨蛋。明天继续上课偷瞄手机。',
-    label: 'mock',
-  })),
+  callWithFallback: vi.fn(async (opts: { messages: Array<{ role: string; content: string }> }) => {
+    const user = opts.messages.find((m) => m.role === 'user');
+    expect(user?.content).toContain('签到');
+    expect(user?.content).toMatch(/禁止瞎编|唯一事实来源/);
+    return {
+      content: '今天本喵在群里划水，顺便嫌弃了两句笨蛋。明天继续上课偷瞄手机。',
+      label: 'mock',
+    };
+  }),
 }));
 
 vi.mock('../../../src/meta/global-state.js', () => ({
@@ -24,14 +29,53 @@ vi.mock('../../../src/meta/global-state.js', () => ({
   }),
 }));
 
+vi.mock('../../../src/db/redis.js', () => ({
+  getRedis: () => ({
+    zrange: async () => ['-1003184176508'],
+    lrange: async () => [],
+  }),
+}));
+
+vi.mock('../../../src/pipeline/context/manager.js', () => ({
+  getRecent: async () => [
+    {
+      role: 'user',
+      uid: 1,
+      username: 'u',
+      fullName: '测试员',
+      timestamp: Math.floor(Date.now() / 1000),
+      messageId: 1,
+      textContent: '签到成功啦',
+      isForwarded: false,
+    },
+    {
+      role: 'assistant',
+      uid: 0,
+      username: '',
+      fullName: '',
+      timestamp: Math.floor(Date.now() / 1000),
+      messageId: 2,
+      textContent: '哼，知道了',
+      isForwarded: false,
+    },
+  ],
+}));
+
+vi.mock('../../../src/bot/sender/telegram.js', () => ({
+  sendMessage: vi.fn(async () => 1),
+}));
+
 describe('dream-journal', () => {
   beforeEach(async () => {
     const { rm } = await import('node:fs/promises');
     await rm('/tmp/nyat-dream-journal-test', { recursive: true, force: true });
+    vi.resetModules();
   });
 
-  it('writes a markdown diary file', async () => {
-    const { runDreamJournal, dreamJournalPath, normalizeJournalChatId } = await import('../../../src/cron/dream-journal.js');
+  it('writes a markdown diary grounded in chat evidence', async () => {
+    const { runDreamJournal, dreamJournalPath, normalizeJournalChatId } = await import(
+      '../../../src/cron/dream-journal.js'
+    );
     expect(normalizeJournalChatId(3954993432)).toBe(-1003954993432);
     const path = await runDreamJournal();
     expect(path).toBeTruthy();

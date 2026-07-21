@@ -27,11 +27,15 @@ DREAM_JOURNAL_USAGE=reply
 
 ## 数据流
 
-1. Ingress：`isMetaSubagentChat` 为真时，消息写入 Redis ctx + Attention（L0=直接/@ /DM，L2=旁观），**不**走 BullMQ/turn-actor（防双回复）。
-2. `startMetaLoop` 每 `META_TICK_MS` flush Attention → `runMetaSession`。
-3. Meta LLM 写 JS，调用 `dispatch.taskToGroup`。
-4. Subagent CodeAct 用 host API：`telegram.*` / `memory.*` / `stickers.pick` / `runtime.endTask`。
+1. Ingress：`isMetaSubagentChat` 为真时，先做 feature 分流再 Attention：
+   - `/` 与 NL「签到/排行」→ **legacy pipeline**（要 reply 注入）
+   - NL 图鉴/心愿/游戏/追踪、猜数字进行中、DM relay/树洞/选群、consent → **Meta ingress intercept**（`src/meta/ingress-intercepts.ts`）
+   - mute 用户 → 丢弃；其余写入 Redis ctx + Attention（L0=直接/@ /DM，L2=旁观）
+2. `startMetaLoop`（与 ingress 同进程）每 `META_TICK_MS` flush Attention → `runMetaSession`。
+3. Meta LLM 写 JS，调用 `dispatch.taskToGroup`；L0 未调度会 gap-fill 自动 dispatch。
+4. Subagent CodeAct：完整人格层 + host API；`sendText` 写回 ctx/Qdrant；群聊软截断。
 5. 完成后 callback 回 Attention（L1_CALLBACK）。
+6. 日记 cron 用**真实聊天记录**作证据（Meta digests 仅参考）。
 
 ## Context Engine
 

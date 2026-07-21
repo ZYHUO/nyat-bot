@@ -101,6 +101,29 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
 }
 
 /**
+ * Meta/CodeAct 用的人格层：与 legacy reply 同源（persona + guardrails + tone + reply），
+ * 但不含 JSON 契约（CodeAct 用 telegram.sendText 发纯文本）。
+ */
+export function buildCodeActIdentityPrompt(userId?: number): string {
+  const layers = [
+    loadPersonaForUser(userId),
+    loadCachedPrompt('safety/guardrails.md'),
+    loadCachedPrompt('style/tone.md'),
+    loadCachedPrompt('task/reply.md'),
+    `# CodeAct 输出差异（覆盖 JSON 契约）
+
+你**不**输出 JSON。用 \`telegram.sendText(纯文本)\` 说话；贴纸用 stickers.pick + sendSticker。
+
+长度铁律（比上面更硬）：
+- 群聊默认 **2–20 字** 微反应（"对对对""笑死""这么强"）；闲聊最多一两句。
+- 私聊最多两三句；禁止小作文、列点、教程腔、客服收尾（"需要帮忙吗"）。
+- contentDirection / toneGuidance 是**方向不是稿子**——用本喵口吻短写，别照着展开成长文。
+- 宁可一条短的，不要两条长的；说完就停。`,
+  ];
+  return layers.filter(Boolean).join(SECTION_SEP);
+}
+
+/**
  * Strip ASCII control characters (except newline) and truncate to maxLen.
  * Used to sanitize user-controlled strings injected into prompts.
  */

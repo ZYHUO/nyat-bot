@@ -1,6 +1,6 @@
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { sendMessage, sendSticker, reactToMessage } from '../bot/sender/telegram.js';
+import { sendMessage, sendSticker, reactToMessage, sendChatAction } from '../bot/sender/telegram.js';
 import { searchMemory, searchMemoryByUser } from '../memory/chroma.js';
 import { getReadyStickersByIntent } from '../knowledge/sticker/store.js';
 import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-identity.js';
@@ -43,16 +43,60 @@ export function createHostApi(
   return {
     telegram: {
       async sendText(text: string, replyToMessageId?: number) {
-        const clean = String(text ?? '').trim();
+        let clean = String(text ?? '').trim();
         if (!clean) throw new Error('empty text');
         assertNotBanned(clean);
+        // Soft cap: CodeAct 偶发小作文时截断，保住「像发微信」
+        const maxLen = chatId > 0 ? 280 : 120;
+        if (clean.length > maxLen) {
+          logger.info({ chatId, from: clean.length, to: maxLen }, 'host sendText truncated');
+          clean = clean.slice(0, maxLen).replace(/\s+\S*$/, '') || clean.slice(0, maxLen);
+        }
+        await sendChatAction(chatId, 'typing');
         const replyTo = replyToMessageId ?? opts.defaultReplyTo;
         const messageId = await sendMessage(chatId, clean, replyTo);
+        // Meta 不走 deliver.ts，必须自己写回 Redis 上下文，否则 recentContext/日记看不到本喵说过的话。
+        void import('../pipeline/context/manager.js')
+          .then(({ addAssistant }) => addAssistant(chatId, { textContent: clean, messageId }))
+          .catch((err) => logger.debug({ err, chatId }, 'host addAssistant failed'));
+        void import('../memory/chroma.js')
+          .then(({ memorizeMessage }) =>
+            memorizeMessage(chatId, {
+              role: 'assistant',
+              uid: 0,
+              username: '',
+              fullName: '',
+              timestamp: Math.floor(Date.now() / 1000),
+              messageId,
+              textContent: clean,
+              isForwarded: false,
+            }),
+          )
+          .catch((err) => logger.debug({ err, chatId }, 'host memorize assistant failed'));
         return { messageId };
       },
       async sendSticker(fileId: string) {
-        const messageId = await sendSticker(chatId, fileId);
-        return { messageId };
+        const id = String(fileId ?? '').trim();
+        // Invalid file_id previously crashed the process via unhandled CodeAct promises.
+        if (!id || id.length < 8 || /[\s<>"'`]/.test(id)) {
+          logger.warn({ chatId, fileId: id.slice(0, 40) }, 'host sendSticker rejected bad fileId');
+          return { messageId: 0 };
+        }
+        await sendChatAction(chatId, 'typing');
+        try {
+          const messageId = await sendSticker(chatId, id);
+          if (messageId > 0) {
+            void import('../pipeline/context/manager.js')
+              .then(({ addAssistant }) =>
+                addAssistant(chatId, { textContent: '[sticker]', messageId }),
+              )
+              .catch((err) => logger.debug({ err, chatId }, 'host addAssistant sticker failed'));
+          }
+          return { messageId };
+        } catch (err) {
+          logger.warn({ err, chatId }, 'host sendSticker failed (non-fatal)');
+          return { messageId: 0 };
+        }
       },
       async react(messageId: number, emoji: string) {
         return reactToMessage(chatId, messageId, emoji);

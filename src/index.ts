@@ -243,8 +243,10 @@ async function main(): Promise<void> {
     logger.info({ ownership }, 'Skipping cron startup in non-owner process');
   }
 
-  // 12.05 Meta+Subagent loop (Attention → Meta → CodeAct); flag-gated
-  if (ownership.worker || ownership.cron) {
+  // 12.05 Meta+Subagent loop — must co-locate with ingress (Attention is in-process).
+  // Also start on worker/cron for single-process and cron-owned digests; duplicate
+  // loops are gated by `ticking` + empty Attention when split (prefer monolith).
+  if (ownership.botIngress || ownership.worker || ownership.cron) {
     startMetaLoop();
   }
 
@@ -329,6 +331,13 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   };
+
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'Unhandled promise rejection (non-fatal)');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, 'Uncaught exception (non-fatal)');
+  });
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));

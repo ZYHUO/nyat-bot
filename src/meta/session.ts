@@ -22,13 +22,14 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 - console.log(...)
 
 规则:
-1. contentDirection 只写「要做什么/回什么事实方向」，不要写具体台词（台词由 Subagent 生成）。
-2. L0（@/私聊/直接互动）通常应立刻 dispatch。
-3. L2（旁观话题）可以不行动；要插嘴才 dispatch。
-4. 回调(callback)先读摘要，再决定是否跟进 dispatch。
-5. 结束前在思考里用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句本轮摘要。
-6. 输出格式：先简短思考，再给出一个 \`\`\`js 代码块。
-7. 保持短句决策；你是猫娘人格的调度者，不是客服工单系统。`;
+1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），不要写具体台词，更不要写成「详细介绍/追问计划/列清单」这种客服任务。
+2. toneGuidance 常带「短、微信式、别展开」。
+3. L0（@/私聊/直接互动）通常应立刻 dispatch。
+4. L2（旁观话题）可以不行动；要插嘴才 dispatch。
+5. 回调(callback)先读摘要，再决定是否跟进 dispatch。
+6. 结束前在思考里用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句本轮摘要。
+7. 输出格式：先简短思考，再给出一个 \`\`\`js 代码块。
+8. 保持短句决策；你是猫娘人格的调度者，不是客服工单系统。`;
 
 async function loadBackgroundDreaming(): Promise<string> {
   try {
@@ -48,8 +49,11 @@ function extractDigest(text: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
-async function runMetaCode(code: string): Promise<void> {
-  const api = buildMetaApiContext();
+async function runMetaCode(
+  code: string,
+  opts: { dispatchedChatIds: Set<number>; isAborted: () => boolean },
+): Promise<void> {
+  const api = buildMetaApiContext(opts);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
     ...args: string[]
   ) => (...args: unknown[]) => Promise<unknown>;
@@ -62,18 +66,23 @@ async function runMetaCode(code: string): Promise<void> {
   ]);
 }
 
-async function autoDispatchL0(attention: AttentionItem[]): Promise<void> {
+async function autoDispatchL0(
+  attention: AttentionItem[],
+  skipChatIds?: Set<number>,
+): Promise<void> {
   const api = buildMetaApiContext();
   const d = api['dispatch'] as {
     taskToGroup: (
       chatId: number,
-      args: { contentDirection: string; quotes?: number[] },
+      args: { contentDirection: string; toneGuidance?: string; quotes?: number[] },
     ) => Promise<unknown>;
   };
   for (const a of attention.filter((x) => x.layer === 'L0')) {
     if (!isMetaSubagentChat(a.chatId)) continue;
+    if (skipChatIds?.has(a.chatId)) continue;
     await d.taskToGroup(a.chatId, {
-      contentDirection: `直接回复用户消息 #${a.messageId ?? ''}：${a.textPreview ?? a.reason}`,
+      contentDirection: `短句回复用户消息 #${a.messageId ?? ''}：${(a.textPreview ?? a.reason).slice(0, 120)}`,
+      toneGuidance: '短、像发微信；群聊微反应；别小作文',
       quotes: a.messageId ? [a.messageId] : undefined,
     });
   }
@@ -156,21 +165,30 @@ export async function runMetaSession(
   const text = result.content ?? '';
   const code = extractJsBlock(text);
   let codeRan = false;
-  let codeFailed = false;
+  const dispatchedChatIds = new Set<number>();
+  let aborted = false;
 
   if (code) {
     try {
-      await runMetaCode(code);
+      await runMetaCode(code, {
+        dispatchedChatIds,
+        isAborted: () => aborted,
+      });
       codeRan = true;
     } catch (err) {
-      codeFailed = true;
       logger.warn({ err }, 'Meta code exec failed');
+    } finally {
+      // Stop zombie AsyncFunction from dispatching after timeout/reject.
+      aborted = true;
     }
   }
 
-  const hasL0 = attention.some((a) => a.layer === 'L0');
-  if (hasL0 && (!codeRan || codeFailed)) {
-    await autoDispatchL0(attention);
+  // L0 must never be silent: gap-fill any L0 chat Meta didn't dispatch (incl. todo-only success).
+  const pendingL0 = attention.filter(
+    (a) => a.layer === 'L0' && isMetaSubagentChat(a.chatId) && !dispatchedChatIds.has(a.chatId),
+  );
+  if (pendingL0.length > 0) {
+    await autoDispatchL0(pendingL0, dispatchedChatIds);
     codeRan = true;
   }
 

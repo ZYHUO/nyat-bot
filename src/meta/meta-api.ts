@@ -14,12 +14,18 @@ export interface DispatchArgs {
 
 /**
  * Meta sandbox APIs — orchestration only. Sending chat messages happens in Subagent.
+ * @param opts.dispatchedChatIds — filled as taskToGroup runs (for L0 gap-fill / timeout dedupe)
+ * @param opts.isAborted — after Meta Promise.race settles, block zombie dispatches
  */
-export function buildMetaApiContext(): Record<string, unknown> {
+export function buildMetaApiContext(opts?: {
+  dispatchedChatIds?: Set<number>;
+  isAborted?: () => boolean;
+}): Record<string, unknown> {
   const state = getGlobalState();
 
   const dispatch = {
     async taskToGroup(chatId: number | string, args: DispatchArgs): Promise<{ taskId: string }> {
+      if (opts?.isAborted?.()) throw new Error('meta_aborted');
       const cid = Number(chatId);
       if (!Number.isFinite(cid) || cid === 0) throw new Error('invalid chatId');
       if (!isMetaSubagentChat(cid)) throw new Error(`chat ${cid} not on Meta+Subagent path`);
@@ -40,6 +46,7 @@ export function buildMetaApiContext(): Record<string, unknown> {
         status: 'queued',
       };
       state.putTask(task);
+      opts?.dispatchedChatIds?.add(cid);
       logger.info({ taskId: task.id, chatId: cid }, 'Meta dispatch.taskToGroup');
       void enqueueSubagentTask(task);
       return { taskId: task.id };
