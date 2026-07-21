@@ -406,6 +406,46 @@ const envSchema = z.object({
   // 同回合多人触发 wait → 都进集合,都被抑制(L1)。
   TURN_WAIT_PER_PERSON: booleanFromEnv.default(true),
 
+  // ── Meta + Subagent (CyberGroupmate-shaped orchestration inside nyatbot) ──
+  // 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback,
+  // 不再走 BullMQ message/turn-actor 直通(避免双回复)。详见 docs/meta-subagent/。
+  META_SUBAGENT_ENABLED: booleanFromEnv.default(false),
+  // 灰度 chatId 列表(逗号分隔)。空 = META_SUBAGENT_ENABLED 时对所有 chat 生效。
+  META_SUBAGENT_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  // Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。
+  META_TICK_MS: z.coerce.number().int().positive().default(5000),
+  // 单次 Meta flush 最多处理几个 attention 条目。
+  META_ATTENTION_TOP_N: z.coerce.number().int().positive().default(8),
+  // Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。
+  META_USAGE: z.string().default('judge'),
+  CODEACT_USAGE: z.string().default('reply'),
+  CODEACT_MAX_TURNS: z.coerce.number().int().positive().default(6),
+  CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // Context Engine:组装 Meta/Subagent prompt 时打 Manifest(可观测+稳定前缀)。
+  CONTEXT_ENGINE_ENABLED: booleanFromEnv.default(true),
+  // 日记 dream-journal(独立 flag,可不启 Meta 单独开)。
+  DREAM_JOURNAL_ENABLED: booleanFromEnv.default(false),
+  DREAM_JOURNAL_DIR: z.string().default('./data/dream-journal'),
+  // cron 表达式(UTC)。默认 16:05 UTC = 北京 00:05。
+  DREAM_JOURNAL_CRON: z.string().default('5 16 * * *'),
+  // 写完是否私聊推送给主人(MASTER_UID)。
+  DREAM_JOURNAL_DM: booleanFromEnv.default(false),
+  // 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。
+  DREAM_JOURNAL_CHAT_ID: z.coerce.number().int().default(0),
+  DREAM_JOURNAL_USAGE: z.string().default('summarize'),
+  // CodeAct 禁词(逗号分隔),出站文本命中则拒发并要求重写。
+  CODEACT_BANNED_WORDS: z
+    .string()
+    .default('是吧,对吧,作为一个AI,作为人工智能')
+    .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean)),
+
   // ── Learner (Expression + Jargon, Stage D) ──
   LEARNER_ENABLED: booleanFromEnv.default(false),
   LEARNER_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(60),

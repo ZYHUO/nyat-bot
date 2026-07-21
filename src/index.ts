@@ -28,6 +28,7 @@ import {
   shouldWarmMemory,
 } from './startup/side-effects.js';
 import { preloadSkills } from './pipeline/tools/registry.js';
+import { startMetaLoop, stopMetaLoop } from './meta/index.js';
 
 async function main(): Promise<void> {
   logger.info('xxb-ts starting…');
@@ -242,6 +243,11 @@ async function main(): Promise<void> {
     logger.info({ ownership }, 'Skipping cron startup in non-owner process');
   }
 
+  // 12.05 Meta+Subagent loop (Attention → Meta → CodeAct); flag-gated
+  if (ownership.worker || ownership.cron) {
+    startMetaLoop();
+  }
+
   // 12.1 Warm up ChromaDB + embedder (fire-and-forget) only on processes that use memory-dependent paths
   if (shouldWarmMemory(ownership)) {
     isMemoryAvailable().then((ok) => {
@@ -278,6 +284,7 @@ async function main(): Promise<void> {
       // 新消息持续打断→replan→起新 LLM 生成,30s 必然等不完。
       step('cron');
       stopCronJobs();
+      stopMetaLoop();
       // 关机广播先于 stopBot:中止全部在飞主回合生成(actor 收到 Shutdown
       // abort 后把锚点条目回 pending 供重启重放)—— TG 链路挂死时 stopBot
       // 可能拖延,不能让它推迟广播(review 加固 #1)。广播是同步的,窗口内
