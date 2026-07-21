@@ -439,7 +439,7 @@ const envSchema = z.object({
   DREAM_JOURNAL_DM: booleanFromEnv.default(false),
   // 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。
   DREAM_JOURNAL_CHAT_ID: z.coerce.number().int().default(0),
-  DREAM_JOURNAL_USAGE: z.string().default('summarize'),
+  DREAM_JOURNAL_USAGE: z.string().default('reply'),
   // CodeAct 禁词(逗号分隔),出站文本命中则拒发并要求重写。
   CODEACT_BANNED_WORDS: z
     .string()
