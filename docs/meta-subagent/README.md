@@ -20,7 +20,7 @@ DREAM_JOURNAL_DIR=./data/dream-journal
 DREAM_JOURNAL_CRON=5 16 * * *          # UTC；北京 00:05
 DREAM_JOURNAL_CHAT_ID=3954993432       # → -1003954993432 频道
 DREAM_JOURNAL_DM=false
-DREAM_JOURNAL_USAGE=summarize
+DREAM_JOURNAL_USAGE=reply
 ```
 
 重启：`npm run build && sudo systemctl restart xxb-ts`
