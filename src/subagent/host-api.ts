@@ -40,20 +40,20 @@ export function createHostApi(
     if (hit) throw new Error(`banned_word:${hit}`);
   };
 
-  /** Resolve reply anchor: prefer task quote; never let model pass 0/NaN/garbage. */
+  /**
+   * Resolve reply anchor:
+   * - Prefer explicit model replyTo when it's a real message id
+   * - Else fall back to task quote (Attention / Meta quotes)
+   * Does NOT pin forever to the trigger — model may reply to another line in the burst.
+   */
   const resolveReplyTo = (replyToMessageId?: number): number | undefined => {
-    const raw = replyToMessageId ?? opts.defaultReplyTo;
-    const n = typeof raw === 'string' ? Number(raw) : Number(raw);
-    if (!Number.isFinite(n) || n <= 0) return opts.defaultReplyTo;
-    // Model sometimes invents ids — in groups always stick to the task anchor when present.
-    if (chatId < 0 && opts.defaultReplyTo && n !== opts.defaultReplyTo) {
-      logger.info(
-        { chatId, modelReplyTo: n, forced: opts.defaultReplyTo },
-        'host sendText: force defaultReplyTo (ignore model replyTo)',
-      );
-      return opts.defaultReplyTo;
+    const candidates = [replyToMessageId, opts.defaultReplyTo];
+    for (const raw of candidates) {
+      if (raw === undefined || raw === null) continue;
+      const n = typeof raw === 'string' ? Number(raw) : Number(raw);
+      if (Number.isFinite(n) && n > 0) return Math.floor(n);
     }
-    return n;
+    return undefined;
   };
 
   return {
@@ -74,7 +74,10 @@ export function createHostApi(
         if (chatId < 0 && !replyTo) {
           logger.warn({ chatId }, 'host sendText: group send without reply_to anchor');
         } else {
-          logger.info({ chatId, replyTo }, 'host sendText');
+          logger.info(
+            { chatId, replyTo, fromModel: replyToMessageId ?? null, fallback: opts.defaultReplyTo ?? null },
+            'host sendText',
+          );
         }
         const messageId = await sendMessage(chatId, clean, replyTo);
         // Meta 不走 deliver.ts，必须自己写回 Redis 上下文，否则 recentContext/日记看不到本喵说过的话。
@@ -165,8 +168,13 @@ export function createHostApi(
           const { getRecent } = await import('../pipeline/context/manager.js');
           const msgs = await getRecent(chatId, limit);
           if (!msgs.length) return '(empty)';
+          // Include messageId so CodeAct can telegram.sendText(text, messageId) to the right line.
           return msgs
-            .map((m, i) => `${i + 1}. ${m.fullName || m.username}: ${m.textContent.slice(0, 200)}`)
+            .map((m, i) => {
+              const who = m.role === 'assistant' ? '本喵' : m.fullName || m.username || `uid:${m.uid}`;
+              const mid = m.messageId > 0 ? `id=${m.messageId}` : 'id=?';
+              return `${i + 1}. [${mid}] ${who}: ${String(m.textContent ?? '').slice(0, 200)}`;
+            })
             .join('\n');
         } catch {
           return '(context unavailable)';

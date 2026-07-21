@@ -24,9 +24,9 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 规则:
 1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），不要写具体台词。
 2. toneGuidance 常带「短、微信式、别展开」。
-3. **L0**（@/私聊/回 bot）→ 应立刻 dispatch，且 **必须**带 quotes: [messageId]（Attention 里的 msg=）。
-4. **L1**（旁观疑问）→ 多数沉默；只有明显想让你插嘴才 dispatch，同样必须 quotes。
-5. **L2**（旁观闲聊）→ **默认不行动**。极少数神回复才可 dispatch，且必须 interrupt: true + quotes。
+3. **L0**（@/私聊/回 bot）→ 应立刻 dispatch；quotes 填你要回的那条 messageId（通常是 Attention 的 msg=，也可以是 burst 里另一条）。
+4. **L1**（旁观疑问）→ 多数沉默；要回必须 quotes 指向具体 msg。
+5. **L2**（旁观闲聊）→ **默认不行动**。极少数才 interrupt: true，且 quotes 必填。
 6. 同一 chat 一轮最多 dispatch 一次。
 7. 回调(callback)先读摘要，再决定是否跟进。
 8. 结束前用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句摘要。
