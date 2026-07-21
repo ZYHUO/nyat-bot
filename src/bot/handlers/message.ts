@@ -9,11 +9,11 @@ import { appendPending } from '../../pipeline/turn/buffer.js';
 import { interruptGeneration } from '../../pipeline/turn/abort-registry.js';
 import { bumpFocus } from '../../pipeline/turn/focus.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
-import { env } from '../../env.js';
 import { getBotIdentity } from '../bot.js';
 import { formatMessage } from '../../pipeline/formatter.js';
 import { detectReplyObligation, isObligationCancelMessage } from '../../pipeline/turn/obligation-detect.js';
 import { saveObligation, setActiveObligation, supersedeActiveObligation, getActiveObligationId, getObligation, updateObligationState } from '../../pipeline/turn/obligation-store.js';
+import { isMetaSubagentChat, getAttentionAccumulator } from '../../meta/index.js';
 
 async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
@@ -54,7 +54,6 @@ async function handleUpdate(ctx: Context): Promise<void> {
     'Message received',
   );
 
-  const e = env();
   const baseData = {
     type: 'message' as const,
     chatId,
@@ -63,6 +62,66 @@ async function handleUpdate(ctx: Context): Promise<void> {
     update: ctx.update,
     enqueuedAt: Date.now(),
   };
+
+  // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
+  // Slash commands fall through to legacy so /checkin etc still work until CodeAct tools cover them.
+  if (isMetaSubagentChat(chatId) && !isEdit) {
+    const botIdentity = getBotIdentity();
+    const directKind = detectDirectInteraction(ctx.update, {
+      botUid: botIdentity.uid,
+      botUsername: botIdentity.username,
+      botNicknames: botIdentity.nicknames,
+      editByContentOnly: true,
+    });
+    const isDirect = directKind !== null;
+    const textPreview = (msg.text ?? msg.caption ?? '').slice(0, 200);
+    const isSlashCommand = /^\s*\//.test(msg.text ?? '');
+
+    const formatted = formatMessage(ctx.update);
+    if (formatted) {
+      try {
+        const { addMessage } = await import('../../pipeline/context/manager.js');
+        await addMessage(chatId, formatted);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
+      }
+      // Keep vector memory / profile warm even when Meta owns the reply.
+      void import('../../memory/chroma.js')
+        .then(({ memorizeMessage }) => memorizeMessage(chatId, formatted))
+        .catch(() => {});
+      try {
+        const { recordUserMessage } = await import('../../tracking/user-profile.js');
+        if (formatted.role === 'user' && formatted.uid > 0) {
+          recordUserMessage(
+            chatId,
+            formatted.uid,
+            formatted.username,
+            formatted.fullName,
+            formatted.senderTag,
+            formatted.textContent,
+          );
+        }
+      } catch {
+        /* non-critical */
+      }
+    }
+
+    if (isSlashCommand) {
+      logger.info({ chatId, messageId }, 'Meta path: slash command → legacy pipeline');
+      // fall through
+    } else {
+      getAttentionAccumulator().ingest({
+        chatId,
+        layer: isDirect || chatId > 0 ? 'L0' : 'L2',
+        reason: isDirect ? `direct:${directKind}` : 'passive',
+        messageId,
+        userId,
+        textPreview,
+      });
+      logger.info({ chatId, messageId, layer: isDirect || chatId > 0 ? 'L0' : 'L2' }, 'Meta attention ingested');
+      return;
+    }
+  }
 
   if (isTurnActorChat(chatId)) {
     const botIdentity = getBotIdentity();

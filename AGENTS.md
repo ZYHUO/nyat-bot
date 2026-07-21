@@ -4,7 +4,7 @@ Guidance for any AI coding agent working in this repository. Concise and tool-ag
 
 ## What this is
 
-NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot: a humanlike reply engine running a per-chat cognition loop (Turn Actor / Heart), long-term vector memory, person modeling, and a large feature surface (checkin, gacha, DM relay, stickers, learning, crons). TypeScript, Node ≥22, **ESM** (`"type": "module"`).
+NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot: a humanlike reply engine running a per-chat cognition loop (Turn Actor / Heart), optional Meta+Subagent+CodeAct orchestration (`META_SUBAGENT_ENABLED`), long-term vector memory, person modeling, and a large feature surface (checkin, gacha, DM relay, stickers, learning, crons, dream-journal). TypeScript, Node ≥22, **ESM** (`"type": "module"`).
 
 ## Tech stack
 
@@ -31,7 +31,7 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 ## Baseline & known noise
 
 - Vitest suite is **fully green**. A failing test is a real regression — fix it, don't skip it.
-- `tsc --noEmit` has two pre-existing unused-var warnings (`message.ts:57`, `prompt-builder.ts:169`). Filter those two out; anything else is new.
+- `tsc --noEmit` may report a pre-existing unused-var warning in `prompt-builder.ts:169`. Filter that out; anything else is new.
 
 ## Non-obvious conventions (these bite)
 
@@ -44,7 +44,7 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 - **`turnContext` is in-process only** (on `ChatJob`, never serialized to Redis/BullMQ).
 - **Privacy `visibility` layer** (`src/memory/visibility.ts`): every memory carries `visibility` (`private`/`contextual`/`public`) + `sourceChatId`; DM defaults private; cross-context reads are scrubbed so DM/sensitive content never leaks across chats.
 - **Cron**: `src/cron/scheduler.ts` wraps each job in `safeRun` (timeout + in-flight dedup + logging) — **don't add your own try/catch** around cron tasks. Flag-gated jobs follow `if (env().X_ENABLED) tasks.push(schedule(...))`.
-- **Docs are source of truth for big subsystems** — read `docs/` before touching them: `timing-gate-maibot-deep-dive.md`, `turn-actor/`, `maibot-framework-gap-analysis.md`, `dm-group-memory-cybergroupmate-plan.md`.
+- **Docs are source of truth for big subsystems** — read `docs/` before touching them: `meta-subagent/`, `timing-gate-maibot-deep-dive.md`, `turn-actor/`, `maibot-framework-gap-analysis.md`, `dm-group-memory-cybergroupmate-plan.md`.
 
 ## Architecture (big picture)
 
