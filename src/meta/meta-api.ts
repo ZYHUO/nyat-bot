@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { getGlobalState } from './global-state.js';
-import type { DispatchTask } from './types.js';
+import type { DispatchTask, AttentionLayer } from './types.js';
 import { enqueueSubagentTask } from '../subagent/executor.js';
 import { isMetaSubagentChat } from './flags.js';
 
@@ -10,16 +10,20 @@ export interface DispatchArgs {
   toneGuidance?: string;
   quotes?: Array<number | string>;
   trackingKey?: string;
+  /**
+   * Allow dispatch for L2 passive attention. Default false — Meta must not
+   * jump into every group message (replaces Heart's silence bias).
+   */
+  interrupt?: boolean;
 }
 
-/**
- * Meta sandbox APIs — orchestration only. Sending chat messages happens in Subagent.
- * @param opts.dispatchedChatIds — filled as taskToGroup runs (for L0 gap-fill / timeout dedupe)
- * @param opts.isAborted — after Meta Promise.race settles, block zombie dispatches
- */
 export function buildMetaApiContext(opts?: {
   dispatchedChatIds?: Set<number>;
   isAborted?: () => boolean;
+  /** Highest-priority attention layer per chat in this session. */
+  chatLayer?: Map<number, AttentionLayer>;
+  /** Default reply-to messageId per chat (from Attention). */
+  defaultQuotes?: Map<number, number>;
 }): Record<string, unknown> {
   const state = getGlobalState();
 
@@ -31,9 +35,24 @@ export function buildMetaApiContext(opts?: {
       if (!isMetaSubagentChat(cid)) throw new Error(`chat ${cid} not on Meta+Subagent path`);
       if (!args?.contentDirection?.trim()) throw new Error('contentDirection required');
 
-      const quotes = (args.quotes ?? [])
+      const layer = opts?.chatLayer?.get(cid) ?? 'L2';
+      if (layer === 'L2' && !args.interrupt) {
+        logger.info({ chatId: cid, layer }, 'Meta dispatch blocked (L2 needs interrupt:true)');
+        return { taskId: 'blocked_l2' };
+      }
+
+      // One dispatch per chat per Meta session (gap-fill / LLM double-call safe).
+      if (opts?.dispatchedChatIds?.has(cid)) {
+        logger.info({ chatId: cid }, 'Meta dispatch skipped (already dispatched this session)');
+        return { taskId: 'skipped_dup' };
+      }
+
+      let quotes = (args.quotes ?? [])
         .map((q) => (typeof q === 'string' ? Number(q.replace(/^msg:/, '')) : Number(q)))
         .filter((n) => Number.isFinite(n) && n > 0);
+      // Always prefer anchoring to the triggering message (Heart/Judge did reply_to).
+      const fallbackQuote = opts?.defaultQuotes?.get(cid);
+      if (!quotes.length && fallbackQuote) quotes = [fallbackQuote];
 
       const task: DispatchTask = {
         id: randomUUID(),
@@ -47,7 +66,10 @@ export function buildMetaApiContext(opts?: {
       };
       state.putTask(task);
       opts?.dispatchedChatIds?.add(cid);
-      logger.info({ taskId: task.id, chatId: cid }, 'Meta dispatch.taskToGroup');
+      logger.info(
+        { taskId: task.id, chatId: cid, layer, quotes, interrupt: !!args.interrupt },
+        'Meta dispatch.taskToGroup',
+      );
       void enqueueSubagentTask(task);
       return { taskId: task.id };
     },

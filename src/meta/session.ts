@@ -6,14 +6,14 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getGlobalState } from './global-state.js';
 import { buildMetaApiContext } from './meta-api.js';
-import type { AttentionItem, SubagentCallback } from './types.js';
+import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
 
 const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
 
 可用全局对象（已注入）:
-- dispatch.taskToGroup(chatId, { contentDirection, toneGuidance?, quotes?, trackingKey? })
+- dispatch.taskToGroup(chatId, { contentDirection, toneGuidance?, quotes?, trackingKey?, interrupt? })
 - dispatch.getTask(taskId) / dispatch.listTasks(chatId?)
 - todo.add(text) / todo.list() / todo.remove(id)
 - agents.listStatus()
@@ -22,14 +22,15 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 - console.log(...)
 
 规则:
-1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），不要写具体台词，更不要写成「详细介绍/追问计划/列清单」这种客服任务。
+1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），不要写具体台词。
 2. toneGuidance 常带「短、微信式、别展开」。
-3. L0（@/私聊/直接互动）通常应立刻 dispatch。
-4. L2（旁观话题）可以不行动；要插嘴才 dispatch。
-5. 回调(callback)先读摘要，再决定是否跟进 dispatch。
-6. 结束前在思考里用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句本轮摘要。
-7. 输出格式：先简短思考，再给出一个 \`\`\`js 代码块。
-8. 保持短句决策；你是猫娘人格的调度者，不是客服工单系统。`;
+3. **L0**（@/私聊/回 bot）→ 应立刻 dispatch，且 **必须**带 quotes: [messageId]（Attention 里的 msg=）。
+4. **L1**（旁观疑问）→ 多数沉默；只有明显想让你插嘴才 dispatch，同样必须 quotes。
+5. **L2**（旁观闲聊）→ **默认不行动**。极少数神回复才可 dispatch，且必须 interrupt: true + quotes。
+6. 同一 chat 一轮最多 dispatch 一次。
+7. 回调(callback)先读摘要，再决定是否跟进。
+8. 结束前用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句摘要。
+9. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。`;
 
 async function loadBackgroundDreaming(): Promise<string> {
   try {
@@ -49,9 +50,37 @@ function extractDigest(text: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
+function buildAttentionMaps(attention: AttentionItem[]): {
+  chatLayer: Map<number, AttentionLayer>;
+  defaultQuotes: Map<number, number>;
+} {
+  const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
+  const chatLayer = new Map<number, AttentionLayer>();
+  const defaultQuotes = new Map<number, number>();
+  for (const a of attention) {
+    const prev = chatLayer.get(a.chatId);
+    if (!prev || (rank[a.layer] ?? 0) >= (rank[prev] ?? 0)) {
+      chatLayer.set(a.chatId, a.layer);
+    }
+    if (a.messageId && a.messageId > 0) {
+      // Prefer L0/L1 message ids over older L2
+      const existing = defaultQuotes.get(a.chatId);
+      if (!existing || a.layer === 'L0' || a.layer === 'L1') {
+        defaultQuotes.set(a.chatId, a.messageId);
+      }
+    }
+  }
+  return { chatLayer, defaultQuotes };
+}
+
 async function runMetaCode(
   code: string,
-  opts: { dispatchedChatIds: Set<number>; isAborted: () => boolean },
+  opts: {
+    dispatchedChatIds: Set<number>;
+    isAborted: () => boolean;
+    chatLayer: Map<number, AttentionLayer>;
+    defaultQuotes: Map<number, number>;
+  },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -69,8 +98,9 @@ async function runMetaCode(
 async function autoDispatchL0(
   attention: AttentionItem[],
   skipChatIds?: Set<number>,
+  maps?: { chatLayer: Map<number, AttentionLayer>; defaultQuotes: Map<number, number> },
 ): Promise<void> {
-  const api = buildMetaApiContext();
+  const api = buildMetaApiContext(maps);
   const d = api['dispatch'] as {
     taskToGroup: (
       chatId: number,
@@ -142,6 +172,8 @@ export async function runMetaSession(
     'Meta session start',
   );
 
+  const maps = buildAttentionMaps(attention);
+
   let result;
   try {
     result = await callWithFallback({
@@ -150,7 +182,8 @@ export async function runMetaSession(
         { role: 'system', content: prompt },
         {
           role: 'user',
-          content: '根据 Attention / Callbacks 做本轮编排。需要行动就写 js 代码块调用 dispatch。',
+          content:
+            '根据 Attention / Callbacks 做本轮编排。L2 默认沉默；dispatch 时务必 quotes:[msgId]。只在需要时写 js。',
         },
       ],
       maxTokens: 1200,
@@ -158,7 +191,7 @@ export async function runMetaSession(
     });
   } catch (err) {
     logger.warn({ err }, 'Meta LLM failed');
-    await autoDispatchL0(attention);
+    await autoDispatchL0(attention, undefined, maps);
     return { digest: 'meta_llm_failed_auto_l0', codeRan: true };
   }
 
@@ -173,22 +206,23 @@ export async function runMetaSession(
       await runMetaCode(code, {
         dispatchedChatIds,
         isAborted: () => aborted,
+        chatLayer: maps.chatLayer,
+        defaultQuotes: maps.defaultQuotes,
       });
       codeRan = true;
     } catch (err) {
       logger.warn({ err }, 'Meta code exec failed');
     } finally {
-      // Stop zombie AsyncFunction from dispatching after timeout/reject.
       aborted = true;
     }
   }
 
-  // L0 must never be silent: gap-fill any L0 chat Meta didn't dispatch (incl. todo-only success).
+  // L0 must never be silent: gap-fill any L0 chat Meta didn't dispatch.
   const pendingL0 = attention.filter(
     (a) => a.layer === 'L0' && isMetaSubagentChat(a.chatId) && !dispatchedChatIds.has(a.chatId),
   );
   if (pendingL0.length > 0) {
-    await autoDispatchL0(pendingL0, dispatchedChatIds);
+    await autoDispatchL0(pendingL0, dispatchedChatIds, maps);
     codeRan = true;
   }
 

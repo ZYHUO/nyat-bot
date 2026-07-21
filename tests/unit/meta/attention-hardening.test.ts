@@ -23,10 +23,16 @@ describe('classifyAttentionLayer', () => {
     ).toBe('L0');
   });
 
-  it('passive question → L1', () => {
+  it('passive question → L1 only with ? and interrogative', () => {
     const d = classifyAttentionLayer({ chatId: -100, isDirect: false, text: '这是什么意思？' });
     expect(d.layer).toBe('L1');
     expect(d.reason).toBe('passive_question');
+  });
+
+  it('casual 吗-chatter stays L2', () => {
+    expect(
+      classifyAttentionLayer({ chatId: -100, isDirect: false, text: '好可爱吗' }).layer,
+    ).toBe('L2');
   });
 
   it('passive chatter → L2', () => {

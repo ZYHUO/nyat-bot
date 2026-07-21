@@ -75,11 +75,8 @@ export function detectDirectInteraction(
       if (!nick) continue;
       const nickLower = nick.toLowerCase();
       if (!nickLower) continue;
-      if (/[a-z0-9_]/i.test(nickLower)) {
-        if (containsStandaloneToken(lower, nickLower)) return 'mention';
-      } else if (lower.includes(nickLower)) {
-        return 'mention';
-      }
+      // Always require token boundaries — bare includes("啾咪") matches too much chatter about the bot.
+      if (containsStandaloneToken(lower, nickLower)) return 'mention';
     }
   }
 
