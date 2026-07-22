@@ -10,9 +10,20 @@ import {
 } from '../../../packages/nyatdb/src/native.js';
 
 const nativeDir = join(dirname(fileURLToPath(import.meta.url)), '../../../native/nyatdb');
-const built = existsSync(join(nativeDir, 'index.js'));
+// index.js is committed as the napi loader; the .node binary is gitignored and
+// only present after `npm run build:nyatdb`. Skip when the addon isn't loadable.
+const nativeReady = builtAddonAvailable();
 
-describe.skipIf(!built)('NyatDB native Step3', () => {
+function builtAddonAvailable(): boolean {
+  if (!existsSync(join(nativeDir, 'index.js'))) return false;
+  try {
+    return isNyatDbNativeAvailable();
+  } catch {
+    return false;
+  }
+}
+
+describe.skipIf(!nativeReady)('NyatDB native Step3', () => {
   it('loads addon', () => {
     expect(isNyatDbNativeAvailable()).toBe(true);
     expect(nativeVersion()).toMatch(/^\d+\.\d+\.\d+/);

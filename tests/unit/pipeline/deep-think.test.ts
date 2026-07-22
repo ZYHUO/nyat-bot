@@ -41,7 +41,10 @@ function setMundo(content: string, label = 'mundo') {
 }
 
 beforeEach(() => {
-  kv.clear(); vi.clearAllMocks();
+  kv.clear();
+  vi.clearAllMocks();
+  callWithFallback.mockReset();
+  sendMessage.mockReset();
   for (const k of Object.keys(envValues)) delete envValues[k];
   Object.assign(envValues, { DEEP_THINK_ENABLED: true, MUNDO_ENABLED: true });
 });

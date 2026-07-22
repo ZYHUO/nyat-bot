@@ -37,7 +37,20 @@ const appendPendingMock = vi.fn(async () => ({ count: 1, firstPendingAt: 0 }));
 const scheduleTurnMock = vi.fn(async () => {});
 const isCancelMock = vi.fn(() => true);
 
-vi.mock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn(), error: vi.fn() } }));
+vi.mock('../../../src/shared/logger.js', () => ({
+  logger: {
+    debug: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(() => ({
+      debug: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+    })),
+  },
+}));
 vi.mock('../../../src/bot/middleware/dedup.js', () => ({ isDuplicate: (...args: unknown[]) => duplicateMock(...args) }));
 vi.mock('../../../src/bot/middleware/rate-limit.js', () => ({ isRateLimited: (...args: unknown[]) => rateLimitMock(...args) }));
 vi.mock('../../../src/queue/producer.js', () => ({ enqueue: vi.fn(async () => {}) }));
