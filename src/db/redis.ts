@@ -6,10 +6,19 @@ let _redis: Redis | undefined;
 
 export function getRedis(): Redis {
   if (!_redis) {
+    const isVitest = !!process.env['VITEST'];
     _redis = new Redis(env().REDIS_URL, {
-      maxRetriesPerRequest: null, // required by BullMQ
+      // BullMQ needs null; vitest CI has no Redis — finite retries or commands hang forever.
+      maxRetriesPerRequest: isVitest ? 1 : null,
+      connectTimeout: isVitest ? 150 : 10_000,
       enableReadyCheck: false,
       lazyConnect: true,
+      ...(isVitest
+        ? {
+            retryStrategy: () => null,
+            enableOfflineQueue: false,
+          }
+        : {}),
     });
 
     _redis.on('error', (err) => {
