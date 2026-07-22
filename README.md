@@ -22,9 +22,12 @@
 ### ✨ 特性
 
 **核心 AI**
-- ❤️ **心流层（Heart）** — 一颗带人格与"此刻自我状态"的心代替三个过滤器：L0 规则未命中的群消息走**一次**心流判断，自己决定 reply / wait / pass —— 决定"接不接"的我和决定"怎么说"的我是同一个我（更便宜：1 次调用 ≤ 旧的 1-3 次）
+- 🧭 **Meta + Subagent + CodeAct**（可选，默认关）— CyberGroupmate 同构编排：Attention 收消息 → Meta 写 JS 派活 → Subagent CodeAct 调 host API（发消息/记忆/贴纸）→ callback；灰度 `META_SUBAGENT_CHAT_IDS`，详见 [`docs/meta-subagent/`](docs/meta-subagent/)
+- 🧱 **Context Engine** — `static|delta|ephemeral|volatile` 分段组装 + Manifest（前缀稳定利于 prompt cache）；Meta/Subagent 共用
+- 📔 **梦境日记（Dream Journal）** — 夜间 cron 写 `data/dream-journal/`，可发频道；与记忆遗忘的 `memory-dream` 无关（`DREAM_JOURNAL_*`）
+- ❤️ **心流层（Heart）** — 一颗带人格与"此刻自我状态"的心代替三个过滤器：L0 规则未命中的群消息走**一次**心流判断，自己决定 reply / wait / pass —— 决定"接不接"的我和决定"怎么说"的我是同一个我（更便宜：1 次调用 ≤ 旧的 1-3 次）；可选「念头」反思（`HEART_REFLECT_ENABLED`）
 - 🔄 **回合制 Turn Actor** — MaiBot 式 per-chat 认知回合：连发合并成一个念头整体评估、生成中被新消息打断→重规划、"等TA说完"真的会回来接话（wait-resume）、有界自我接话（"对了…"/补贴纸）
-- 🧠 **三级判断管线** — L0 本地规则 → L1 微型 AI → L2 完整 AI，智能决定是否回复（心流关闭时的回退链路）
+- 🧠 **三级判断管线** — L0 本地规则 → L1 微型 AI → L2 完整 AI，智能决定是否回复（心流关闭时的回退链路；**Meta 灰度群不走此路径**，防双回复）
 - 💬 **自然接话** — bot 说完话后保持"在场"：最近几条内你或它任一方是问句即接，陈述句也按概率接（MaiBot 式 talk-frequency），不需 @ 或引用；群太热/@别人时自动克制
 - 🗣️ **自然语言调用指令** — "帮我签到"→签到、"看看我的图鉴"→卡册、"追踪比特币"→关注话题，私聊宽松、群里需点名
 - 💬 **多条回复 / 多目标** — AI 可一次性回复多个人（JSON 数组），每条精准引用各自目标
@@ -107,32 +110,45 @@
 Telegram Update  (长轮询 ⇄ webhook 自动故障转移)
   │
   ▼
-grammy Bot ──→ Turn Buffer (Redis, 连发合并) ──→ chat_turn (BullMQ)
-  │                              │
-  │              Pipeline Orchestrator (pipeline.ts)
-  │                  │
-  │              Formatter ──→ Context (Redis)
-  │                  │
-  │              L0 rules ──未命中──→ ❤️ Heart (心流: reply/wait/pass)
-  │                  │                    │   (打断 → 重规划 · wait → 真回访)
-  │             IGNORE / NL-cmd / DM    REPLY
-  │                 intercepts            │
-  │                  │              Reply Pipeline (stages/deliver)
-  │                          │             ├─ 4-Way Context Retrieval
-  │                          │             │   ├─ Recent Window
-  │                          │             │   ├─ Thread Trace (reply chain)
-  │                          │             │   ├─ Entity Mentions
-  │                          │             │   └─ Semantic (Qdrant, int8)
-  │                          │             ├─ 5-Layer Prompt Builder
-  │                          │             │   (+画像/外号/情绪/关系注入)
-  │                          │             ├─ Tool Executor (search, fetch...)
-  │                          │             ├─ Multi-Reply Parser
-  │                          │             ├─ Humanizer (self-tuning)
-  │                          │             └─ Streaming Sender
-  │                          ▼
-  │              DM Assistant (传话/纸条/树洞/缘分签/定时/档案)
-  │              · Cards & Games (/cards /wish /game) · Checkin
+grammy Bot
   │
+  ├─【可选 META_SUBAGENT】Attention(Redis) ──→ Meta loop(tick)
+  │       │                                      │
+  │       │                                 Meta CodeAct
+  │       │                                      │ dispatch.taskToGroup
+  │       │                                      ▼
+  │       │                               Subagent CodeAct
+  │       │                         (telegram / memory / stickers)
+  │       └────────────────────────── callback ──┘
+  │         （灰度群：不入 BullMQ / Turn Actor，防双回复）
+  │
+  └─【默认路径】Turn Buffer (Redis) ──→ chat_turn (BullMQ)
+                 │
+                 Pipeline Orchestrator (pipeline.ts)
+                     │
+                 Formatter ──→ Context (Redis)
+                     │
+                 L0 rules ──未命中──→ ❤️ Heart (心流: reply/wait/pass)
+                     │                    │   (+ 可选念头反思)
+                     │                    │   (打断 → 重规划 · wait → 真回访)
+                IGNORE / NL-cmd / DM    REPLY
+                    intercepts            │
+                     │              Reply Pipeline (stages/deliver)
+                     │                     ├─ 4-Way Context Retrieval
+                     │                     │   ├─ Recent Window
+                     │                     │   ├─ Thread Trace (reply chain)
+                     │                     │   ├─ Entity Mentions
+                     │                     │   └─ Semantic (Qdrant, int8)
+                     │                     ├─ 5-Layer Prompt Builder
+                     │                     │   (+画像/外号/情绪/关系注入)
+                     │                     ├─ Tool Executor (search, fetch...)
+                     │                     ├─ Multi-Reply Parser
+                     │                     ├─ Humanizer (self-tuning)
+                     │                     └─ Streaming Sender
+                     ▼
+                 DM Assistant (传话/纸条/树洞/缘分签/定时/档案)
+                 · Cards & Games (/cards /wish /game) · Checkin
+
   ├─ Member Registry (Redis Hash)      ├─ Mood / Relationship / Reputation
   ├─ Bot Interaction Tracker (SQLite)  ├─ Outcome + ASI quality tracking
   ├─ Rate Limiter (Redis Lua)          ├─ Learners (jargon / expression)
@@ -143,8 +159,9 @@ Hono HTTP Server
   ├─ /health   ├─ /miniapp_api (Admin)   └─ /webhook (failover)
 
 Cron: model health · profile sync · idle proactive · channel ingest
-      · memory dream · learner scan · cleanup · relationship summarize
-      · sleep cycle · pm-nudge · school day-plan · resident-sticker vision
+      · memory dream · dream-journal · learner scan · cleanup
+      · relationship summarize · sleep cycle · pm-nudge
+      · school day-plan · resident-sticker vision
 ```
 
 ### 📁 项目结构
@@ -169,8 +186,11 @@ src/
 ├── knowledge/            # 知识库 + 贴纸 + 人物外号
 ├── learners/             # 黑话挖掘/释义 + 表达学习门控 + 学习并发门
 ├── memory/               # Qdrant 语义记忆 (int8量化) + 重要度/遗忘
+├── meta/                 # Meta 编排 (Attention / loop / CodeAct session)
+├── subagent/             # Subagent CodeAct + host API (telegram/memory/stickers)
+├── context-engine/       # static|delta|ephemeral|volatile 上下文组装
 ├── ingress/              # 长轮询 ⇄ webhook 故障转移
-├── pipeline/             # 核心消息管线
+├── pipeline/             # 核心消息管线（Heart / Turn Actor；非 Meta 灰度路径）
 │   ├── pipeline.ts       #   编排器 (orchestrator)
 │   ├── stages/           #   管线阶段模块 (media/intercepts/stale-reply/deliver)
 │   ├── heart/            #   心流层 (decision + self-state + mind + engagement)
@@ -195,9 +215,11 @@ prompts/                  # AI Prompt 模板 (Markdown)
 ├── contract/             #   输出格式 (JSON Schema)
 ├── style/                #   语调风格
 ├── task/                 #   任务指令 (reply, judge, vision...)
+├── meta/                 #   Meta/Subagent 人设方向 (background-dreaming 等)
 └── system/               #   系统级 prompt (摘要等)
 migrations/               # SQLite 迁移脚本
-scripts/                  # 迁移 + 部署脚本
+docs/meta-subagent/       # Meta+Subagent+CodeAct 开关 / 切流 / 日记
+scripts/                  # 安装 / 更新 / 迁移（deploy.sh · auto-update.sh）
 ```
 
 ### 🛠️ 技术栈
@@ -261,6 +283,15 @@ sudo ./scripts/deploy.sh --uninstall     # 停服并移除单元（保留数据�
 更多标志：`--dry-run`(预览不执行) `--yes`(非交互) `--china`(国内 npm 镜像) `--minimal`(低内存最小部署) `--skip-{qdrant,build,deps}` `--no-restart`。
 墙内：下载被挡时 `export HTTPS_PROXY=…`，或手动下好 Qdrant 包用 `QDRANT_TARBALL=/path`；嵌入模型可设 `HF_ENDPOINT=https://hf-mirror.com`。
 
+#### 日常更新
+
+```bash
+sudo ./scripts/deploy.sh --update
+# 或：curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash -s -- --update
+```
+
+生产机也可挂 `scripts/systemd/xxb-autoupdate.{timer,service}`（每 5 分钟对齐 `origin/main`；构建失败自动回滚不重启）。日志：`logs/auto-update.log`。
+
 #### 手动安装
 
 ```bash
@@ -269,6 +300,8 @@ cd nyat-bot
 npm install
 cp .env.example .env
 # 编辑 .env，填入你的 Bot Token 和 AI API 配置
+# 可选开启 Meta：META_SUBAGENT_ENABLED=true（建议先设 META_SUBAGENT_CHAT_IDS 灰度）
+# 详见 docs/meta-subagent/
 ```
 
 #### 从 PHP 版 (xxb) 迁移数据
@@ -280,11 +313,11 @@ cp .env.example .env
 #### 开发
 
 ```bash
-npm run dev        # tsx watch 热重载
-npm run build      # 生产构建
-npm run start      # 启动生产服务
-npm run test       # vitest 运行测试
-npm run lint       # ESLint 检查
+npm run dev            # tsx watch 热重载
+npm run build          # 生产构建
+npm run start          # 启动生产服务
+npm run test           # vitest 运行测试
+npm run lint           # ESLint 检查
 ```
 
 #### Docker 部署
@@ -345,8 +378,15 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 | `GEMINI_SEARCH_MODEL` / `GEMINI_SEARCH_PROXY` | 搜索模型 / 出口受限时的代理 | `gemini-2.5-flash-lite` / — |
 | `FIRECRAWL_API_KEY` / `FIRECRAWL_API_URL` | 抓取兜底（自托管可填 localhost） | (可选) |
 | `RESIDENT_STICKER_PACKS` | 常驻贴纸包 set_name（逗号分隔） | (可选) |
+| `META_SUBAGENT_ENABLED` | 启用 Meta+Subagent+CodeAct 编排 | `false` |
+| `META_SUBAGENT_CHAT_IDS` | 灰度 chatId（逗号分隔；空=全开） | (空) |
+| `META_TICK_MS` / `META_USAGE` | Meta loop 间隔 / 廉价模型 usage | `5000` / `judge` |
+| `CODEACT_USAGE` / `CODEACT_MAX_TURNS` | Subagent CodeAct 模型与轮数 | `reply` / `6` |
+| `CONTEXT_ENGINE_ENABLED` | Context Engine 分段组装 | `true` |
+| `DREAM_JOURNAL_ENABLED` | 梦境日记 cron（可发频道） | `false` |
+| `DREAM_JOURNAL_CHAT_ID` | 日记发送目标（频道/群，可写正数自动转 `-100…`） | `0` |
 
-> 实际模型路由用 `AI_PROVIDER_<NAME>_*` + `AI_USAGE_<NAME>_*`(provider/usage 分离,Redis `xxb:admin:model_routing:override` 可运行时覆盖);上表 `AI_*` 为兼容旧式简化配置。功能开关一律 `*_ENABLED`(默认关,灰度上线):如 `SCHOOL_SCHEDULE_ENABLED` / `SLEEP_DM_ENABLED` / `PM_NUDGE_ENABLED`。
+> 实际模型路由用 `AI_PROVIDER_<NAME>_*` + `AI_USAGE_<NAME>_*`(provider/usage 分离,Redis `xxb:admin:model_routing:override` 可运行时覆盖);上表 `AI_*` 为兼容旧式简化配置。功能开关一律 `*_ENABLED`(默认关,灰度上线):如 `SCHOOL_SCHEDULE_ENABLED` / `SLEEP_DM_ENABLED` / `PM_NUDGE_ENABLED` / `META_SUBAGENT_ENABLED`。编排与日记详见 [`docs/meta-subagent/`](docs/meta-subagent/)。
 
 ### 📊 Prompt 五层系统
 
@@ -436,7 +476,9 @@ Bot 可在回复时调用以下工具：
 
 xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts as an opinionated, cat-girl-themed group member that can:
 
-- **Decide with one heart** — a single persona-aware "heart" call (with a first-person self-state narration) decides reply / wait / pass for passive group messages; the self that decides and the self that writes are the same self (3-level judge pipeline remains as the fallback)
+- **Orchestrate with Meta + Subagent** (optional, default off) — Attention → Meta CodeAct → dispatch → Subagent host APIs → callback; graylist via `META_SUBAGENT_CHAT_IDS` (see [`docs/meta-subagent/`](docs/meta-subagent/))
+- **Keep a dream journal** — nightly cron writes `data/dream-journal/` and can post to a channel (`DREAM_JOURNAL_*`)
+- **Decide with one heart** — a single persona-aware "heart" call (with a first-person self-state narration) decides reply / wait / pass for passive group messages; optional post-decision "念头" reflection; the 3-level judge pipeline remains as the fallback (Meta graylist chats skip this path to avoid double replies)
 - **Think in turns** — MaiBot-style per-chat cognition turns: message bursts judged as one thought, mid-generation interrupts trigger a replan, "wait for them to finish" genuinely comes back, bounded self-continuation
 - **Carry a conversation naturally** — stays engaged after it speaks (MaiBot-style talk-frequency): picks up questions/statements from either side within the last few messages, no @ or reply needed, while staying restrained in hot chats
 - **Understand natural-language commands** — "帮我签到" → checkin, "看看我的图鉴" → card album, "追踪比特币" → watch topic (DM is lenient; groups require addressing the bot)
@@ -455,19 +497,31 @@ xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts 
 ### Key Design Decisions
 
 - **AI-provider agnostic** — Uses [Vercel AI SDK](https://sdk.vercel.ai/) with OpenAI-compatible endpoints. Works with OpenAI, Google Gemini, Anthropic, or any compatible proxy.
+- **Dual path cognition** — default Heart/Turn Actor pipeline, or optional Meta+Subagent CodeAct loop (mutually exclusive per chat graylist).
 - **Dual storage** — Redis for hot data (context, rate limits, member registry) + SQLite for cold data (knowledge, tracking, checkins).
+- **Context Engine** — `static|delta|ephemeral|volatile` assembly with a stable prefix for prompt-cache-friendly providers.
 - **5-layer prompt system** — Identity, Safety, Contract (JSON Schema), Style, and Task layers compose the system prompt. All prompts are Markdown files, editable without rebuilding.
 - **4-way context retrieval** — Recent window + reply thread trace + entity mentions + semantic search (future), merged and token-budget-capped.
 - **Graceful shutdown** — BullMQ worker drains active jobs before the bot instance is destroyed.
 
 ### Quick Start
 
+One-shot (recommended):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash
+# later: … | sudo bash -s -- --update
+# or:    sudo ./scripts/deploy.sh --update
+```
+
+Manual:
+
 ```bash
 git clone https://github.com/ZYHUO/nyat-bot.git
 cd nyat-bot
 npm install
 cp .env.example .env
-# Edit .env with your Bot Token and AI API credentials
+# Edit .env — optional Meta: META_SUBAGENT_ENABLED (see docs/meta-subagent/)
 npm run build && npm start
 ```
 
@@ -481,8 +535,7 @@ See the [Chinese section](#中文) for detailed configuration and architecture d
 
 ### Tech Stack
 
-Node.js 22+ · TypeScript · grammy · Vercel AI SDK · Hono · BullMQ · SQLite · Redis · pino · zod · tiktoken · tsup · vitest · Docker / PM2
-
+Node.js 22+ · TypeScript · grammy · Vercel AI SDK · Hono · BullMQ · SQLite · Redis · Qdrant · pino · zod · tiktoken · tsup · vitest · Docker / PM2
 ---
 
 ## 📄 License
