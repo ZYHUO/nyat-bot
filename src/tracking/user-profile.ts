@@ -585,7 +585,7 @@ export async function runUserProfileSync(): Promise<void> {
 ${tagLine}${existingBlock}最新发言(${pending.length}条):\n${messagesBlock}`;
 
       const result = await callWithFallback({
-        usage: 'summarize_deep',
+        usage: 'summarize',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },

@@ -15,3 +15,7 @@ coverage/
 _find_group*.mjs
 backups/
 deploy-report.txt
+
+# NyatDB native build artifacts (rebuild via npm run build:nyatdb)
+native/**/target/
+*.node

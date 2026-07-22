@@ -4,6 +4,7 @@ import type { Bot } from 'grammy';
 import type { Env } from '../env.js';
 import { timingSafeEqual } from 'crypto';
 import { listObligationSnapshots } from './obligations.js';
+import { getRecent } from '../pipeline/context/manager.js';
 
 interface MonitorDeps {
   redis: Redis;
@@ -32,6 +33,26 @@ async function getCachedTitle(bot: Bot, chatId: number): Promise<string> {
   return title;
 }
 
+async function listActiveChatIds(redis: Redis): Promise<number[]> {
+  const ids = new Set<number>();
+  // Groups still tracked on Redis; DMs may only exist in Redis ctx keys (legacy) or NyatDB.
+  const members = await redis.zrange('xxb:active_groups', 0, -1);
+  for (const m of members) {
+    const n = Number(m);
+    if (Number.isFinite(n)) ids.add(n);
+  }
+  let cursor = '0';
+  do {
+    const [next, batch] = await redis.scan(cursor, 'MATCH', 'xxb:ctx:*', 'COUNT', 200);
+    cursor = next;
+    for (const key of batch) {
+      const chatId = Number(key.replace('xxb:ctx:', ''));
+      if (Number.isFinite(chatId)) ids.add(chatId);
+    }
+  } while (cursor !== '0');
+  return [...ids];
+}
+
 export function createMonitorApi(deps: MonitorDeps): Hono {
   const api = new Hono();
 
@@ -51,27 +72,18 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
 
   // List all chats with last message preview
   api.get('/chats', async (c) => {
-    const keys: string[] = [];
-    let cursor = '0';
-    do {
-      const [next, batch] = await deps.redis.scan(cursor, 'MATCH', 'xxb:ctx:*', 'COUNT', 200);
-      cursor = next;
-      keys.push(...batch);
-    } while (cursor !== '0');
+    const chatIds = await listActiveChatIds(deps.redis);
 
-    // Parallel: get last message + title for all chats
-    const results = await Promise.all(keys.map(async (key) => {
-      const chatId = Number(key.replace('xxb:ctx:', ''));
-      if (isNaN(chatId)) return null;
-      const [raw, title] = await Promise.all([
-        deps.redis.lrange(key, -1, -1),
+    const results = await Promise.all(chatIds.map(async (chatId) => {
+      const [recent, title] = await Promise.all([
+        getRecent(chatId, 1),
         getCachedTitle(deps.bot, chatId),
       ]);
-      const lastMessage = raw[0] ? JSON.parse(raw[0]) : null;
+      const lastMessage = recent[recent.length - 1] ?? null;
       return { chatId, title, lastMessage };
     }));
 
-    const chats = results.filter(Boolean) as Array<{ chatId: number; title: string; lastMessage: unknown }>;
+    const chats = results.filter((r) => r.lastMessage);
     chats.sort((a, b) => ((b.lastMessage as { timestamp?: number })?.timestamp ?? 0) - ((a.lastMessage as { timestamp?: number })?.timestamp ?? 0));
     return c.json({ ok: true, chats });
   });
@@ -81,8 +93,7 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
     const chatId = c.req.query('chat_id');
     const limit = Math.min(Number(c.req.query('limit') || 50), 200);
     if (!chatId) return c.json({ ok: false, error: 'missing chat_id' }, 400);
-    const raw = await deps.redis.lrange(`xxb:ctx:${chatId}`, -limit, -1);
-    const messages = raw.map((r) => JSON.parse(r));
+    const messages = await getRecent(Number(chatId), limit);
     return c.json({ ok: true, messages });
   });
 
@@ -112,20 +123,18 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
     }
   });
 
-  // Long poll for new messages
+  // Long poll for new messages (after = already-seen count in recent window)
   api.get('/poll', async (c) => {
     const chatId = c.req.query('chat_id');
     const after = Number(c.req.query('after') || 0);
     if (!chatId) return c.json({ ok: false, error: 'missing chat_id' }, 400);
 
-    const key = `xxb:ctx:${chatId}`;
+    const id = Number(chatId);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      const len = await deps.redis.llen(key);
-      if (len > after) {
-        const raw = await deps.redis.lrange(key, after, -1);
-        const messages = raw.map((r) => JSON.parse(r));
-        return c.json({ ok: true, messages, total: len });
+      const messages = await getRecent(id, 200);
+      if (messages.length > after) {
+        return c.json({ ok: true, messages: messages.slice(after), total: messages.length });
       }
       await new Promise((r) => setTimeout(r, 1000));
     }

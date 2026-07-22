@@ -7,7 +7,7 @@ export async function callAllowlistReviewModel(
 ): Promise<string | null> {
   try {
     const result = await callWithFallback({
-      usage: 'allowlist_review',
+      usage: 'judge',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },

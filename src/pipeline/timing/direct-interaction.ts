@@ -39,13 +39,37 @@ function pickMessage(update: UpdateLike): {
   return { msg: undefined, isEdit: false };
 }
 
-export type DirectInteractionKind = 'private_chat' | 'command' | 'mention' | 'reply_to_bot' | 'edit';
+export type DirectInteractionKind =
+  | 'private_chat'
+  | 'command'
+  | 'mention'
+  | 'nickname'
+  | 'reply_to_bot'
+  | 'edit';
 
 export interface DirectInteractionContext {
   botUid: number;
   botUsername: string;
   botNicknames: string[];
   editByContentOnly?: boolean;
+}
+
+function mentionsBotNickname(text: string, nicknames: string[]): boolean {
+  const lower = text.toLowerCase();
+  // Longer nicknames first so「啾咪囝」优先于「啾咪」
+  const nicks = [...nicknames].filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const nick of nicks) {
+    const nickLower = nick.toLowerCase();
+    if (!nickLower) continue;
+    // ASCII / 数字昵称：要词边界，避免误伤
+    if (/[a-z0-9_]/i.test(nickLower)) {
+      if (containsStandaloneToken(lower, nickLower)) return true;
+      continue;
+    }
+    // 中文昵称：中文无空格，词边界会把「叫啾咪」判失败 —— 用 includes（与 judge 一致）
+    if (lower.includes(nickLower)) return true;
+  }
+  return false;
 }
 
 export function detectDirectInteraction(
@@ -71,13 +95,7 @@ export function detectDirectInteraction(
     const lower = trimmed.toLowerCase();
     const usernameLower = ctx.botUsername.toLowerCase();
     if (usernameLower && lower.includes(`@${usernameLower}`)) return 'mention';
-    for (const nick of ctx.botNicknames) {
-      if (!nick) continue;
-      const nickLower = nick.toLowerCase();
-      if (!nickLower) continue;
-      // Always require token boundaries — bare includes("啾咪") matches too much chatter about the bot.
-      if (containsStandaloneToken(lower, nickLower)) return 'mention';
-    }
+    if (mentionsBotNickname(trimmed, ctx.botNicknames)) return 'nickname';
   }
 
   const replyFromId = msg.reply_to_message?.from?.id;

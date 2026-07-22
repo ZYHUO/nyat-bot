@@ -158,7 +158,6 @@ export async function handleNoteStart(
   }
 
   // 3. Resolve group
-  let group: ResolvedGroup;
   const result = await resolveGroup(formatted.uid);
   if (!result.ok) {
     if (result.reason === 'multiple_groups') {
@@ -172,7 +171,7 @@ export async function handleNoteStart(
     await sender.sendDirect(dmChatId, result.reply, formatted.messageId);
     return;
   }
-  group = result.group;
+  const group = result.group;
 
   const gate = await checkFeatureGate(group.chatId, 'note');
   if (gate) {

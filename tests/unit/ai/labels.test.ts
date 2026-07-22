@@ -35,7 +35,7 @@ vi.mock('../../../src/env.js', () => ({
   getUsageRouting: () => new Map(),
 }));
 
-import { _resetLabels, getLabel, getUsage } from '../../../src/ai/labels.js';
+import { _resetLabels, getLabel, getUsage, resolveUsageName } from '../../../src/ai/labels.js';
 
 describe('reply_max labels', () => {
   beforeEach(() => {
@@ -56,5 +56,16 @@ describe('reply_max labels', () => {
     ]).toContain(usage.label);
     expect(usage.backups).toHaveLength(2);
     expect(new Set([usage.label, ...usage.backups]).size).toBe(3);
+  });
+
+  it('resolves legacy usage aliases to core departments', () => {
+    expect(resolveUsageName('heart')).toBe('judge');
+    expect(resolveUsageName('heart_reflect')).toBe('summarize');
+    expect(resolveUsageName('path_reflection')).toBe('judge');
+    expect(resolveUsageName('allowlist_review')).toBe('judge');
+    expect(resolveUsageName('reply_splitter')).toBe('judge');
+    expect(resolveUsageName('planner')).toBe('judge');
+    expect(resolveUsageName('summarize_deep')).toBe('summarize');
+    expect(resolveUsageName('reply')).toBe('reply');
   });
 });

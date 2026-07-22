@@ -7,6 +7,7 @@ vi.mock('../../../src/env.js', () => ({
     DREAM_JOURNAL_DM: false,
     DREAM_JOURNAL_CHAT_ID: 0,
     DREAM_JOURNAL_USAGE: 'summarize',
+    DREAM_JOURNAL_HOOK_SLEEP: true,
     MASTER_UID: 7624515600,
   }),
 }));
@@ -15,9 +16,10 @@ vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: vi.fn(async (opts: { messages: Array<{ role: string; content: string }> }) => {
     const user = opts.messages.find((m) => m.role === 'user');
     expect(user?.content).toContain('签到');
-    expect(user?.content).toMatch(/禁止瞎编|唯一事实来源/);
+    expect(user?.content).toMatch(/WRITE|SKIP|时段暗示/);
     return {
-      content: '今天本喵在群里划水，顺便嫌弃了两句笨蛋。明天继续上课偷瞄手机。',
+      content:
+        'WRITE\n\n今天本喵在群里划水，顺便嫌弃了两句笨蛋。明天继续上课偷瞄手机。',
       label: 'mock',
     };
   }),
@@ -72,16 +74,36 @@ describe('dream-journal', () => {
     vi.resetModules();
   });
 
-  it('writes a markdown diary grounded in chat evidence', async () => {
+  it('appends a markdown diary entry when model says WRITE', async () => {
     const { runDreamJournal, dreamJournalPath, normalizeJournalChatId } = await import(
       '../../../src/cron/dream-journal.js'
     );
     expect(normalizeJournalChatId(3954993432)).toBe(-1003954993432);
-    const path = await runDreamJournal();
+    const path = await runDreamJournal({ slot: 'bedtime' });
     expect(path).toBeTruthy();
     const { readFile } = await import('node:fs/promises');
     const body = await readFile(dreamJournalPath(), 'utf8');
     expect(body).toContain('本喵');
     expect(body.startsWith('# ')).toBe(true);
+    expect(body).toMatch(/^## /m);
+  });
+
+  it('skips when model says SKIP', async () => {
+    const { callWithFallback } = await import('../../../src/ai/fallback.js');
+    vi.mocked(callWithFallback).mockResolvedValueOnce({
+      content: 'SKIP 今天没啥好写的',
+      label: 'mock',
+    } as never);
+    const { runDreamJournal } = await import('../../../src/cron/dream-journal.js');
+    const path = await runDreamJournal({ slot: 'morning' });
+    expect(path).toBeNull();
+  });
+
+  it('tryWriteDreamJournal force writes via journal path', async () => {
+    const { tryWriteDreamJournal } = await import('../../../src/cron/dream-journal.js');
+    const r = await tryWriteDreamJournal({ slot: 'free', force: true });
+    expect(r.wrote).toBe(true);
+    expect(r.path).toBeTruthy();
+    expect(r.slot).toBe('free');
   });
 });

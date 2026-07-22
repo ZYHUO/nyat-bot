@@ -22,6 +22,13 @@ export interface DispatchTask {
   contentDirection: string;
   toneGuidance?: string;
   quoteMessageIds?: number[];
+  /**
+   * Same-burst sibling messageIds (not the primary quote). Marked answered only
+   * after a successful sendText so a failed CodeAct can still re-fire them.
+   */
+  relatedQuoteIds?: number[];
+  /** 要回的那个人（用于分人设 persona/{uid}.md）；来自 Attention.userId */
+  targetUserId?: number;
   trackingKey?: string;
   createdAt: number;
   status: 'queued' | 'running' | 'done' | 'failed';

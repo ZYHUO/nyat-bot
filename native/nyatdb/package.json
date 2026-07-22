@@ -1,0 +1,30 @@
+{
+  "name": "@nyat/nyatdb-native",
+  "version": "0.1.0",
+  "description": "NyatDB native engine (Rust / napi-rs)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "nyatdb",
+    "targets": [
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test test/*.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

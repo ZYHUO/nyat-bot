@@ -754,7 +754,7 @@ export async function generateAndSendReplies(args: {
         }
 
         // Use typo text if available, otherwise original
-        let effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
+        const effectiveText = typoResult ? typoResult.typoedText : reply.replyContent;
         // If sticker-only replacement resolved a sticker, skip text send
         const skipTextSend = stickerOnlyFileId !== undefined && stickerOnlyResult.shouldReplace;
 

@@ -98,7 +98,7 @@ export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyR
   let personaBlock: string | undefined;
   let directorHint: string | undefined;
   let contextDigest: string | undefined;
-  let specialistToolsUsed: string[] = [];
+  const specialistToolsUsed: string[] = [];
   let researcherFailed = true;
 
   if (runResearcherFlag || runGroundingFlag) {

@@ -1,23 +1,25 @@
 // ────────────────────────────────────────
-// Context 管理 (Redis)
+// Context 管理 — NyatDB ChatLog 主存 + 可选 Redis 镜像
 // ────────────────────────────────────────
+// 热路径（getRecent / addMessage）以 NyatDB 为准。
+// Redis `xxb:ctx:*` 仅在 NYATDB_REDIS_MIRROR=true 或 NyatDB 未启用时写入。
+// members / active_groups 等索引仍用 Redis（与 ChatLog 无关）。
 
 import type { FormattedMessage } from '../../shared/types.js';
 import { getRedis } from '../../db/redis.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { unwrapPromptEnvelope, looksLikePromptEnvelope } from '../../shared/message-text.js';
+import { unpackChatLogRow, getNyatDb, chatAppendFromFormatted } from '../../nyatdb/index.js';
 
 const CTX_PREFIX = 'xxb:ctx:';
 const MEMBERS_PREFIX = 'xxb:members:';
 const USER_GROUPS_PREFIX = 'xxb:user:groups:';
-// 机制2:DM 反向索引单独一个 key —— 不污染 xxb:user:groups(其下游 dm-relay
-// group-resolver/fate/relay-queue/profile 的语义必须保持"纯群")。
 const USER_DMS_PREFIX = 'xxb:user:dms:';
 const TRUNCATE_SIZE = 50;
-const MEMBERS_TTL = 30 * 86400; // 30 days
-const CTX_TTL = 7 * 86400; // 7 days rolling TTL
+const MEMBERS_TTL = 30 * 86400;
+const CTX_TTL = 7 * 86400;
 
-// Atomic rpush + trim + expire via Lua
 const RPUSH_TRIM_LUA = `
 local key = KEYS[1]
 redis.call('RPUSH', key, ARGV[1])
@@ -35,7 +37,49 @@ function ctxKey(chatId: number): string {
   return CTX_PREFIX + chatId;
 }
 
-export async function addMessage(chatId: number, message: FormattedMessage): Promise<void> {
+function nyatWriteEnabled(): boolean {
+  const e = env();
+  return e.NYATDB_ENABLED && e.NYATDB_DUAL_WRITE;
+}
+
+function redisCtxWriteEnabled(): boolean {
+  const e = env();
+  // NyatDB 主写且不镜像 → 不再写 Redis ctx
+  if (nyatWriteEnabled() && !e.NYATDB_REDIS_MIRROR) return false;
+  return true;
+}
+
+function sanitizeMessage(message: FormattedMessage): FormattedMessage {
+  if (message.role !== 'user' || !message.textContent) return message;
+  if (!looksLikePromptEnvelope(message.textContent)) return message;
+  const inner = unwrapPromptEnvelope(message.textContent);
+  if (!inner || inner === message.textContent) return message;
+  logger.warn(
+    {
+      messageId: message.messageId,
+      from: message.textContent.slice(0, 80),
+      to: inner.slice(0, 80),
+    },
+    'Unwrapped prompt-envelope user text',
+  );
+  return { ...message, textContent: inner };
+}
+
+function appendToNyatDb(chatId: number, message: FormattedMessage): void {
+  const ndb = getNyatDb();
+  if (!ndb) throw new Error('nyatdb_unavailable');
+  if (!(message.messageId > 0)) {
+    logger.debug({ chatId }, 'skip NyatDB append (no messageId)');
+    return;
+  }
+  ndb.chatAppend(chatId, chatAppendFromFormatted(message));
+  const keep = env().NYATDB_MAX_MESSAGES_PER_CHAT;
+  if (keep > 0 && message.messageId % 64 === 0) {
+    ndb.chatTrimKeepLast(chatId, keep);
+  }
+}
+
+async function appendToRedisCtx(chatId: number, message: FormattedMessage): Promise<void> {
   const redis = getRedis();
   const maxLen = env().CONTEXT_MAX_LENGTH;
   await redis.eval(
@@ -47,19 +91,52 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
     String(maxLen - TRUNCATE_SIZE),
     String(CTX_TTL),
   );
+}
 
-  // Track active group chats for idle discovery (sorted set: score = last seen timestamp)
+export async function addMessage(chatId: number, message: FormattedMessage): Promise<void> {
+  message = sanitizeMessage(message);
+
+  let nyatOk = false;
+  if (nyatWriteEnabled()) {
+    try {
+      appendToNyatDb(chatId, message);
+      nyatOk = true;
+    } catch (err) {
+      logger.warn({ err, chatId, messageId: message.messageId }, 'NyatDB append failed');
+    }
+  }
+
+  // Redis ctx: mirror, or primary fallback when NyatDB write failed / disabled
+  if (redisCtxWriteEnabled() || !nyatOk) {
+    try {
+      await appendToRedisCtx(chatId, message);
+      // Redis moved ahead of NyatDB — allow catch-up on next getRecent
+      if (!nyatOk) {
+        catchUpSettled.delete(chatId);
+        redisPeekSkip.delete(chatId);
+      }
+    } catch (err) {
+      if (!nyatOk) throw err;
+      logger.warn({ err, chatId }, 'Redis ctx mirror failed (NyatDB already wrote)');
+    }
+  } else if (nyatOk) {
+    catchUpSettled.add(chatId);
+  }
+
+  const redis = getRedis();
+
   if (chatId < 0) {
     const ts = Math.floor(Date.now() / 1000);
     redis.zadd('xxb:active_groups', ts, String(chatId)).catch(() => {});
   }
 
-  // 中期记忆:ctx 接近上限时压缩最老一段(fire-and-forget,内部有锁+flag)
-  import('./mid-term.js')
-    .then(({ maybeCompressMidTerm }) => maybeCompressMidTerm(chatId))
-    .catch(() => {});
+  // Mid-term: Redis path when mirroring; NyatDB path when sole chat store.
+  if (redisCtxWriteEnabled() || !nyatOk || (nyatOk && !env().NYATDB_REDIS_MIRROR)) {
+    import('./mid-term.js')
+      .then(({ maybeCompressMidTerm }) => maybeCompressMidTerm(chatId))
+      .catch(() => {});
+  }
 
-  // Track group member (skip bots and assistant messages)
   if (message.uid && message.role === 'user' && !message.isBot && !message.isAnonymous) {
     try {
       const memberKey = MEMBERS_PREFIX + chatId;
@@ -72,14 +149,11 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
       await redis.hset(memberKey, String(message.uid), memberData);
       await redis.expire(memberKey, MEMBERS_TTL);
 
-      // Reverse index: track which groups this user belongs to
       if (chatId < 0) {
         const userGroupsKey = USER_GROUPS_PREFIX + message.uid;
         await redis.sadd(userGroupsKey, String(chatId));
         await redis.expire(userGroupsKey, MEMBERS_TTL);
       } else if (chatId > 0) {
-        // 机制2:DM 也进反向索引(独立 key),供 getUserContexts 把私聊算作
-        // 一个上下文——让"只在一个群但也私聊过"的人也能拿到跨上下文连结。
         const userDmsKey = USER_DMS_PREFIX + message.uid;
         await redis.sadd(userDmsKey, String(chatId));
         await redis.expire(userDmsKey, MEMBERS_TTL);
@@ -102,16 +176,210 @@ function safeParseMessages(raw: string[]): FormattedMessage[] {
   return result;
 }
 
-export async function getRecent(chatId: number, count: number): Promise<FormattedMessage[]> {
+function fromNyatChatRows(
+  rows: Array<{
+    messageId: number;
+    ts: number;
+    uid: number;
+    role: number;
+    roleName: string;
+    text: string;
+    bodyFormat?: string;
+  }>,
+): FormattedMessage[] {
+  return rows.map((r) =>
+    unpackChatLogRow({
+      ...r,
+      bodyFormat: r.bodyFormat === 'json' ? 'json' : r.bodyFormat === 'text' ? 'text' : undefined,
+    }) as FormattedMessage,
+  );
+}
+
+function readFromNyatDb(chatId: number, count: number): FormattedMessage[] | null {
+  if (!env().NYATDB_ENABLED || !env().NYATDB_READ) return null;
+  try {
+    const ndb = getNyatDb();
+    if (!ndb) return null;
+    const rows = ndb.chatRecent(chatId, count);
+    if (!rows.length) return null;
+    return fromNyatChatRows(rows);
+  } catch (err) {
+    logger.warn({ err, chatId }, 'NyatDB read failed; falling back to Redis');
+    return null;
+  }
+}
+
+async function readFromRedis(chatId: number, count: number): Promise<FormattedMessage[]> {
   const redis = getRedis();
   const raw = await redis.lrange(ctxKey(chatId), -count, -1);
   return safeParseMessages(raw);
 }
 
+/** Lazy migrate Redis → NyatDB when NyatDB is empty but Redis still has history. */
+function backfillNyatFromRedis(chatId: number, msgs: FormattedMessage[]): void {
+  if (!nyatWriteEnabled() || !msgs.length) return;
+  try {
+    const ndb = getNyatDb();
+    if (!ndb) return;
+    const existing = ndb.chatRecent(chatId, 1);
+    if (existing.length) return;
+    let n = 0;
+    for (const m of msgs) {
+      if (!(m.messageId > 0)) continue;
+      try {
+        ndb.chatAppend(chatId, chatAppendFromFormatted(m));
+        n += 1;
+      } catch {
+        /* skip bad rows */
+      }
+    }
+    if (n) logger.info({ chatId, n }, 'NyatDB backfilled from Redis ctx');
+  } catch (err) {
+    logger.warn({ err, chatId }, 'NyatDB backfill failed');
+  }
+}
+
+/** Chats whose Redis tip is known ≤ NyatDB tip (process-local). */
+const catchUpSettled = new Set<number>();
+/** Chats with no Redis-only holes in the ring — skip Redis LRANGE on getRecent. */
+const redisPeekSkip = new Set<number>();
+
+/** @internal vitest only */
+export function _resetNyatCatchUpStateForTests(): void {
+  catchUpSettled.clear();
+  redisPeekSkip.clear();
+}
+
+/**
+ * Catch up NyatDB when Redis has messages NyatDB lacks (tip-ahead OR mid-window holes
+ * from the broken dual-write era). Uses chatRecent ring for membership — native chatGet
+ * index can miss rows that are already in the ring.
+ */
+async function catchUpNyatFromRedis(chatId: number): Promise<number> {
+  if (!nyatWriteEnabled() || catchUpSettled.has(chatId)) return 0;
+  try {
+    const ndb = getNyatDb();
+    if (!ndb) return 0;
+
+    const redis = getRedis();
+    const tipRaw = await redis.lindex(ctxKey(chatId), -1);
+    if (!tipRaw) {
+      catchUpSettled.add(chatId);
+      return 0;
+    }
+
+    const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX, env().CONTEXT_MAX_LENGTH);
+    const known = new Set(ndb.chatRecent(chatId, ringMax).map((r) => r.messageId));
+    const fromRedis = await readFromRedis(chatId, env().CONTEXT_MAX_LENGTH);
+    if (!fromRedis.length) {
+      catchUpSettled.add(chatId);
+      return 0;
+    }
+
+    const tipRow = ndb.chatRecent(chatId, 1)[0];
+    const nyatLastId = tipRow?.messageId ?? 0;
+    let redisLastId = 0;
+    try {
+      redisLastId = (JSON.parse(tipRaw) as FormattedMessage).messageId ?? 0;
+    } catch {
+      return 0;
+    }
+
+    // Only append Redis msgs that are newer than Nyat tip (safe for ring order).
+    // Older holes are filled at read-time via mergeRecentWithRedis.
+    let n = 0;
+    for (const m of fromRedis) {
+      if (!(m.messageId > nyatLastId)) continue;
+      if (known.has(m.messageId)) continue;
+      try {
+        ndb.chatAppend(chatId, chatAppendFromFormatted(m));
+        known.add(m.messageId);
+        n += 1;
+      } catch {
+        /* skip bad / duplicate rows */
+      }
+    }
+    if (n) {
+      logger.info({ chatId, n, from: nyatLastId, to: redisLastId }, 'NyatDB catch-up from Redis ctx');
+    }
+    catchUpSettled.add(chatId);
+    return n;
+  } catch (err) {
+    logger.warn({ err, chatId }, 'NyatDB catch-up failed');
+    return 0;
+  }
+}
+
+/** Fill dual-write holes: union NyatDB + Redis by messageId (Nyat wins on conflict). */
+function mergeRecentWithRedis(
+  fromNyat: FormattedMessage[],
+  fromRedis: FormattedMessage[],
+  count: number,
+): FormattedMessage[] {
+  if (!fromRedis.length) return fromNyat.slice(-count);
+  if (!fromNyat.length) return fromRedis.slice(-count);
+  const byId = new Map<number, FormattedMessage>();
+  for (const m of fromRedis) {
+    if (m.messageId > 0) byId.set(m.messageId, m);
+  }
+  for (const m of fromNyat) {
+    if (m.messageId > 0) byId.set(m.messageId, m);
+  }
+  const merged = [...byId.values()].sort(
+    (a, b) => a.messageId - b.messageId || a.timestamp - b.timestamp,
+  );
+  return merged.slice(-count);
+}
+
+export async function getRecent(chatId: number, count: number): Promise<FormattedMessage[]> {
+  // Heal tip-ahead gaps before preferring NyatDB.
+  if (nyatWriteEnabled() && env().NYATDB_READ) {
+    await catchUpNyatFromRedis(chatId);
+  }
+
+  const fromNyat = readFromNyatDb(chatId, count);
+
+  // After catch-up + one clean merge, skip Redis LRANGE (hot path).
+  if (
+    fromNyat &&
+    fromNyat.length > 0 &&
+    redisPeekSkip.has(chatId) &&
+    !env().NYATDB_REDIS_MIRROR
+  ) {
+    return fromNyat.slice(-count);
+  }
+
+  const fromRedis = await readFromRedis(chatId, Math.max(count, env().CONTEXT_MAX_LENGTH));
+
+  if (fromNyat && fromNyat.length > 0) {
+    const merged = mergeRecentWithRedis(fromNyat, fromRedis, count);
+    if (!env().NYATDB_REDIS_MIRROR && catchUpSettled.has(chatId)) {
+      const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX, env().CONTEXT_MAX_LENGTH);
+      const ringIds = new Set(
+        (readFromNyatDb(chatId, ringMax) ?? fromNyat).map((m) => m.messageId).filter((id) => id > 0),
+      );
+      const hasHole = fromRedis.some((m) => m.messageId > 0 && !ringIds.has(m.messageId));
+      if (hasHole) redisPeekSkip.delete(chatId);
+      else redisPeekSkip.add(chatId);
+    }
+    // Mirror off: keep legacy Redis hole copy alive until peek-skip settles.
+    if (fromRedis.length > 0 && !env().NYATDB_REDIS_MIRROR && !redisPeekSkip.has(chatId)) {
+      getRedis()
+        .expire(ctxKey(chatId), CTX_TTL)
+        .catch(() => {});
+    }
+    return merged;
+  }
+
+  if (fromRedis.length > 0) {
+    backfillNyatFromRedis(chatId, fromRedis);
+    return fromRedis.slice(-count);
+  }
+  return [];
+}
+
 export async function getAll(chatId: number, limit = 500): Promise<FormattedMessage[]> {
-  const redis = getRedis();
-  const raw = await redis.lrange(ctxKey(chatId), -limit, -1);
-  return safeParseMessages(raw);
+  return getRecent(chatId, limit);
 }
 
 export async function addAssistant(chatId: number, reply: { textContent: string; messageId: number }): Promise<void> {
@@ -144,32 +412,34 @@ export async function getGroupMembers(chatId: number): Promise<GroupMember[]> {
   for (const val of Object.values(all)) {
     try {
       members.push(JSON.parse(val) as GroupMember);
-    } catch { /* skip corrupted entries */ }
+    } catch {
+      /* skip corrupted entries */
+    }
   }
-  // Sort by last seen (most recent first)
   members.sort((a, b) => b.lastSeen - a.lastSeen);
   return members;
 }
 
-/** Get all group chatIds a user has been seen in (reverse index) */
 export async function getUserGroups(uid: number): Promise<number[]> {
   const redis = getRedis();
-  const raw = await redis.smembers(USER_GROUPS_PREFIX + uid);
-  return raw.map(Number).filter((n) => !Number.isNaN(n));
+  const members = await redis.smembers(USER_GROUPS_PREFIX + uid);
+  return members.map(Number).filter((n) => Number.isFinite(n) && n < 0);
 }
 
-/** 机制2:该用户私聊过的 DM chatId(正数;通常只有一个 = uid)。 */
-export async function getUserDMs(uid: number): Promise<number[]> {
-  const redis = getRedis();
-  const raw = await redis.smembers(USER_DMS_PREFIX + uid);
-  return raw.map(Number).filter((n) => !Number.isNaN(n));
-}
-
-/**
- * 机制2:该用户出现过的**所有上下文**(群 ∪ DM)。全局画像/跨上下文连结用此,
- * 而非 getUserGroups(后者保持纯群,供 dm-relay 定向转达)。
- */
 export async function getUserContexts(uid: number): Promise<number[]> {
-  const [groups, dms] = await Promise.all([getUserGroups(uid), getUserDMs(uid)]);
-  return [...groups, ...dms];
+  const redis = getRedis();
+  const [groups, dms] = await Promise.all([
+    redis.smembers(USER_GROUPS_PREFIX + uid),
+    redis.smembers(USER_DMS_PREFIX + uid),
+  ]);
+  const out = new Set<number>();
+  for (const g of groups) {
+    const n = Number(g);
+    if (Number.isFinite(n) && n < 0) out.add(n);
+  }
+  for (const d of dms) {
+    const n = Number(d);
+    if (Number.isFinite(n) && n > 0) out.add(n);
+  }
+  return [...out];
 }

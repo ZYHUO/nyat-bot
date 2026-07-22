@@ -29,7 +29,7 @@ export async function planReply(input: PlannerInput): Promise<ToolPlan> {
 
   try {
     const result = await callWithFallback({
-      usage: 'planner',
+      usage: 'judge',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: buildPlannerUserPrompt(input) },

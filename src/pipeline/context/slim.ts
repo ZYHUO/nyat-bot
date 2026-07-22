@@ -78,7 +78,7 @@ function formatContent(msg: FormattedMessage): string {
 function formatReplyTag(msg: FormattedMessage): string {
   if (!msg.replyTo) return '';
   // Increase snippet length to preserve more context for pronoun resolution
-  const snippet = (msg.replyTo.textSnippet ?? '').slice(0, 60);
+  const snippet = (msg.replyTo.textSnippet ?? '').slice(0, 200);
   return ` →回复 ${msg.replyTo.fullName ?? ''}(#${msg.replyTo.messageId})「${snippet}」`;
 }
 

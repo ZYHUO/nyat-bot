@@ -330,6 +330,12 @@ export async function runSleepCycle(): Promise<void> {
         const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
         await announceDmGreetings('goodnight');
       }
+      // 睡前日记窗口：提醒 Meta 可 journal.tryWrite；cron 仍是保底写手
+      if (env().DREAM_JOURNAL_ENABLED && env().DREAM_JOURNAL_HOOK_SLEEP) {
+        void import('./dream-journal.js')
+          .then(({ nudgeMetaForDream }) => nudgeMetaForDream('bedtime'))
+          .catch((err) => logger.debug({ err }, 'Dream journal bedtime nudge failed'));
+      }
     } else {
       // 起床:先问候(欠回复的群优先),下一分钟起逐 chat 补回
       const oweChats = (await peekSleepQueues()).map((q) => q.chatId);
@@ -339,6 +345,11 @@ export async function runSleepCycle(): Promise<void> {
       if (e.SLEEP_DM_ENABLED) {
         const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
         await announceDmGreetings('morning');
+      }
+      if (env().DREAM_JOURNAL_ENABLED && env().DREAM_JOURNAL_HOOK_SLEEP) {
+        void import('./dream-journal.js')
+          .then(({ nudgeMetaForDream }) => nudgeMetaForDream('morning'))
+          .catch((err) => logger.debug({ err }, 'Dream journal morning nudge failed'));
       }
       if (oweChats.length > 0) {
         await redis.set(DRAIN_KEY, String(MORNING_DRAIN_BUDGET), 'EX', 3600);

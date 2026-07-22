@@ -231,6 +231,20 @@ export async function handleWaitResume(args: {
 
   await enterRunning(chatId);
 
+  // Meta path: re-ingest Attention so orchestrator can revisit after wait.
+  if (env().META_SUBAGENT_ENABLED) {
+    try {
+      const { resumeMetaWaitAttention } = await import('../../meta/timing-adapter.js');
+      const resumed = await resumeMetaWaitAttention(chatId);
+      if (resumed) {
+        logger.info({ chatId, anchorMessageId: waitResume?.anchorMessageId }, 'wait-resume → Meta Attention');
+        return;
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta wait-resume hook failed');
+    }
+  }
+
   // G5: 真正的 wait 回访 — 把 wait 时暂存的锚点条目重注入 pending,
   // 立即排程一个 wait_timeout 回合,带着完整语境重新决策(judge 仍可
   // 选择沉默;若期间话题已翻篇,actor 会让位给更新的消息重新锚定)。

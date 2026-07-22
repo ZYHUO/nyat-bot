@@ -42,6 +42,11 @@ vi.mock('../../../src/db/redis.js', () => ({
       };
       return api;
     },
+    async eval(_script: string, _numKeys: number, key: string) {
+      const arr = redisLists.get(key) ?? [];
+      redisLists.delete(key);
+      return [...arr];
+    },
     async lrange(key: string, start: number, stop: number) {
       const arr = redisLists.get(key) ?? [];
       if (stop < 0) return arr.slice(start);

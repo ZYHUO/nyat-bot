@@ -17,11 +17,15 @@ CODEACT_BANNED_WORDS=是吧,对吧,作为一个AI
 
 DREAM_JOURNAL_ENABLED=true
 DREAM_JOURNAL_DIR=./data/dream-journal
-DREAM_JOURNAL_CRON=5 16 * * *          # UTC；北京 00:05
+DREAM_JOURNAL_CRON=0 23 * * *,0 15 * * *   # UTC：北京 07:00 早 / 23:00 睡前；逗号多段
+DREAM_JOURNAL_HOOK_SLEEP=true              # 作息起床/入睡边沿也试写（模型可 SKIP）
 DREAM_JOURNAL_CHAT_ID=3954993432       # → -1003954993432 频道
 DREAM_JOURNAL_DM=false
 DREAM_JOURNAL_USAGE=reply
 ```
+
+日记：模型返回 `WRITE`/`SKIP`；一天可多段 append；不设条数上限。优先早上/睡前（cron 保底写 + sleep 边沿 Attention 提醒 Meta）。  
+Meta 可用 `journal.tryWrite({slot})` / `journal.recent()`；`diary:*` Attention 禁止为此 dispatch。
 
 重启：`npm run build && sudo systemctl restart xxb-ts`
 
@@ -32,13 +36,21 @@ DREAM_JOURNAL_USAGE=reply
    - NL 图鉴/心愿/游戏/追踪、猜数字进行中、DM relay/树洞/选群、consent → **Meta ingress intercept**（`src/meta/ingress-intercepts.ts`）
    - mute / 睡眠门 → 丢弃或入 sleep-queue；其余写入 Redis ctx
    - Attention 写入 Redis list `xxb:meta:attention`（ingress↔worker 可拆）
-   - L0=直接/@/DM，L1=旁观疑问句，L2=其它旁观；媒体 `processMedia` 异步不堵 grammY
+   - L0=直接/@/DM → 直通 Attention→Meta
+   - 非 L0 旁观：`HEART_ENABLED` 时先跑 Heart（reply→升 L1 进 Meta；pass/wait→沉默/等待）；**Heart 即 gate，放行后不再跑 Meta timing**。Heart 关则 L2 硬丢
+   - L0/direct 仍可走 Meta timing（实际短路 allow）；媒体 `processMedia` 异步不堵 grammY
 2. Worker 上 `startMetaLoop` 每 `META_TICK_MS` 从 Redis flush Attention + callbacks → `runMetaSession`。
 3. Meta LLM 写 JS，调用 `dispatch.taskToGroup`；L0 未调度会 gap-fill 自动 dispatch。
-4. Subagent CodeAct：完整人格层 + host API；`sendText` 写回 ctx/Qdrant；CJK 友好软截断。
-5. 完成后 callback 进 Redis `xxb:meta:callbacks`。
-6. 日记 cron 用**真实聊天记录**作证据；起床补回对 Meta 群重投 Attention。
+4. Subagent CodeAct：完整人格层 + host API（含 `web.search`、`meta.request`）；`sendText` 写回 ctx/Qdrant；CJK 友好软截断。
+5. 完成后 callback 进 Redis `xxb:meta:callbacks`。Subagent 也可 `meta.request({action})` 投 Attention `subagent_request:*`（如 `journal.write`），下一 tick Meta 硬处理或再编排。
+6. 日记 cron 用**真实聊天记录**作证据；起床补回对 Meta 群重投 Attention。用户直说写日记 / Subagent 升级写日记 → Meta `journal.tryWrite`（可 force）。
 7. Side effects：topic-watch、on_speak 捎话、DM affinity / 唤醒 poke。
+8. **Timing gate**：Meta 在 Attention 前跑同一套 `runTimingGate`（L0/direct 短路；L1 可 wait/no_action；L2 旁观不进 Attention）。wait 到期经 `wait_resume` 再投 Attention；CodeAct `sendText` 写回 `recordBotReply` 续窗。
+9. **CodeAct 耐久**：`xxb-codeact` BullMQ 队列 + 每 chat Redis busy 锁；全局 `CODEACT_CONCURRENCY`（默认 4）并行不同群。Attention/callback 用 Lua 原子 claim。
+
+```bash
+CODEACT_WEB_SEARCH_ENABLED=true   # Subagent web.search；复用 pipeline executeSearch
+```
 
 ## Context Engine
 

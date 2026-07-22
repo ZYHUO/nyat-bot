@@ -5,6 +5,33 @@ import type { AttentionItem, AttentionLayer } from './types.js';
 
 const REDIS_KEY = 'xxb:meta:attention';
 const MAX = 500;
+/** 丢弃过期 Attention，避免重启后把几小时前的 L0 再回一遍 */
+const MAX_AGE_MS = 30 * 60_000;
+
+/** Kick metaTick when coalesce quiet window ends (don't wait full META_TICK_MS). */
+let coalesceWakeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleCoalesceWake(delayMs: number): void {
+  const ms = Math.max(50, Math.ceil(delayMs));
+  if (coalesceWakeTimer) clearTimeout(coalesceWakeTimer);
+  coalesceWakeTimer = setTimeout(() => {
+    coalesceWakeTimer = null;
+    void import('./loop.js')
+      .then(({ metaTick }) => metaTick())
+      .catch(() => {});
+  }, ms);
+  if (typeof coalesceWakeTimer === 'object' && coalesceWakeTimer && 'unref' in coalesceWakeTimer) {
+    (coalesceWakeTimer as NodeJS.Timeout).unref?.();
+  }
+}
+
+/** Atomic claim: LRANGE + DEL in one Lua script (no cross-process gap). */
+const CLAIM_ALL_LUA = `
+local key = KEYS[1]
+local items = redis.call('LRANGE', key, 0, -1)
+redis.call('DEL', key)
+return items
+`;
 
 function layerBase(layer: AttentionLayer): number {
   switch (layer) {
@@ -57,15 +84,28 @@ export class AttentionAccumulator {
     const item = buildItem(partial);
     this.local.push(item);
     if (this.local.length > MAX) this.local.splice(0, this.local.length - MAX);
-    // Fire-and-forget Redis mirror; await variant for callers that need durability before return.
     void this.persistPush(item);
     return item;
   }
 
-  /** Prefer this from ingress when crossing process boundaries. */
   async ingestAsync(
     partial: Omit<AttentionItem, 'id' | 'createdAt' | 'pressure'> & { pressure?: number },
-  ): Promise<AttentionItem> {
+  ): Promise<AttentionItem | null> {
+    // 已回过的 message 不再进队列（重启残留 / 双路径）
+    if (partial.messageId && partial.messageId > 0) {
+      try {
+        const { isMessageAnswered } = await import('./answered.js');
+        if (await isMessageAnswered(partial.chatId, partial.messageId)) {
+          logger.info(
+            { chatId: partial.chatId, messageId: partial.messageId },
+            'Attention skip ingest (already answered)',
+          );
+          return null;
+        }
+      } catch {
+        /* fail-open */
+      }
+    }
     const item = buildItem(partial);
     try {
       await this.persistPush(item);
@@ -86,7 +126,6 @@ export class AttentionAccumulator {
       .exec();
   }
 
-  /** Approximate: local + Redis length (best-effort). */
   async size(): Promise<number> {
     let remote = 0;
     try {
@@ -97,7 +136,6 @@ export class AttentionAccumulator {
     return remote + this.local.length;
   }
 
-  /** Sync size of local buffer only (tests / fail-soft). */
   localSize(): number {
     return this.local.length;
   }
@@ -108,27 +146,118 @@ export class AttentionAccumulator {
     return [...all].sort((a, b) => b.pressure - a.pressure || a.createdAt - b.createdAt).slice(0, n);
   }
 
+  /**
+   * Atomically claim Redis items, merge local, return top-N.
+   * Remain is written back; items arriving after claim stay in Redis safely.
+   */
   async flush(topN?: number): Promise<AttentionItem[]> {
     const n = topN ?? env().META_ATTENTION_TOP_N;
-    const all = await this.loadAll();
-    const sorted = [...all].sort((a, b) => b.pressure - a.pressure || a.createdAt - b.createdAt);
-    const picked = sorted.slice(0, n);
-    const remain = sorted.slice(n);
-    const ids = new Set(picked.map((p) => p.id));
-    this.local = this.local.filter((it) => !ids.has(it.id));
+    const byId = new Map<string, AttentionItem>();
+    const now = Date.now();
+
+    // Drain local first (same-process)
+    const localSnap = this.local.splice(0, this.local.length);
+    for (const it of localSnap) byId.set(it.id, it);
+
     try {
       const redis = getRedis();
-      const pipe = redis.multi().del(REDIS_KEY);
-      for (const it of remain) pipe.rpush(REDIS_KEY, JSON.stringify(it));
-      if (remain.length) pipe.ltrim(REDIS_KEY, 0, MAX - 1);
-      await pipe.exec();
+      const raw = (await redis.eval(CLAIM_ALL_LUA, 1, REDIS_KEY)) as string[];
+      for (const it of parseItems(raw ?? [])) byId.set(it.id, it);
     } catch (err) {
-      logger.warn({ err }, 'Attention Redis flush rewrite failed');
-      // Keep remain in local so we don't lose them
-      for (const it of remain) {
-        if (!this.local.some((x) => x.id === it.id)) this.local.push(it);
+      logger.warn({ err }, 'Attention Redis atomic claim failed — using local only');
+    }
+
+    // Drop stale + already-answered (restart / busy-requeue leftovers)
+    const fresh: AttentionItem[] = [];
+    let droppedStale = 0;
+    let droppedAnswered = 0;
+    for (const it of byId.values()) {
+      if (now - (it.createdAt || 0) > MAX_AGE_MS) {
+        droppedStale += 1;
+        continue;
+      }
+      if (it.messageId && it.messageId > 0) {
+        try {
+          const { isMessageAnswered } = await import('./answered.js');
+          if (await isMessageAnswered(it.chatId, it.messageId)) {
+            droppedAnswered += 1;
+            continue;
+          }
+        } catch {
+          /* keep */
+        }
+      }
+      fresh.push(it);
+    }
+    if (droppedStale || droppedAnswered) {
+      logger.info(
+        { droppedStale, droppedAnswered, kept: fresh.length },
+        'Attention flush dropped stale/answered',
+      );
+    }
+
+    const sorted = fresh.sort(
+      (a, b) => b.pressure - a.pressure || a.createdAt - b.createdAt,
+    );
+
+    // Coalesce: group chats still receiving L0/L1 stay in Redis until quiet.
+    const coalesceMs = env().META_L0_COALESCE_MS;
+    let ready = sorted;
+    let held: AttentionItem[] = [];
+    if (coalesceMs > 0) {
+      const latestAt = new Map<number, number>();
+      for (const it of sorted) {
+        if (it.chatId > 0) continue; // DM: no hold
+        if (it.layer === 'L1_CALLBACK') continue;
+        const t = it.createdAt || 0;
+        latestAt.set(it.chatId, Math.max(latestAt.get(it.chatId) ?? 0, t));
+      }
+      const hot = new Set<number>();
+      for (const [cid, t] of latestAt) {
+        if (now - t < coalesceMs) hot.add(cid);
+      }
+      if (hot.size) {
+        ready = [];
+        held = [];
+        let wakeIn = Number.POSITIVE_INFINITY;
+        for (const it of sorted) {
+          const hold =
+            hot.has(it.chatId) &&
+            it.chatId < 0 &&
+            (it.layer === 'L0' || it.layer === 'L1');
+          if (hold) held.push(it);
+          else ready.push(it);
+        }
+        for (const cid of hot) {
+          const t = latestAt.get(cid) ?? now;
+          wakeIn = Math.min(wakeIn, coalesceMs - (now - t));
+        }
+        if (held.length) {
+          logger.info(
+            { held: held.length, hotChats: hot.size, coalesceMs, wakeInMs: wakeIn },
+            'Attention coalesce hold (waiting for quiet)',
+          );
+          if (Number.isFinite(wakeIn) && wakeIn > 0) scheduleCoalesceWake(wakeIn + 30);
+        }
       }
     }
+
+    const picked = ready.slice(0, n);
+    const remain = [...ready.slice(n), ...held];
+
+    if (remain.length) {
+      try {
+        const redis = getRedis();
+        const pipe = redis.multi();
+        for (const it of remain) pipe.rpush(REDIS_KEY, JSON.stringify(it));
+        pipe.ltrim(REDIS_KEY, 0, MAX - 1);
+        await pipe.exec();
+      } catch (err) {
+        logger.warn({ err }, 'Attention remain rewrite failed — keeping local');
+        this.local.push(...remain);
+      }
+    }
+
     return picked;
   }
 

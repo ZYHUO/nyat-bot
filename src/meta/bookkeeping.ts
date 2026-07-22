@@ -116,9 +116,7 @@ export async function metaSleepGate(opts: {
         ? 'private_chat'
         : isDirect
           ? 'mention_self'
-          : layer === 'L1'
-            ? 'mention_self'
-            : undefined;
+          : undefined;
     const verdict = await sleepWakeDecision(chatId, formatted.uid, rule, phase);
     if (verdict === 'wake' || verdict === 'pass') {
       const { clearSleepPending } = await import('../tracking/sleep-queue.js');

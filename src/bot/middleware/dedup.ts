@@ -6,7 +6,8 @@ import { getRedis } from '../../db/redis.js';
 import { logger } from '../../shared/logger.js';
 
 const DEDUP_PREFIX = 'xxb:dedup:';
-const DEDUP_TTL = 300; // 5 minutes
+/** 24h — 重启后 Telegram 偶发重放 / offset 漂移时仍能挡住老 message_id */
+const DEDUP_TTL = 86_400;
 
 export async function isDuplicate(chatId: number, messageId: number, isEdit = false): Promise<boolean> {
   const redis = getRedis();

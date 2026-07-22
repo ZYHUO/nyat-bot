@@ -162,11 +162,122 @@ async function handleUpdate(ctx: Context): Promise<void> {
           return 'done';
         }
 
-        if (layerDec.layer === 'L0' || layerDec.layer === 'L1') {
-          void import('../../bot/sender/telegram.js')
-            .then(({ sendChatAction }) => sendChatAction(chatId, 'typing'))
-            .catch(() => {});
+        // Passive group chat: Heart decides是否插话 → 升 L1 再进 Meta。
+        // Heart 本身就是 gate（含 cooldown/engagement/wait/pass），放行后
+        // 不再跑 Meta timing——否则会和 Heart 双重否决、把已批准的插话掐掉。
+        // Direct/L0 仍直通 Meta；HEART 关时保持旧 L2 硬丢。
+        if (!isDirect && layerDec.layer !== 'L0') {
+          const { env } = await import('../../env.js');
+          if (env().HEART_ENABLED) {
+            void (async () => {
+              try {
+                const { evaluateMetaHeart } = await import('../../meta/heart-adapter.js');
+                const heart = await evaluateMetaHeart({
+                  chatId,
+                  formatted: fm,
+                  layer: layerDec.layer,
+                });
+                if (heart.verdict !== 'allow') return;
+
+                const elevLayer = heart.layer;
+                const elevReason = heart.reason;
+                const elevBoost = heart.pressureBoost ?? 0;
+
+                const basePressure = elevLayer === 'L0' ? 100 : elevLayer === 'L1' ? 70 : 30;
+                await getAttentionAccumulator().ingestAsync({
+                  chatId,
+                  layer: elevLayer,
+                  reason: elevReason,
+                  messageId,
+                  userId,
+                  textPreview,
+                  pressure: basePressure + elevBoost,
+                  payload: {
+                    username: fm.username || undefined,
+                    fullName: fm.fullName || undefined,
+                    heartPath: heart.path,
+                    ...(fm.replyTo
+                      ? {
+                          replyTo: {
+                            messageId: fm.replyTo.messageId,
+                            uid: fm.replyTo.uid,
+                            fullName: fm.replyTo.fullName,
+                            textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                          },
+                        }
+                      : {}),
+                  },
+                });
+                logger.info(
+                  { chatId, messageId, layer: elevLayer, reason: elevReason },
+                  'Meta attention ingested (heart)',
+                );
+              } catch (err) {
+                // Infra failure ≠ Heart "pass". Fail-open once into Attention so the
+                // msg isn't silently lost; gap-fill may still dispatch.
+                logger.warn({ err, chatId, messageId }, 'Meta heart path failed — soft ingest');
+                try {
+                  await getAttentionAccumulator().ingestAsync({
+                    chatId,
+                    layer: 'L1',
+                    reason: 'heart:infra_fail',
+                    messageId,
+                    userId,
+                    textPreview,
+                    pressure: 55,
+                    payload: {
+                      username: fm.username || undefined,
+                      fullName: fm.fullName || undefined,
+                      ...(fm.replyTo
+                        ? {
+                            replyTo: {
+                              messageId: fm.replyTo.messageId,
+                              uid: fm.replyTo.uid,
+                              fullName: fm.replyTo.fullName,
+                              textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                            },
+                          }
+                        : {}),
+                    },
+                  });
+                } catch (err2) {
+                  logger.warn({ err: err2, chatId, messageId }, 'Meta heart soft ingest failed');
+                }
+              }
+            })();
+            return 'done';
+          }
+
+          // Heart off: L2 旁观硬丢（旧行为）
+          if (layerDec.layer === 'L2') {
+            logger.debug({ chatId, messageId }, 'Meta path: L2 drop (no Attention)');
+            return 'done';
+          }
         }
+
+        // Timing gate — only for L0/direct (and Heart-off L1). Heart path skips this.
+        try {
+          const { evaluateMetaTiming } = await import('../../meta/timing-adapter.js');
+          const timing = await evaluateMetaTiming({
+            chatId,
+            formatted: fm,
+            isDirect,
+            layer: layerDec.layer,
+            directKind,
+          });
+          if (timing.verdict === 'silence') {
+            logger.info(
+              { chatId, messageId, layer: layerDec.layer, reason: timing.reason },
+              'Meta path: timing gate silence',
+            );
+            return 'done';
+          }
+        } catch (err) {
+          logger.warn({ err, chatId }, 'Meta timing gate failed — fail-open to Attention');
+        }
+
+        // Typing starts at CodeAct (executor heartbeat), not here — coalesce may
+        // hold L0/L1 for META_L0_COALESCE_MS and premature typing looks stuck.
 
         const basePressure =
           layerDec.layer === 'L0' ? 100 : layerDec.layer === 'L1' ? 60 : 30;
@@ -178,6 +289,20 @@ async function handleUpdate(ctx: Context): Promise<void> {
           userId,
           textPreview,
           pressure: basePressure + (layerDec.pressureBoost ?? 0),
+          payload: {
+            username: fm.username || undefined,
+            fullName: fm.fullName || undefined,
+            ...(fm.replyTo
+              ? {
+                  replyTo: {
+                    messageId: fm.replyTo.messageId,
+                    uid: fm.replyTo.uid,
+                    fullName: fm.replyTo.fullName,
+                    textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                  },
+                }
+              : {}),
+          },
         });
         logger.info({ chatId, messageId, layer: layerDec.layer }, 'Meta attention ingested');
         return 'done';

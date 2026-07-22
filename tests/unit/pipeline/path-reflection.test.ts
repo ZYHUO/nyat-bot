@@ -56,7 +56,7 @@ describe('path reflection', () => {
     });
   });
 
-  it('calls the dedicated path_reflection usage', async () => {
+  it('calls the judge usage (path_reflection merged)', async () => {
     const result = await reviewPathDecision({
       messageText: '有没有grok的股价',
       replyText: '主人，Grok 没有股票代码，它不是上市公司喵。',
@@ -67,7 +67,7 @@ describe('path reflection', () => {
     });
 
     expect(mockCallWithFallback).toHaveBeenCalledWith(expect.objectContaining({
-      usage: 'path_reflection',
+      usage: 'judge',
     }));
     expect(result.targetReplyPath).toBe('planned');
     expect(result.pattern).toBe('market_quote');

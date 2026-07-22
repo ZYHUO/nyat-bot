@@ -857,7 +857,6 @@ export async function generateReply(
   const delegationMarkers = /(回复|回应|怼|评价|告诉|转告|提醒|帮我回|替我回|替我说|帮我和|代我)/;
   const userDelegated = delegationMarkers.test(message.textContent || '');
   let reactions: Array<{ targetMessageId: number; emoji: string }> | undefined;
-  let modelSilent: boolean | undefined;
 
   const normalizeDraft = (raw: ReturnType<typeof parseReplyResponse>): ReturnType<typeof parseReplyResponse> => {
     let texts = raw;
@@ -980,7 +979,7 @@ export async function generateReply(
   }
 
   // 终态:归一化后没有任何可发文本 = 主动沉默(react 仍可执行)
-  modelSilent = parsedReplies.length === 0 ? true : undefined;
+  const modelSilent = parsedReplies.length === 0 ? true : undefined;
 
   const latencyMs = Math.round(performance.now() - start);
   logger.info({

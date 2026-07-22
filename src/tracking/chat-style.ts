@@ -29,7 +29,7 @@ export interface ChatStyle {
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const cache = new Map<number, { style: ChatStyle | null; at: number }>();
 
-const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u;
+const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u; // FE0F variation selector omitted (eslint)
 const PUNCT_END_RE = /[。.!?!?~~…]$/;
 
 export async function getChatStyle(chatId: number): Promise<ChatStyle | null> {

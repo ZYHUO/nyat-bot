@@ -58,10 +58,10 @@ export async function checkNearDuplicate(chatId: number, candidate: string): Pro
   if (candidate.replace(/\s+/g, '').length < 10) return { isNearDuplicate: false, ratio: 0 };
 
   try {
-    const recent = await getRecent(chatId, 12);
+    const recent = await getRecent(chatId, 40);
     const lastBotTexts = recent
       .filter((m) => m.role === 'assistant')
-      .slice(-3)
+      .slice(-12)
       .map((m) => m.textContent)
       .filter((t) => t && t.length >= 10);
 

@@ -29,6 +29,7 @@ import {
 } from './startup/side-effects.js';
 import { preloadSkills } from './pipeline/tools/registry.js';
 import { startMetaLoop, stopMetaLoop } from './meta/index.js';
+import { startCodeActWorker, closeCodeActWorker } from './subagent/index.js';
 
 async function main(): Promise<void> {
   logger.info('xxb-ts starting…');
@@ -47,6 +48,14 @@ async function main(): Promise<void> {
   // 3. Run SQLite migrations
   const appConfig = getConfig();
   runMigrations(appConfig.migrationsDir);
+
+  // 3.1 NyatDB (optional embedded engine; default off)
+  try {
+    const { getNyatDb } = await import('./nyatdb/index.js');
+    getNyatDb();
+  } catch (err) {
+    logger.warn({ err }, 'NyatDB open failed');
+  }
 
   // 3.5 Initialize bot interaction tracker
   initBotTracker();
@@ -94,6 +103,9 @@ async function main(): Promise<void> {
   // 8. Start BullMQ worker
   if (ownership.worker) {
     startWorker();
+    if (config.META_SUBAGENT_ENABLED) {
+      startCodeActWorker();
+    }
   } else {
     logger.info({ ownership }, 'Skipping worker startup in non-owner process');
   }
@@ -290,6 +302,7 @@ async function main(): Promise<void> {
       step('cron');
       stopCronJobs();
       stopMetaLoop();
+      await closeCodeActWorker();
       // 关机广播先于 stopBot:中止全部在飞主回合生成(actor 收到 Shutdown
       // abort 后把锚点条目回 pending 供重启重放)—— TG 链路挂死时 stopBot
       // 可能拖延,不能让它推迟广播(review 加固 #1)。广播是同步的,窗口内
@@ -327,6 +340,12 @@ async function main(): Promise<void> {
       step('redis+db');
       await closeRedis();
       closeDb();
+      try {
+        const { closeNyatDb } = await import('./nyatdb/index.js');
+        closeNyatDb();
+      } catch {
+        /* ignore */
+      }
       freeEncoder();
       logger.info('Shutdown complete');
     } catch (err) {

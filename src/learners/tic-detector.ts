@@ -42,11 +42,11 @@ const MEOW_TAIL = /(喵+呜?)([~～]*)$/u;
 
 /** 一条消息里,句首/句尾各取 2-4 字的候选短语(已归一)。 */
 function candidatesOf(text: string): { head: string[]; tail: string[] } {
-  let s = (text ?? '').trim();
+  const s = (text ?? '').trim();
   if (!s) return { head: [], tail: [] };
   // 多行只看第一行开头 + 最后一行结尾
   const head0 = s.split(/\n/)[0]!.replace(HEAD_TRIM, '');
-  let tail0 = s.split(/\n/).pop()!.replace(TAIL_TRIM, '').replace(MEOW_TAIL, '').replace(TAIL_TRIM, '');
+  const tail0 = s.split(/\n/).pop()!.replace(TAIL_TRIM, '').replace(MEOW_TAIL, '').replace(TAIL_TRIM, '');
   const heads: string[] = [];
   const tails: string[] = [];
   const hchars = [...head0];
