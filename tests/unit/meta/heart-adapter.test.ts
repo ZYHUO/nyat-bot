@@ -11,6 +11,7 @@ const {
   transitionToWait,
   recordGateNoAction,
   redisSet,
+  redisGet,
   isCodeActBusy,
 } = vi.hoisted(() => ({
   heartDecision: vi.fn(),
@@ -23,6 +24,7 @@ const {
   transitionToWait: vi.fn(async () => {}),
   recordGateNoAction: vi.fn(async () => {}),
   redisSet: vi.fn(async () => 'OK'),
+  redisGet: vi.fn(async () => null),
   isCodeActBusy: vi.fn(async () => false),
 }));
 
@@ -55,7 +57,12 @@ vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
   transitionToWait,
 }));
 vi.mock('../../../src/pipeline/timing/state-store.js', () => ({ recordGateNoAction }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ set: redisSet }) }));
+vi.mock('../../../src/db/redis.js', () => ({
+  getRedis: () => ({
+    set: redisSet,
+    get: redisGet,
+  }),
+}));
 vi.mock('../../../src/subagent/task-store.js', () => ({
   isCodeActBusy,
 }));
@@ -81,6 +88,8 @@ describe('evaluateMetaHeart', () => {
     isInContinuation.mockReturnValue(false);
     isCodeActBusy.mockResolvedValue(false);
     getChatState.mockResolvedValue({ lastBotReplyAt: 0 });
+    redisSet.mockResolvedValue('OK');
+    redisGet.mockResolvedValue(null);
   });
 
   it('reply → allow L1 with heart: reason', async () => {
@@ -132,5 +141,27 @@ describe('evaluateMetaHeart', () => {
     expect(r.verdict).toBe('silence');
     expect(r.reason).toBe('heart_refractory');
     expect(heartDecision).not.toHaveBeenCalled();
+  });
+
+  it('armed heart → refractory silence without LLM', async () => {
+    redisGet.mockResolvedValue(String(Date.now()));
+    const r = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L2' });
+    expect(r.verdict).toBe('silence');
+    expect(r.reason).toBe('heart_refractory');
+    expect(heartDecision).not.toHaveBeenCalled();
+  });
+
+  it('lost NX arm race after LLM → silence', async () => {
+    heartDecision.mockResolvedValue({
+      act: 'reply',
+      path: 'chat',
+      why: '接一下',
+      latencyMs: 10,
+      judgeResult: { action: 'REPLY', level: 'L2_AI', rule: 'heart', latencyMs: 10 },
+    });
+    redisSet.mockResolvedValue(null); // NX lost
+    const r = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L2' });
+    expect(r.verdict).toBe('silence');
+    expect(r.reason).toBe('heart_refractory');
   });
 });

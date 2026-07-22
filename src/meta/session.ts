@@ -431,23 +431,8 @@ async function autoDispatchL0(
 
 /** True when Heart auto-dispatch should stay quiet (busy CodeAct or recent bot reply). */
 async function shouldSuppressHeartAutoDispatch(chatId: number): Promise<boolean> {
-  const refractoryMs = env().META_HEART_REFRACTORY_MS;
-  try {
-    const { isCodeActBusy } = await import('../subagent/task-store.js');
-    if (await isCodeActBusy(chatId)) return true;
-  } catch {
-    /* ignore */
-  }
-  if (refractoryMs <= 0) return false;
-  try {
-    const { getChatState } = await import('../pipeline/timing/chat-runtime.js');
-    const tstate = await getChatState(chatId);
-    const at = tstate?.lastBotReplyAt;
-    if (at && at > 0 && Date.now() - at < refractoryMs) return true;
-  } catch {
-    /* ignore */
-  }
-  return false;
+  const { shouldSuppressMetaHeartDispatch } = await import('./heart-refractory.js');
+  return shouldSuppressMetaHeartDispatch(chatId);
 }
 
 export async function runMetaSession(
