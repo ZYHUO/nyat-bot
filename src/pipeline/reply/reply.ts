@@ -14,7 +14,7 @@ import { slimContextForAI } from '../context/slim.js';
 import { searchKnowledge } from '../../knowledge/manager.js';
 import { getToolNames } from '../tools/registry.js';
 import { parseReplyResponse, isBlankReply } from './parser.js';
-import { segmentReply, type SegmenterConfig } from './segmenter.js';
+import { segmentReply, type SegmenterConfig, REPLY_SPLIT_CHAR_THRESHOLD } from './segmenter.js';
 import { getRecent, getGroupMembers } from '../context/manager.js';
 import { doCheckin, getCheckinStats } from '../checkin.js';
 import { getBotTracker } from '../../tracking/interaction.js';
@@ -42,7 +42,6 @@ import { assembleBurstHint, type CtxPart } from './burst-hint.js';
 const MAX_DUPLICATE_RETRIES = 1;
 const MAX_MULTI_REPLY_RETRIES = 1;
 const MAX_TOOL_ARTIFACT_RETRIES = 1;
-const REPLY_SPLITTER_CHAR_THRESHOLD = 60; // 短回复(<60字)不分段，保持单条（之前 20，几乎都被切）
 const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
   normal: 48_000,
   pro: 72_000,
@@ -955,7 +954,7 @@ export async function generateReply(
   //   b) Explicitly handed off by the AI
   const needsSegment =
     parsedReplies.length === 1 &&
-    (parsedReplies[0]!.replyContent.length > REPLY_SPLITTER_CHAR_THRESHOLD ||
+    (parsedReplies[0]!.replyContent.length > REPLY_SPLIT_CHAR_THRESHOLD ||
       parsedReplies[0]!.handoffToSplitter === true);
 
   if (needsSegment) {

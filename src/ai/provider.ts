@@ -262,7 +262,12 @@ async function callOpenAIRaw(
     }
   } else {
     const json = await res.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
+      choices?: Array<{
+        message?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+        };
+      }>;
       usage?: {
         prompt_tokens?: number; completion_tokens?: number; total_tokens?: number;
         // DeepSeek-specific automatic prefix-cache accounting
@@ -271,7 +276,18 @@ async function callOpenAIRaw(
         prompt_tokens_details?: { cached_tokens?: number };
       };
     };
-    fullText = json.choices?.[0]?.message?.content ?? '';
+    const msg = json.choices?.[0]?.message;
+    const rawContent = typeof msg?.content === 'string' ? msg.content : '';
+    const rawReasoning = typeof msg?.reasoning_content === 'string' ? msg.reasoning_content : '';
+    // Prefer visible content; only fall back to reasoning_content when content is empty
+    // (some grok relays put the whole answer there).
+    fullText = rawContent.trim() ? rawContent : rawReasoning;
+    if (!rawContent.trim() && rawReasoning.trim()) {
+      logger.info(
+        { label: label.name, model: label.model, reasoningChars: rawReasoning.length },
+        'AI empty content — using reasoning_content',
+      );
+    }
     const latencyMs = Math.round(performance.now() - start);
     // Prompt-cache visibility (DeepSeek auto prefix-cache / OpenAI cached_tokens).
     // Lets us confirm the stable-system-prefix design is actually paying off.
@@ -293,6 +309,9 @@ async function callOpenAIRaw(
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
       .trim();
+    if (!text) {
+      throw new AIError('Empty response (no content/reasoning)', label.name, label.model, 'AI_EMPTY');
+    }
     return {
       content: text,
       tokenUsage: {
@@ -415,6 +434,10 @@ export async function callModel(
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
       .trim();
+
+    if (!text) {
+      throw new AIError('Empty response from SDK', label.name, label.model, 'AI_EMPTY');
+    }
 
     return {
       content: text,

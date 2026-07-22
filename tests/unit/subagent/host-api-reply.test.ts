@@ -79,6 +79,27 @@ describe('host sendText reply_to policy', () => {
     expect(sendMessage.mock.calls[1]![2]).toBeUndefined();
   });
 
+  it('group: later sendText honors explicit replyTo wish', async () => {
+    const { createHostApi } = await import('../../../src/subagent/host-api.js');
+    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77 });
+    await host.telegram.sendText('先回主锚点');
+    await host.telegram.sendText('再点另一条', 88);
+    expect(sendMessage.mock.calls[0]![2]).toBe(77);
+    expect(sendMessage.mock.calls[1]![2]).toBe(88);
+  });
+
+  it('group: segmenter splits — only first part has reply_to', async () => {
+    const { createHostApi } = await import('../../../src/subagent/host-api.js');
+    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77 });
+    // >20 chars + 句号 → host runs segmentReply
+    await host.telegram.sendText('先看看温度是不是瓶颈吧。别真把小机子给烤熟了喵。别瞎超频！');
+    expect(sendMessage.mock.calls.length).toBeGreaterThan(1);
+    expect(sendMessage.mock.calls[0]![2]).toBe(77);
+    for (let i = 1; i < sendMessage.mock.calls.length; i++) {
+      expect(sendMessage.mock.calls[i]![2]).toBeUndefined();
+    }
+  });
+
   it('rejects echoing the latest user line', async () => {
     const { getRecent } = await import('../../../src/pipeline/context/manager.js');
     vi.mocked(getRecent).mockResolvedValueOnce([

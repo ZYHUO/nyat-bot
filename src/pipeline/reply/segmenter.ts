@@ -52,6 +52,12 @@ const DEFAULT_CONFIG: SegmenterConfig = {
   thinMeow: true,
 };
 
+/**
+ * Legacy reply + CodeAct host: shorter than this → keep one bubble.
+ * 60 会把 Meta/CodeAct 的微反应几乎全卡成单句；回到 ~20 与早期行为一致。
+ */
+export const REPLY_SPLIT_CHAR_THRESHOLD = 20;
+
 // 句尾「喵」口癖:喵(呜)? 后可跟波浪号/单个表情收尾。抓这个尾巴,决定去留时
 // 只摘掉「喵」本体,保留核心话、波浪号和表情。
 const MEOW_TAIL = /^([\s\S]*?)(喵+呜?)([~～]*)(\s*(?:😼|😸|😹|😻|[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}])?)\s*$/u;

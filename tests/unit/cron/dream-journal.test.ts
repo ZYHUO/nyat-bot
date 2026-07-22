@@ -107,5 +107,23 @@ describe('dream-journal', () => {
     expect(r.wrote).toBe(true);
     expect(r.path).toBeTruthy();
     expect(r.slot).toBe('free');
+    expect(r.reason).toBe('wrote');
+  });
+
+  it('parseDiaryDecision tolerates fences, chatter, and Chinese skip', async () => {
+    const { parseDiaryDecision } = await import('../../../src/cron/dream-journal.js');
+    expect(parseDiaryDecision('```\nWRITE\n\n本喵今天划水。\n```')).toMatchObject({
+      action: 'WRITE',
+      body: expect.stringContaining('本喵'),
+    });
+    expect(
+      parseDiaryDecision('先想一下……\n\n**WRITE**\n\n群里有人签到，本喵困得要命。'),
+    ).toMatchObject({ action: 'WRITE' });
+    expect(parseDiaryDecision('SKIP：没什么新事')).toMatchObject({
+      action: 'SKIP',
+      reason: expect.stringContaining('没什么'),
+    });
+    expect(parseDiaryDecision('跳过，今天不想写')).toMatchObject({ action: 'SKIP' });
+    expect(parseDiaryDecision('好的收到')).toMatchObject({ action: 'SKIP', reason: 'unparsed' });
   });
 });

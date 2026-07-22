@@ -100,6 +100,7 @@ vi.mock('../../../src/pipeline/tools/registry.js', () => ({
 
 vi.mock('../../../src/pipeline/reply/segmenter.js', () => ({
   segmentReply: (...args: unknown[]) => mockSegmentReply(...args),
+  REPLY_SPLIT_CHAR_THRESHOLD: 20,
 }));
 
 vi.mock('../../../src/shared/config.js', () => ({

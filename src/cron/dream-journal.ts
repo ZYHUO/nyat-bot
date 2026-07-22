@@ -157,25 +157,82 @@ function slotLabel(slot: DreamSlot): string {
   return '随时';
 }
 
-function parseDiaryDecision(raw: string): { action: 'WRITE' | 'SKIP'; body: string; reason: string } {
-  const text = (raw || '').trim();
-  const firstNl = text.indexOf('\n');
-  const firstLine = (firstNl >= 0 ? text.slice(0, firstNl) : text).trim();
-  const rest = (firstNl >= 0 ? text.slice(firstNl + 1) : '').trim();
-  const m = firstLine.match(/^(WRITE|SKIP)\b(.*)$/i);
-  if (!m) {
+function stripDiaryFences(raw: string): string {
+  let s = (raw || '').trim();
+  // Whole-response fence, or leading/trailing fences from chatty models.
+  if (/^```/.test(s)) {
+    s = s.replace(/^```(?:markdown|md|text|diary)?\s*/i, '');
+    s = s.replace(/\s*```\s*$/i, '');
+  }
+  return s.trim();
+}
+
+function normalizeDiaryHeaderLine(line: string): string {
+  return line
+    .trim()
+    .replace(/^[*_`"'「『【（(]+/, '')
+    .replace(/[*_`"'」』】）)]+$/, '')
+    .replace(/^#+\s*/, '')
+    .trim();
+}
+
+/**
+ * Parse WRITE/SKIP decision. Tolerates fences, bold, leading chatter,
+ * and WRITE/SKIP not on the absolute first line (common with summarize models).
+ */
+export function parseDiaryDecision(raw: string): {
+  action: 'WRITE' | 'SKIP';
+  body: string;
+  reason: string;
+} {
+  const text = stripDiaryFences(raw);
+  if (!text) return { action: 'SKIP', body: '', reason: 'empty_output' };
+
+  const lines = text.split(/\r?\n/);
+  let headerIdx = -1;
+  let action: 'WRITE' | 'SKIP' | null = null;
+  let headerReason = '';
+
+  for (let i = 0; i < Math.min(lines.length, 16); i++) {
+    const line = normalizeDiaryHeaderLine(lines[i] ?? '');
+    if (!line) continue;
+    const m = line.match(/^(WRITE|SKIP)(?:\s*[:：\-—]\s*|\s+|$)(.*)$/i);
+    if (m?.[1]) {
+      headerIdx = i;
+      action = m[1].toUpperCase() as 'WRITE' | 'SKIP';
+      headerReason = (m[2] || '').trim();
+      break;
+    }
+    // Chinese skip without English keyword
+    if (/^(跳过|不写了?|没空写|没什么好写|没啥好写|不硬编)/.test(line)) {
+      return { action: 'SKIP', body: '', reason: line.slice(0, 80) };
+    }
+  }
+
+  if (!action) {
     // Model forgot the header — if looks like diary, treat as WRITE
     if (text.length >= 40 && /本喵|今天|群里/.test(text)) {
       return { action: 'WRITE', body: text, reason: 'implicit_write' };
     }
     return { action: 'SKIP', body: '', reason: 'unparsed' };
   }
-  const action = m[1]!.toUpperCase() as 'WRITE' | 'SKIP';
-  return { action, body: rest, reason: (m[2] || '').trim() };
+
+  const body = lines
+    .slice(headerIdx + 1)
+    .join('\n')
+    .trim()
+    .replace(/^```(?:markdown|md|text)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+  return { action, body, reason: headerReason };
 }
 
-export async function runDreamJournal(opts?: { slot?: DreamSlot }): Promise<string | null> {
-  if (!env().DREAM_JOURNAL_ENABLED) return null;
+export type DreamJournalRunResult = { path: string | null; reason: string };
+
+async function runDreamJournalInner(opts?: { slot?: DreamSlot }): Promise<DreamJournalRunResult> {
+  if (!env().DREAM_JOURNAL_ENABLED) {
+    return { path: null, reason: 'disabled' };
+  }
 
   const slot: DreamSlot = opts?.slot ?? 'free';
   const day = todayStamp();
@@ -203,7 +260,7 @@ export async function runDreamJournal(opts?: { slot?: DreamSlot }): Promise<stri
 
   if (evidence.msgCount === 0 && !existing) {
     logger.info({ day, slot }, 'Dream journal: no evidence, skip');
-    return null;
+    return { path: null, reason: 'no_evidence' };
   }
 
   let rawOut: string;
@@ -233,23 +290,40 @@ ${existing.slice(0, 2500) || '(空)'}
       ],
       maxTokens: 700,
       temperature: 0.55,
+      rejectEmpty: true,
     });
     rawOut = (result.content ?? '').trim();
+    logger.info(
+      { day, slot, label: result.label, model: result.model, chars: rawOut.length },
+      'Dream journal LLM ok',
+    );
   } catch (err) {
     logger.warn({ err, slot }, 'Dream journal LLM failed');
-    return null;
+    return { path: null, reason: 'llm_failed' };
   }
 
   const decided = parseDiaryDecision(rawOut);
   if (decided.action === 'SKIP') {
-    logger.info({ day, slot, reason: decided.reason || 'model_skip' }, 'Dream journal skipped by model');
-    return null;
+    const reason = decided.reason || 'model_skip';
+    logger.info(
+      {
+        day,
+        slot,
+        reason,
+        rawPreview: reason === 'unparsed' || reason === 'empty_output' ? rawOut.slice(0, 240) : undefined,
+      },
+      'Dream journal skipped by model',
+    );
+    return { path: null, reason: reason === 'unparsed' || reason === 'empty_output' ? reason : `skip:${reason}` };
   }
 
   const body = decided.body.trim();
   if (body.length < 15) {
-    logger.info({ day, slot, len: body.length }, 'Dream journal WRITE too short, skip');
-    return null;
+    logger.info(
+      { day, slot, len: body.length, rawPreview: rawOut.slice(0, 240) },
+      'Dream journal WRITE too short, skip',
+    );
+    return { path: null, reason: 'too_short' };
   }
 
   const heading = `## ${clock} · ${slotLabel(slot)}`;
@@ -288,7 +362,11 @@ ${existing.slice(0, 2500) || '(空)'}
     }
   }
 
-  return outPath;
+  return { path: outPath, reason: 'wrote' };
+}
+
+export async function runDreamJournal(opts?: { slot?: DreamSlot }): Promise<string | null> {
+  return (await runDreamJournalInner(opts)).path;
 }
 
 /** Infer slot from Shanghai clock for generic cron ticks. */
@@ -383,6 +461,11 @@ export async function tryWriteDreamJournal(opts?: {
     }
   }
 
-  const path = await runDreamJournal({ slot });
-  return { wrote: !!path, path, slot, reason: path ? 'wrote' : 'skipped_or_empty' };
+  const result = await runDreamJournalInner({ slot });
+  return {
+    wrote: !!result.path,
+    path: result.path,
+    slot,
+    reason: result.reason,
+  };
 }
