@@ -246,8 +246,7 @@ export function createHostApi(
             }
 
             // 同一任务里连发两条几乎一样的（「催什么催」+「催什么催嘛喵」）——拒第二条
-            const norm = normalizeForDup(clean);
-            if (lastSentNorm && nearDuplicateReply(norm, lastSentNorm)) {
+            if (lastSentNorm && isEchoOf(clean, lastSentNorm)) {
               logger.info({ chatId, preview: clean.slice(0, 60) }, 'host sendText rejected near-dup');
               throw new Error('near_dup_reply');
             }
@@ -318,7 +317,7 @@ export function createHostApi(
               }
               const messageId = await sendMessage(chatId, part, replyTo);
               lastMessageId = messageId;
-              lastSentNorm = normalizeForDup(part);
+              lastSentNorm = part;
               rememberBotText(chatId, part);
               await track(
                 import('../pipeline/context/manager.js')
@@ -551,23 +550,4 @@ export function createHostApi(
       },
     },
   };
-}
-
-function normalizeForDup(s: string): string {
-  return s
-    .replace(/\s+/g, '')
-    .replace(/[喵~～。！!？?…\.]+$/g, '')
-    .replace(/[喵~～]/g, '');
-}
-
-function nearDuplicateReply(a: string, b: string): boolean {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) return true;
-  // 编辑距离粗判：长度接近且公共前缀很长
-  const minLen = Math.min(a.length, b.length);
-  if (minLen < 6) return false;
-  let common = 0;
-  while (common < minLen && a[common] === b[common]) common += 1;
-  return common / Math.max(a.length, b.length) >= 0.85;
 }

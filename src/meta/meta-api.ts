@@ -81,6 +81,21 @@ export function buildMetaApiContext(opts?: {
         return { taskId: 'skipped_busy' };
       }
 
+      // Meta LLM JS used to bypass autoDispatch's Heart refractory → near-dup
+      // second bubbles. L0/@ still dispatches; L1 Heart gap-fill must not.
+      if (layer !== 'L0') {
+        try {
+          const { shouldSuppressMetaHeartDispatch } = await import('./heart-refractory.js');
+          if (await shouldSuppressMetaHeartDispatch(cid)) {
+            unclaim();
+            logger.info({ chatId: cid, layer }, 'Meta dispatch skipped (heart refractory)');
+            return { taskId: 'skipped_refractory' };
+          }
+        } catch {
+          /* fail-open */
+        }
+      }
+
       let quotes = (args.quotes ?? [])
         .map((q) => (typeof q === 'string' ? Number(q.replace(/^msg:/, '')) : Number(q)))
         .filter((n) => Number.isFinite(n) && n > 0);

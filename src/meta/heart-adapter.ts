@@ -59,14 +59,17 @@ export async function evaluateMetaHeart(opts: {
     return { verdict: 'allow', layer: 'L0', reason: 'dm' };
   }
 
-  // One Heart chime-in per refractory window: don't elevate while CodeAct is
-  // already speaking, or right after we just spoke (group pile-on / 连珠炮).
-  const refractoryMs = e.META_HEART_REFRACTORY_MS;
+  // One Heart chime-in per refractory window: CodeAct busy, prior Heart arm,
+  // or lastBotReplyAt (group pile-on / 连珠炮). Arm covers parallel Heart LLMs
+  // that finish after the first elevate but before CodeAct speaks.
   try {
-    const { isCodeActBusy } = await import('../subagent/task-store.js');
-    if (await isCodeActBusy(chatId)) {
-      logger.info({ chatId, messageId: formatted.messageId }, 'Meta heart: busy silence');
-      return { verdict: 'silence', layer, reason: 'heart_busy' };
+    const { shouldSuppressMetaHeartElevate } = await import('./heart-refractory.js');
+    if (await shouldSuppressMetaHeartElevate(chatId)) {
+      const { isCodeActBusy } = await import('../subagent/task-store.js');
+      const busy = await isCodeActBusy(chatId).catch(() => false);
+      const reason = busy ? 'heart_busy' : 'heart_refractory';
+      logger.info({ chatId, messageId: formatted.messageId, reason }, 'Meta heart: suppress silence');
+      return { verdict: 'silence', layer, reason };
     }
   } catch {
     /* fail-open */
@@ -89,24 +92,6 @@ export async function evaluateMetaHeart(opts: {
     tstate = await getChatState(chatId);
   } catch {
     tstate = undefined;
-  }
-
-  if (
-    refractoryMs > 0 &&
-    tstate?.lastBotReplyAt &&
-    tstate.lastBotReplyAt > 0 &&
-    Date.now() - tstate.lastBotReplyAt < refractoryMs
-  ) {
-    logger.info(
-      {
-        chatId,
-        messageId: formatted.messageId,
-        agoMs: Date.now() - tstate.lastBotReplyAt,
-        refractoryMs,
-      },
-      'Meta heart: refractory silence',
-    );
-    return { verdict: 'silence', layer, reason: 'heart_refractory' };
   }
 
   const continuation = tstate !== undefined && isInContinuation(tstate);
@@ -218,7 +203,19 @@ export async function evaluateMetaHeart(opts: {
     return { verdict: 'silence', layer, reason: `heart_pass:${heart.why}` };
   }
 
-  // reply
+  // reply — NX arm so only one parallel Heart elevate wins; losers silence.
+  try {
+    const { armMetaHeartRefractory } = await import('./heart-refractory.js');
+    if (!(await armMetaHeartRefractory(chatId))) {
+      logger.info(
+        { chatId, messageId: formatted.messageId },
+        'Meta heart: lost arm race — silence',
+      );
+      return { verdict: 'silence', layer: 'L1', reason: 'heart_refractory' };
+    }
+  } catch {
+    /* non-critical */
+  }
   logger.info(
     {
       chatId,
