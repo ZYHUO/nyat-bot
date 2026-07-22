@@ -330,11 +330,16 @@ export async function runSleepCycle(): Promise<void> {
         const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
         await announceDmGreetings('goodnight');
       }
-      // 睡前日记窗口：提醒 Meta 可 journal.tryWrite；cron 仍是保底写手
+      // 睡前日记：边沿直接落笔（不等 Meta soft-nudge；重启会冲掉 void promise）
       if (env().DREAM_JOURNAL_ENABLED && env().DREAM_JOURNAL_HOOK_SLEEP) {
-        void import('./dream-journal.js')
-          .then(({ nudgeMetaForDream }) => nudgeMetaForDream('bedtime'))
-          .catch((err) => logger.debug({ err }, 'Dream journal bedtime nudge failed'));
+        try {
+          const { tryWriteDreamJournal, nudgeMetaForDream } = await import('./dream-journal.js');
+          const r = await tryWriteDreamJournal({ slot: 'bedtime', force: true });
+          logger.info({ ...r }, 'Dream journal sleep-edge tryWrite');
+          void nudgeMetaForDream('bedtime').catch(() => undefined);
+        } catch (err) {
+          logger.warn({ err }, 'Dream journal bedtime write failed');
+        }
       }
     } else {
       // 起床:先问候(欠回复的群优先),下一分钟起逐 chat 补回
@@ -347,9 +352,14 @@ export async function runSleepCycle(): Promise<void> {
         await announceDmGreetings('morning');
       }
       if (env().DREAM_JOURNAL_ENABLED && env().DREAM_JOURNAL_HOOK_SLEEP) {
-        void import('./dream-journal.js')
-          .then(({ nudgeMetaForDream }) => nudgeMetaForDream('morning'))
-          .catch((err) => logger.debug({ err }, 'Dream journal morning nudge failed'));
+        try {
+          const { tryWriteDreamJournal, nudgeMetaForDream } = await import('./dream-journal.js');
+          const r = await tryWriteDreamJournal({ slot: 'morning', force: true });
+          logger.info({ ...r }, 'Dream journal wake-edge tryWrite');
+          void nudgeMetaForDream('morning').catch(() => undefined);
+        } catch (err) {
+          logger.warn({ err }, 'Dream journal morning write failed');
+        }
       }
       if (oweChats.length > 0) {
         await redis.set(DRAIN_KEY, String(MORNING_DRAIN_BUDGET), 'EX', 3600);

@@ -49,7 +49,7 @@ export function looksLikeDiaryRequest(text: string): boolean {
   if (!t) return false;
   // CodeAct / ack summaries often contain「写日记」as in「没写日记」— never re-trigger.
   if (
-    /没写日记|未写日记|不写日记|没素材写|日记未写|日记已写|跳过.*日记|skipped_or_empty|老实[解承]|告知主人/.test(
+    /没写日记|未写日记|不写日记|没素材写|日记未写|日记已写|跳过.*日记|skipped_or_empty|unparsed|落笔失败|老实[解承]|告知主人/.test(
       t,
     )
   ) {
@@ -63,6 +63,30 @@ export function looksLikeDiaryRequest(text: string): boolean {
 function subagentRequestAction(reason: string): string | null {
   if (!reason.startsWith('subagent_request:')) return null;
   return reason.slice('subagent_request:'.length).trim().toLowerCase() || null;
+}
+
+function diarySkipAckDirection(reason?: string): string {
+  const r = (reason || '').trim();
+  if (r === 'no_evidence') {
+    return '主人要写日记，今天可写的聊天素材确实很少。短回老实说明没素材、不硬编；禁止假装写完。';
+  }
+  if (r === 'cooldown') {
+    return '主人要写日记，但这会儿还在冷却（刚写过/刚试过）。短回说明稍后再写，禁止假装已经写完。';
+  }
+  if (r === 'unparsed' || r === 'empty_output' || r === 'too_short' || r === 'llm_failed') {
+    return `主人要写日记，这次落笔失败（${r}：模型输出格式飘了或调用挂了，不是「没素材」）。短回老实说明这次没写成、不硬编；禁止说成没素材，禁止假装写完。`;
+  }
+  if (r === 'disabled') {
+    return '日记功能关着。短回说明一下，别假装写完。';
+  }
+  if (r.startsWith('skip:')) {
+    const why = r.slice(5).trim() || '模型选择跳过';
+    return `主人要写日记，模型决定 SKIP（${why.slice(0, 80)}）。短回说明跳过了、不硬编；禁止假装写完。只有真没记录时才能说没素材。`;
+  }
+  if (r === 'skipped_or_empty' || r === 'model_skip' || !r) {
+    return '主人要写日记，这次模型选择跳过。短回说明跳过了、不硬编；禁止说成没素材，禁止假装写完。';
+  }
+  return `主人要写日记，这次没写成（${r.slice(0, 80)}）。短回老实说明原因、不硬编；禁止假装写完。不要默认说成没素材。`;
 }
 
 async function interceptDiaryAttention(
@@ -110,7 +134,7 @@ async function interceptDiaryAttention(
     const snip = (result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
     const direction = result.wrote
       ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
-      : `主人要写日记，这次没写成（${result.reason || 'skip'}）。短回老实说明（刚写过/没素材/跳过），禁止假装已经写完。`;
+      : diarySkipAckDirection(result.reason);
     const dispatched = await dispatch.taskToGroup(a.chatId, {
       contentDirection: direction,
       toneGuidance: '短、傲娇、像发微信；别小作文',

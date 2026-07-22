@@ -121,10 +121,10 @@ export function createHostApi(
     const explicit = parseMsgId(replyToMessageId);
     const fallback = parseMsgId(opts.defaultReplyTo);
 
-    // Task quote exists: never accept a different #id (DM used to trust model and
-    // pasted a *group* messageId → 私聊回「冒充号」对着群 #392467).
+    // Task quote exists: never accept a different #id on the *first* quote fill
+    // (DM used to trust model and pasted a *group* messageId → 串台).
     if (fallback) {
-      if (explicit && explicit !== fallback) {
+      if (explicit && explicit !== fallback && !defaultQuoteUsed) {
         logger.warn(
           { chatId, fromModel: explicit, forced: fallback, dm: isDM(chatId) },
           'host sendText: reject model replyTo ≠ task quote',
@@ -134,13 +134,15 @@ export function createHostApi(
             `Omit replyTo or pass only ${fallback}, then retry sendText (do not reuse wrong bubble text).`,
         );
       }
-      // DM: still never *force* quote (omit → plain bubble). Group: fill quote.
+      // DM: never force quote (omit → plain bubble).
       if (isDM(chatId)) return explicit;
+      // Group first bubble: fill task quote once.
       if (!defaultQuoteUsed) {
         defaultQuoteUsed = true;
         return fallback;
       }
-      return undefined;
+      // Later sendText: default plain; only honor explicit 特别许愿 replyTo.
+      return explicit;
     }
 
     // No task quote — DM/group: explicit only as last resort
@@ -254,19 +256,20 @@ export function createHostApi(
             // MaiBot-style split (same segmenter as legacy reply). One sendText may
             // become multiple bubbles; only the first carries reply-to.
             const maxLen = chatId > 0 ? 280 : 160;
-            const splitThreshold = 60;
             let parts: string[] = [clean];
-            if (clean.length > splitThreshold) {
-              try {
-                const { segmentReply } = await import('../pipeline/reply/segmenter.js');
+            try {
+              const { segmentReply, REPLY_SPLIT_CHAR_THRESHOLD } = await import(
+                '../pipeline/reply/segmenter.js'
+              );
+              if (clean.length > REPLY_SPLIT_CHAR_THRESHOLD) {
                 const { segments } = segmentReply(clean);
                 if (segments.length > 1) {
                   parts = segments.map((s) => s.trim()).filter(Boolean);
                   logger.info({ chatId, n: parts.length, chars: clean.length }, 'host sendText segmented');
                 }
-              } catch (err) {
-                logger.debug({ err, chatId }, 'host segmentReply failed — single bubble');
               }
+            } catch (err) {
+              logger.debug({ err, chatId }, 'host segmentReply failed — single bubble');
             }
             if (parts.length === 1 && clean.length > maxLen) {
               const { softTruncate } = await import('../shared/soft-truncate.js');
@@ -295,8 +298,7 @@ export function createHostApi(
                 }
               }
               await sendChatAction(chatId, 'typing');
-              // Group: first bubble quotes task; later bubbles plain (legacy firstMessageQuoteReply).
-              // DM: model chooses — only first bubble may carry explicit replyTo.
+              // 分句：仅首条带 reply_to；后续默认不带。另一次 sendText 若显式传 messageId 才 quote（特别许愿）。
               const replyTo = i === 0 ? resolveReplyTo(replyToMessageId) : undefined;
               if (i === 0) firstReplyTo = replyTo;
               if (i === 0 && chatId < 0 && !replyTo && !opts.defaultReplyTo) {
@@ -313,6 +315,11 @@ export function createHostApi(
                     preview: part.slice(0, 80),
                   },
                   'host sendText',
+                );
+              } else {
+                logger.info(
+                  { chatId, part: i + 1, of: parts.length, replyTo: null, preview: part.slice(0, 60) },
+                  'host sendText continuation',
                 );
               }
               const messageId = await sendMessage(chatId, part, replyTo);
