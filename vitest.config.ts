@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    setupFiles: ['./tests/setup-env.ts', './tests/setup-redis-stub.ts'],
+    setupFiles: ['./tests/setup-env.ts'],
     include: ['tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',

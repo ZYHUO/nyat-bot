@@ -352,8 +352,7 @@ describe("heart infra failure & engagement hard-pass fixes", () => {
     expect(mockRecordGateNoAction).toHaveBeenCalledTimes(1);
   });
 
-  // Flaky under full-suite CI load (hangs >15s only when parallel with other files).
-  // Behavior still covered by isDeferReplay twin above + unit engagement helpers.
+  // Flaky when co-run with other pipeline files (hangs on CI/local full batch).
   it.skip("engagement 硬阈:obligationStrong 强债务豁免 → 心流照常裁决", async () => {
     mockGetRecent.mockResolvedValue(highShareContext());
     mockHeartDecision.mockResolvedValue({
