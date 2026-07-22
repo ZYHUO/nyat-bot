@@ -35,6 +35,9 @@ vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
     zrange: async () => ['-1003184176508'],
     lrange: async () => [],
+    set: async () => 'OK',
+    get: async () => null,
+    del: async () => 1,
   }),
 }));
 
@@ -71,7 +74,6 @@ describe('dream-journal', () => {
   beforeEach(async () => {
     const { rm } = await import('node:fs/promises');
     await rm('/tmp/nyat-dream-journal-test', { recursive: true, force: true });
-    vi.resetModules();
   });
 
   it('appends a markdown diary entry when model says WRITE', async () => {
