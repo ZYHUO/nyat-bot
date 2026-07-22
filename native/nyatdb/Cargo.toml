@@ -1,0 +1,29 @@
+[package]
+name = "nyatdb"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "NyatDB — NyatBot embedded page engine (napi-rs)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi9", "serde-json"] }
+napi-derive = "3"
+parking_lot = "0.12"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.13"
+rayon = "1.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1

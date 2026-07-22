@@ -4,17 +4,22 @@ import { callWithFallback } from '../ai/fallback.js';
 import { getContextEngine, staticText, deltaText, ephemeralText, volatileText } from '../context-engine/index.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { formatBeijingNowLine } from '../shared/beijing-time.js';
+import { buildMasterIdentityBlock, masterShortHint } from '../shared/master-identity.js';
 import { getGlobalState } from './global-state.js';
 import { buildMetaApiContext } from './meta-api.js';
-import type { AttentionItem, SubagentCallback } from './types.js';
+import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
+import { buildL0ContentDirection, replyToFromPayload } from './reply-context.js';
 
 const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
 
 可用全局对象（已注入）:
-- dispatch.taskToGroup(chatId, { contentDirection, toneGuidance?, quotes?, trackingKey? })
+- dispatch.taskToGroup(chatId, { contentDirection, toneGuidance?, quotes?, trackingKey?, interrupt? })
 - dispatch.getTask(taskId) / dispatch.listTasks(chatId?)
+- journal.tryWrite({ slot?: 'morning'|'bedtime'|'free', force?: boolean }) → 写真实日记（可 SKIP；force 跳过冷却）
+- journal.recent() → 看最近日记片段
 - todo.add(text) / todo.list() / todo.remove(id)
 - agents.listStatus()
 - conversations.query(hint)
@@ -22,13 +27,222 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 - console.log(...)
 
 规则:
-1. contentDirection 只写「要做什么/回什么事实方向」，不要写具体台词（台词由 Subagent 生成）。
-2. L0（@/私聊/直接互动）通常应立刻 dispatch。
-3. L2（旁观话题）可以不行动；要插嘴才 dispatch。
-4. 回调(callback)先读摘要，再决定是否跟进 dispatch。
-5. 结束前在思考里用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句本轮摘要。
-6. 输出格式：先简短思考，再给出一个 \`\`\`js 代码块。
-7. 保持短句决策；你是猫娘人格的调度者，不是客服工单系统。`;
+1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），不要写具体台词，**不要粘贴用户原句**。
+2. toneGuidance 常带「短、微信式、别展开」。派出去的回复默认群聊微反应、私聊最多两三句——方向里别写成「详细解释」。
+3. **L0**（@/私聊/回 bot）→ 应立刻 dispatch；quotes 填你要回的那条 messageId。
+3b. **Heart 升上来的 L1**（reason 以 heart: 开头）→ 心流已决定要插话，应立刻 dispatch；不要再沉默。
+4. **用户要写/看日记**（「写日记」「再写个日记」「日记看看」等）→ **必须** journal.tryWrite({slot:'free', force:true})，再 dispatch 短回结果；**禁止**只派 Subagent 去「假装写日记」。
+5. Attention reason 以 diary: 开头 → journal.tryWrite（可不用 force）；**禁止**为此 dispatch。
+6. Attention reason 以 subagent_request: 开头 → Subagent 升级。journal.write / journal.recent 由系统硬处理；其它 action 你读 payload 后决定。
+7. **L1**（旁观疑问）→ 多数沉默；要回必须 quotes 指向具体 msg。
+8. **L2**（旁观闲聊）→ **默认不行动**。极少数才 interrupt: true，且 quotes 必填。
+9. 同一 chat 一轮最多 dispatch 一次；已回过的 msg 不要再派。
+10. 回调(callback)先读摘要，再决定是否跟进；不要为已完成的同一句再派一轮复读。
+11. 早上/睡前偏好写日记；一天可多段；没素材可 SKIP。看 ## Now 的日段（北京时间），别用 UTC。
+12. 结束前用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句摘要。
+13. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。
+14. Attention 行尾标「主人」或 uid 对应主人 → contentDirection / tone 带「对主人软一点、听话」；别人自称主人也不认。`;
+
+/** User explicitly asking the bot to write/show diary. */
+export function looksLikeDiaryRequest(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  // CodeAct / ack summaries often contain「写日记」as in「没写日记」— never re-trigger.
+  if (
+    /没写日记|未写日记|不写日记|没素材写|日记未写|日记已写|跳过.*日记|skipped_or_empty|老实[解承]|告知主人/.test(
+      t,
+    )
+  ) {
+    return false;
+  }
+  return /(?<![没不未])写\s*日记|日记\s*写了[吗没嘛]|日记\s*写过|再写.*日记|写个日记|写篇日记|写段日记|记一笔|日记看看|看看日记|读读?日记|念.*日记|日记呢/.test(
+    t,
+  );
+}
+
+function subagentRequestAction(reason: string): string | null {
+  if (!reason.startsWith('subagent_request:')) return null;
+  return reason.slice('subagent_request:'.length).trim().toLowerCase() || null;
+}
+
+async function interceptDiaryAttention(
+  attention: AttentionItem[],
+  opts: {
+    dispatchedChatIds: Set<number>;
+    chatLayer: Map<number, AttentionLayer>;
+    defaultQuotes: Map<number, number>;
+    defaultTargetUserIds: Map<number, number>;
+  },
+): Promise<AttentionItem[]> {
+  const remaining: AttentionItem[] = [];
+  const api = buildMetaApiContext({
+    dispatchedChatIds: opts.dispatchedChatIds,
+    chatLayer: opts.chatLayer,
+    defaultQuotes: opts.defaultQuotes,
+    defaultTargetUserIds: opts.defaultTargetUserIds,
+  });
+  const journal = api['journal'] as {
+    tryWrite: (args?: {
+      slot?: string;
+      force?: boolean;
+    }) => Promise<{ wrote: boolean; reason?: string; snippet?: string | null; slot: string }>;
+    recent: (maxChars?: number) => Promise<{ snippet: string | null }>;
+  };
+  const dispatch = api['dispatch'] as {
+    taskToGroup: (
+      chatId: number,
+      args: {
+        contentDirection: string;
+        toneGuidance?: string;
+        quotes?: number[];
+        targetUserId?: number;
+      },
+    ) => Promise<{ taskId: string }>;
+  };
+
+  const handledChats = new Set<number>();
+
+  async function ackDiary(
+    a: AttentionItem,
+    result: { wrote: boolean; reason?: string; snippet?: string | null },
+  ): Promise<void> {
+    if (!isMetaSubagentChat(a.chatId)) return;
+    const snip = (result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const direction = result.wrote
+      ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
+      : `主人要写日记，这次没写成（${result.reason || 'skip'}）。短回老实说明（刚写过/没素材/跳过），禁止假装已经写完。`;
+    const dispatched = await dispatch.taskToGroup(a.chatId, {
+      contentDirection: direction,
+      toneGuidance: '短、傲娇、像发微信；别小作文',
+      quotes: a.messageId ? [a.messageId] : undefined,
+      targetUserId: a.userId && a.userId > 0 ? a.userId : undefined,
+    });
+    if (dispatched.taskId !== 'skipped_busy') return;
+    try {
+      const { getAttentionAccumulator } = await import('./attention.js');
+      await getAttentionAccumulator().requeue([
+        {
+          ...a,
+          id: `diary-ack-${a.chatId}-${Date.now()}`,
+          reason: result.wrote ? 'diary_ack:wrote' : `diary_ack:skip`,
+          textPreview: result.wrote
+            ? `日记已写：${snip || '见文件'}`
+            : `日记未写：${result.reason || 'skip'}`,
+          createdAt: Date.now(),
+          payload: {
+            wrote: result.wrote,
+            reason: result.reason,
+            snippet: result.snippet ?? null,
+          },
+        },
+      ]);
+    } catch (err) {
+      logger.warn({ err, chatId: a.chatId }, 'Meta diary ack requeue failed');
+    }
+  }
+
+  for (const a of attention) {
+    // Callbacks / diary_ack leftovers must not be re-parsed as user diary asks
+    // (summary text often contains「写日记」and used to cascade another CodeAct).
+    if (a.layer === 'L1_CALLBACK' || a.reason.startsWith('callback:')) {
+      remaining.push(a);
+      continue;
+    }
+
+    const text = a.textPreview ?? '';
+    const ackOnly = a.reason.startsWith('diary_ack:');
+    const reqAction = subagentRequestAction(a.reason);
+    const userAsk = !ackOnly && !reqAction && looksLikeDiaryRequest(text);
+    const nudge = a.reason.startsWith('diary:');
+    const journalReq =
+      reqAction === 'journal.write' ||
+      reqAction === 'journal.trywrite' ||
+      reqAction === 'journal.recent';
+
+    if (!ackOnly && !userAsk && !nudge && !journalReq) {
+      remaining.push(a);
+      continue;
+    }
+    if (handledChats.has(a.chatId)) continue;
+
+    try {
+      if (ackOnly) {
+        handledChats.add(a.chatId);
+        const wrote = a.reason.includes('wrote') || a.payload?.['wrote'] === true;
+        await ackDiary(a, {
+          wrote,
+          reason: typeof a.payload?.['reason'] === 'string' ? a.payload['reason'] : 'skip',
+          snippet: typeof a.payload?.['snippet'] === 'string' ? a.payload['snippet'] : text,
+        });
+        continue;
+      }
+
+      if (reqAction === 'journal.recent') {
+        handledChats.add(a.chatId);
+        if (!env().DREAM_JOURNAL_ENABLED) {
+          await dispatch.taskToGroup(a.chatId, {
+            contentDirection: '日记功能关着。短回说明一下，别编日记。',
+            toneGuidance: '短、像发微信',
+            quotes: a.messageId ? [a.messageId] : undefined,
+          });
+          continue;
+        }
+        const { snippet } = await journal.recent(280);
+        const snip = (snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        await dispatch.taskToGroup(a.chatId, {
+          contentDirection: snip
+            ? `主人要看日记。短回并点一点真实片段：「${snip}」。禁止编造。`
+            : '暂时没有可念的日记片段。短回说明，别编。',
+          toneGuidance: '短、傲娇、像发微信；别小作文',
+          quotes: a.messageId ? [a.messageId] : undefined,
+        });
+        logger.info({ chatId: a.chatId }, 'Meta subagent_request journal.recent');
+        continue;
+      }
+
+      if (
+        reqAction === 'journal.write' ||
+        reqAction === 'journal.trywrite' ||
+        userAsk ||
+        nudge
+      ) {
+        if (!env().DREAM_JOURNAL_ENABLED) {
+          handledChats.add(a.chatId);
+          if (userAsk || reqAction) {
+            await dispatch.taskToGroup(a.chatId, {
+              contentDirection: '日记功能关着。短回说明一下，别假装写完。',
+              toneGuidance: '短、像发微信',
+              quotes: a.messageId ? [a.messageId] : undefined,
+            });
+          }
+          continue;
+        }
+
+        const slot =
+          nudge && a.reason.includes('morning')
+            ? 'morning'
+            : nudge && a.reason.includes('bedtime')
+              ? 'bedtime'
+              : 'free';
+        const force = !!(userAsk || reqAction);
+        const result = await journal.tryWrite({ slot, force });
+        handledChats.add(a.chatId);
+        logger.info(
+          { chatId: a.chatId, userAsk, nudge, reqAction, ...result },
+          'Meta diary intercept',
+        );
+
+        if (userAsk || reqAction) await ackDiary(a, result);
+        continue;
+      }
+    } catch (err) {
+      logger.warn({ err, chatId: a.chatId }, 'Meta diary intercept failed');
+      remaining.push(a);
+    }
+  }
+
+  return remaining.filter((a) => !handledChats.has(a.chatId));
+}
 
 async function loadBackgroundDreaming(): Promise<string> {
   try {
@@ -48,8 +262,46 @@ function extractDigest(text: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
-async function runMetaCode(code: string): Promise<void> {
-  const api = buildMetaApiContext();
+function buildAttentionMaps(attention: AttentionItem[]): {
+  chatLayer: Map<number, AttentionLayer>;
+  defaultQuotes: Map<number, number>;
+  defaultTargetUserIds: Map<number, number>;
+} {
+  const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
+  const chatLayer = new Map<number, AttentionLayer>();
+  const defaultQuotes = new Map<number, number>();
+  const defaultTargetUserIds = new Map<number, number>();
+  for (const a of attention) {
+    const prev = chatLayer.get(a.chatId);
+    if (!prev || (rank[a.layer] ?? 0) >= (rank[prev] ?? 0)) {
+      chatLayer.set(a.chatId, a.layer);
+    }
+    if (a.messageId && a.messageId > 0) {
+      // Prefer the newest messageId as the reply quote (burst → last bubble).
+      const existing = defaultQuotes.get(a.chatId) ?? 0;
+      const layerOk = a.layer === 'L0' || a.layer === 'L1' || a.layer === 'L1_CALLBACK';
+      if (!existing || (layerOk && a.messageId >= existing)) {
+        defaultQuotes.set(a.chatId, a.messageId);
+        if (a.userId && a.userId > 0) defaultTargetUserIds.set(a.chatId, a.userId);
+      }
+    } else if (a.userId && a.userId > 0 && !defaultTargetUserIds.has(a.chatId)) {
+      defaultTargetUserIds.set(a.chatId, a.userId);
+    }
+  }
+  return { chatLayer, defaultQuotes, defaultTargetUserIds };
+}
+
+async function runMetaCode(
+  code: string,
+  opts: {
+    dispatchedChatIds: Set<number>;
+    isAborted: () => boolean;
+    chatLayer: Map<number, AttentionLayer>;
+    defaultQuotes: Map<number, number>;
+    defaultTargetUserIds: Map<number, number>;
+  },
+): Promise<void> {
+  const api = buildMetaApiContext(opts);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
     ...args: string[]
   ) => (...args: unknown[]) => Promise<unknown>;
@@ -62,21 +314,140 @@ async function runMetaCode(code: string): Promise<void> {
   ]);
 }
 
-async function autoDispatchL0(attention: AttentionItem[]): Promise<void> {
-  const api = buildMetaApiContext();
+async function autoDispatchL0(
+  attention: AttentionItem[],
+  skipChatIds?: Set<number>,
+  maps?: {
+    chatLayer: Map<number, AttentionLayer>;
+    defaultQuotes: Map<number, number>;
+    defaultTargetUserIds: Map<number, number>;
+  },
+): Promise<Set<number>> {
+  const busyChatIds = new Set<number>();
+  const api = buildMetaApiContext({
+    dispatchedChatIds: skipChatIds,
+    chatLayer: maps?.chatLayer,
+    defaultQuotes: maps?.defaultQuotes,
+    defaultTargetUserIds: maps?.defaultTargetUserIds,
+  });
   const d = api['dispatch'] as {
     taskToGroup: (
       chatId: number,
-      args: { contentDirection: string; quotes?: number[] },
-    ) => Promise<unknown>;
+      args: {
+        contentDirection: string;
+        toneGuidance?: string;
+        quotes?: number[];
+        relatedQuotes?: number[];
+        targetUserId?: number;
+      },
+    ) => Promise<{ taskId: string }>;
   };
-  for (const a of attention.filter((x) => x.layer === 'L0')) {
+
+  // One CodeAct per chat — L0 + Heart-elevated L1 (reason heart:… / wait_resume:heart:…).
+  const l0ByChat = new Map<number, AttentionItem[]>();
+  for (const a of attention) {
+    const heartForce = a.reason.includes('heart:');
+    if (a.layer !== 'L0' && !heartForce) continue;
     if (!isMetaSubagentChat(a.chatId)) continue;
-    await d.taskToGroup(a.chatId, {
-      contentDirection: `直接回复用户消息 #${a.messageId ?? ''}：${a.textPreview ?? a.reason}`,
-      quotes: a.messageId ? [a.messageId] : undefined,
-    });
+    if (skipChatIds?.has(a.chatId)) continue;
+    const list = l0ByChat.get(a.chatId);
+    if (list) list.push(a);
+    else l0ByChat.set(a.chatId, [a]);
   }
+
+  for (const [chatId, siblings] of l0ByChat) {
+    const withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
+    const latest =
+      withIds.length > 0
+        ? withIds.reduce((best, cur) =>
+            (cur.messageId ?? 0) >= (best.messageId ?? 0) ? cur : best,
+          )
+        : siblings[0]!;
+
+    // Heart pile-on: if CodeAct busy or bot just spoke, drop heart: items
+    // (mark answered) so the next tick doesn't fire a near-duplicate reply.
+    // L0/@ siblings still dispatch normally.
+    const heartOnly = siblings.every((s) => s.reason.includes('heart:'));
+    if (heartOnly && (await shouldSuppressHeartAutoDispatch(chatId))) {
+      try {
+        const { markMessageAnswered } = await import('./answered.js');
+        for (const s of withIds) {
+          if (s.messageId) await markMessageAnswered(chatId, s.messageId);
+        }
+        logger.info(
+          {
+            chatId,
+            dropped: withIds.map((s) => s.messageId).filter(Boolean),
+            reason: 'heart_refractory_or_busy',
+          },
+          'Meta autoDispatch: suppress heart pile-on',
+        );
+      } catch {
+        /* non-critical */
+      }
+      continue;
+    }
+
+    const who =
+      typeof latest.payload?.['username'] === 'string' && latest.payload['username']
+        ? `@${latest.payload['username']}`
+        : latest.userId
+          ? `uid:${latest.userId}`
+          : '用户';
+    const masterHint =
+      latest.userId && latest.userId === env().MASTER_UID
+        ? '对方是主人(@Zh_Taiwan)：软一点、听话一点。'
+        : '';
+    const burstHint =
+      withIds.length > 1
+        ? `对方连发了 ${withIds.length} 条，只回最后一条 #${latest.messageId}，前面当上下文。`
+        : '';
+    const heartHint =
+      latest.reason.includes('heart:')
+        ? '这是心流决定插话的旁观消息（未必 @你）：自然接一句，别空问候。'
+        : '';
+    const relatedQuotes = withIds
+      .map((s) => s.messageId!)
+      .filter((id) => id !== latest.messageId);
+    const r = await d.taskToGroup(chatId, {
+      contentDirection: buildL0ContentDirection({
+        who,
+        messageId: latest.messageId,
+        textPreview: latest.textPreview,
+        replyTo: replyToFromPayload(latest.payload),
+        burstHint: `${burstHint}${heartHint}`,
+        masterHint,
+      }),
+      toneGuidance: '短、像发微信；群聊微反应；别小作文；别复读',
+      quotes: latest.messageId ? [latest.messageId] : undefined,
+      relatedQuotes: relatedQuotes.length ? relatedQuotes : undefined,
+      targetUserId: latest.userId && latest.userId > 0 ? latest.userId : undefined,
+    });
+    if (r.taskId === 'skipped_busy') busyChatIds.add(chatId);
+    else if (skipChatIds) skipChatIds.add(chatId);
+  }
+  return busyChatIds;
+}
+
+/** True when Heart auto-dispatch should stay quiet (busy CodeAct or recent bot reply). */
+async function shouldSuppressHeartAutoDispatch(chatId: number): Promise<boolean> {
+  const refractoryMs = env().META_HEART_REFRACTORY_MS;
+  try {
+    const { isCodeActBusy } = await import('../subagent/task-store.js');
+    if (await isCodeActBusy(chatId)) return true;
+  } catch {
+    /* ignore */
+  }
+  if (refractoryMs <= 0) return false;
+  try {
+    const { getChatState } = await import('../pipeline/timing/chat-runtime.js');
+    const tstate = await getChatState(chatId);
+    const at = tstate?.lastBotReplyAt;
+    if (at && at > 0 && Date.now() - at < refractoryMs) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
 }
 
 export async function runMetaSession(
@@ -90,13 +461,55 @@ export async function runMetaSession(
   const state = getGlobalState();
   const engine = getContextEngine('meta');
   const dreaming = await loadBackgroundDreaming();
+  const dispatchedChatIds = new Set<number>();
+  const maps = buildAttentionMaps(attention);
 
-  const attentionBlock = attention
-    .map(
-      (a) =>
-        `- [${a.layer} p=${a.pressure}] chat=${a.chatId} msg=${a.messageId ?? '-'} uid=${a.userId ?? '-'} reason=${a.reason}` +
-        (a.textPreview ? ` text="${a.textPreview.slice(0, 120)}"` : ''),
-    )
+  // Hard-intercept user diary asks / diary:* nudges before Meta LLM (Subagent has no journal tool).
+  const workAttention = await interceptDiaryAttention(attention, {
+    dispatchedChatIds,
+    chatLayer: maps.chatLayer,
+    defaultQuotes: maps.defaultQuotes,
+    defaultTargetUserIds: maps.defaultTargetUserIds,
+  });
+  let codeRan = dispatchedChatIds.size > 0;
+
+  if (workAttention.length === 0 && callbacks.length === 0) {
+    return { digest: codeRan ? 'diary_intercept_only' : null, codeRan };
+  }
+
+  // Pure ok-callbacks: CodeAct already spoke. Do not Meta-LLM another group reply
+  // (was causing near-duplicate second bubbles after diary ack).
+  const userFacing = workAttention.filter((a) => a.layer === 'L0' || a.layer === 'L1');
+  const onlyOkCallbacks =
+    userFacing.length === 0 &&
+    callbacks.length > 0 &&
+    callbacks.every((c) => c.ok) &&
+    workAttention.every((a) => a.layer === 'L1_CALLBACK' || a.reason.startsWith('callback:'));
+  if (onlyOkCallbacks) {
+    const digest = callbacks
+      .map((c) => c.summary)
+      .join('; ')
+      .slice(0, 240);
+    if (digest) state.addDigest(digest);
+    logger.info(
+      { callbacks: callbacks.length, alreadyDispatched: codeRan },
+      'Meta callbacks-only session skipped (no re-dispatch)',
+    );
+    return { digest: digest || 'callbacks_only', codeRan };
+  }
+
+  const attentionBlock = workAttention
+    .map((a) => {
+      const un =
+        typeof a.payload?.['username'] === 'string' && a.payload['username']
+          ? `@${a.payload['username']}`
+          : '';
+      const master = a.userId && a.userId === env().MASTER_UID ? ' 主人' : '';
+      return (
+        `- [${a.layer} p=${a.pressure}] chat=${a.chatId} msg=${a.messageId ?? '-'} uid=${a.userId ?? '-'}${un ? ` ${un}` : ''}${master} reason=${a.reason}` +
+        (a.textPreview ? ` text="${a.textPreview.slice(0, 120)}"` : '')
+      );
+    })
     .join('\n');
 
   const callbackBlock =
@@ -108,30 +521,34 @@ export async function runMetaSession(
 
   const digestBlock = state
     .recentDigests(6)
-    .map((d) => `- ${new Date(d.at).toISOString()} ${d.text.slice(0, 160)}`)
+    .map((d) => `- ${formatBeijingNowLine(new Date(d.at))} ${d.text.slice(0, 160)}`)
     .join('\n');
 
   const { prompt, manifest } = await engine.assemble([
     staticText('meta-system', META_SYSTEM),
     staticText('meta-persona-direction', dreaming || '（无人设方向文件）'),
+    ephemeralText('meta-master', buildMasterIdentityBlock()),
     deltaText('meta-digests', `## Recent session digests\n${digestBlock || '(none)'}`),
     ephemeralText('meta-attention', `## Attention set\n${attentionBlock || '(none)'}`),
     ephemeralText('meta-callbacks', `## Callbacks\n${callbackBlock}`),
     volatileText(
       'meta-now',
-      `## Now\nISO=${new Date().toISOString()}\nWrite JS to dispatch if needed.`,
+      `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\n派 Subagent 时 tone 默认短回；看日段决定早上/晚上口吻。Write JS to dispatch if needed.`,
     ),
   ]);
 
   logger.info(
     {
-      attention: attention.length,
+      attention: workAttention.length,
+      intercepted: attention.length - workAttention.length,
       callbacks: callbacks.length,
       cacheHitRatio: Number(manifest.cacheHitRatio.toFixed(3)),
       totalChars: manifest.totalChars,
     },
     'Meta session start',
   );
+
+  const workMaps = buildAttentionMaps(workAttention);
 
   let result;
   try {
@@ -141,7 +558,8 @@ export async function runMetaSession(
         { role: 'system', content: prompt },
         {
           role: 'user',
-          content: '根据 Attention / Callbacks 做本轮编排。需要行动就写 js 代码块调用 dispatch。',
+          content:
+            '根据 Attention / Callbacks 做本轮编排。L2 默认沉默；dispatch 时务必 quotes:[msgId]。只在需要时写 js。',
         },
       ],
       maxTokens: 1200,
@@ -149,29 +567,91 @@ export async function runMetaSession(
     });
   } catch (err) {
     logger.warn({ err }, 'Meta LLM failed');
-    await autoDispatchL0(attention);
+    const busy = await autoDispatchL0(workAttention, dispatchedChatIds, workMaps);
+    if (busy.size > 0) {
+      const toRequeue = workAttention.filter((a) => a.layer === 'L0' && busy.has(a.chatId));
+      if (toRequeue.length) {
+        try {
+          const { getAttentionAccumulator } = await import('./attention.js');
+          await getAttentionAccumulator().requeue(toRequeue);
+        } catch {
+          /* non-critical */
+        }
+      }
+    }
     return { digest: 'meta_llm_failed_auto_l0', codeRan: true };
   }
 
   const text = result.content ?? '';
   const code = extractJsBlock(text);
-  let codeRan = false;
-  let codeFailed = false;
+  let aborted = false;
 
   if (code) {
     try {
-      await runMetaCode(code);
+      await runMetaCode(code, {
+        dispatchedChatIds,
+        isAborted: () => aborted,
+        chatLayer: workMaps.chatLayer,
+        defaultQuotes: workMaps.defaultQuotes,
+        defaultTargetUserIds: workMaps.defaultTargetUserIds,
+      });
       codeRan = true;
     } catch (err) {
-      codeFailed = true;
       logger.warn({ err }, 'Meta code exec failed');
+    } finally {
+      aborted = true;
     }
   }
 
-  const hasL0 = attention.some((a) => a.layer === 'L0');
-  if (hasL0 && (!codeRan || codeFailed)) {
-    await autoDispatchL0(attention);
+  // L0 / Heart-elevated must never be silent: gap-fill any chat Meta didn't dispatch.
+  const pendingL0 = workAttention.filter(
+    (a) =>
+      (a.layer === 'L0' || a.reason.includes('heart:')) &&
+      isMetaSubagentChat(a.chatId) &&
+      !dispatchedChatIds.has(a.chatId),
+  );
+  const busyChatIds = new Set<number>();
+  if (pendingL0.length > 0) {
+    const busy = await autoDispatchL0(pendingL0, dispatchedChatIds, workMaps);
+    for (const id of busy) busyChatIds.add(id);
     codeRan = true;
+  }
+
+  // CodeAct 占线时 L0 已被 flush 掉 → 丢回复。把最新 L0 塞回 Attention 下一 tick 再试。
+  // 但若该 message 已回过、或当前 in-flight 任务已在回同一条，则不再 requeue（防复读同句）。
+  if (busyChatIds.size > 0) {
+    const candidates = workAttention.filter(
+      (a) => (a.layer === 'L0' || a.reason.includes('heart:')) && busyChatIds.has(a.chatId),
+    );
+    const toRequeue: AttentionItem[] = [];
+    for (const a of candidates) {
+      if (a.messageId && a.messageId > 0) {
+        try {
+          const { isMessageAnswered } = await import('./answered.js');
+          if (await isMessageAnswered(a.chatId, a.messageId)) continue;
+        } catch {
+          /* fail-open */
+        }
+        const inflight = state
+          .listTasks(a.chatId)
+          .filter((t) => t.status === 'queued' || t.status === 'running')
+          .some((t) => t.quoteMessageIds?.includes(a.messageId!));
+        if (inflight) continue;
+      }
+      toRequeue.push(a);
+    }
+    if (toRequeue.length) {
+      try {
+        const { getAttentionAccumulator } = await import('./attention.js');
+        await getAttentionAccumulator().requeue(toRequeue);
+        logger.info(
+          { chats: [...busyChatIds], n: toRequeue.length },
+          'Meta requeued L0 Attention (chat busy)',
+        );
+      } catch (err) {
+        logger.warn({ err }, 'Meta requeue busy L0 failed');
+      }
+    }
   }
 
   const digest = extractDigest(text) ?? text.slice(0, 240);

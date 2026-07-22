@@ -15,7 +15,7 @@ describe('parseEnv', () => {
     expect(env.CONTEXT_MAX_LENGTH).toBe(600);
     expect(env.JUDGE_WINDOW_SIZE).toBe(10);
     expect(env.MASTER_UID).toBe(0);
-    expect(env.BOT_NICKNAMES).toEqual(['xxb', '啾咪囝']);
+    expect(env.BOT_NICKNAMES).toEqual(['xxb', '啾咪囝', '啾咪']);
   });
 
   it('throws on missing BOT_TOKEN', () => {

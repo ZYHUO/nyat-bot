@@ -250,20 +250,29 @@ export function startCronJobs(deps?: CronDeps): void {
     void safeRun('idle-check', runIdleCheck);
   }));
 
-  // Dream journal (first-person diary) — independent of Meta flag
+  // Dream journal — multi cron (UTC, comma-separated); model WRITE/SKIP; append entries
   if (env().DREAM_JOURNAL_ENABLED) {
-    const djCron = env().DREAM_JOURNAL_CRON;
-    if (validate(djCron)) {
-      tasks.push(schedule(djCron, () => {
-        void safeRun('dream-journal', async () => {
-          const { runDreamJournal } = await import('./dream-journal.js');
-          await runDreamJournal();
-        });
-      }));
-      logger.info({ cron: djCron }, 'Dream journal cron enabled');
-    } else {
-      logger.warn({ expr: djCron }, 'Invalid DREAM_JOURNAL_CRON, dream-journal disabled');
+    const exprs = env()
+      .DREAM_JOURNAL_CRON.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    let any = false;
+    for (const djCron of exprs) {
+      if (!validate(djCron)) {
+        logger.warn({ expr: djCron }, 'Invalid DREAM_JOURNAL_CRON entry, skipped');
+        continue;
+      }
+      any = true;
+      tasks.push(
+        schedule(djCron, () => {
+          void safeRun('dream-journal', async () => {
+            const { runDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
+            await runDreamJournal({ slot: inferDreamSlot() });
+          });
+        }),
+      );
     }
+    if (any) logger.info({ crons: exprs }, 'Dream journal cron enabled');
   }
 
   // 借力其他 bot:周期观察学命令档案(P1,纯观察,flag 默认关)

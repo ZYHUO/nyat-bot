@@ -1,0 +1,31 @@
+{
+  "name": "@nyat/nyatdb",
+  "version": "0.1.0",
+  "description": "NyatDB — page-store ChatLog engine (TS + optional Rust napi)",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {},
+  "peerDependencies": {
+    "@nyat/nyatdb-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "@nyat/nyatdb-native": {
+      "optional": true
+    }
+  }
+}

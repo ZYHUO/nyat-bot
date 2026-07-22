@@ -255,7 +255,7 @@ async function runJudgedEntry(
   let gateBypass = false;
   let replans = 0;
 
-  // eslint-disable-next-line no-constant-condition
+   
   while (true) {
     const controller = registerGeneration(chatId, epoch);
     let interrupted = false;

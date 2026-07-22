@@ -85,6 +85,10 @@ const envValues: Record<string, unknown> = {
   MTM_INPUT_MAX_CHARS: 16000,
 };
 vi.mock('../../../../src/env.js', () => ({ env: () => envValues }));
+vi.mock('../../../../src/nyatdb/index.js', () => ({
+  getNyatDb: () => null,
+  unpackChatLogRow: () => ({}),
+}));
 
 import { maybeCompressMidTerm, getMidTermBlock } from '../../../../src/pipeline/context/mid-term.js';
 
@@ -114,6 +118,18 @@ describe('mid-term memory', () => {
     vi.clearAllMocks();
     envValues['MTM_ENABLED'] = true;
     callWithFallbackMock.mockResolvedValue({ content: '群里在聊代理协议,小明宣布退群又回来了' });
+  });
+
+  it('NyatDB 独占 ctx 时跳过 Redis 中期压缩', async () => {
+    envValues['NYATDB_ENABLED'] = true;
+    envValues['NYATDB_DUAL_WRITE'] = true;
+    envValues['NYATDB_REDIS_MIRROR'] = false;
+    fillCtx(400);
+    await maybeCompressMidTerm(CHAT);
+    expect(callWithFallbackMock).not.toHaveBeenCalled();
+    delete envValues['NYATDB_ENABLED'];
+    delete envValues['NYATDB_DUAL_WRITE'];
+    delete envValues['NYATDB_REDIS_MIRROR'];
   });
 
   it('低于阈值不触发压缩', async () => {

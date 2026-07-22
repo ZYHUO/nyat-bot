@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import type { FormattedMessage, UpdateLike } from '../shared/types.js';
+import { unwrapPromptEnvelope, looksLikePromptEnvelope } from '../shared/message-text.js';
 
 interface TgUser {
   id: number;
@@ -105,7 +106,7 @@ function extractReplyTo(replyMsg: TgMessage): FormattedMessage['replyTo'] {
     messageId: replyMsg.message_id,
     uid: from?.id ?? 0,
     fullName: from ? buildFullName(from) : 'Unknown',
-    textSnippet: text.slice(0, 80),
+    textSnippet: text.slice(0, 400),
     ...(doc?.file_id && { documentFileId: doc.file_id, documentMimeType: doc.mime_type, documentFileName: doc.file_name }),
     ...(photo?.length && { imageFileId: photo[photo.length - 1]!.file_id }),
   };
@@ -174,6 +175,10 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
     ? (isAnonymousAdmin ? 'admin' : 'channel')
     : undefined;
 
+  const rawText = msg.text ?? '';
+  const textContent =
+    rawText && looksLikePromptEnvelope(rawText) ? unwrapPromptEnvelope(rawText) : rawText;
+
   const formatted: FormattedMessage = {
     role: 'user',
     uid,
@@ -183,7 +188,7 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
     // 原时间入册,上下文里会把几小时前的行当成"刚发的"渲染(review #0)
     timestamp: msg.edit_date ?? msg.date,
     messageId: msg.message_id,
-    textContent: msg.text ?? '',
+    textContent,
     isForwarded,
     isBot,
     ...(isAnonymous && { isAnonymous, anonymousType }),

@@ -217,14 +217,47 @@ async function announce(chatIds: number[], kind: 'goodnight' | 'morning'): Promi
   }
 }
 
-/** 回放一个 chat 的最欠回条目(wait-resume 通道);返回是否还有下一个 */
+/** 回放一个 chat 的最欠回条目;返回是否还有下一个 */
 async function drainOneChat(): Promise<boolean> {
   const queues = await peekSleepQueues(); // 点名优先,其次最新
   if (queues.length === 0) return false;
   const { chatId } = queues[0]!;
-  // 防御:补回只能走 turn actor 的 wait-resume 通道。非 actor 群理论上
-  // 在 pushSleepPending 就被拦了入不了队;万一灰度名单中途变更让它残留,
-  // 这里**先清掉再跳过**(clear 而非 take —— 不假装回放),避免被反复挑中。
+
+  // Meta 群：欠账重投 Attention → Meta→CodeAct 补回（不走 turn-actor）。
+  const { isMetaSubagentChat } = await import('../meta/flags.js');
+  if (isMetaSubagentChat(chatId)) {
+    const items = await takeSleepPending(chatId);
+    if (items.length === 0) return queues.length > 1;
+    try {
+      const { getAttentionAccumulator } = await import('../meta/attention.js');
+      const { formatMessage } = await import('../pipeline/formatter.js');
+      const acc = getAttentionAccumulator();
+      for (const it of items) {
+        const addressed = ADDRESSED_RULES_FOR_PRIORITY.has(it.rule ?? '');
+        let textPreview = '';
+        try {
+          const formatted = formatMessage(it.entry.update);
+          textPreview = (formatted?.textContent ?? '').slice(0, 200);
+        } catch {
+          /* optional */
+        }
+        await acc.ingestAsync({
+          chatId,
+          layer: addressed || chatId > 0 ? 'L0' : 'L1',
+          reason: `sleep_catchup:${it.rule ?? 'reply'}`,
+          messageId: it.entry.messageId,
+          textPreview: textPreview || `sleep catch-up #${it.entry.messageId}`,
+          pressure: addressed ? 110 : 70,
+        });
+      }
+      logger.info({ chatId, replayed: items.length }, 'Sleep cycle: Meta Attention catch-up');
+    } catch (err) {
+      logger.warn({ err, chatId }, 'Sleep cycle: Meta catch-up failed');
+    }
+    return queues.length > 1;
+  }
+
+  // turn-actor wait-resume 通道
   if (!isTurnActorChat(chatId)) {
     await clearSleepPending(chatId);
     logger.info({ chatId }, 'Sleep cycle: chat not on turn actor, queue dropped');
@@ -233,11 +266,6 @@ async function drainOneChat(): Promise<boolean> {
   const items = await takeSleepPending(chatId); // 取全部欠账(旧→新)并清空该 chat
   if (items.length === 0) return queues.length > 1;
   try {
-    // 全量注入 pending(曾只回放 1 条、销毁其余 —— 48h 实测 52% 欠账丢失)。
-    // 仍是一个回合一个念头:全部条目带 waitReplay(drain 时 hasFresh=false
-    // 全保留),点名条目标 direct → actor 锚点选择自然落在点名消息上
-    // (最后一条 direct 优先),非锚点条目 tracking-only 但写手经 burstIds
-    // 看得到整段欠账。
     const addressed = items.filter((i) => ADDRESSED_RULES_FOR_PRIORITY.has(i.rule ?? ''));
     const anchor = (addressed.length > 0 ? addressed : items).at(-1)!;
     for (const it of items) {
@@ -302,6 +330,12 @@ export async function runSleepCycle(): Promise<void> {
         const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
         await announceDmGreetings('goodnight');
       }
+      // 睡前日记窗口：提醒 Meta 可 journal.tryWrite；cron 仍是保底写手
+      if (env().DREAM_JOURNAL_ENABLED && env().DREAM_JOURNAL_HOOK_SLEEP) {
+        void import('./dream-journal.js')
+          .then(({ nudgeMetaForDream }) => nudgeMetaForDream('bedtime'))
+          .catch((err) => logger.debug({ err }, 'Dream journal bedtime nudge failed'));
+      }
     } else {
       // 起床:先问候(欠回复的群优先),下一分钟起逐 chat 补回
       const oweChats = (await peekSleepQueues()).map((q) => q.chatId);
@@ -311,6 +345,11 @@ export async function runSleepCycle(): Promise<void> {
       if (e.SLEEP_DM_ENABLED) {
         const { announceDmGreetings } = await import('../pipeline/dm-proactive.js');
         await announceDmGreetings('morning');
+      }
+      if (env().DREAM_JOURNAL_ENABLED && env().DREAM_JOURNAL_HOOK_SLEEP) {
+        void import('./dream-journal.js')
+          .then(({ nudgeMetaForDream }) => nudgeMetaForDream('morning'))
+          .catch((err) => logger.debug({ err }, 'Dream journal morning nudge failed'));
       }
       if (oweChats.length > 0) {
         await redis.set(DRAIN_KEY, String(MORNING_DRAIN_BUDGET), 'EX', 3600);

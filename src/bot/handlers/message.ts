@@ -14,6 +14,17 @@ import { formatMessage } from '../../pipeline/formatter.js';
 import { detectReplyObligation, isObligationCancelMessage } from '../../pipeline/turn/obligation-detect.js';
 import { saveObligation, setActiveObligation, supersedeActiveObligation, getActiveObligationId, getObligation, updateObligationState } from '../../pipeline/turn/obligation-store.js';
 import { isMetaSubagentChat, getAttentionAccumulator } from '../../meta/index.js';
+import {
+  metaNeedsLegacyPipeline,
+  metaMuteBlocksReply,
+  tryMetaIngressIntercepts,
+} from '../../meta/ingress-intercepts.js';
+import { classifyAttentionLayer } from '../../meta/classify-layer.js';
+import {
+  runMetaBookkeepingHooks,
+  metaSleepGate,
+  messageHasMedia,
+} from '../../meta/bookkeeping.js';
 
 async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
@@ -64,7 +75,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
   };
 
   // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
-  // Slash commands fall through to legacy so /checkin etc still work until CodeAct tools cover them.
+  // Slash / checkin·stats NL → legacy. Gacha/game/DM-relay → Meta ingress intercepts.
   if (isMetaSubagentChat(chatId) && !isEdit) {
     const botIdentity = getBotIdentity();
     const directKind = detectDirectInteraction(ctx.update, {
@@ -74,52 +85,253 @@ async function handleUpdate(ctx: Context): Promise<void> {
       editByContentOnly: true,
     });
     const isDirect = directKind !== null;
-    const textPreview = (msg.text ?? msg.caption ?? '').slice(0, 200);
-    const isSlashCommand = /^\s*\//.test(msg.text ?? '');
+    const rawText = msg.text ?? msg.caption ?? '';
 
-    const formatted = formatMessage(ctx.update);
-    if (formatted) {
-      try {
-        const { addMessage } = await import('../../pipeline/context/manager.js');
-        await addMessage(chatId, formatted);
-      } catch (err) {
-        logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
-      }
-      // Keep vector memory / profile warm even when Meta owns the reply.
-      void import('../../memory/chroma.js')
-        .then(({ memorizeMessage }) => memorizeMessage(chatId, formatted))
-        .catch(() => {});
-      try {
-        const { recordUserMessage } = await import('../../tracking/user-profile.js');
-        if (formatted.role === 'user' && formatted.uid > 0) {
-          recordUserMessage(
-            chatId,
-            formatted.uid,
-            formatted.username,
-            formatted.fullName,
-            formatted.senderTag,
-            formatted.textContent,
-          );
-        }
-      } catch {
-        /* non-critical */
-      }
-    }
-
-    if (isSlashCommand) {
-      logger.info({ chatId, messageId }, 'Meta path: slash command → legacy pipeline');
+    // Fall through BEFORE Meta bookkeeping to avoid duplicate Redis/Qdrant writes.
+    if (metaNeedsLegacyPipeline(chatId, rawText, isDirect)) {
+      logger.info({ chatId, messageId }, 'Meta path: slash/checkin-stats → legacy pipeline');
       // fall through
     } else {
-      getAttentionAccumulator().ingest({
-        chatId,
-        layer: isDirect || chatId > 0 ? 'L0' : 'L2',
-        reason: isDirect ? `direct:${directKind}` : 'passive',
-        messageId,
-        userId,
-        textPreview,
-      });
-      logger.info({ chatId, messageId, layer: isDirect || chatId > 0 ? 'L0' : 'L2' }, 'Meta attention ingested');
-      return;
+      const formatted = formatMessage(ctx.update);
+      if (!formatted) {
+        logger.debug({ chatId, messageId }, 'Meta path: formatMessage empty, drop');
+        return;
+      }
+
+      const finishMeta = async (fm: typeof formatted): Promise<'done' | 'legacy'> => {
+        try {
+          const { addMessage } = await import('../../pipeline/context/manager.js');
+          await addMessage(chatId, fm);
+        } catch (err) {
+          logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
+        }
+        void import('../../memory/chroma.js')
+          .then(({ memorizeMessage }) => memorizeMessage(chatId, fm))
+          .catch(() => {});
+        void import('../../tracking/activity.js')
+          .then(({ recordMessage }) => recordMessage(chatId, fm.messageId, fm.uid))
+          .catch(() => {});
+        try {
+          const { recordUserMessage } = await import('../../tracking/user-profile.js');
+          if (fm.role === 'user' && fm.uid > 0) {
+            recordUserMessage(
+              chatId,
+              fm.uid,
+              fm.username,
+              fm.fullName,
+              fm.senderTag,
+              fm.textContent,
+            );
+          }
+        } catch {
+          /* non-critical */
+        }
+
+        runMetaBookkeepingHooks(chatId, fm);
+
+        if (metaMuteBlocksReply(chatId, fm, isDirect)) {
+          logger.debug({ chatId, uid: fm.uid }, 'Meta path: muted, skip Attention');
+          return 'done';
+        }
+
+        const intercept = await tryMetaIngressIntercepts(chatId, fm, { isDirect });
+        if (intercept === 'handled') {
+          logger.info({ chatId, messageId }, 'Meta path: feature intercept handled');
+          return 'done';
+        }
+        if (intercept === 'legacy') return 'legacy';
+
+        const textPreview = (fm.textContent || rawText).slice(0, 200);
+        const layerDec = classifyAttentionLayer({
+          chatId,
+          isDirect,
+          directKind,
+          text: textPreview,
+        });
+
+        const sleep = await metaSleepGate({
+          chatId,
+          formatted: fm,
+          isDirect,
+          layer: layerDec.layer === 'L1_CALLBACK' ? 'L1' : layerDec.layer,
+          update: ctx.update,
+          messageId,
+        });
+        if (sleep === 'silent' || sleep === 'queued') {
+          logger.info({ chatId, messageId, sleep, layer: layerDec.layer }, 'Meta path: asleep');
+          return 'done';
+        }
+
+        // Passive group chat: Heart decides是否插话 → 升 L1 再进 Meta。
+        // Heart 本身就是 gate（含 cooldown/engagement/wait/pass），放行后
+        // 不再跑 Meta timing——否则会和 Heart 双重否决、把已批准的插话掐掉。
+        // Direct/L0 仍直通 Meta；HEART 关时保持旧 L2 硬丢。
+        if (!isDirect && layerDec.layer !== 'L0') {
+          const { env } = await import('../../env.js');
+          if (env().HEART_ENABLED) {
+            void (async () => {
+              try {
+                const { evaluateMetaHeart } = await import('../../meta/heart-adapter.js');
+                const heart = await evaluateMetaHeart({
+                  chatId,
+                  formatted: fm,
+                  layer: layerDec.layer,
+                });
+                if (heart.verdict !== 'allow') return;
+
+                const elevLayer = heart.layer;
+                const elevReason = heart.reason;
+                const elevBoost = heart.pressureBoost ?? 0;
+
+                const basePressure = elevLayer === 'L0' ? 100 : elevLayer === 'L1' ? 70 : 30;
+                await getAttentionAccumulator().ingestAsync({
+                  chatId,
+                  layer: elevLayer,
+                  reason: elevReason,
+                  messageId,
+                  userId,
+                  textPreview,
+                  pressure: basePressure + elevBoost,
+                  payload: {
+                    username: fm.username || undefined,
+                    fullName: fm.fullName || undefined,
+                    heartPath: heart.path,
+                    ...(fm.replyTo
+                      ? {
+                          replyTo: {
+                            messageId: fm.replyTo.messageId,
+                            uid: fm.replyTo.uid,
+                            fullName: fm.replyTo.fullName,
+                            textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                          },
+                        }
+                      : {}),
+                  },
+                });
+                logger.info(
+                  { chatId, messageId, layer: elevLayer, reason: elevReason },
+                  'Meta attention ingested (heart)',
+                );
+              } catch (err) {
+                // Infra failure ≠ Heart "pass". Fail-open once into Attention so the
+                // msg isn't silently lost; gap-fill may still dispatch.
+                logger.warn({ err, chatId, messageId }, 'Meta heart path failed — soft ingest');
+                try {
+                  await getAttentionAccumulator().ingestAsync({
+                    chatId,
+                    layer: 'L1',
+                    reason: 'heart:infra_fail',
+                    messageId,
+                    userId,
+                    textPreview,
+                    pressure: 55,
+                    payload: {
+                      username: fm.username || undefined,
+                      fullName: fm.fullName || undefined,
+                      ...(fm.replyTo
+                        ? {
+                            replyTo: {
+                              messageId: fm.replyTo.messageId,
+                              uid: fm.replyTo.uid,
+                              fullName: fm.replyTo.fullName,
+                              textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                            },
+                          }
+                        : {}),
+                    },
+                  });
+                } catch (err2) {
+                  logger.warn({ err: err2, chatId, messageId }, 'Meta heart soft ingest failed');
+                }
+              }
+            })();
+            return 'done';
+          }
+
+          // Heart off: L2 旁观硬丢（旧行为）
+          if (layerDec.layer === 'L2') {
+            logger.debug({ chatId, messageId }, 'Meta path: L2 drop (no Attention)');
+            return 'done';
+          }
+        }
+
+        // Timing gate — only for L0/direct (and Heart-off L1). Heart path skips this.
+        try {
+          const { evaluateMetaTiming } = await import('../../meta/timing-adapter.js');
+          const timing = await evaluateMetaTiming({
+            chatId,
+            formatted: fm,
+            isDirect,
+            layer: layerDec.layer,
+            directKind,
+          });
+          if (timing.verdict === 'silence') {
+            logger.info(
+              { chatId, messageId, layer: layerDec.layer, reason: timing.reason },
+              'Meta path: timing gate silence',
+            );
+            return 'done';
+          }
+        } catch (err) {
+          logger.warn({ err, chatId }, 'Meta timing gate failed — fail-open to Attention');
+        }
+
+        // Typing starts at CodeAct (executor heartbeat), not here — coalesce may
+        // hold L0/L1 for META_L0_COALESCE_MS and premature typing looks stuck.
+
+        const basePressure =
+          layerDec.layer === 'L0' ? 100 : layerDec.layer === 'L1' ? 60 : 30;
+        await getAttentionAccumulator().ingestAsync({
+          chatId,
+          layer: layerDec.layer,
+          reason: layerDec.reason,
+          messageId,
+          userId,
+          textPreview,
+          pressure: basePressure + (layerDec.pressureBoost ?? 0),
+          payload: {
+            username: fm.username || undefined,
+            fullName: fm.fullName || undefined,
+            ...(fm.replyTo
+              ? {
+                  replyTo: {
+                    messageId: fm.replyTo.messageId,
+                    uid: fm.replyTo.uid,
+                    fullName: fm.replyTo.fullName,
+                    textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                  },
+                }
+              : {}),
+          },
+        });
+        logger.info({ chatId, messageId, layer: layerDec.layer }, 'Meta attention ingested');
+        return 'done';
+      };
+
+      // Vision/sticker off the grammY hot path — ingest text first when media-heavy.
+      if (messageHasMedia(formatted)) {
+        void (async () => {
+          try {
+            const { processMedia } = await import('../../pipeline/stages/media.js');
+            await processMedia(formatted);
+          } catch (err) {
+            logger.debug({ err, chatId }, 'Meta path: deferred processMedia failed');
+          }
+          const result = await finishMeta(formatted);
+          if (result === 'legacy') {
+            logger.warn({ chatId, messageId }, 'Meta deferred path cannot fall through — drop');
+          }
+        })();
+        return;
+      }
+
+      const result = await finishMeta(formatted);
+      if (result === 'legacy') {
+        logger.info({ chatId, messageId }, 'Meta path: intercept → legacy');
+        // fall through
+      } else {
+        return;
+      }
     }
   }
 

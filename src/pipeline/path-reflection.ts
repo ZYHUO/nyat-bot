@@ -33,7 +33,7 @@ export async function reviewPathDecision(input: {
   const config = getConfig();
   const systemPrompt = loadPrompt('task/path-reflection.md', config.promptsDir);
   const result = await callWithFallback({
-    usage: 'path_reflection',
+    usage: 'judge',
     messages: [
       { role: 'system', content: systemPrompt },
       {

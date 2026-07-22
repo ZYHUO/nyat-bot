@@ -9,6 +9,7 @@ NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot: a humanlike reply engin
 ## Tech stack
 
 - **Bot**: grammY · **Queue/state**: BullMQ + Redis · **Structured DB**: better-sqlite3 (WAL, single connection via `getDb()`) · **Vectors**: Qdrant (384-dim local `@xenova/transformers` embeddings, no external embedding API) · **LLM**: Vercel AI SDK + native `fetch`.
+- **Monorepo**: npm workspaces — see [`docs/modules.md`](docs/modules.md). Packages: `@nyat/nyatdb` (`packages/nyatdb`), `@nyat/context-engine` (`packages/context-engine`); host adapters under `src/nyatdb/`, `src/context-engine/`.
 - **Tooling**: `tsup` (build) · `tsx` (dev) · `vitest` (test) · `eslint` + `prettier` · `tsc --noEmit` (typecheck).
 - `tsconfig.json` is `strict`, `noUncheckedIndexedAccess`, `noUnusedLocals`/`noUnusedParameters`, `verbatimModuleSyntax` → **always use `import type` for type-only imports**, and mind possibly-undefined index access.
 

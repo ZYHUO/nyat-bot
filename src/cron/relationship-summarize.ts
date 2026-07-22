@@ -55,7 +55,7 @@ export async function runRelationshipSummarize(): Promise<void> {
       if (lines.length < 60) continue; // 素材太少,这轮跳过
 
       const result = await callWithFallback({
-        usage: 'summarize_deep',
+        usage: 'summarize',
         messages: [
           {
             role: 'system',

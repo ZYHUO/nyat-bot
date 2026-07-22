@@ -131,15 +131,14 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   let raw: string;
   try {
     const result = await callWithFallback({
-      usage: 'heart',
+      usage: 'judge',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ],
       // maxTokens 不再硬编码(callWithFallback 里显式参数会压过 usage 配置):
-      // step-3.5-flash 是推理模型,思考先烧 token,120 截断成空 → rejectEmpty
-      // throw → 整链耗尽 → fail-closed 吞回复(48h 1263 次)。上限由
-      // AI_USAGE_HEART_MAX_TOKENS 管理。
+      // 推理模型思考先烧 token 会截断成空 → rejectEmpty → fail-closed。
+      // 上限由 AI_USAGE_JUDGE_MAX_TOKENS 管理（heart 已并入 judge）。
       temperature: 0,
       rejectEmpty: true,
       // 只传原始打断信号。8s 预算改为 per-attempt cap(maxTimeoutMs):
@@ -167,7 +166,7 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   if ((!parsed || !raw.trim()) && !input.signal?.aborted) {
     try {
       const retry = await callWithFallback({
-        usage: 'heart',
+        usage: 'judge',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMsg },
@@ -200,8 +199,8 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   if (parsed.act === 'reply' && e.HEART_REFLECT_ENABLED && !input.signal?.aborted) {
     try {
       const rr = await callWithFallback({
-        // 走 heart_reflect 快模型(sub2gpt54mini),避开 stepfun 并发争用;heart 决策仍 stepfunjudge
-        usage: 'heart_reflect',
+        // 念头磨光走 summarize（原 heart_reflect 已并入）
+        usage: 'summarize',
         messages: [
           {
             role: 'system',

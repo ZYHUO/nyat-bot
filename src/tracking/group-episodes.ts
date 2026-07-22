@@ -63,7 +63,7 @@ export async function summarizeEpisodes(chatId: number): Promise<number> {
   let content: string;
   try {
     const result = await callWithFallback({
-      usage: 'summarize_deep',
+      usage: 'summarize',
       messages: [
         {
           role: 'system',

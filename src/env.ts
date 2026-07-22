@@ -20,6 +20,32 @@ const envSchema = z.object({
   // SQLite
   SQLITE_PATH: z.string().default('./data/xxb.db'),
 
+  // NyatDB — NyatBot-only embedded engine (MemTable+WAL+zstd). Default off.
+  NYATDB_ENABLED: booleanFromEnv.default(false),
+  NYATDB_PATH: z.string().default('./data/nyatdb'),
+  NYATDB_SYNC_EVERY: z.coerce.number().int().positive().default(8),
+  NYATDB_MAX_MESSAGES_PER_CHAT: z.coerce.number().int().positive().default(5000),
+  NYATDB_POOL_FRAMES: z.coerce.number().int().positive().default(64),
+  /** Write chat context into NyatDB ChatLog (requires NYATDB_ENABLED).
+   * Name is historical ("dual-write" era); with NYATDB_REDIS_MIRROR=false this is
+   * the sole chat-log writer. Prefer thinking of it as NYATDB_WRITE. */
+  NYATDB_DUAL_WRITE: booleanFromEnv.default(false),
+  /**
+   * Prefer NyatDB ChatLog for getRecent/getAll; fall back to Redis if empty/error.
+   * Pair with NYATDB_DUAL_WRITE. Default off.
+   */
+  NYATDB_READ: booleanFromEnv.default(false),
+  /**
+   * Also mirror chat context into Redis `xxb:ctx:*`.
+   * When NyatDB write is on and this is false, Redis ctx is no longer updated
+   * (members / active_groups / BullMQ still use Redis). Default off.
+   */
+  NYATDB_REDIS_MIRROR: booleanFromEnv.default(false),
+  NYATDB_CHAT_RING_MAX: z.coerce.number().int().positive().default(200),
+  NYATDB_VERIFY_ON_OPEN: booleanFromEnv.default(false),
+  /** Use Rust napi engine when the native addon is built (`npm run build:nyatdb`). Default off. */
+  NYATDB_NATIVE: booleanFromEnv.default(false),
+
   // Server
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
@@ -83,7 +109,7 @@ const envSchema = z.object({
     }),
   BOT_NICKNAMES: z
     .string()
-    .default('xxb,啾咪囝')
+    .default('xxb,啾咪囝,啾咪')
     .transform((s) => s.split(',')),
   CONTEXT_MAX_LENGTH: z.coerce.number().int().positive().default(600),
   JUDGE_WINDOW_SIZE: z.coerce.number().int().positive().default(10),
@@ -421,6 +447,19 @@ const envSchema = z.object({
     }),
   // Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。
   META_TICK_MS: z.coerce.number().int().positive().default(5000),
+  /**
+   * L0/L1 Attention 合并静默窗：群聊在最后一条进队后还要再等这么久才让 Meta flush。
+   * 这是 Meta 路径的「连发→一回」节奏（不是 TIMING_TALK_VALUE / gate wait）。
+   * L0 含昵称点名仍立刻 ingest；@ / 回 bot 可走 timing hard-bypass。
+   * hold 到期会 kick 一次 metaTick，不完全依赖 META_TICK_MS。
+   * 0 = 关闭。默认 2800ms。
+   */
+  META_L0_COALESCE_MS: z.coerce.number().int().nonnegative().default(2800),
+  /**
+   * Heart 插话不应期(ms)：bot 刚回过 / CodeAct 占用时，被动消息不再 elevate、也不再 auto-dispatch heart:。
+   * 防群里同一话题连珠炮（三连赖账）。L0/@/回 bot 不受影响。0 = 关闭。默认 45s。
+   */
+  META_HEART_REFRACTORY_MS: z.coerce.number().int().nonnegative().default(45_000),
   // 单次 Meta flush 最多处理几个 attention 条目。
   META_ATTENTION_TOP_N: z.coerce.number().int().positive().default(8),
   // Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。
@@ -428,13 +467,20 @@ const envSchema = z.object({
   CODEACT_USAGE: z.string().default('reply'),
   CODEACT_MAX_TURNS: z.coerce.number().int().positive().default(6),
   CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。
+  CODEACT_CONCURRENCY: z.coerce.number().int().positive().default(4),
+  // Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。
+  CODEACT_WEB_SEARCH_ENABLED: booleanFromEnv.default(true),
   // Context Engine:组装 Meta/Subagent prompt 时打 Manifest(可观测+稳定前缀)。
   CONTEXT_ENGINE_ENABLED: booleanFromEnv.default(true),
   // 日记 dream-journal(独立 flag,可不启 Meta 单独开)。
   DREAM_JOURNAL_ENABLED: booleanFromEnv.default(false),
   DREAM_JOURNAL_DIR: z.string().default('./data/dream-journal'),
-  // cron 表达式(UTC)。默认 16:05 UTC = 北京 00:05。
-  DREAM_JOURNAL_CRON: z.string().default('5 16 * * *'),
+  // 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。
+  // 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。
+  DREAM_JOURNAL_CRON: z.string().default('0 23 * * *,0 15 * * *'),
+  // 是否在硬作息起床/入睡边沿各试写一次(模型仍可 SKIP)。
+  DREAM_JOURNAL_HOOK_SLEEP: booleanFromEnv.default(true),
   // 写完是否私聊推送给主人(MASTER_UID)。
   DREAM_JOURNAL_DM: booleanFromEnv.default(false),
   // 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。
@@ -606,10 +652,11 @@ const envSchema = z.object({
   // 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。
   CONTROL_DIRECTIVE_ENABLED: booleanFromEnv.default(false),
 
-  // ── School schedule (功能 A) ──
-  // 16 岁上学人设:确定性周课表 + school_overrides 特殊日,注入 self-state。
-  // 默认关。睡眠硬门优先级高于上课。
+  // ── Daily life / school schedule ──
+  // 16 岁人设的「每日安排」：school=周课表，summer=暑假日计划，auto=7–8 月暑假否则上学。
+  // SCHOOL_SCHEDULE_ENABLED 关 → 不注入。睡眠硬门仍优先于本模块。
   SCHOOL_SCHEDULE_ENABLED: booleanFromEnv.default(false),
+  DAILY_LIFE_PROFILE: z.enum(['auto', 'school', 'summer']).default('auto'),
 
   // ── Mood drift (Stage E) ──
   // Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。

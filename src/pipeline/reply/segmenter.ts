@@ -239,7 +239,7 @@ function splitIntoSentences(text: string): string[] {
 
   const segments: Segment[] = [];
   let currentSegment = '';
-  let quoteStack: string[] = []; // Track open quotes
+  const quoteStack: string[] = []; // Track open quotes
 
   let i = 0;
   while (i < len) {

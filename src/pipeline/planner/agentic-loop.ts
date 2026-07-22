@@ -55,7 +55,7 @@ function buildUserPrompt(input: AgenticPlanInput): string {
 export async function runAgenticPlanner(input: AgenticPlanInput): Promise<AgenticPlanResult> {
   const e = env();
   const config = getConfig();
-  const usage = getUsage('planner');
+  const usage = getUsage('judge');
   const systemPrompt = loadPrompt('task/planner-agentic.md', config.promptsDir);
   const tools = buildToolSet(input.chatId, input.userId, input.toolFilter);
   const start = performance.now();

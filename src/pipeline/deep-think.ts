@@ -73,7 +73,7 @@ export async function maybeDeepThink(
       botNicknames: botIdentity.nicknames,
       editByContentOnly: false,
     });
-    if (kind !== 'mention' && kind !== 'reply_to_bot') return;
+    if (kind !== 'mention' && kind !== 'reply_to_bot' && kind !== 'nickname') return;
 
     if (await isAsleep()) return; // 睡觉不深想
 

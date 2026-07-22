@@ -52,44 +52,52 @@ function ensureUsageLabelsExist(usageName: string, usage: AIUsage): AIUsage {
   return usage;
 }
 
-// Fallback defaults — stepfun 全家桶;识图单独 sub2gpt54mini。
+/**
+ * 核心部门（配 AI_USAGE_*）:
+ *   reply / reply_pro / reply_max / judge / summarize / vision / deep_think
+ * 可选: audio / mundo
+ *
+ * 历史名 → 核心部门（旧调用/旧 .env 仍可解析）
+ */
+export const USAGE_ALIASES: Readonly<Record<string, string>> = {
+  heart: 'judge',
+  heart_reflect: 'summarize',
+  path_reflection: 'judge',
+  allowlist_review: 'judge',
+  reply_splitter: 'judge',
+  planner: 'judge',
+  summarize_deep: 'summarize',
+};
+
+export function resolveUsageName(name: string): string {
+  return USAGE_ALIASES[name] ?? name;
+}
+
+// Fallback defaults — 仅核心 + 可选重活；别名不在此表
 const USAGE_DEFAULTS: Record<string, AIUsage> = {
-  reply:            { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
-  reply_pro:        { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 90_000 },
-  vision:           { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
-  audio:            { label: 'stepfun',       backups: [],               timeout: 30_000 },
-  judge:            { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 200,  temperature: 0 },
-  heart:            { label: 'stepfunjudge',  backups: ['longcat'],      timeout: 30_000, maxTokens: 120,  temperature: 0 },
-  // 心流「念头」反思(附加、非决策):火山 DeepSeek-V4-Pro 主(4-5s、念头更妙),
-  // maxTokens 给足 600 防被推理吃空;gemini-3.1-flash-lite 兜底(都非 GPT,主人要求)。
-  // 反思约 4-5s,decision.ts 的 maxTimeoutMs 放宽到 10s 配合。
-  heart_reflect:    { label: 'dsv4pro',       backups: ['gemini31lite', 'stepfunjudge'], timeout: 15_000, maxTokens: 600,  temperature: 0.3 },
-  planner:          { label: 'sub2gpt54mini', backups: ['sub2gpt55'],     timeout: 60_000, maxTokens: 300,  temperature: 0 },
-  summarize:        { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 120_000 },
-  // Mundo「难题攻坚」部门(可选,默认关):深推理模型走 mundo,失败/未启用则兜底
-  // 到 stepfun(reasoning 模型)。maxTokens 给足(深推理模型截断会返回空 content);
-  // timeout 拉长(它想得很久)。仅手动/显式路由使用,不接任何自动热路径。
-  mundo:            { label: 'mundo',          backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
-  // 「深想」异步深答:走火山 coding 的 Kimi-K2.7(强思考,~38s,拍平价免费),
-  // mundo/stepfunthink 兜底。异步补发、不赶时间,慢没关系。
-  deep_think:       { label: 'k27code',        backups: ['mundo', 'stepfunthink'], timeout: 120_000, maxTokens: 16_000 },
-  // 后台深度摘要:high 推理(stepfunthink),只给配额消费 cron 用,不碰用户可见路径。
-  // stepfunthink 缺失时回退 stepfun(medium),不致命。
-  summarize_deep:   { label: 'stepfunthink',  backups: ['stepfun'],      timeout: 180_000 },
-  path_reflection:  { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 20_000, maxTokens: 200,  temperature: 0 },
-  allowlist_review: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
-  reply_splitter:   { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 500,  temperature: 0 },
+  reply:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
+  reply_pro: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 90_000 },
+  vision:    { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
+  audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
+  judge:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 800,  temperature: 0 },
+  summarize: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 180_000 },
+  // Mundo「难题攻坚」部门(可选,默认关)
+  mundo:     { label: 'mundo',         backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
+  // 「深想」异步深答(可选)
+  deep_think:{ label: 'k27code',       backups: ['mundo', 'stepfunthink'], timeout: 120_000, maxTokens: 16_000 },
 };
 
 export function getUsage(name: string): AIUsage {
+  const resolved = resolveUsageName(name);
+
   // reply_max: randomly rotate from AI_USAGE_REPLY_MAX_LABELS
-  if (name === 'reply_max') {
+  if (resolved === 'reply_max') {
     const maxLabels = getReplyMaxLabels();
     if (maxLabels.length === 0) {
       throw new AIConfigError('AI_USAGE_REPLY_MAX_LABELS not configured');
     }
     const shuffled = [...maxLabels].sort(() => Math.random() - 0.5);
-    return ensureUsageLabelsExist(name, {
+    return ensureUsageLabelsExist(resolved, {
       label: shuffled[0]!,
       backups: shuffled.slice(1),
       timeout: 180_000,
@@ -97,9 +105,9 @@ export function getUsage(name: string): AIUsage {
   }
 
   // Check env-defined usage routing first
-  const envUsage = getUsageRouting().get(name);
+  const envUsage = getUsageRouting().get(resolved);
   if (envUsage) {
-    return ensureUsageLabelsExist(name, {
+    return ensureUsageLabelsExist(resolved, {
       label: envUsage.label,
       backups: envUsage.backups,
       timeout: envUsage.timeout ?? 60_000,
@@ -109,9 +117,9 @@ export function getUsage(name: string): AIUsage {
   }
 
   // Fallback to hardcoded defaults
-  const usage = USAGE_DEFAULTS[name];
-  if (!usage) throw new AIConfigError(`AI usage not found: ${name}`);
-  return ensureUsageLabelsExist(name, { ...usage });
+  const usage = USAGE_DEFAULTS[resolved];
+  if (!usage) throw new AIConfigError(`AI usage not found: ${name}${resolved !== name ? ` (alias→${resolved})` : ''}`);
+  return ensureUsageLabelsExist(resolved, { ...usage });
 }
 
 /** Reset cached labels (for testing) */

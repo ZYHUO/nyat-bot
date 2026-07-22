@@ -14,37 +14,37 @@
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
 import { isTurnActorChat } from '../pipeline/turn/flags.js';
+import { isMetaSubagentChat } from '../meta/flags.js';
 import type { PendingEntry } from '../pipeline/turn/types.js';
 
 const QKEY = (chatId: number): string => `xxb:sleep:pendingq:${chatId}`;
 const INDEX_KEY = 'xxb:sleep:pendingq:chats';
-const MAX_PER_CHAT = 8;       // tunable — 每 chat 攒几条(保最新;曾为 3,48h 实测 52% 欠账被截断丢弃)
-const TTL_SEC = 18 * 3600;    // 攒到次日中午左右自然过期
+const MAX_PER_CHAT = 8;
+const TTL_SEC = 18 * 3600;
 
 export interface SleepPendingItem {
   entry: PendingEntry;
-  /** 入队时的 judge/L0 规则(挑"最值得回"的条目用) */
   rule?: string;
   ts: number;
 }
 
-/** 点名类规则:补回时优先(@/回 bot/私聊 比闲聊更欠回复)。导出供
- *  sleep-cycle 的补回消费方挑锚点/标 direct 用。 */
 export const ADDRESSED_RULES_FOR_PRIORITY = new Set([
   'mention_self', 'mention_self_lookup',
   'reply_to_self', 'reply_to_self_lookup', 'reply_to_self_followup_lookup',
   'private_chat',
 ]);
 
+/** True if catch-up can replay via turn-actor OR Meta Attention re-ingest. */
+export function isSleepReplayableChat(chatId: number): boolean {
+  return isTurnActorChat(chatId) || isMetaSubagentChat(chatId);
+}
+
 /**
- * 入队一条睡眠欠账。仅接受能被回放的 turn-actor 群 —— 补回走 actor 的
- * wait-resume 通道,非 actor 群入了也永远回放不出去,只会被 drain 取出
- * 后默默丢弃(cursor review 抓到的数据丢失点)。非 actor → 不入队、返回
- * false,调用方据此静默(与 v1 一致:无法回放就别假装攒着)。
+ * 入队一条睡眠欠账。turn-actor 群走 wait-resume；Meta 群起床后 Attention 重投。
  */
 export async function pushSleepPending(chatId: number, item: SleepPendingItem): Promise<boolean> {
-  if (!isTurnActorChat(chatId)) {
-    logger.debug({ chatId }, 'Sleep queue: chat not replayable (non turn-actor), not queued');
+  if (!isSleepReplayableChat(chatId)) {
+    logger.debug({ chatId }, 'Sleep queue: chat not replayable, not queued');
     return false;
   }
   try {

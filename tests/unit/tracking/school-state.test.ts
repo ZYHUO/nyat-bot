@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockEnv = vi.fn(() => ({ SCHOOL_SCHEDULE_ENABLED: true }));
+const mockEnv = vi.fn(() => ({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'school' as const }));
 vi.mock('../../../src/env.js', () => ({ env: () => mockEnv() }));
 vi.mock('../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -23,11 +23,11 @@ function bjDate(isoBeijing: string): Date {
 
 describe('getSchoolState', () => {
   beforeEach(() => {
-    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true });
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'school' });
   });
 
   it('returns free no-op when disabled', () => {
-    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: false });
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: false, DAILY_LIFE_PROFILE: 'school' });
     const s = getSchoolState(bjDate('2026-06-15T08:10'));
     expect(s.phase).toBe('free');
     expect(s.selfLine).toBeNull();
@@ -69,12 +69,32 @@ describe('getSchoolState', () => {
     expect(s.selfLine).toContain('晚自习');
   });
 
-  it('weekend → free, no school line', () => {
+  it('weekend → rest-day plan (not school), with a daily activity line', () => {
     // 2026-06-13 is Saturday
     const s = getSchoolState(bjDate('2026-06-13T10:00'));
     expect(s.isSchoolDay).toBe(false);
-    expect(s.phase).toBe('free');
-    expect(s.selfLine).toBeNull();
+    expect(s.profile).toBe('weekend');
+    expect(s.activity).toBeTruthy();
+    expect(s.selfLine).toMatch(/周末/);
+  });
+
+  it('summer profile mid-morning → day_plan gaming, not in_class', () => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'summer' });
+    const s = getSchoolState(bjDate('2026-07-22T10:30'));
+    expect(s.isSchoolDay).toBe(false);
+    expect(s.profile).toBe('summer');
+    expect(s.phase).toBe('day_plan');
+    expect(s.activity).toMatch(/游戏|追番/);
+    expect(s.selfLine).toMatch(/暑假/);
+  });
+
+  it('auto profile in July → summer even on weekday morning', () => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'auto' });
+    // 2026-07-22 is Wednesday
+    const s = getSchoolState(bjDate('2026-07-22T08:10'));
+    expect(s.isSchoolDay).toBe(false);
+    expect(s.profile).toBe('summer');
+    expect(s.phase).not.toBe('in_class');
   });
 
   it('late night after evening study → free', () => {
@@ -85,7 +105,7 @@ describe('getSchoolState', () => {
   it('A2: getSchoolAttentionFactor low in class, 1 after school', () => {
     expect(getSchoolAttentionFactor(bjDate('2026-06-15T08:10'))).toBeLessThanOrEqual(0.3); // in class
     expect(getSchoolAttentionFactor(bjDate('2026-06-15T17:30'))).toBe(1); // after school
-    expect(getSchoolAttentionFactor(bjDate('2026-06-13T10:00'))).toBe(1); // weekend
+    expect(getSchoolAttentionFactor(bjDate('2026-06-13T10:00'))).toBe(1); // weekend play
   });
 
   it('A3: getDaySummary describes weekday classes / weekend without inventing times', () => {
@@ -99,7 +119,7 @@ describe('getSchoolState', () => {
   });
 
   it('A2/A3 disabled → factor 1, summary null', () => {
-    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: false });
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: false, DAILY_LIFE_PROFILE: 'school' });
     expect(getSchoolAttentionFactor(bjDate('2026-06-15T08:10'))).toBe(1);
     expect(getDaySummary(bjDate('2026-06-15T08:10'))).toBeNull();
   });
@@ -108,7 +128,9 @@ describe('getSchoolState', () => {
 describe('getSchoolState with overrides', () => {
   it('early_off override → after the cutoff is after_school, not in_class (review #3)', async () => {
     vi.resetModules();
-    vi.doMock('../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: true }) }));
+    vi.doMock('../../../src/env.js', () => ({
+      env: () => ({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'school' }),
+    }));
     vi.doMock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn() } }));
     vi.doMock('../../../src/db/sqlite.js', () => ({
       getDb: () => ({ prepare: () => ({ get: () => ({ kind: 'early_off', makeup_dow: null, end_min: 900, note: '运动会' }) }) }),
@@ -122,7 +144,9 @@ describe('getSchoolState with overrides', () => {
 
   it('holiday override → not a school day, holiday line', async () => {
     vi.resetModules();
-    vi.doMock('../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: true }) }));
+    vi.doMock('../../../src/env.js', () => ({
+      env: () => ({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'school' }),
+    }));
     vi.doMock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn() } }));
     vi.doMock('../../../src/db/sqlite.js', () => ({
       getDb: () => ({ prepare: () => ({ get: () => ({ kind: 'holiday', makeup_dow: null, end_min: null, note: '端午节' }) }) }),

@@ -17,9 +17,11 @@ import { loadPrompt, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import type { FormattedMessage } from '../../shared/types.js';
+import { getNyatDb, unpackChatLogRow } from '../../nyatdb/index.js';
 
 const MTM_PREFIX = 'xxb:mtm:';
 const LOCK_PREFIX = 'xxb:mtm:lock:';
+const NYAT_CURSOR_PREFIX = 'xxb:mtm:nyat_cursor:';
 const MTM_TTL = 7 * 86400; // 与 ctx 同寿命
 const LOCK_TTL_SEC = 180;
 
@@ -76,6 +78,11 @@ function renderForCompression(messages: FormattedMessage[]): string {
 export async function maybeCompressMidTerm(chatId: number): Promise<void> {
   const e = env();
   if (!e.MTM_ENABLED) return;
+  // NyatDB sole chat store → compress from ChatLog; summaries still live in Redis MTM.
+  if (e.NYATDB_ENABLED && e.NYATDB_DUAL_WRITE && !e.NYATDB_REDIS_MIRROR) {
+    await maybeCompressMidTermFromNyat(chatId);
+    return;
+  }
   const redis = getRedis();
   const ctxKey = `xxb:ctx:${chatId}`;
   const threshold = e.CONTEXT_MAX_LENGTH - 20;
@@ -144,6 +151,93 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
   }
 }
 
+/**
+ * NyatDB-primary mid-term: summarize oldest ring msgs that fall outside the live
+ * CONTEXT_MAX_LENGTH window. Does not trim ChatLog (ring MAX handles size);
+ * summaries go to the same Redis `xxb:mtm:*` list used by getMidTermBlock.
+ */
+async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
+  const e = env();
+  const ndb = getNyatDb();
+  if (!ndb) return;
+  const redis = getRedis();
+  const threshold = e.CONTEXT_MAX_LENGTH - 20;
+  const chunk = e.MTM_CHUNK;
+  const ringMax = Math.max(e.NYATDB_CHAT_RING_MAX, e.CONTEXT_MAX_LENGTH + chunk);
+
+  try {
+    const rows = ndb.chatRecent(chatId, ringMax);
+    if (rows.length < threshold) return;
+
+    const locked = await redis.set(LOCK_PREFIX + chatId, '1', 'EX', LOCK_TTL_SEC, 'NX');
+    if (!locked) return;
+
+    try {
+      const all: FormattedMessage[] = [];
+      for (const r of rows) {
+        try {
+          all.push(
+            unpackChatLogRow({
+              ...r,
+              bodyFormat:
+                r.bodyFormat === 'json' ? 'json' : r.bodyFormat === 'text' ? 'text' : undefined,
+            }) as FormattedMessage,
+          );
+        } catch {
+          /* skip */
+        }
+      }
+      if (all.length < threshold) return;
+
+      const cursorKey = NYAT_CURSOR_PREFIX + chatId;
+      const cursor = Number(await redis.get(cursorKey)) || 0;
+      const liveStart = Math.max(0, all.length - e.CONTEXT_MAX_LENGTH);
+      const compressible = all.slice(0, liveStart).filter((m) => m.messageId > cursor);
+      if (compressible.length < Math.min(chunk, 60)) return;
+
+      const messages = compressible.slice(0, chunk);
+      const config = getConfig();
+      const systemPrompt = loadPrompt('task/mid-term-summary.md', config.promptsDir);
+      const result = await callWithFallback({
+        usage: 'summarize',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: renderForCompression(messages).slice(0, e.MTM_INPUT_MAX_CHARS) },
+        ],
+        maxTokens: 400,
+        temperature: 0,
+      });
+      const summaryText = result.content.trim();
+      if (!summaryText) return;
+
+      const entry: MidTermSummary = {
+        summary: summaryText.slice(0, 600),
+        fromTs: messages[0]!.timestamp,
+        toTs: messages[messages.length - 1]!.timestamp,
+        count: messages.length,
+        createdAt: Date.now(),
+      };
+      const lastId = messages[messages.length - 1]!.messageId;
+      await redis
+        .multi()
+        .rpush(mtmKey(chatId), JSON.stringify(entry))
+        .ltrim(mtmKey(chatId), -e.MTM_MAX_SUMMARIES, -1)
+        .expire(mtmKey(chatId), MTM_TTL)
+        .set(cursorKey, String(lastId), 'EX', MTM_TTL)
+        .exec();
+
+      logger.info(
+        { chatId, compressed: messages.length, summaryChars: entry.summary.length, lastId },
+        'Mid-term memory compressed (NyatDB)',
+      );
+    } finally {
+      await redis.del(LOCK_PREFIX + chatId).catch(() => {});
+    }
+  } catch (err) {
+    logger.warn({ err, chatId }, 'Mid-term NyatDB compression failed (non-critical)');
+  }
+}
+
 /** prompt 注入块;没有摘要返回 null。 */
 export async function getMidTermBlock(chatId: number): Promise<string | null> {
   if (!env().MTM_ENABLED) return null;
@@ -167,5 +261,5 @@ export async function getMidTermBlock(chatId: number): Promise<string | null> {
 
 /** 测试用 */
 export async function _clearMidTerm(chatId: number): Promise<void> {
-  await getRedis().del(mtmKey(chatId), LOCK_PREFIX + chatId);
+  await getRedis().del(mtmKey(chatId), LOCK_PREFIX + chatId, NYAT_CURSOR_PREFIX + chatId);
 }

@@ -242,6 +242,7 @@ export async function handleScheduleMessage(
   content: string,
   _groupName?: string,
 ): Promise<void> {
+  void _groupName;
   await sendChatAction(dmChatId, 'typing');
 
   // 1. Parse time from content
@@ -437,6 +438,7 @@ export async function executeScheduledMessages(): Promise<number> {
  * This is a simple implementation for the common patterns used by schedule.
  */
 function calculateNextCronRun(cronExpr: string, _timezone: string): number | null {
+  void _timezone;
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) return null;
 

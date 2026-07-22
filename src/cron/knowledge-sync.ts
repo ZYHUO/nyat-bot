@@ -51,23 +51,30 @@ function saveHashes(hashes: Record<string, string>): void {
 export async function runKnowledgeSync(): Promise<void> {
   const e = env();
 
-  // Auto-discover all active group chats from Redis context keys
+  // Auto-discover active groups (active_groups index; Redis ctx is optional when NyatDB-primary)
   // Fall back to explicit list if configured
   let chatIds: number[];
   if (e.KNOWLEDGE_CRON_CHAT_IDS.length > 0) {
     chatIds = e.KNOWLEDGE_CRON_CHAT_IDS;
   } else {
     const redis = getRedis();
-    const keys: string[] = [];
+    const ids = new Set<number>();
+    const members = await redis.zrange('xxb:active_groups', 0, -1);
+    for (const m of members) {
+      const id = Number(m);
+      if (Number.isFinite(id) && id < 0) ids.add(id);
+    }
+    // Legacy soak: still pick up chats that only have Redis ctx keys
     let cursor = '0';
     do {
       const [next, found] = await redis.scan(cursor, 'MATCH', `${CTX_PREFIX}*`, 'COUNT', '200');
       cursor = next;
-      keys.push(...found);
+      for (const k of found) {
+        const id = parseInt(k.slice(CTX_PREFIX.length), 10);
+        if (!Number.isNaN(id) && id < 0) ids.add(id);
+      }
     } while (cursor !== '0');
-    chatIds = keys
-      .map((k) => parseInt(k.slice(CTX_PREFIX.length), 10))
-      .filter((id) => !Number.isNaN(id) && id < 0); // negative = group chat
+    chatIds = [...ids];
   }
 
   if (!chatIds.length) {

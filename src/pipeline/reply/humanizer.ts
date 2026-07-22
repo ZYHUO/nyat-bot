@@ -250,7 +250,7 @@ export function injectTypo(text: string, config?: Partial<HumanizerConfig>): Typ
   const replacements = TYPO_MAP.get(originalChar)!;
   const replacement = replacements[Math.floor(Math.random() * replacements.length)]!;
 
-  let typoedText = text.slice(0, typoIdx) + replacement + text.slice(typoIdx + 1);
+  const typoedText = text.slice(0, typoIdx) + replacement + text.slice(typoIdx + 1);
 
   // Decide correction mode: 50% edit original message, 50% append correct char in next segment
   // "edit" = fix the typo by editing the original message

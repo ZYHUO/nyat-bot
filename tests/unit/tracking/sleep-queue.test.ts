@@ -41,6 +41,9 @@ let actorChat = true;
 vi.mock('../../../src/pipeline/turn/flags.js', () => ({
   isTurnActorChat: () => actorChat,
 }));
+vi.mock('../../../src/meta/flags.js', () => ({
+  isMetaSubagentChat: () => false,
+}));
 
 const { pushSleepPending, clearSleepPending, listSleepPendingChats, takeSleepPending, peekSleepQueues } =
   await import('../../../src/tracking/sleep-queue.js');

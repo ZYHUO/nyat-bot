@@ -76,7 +76,8 @@ export async function tryMuteCommandIntercepts(
  * Returns true if it handled the message. Shared by the slash-command path and
  * the natural-language router so both stay in lockstep.
  */
-async function dispatchCommand(
+/** Shared by pipeline pre-mute intercepts and Meta ingress (NL/gacha/game). */
+export async function dispatchCommand(
   chatId: number,
   formatted: FormattedMessage,
   cmd: string,

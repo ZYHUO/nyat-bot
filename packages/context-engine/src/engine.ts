@@ -1,5 +1,3 @@
-import { env } from '../env.js';
-import { logger } from '../shared/logger.js';
 import type {
   AssembleResult,
   ContextManifest,
@@ -11,19 +9,51 @@ import type {
 
 const TIER_ORDER: ContextTier[] = ['static', 'delta', 'ephemeral', 'volatile'];
 
+export type ContextEngineLogger = {
+  warn: (obj: Record<string, unknown>, msg: string) => void;
+  debug?: (obj: Record<string, unknown>, msg: string) => void;
+};
+
+export type ContextEngineOptions = {
+  /** When false, still assembles but does not update fingerprints (always cache miss). */
+  enabled?: boolean;
+  logger?: ContextEngineLogger;
+};
+
+const defaultOpts: Required<Pick<ContextEngineOptions, 'enabled'>> & {
+  logger: ContextEngineLogger;
+} = {
+  enabled: true,
+  logger: { warn: () => undefined },
+};
+
+let globalOpts = { ...defaultOpts };
+
+/** Process-wide defaults (host injects env + pino). */
+export function setContextEngineOptions(opts: ContextEngineOptions): void {
+  globalOpts = {
+    enabled: opts.enabled ?? globalOpts.enabled,
+    logger: opts.logger ?? globalOpts.logger,
+  };
+}
+
 /** In-memory last fingerprints per engine instance (process-local). */
 export class ContextEngine {
   private readonly lastFingerprints = new Map<string, string>();
   private lastManifest: ContextManifest | null = null;
 
-  constructor(private readonly name: string) {}
+  constructor(
+    private readonly name: string,
+    private readonly opts: ContextEngineOptions = {},
+  ) {}
 
   getLastManifest(): ContextManifest | null {
     return this.lastManifest;
   }
 
   async assemble(providers: ContextProvider[]): Promise<AssembleResult> {
-    const enabled = env().CONTEXT_ENGINE_ENABLED;
+    const enabled = this.opts.enabled ?? globalOpts.enabled;
+    const log = this.opts.logger ?? globalOpts.logger;
     const collected: ContextPart[] = [];
 
     for (const provider of providers) {
@@ -40,7 +70,7 @@ export class ContextEngine {
           });
         }
       } catch (err) {
-        logger.warn({ err, engine: this.name, provider: provider.id }, 'Context provider failed');
+        log.warn({ err, engine: this.name, provider: provider.id }, 'Context provider failed');
       }
     }
 
@@ -88,7 +118,7 @@ export class ContextEngine {
     };
     this.lastManifest = manifest;
 
-    logger.debug(
+    log.debug?.(
       {
         engine: this.name,
         totalChars,
@@ -107,10 +137,10 @@ export class ContextEngine {
 
 const engines = new Map<string, ContextEngine>();
 
-export function getContextEngine(name: string): ContextEngine {
+export function getContextEngine(name: string, opts?: ContextEngineOptions): ContextEngine {
   let eng = engines.get(name);
   if (!eng) {
-    eng = new ContextEngine(name);
+    eng = new ContextEngine(name, opts);
     engines.set(name, eng);
   }
   return eng;
