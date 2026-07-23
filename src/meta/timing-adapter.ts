@@ -148,7 +148,12 @@ export async function evaluateMetaTiming(opts: {
   let botPersona = '';
   try {
     const { loadCachedPrompt } = await import('../shared/config.js');
-    botPersona = loadCachedPrompt('identity/persona.md');
+    // Timing 只要「回不回」——用精简 behavior-style；缺文件时回退 persona。
+    try {
+      botPersona = loadCachedPrompt('identity/behavior-style.md');
+    } catch {
+      botPersona = loadCachedPrompt('identity/persona.md');
+    }
   } catch {
     /* optional */
   }

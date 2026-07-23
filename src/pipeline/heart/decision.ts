@@ -102,14 +102,18 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   try {
     let personaCore = '';
     try {
-      // 结构化截取而非固定偏移 slice:身份/识人守则(主人 uid、"绝不管别人
-      // 叫主人")是心流的硬依赖,persona.md 改版加长时固定 700 字符会把它们
-      // 静默截掉(review #11)。取「我在群里的样子」之前的全部身份段。
+      // 身份/识人守则(主人 uid、"绝不管别人叫主人")是心流硬依赖。
+      // 参与节奏在 behavior-style.md（从 persona 拆出）；拼在身份段后面。
       const full = loadCachedPrompt('identity/persona.md');
-      const cut = full.indexOf('## 我在群里的样子');
-      personaCore = cut > 0
-        ? full.slice(0, cut).trimEnd()
-        : (full.length <= 900 ? full : full.slice(0, 900));
+      // 旧版曾有「我在群里的样子」大段——若还在则截掉，避免和 behavior-style 重复。
+      const legacyCut = full.indexOf('## 我在群里的样子');
+      const identity = legacyCut > 0
+        ? full.slice(0, legacyCut).trimEnd()
+        : full.trimEnd();
+      let style = '';
+      try { style = loadCachedPrompt('identity/behavior-style.md').trim(); } catch { /* optional */ }
+      personaCore = style ? `${identity}\n\n${style}` : identity;
+      if (personaCore.length > 2400) personaCore = personaCore.slice(0, 2400);
     } catch { /* persona optional for the heart call */ }
     systemPrompt = loadCachedPrompt('task/heart.md')
       .replace(/\{bot_name\}/g, input.botName)

@@ -1036,7 +1036,13 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       );
       const tg = performance.now();
       let botPersona = '';
-      try { botPersona = loadCachedPrompt('identity/persona.md'); } catch { /* non-fatal */ }
+      try {
+        try {
+          botPersona = loadCachedPrompt('identity/behavior-style.md');
+        } catch {
+          botPersona = loadCachedPrompt('identity/persona.md');
+        }
+      } catch { /* non-fatal */ }
       // 预读 timing state(审计 #38:一份快照供 lastSpokeSecAgo + gate 内
       // 连续免检/冷却/talk_value 共用,避免重复 HGETALL)。读失败 → undefined,
       // gate 内自行兜底。
