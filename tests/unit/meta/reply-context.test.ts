@@ -15,6 +15,11 @@ describe('reply-context', () => {
     expect(isBarePingText('')).toBe(true);
     expect(isBarePingText('这个怎么看')).toBe(false);
     expect(isBarePingText('@hunhebi_bot 怎么看')).toBe(false);
+    // ≤2 CJK content is NOT a ping (regression: 笨猫 → reply+@ dinner joke)
+    expect(isBarePingText('笨猫')).toBe(false);
+    expect(isBarePingText('早')).toBe(false);
+    expect(isBarePingText('呢')).toBe(true);
+    expect(isBarePingText('？')).toBe(true);
   });
 
   it('detects short follow-ups that need prior turn', () => {
@@ -72,6 +77,24 @@ describe('reply-context', () => {
     expect(d).toMatch(/短回 @u 的消息 #1/);
     expect(d).not.toMatch(/禁止空问候/);
     expect(d).not.toMatch(/短接话/);
+  });
+
+  it('L0 direction: 「笨猫」with replyTo-self is content, not bare ping', () => {
+    const d = buildL0ContentDirection({
+      who: '@Zh_Taiwan',
+      messageId: 393539,
+      textPreview: '笨猫',
+      replyTo: {
+        messageId: 393535,
+        uid: 1,
+        textSnippet: '这晚饭吃完怕不是要被整条街的商家拉黑喵',
+      },
+      replyToIsSelf: true,
+    });
+    expect(d).toMatch(/回复你的 #393535/);
+    expect(d).toMatch(/笨猫/);
+    expect(d).not.toMatch(/reply\+@/);
+    expect(d).not.toMatch(/禁止空问候/);
   });
 
   it('L0 direction: reply-to-self forbids invented「没事/本喵看着」', () => {

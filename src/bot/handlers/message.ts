@@ -166,6 +166,50 @@ async function handleUpdate(ctx: Context): Promise<void> {
         // Heart 本身就是 gate（含 cooldown/engagement/wait/pass），放行后
         // 不再跑 Meta timing——否则会和 Heart 双重否决、把已批准的插话掐掉。
         // Direct/L0 仍直通 Meta；HEART 关时保持旧 L2 硬丢。
+        //
+        // Same-speaker burst: 正在回这个人的 L0 / CodeAct 占线时，后续无 @ 气泡
+        // 也升 L0（否则 Heart busy 会把「钱包还有多少」整句丢掉）。
+        if (!isDirect && layerDec.layer !== 'L0' && userId && userId > 0) {
+          try {
+            const { shouldForceSameSpeakerL0, markSpeakerBurst } = await import(
+              '../../meta/speaker-burst.js'
+            );
+            if (await shouldForceSameSpeakerL0(chatId, userId)) {
+              await getAttentionAccumulator().ingestAsync({
+                chatId,
+                layer: 'L0',
+                reason: 'same_speaker_burst',
+                messageId,
+                userId,
+                textPreview,
+                pressure: 100,
+                payload: {
+                  username: fm.username || undefined,
+                  fullName: fm.fullName || undefined,
+                  ...(fm.replyTo
+                    ? {
+                        replyTo: {
+                          messageId: fm.replyTo.messageId,
+                          uid: fm.replyTo.uid,
+                          fullName: fm.replyTo.fullName,
+                          textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                        },
+                      }
+                    : {}),
+                },
+              });
+              await markSpeakerBurst(chatId, userId, 120);
+              logger.info(
+                { chatId, messageId, uid: userId },
+                'Meta attention ingested (same_speaker_burst)',
+              );
+              return 'done';
+            }
+          } catch (err) {
+            logger.debug({ err, chatId, messageId }, 'same_speaker_burst check failed — Heart path');
+          }
+        }
+
         if (!isDirect && layerDec.layer !== 'L0') {
           const { env } = await import('../../env.js');
           if (env().HEART_ENABLED) {
@@ -304,6 +348,14 @@ async function handleUpdate(ctx: Context): Promise<void> {
               : {}),
           },
         });
+        if (layerDec.layer === 'L0' && userId && userId > 0 && chatId < 0) {
+          try {
+            const { markSpeakerBurst } = await import('../../meta/speaker-burst.js');
+            await markSpeakerBurst(chatId, userId);
+          } catch {
+            /* non-critical */
+          }
+        }
         logger.info({ chatId, messageId, layer: layerDec.layer }, 'Meta attention ingested');
         return 'done';
       };

@@ -18,8 +18,13 @@ export function isBarePingText(text: string | undefined | null): boolean {
   if (!t) return true;
   // @username / @botname only (optional trailing punctuation)
   if (/^[@＠][A-Za-z0-9_]{3,64}\s*[.。!！?？~～]*$/u.test(t)) return true;
-  // very short non-substantive
-  if (t.length <= 2) return true;
+  // Ultra-short non-substantive only — NOT any ≤2 CJK (「笨猫」is content, not a ping).
+  if (t.length <= 2) {
+    if (/^[.。!！?？~～…·、，,\s]+$/u.test(t)) return true;
+    if (/^(呢|啊|呀|啦|嘛|哦|噢|嗯|哈|呵|嘿|嗨|哟)$/u.test(t)) return true;
+    if (/^[\p{Extended_Pictographic}\p{Emoji_Presentation}]+$/u.test(t)) return true;
+    return false;
+  }
   return false;
 }
 

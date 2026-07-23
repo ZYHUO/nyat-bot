@@ -162,6 +162,15 @@ export function buildMetaApiContext(opts?: {
       }
 
       state.putTask(task);
+      // Keep same-speaker burst open while CodeAct runs (follow-ups without @).
+      if (task.targetUserId && task.targetUserId > 0) {
+        try {
+          const { markSpeakerBurst } = await import('./speaker-burst.js');
+          await markSpeakerBurst(cid, task.targetUserId, 120);
+        } catch {
+          /* non-critical */
+        }
+      }
       logger.info(
         { taskId: task.id, chatId: cid, layer, quotes, interrupt: !!args.interrupt },
         'Meta dispatch.taskToGroup',
