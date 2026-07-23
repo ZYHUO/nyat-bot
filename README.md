@@ -101,7 +101,7 @@
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
 - 🎨 **359 个贴纸意图 + 常驻贴纸包** — AI 按意图自主选贴纸（top-N 截断 + Levenshtein 模糊 + 反感反馈）;指定贴纸包作「常驻主力」（走视觉识图生成情绪标签、忽略 emoji,选择时预留多数候选槽,其余学习来的贴纸仍可用）（migrations 0042-0043）
 - 🚀 **一键部署** — `scripts/deploy.sh` 端到端：依赖 → Qdrant → 构建 → systemd → 自检
-- 🧪 **1121 单元测试** — vitest 全绿基线；43 个 SQLite 迁移自动按序应用
+- 🧪 **1666 单元测试** — vitest 全绿基线；49 个 SQLite 迁移自动按序应用
 - 🪦 **优雅关机契约** — worker 排干在飞任务、游离的自我接话统一中止信号排干、写缓冲落盘,SIGTERM 不丢消息不留孤儿锁
 
 ### 🏗️ 架构
@@ -210,11 +210,11 @@ src/
 ├── shared/               # 类型 + 日志 (pino) + 配置
 └── tracking/             # 活跃度 + 情绪 + 关系 + 声望 + 行为角色 + ASI + 结果追踪
 prompts/                  # AI Prompt 模板 (Markdown)
-├── identity/             #   人格定义
+├── identity/             #   人格：persona.md（身份）+ behavior-style.md（回不回）
 ├── safety/               #   安全护栏
 ├── contract/             #   输出格式 (JSON Schema)
 ├── style/                #   语调风格
-├── task/                 #   任务指令 (reply, judge, vision...)
+├── task/                 #   任务指令 (reply / heart / judge / timing-gate / codeact…)
 ├── meta/                 #   Meta/Subagent 人设方向 (background-dreaming 等)
 └── system/               #   系统级 prompt (摘要等)
 migrations/               # SQLite 迁移脚本
@@ -388,19 +388,29 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 
 > 实际模型路由用 `AI_PROVIDER_<NAME>_*` + `AI_USAGE_<NAME>_*`(provider/usage 分离,Redis `xxb:admin:model_routing:override` 可运行时覆盖);上表 `AI_*` 为兼容旧式简化配置。功能开关一律 `*_ENABLED`(默认关,灰度上线):如 `SCHOOL_SCHEDULE_ENABLED` / `SLEEP_DM_ENABLED` / `PM_NUDGE_ENABLED` / `META_SUBAGENT_ENABLED`。编排与日记详见 [`docs/meta-subagent/`](docs/meta-subagent/)。
 
-### 📊 Prompt 五层系统
+### 📊 Prompt 体系
 
-AI 回复质量由 5 层 prompt 协同控制：
+**写回复**（`prompt-builder`）仍是 5 层叠装：
 
 | 层级 | 文件 | 用途 |
 |------|------|------|
-| L1 Identity | `prompts/identity/persona.md` | 人格定义（性格、身份关系、行为边界） |
+| L1 Identity | `prompts/identity/persona.md` | 人格身份（主人/认人/日程/优先级） |
 | L2 Safety | `prompts/safety/guardrails.md` | 安全护栏（拒绝有害内容、防注入） |
 | L3 Contract | `prompts/contract/reply-schema.json` | JSON Schema 输出格式约束 |
 | L4 Style | `prompts/style/tone.md` | 语调风格（短句、群聊风格） |
-| L5 Task | `prompts/task/reply.md` | 任务指令（单条/多条回复规则） |
+| L5 Task | `prompts/task/reply.md`（+ `reply-pro` / `reply-max`） | 任务指令；按 `replyTier` 叠加深层 |
 
-Prompt 文件热缓存，修改后重启即生效，无需重新构建。
+**接不接话**（决策层）与写作拆开，避免把整份人设塞进 Timing/Heart：
+
+| 用途 | 文件 | 说明 |
+|------|------|------|
+| 参与准则 | `prompts/identity/behavior-style.md` | 只答「回不回 / 什么时候回」；Timing Gate 主用 |
+| 心流 | `prompts/task/heart.md` + persona 身份段 + behavior-style | Heart 一次调用决定 reply / wait / pass |
+| 三级判断 | `prompts/task/judge.md` | Heart 关闭时的回退；含 `normal` / `pro` / `max` |
+| 节奏门 | `prompts/task/timing-gate.md` | continue / wait / no_action |
+| CodeAct | `prompts/task/codeact-reply.md` | Meta→Subagent 写手人格层 |
+
+Prompt 文件进程内热缓存，改完重启即生效，无需重新构建。
 
 ### 💬 命令速查
 
@@ -500,7 +510,7 @@ xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts 
 - **Dual path cognition** — default Heart/Turn Actor pipeline, or optional Meta+Subagent CodeAct loop (mutually exclusive per chat graylist).
 - **Dual storage** — Redis for hot data (context, rate limits, member registry) + SQLite for cold data (knowledge, tracking, checkins).
 - **Context Engine** — `static|delta|ephemeral|volatile` assembly with a stable prefix for prompt-cache-friendly providers.
-- **5-layer prompt system** — Identity, Safety, Contract (JSON Schema), Style, and Task layers compose the system prompt. All prompts are Markdown files, editable without rebuilding.
+- **Split prompt system** — Reply path keeps 5 layers (Identity / Safety / Contract / Style / Task). Decision path uses a slim `behavior-style.md` for Timing/Heart so “whether to speak” isn’t stuffed with full persona prose. All prompts are Markdown; edit + restart, no rebuild.
 - **4-way context retrieval** — Recent window + reply thread trace + entity mentions + semantic search (future), merged and token-budget-capped.
 - **Graceful shutdown** — BullMQ worker drains active jobs before the bot instance is destroyed.
 
