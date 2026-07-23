@@ -487,6 +487,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await host.runtime.flushBookkeeping().catch(() => undefined);
     closed = true;
     stopTyping();
+    try {
+      const { clearSpeakerBurst } = await import('../meta/speaker-burst.js');
+      await clearSpeakerBurst(task.chatId);
+    } catch {
+      /* non-critical */
+    }
   }
   logger.info({ taskId: task.id, status: task.status, summary: task.resultSummary }, 'CodeAct task done');
 }

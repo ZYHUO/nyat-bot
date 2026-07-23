@@ -198,7 +198,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                     : {}),
                 },
               });
-              await markSpeakerBurst(chatId, userId, 120);
+              await markSpeakerBurst(chatId, userId);
               logger.info(
                 { chatId, messageId, uid: userId },
                 'Meta attention ingested (same_speaker_burst)',
