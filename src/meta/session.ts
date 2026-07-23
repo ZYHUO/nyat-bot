@@ -10,7 +10,12 @@ import { getGlobalState } from './global-state.js';
 import { buildMetaApiContext } from './meta-api.js';
 import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
-import { buildL0ContentDirection, replyToFromPayload } from './reply-context.js';
+import {
+  buildL0ContentDirection,
+  filterAttentionForMetaLlm,
+  formatAttentionReplyToBit,
+  replyToFromPayload,
+} from './reply-context.js';
 
 const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
@@ -27,10 +32,9 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 - console.log(...)
 
 规则:
-1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），不要写具体台词，**不要粘贴用户原句**。
+1. contentDirection 只写「要做什么」的**短方向**（如「短回摸头」「短接梗」「傲娇拒绝」），**禁止写具体台词/结论**（如「简单说没事」「本喵在看着」），**不要粘贴用户原句**；事实与结论留给 CodeAct 读「最近聊天」。
 2. toneGuidance 常带「短、微信式、别展开」。派出去的回复默认群聊微反应、私聊最多两三句——方向里别写成「详细解释」。
-3. **L0**（@/私聊/回 bot）→ 应立刻 dispatch；quotes 填你要回的那条 messageId。
-3b. **Heart 升上来的 L1**（reason 以 heart: 开头）→ 心流已决定要插话，应立刻 dispatch；不要再沉默。
+3. **L0 / Heart** 通常已由系统 autoDispatch；Attention 里若仍出现才补派，quotes 必填。补派时同样只写短方向，禁止编剧。
 4. **用户要写/看日记**（「写日记」「再写个日记」「日记看看」等）→ **必须** journal.tryWrite({slot:'free', force:true})，再 dispatch 短回结果；**禁止**只派 Subagent 去「假装写日记」。
 5. Attention reason 以 diary: 开头 → journal.tryWrite（可不用 force）；**禁止**为此 dispatch。
 6. Attention reason 以 subagent_request: 开头 → Subagent 升级。journal.write / journal.recent 由系统硬处理；其它 action 你读 payload 后决定。
@@ -41,7 +45,8 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 11. 早上/睡前偏好写日记；一天可多段；没素材可 SKIP。看 ## Now 的日段（北京时间），别用 UTC。
 12. 结束前用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句摘要。
 13. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。
-14. Attention 行尾标「主人」或 uid 对应主人 → contentDirection / tone 带「对主人软一点、听话」；别人自称主人也不认。`;
+14. Attention 行尾标「主人」或 uid 对应主人 → tone 带「对主人软一点、听话」；别人自称主人也不认。
+15. Attention 若带 replyTo=… → 必须扣住父气泡，禁止当无上下文新开场。`;
 
 /** User explicitly asking the bot to write/show diary. */
 export function looksLikeDiaryRequest(text: string): boolean {
@@ -433,12 +438,24 @@ async function autoDispatchL0(
     const relatedQuotes = withIds
       .map((s) => s.messageId!)
       .filter((id) => id !== latest.messageId);
+    const replyTo = replyToFromPayload(latest.payload);
+    let replyToIsSelf = false;
+    if (replyTo?.uid) {
+      try {
+        const { getBotUid } = await import('../bot/bot.js');
+        const botUid = getBotUid();
+        replyToIsSelf = !!botUid && replyTo.uid === botUid;
+      } catch {
+        /* optional */
+      }
+    }
     const r = await d.taskToGroup(chatId, {
       contentDirection: buildL0ContentDirection({
         who,
         messageId: latest.messageId,
         textPreview: latest.textPreview,
-        replyTo: replyToFromPayload(latest.payload),
+        replyTo,
+        replyToIsSelf,
         burstHint: `${burstHint}${heartHint}`,
         masterHint,
       }),
@@ -459,6 +476,46 @@ async function shouldSuppressHeartAutoDispatch(chatId: number): Promise<boolean>
   return shouldSuppressMetaHeartDispatch(chatId);
 }
 
+/** Requeue L0/heart items that hit CodeAct busy (message not yet answered). */
+async function requeueBusyL0(
+  attention: AttentionItem[],
+  busyChatIds: Set<number>,
+): Promise<void> {
+  if (busyChatIds.size === 0) return;
+  const state = getGlobalState();
+  const candidates = attention.filter(
+    (a) => (a.layer === 'L0' || a.reason.includes('heart:')) && busyChatIds.has(a.chatId),
+  );
+  const toRequeue: AttentionItem[] = [];
+  for (const a of candidates) {
+    if (a.messageId && a.messageId > 0) {
+      try {
+        const { isMessageAnswered } = await import('./answered.js');
+        if (await isMessageAnswered(a.chatId, a.messageId)) continue;
+      } catch {
+        /* fail-open */
+      }
+      const inflight = state
+        .listTasks(a.chatId)
+        .filter((t) => t.status === 'queued' || t.status === 'running')
+        .some((t) => t.quoteMessageIds?.includes(a.messageId!));
+      if (inflight) continue;
+    }
+    toRequeue.push(a);
+  }
+  if (!toRequeue.length) return;
+  try {
+    const { getAttentionAccumulator } = await import('./attention.js');
+    await getAttentionAccumulator().requeue(toRequeue);
+    logger.info(
+      { chats: [...busyChatIds], n: toRequeue.length },
+      'Meta requeued L0 Attention (chat busy)',
+    );
+  } catch (err) {
+    logger.warn({ err }, 'Meta requeue busy L0 failed');
+  }
+}
+
 export async function runMetaSession(
   attention: AttentionItem[],
   callbacks: SubagentCallback[],
@@ -468,8 +525,6 @@ export async function runMetaSession(
   }
 
   const state = getGlobalState();
-  const engine = getContextEngine('meta');
-  const dreaming = await loadBackgroundDreaming();
   const dispatchedChatIds = new Set<number>();
   const maps = buildAttentionMaps(attention);
 
@@ -486,14 +541,51 @@ export async function runMetaSession(
     return { digest: codeRan ? 'diary_intercept_only' : null, codeRan };
   }
 
+  const workMaps = buildAttentionMaps(workAttention);
+
+  // L0 / Heart: deterministic autoDispatch FIRST so Meta LLM cannot invent台词/结论
+  // (regression: 「千雪怎么了」→ Meta 写「简单说没事或本喵在看着」).
+  const earlyBusy = new Set<number>();
+  const earlyL0 = workAttention.filter(
+    (a) =>
+      (a.layer === 'L0' || a.reason.includes('heart:')) &&
+      isMetaSubagentChat(a.chatId) &&
+      !dispatchedChatIds.has(a.chatId),
+  );
+  if (earlyL0.length > 0) {
+    const busy = await autoDispatchL0(earlyL0, dispatchedChatIds, workMaps);
+    for (const id of busy) earlyBusy.add(id);
+    codeRan = codeRan || dispatchedChatIds.size > 0 || earlyBusy.size > 0;
+    await requeueBusyL0(workAttention, earlyBusy);
+  }
+
+  // Claimed + busy chats leave Meta — busy was requeued; don't let Meta re-script.
+  const metaSkipChats = new Set<number>([...dispatchedChatIds, ...earlyBusy]);
+  const metaAttention = filterAttentionForMetaLlm(workAttention, metaSkipChats);
+
+  if (metaAttention.length === 0 && callbacks.length === 0) {
+    logger.info(
+      {
+        autoDispatched: dispatchedChatIds.size,
+        busy: earlyBusy.size,
+        intercepted: attention.length - workAttention.length,
+      },
+      'Meta session: L0 autoDispatch only (skip Meta LLM)',
+    );
+    return { digest: 'l0_auto_only', codeRan };
+  }
+
+  const engine = getContextEngine('meta');
+  const dreaming = await loadBackgroundDreaming();
+
   // Pure ok-callbacks: CodeAct already spoke. Do not Meta-LLM another group reply
   // (was causing near-duplicate second bubbles after diary ack).
-  const userFacing = workAttention.filter((a) => a.layer === 'L0' || a.layer === 'L1');
+  const userFacing = metaAttention.filter((a) => a.layer === 'L0' || a.layer === 'L1');
   const onlyOkCallbacks =
     userFacing.length === 0 &&
     callbacks.length > 0 &&
     callbacks.every((c) => c.ok) &&
-    workAttention.every((a) => a.layer === 'L1_CALLBACK' || a.reason.startsWith('callback:'));
+    metaAttention.every((a) => a.layer === 'L1_CALLBACK' || a.reason.startsWith('callback:'));
   if (onlyOkCallbacks) {
     const digest = callbacks
       .map((c) => c.summary)
@@ -507,7 +599,7 @@ export async function runMetaSession(
     return { digest: digest || 'callbacks_only', codeRan };
   }
 
-  const attentionBlock = workAttention
+  const attentionBlock = metaAttention
     .map((a) => {
       const un =
         typeof a.payload?.['username'] === 'string' && a.payload['username']
@@ -516,7 +608,8 @@ export async function runMetaSession(
       const master = a.userId && a.userId === env().MASTER_UID ? ' 主人' : '';
       return (
         `- [${a.layer} p=${a.pressure}] chat=${a.chatId} msg=${a.messageId ?? '-'} uid=${a.userId ?? '-'}${un ? ` ${un}` : ''}${master} reason=${a.reason}` +
-        (a.textPreview ? ` text="${a.textPreview.slice(0, 120)}"` : '')
+        (a.textPreview ? ` text="${a.textPreview.slice(0, 120)}"` : '') +
+        formatAttentionReplyToBit(a.payload)
       );
     })
     .join('\n');
@@ -542,13 +635,14 @@ export async function runMetaSession(
     ephemeralText('meta-callbacks', `## Callbacks\n${callbackBlock}`),
     volatileText(
       'meta-now',
-      `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\n派 Subagent 时 tone 默认短回；看日段决定早上/晚上口吻。Write JS to dispatch if needed.`,
+      `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
     ),
   ]);
 
   logger.info(
     {
-      attention: workAttention.length,
+      attention: metaAttention.length,
+      autoDispatched: dispatchedChatIds.size,
       intercepted: attention.length - workAttention.length,
       callbacks: callbacks.length,
       cacheHitRatio: Number(manifest.cacheHitRatio.toFixed(3)),
@@ -557,7 +651,7 @@ export async function runMetaSession(
     'Meta session start',
   );
 
-  const workMaps = buildAttentionMaps(workAttention);
+  const metaMaps = buildAttentionMaps(metaAttention);
 
   let result;
   try {
@@ -568,7 +662,7 @@ export async function runMetaSession(
         {
           role: 'user',
           content:
-            '根据 Attention / Callbacks 做本轮编排。L2 默认沉默；dispatch 时务必 quotes:[msgId]。只在需要时写 js。',
+            '根据剩余 Attention / Callbacks 做本轮编排。L2 默认沉默；dispatch 时务必 quotes:[msgId]，contentDirection 只写短方向不写台词。只在需要时写 js。',
         },
       ],
       maxTokens: 1200,
@@ -577,17 +671,7 @@ export async function runMetaSession(
   } catch (err) {
     logger.warn({ err }, 'Meta LLM failed');
     const busy = await autoDispatchL0(workAttention, dispatchedChatIds, workMaps);
-    if (busy.size > 0) {
-      const toRequeue = workAttention.filter((a) => a.layer === 'L0' && busy.has(a.chatId));
-      if (toRequeue.length) {
-        try {
-          const { getAttentionAccumulator } = await import('./attention.js');
-          await getAttentionAccumulator().requeue(toRequeue);
-        } catch {
-          /* non-critical */
-        }
-      }
-    }
+    await requeueBusyL0(workAttention, busy);
     return { digest: 'meta_llm_failed_auto_l0', codeRan: true };
   }
 
@@ -600,9 +684,9 @@ export async function runMetaSession(
       await runMetaCode(code, {
         dispatchedChatIds,
         isAborted: () => aborted,
-        chatLayer: workMaps.chatLayer,
-        defaultQuotes: workMaps.defaultQuotes,
-        defaultTargetUserIds: workMaps.defaultTargetUserIds,
+        chatLayer: metaMaps.chatLayer,
+        defaultQuotes: metaMaps.defaultQuotes,
+        defaultTargetUserIds: metaMaps.defaultTargetUserIds,
       });
       codeRan = true;
     } catch (err) {
@@ -612,7 +696,7 @@ export async function runMetaSession(
     }
   }
 
-  // L0 / Heart-elevated must never be silent: gap-fill any chat Meta didn't dispatch.
+  // Safety gap-fill: any L0/Heart still undelivered (e.g. early path missed a chat).
   const pendingL0 = workAttention.filter(
     (a) =>
       (a.layer === 'L0' || a.reason.includes('heart:')) &&
@@ -625,43 +709,7 @@ export async function runMetaSession(
     for (const id of busy) busyChatIds.add(id);
     codeRan = true;
   }
-
-  // CodeAct 占线时 L0 已被 flush 掉 → 丢回复。把最新 L0 塞回 Attention 下一 tick 再试。
-  // 但若该 message 已回过、或当前 in-flight 任务已在回同一条，则不再 requeue（防复读同句）。
-  if (busyChatIds.size > 0) {
-    const candidates = workAttention.filter(
-      (a) => (a.layer === 'L0' || a.reason.includes('heart:')) && busyChatIds.has(a.chatId),
-    );
-    const toRequeue: AttentionItem[] = [];
-    for (const a of candidates) {
-      if (a.messageId && a.messageId > 0) {
-        try {
-          const { isMessageAnswered } = await import('./answered.js');
-          if (await isMessageAnswered(a.chatId, a.messageId)) continue;
-        } catch {
-          /* fail-open */
-        }
-        const inflight = state
-          .listTasks(a.chatId)
-          .filter((t) => t.status === 'queued' || t.status === 'running')
-          .some((t) => t.quoteMessageIds?.includes(a.messageId!));
-        if (inflight) continue;
-      }
-      toRequeue.push(a);
-    }
-    if (toRequeue.length) {
-      try {
-        const { getAttentionAccumulator } = await import('./attention.js');
-        await getAttentionAccumulator().requeue(toRequeue);
-        logger.info(
-          { chats: [...busyChatIds], n: toRequeue.length },
-          'Meta requeued L0 Attention (chat busy)',
-        );
-      } catch (err) {
-        logger.warn({ err }, 'Meta requeue busy L0 failed');
-      }
-    }
-  }
+  await requeueBusyL0(workAttention, busyChatIds);
 
   const digest = extractDigest(text) ?? text.slice(0, 240);
   if (digest) {

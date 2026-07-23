@@ -58,12 +58,39 @@ export function replyToFromPayload(payload?: Record<string, unknown> | null): Re
   };
 }
 
+/** Compact replyTo suffix for Meta Attention lines. */
+export function formatAttentionReplyToBit(payload?: Record<string, unknown> | null): string {
+  const rt = replyToFromPayload(payload);
+  if (!rt) return '';
+  const snip = String(rt.textSnippet ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  const who = rt.fullName ? ` ${rt.fullName}` : '';
+  const snipBit = snip ? `「${snip}${snip.length >= 80 ? '…' : ''}」` : '';
+  return ` replyTo=#${rt.messageId}${who}${snipBit}`;
+}
+
+/**
+ * Drop Attention already claimed by diary/autoDispatch so Meta LLM cannot
+ * re-script the same chat this session.
+ */
+export function filterAttentionForMetaLlm<T extends { chatId: number }>(
+  attention: T[],
+  dispatchedChatIds: Set<number>,
+): T[] {
+  if (dispatchedChatIds.size === 0) return attention;
+  return attention.filter((a) => !dispatchedChatIds.has(a.chatId));
+}
+
 /** Build L0 contentDirection when the Attention item may carry replyTo. */
 export function buildL0ContentDirection(opts: {
   who: string;
   messageId?: number;
   textPreview?: string;
   replyTo?: ReplyToPayload | null;
+  /** Parent bubble is the bot's own prior message. */
+  replyToIsSelf?: boolean;
   burstHint?: string;
   masterHint?: string;
 }): string {
@@ -71,6 +98,11 @@ export function buildL0ContentDirection(opts: {
   const master = opts.masterHint ?? '';
   const tail = `${burst}${master}禁止复读用户原话；用本喵口吻接一句。`;
   const mid = opts.messageId ? `#${opts.messageId}` : '';
+  const preview = String(opts.textPreview ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  const previewBit = preview ? `「${preview}${preview.length >= 80 ? '…' : ''}」` : '';
   const rt = opts.replyTo;
   if (rt?.messageId) {
     const snip = String(rt.textSnippet ?? '')
@@ -79,6 +111,19 @@ export function buildL0ContentDirection(opts: {
       .slice(0, 180);
     const whoRt = rt.fullName ? `${rt.fullName}` : '别人';
     const snipBit = snip ? `「${snip}${snip.length >= 180 ? '…' : ''}」` : '';
+    if (opts.replyToIsSelf) {
+      if (isBarePingText(opts.textPreview)) {
+        return (
+          `${opts.who} 用 reply+@ 点了你上一句 #${rt.messageId}${snipBit}。` +
+          `针对那句短评/接话，禁止空问候（在呢/怎么啦/啥事）。` +
+          `回气泡 quote 用户这条 ${mid || '消息'}。${tail}`
+        );
+      }
+      return (
+        `${opts.who} 在回复你的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}${previewBit}（内容见最近聊天）。` +
+        `先弄清对方这一句和你上一句的关系再回；禁止臆造对方没提到的结论，禁止「没事/本喵看着」式糊弄。${tail}`
+      );
+    }
     if (isBarePingText(opts.textPreview)) {
       return (
         `${opts.who} 用 reply+@ 点了你：原消息是 ${whoRt} 的 #${rt.messageId}${snipBit}。` +
@@ -87,8 +132,8 @@ export function buildL0ContentDirection(opts: {
       );
     }
     return (
-      `${opts.who} 在回复 ${whoRt} 的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}（内容见最近聊天）。` +
-      `回应要扣住被引用的那条，别当闲聊打招呼。${tail}`
+      `${opts.who} 在回复 ${whoRt} 的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}${previewBit}（内容见最近聊天）。` +
+      `回应要扣住被引用的那条，别当闲聊打招呼；禁止臆造未出现在最近聊天里的结论。${tail}`
     );
   }
   if (isShortFollowUpText(opts.textPreview)) {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildL0ContentDirection,
+  filterAttentionForMetaLlm,
+  formatAttentionReplyToBit,
   isBarePingText,
   isShortFollowUpText,
   replyToFromPayload,
@@ -70,5 +72,44 @@ describe('reply-context', () => {
     expect(d).toMatch(/短回 @u 的消息 #1/);
     expect(d).not.toMatch(/禁止空问候/);
     expect(d).not.toMatch(/短接话/);
+  });
+
+  it('L0 direction: reply-to-self forbids invented「没事/本喵看着」', () => {
+    const d = buildL0ContentDirection({
+      who: '@Zh_Taiwan',
+      messageId: 393495,
+      textPreview: '千雪怎么了',
+      replyTo: {
+        messageId: 393494,
+        uid: 1,
+        textSnippet: '哼 本喵刚醒 才没跟他玩',
+      },
+      replyToIsSelf: true,
+      masterHint: '对方是主人(@Zh_Taiwan)：软一点、听话一点。',
+    });
+    expect(d).toMatch(/回复你的 #393494/);
+    expect(d).toMatch(/千雪怎么了/);
+    expect(d).toMatch(/禁止臆造/);
+    expect(d).toMatch(/没事\/本喵看着/);
+    expect(d).not.toMatch(/简单说没事/);
+  });
+
+  it('formats replyTo bit for Meta Attention lines', () => {
+    expect(
+      formatAttentionReplyToBit({
+        replyTo: { messageId: 393494, fullName: '啾咪囝', textSnippet: '哼 本喵刚醒 才没跟他玩' },
+      }),
+    ).toMatch(/replyTo=#393494 啾咪囝「哼 本喵刚醒/);
+    expect(formatAttentionReplyToBit({})).toBe('');
+  });
+
+  it('filters already-dispatched chats out of Meta LLM Attention', () => {
+    const items = [
+      { chatId: 1, layer: 'L0' },
+      { chatId: 2, layer: 'L1' },
+      { chatId: 1, layer: 'L2' },
+    ];
+    expect(filterAttentionForMetaLlm(items, new Set([1]))).toEqual([{ chatId: 2, layer: 'L1' }]);
+    expect(filterAttentionForMetaLlm(items, new Set())).toEqual(items);
   });
 });
