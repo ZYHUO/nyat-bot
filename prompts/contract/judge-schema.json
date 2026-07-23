@@ -1,13 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "JudgeOutput",
-  "description": "Judge 决策输出格式",
+  "description": "Judge 决策输出格式。REPLY_PRO 等价于 REPLY + replyTier=pro；REPLY_MAX 等价于 REPLY + replyTier=max（慎用）。",
   "type": "object",
   "required": ["action"],
   "properties": {
     "action": {
       "type": "string",
-      "enum": ["REPLY", "IGNORE", "REJECT"],
+      "enum": ["REPLY", "REPLY_PRO", "REPLY_MAX", "IGNORE", "REJECT"],
       "description": "决策动作"
     },
     "replyPath": {
@@ -17,8 +17,8 @@
     },
     "replyTier": {
       "type": "string",
-      "enum": ["normal", "pro"],
-      "description": "回复模型档位：normal=普通，pro=更高预算/更强分析"
+      "enum": ["normal", "pro", "max"],
+      "description": "回复模型档位：normal=普通，pro=更高预算/更强分析，max=最高推理（慎用，每天仅3次）"
     },
     "confidence": {
       "type": "number",
@@ -28,7 +28,7 @@
     },
     "reasoning": {
       "type": "string",
-      "description": "决策理由（可选，用于调试）",
+      "description": "决策理由（审计用，不展示给用户）",
       "maxLength": 500
     }
   },
