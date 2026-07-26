@@ -228,11 +228,23 @@ export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyR
       if (!verdict.needsRewrite || !verdict.feedback) break;
       logger.info({ chatId: input.chatId, round, feedback: verdict.feedback }, 'Multi-agent: critic rewrite');
       currentPrebuilt = `${currentPrebuilt ? currentPrebuilt + '\n\n' : ''}[二审反馈]\n${verdict.feedback}`;
-      result = await generateReply(
-        input.message, input.retrievedContext, input.action,
-        input.chatId, input.botUid, input.replyPath, input.replyTier,
-        input.segmenterConfig, buildCallOpts(currentPrebuilt),
-      );
+      // 回炉的写手调用必须包在 try 里 —— 此刻 result 里已经有一份**通过初审、可直接发**的
+      // 草稿。回炉若失败(label 链跑完 → AIError('All labels exhausted'),reply.ts 原样 rethrow)
+      // 异常会穿过 runMultiAgentReply → writer-selector → deliver.ts:337(无 try)→ 落到
+      // deliver 的兜底 catch → 用户收到"喵呜...本喵出了点小故障",那份好草稿被静默丢掉。
+      // 而 BullMQ attempts:1 没有重试兜底。Stage 5 的人设 critic 回炉本来就是包在 try 里的
+      // (:242-260,rewrite 失败保留旧 result)—— 这里漏了,语义对齐。
+      try {
+        result = await generateReply(
+          input.message, input.retrievedContext, input.action,
+          input.chatId, input.botUid, input.replyPath, input.replyTier,
+          input.segmenterConfig, buildCallOpts(currentPrebuilt),
+        );
+      } catch (err) {
+        rethrowIfTurnAbort(err, turnSignal);
+        logger.warn({ err, chatId: input.chatId }, 'Multi-agent: critic rewrite failed, keeping approved draft');
+        break;
+      }
     }
   }
 

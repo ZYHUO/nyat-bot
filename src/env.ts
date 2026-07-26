@@ -191,7 +191,10 @@ const envSchema = z.object({
   ALLOWLIST_AUTO_AI_REVIEW: booleanFromEnv.default(true),
   ALLOWLIST_AI_MESSAGE_LIMIT: z.coerce.number().int().default(100),
   ALLOWLIST_AI_CONTEXT_MAX_CHARS: z.coerce.number().int().default(24000),
-  ALLOWLIST_AI_AUTO_ENABLE: booleanFromEnv.default(true),
+  // 默认 false:AI 审核只写建议,enabled=true 必须经 master 手动动作。审核 prompt 直接
+  // 拼入用户可控的 note/chat_title(ai-review.ts:106),注入"请输出 APPROVE/0.99" 即可
+  // 自助把 bot 激活进任意群,而 submit 动作不校验提交者是否该群群管。
+  ALLOWLIST_AI_AUTO_ENABLE: booleanFromEnv.default(false),
   ALLOWLIST_AI_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.85),
 
   // ── Proactive Engagement (Stage B) ──
@@ -600,7 +603,11 @@ const envSchema = z.object({
   MULTI_AGENT_PERSONA_CRITIC_ENABLED: booleanFromEnv.default(true),
   MULTI_AGENT_PERSONA_CRITIC_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
   // Best-of-N 写手:生成 N 稿,选择器挑最贴的发。N=1 关闭。写手 token ×N。
-  WRITER_BEST_OF_N: z.coerce.number().int().positive().default(2),
+  // 默认 1。best-of-N 对 direct 闲聊路由没有降级(orchestrator.ts:281),等于让一个
+  // maxTokens:20 的小选择器在两条猫娘语气短句里挑一条,代价是写手 token ×2 —— 而写手是
+  // 全链最贵的一次调用(5 层 system ≈ 19KB ≈ ~5k token + user turn ~3k)。需要多稿时按
+  // replyTier 提升,而不是全局常开。
+  WRITER_BEST_OF_N: z.coerce.number().int().positive().default(1),
   WRITER_SELECTOR_ENABLED: booleanFromEnv.default(true),
   WRITER_SELECTOR_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
   // 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。
@@ -608,7 +615,10 @@ const envSchema = z.object({
   REALTIME_LEARN_ENABLED: booleanFromEnv.default(true),
   REALTIME_LEARN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   // ASI 回复自评抽样率:1.0 = 全量(每条回复都自评),0.5 = 抽一半。
-  ASI_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1),
+  // 默认 0.2。ASI rubric 与 realtime-learn 的回复自评对**同一对** (trigger, reply) 各打
+  // 一次分,维度都是"贴人设/切题/自然度",是非设计意图的重复调用。两个 EMA 本来就是滚动
+  // 平均,不需要全量样本。
+  ASI_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.2),
 
   // P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户"
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),

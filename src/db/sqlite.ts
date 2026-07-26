@@ -18,6 +18,13 @@ export function getDb(): Database.Database {
     _db.pragma('journal_mode = WAL');
     _db.pragma('foreign_keys = ON');
     _db.pragma('busy_timeout = 5000');
+    // WAL + synchronous=FULL(SQLite 默认) 意味着每次 commit 都 fsync WAL:实测 2.24ms/commit
+    // vs NORMAL 的 0.017ms(约 130x)。热路径一条入站消息会产生 3-10 个独立隐式事务
+    // (memory_meta / social_edges / person_aliases / user_profiles / self_replies …),
+    // 即 ~7-22ms 同步 fsync 阻塞在唯一的 JS 线程上。WAL 下 NORMAL 不会损坏数据库,
+    // 只在**操作系统/断电**故障时可能丢最后几次 commit(进程崩溃不丢)——对心情增量/
+    // 外号计数/记忆 sidecar 这类数据是可接受的权衡。
+    _db.pragma('synchronous = NORMAL');
 
     // try loading sqlite-vec extension (optional)
     try {

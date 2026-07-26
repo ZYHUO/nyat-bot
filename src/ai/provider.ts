@@ -281,11 +281,23 @@ async function callOpenAIRaw(
     const rawReasoning = typeof msg?.reasoning_content === 'string' ? msg.reasoning_content : '';
     // Prefer visible content; only fall back to reasoning_content when content is empty
     // (some grok relays put the whole answer there).
-    fullText = rawContent.trim() ? rawContent : rawReasoning;
+    // 回落到 reasoning_content 只对"中继把答案塞进了 reasoning 字段"这一种情况成立。
+    // 无法区分"reasoning 里是答案"和"reasoning 里是思维链"时,把 CoT 当正文返回会一路走到
+    // parser 的纯文本兜底 → 内心独白被发进群。所以只接受**看起来像结构化回复**的 reasoning
+    // (JSON / 代码块包裹的 JSON / <response> 标签),其余一律当空响应,让 fallback 换 label、
+    // 让 reply.ts 的空响应重试真正生效。
+    fullText = rawContent.trim() ? rawContent : (looksLikeStructuredReply(rawReasoning) ? rawReasoning : '');
     if (!rawContent.trim() && rawReasoning.trim()) {
       logger.info(
-        { label: label.name, model: label.model, reasoningChars: rawReasoning.length },
-        'AI empty content — using reasoning_content',
+        {
+          label: label.name,
+          model: label.model,
+          reasoningChars: rawReasoning.length,
+          accepted: fullText.length > 0,
+        },
+        fullText.length > 0
+          ? 'AI empty content — using structured reasoning_content'
+          : 'AI empty content — reasoning_content looks like raw CoT, treating as empty',
       );
     }
     const latencyMs = Math.round(performance.now() - start);
@@ -305,10 +317,7 @@ async function callOpenAIRaw(
         logger.debug(payload, 'prompt cache');
       }
     }
-    const text = fullText
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-      .trim();
+    const text = stripThinkingBlocks(fullText);
     if (!text) {
       throw new AIError('Empty response (no content/reasoning)', label.name, label.model, 'AI_EMPTY');
     }
@@ -327,10 +336,7 @@ async function callOpenAIRaw(
   }
 
   const latencyMs = Math.round(performance.now() - start);
-  const text = fullText
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-    .trim();
+  const text = stripThinkingBlocks(fullText);
 
   if (!text) {
     throw new AIError('Empty response from stream', label.name, label.model, 'AI_EMPTY');
@@ -346,6 +352,37 @@ async function callOpenAIRaw(
 }
 
 // ── Main entry ────────────────────────────────────────────────────
+
+/**
+ * reasoning_content 是否长得像"结构化回复"而不是裸思维链。
+ * 保守:只认 JSON 对象 / ```json 围栏 / <response> 标签这三种回复契约形态。
+ */
+function looksLikeStructuredReply(s: string): boolean {
+  const t = s.trim();
+  if (!t) return false;
+  if (t.startsWith('{') && t.endsWith('}')) return true;
+  if (/^```(?:json)?\s*\{[\s\S]*\}\s*```$/.test(t)) return true;
+  if (/<response>[\s\S]*<\/response>/i.test(t)) return true;
+  if (/"reply_?[cC]ontent"\s*:/.test(t)) return true;
+  // Dream journal / directive contracts: first line WRITE|SKIP (not bare CoT prose).
+  if (/^(WRITE|SKIP)\b/im.test(t)) return true;
+  return false;
+}
+
+/**
+ * 剥掉思维链块。除了成对的 <think>/<thinking>,还要处理**未闭合**的前缀 ——
+ * maxTokens 在思考中途截断时 content 就是 `<think>让我想想…`(没有 </think>),
+ * 原来的成对正则不匹配,于是带 <think> 字样的内心独白被当正文发出去。
+ */
+function stripThinkingBlocks(s: string): string {
+  let out = s
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/◁think▷[\s\S]*?◁\/think▷/gi, '');
+  // 未闭合的开标签 → 之后全部是思考内容,整段丢弃。
+  out = out.replace(/<think(?:ing)?>[\s\S]*$/i, '').replace(/◁think▷[\s\S]*$/i, '');
+  return out.trim();
+}
 
 export async function callModel(
   label: AILabel,

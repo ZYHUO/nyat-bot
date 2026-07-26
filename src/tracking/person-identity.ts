@@ -63,12 +63,40 @@ function shouldTriggerMerge(uid: number, nowSec: number): boolean {
   return true;
 }
 
-function upsertIdentity(uid: number, impression: string | null, primary: number | null, chatCount: number, now: number): void {
+/**
+ * @param clearImpression tombstone 路径专用:显式把 impression 清成 NULL(绕过下面的
+ *   COALESCE 保护)。普通刷新路径必须为 false —— impression 取不到时应保留旧值。
+ */
+function upsertIdentity(
+  uid: number,
+  impression: string | null,
+  primary: number | null,
+  chatCount: number,
+  now: number,
+  clearImpression = false,
+): void {
+  if (clearImpression) {
+    getDb().prepare(
+      `INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at)
+       VALUES (?, NULL, ?, ?, ?)
+       ON CONFLICT(uid) DO UPDATE SET
+         impression = NULL,
+         primary_chat_id = excluded.primary_chat_id,
+         chat_count = excluded.chat_count,
+         updated_at = excluded.updated_at`,
+    ).run(uid, primary, chatCount, now);
+    return;
+  }
   getDb().prepare(
     `INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(uid) DO UPDATE SET
-       impression = excluded.impression,
+       -- COALESCE:primary 群的 user_profiles.profile_prompt 还没被每小时的画像 cron 填上
+       -- (新活跃的群,或好感排序刚漂移换了 primary)时 impression 会是 NULL。无条件覆盖会
+       -- 抹掉已积累的跨群印象,而 PROFILE_MERGE_ENABLED 默认关 → 全局结构化列是空 →
+       -- buildCrossGroupInjection 里 "if (!row.impression) return null" 让跨群认人直接归零,
+       -- 且要等 6h + 画像 cron 才恢复。真的要清空走 upsertIdentity 的 clearImpression=true。
+       impression = COALESCE(excluded.impression, person_identity.impression),
        primary_chat_id = excluded.primary_chat_id,
        chat_count = excluded.chat_count,
        updated_at = excluded.updated_at`,
@@ -90,8 +118,9 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
     const contexts = await getUserContexts(uid).catch(() => [] as number[]);
     const now = Math.floor(Date.now() / 1000);
     if (contexts.length <= 1) {
-      // tombstone:更新时间戳以节流;impression=null → buildCrossGroupInjection 返回 null
-      upsertIdentity(uid, null, null, contexts.length, now);
+      // tombstone:更新时间戳以节流;impression=null → buildCrossGroupInjection 返回 null。
+      // clearImpression=true 显式绕过 upsert 里的 COALESCE 保护 —— 这里的 NULL 是有意的。
+      upsertIdentity(uid, null, null, contexts.length, now, true);
       return { uid, impression: null, primary_chat_id: null, chat_count: contexts.length, updated_at: now };
     }
     const agg = getAggregatedAffinity(uid);
@@ -101,7 +130,9 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
     const impression = getUserProfilePrompt(primary, uid);
     upsertIdentity(uid, impression, primary, contexts.length, now);
     const existing = getPersonIdentity(uid);
-    return { ...(existing ?? {} as PersonIdentityRow), uid, impression, primary_chat_id: primary, chat_count: contexts.length, updated_at: now };
+    // impression 用**落库后**的值,不是本地变量 —— COALESCE 可能保留了旧值,返回本地的
+    // null 会让调用方以为跨群印象没了。
+    return { ...(existing ?? {} as PersonIdentityRow), uid, impression: existing?.impression ?? impression, primary_chat_id: primary, chat_count: contexts.length, updated_at: now };
   } catch (err) {
     logger.debug({ err, uid }, 'refreshPersonIdentity failed (non-critical)');
     return null;

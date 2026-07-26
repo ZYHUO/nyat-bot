@@ -19,3 +19,7 @@ deploy-report.txt
 # NyatDB native build artifacts (rebuild via npm run build:nyatdb)
 native/**/target/
 *.node
+
+# 一次性导出物 —— 曾把真实群聊记录(群 ID + 成员显示名 + 对话原文)
+# 和运营者 uid/username 随公开仓库分发。历史里已存在的需 git filter-repo 清。
+exports/

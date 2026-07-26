@@ -349,7 +349,16 @@ export async function getRecent(chatId: number, count: number): Promise<Formatte
     return fromNyat.slice(-count);
   }
 
-  const fromRedis = await readFromRedis(chatId, Math.max(count, env().CONTEXT_MAX_LENGTH));
+  // 取满 CONTEXT_MAX_LENGTH 只为给 mergeRecentWithRedis 补 NyatDB 空洞。NyatDB 读关闭时
+  // 下面走的是 `fromRedis.slice(-count)`,多取的部分会被立刻丢掉 —— 而 getRecent 在一条
+  // 产生回复的消息上被调用 8-10 次(judge 窗口/retriever/stale-reply×2/quote policy/
+  // 判重/chat-style/chat-pressure),每次 LRANGE 600 条 + 600 次 JSON.parse ≈ 180KB,
+  // 合计 ~1.4MB Redis 出向 + 40-80ms 同步阻塞。
+  const needForMerge = nyatWriteEnabled() && env().NYATDB_READ;
+  const fromRedis = await readFromRedis(
+    chatId,
+    needForMerge ? Math.max(count, env().CONTEXT_MAX_LENGTH) : count,
+  );
 
   if (fromNyat && fromNyat.length > 0) {
     const merged = mergeRecentWithRedis(fromNyat, fromRedis, count);

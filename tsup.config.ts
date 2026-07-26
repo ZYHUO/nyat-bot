@@ -8,7 +8,9 @@ export default defineConfig({
   clean: true,
   splitting: false,
   sourcemap: true,
-  dts: true,
+  // dist/index.js 是 `node dist/index.js` 直接跑的应用入口,package.json 又是 private:true
+  // 不发包 —— 生成 .d.ts rollup 没有消费者,纯粹浪费构建时间。
+  dts: false,
   shims: false,
   external: [
     'better-sqlite3',

@@ -550,7 +550,19 @@ async function runChatTurnInner(data: MessageJobData, jobId?: string): Promise<v
     entries = [...olderDirects, ...recent];
   }
 
-  const epoch = await bumpEpoch(chatId);
+  // drainPending 已经用 MULTI(LRANGE+DEL+HDEL) 原子取走整批 burst —— 此后这批消息的
+  // **唯一副本在进程内存里**。而 chat_turn job 是 attempts:1 + removeOnFail:true
+  // (producer.ts:21 / turn-scheduler.ts:174),所以这里抛异常等于整批消息永久消失、
+  // 连 bookkeeping 都没做过(上下文出现空洞,后续回复"失忆"),且队列里不留任何痕迹。
+  // Redis 的 MISCONF / OOM / READONLY 是"读成功写失败"的偏态故障:drain 里的 LRANGE
+  // 是读命令仍会成功,恰好落在这个组合上。epoch 只用于打断身份比较,退化成时间戳无害。
+  //
+  // 对照:defer_resume 专门配了 attempts:5 + 保留失败 job(producer.ts:102-111),
+  // 说明这个风险已被认知,只是没覆盖到 chat_turn 这条路。
+  const epoch = await bumpEpoch(chatId).catch((err: unknown) => {
+    logger.error({ err, chatId, drained: drained.length }, 'bumpEpoch failed after drain; degrading epoch to timestamp');
+    return Date.now();
+  });
   const e = env();
   const hasDirect = entries.some((entry) => entry.direct);
 

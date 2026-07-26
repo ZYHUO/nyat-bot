@@ -14,6 +14,7 @@ import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
 import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility } from './visibility.js';
+import { env } from '../env.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
@@ -65,6 +66,15 @@ const _embedCache = new LRUCache<string, number[]>({
 });
 
 // ── Embedder (local, lazy-loaded) ────────────────────────
+
+/**
+ * 启动预热:把 ONNX session init(~23MB 量化模型,冷缓存时还要下载)从"第一条文本消息
+ * 的关键路径"挪到进程启动期。不预热时每次 systemctl restart 后的第一条消息要当场阻塞
+ * 0.5-2s,且 searchMemory 的 500ms 竞速会返回 [] —— 重启后头几条回复静默地完全没有长期记忆。
+ */
+export function warmEmbedder(): void {
+  void getEmbedder().catch(() => { /* non-critical; getEmbedder 内部失败会清空 promise 以便重试 */ });
+}
 
 function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
   if (_embedder) return Promise.resolve(_embedder);
@@ -316,8 +326,14 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
 /**
  * 机制4:per-uid 跨上下文记忆检索(旁路,不锁 chatId)。filter 改按 uid,
  * 返回**强制过 scrubMemoryHits(boundChatId)**——默认带 public + 非私密来源
- * contextual,private 一律剔除。仅 MEMORY_CROSS_CONTEXT_ENABLED &&
- * MEMORY_VISIBILITY_ENABLED 同开时才应由调用方启用(fail-closed 见 retriever)。
+ * contextual,private 一律剔除。
+ *
+ * **双 flag fail-closed 在本函数内收口**(不再靠调用方自觉)。原先的约定是"仅
+ * MEMORY_CROSS_CONTEXT_ENABLED && MEMORY_VISIBILITY_ENABLED 同开时才应由调用方启用",
+ * retriever.retrieveCrossContext 照做了,但 subagent 的 host-api.recallPerson 漏了 ——
+ * 而 scrubMemoryHits 在 MEMORY_VISIBILITY_ENABLED=false(默认)时是**空操作**,于是
+ * 任意群成员可让 CodeAct 模型对任意 uid 调 recallPerson,把受害者 DM 原文取回并念到群里。
+ * 守卫放在唯一出口这里,新调用方不可能再绕过。
  */
 export async function searchMemoryByUser(
   uid: number,
@@ -326,6 +342,8 @@ export async function searchMemoryByUser(
   topK = 8,
   timeoutMs = 500,
 ): Promise<ScoredMessage[]> {
+  const e = env();
+  if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) return [];
   // 负数 uid = sender_chat(匿名管理员/频道),不是真实的人,不做 per-person 检索。
   if (!query.trim() || !uid || uid <= 0) return [];
   try {
@@ -353,7 +371,13 @@ async function _searchMemoryByUserInner(
   const hits = await store.search(COLLECTION_NAME, {
     vector,
     limit: topK * 3,
-    filter: { must: [{ key: 'uid', match: { value: uid } }] },
+    filter: {
+      must: [{ key: 'uid', match: { value: uid } }],
+      // 纵深:private 在**数据库侧**就剔掉,不要取回进程内存再靠 JS 过滤(取回即已是
+      // 泄漏面 —— 中途任何日志/异常都会带出原文)。存量点没有 visibility 字段时
+      // must_not 不会命中,仍由下面的 scrubMemoryHits 按 sourceChatId 兜底。
+      must_not: [{ key: 'visibility', match: { value: 'private' satisfies MemoryVisibility } }],
+    },
     with_payload: true,
     params: { quantization: { rescore: true, oversampling: 2.0 } },
   });

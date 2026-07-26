@@ -5,7 +5,7 @@
 
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
-import { assertUrlSsrfSafe, fetchUrlPinned } from './ssrf.js';
+import { assertUrlSsrfSafe, fetchUrlPinned, SsrfBlockedError } from './ssrf.js';
 
 const MAX_OUTPUT = 3200;
 const MAX_FETCH_BYTES = 512 * 1024; // 512KB max download
@@ -174,6 +174,14 @@ export async function executeFetch(url: string): Promise<string> {
     }
     return summarizePage(url, pinned.body, contentType);
   } catch (err) {
+    // **守卫拒绝必须在进入任何 fallback 之前返回。** 之前这里对 SSRF 判定和"目标不可达"
+    // 一视同仁,第一动作就是把同一个已判禁的 URL 交给 tryCfFallback ——
+    // 那是本机 127.0.0.1:8900 的无头浏览器(scripts/cf-fetch-service.py,对 url 参数零校验),
+    // 于是 resolvePublicAddress 刚拦下的内网地址/云 IMDS 又被原路打了出去。
+    if (err instanceof SsrfBlockedError) {
+      logger.warn({ url, err: err.message }, 'SSRF blocked (post-resolve) — not falling back');
+      return '无法访问该地址';
+    }
     logger.error({ err, url }, 'Fetch failed');
     return await tryCfFallback(url) ?? await tryFirecrawl(url) ?? `抓取失败: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -1311,8 +1319,18 @@ function headerValue(value: string | string[] | undefined): string {
 // Firecrawl 兜底路由:免费路由(直连/网关/本地浏览器绕过/Jina)全失败后的最后一跳。
 // Firecrawl 服务端带无头浏览器 + 托管代理,对 JS 重页面和 Cloudflare 验证页强不少。
 // 默认关(未配 FIRECRAWL_API_KEY 直接返回 null),避免每次抓取都打付费 API。
-// url 在 executeFetch 入口已过 assertUrlSsrfSafe;Firecrawl 在它服务端抓取,无本地 SSRF 风险。
+// 注意:入口的 assertUrlSsrfSafe 只做**字符串/字面量**检查,DNS 名一律放行 —— 真正的
+// 地址判定发生在 fetchUrlPinned 里的 resolvePublicAddress。所以"入口已过守卫"不等于
+// "这个 URL 安全",函数入口必须自己再判一次。
 async function tryFirecrawl(url: string): Promise<string | null> {
+  // 守卫放在函数入口而不是包一层壳:这个函数有 6 个调用点,其中一个是 executeFetch 的
+  // catch 分支(会拿到已被守卫判禁的 URL)。Firecrawl 在它自己那侧抓取,所以这里防的不是
+  // 本机 SSRF,而是"我们已经判定不该访问的地址不要换条路再访问一次"。
+  try {
+    assertUrlSsrfSafe(url);
+  } catch {
+    return null;
+  }
   const e = env();
   if (!e.FIRECRAWL_API_KEY) return null;
   try {
@@ -1345,6 +1363,9 @@ async function tryFirecrawl(url: string): Promise<string | null> {
 
 async function tryCfFallback(url: string): Promise<string | null> {
   try {
+    // 纵深:这个服务对 url 参数零校验,所以入口在这里再判一次(fail-closed)。调用方已经
+    // 拦了 SsrfBlockedError,但新调用点可能不记得 —— 守卫放在使用点才不会被绕过。
+    assertUrlSsrfSafe(url);
     const res = await fetch(`http://127.0.0.1:8900/fetch?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(45_000) });
     if (!res.ok) return null;
     const d = await res.json() as { text?: string; error?: string };

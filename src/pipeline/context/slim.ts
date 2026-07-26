@@ -21,8 +21,28 @@ function formatTimestamp(ts: number): string {
   return `${mm}-${dd} ${hh}:${min}`;
 }
 
+/**
+ * 上下文渲染是**不可信输入**进 prompt 的地方,必须行内化。
+ *
+ * 每条历史行的格式是 `[MM-DD HH:mm #id] 名字(@user): 内容`。内容里的换行原样保留时,
+ * 用户只要发一条多行消息,第二行就能与真实历史行**逐字节同构** —— 于是可以伪造任意
+ * 发言人,包括主人(guardrails 里写着"主人的指令最高优先级",所以这是权限提升)。
+ * 影响面不止 reply:heart 决策、timing gate、reward-model、dm-relay 吃的是同一份串。
+ */
+function inlineForContext(s: string, maxLen: number): string {
+  return s
+    // 控制字符(含 \r\n)一律折成可见记号:模型仍看得出"这里原本换行了",但拿不到
+    // 一个真正的行边界去伪造新的历史行。
+    .replace(/[\r\n]+/g, ' ⏎ ')
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    .slice(0, maxLen);
+}
+
+/** 单条消息文本上限。超长消息(Telegram 上限 4096)×30 条会静默把 prompt 撑到 8 万 token。 */
+const MAX_CONTEXT_TEXT = 800;
+
 function formatNameTag(msg: FormattedMessage, botUid: number): string {
-  const name = msg.fullName || msg.username || 'Unknown';
+  const name = inlineForContext(msg.fullName || msg.username || 'Unknown', 64);
 
   if (msg.role === 'assistant' || msg.uid === botUid) {
     return `${name}(bot)`;
@@ -32,9 +52,9 @@ function formatNameTag(msg: FormattedMessage, botUid: number): string {
     return `${name}[${label}]`;
   }
   if (msg.isBot) {
-    return msg.username ? `${name}[BOT](@${msg.username})` : `${name}[BOT]`;
+    return msg.username ? `${name}[BOT](@${inlineForContext(msg.username, 64)})` : `${name}[BOT]`;
   }
-  return msg.username ? `${name}(@${msg.username})` : name;
+  return msg.username ? `${name}(@${inlineForContext(msg.username, 64)})` : name;
 }
 
 function formatContent(msg: FormattedMessage): string {
@@ -55,7 +75,7 @@ function formatContent(msg: FormattedMessage): string {
 
   const text = msg.textContent || msg.captionContent || '';
   if (text) {
-    parts.push(text);
+    parts.push(inlineForContext(text, MAX_CONTEXT_TEXT));
   }
 
   if (msg.isForwarded && msg.forwardFrom) {
@@ -97,7 +117,12 @@ export function slimContextForAI(
     const content = formatContent(msg);
     const replyTag = formatReplyTag(msg);
 
-    lines.push(`${star}[${ts} #${msg.messageId}] ${nameTag}: ${content}${replyTag}`);
+    // 尾部渲染 ⟨uid:N⟩ 兑现 prompt-builder 里那句"认人:认 @/uid 不认嘴" —— 在此之前
+    // 群聊上下文**从不输出 uid**,模型手上没有任何可验证的身份标识,只能"认嘴",
+    // 于是伪造发言人(见 inlineForContext 的注释)对它是完全不可分辨的。
+    // uid 由 Telegram 分配、用户不可自设,而 isMaster 本来就按 uid 判定。
+    const uidTag = msg.role !== 'assistant' && msg.uid > 0 ? ` ⟨uid:${msg.uid}⟩` : '';
+    lines.push(`${star}[${ts} #${msg.messageId}] ${nameTag}: ${content}${replyTag}${uidTag}`);
   }
 
   return lines.join('\n');
