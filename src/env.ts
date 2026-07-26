@@ -251,6 +251,18 @@ const envSchema = z.object({
   // scrub(默认带 public + 非私密来源 contextual,private 一律剔除)。
   // **必须** MEMORY_VISIBILITY_ENABLED 也开才生效(fail-closed)。默认关。
   MEMORY_CROSS_CONTEXT_ENABLED: booleanFromEnv.default(false),
+  // ── 长期记忆嵌入模型 / collection / 相关性下限 ──────────────
+  // 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文
+  // 同义 0.7543 / 无关 0.6097 → 区分度仅 0.1446(「打篮球」vs「查比特币价格」相似度
+  // 0.7210,比英文同义句对的 0.7025 还高),即语义检索接近随机。
+  // paraphrase-multilingual-MiniLM-L12-v2 同为 384 维、区分度 0.5592(3.9x)。
+  // 换模型后新旧向量空间不兼容,**必须整库重嵌入**:scripts/reembed-memory.ts 灌进
+  // 新 collection → 改 MEMORY_COLLECTION 切换 → 旧库保留一周作回滚。
+  MEMORY_EMBED_MODEL: z.string().default('Xenova/all-MiniLM-L6-v2'),
+  MEMORY_COLLECTION: z.string().default('xxb_group_history'),
+  // 检索相关性下限(0..1)。0 = 不过滤,保持历史行为(纯 topK)。
+  // 换模型与调阈值刻意分成两次改动;标定必须用真实语料,别沿用旧模型下的经验值。
+  MEMORY_MIN_SCORE: z.coerce.number().min(0).max(1).default(0),
   // 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。
   TOPIC_REGISTRY_ENABLED: booleanFromEnv.default(false),
   TOPIC_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(8),

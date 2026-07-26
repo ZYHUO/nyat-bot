@@ -3,7 +3,12 @@
 // ────────────────────────────────────────
 // - 写入：fire-and-forget，消息进 pipeline 后异步存入
 // - 读取：语义搜索，填 retriever.ts 的 semantic 路
-// - Embedding：@xenova/transformers 本地模型 (all-MiniLM-L6-v2, 384-dim)，无外部 API
+// - Embedding：@xenova/transformers 本地模型 (384-dim)，无外部 API。模型由
+//   MEMORY_EMBED_MODEL 指定 —— 默认的 all-MiniLM-L6-v2 是**英文单语**模型，对中文
+//   实测同义/无关区分度仅 0.14(无关句对 0.72 高于英文同义句对 0.70)，即检索结果
+//   接近随机；paraphrase-multilingual-MiniLM-L12-v2 同为 384 维、区分度 0.56。
+//   换模型必须整库重嵌入(新旧向量空间不兼容)——见 scripts/reembed-memory.ts，
+//   灌进新 collection 再用 MEMORY_COLLECTION 切换，旧库留作回滚。
 // - 存储：Qdrant (HNSW + cosine)，进程外但内存/性能远优于旧的 Chroma Python 服务
 //   迁移自 ChromaDB；点 id = UUIDv5(`${chatId}_${messageId}`) 以满足 Qdrant id 约束。
 // ────────────────────────────────────────
@@ -30,8 +35,16 @@ export type ScoredMessage = FormattedMessage & {
 
 const QDRANT_HOST = process.env['QDRANT_HOST'] ?? '127.0.0.1';
 const QDRANT_PORT = parseInt(process.env['QDRANT_PORT'] ?? '6333', 10);
-const COLLECTION_NAME = 'xxb_group_history';
 const VECTOR_SIZE = 384;
+
+/**
+ * Collection 名走 env,好让"重嵌入到新库 → 切换 → 保留旧库回滚"成为改一行配置的事。
+ * 读取点都走这个函数(而不是模块常量),这样测试 mock env() 就能生效;运行时改动需重启,
+ * 因为 getStore() 会把首次解析的结果连同 client 一起 memo 住。
+ */
+function collectionName(): string {
+  return env().MEMORY_COLLECTION;
+}
 
 // Deterministic mid → Qdrant point id. Qdrant ids must be uint64 or UUID, but our
 // natural key is the string `${chatId}_${messageId}`, so map it to a stable UUIDv5
@@ -83,7 +96,8 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
   _embedderPromise = (async () => {
     // Dynamic import to avoid blocking startup
     const { pipeline } = await import('@xenova/transformers');
-    const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+    const modelId = env().MEMORY_EMBED_MODEL;
+    const extractor = await pipeline('feature-extraction', modelId, {
       progress_callback: undefined, // suppress download progress logs
     });
 
@@ -117,7 +131,8 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
       return results as number[][];
     };
 
-    logger.info('Memory embedder loaded (all-MiniLM-L6-v2, 384-dim)');
+    // 打真实模型名:写死的日志在换模型后会撒谎,而"检索质量变差"最先查的就是这一行。
+    logger.info({ model: modelId, dim: VECTOR_SIZE, collection: collectionName() }, 'Memory embedder loaded');
     return _embedder;
   })().catch((err) => {
     // Clear promise so next call retries
@@ -143,8 +158,8 @@ function getStore(): Promise<QdrantClient> {
   _ready = (async () => {
     const c = client();
     const { collections } = await c.getCollections();
-    if (!collections.some((col) => col.name === COLLECTION_NAME)) {
-      await c.createCollection(COLLECTION_NAME, {
+    if (!collections.some((col) => col.name === collectionName())) {
+      await c.createCollection(collectionName(), {
         // Scalar int8 quantization: keep the quantized vectors in RAM for fast ANN,
         // offload the float32 originals to disk; search rescores from disk to keep
         // recall near-lossless. ~4x less RAM for the vector data.
@@ -154,7 +169,7 @@ function getStore(): Promise<QdrantClient> {
         },
       });
       // Index chatId so the per-chat filter is a fast pre-filter, not a scan.
-      await c.createPayloadIndex(COLLECTION_NAME, {
+      await c.createPayloadIndex(collectionName(), {
         field_name: 'chatId', field_schema: 'integer', wait: true,
       });
       logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection created');
@@ -179,7 +194,7 @@ async function ensurePayloadIndex(
   schema: 'integer' | 'keyword',
 ): Promise<void> {
   try {
-    await c.createPayloadIndex(COLLECTION_NAME, {
+    await c.createPayloadIndex(collectionName(), {
       field_name: field, field_schema: schema, wait: true,
     });
   } catch (err) {
@@ -211,7 +226,7 @@ export async function memorizeMessage(
     // 机制1:无条件写 visibility + sourceChatId(前向兼容,让数据先积累;
     // scrub 由 MEMORY_VISIBILITY_ENABLED 门控,不影响默认锁 chatId 的检索)。
     const visibility: MemoryVisibility = visibilityOverride ?? defaultVisibilityForChat(chatId);
-    await store.upsert(COLLECTION_NAME, {
+    await store.upsert(collectionName(), {
       wait: false,
       points: [{
         id: midToPointId(mid),
@@ -276,7 +291,7 @@ async function _searchMemoryInner(
   const [vector] = await embed([query]);
   if (!vector) return [];
 
-  const hits = await store.search(COLLECTION_NAME, {
+  const hits = await store.search(collectionName(), {
     vector,
     limit: topK,
     filter: { must: [{ key: 'chatId', match: { value: chatId } }] },
@@ -292,7 +307,27 @@ async function _searchMemoryInner(
     if (m) messages.push(m);
   }
 
-  return messages;
+  return applyMinScore(messages, { chatId });
+}
+
+/**
+ * 相关性下限。原先是纯 topK 无阈值 —— 那不是"检索不到就不注入",而是**无论多不相关
+ * 都稳定注入 topK 条**,冷门话题下等于持续往 prompt 里灌噪声(既误导模型又烧 token)。
+ *
+ * 默认 0 = 保持旧行为,换模型与调阈值分成两次改动,出问题才分得清是谁的锅。
+ * 阈值必须在换完模型之后、用真实语料标定 —— 旧的英文单语模型下中文相似度普遍虚高
+ * (无关句对 0.72),任何在旧空间里选的阈值搬到新空间都是错的。
+ */
+function applyMinScore<T extends ScoredMessage>(hits: T[], ctx: Record<string, unknown>): T[] {
+  const min = env().MEMORY_MIN_SCORE;
+  if (min <= 0) return hits;
+  const kept = hits.filter((m) => (m.score ?? 0) >= min);
+  const dropped = hits.length - kept.length;
+  if (dropped > 0) {
+    // debug 级:调阈值时要看得见取舍,但正常运行不该刷屏。
+    logger.debug({ ...ctx, min, dropped, kept: kept.length }, 'memory hits below MEMORY_MIN_SCORE');
+  }
+  return kept;
 }
 
 /** Qdrant hit → ScoredMessage(带 visibility/sourceChatId);无文本返回 null。 */
@@ -368,7 +403,7 @@ async function _searchMemoryByUserInner(
   if (!vector) return [];
 
   // 多取一些候选,scrub 掉跨界私密后仍够 topK。
-  const hits = await store.search(COLLECTION_NAME, {
+  const hits = await store.search(collectionName(), {
     vector,
     limit: topK * 3,
     filter: {
@@ -389,8 +424,10 @@ async function _searchMemoryByUserInner(
     // scrub/slice **之前**就剔除,否则本会话记忆挤占 topK 预算、跨上下文召回饿死。
     if (m && m.sourceChatId !== boundChatId) raw.push(m);
   }
+  // 阈值放在 scrub **之前**:低分噪声不该先占掉 topK 预算再被裁掉。
+  const scored = applyMinScore(raw, { uid, boundChatId });
   // R1 读隔离:剔除跨界私密(DM private / 敏感群来源)。
-  const { kept, dropped } = scrubMemoryHits(raw, boundChatId);
+  const { kept, dropped } = scrubMemoryHits(scored, boundChatId);
   if (dropped > 0) {
     // info 级:隐私防线真的挡下了跨界私密(DM/敏感群)内容 —— 生产可观测。
     logger.info({ uid, boundChatId, dropped, kept: kept.length }, 'per-user memory scrubbed cross-context private');
@@ -403,7 +440,7 @@ export async function deleteMemories(ids: string[]): Promise<number> {
   if (ids.length === 0) return 0;
   try {
     const store = await getStore();
-    await store.delete(COLLECTION_NAME, { points: ids.map(midToPointId), wait: false });
+    await store.delete(collectionName(), { points: ids.map(midToPointId), wait: false });
     return ids.length;
   } catch (err) {
     logger.warn({ err, count: ids.length }, 'deleteMemories failed (non-critical)');
