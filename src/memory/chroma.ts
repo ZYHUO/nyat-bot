@@ -36,6 +36,10 @@ export type ScoredMessage = FormattedMessage & {
 const QDRANT_HOST = process.env['QDRANT_HOST'] ?? '127.0.0.1';
 const QDRANT_PORT = parseInt(process.env['QDRANT_PORT'] ?? '6333', 10);
 const VECTOR_SIZE = 384;
+/** 去重查询的硬超时。写入是 fire-and-forget,但仍然跑在消息处理的任务里。 */
+const DEDUP_TIMEOUT_MS = 300;
+/** 混合检索时每一路的超取倍数 —— 融合后才截到 topK,单路取满 topK 会让融合无从选择。 */
+const HYBRID_OVERFETCH = 2;
 
 /**
  * Collection 名走 env,好让"重嵌入到新库 → 切换 → 保留旧库回滚"成为改一行配置的事。
@@ -223,6 +227,22 @@ export async function memorizeMessage(
     if (!vector) return;
 
     const mid = `${chatId}_${msg.messageId}`;
+
+    // 近重复合并:群聊里「哈哈哈」「+1」「同问」会被原样存成几万条独立记忆,
+    // 既撑大索引又挤占 topK 预算。命中已有近邻时不新增点,改为把它的 ref_count 顶上去
+    // —— 语义上"这件事又被说了一次"本就该是强化,而不是复制。
+    // 复用上面已算好的 vector,不额外 embed;整段套硬超时,绝不阻塞消息处理。
+    if (env().MEMORY_DEDUP_ENABLED) {
+      const dup = await findNearDuplicate(store, chatId, vector);
+      if (dup) {
+        try {
+          const { recordMemoryReferenced } = await import('./importance.js');
+          recordMemoryReferenced([dup]);
+        } catch { /* non-critical */ }
+        logger.debug({ chatId, messageId: msg.messageId, mergedInto: dup }, 'memory near-duplicate merged');
+        return;
+      }
+    }
     // 机制1:无条件写 visibility + sourceChatId(前向兼容,让数据先积累;
     // scrub 由 MEMORY_VISIBILITY_ENABLED 门控,不影响默认锁 chatId 的检索)。
     const visibility: MemoryVisibility = visibilityOverride ?? defaultVisibilityForChat(chatId);
@@ -251,8 +271,56 @@ export async function memorizeMessage(
       const { recordMemoryCreated } = await import('./importance.js');
       recordMemoryCreated(mid, chatId, msg.timestamp);
     } catch { /* non-critical */ }
+    // 词法索引与向量库必须同生同灭 —— 只写一边会让 BM25 与向量两路看到不同的库。
+    await writeLexical(mid, chatId, text);
   } catch (err) {
     logger.warn({ err, chatId, messageId: msg.messageId }, 'Memory write failed (non-critical)');
+  }
+}
+
+/**
+ * 找同 chat 内的近重复。返回被合并到的 mid,没有则 null。
+ * 这是**热路径**(每条消息都走),所以套硬超时:超时就当没有重复、正常写入 ——
+ * 宁可多存一条,也不能让去重把消息处理卡住。
+ */
+async function findNearDuplicate(
+  store: QdrantClient,
+  chatId: number,
+  vector: number[],
+): Promise<string | null> {
+  const threshold = env().MEMORY_DEDUP_THRESHOLD;
+  try {
+    const hits = await Promise.race([
+      store.search(collectionName(), {
+        vector,
+        limit: 1,
+        filter: { must: [{ key: 'chatId', match: { value: chatId } }] },
+        with_payload: true,
+        params: { quantization: { rescore: true, oversampling: 2.0 } },
+      }),
+      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), DEDUP_TIMEOUT_MS)),
+    ]);
+    const top = hits[0];
+    if (!top || typeof top.score !== 'number' || top.score < threshold) return null;
+    const mid = (top.payload ?? {})['mid'];
+    return typeof mid === 'string' ? mid : null;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'near-duplicate check failed (non-critical)');
+    return null;
+  }
+}
+
+/** 写 FTS 词法索引。非关键路径:失败只告警,不影响向量库那份已经写成功的记忆。 */
+async function writeLexical(mid: string, chatId: number, text: string): Promise<void> {
+  if (!env().MEMORY_HYBRID_ENABLED) return;
+  try {
+    const [{ getDb }, { upsertLexical }] = await Promise.all([
+      import('../db/sqlite.js'),
+      import('./lexical.js'),
+    ]);
+    upsertLexical(getDb(), mid, chatId, text);
+  } catch (err) {
+    logger.debug({ err, mid }, 'lexical index write failed (non-critical)');
   }
 }
 
@@ -287,13 +355,17 @@ async function _searchMemoryInner(
   query: string,
   topK: number,
 ): Promise<ScoredMessage[]> {
+  const hybrid = env().MEMORY_HYBRID_ENABLED;
+  // 混合时每路多取:融合要靠名次交叉,单路只取 topK 会让第二路没有发言权。
+  const perPath = hybrid ? topK * HYBRID_OVERFETCH : topK;
+
   const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
   const [vector] = await embed([query]);
   if (!vector) return [];
 
   const hits = await store.search(collectionName(), {
     vector,
-    limit: topK,
+    limit: perPath,
     filter: { must: [{ key: 'chatId', match: { value: chatId } }] },
     with_payload: true,
     // Under int8 quantization: over-fetch on the quantized index, then re-rank the
@@ -301,13 +373,62 @@ async function _searchMemoryInner(
     params: { quantization: { rescore: true, oversampling: 2.0 } },
   });
 
-  const messages: ScoredMessage[] = [];
+  const semantic: ScoredMessage[] = [];
   for (const hit of hits) {
     const m = hitToMessage(hit);
-    if (m) messages.push(m);
+    if (m) semantic.push(m);
   }
 
-  return applyMinScore(messages, { chatId });
+  if (!hybrid) return applyMinScore(semantic, { chatId }).slice(0, topK);
+
+  // 词法路:384 维小模型对专有名词/黑话/型号天然弱,BM25 正好补这一块。
+  const lexical = await lexicalPath(store, chatId, query, perPath);
+  if (lexical.length === 0) return applyMinScore(semantic, { chatId }).slice(0, topK);
+
+  // 阈值只施加于语义路 —— 词法路没有可比的 [0,1] 分数,拿余弦阈值卡它没有意义。
+  const { rrfFuse } = await import('./fusion.js');
+  const fused = rrfFuse<ScoredMessage>(
+    [applyMinScore(semantic, { chatId }), lexical],
+    (m) => `${m.sourceChatId ?? chatId}_${m.messageId}`,
+    { limit: topK },
+  );
+  return fused;
+}
+
+/**
+ * BM25 一路:FTS5 只存 id,所以命中后要回 Qdrant 取 payload 才能拼成 ScoredMessage。
+ * 全程非关键 —— 任何一步失败就返回空,退化成纯向量检索。
+ */
+async function lexicalPath(
+  store: QdrantClient,
+  chatId: number,
+  query: string,
+  limit: number,
+): Promise<ScoredMessage[]> {
+  try {
+    const [{ getDb }, { searchLexical }] = await Promise.all([
+      import('../db/sqlite.js'),
+      import('./lexical.js'),
+    ]);
+    const rows = searchLexical(getDb(), chatId, query, limit);
+    if (rows.length === 0) return [];
+
+    const points = await store.retrieve(collectionName(), {
+      ids: rows.map((r) => midToPointId(r.chromaId)),
+      with_payload: true,
+    });
+    // retrieve 不保证顺序,而 RRF 吃的是名次 —— 必须按 BM25 的原始排序还原。
+    const byMid = new Map<string, ScoredMessage>();
+    for (const p of points) {
+      const m = hitToMessage(p as { payload?: Record<string, unknown> | null; score?: number });
+      const mid = (p.payload ?? {})['mid'];
+      if (m && typeof mid === 'string') byMid.set(mid, m);
+    }
+    return rows.map((r) => byMid.get(r.chromaId)).filter((m): m is ScoredMessage => m !== undefined);
+  } catch (err) {
+    logger.debug({ err, chatId }, 'lexical path failed (non-critical, falling back to vector-only)');
+    return [];
+  }
 }
 
 /**
@@ -441,6 +562,20 @@ export async function deleteMemories(ids: string[]): Promise<number> {
   try {
     const store = await getStore();
     await store.delete(collectionName(), { points: ids.map(midToPointId), wait: false });
+    // 必须同步删词法索引。只删向量库的话索引会单向泄漏 —— 遗忘 cron 每天删一批,
+    // BM25 却继续召回这些"已被遗忘"的记忆,而且回 Qdrant 取 payload 会取空、
+    // 被 lexicalPath 静默滤掉,表现为"混合检索莫名其妙少了几条",极难定位。
+    if (env().MEMORY_HYBRID_ENABLED) {
+      try {
+        const [{ getDb }, { deleteLexical }] = await Promise.all([
+          import('../db/sqlite.js'),
+          import('./lexical.js'),
+        ]);
+        deleteLexical(getDb(), ids);
+      } catch (err) {
+        logger.warn({ err, count: ids.length }, 'lexical delete failed — FTS index may now leak');
+      }
+    }
     return ids.length;
   } catch (err) {
     logger.warn({ err, count: ids.length }, 'deleteMemories failed (non-critical)');

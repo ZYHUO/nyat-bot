@@ -263,6 +263,16 @@ const envSchema = z.object({
   // 检索相关性下限(0..1)。0 = 不过滤,保持历史行为(纯 topK)。
   // 换模型与调阈值刻意分成两次改动;标定必须用真实语料,别沿用旧模型下的经验值。
   MEMORY_MIN_SCORE: z.coerce.number().min(0).max(1).default(0),
+  // 混合检索:向量召回 + FTS5 BM25 词法召回,按 RRF(名次融合)合并。
+  // 384 维小模型对专有名词/群内黑话/型号天然弱(jargon-miner 挖的正是这类词),
+  // BM25 补的就是这一块。关闭时完全走旧的纯向量路径。默认关。
+  MEMORY_HYBRID_ENABLED: booleanFromEnv.default(false),
+  // 写入侧近重复合并:命中已有近邻时不新增点,改为顶高它的 ref_count
+  // (「这件事又被说了一次」语义上是强化,不是复制)。压制「哈哈哈」「+1」这类刷屏。
+  // **阈值必须在换完嵌入模型之后标定** —— 旧的英文单语模型下中文相似度普遍虚高
+  // (无关句对都有 0.72),0.93 在旧向量空间里会命中几乎一切,等于把记忆写没了。默认关。
+  MEMORY_DEDUP_ENABLED: booleanFromEnv.default(false),
+  MEMORY_DEDUP_THRESHOLD: z.coerce.number().min(0).max(1).default(0.93),
   // 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。
   TOPIC_REGISTRY_ENABLED: booleanFromEnv.default(false),
   TOPIC_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(8),
