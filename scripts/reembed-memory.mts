@@ -43,6 +43,26 @@ const qdrant = new QdrantClient({
   https: false,
 });
 
+/**
+ * Qdrant 调用重试。实测在长回填里会撞上 `fetch failed / EPIPE` —— Qdrant 关掉了
+ * keep-alive 连接,而 undici 的连接池复用了那个已死的 socket。这是连接层的瞬时故障,
+ * 重试即可;没有它,跑到一半崩掉就得靠 --resume 人工续,几十分钟的任务几乎必然中断。
+ */
+async function withRetry<T>(what: string, fn: () => Promise<T>, attempts = 5): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const wait = 500 * 2 ** i;
+      console.warn(`  ⚠ ${what} 失败(第 ${i + 1}/${attempts} 次),${wait}ms 后重试: ${String(err).slice(0, 80)}`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+
 // ── 前置检查 ────────────────────────────────────────────────
 const { collections } = await qdrant.getCollections();
 if (!collections.some((c) => c.name === SOURCE)) {
@@ -121,12 +141,12 @@ if (resume && existsSync(PROGRESS)) {
 
 const started = Date.now();
 for (;;) {
-  const res = await qdrant.scroll(SOURCE, {
+  const res = await withRetry('scroll', () => qdrant.scroll(SOURCE, {
     limit: BATCH,
     offset: prog.offset ?? undefined,
     with_payload: true,
     with_vector: false,
-  });
+  }));
   const points = res.points ?? [];
   if (points.length === 0) break;
 
@@ -147,7 +167,7 @@ for (;;) {
   }
 
   if (upserts.length > 0) {
-    await qdrant.upsert(TARGET, { wait: false, points: upserts });
+    await withRetry('upsert', () => qdrant.upsert(TARGET, { wait: false, points: upserts }));
     prog.done += upserts.length;
   }
   if (db && ftsRows.length > 0) {
