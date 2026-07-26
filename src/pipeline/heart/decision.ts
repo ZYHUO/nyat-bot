@@ -95,6 +95,18 @@ function toJudgeResult(act: HeartAct, path: 'chat' | 'lookup', latencyMs: number
  * 比误抢话安全;直接交互根本不经过这里)。
  */
 export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
+  const d = await _heartDecision(input);
+  // G8 A/B 基线:三种出口各自的次数。记在这里而不是调用方 —— 本函数有 5 条
+  // 提前返回的失败路径(prompt_load_failed / llm_failed / parse_failed …)和
+  // 两个调用方(pipeline.ts、meta/heart-adapter.ts),在出口收口才不会漏。
+  // 抛出的情况(caller abort)不记:那不是一次"决策"。
+  void import('../../metrics/social-ledger.js')
+    .then(({ recordDecision }) => recordDecision(input.chatId, d.act))
+    .catch(() => { /* telemetry never breaks the decision path */ });
+  return d;
+}
+
+async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const start = performance.now();
   const e = env();
 
@@ -140,6 +152,7 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
       // 一遍。provider 已支持 jsonMode(provider.ts:197),heart 的两次调用原先都没传 ——
       // heart 是全系统调用频次最高的 LLM,这一行的杠杆很高。
       jsonMode: true,
+      chatId: input.chatId,
       usage: 'judge',
       messages: [
         { role: 'system', content: systemPrompt },
@@ -180,6 +193,7 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
       // 一遍。provider 已支持 jsonMode(provider.ts:197),heart 的两次调用原先都没传 ——
       // heart 是全系统调用频次最高的 LLM,这一行的杠杆很高。
       jsonMode: true,
+        chatId: input.chatId,
         usage: 'judge',
         messages: [
           { role: 'system', content: systemPrompt },

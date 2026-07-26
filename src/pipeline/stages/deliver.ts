@@ -1135,6 +1135,18 @@ export async function generateAndSendReplies(args: {
       },
       "Pipeline complete",
     );
+
+    // G8 A/B 基线:回复数与端到端耗时。注意 totalMs 量的是**管线**耗时(从 job 开始
+    // 到发完),不含消息在 BullMQ 里的排队时间 —— 口径要在两组之间一致,所以不去
+    // 追求"真·端到端",只要同一把尺子。每条投递出去的消息各记一次。
+    if (sentMessages.length > 0) {
+      void import('../../metrics/social-ledger.js')
+        .then(({ recordReplySent }) => {
+          recordReplySent(job.chatId, totalMs);
+          for (let i = 1; i < sentMessages.length; i++) recordReplySent(job.chatId);
+        })
+        .catch(() => { /* telemetry never breaks delivery */ });
+    }
   } catch (err) {
     if (maxPlaceholderMsgId) {
       await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});

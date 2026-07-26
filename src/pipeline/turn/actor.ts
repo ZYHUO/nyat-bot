@@ -346,6 +346,11 @@ async function runJudgedEntry(
       }
       interrupted = true;
       replans++;
+      // G8 A/B 基线:打断率。G8 把"接不接"和"怎么说"合成一次决策,理论上会改变
+      // 在飞生成的时长分布,进而改变被打断的概率 —— 这是它最容易产生副作用的地方。
+      void import('../../metrics/social-ledger.js')
+        .then(({ recordInterrupt }) => recordInterrupt(chatId))
+        .catch(() => { /* telemetry never breaks the turn */ });
 
       // 等用户这一波消息发完(MaiBot post-interrupt 1s 静默期)
       await waitForMessageQuiet(chatId, e.TURN_INTERRUPT_QUIET_MS);

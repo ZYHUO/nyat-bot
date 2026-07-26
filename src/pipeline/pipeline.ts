@@ -91,6 +91,11 @@ function buildDeferEntry(job: ChatJob, formatted: FormattedMessage): PendingEntr
 
 export async function processPipeline(job: ChatJob): Promise<void> {
   const start = performance.now();
+  // G8 A/B 基线:回复/消息比的分母。记在管线入口 —— 这里是"bot 看见了一条消息"
+  // 的唯一收口,L0 规则命中、心流 pass、gate 拦截都在此之后,不会漏计。
+  void import('../metrics/social-ledger.js')
+    .then(({ recordMessageSeen }) => recordMessageSeen(job.chatId))
+    .catch(() => { /* telemetry never breaks the pipeline */ });
   const timings: Record<string, number> = {};
   const lockState: ChatLockState = {
     release: await acquireChatLock(job.chatId),
