@@ -68,6 +68,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         const result = await hedgedCall(
           label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown,
           options.rejectEmpty ?? false, options.maxTimeoutMs,
+          options.usage, options.suppressMetrics ?? false,
         );
         // rejectEmpty 已在 hedgedCall 内对两跳都施加;这里再兜一层,空则落到下个 backup。
         if (options.rejectEmpty && !result.content.trim()) {
@@ -153,19 +154,54 @@ async function hedgedCall(
   cooldown: CooldownTracker,
   rejectEmpty: boolean,
   maxTimeoutMs: number | undefined,
+  usage: string,
+  suppressMetrics: boolean,
 ): Promise<AICallResult> {
   const toError = (err: unknown) => (err instanceof Error ? err : new Error(String(err)));
+
+  // 每一跳一个自己的 AbortController,并把调用方的 signal 合进去。
+  //
+  // 原实现只用 clearTimeout 取消 hedge —— 那只在"主标签 2s 内先完成"时有效。定时器一旦
+  // 触发、hedge 的 fetch 已经发出,主标签随后胜出时 Promise.any 直接返回,**没有任何东西
+  // 去掐掉 hedge 的请求**:它会跑到底并被 provider 完整计费。而 HEDGE_DELAY_MS 默认 2000,
+  // 回复链主模型(grok-4.5, REASONING=low)的延迟远高于 2s,heart 判定也在 2-6s ——
+  // 这不是边缘情况,是几乎每次都命中,等于整条链的 token 账单翻倍。
+  const controllers = new Map<string, AbortController>();
+  let settledWinner: string | null = null;
+  const abortLosers = (winner: string | null) => {
+    for (const [name, ac] of controllers) {
+      if (name !== winner) ac.abort(new Error('hedge lost the race'));
+    }
+  };
 
   // 单跳:用该 label 自己的 attemptOpts(修 #1:per-label timeout/maxTokens 覆盖);
   // rejectEmpty 时空内容视为失败**在这里 reject**(修 #1:否则 Promise.any 把空当成功,
   // heart/gate 解析失败 → fail-open pass → 吞回复)。
-  const attempt = (label: ReturnType<typeof getLabel>): Promise<AICallResult> =>
-    callModel(label, messages, attemptOptsFor(label, callOpts, maxTimeoutMs)).then((r) => {
+  const attempt = (label: ReturnType<typeof getLabel>): Promise<AICallResult> => {
+    const ac = new AbortController();
+    controllers.set(label.name, ac);
+    const opts = attemptOptsFor(label, callOpts, maxTimeoutMs);
+    const signal = callOpts.signal
+      ? AbortSignal.any([callOpts.signal, ac.signal])
+      : ac.signal;
+    return callModel(label, messages, { ...opts, signal }).then((r) => {
+      // abort 之前就已经完成的输家(两跳几乎同时返回)仍然被 provider 计费过。原实现让
+      // 它的 rejection/resolution 被 Promise.any 吞掉,既不 emitLlmResult 也不 emitLlmError
+      // —— 于是 llm_token_daily 与 llm_tokens_total 系统性少算了 hedge 那一份,
+      // 这也正是"hedge 不取消输家"能长期没被发现的原因。这里把它记成 discarded。
+      if (settledWinner !== null && settledWinner !== label.name && !suppressMetrics) {
+        emitLlmResult(usage, r);
+        logger.info(
+          { usage, label: label.name, tokens: r.tokenUsage.total },
+          'Hedge loser completed anyway — tokens billed, counted as discarded',
+        );
+      }
       if (rejectEmpty && !r.content.trim()) {
         throw new AIError('Empty response', label.name, label.model, 'AI_EMPTY');
       }
       return r;
     });
+  };
 
   // Wrap each call to handle rate-limit cooldown side-effects and normalize errors
   const primaryPromise = attempt(primaryLabel).catch((err: unknown) => {
@@ -176,12 +212,14 @@ async function hedgedCall(
   });
 
   // After hedgeDelayMs, start hedge if primary hasn't resolved yet and hedge isn't cooling down
+  let hedgeStarted = false;
   const hedgePromise = new Promise<AICallResult>((resolve, reject) => {
     const timer = setTimeout(async () => {
       if (await cooldown.isCoolingDown(hedgeLabel.model)) {
         reject(new AIError('Hedge skipped (cooldown)', 'unknown', 'unknown', 'AI_HEDGE_FAILED'));
         return;
       }
+      hedgeStarted = true;
       attempt(hedgeLabel).then(resolve, (err: unknown) => {
         if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
         reject(toError(err));
@@ -193,10 +231,24 @@ async function hedgedCall(
   });
 
   // Return whichever succeeds first; only reject if both fail
-  return Promise.any([primaryPromise, hedgePromise]).catch((err: unknown) => {
-    if (err instanceof AggregateError && err.errors.length > 0) {
-      throw err.errors[0];
-    }
-    throw err;
-  });
+  return Promise.any([primaryPromise, hedgePromise])
+    .then((r) => {
+      // 赢家返回前先掐掉输家在飞的请求 —— 否则它跑到底并被计费。
+      settledWinner = r.label;
+      abortLosers(r.label);
+      if (hedgeStarted) {
+        logger.info(
+          { winner: r.label, primary: primaryLabel.name, hedge: hedgeLabel.name },
+          'Hedge raced; loser aborted',
+        );
+      }
+      return r;
+    })
+    .catch((err: unknown) => {
+      abortLosers(null);
+      if (err instanceof AggregateError && err.errors.length > 0) {
+        throw err.errors[0];
+      }
+      throw err;
+    });
 }

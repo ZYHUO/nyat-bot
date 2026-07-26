@@ -608,6 +608,9 @@ export function createAdminApi(deps: ApiDeps): Hono {
           return c.json(skRes);
         }
         case 'verify_get_settings':
+          // 与同组 verify_set_* 对齐:handler 内部只校验 chat_id 非零,而 chat_id 完全由
+          // 请求体决定且可枚举 —— 缺这道闸时任意已认证用户可读任意群的验证配置/统计。
+          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
           return c.json(await handleVerifyGetSettings(body));
         case 'verify_set_enabled':
           if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
@@ -616,6 +619,7 @@ export function createAdminApi(deps: ApiDeps): Hono {
           if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
           return c.json(await handleVerifySetConfig(body));
         case 'verify_stats':
+          if (!master) return c.json({ ok: false, error: 'forbidden' }, 403);
           return c.json(await handleVerifyStats(body));
         default:
           return c.json({ ok: false, error: 'unknown_action' }, 400);

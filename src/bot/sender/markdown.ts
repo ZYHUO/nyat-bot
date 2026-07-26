@@ -14,7 +14,10 @@ function escapeMarkdownV2(text: string): string {
 export function toMarkdownV2(text: string): string {
   if (!text.trim()) return text;
 
-  let remaining = text;
+  // \x00 是本函数内部的占位符定界符。入参自带它(模型复读上一轮的坏输出、或上游拼进
+  // 来的脏数据)会让 `bolds[Number(idx)]` 取到 undefined,escapeMarkdownV2(undefined)
+  // 直接抛 TypeError,异常穿过 withRetry 冒到 deliver 的兜底 catch。先无条件剥掉。
+  let remaining = text.replace(/\x00/g, '');
 
   // 1. 提取代码块（```...```），保护不被转义
   const codeBlocks: string[] = [];
@@ -84,14 +87,19 @@ export function toMarkdownV2(text: string): string {
   // 5. 转义剩余文本
   remaining = escapeMarkdownV2(remaining);
 
-  // 6. 还原粗体
-  remaining = remaining.replace(/\x00BD(\d+)\x00/g, (_, idx: string) => {
-    return `*${escapeMarkdownV2(bolds[Number(idx)]!)}*`;
-  });
-
-  // 6.5 还原剧透:内容按普通规则全量转义,包在 ||...|| 里
+  // 6. 还原剧透**先于**粗体:剧透正则 (步骤 3.5) 可能把粗体占位符 \x00BD{n}\x00 整体
+  //    吞进 spoilers[] 里。若先还原粗体,那个占位符此刻还藏在数组里、匹配不到;等 6.5
+  //    把剧透还原回文本时,BD 占位符被重新注入到**已经走过**粗体还原的文本上 —— 结果
+  //    是粗体内容彻底丢失、群里出现裸 \x00 和字面量 "BD0",且因为 ||…|| 本身合法,
+  //    Telegram 不报 can't parse entities,纯文本回退也不触发。
+  //    (IC/CB/URL 的还原本来就排在剧透之后,所以只有粗体这一对顺序是错的。)
   remaining = remaining.replace(/\x00SP(\d+)\x00/g, (_, idx: string) => {
     return `||${escapeMarkdownV2(spoilers[Number(idx)]!)}||`;
+  });
+
+  // 6.5 还原粗体
+  remaining = remaining.replace(/\x00BD(\d+)\x00/g, (_, idx: string) => {
+    return `*${escapeMarkdownV2(bolds[Number(idx)]!)}*`;
   });
 
   // 7. 还原行内代码。code 实体内规范要求 '\' 和 '`' 必须转义

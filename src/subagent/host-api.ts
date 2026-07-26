@@ -438,6 +438,12 @@ export function createHostApi(
           const inj = buildCrossGroupInjection(id, chatId);
           if (inj) bits.push(inj);
         } catch { /* optional */ }
+        // 跨上下文召回的 fail-closed 守卫已收口进 searchMemoryByUser 本身(双 flag),
+        // 这里再显式判一次只为给模型一个明确信号 —— 否则它拿到空结果会反复重试。
+        const e = env();
+        if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) {
+          return bits.join('\n') || '(cross-context recall disabled)';
+        }
         try {
           const hits = await searchMemoryByUser(id, String(query || '最近').slice(0, 200), chatId, 5, 2000);
           if (hits.length) {

@@ -4,6 +4,7 @@
 
 import { getBot } from '../bot.js';
 import { toMarkdownV2 } from './markdown.js';
+import { shardMarkdownV2, TG_TEXT_LIMIT } from './shard.js';
 import { recordSpeech } from '../../tracking/speech-meter.js';
 import { logger } from '../../shared/logger.js';
 
@@ -24,9 +25,23 @@ export async function reactToMessage(chatId: number, messageId: number, emoji: s
   }
 }
 
+/**
+ * @param idempotent 该操作重放一次是否安全。
+ *
+ * **非幂等操作(sendMessage / sendSticker)绝不能对网络错误重试。** Telegram Bot API 没有
+ * idempotency key,客户端侧的 ECONNRESET/ETIMEDOUT **无法区分**"没送达"和"已送达但响应
+ * 丢了" —— 重试就是群里出现两条一模一样的回复(最多 3 条)。而且只有最后一次成功返回的
+ * message_id 会进 sentMessages,前面那条重复消息从不进 addAssistant,所以下一轮的
+ * isDuplicateReply / checkNearDuplicate 看不到它,recordSelfReply / outcome 也漏记 ——
+ * bot 对自己刚刷了屏毫不知情。
+ *
+ * 429 不在此列:Telegram 明确告知"未发送",重试是正确的。
+ * editMessage / deleteMessage / sendChatAction 是幂等的,保留原有重试。
+ */
 async function withRetry<T>(
   fn: () => Promise<T>,
   operation: string,
+  idempotent = true,
 ): Promise<T> {
   let lastError: Error | undefined;
 
@@ -46,13 +61,20 @@ async function withRetry<T>(
         continue;
       }
 
-      // Transient network errors — retry
+      // Transient network errors — retry only when replaying is safe.
       if (
         message.includes('ETIMEDOUT') ||
         message.includes('ECONNRESET') ||
         message.includes('ECONNREFUSED') ||
         message.includes('network')
       ) {
+        if (!idempotent) {
+          logger.warn(
+            { attempt, operation, err: message },
+            'Transient network error on a non-idempotent send — NOT retrying (may already be delivered)',
+          );
+          throw lastError;
+        }
         const waitMs = BASE_BACKOFF_MS * Math.pow(2, attempt);
         logger.warn({ attempt, waitMs, operation }, 'Telegram transient error, retrying');
         await sleep(waitMs);
@@ -84,9 +106,32 @@ export async function sendMessage(
   text: string,
   replyToId?: number,
 ): Promise<number> {
-  const messageId = await withRetry(async () => {
+  const shards = shardMarkdownV2(toMarkdownV2(text));
+  if (shards.length > 1) {
+    logger.info({ chatId, shards: shards.length, chars: text.length }, 'Reply exceeded Telegram limit, sharding');
+    let first = 0;
+    for (let i = 0; i < shards.length; i++) {
+      // 只有第一片挂 reply anchor,其余顺序追加。
+      const id = await sendMarkdownOnce(chatId, shards[i]!, text, i === 0 ? replyToId : undefined);
+      if (i === 0) first = id;
+    }
+    recordSpeech();
+    return first;
+  }
+  const messageId = await sendMarkdownOnce(chatId, shards[0]!, text, replyToId);
+  recordSpeech();
+  return messageId;
+}
+
+/** 单片发送 + 既有的 anchor / parse 降级逻辑。 */
+async function sendMarkdownOnce(
+  chatId: number,
+  md: string,
+  plainFallback: string,
+  replyToId?: number,
+): Promise<number> {
+  return withRetry(async () => {
     const bot = getBot();
-    const md = toMarkdownV2(text);
     const anchor =
       typeof replyToId === 'number' && Number.isFinite(replyToId) && replyToId > 0
         ? Math.floor(replyToId)
@@ -113,13 +158,23 @@ export async function sendMessage(
           const result = await bot.api.sendMessage(chatId, md, { parse_mode: 'MarkdownV2' });
           return result.message_id;
         } catch {
-          const result = await bot.api.sendMessage(chatId, text);
+          const result = await bot.api.sendMessage(chatId, plainFallback);
           return result.message_id;
         }
       }
       if (msg.includes("can't parse entities") || msg.includes('parse')) {
         logger.debug({ chatId }, 'MarkdownV2 parse failed, falling back to plain text');
-        const result = await bot.api.sendMessage(chatId, text, {
+        const result = await bot.api.sendMessage(chatId, plainFallback, {
+          reply_parameters: replyParams,
+          ...legacyReply,
+        });
+        return result.message_id;
+      }
+      // "message is too long" 走到这里说明分片没算准(例如上游又拼了内容)。降级:
+      // 去掉 parse_mode 直接发纯文本的前 4096 字符,至少别让用户只收到一句故障文案。
+      if (msg.includes('too long') || msg.includes('MESSAGE_TOO_LONG')) {
+        logger.warn({ chatId, mdLen: md.length }, 'sendMessage: still too long after sharding, sending plain truncated');
+        const result = await bot.api.sendMessage(chatId, plainFallback.slice(0, TG_TEXT_LIMIT), {
           reply_parameters: replyParams,
           ...legacyReply,
         });
@@ -127,9 +182,7 @@ export async function sendMessage(
       }
       throw err;
     }
-  }, 'sendMessage');
-  recordSpeech();
-  return messageId;
+  }, 'sendMessage', /* idempotent */ false);
 }
 
 /**
@@ -161,7 +214,7 @@ export async function sendSticker(
     const bot = getBot();
     const result = await bot.api.sendSticker(chatId, stickerId);
     return result.message_id;
-  }, 'sendSticker');
+  }, 'sendSticker', /* idempotent */ false);
 }
 
 /**

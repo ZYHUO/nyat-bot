@@ -92,7 +92,12 @@ export function detectCommandIntent(raw: string): CommandIntent | null {
   }
 
   // ── checkin (LLM-rendered) ──
-  if (/签到|打卡|签个到|check\s?in/i.test(t)) {
+  // 必须是"整句就是签到指令",不能是子串匹配。原先 /签到|打卡|签个到|check\s?in/i 会让
+  // 「今天忘了打卡」「签到活动结束了吗」「这家店我打卡过」「let me check in on that later」
+  // 全部命中 —— 而 reply.ts 里那次 detectCommandIntent 是**无寻址门**的,命中即真的
+  // doCheckin() 写库发卡,把用户当天的签到消耗掉(之后真敲 /checkin 只会得到"已经签过了",
+  // 连签播报/里程碑/奖励永久丢失)。对称参考:同文件的派对分支就要求动词或 t.length<=6。
+  if (/^(?:帮我|替我|我要|我想|来|想)?(?:签到|签个到|打卡)[。.!!~\s]*$/.test(t) || /\bcheckin\b/i.test(t)) {
     return { cmd: '/checkin', arg: '', kind: 'llm' };
   }
 

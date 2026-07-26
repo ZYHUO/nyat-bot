@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import { resolveReplyPath, resolveReplyTier } from '../../shared/types.js';
+import { isDM } from '../../shared/chat.js';
 import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath, ReplyTier } from '../../shared/types.js';
 import type { JudgeAction } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
@@ -196,6 +197,9 @@ export async function generateReply(
     sleepCatchup?: boolean;
     /** P2-F:wait 回访 — "你刚等了 N 秒,期间有/无新消息"提示 */
     waitResume?: { waitSec?: number; hadNewMessages: boolean };
+    /** 本条消息是否"寻址"了 bot(@提及 / 回复 bot / L0 direct 规则命中)。
+     *  自然语言命令意图(签到等**带副作用**的)只在为 true 时才生效 —— 见下面 3.5 的注释。 */
+    isAddressed?: boolean;
     /** L1: 心流的内心独白 — 决定与写作是同一个念头 */
     heartWhy?: string;
     /** 审计 #38:心流分支算好的自我状态快照,同回合直接复用 */
@@ -317,7 +321,12 @@ export async function generateReply(
   // Detect checkin/stats via exact slash command OR natural-language phrasing
   // (e.g. "帮我签到"), so the data is injected even when the bot wasn't formally
   // @addressed — otherwise the reply LLM hallucinates a checkin without the streak.
-  const cmdIntent = detectCommandIntent(msgText);
+  // 自然语言意图**只在被寻址时**才算。intercepts.ts 的 NL 命令路由有寻址门
+  // (addressed = isDM || ADDRESSED_RULES.has(rule)),而这里是第二次、独立的
+  // detectCommandIntent 调用,原先除了 isAnonymous 之外没有任何门 —— 于是群里一句
+  // 没有 @bot 的「今天忘了打卡」也会真的执行签到副作用。精确斜杠命令不受此限制。
+  const addressedForCommands = isDM(chatId) || callOpts?.isAddressed === true;
+  const cmdIntent = addressedForCommands ? detectCommandIntent(msgText) : null;
   const isCheckinMsg = /^\/checkin(?:@\w+)?$/i.test(msgText.trim()) || cmdIntent?.cmd === '/checkin';
   const isStatsMsg = /^\/stats(?:@\w+)?$/i.test(msgText.trim()) || cmdIntent?.cmd === '/stats';
   if (isCheckinMsg && message.isAnonymous) {

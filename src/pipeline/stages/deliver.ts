@@ -24,7 +24,7 @@ import {
   type HumanizerConfig,
 } from "../reply/humanizer.js";
 import { reflectChatPathPolicy } from "../path-policy.js";
-import { sender, DIRECT_INTERACTION_RULES } from "../shared.js";
+import { sender, DIRECT_INTERACTION_RULES, ADDRESSED_RULES } from "../shared.js";
 import { sleepWithAbort, mergeAbortSignals } from "../../shared/abort.js";
 import { getShutdownSignal } from "../turn/abort-registry.js";
 import { scheduleDeferredTypoFix, shouldSuppressStaleReply } from "./stale-reply.js";
@@ -312,7 +312,11 @@ export async function generateAndSendReplies(args: {
         logger.debug({ err, chatId: job.chatId }, "pickRevisitCandidates failed (non-critical)");
       }
     }
-    const turnCallOpts = job.turnContext || instructionInfo || latenessSec !== undefined
+    // 寻址判定与 intercepts.ts:184 的 NL 命令路由保持同一口径。带副作用的自然语言
+    // 命令意图(签到)只在寻址时才生效 —— 见 reply.ts 的 3.5 段注释。
+    const isAddressedForCommands =
+      job.chatId > 0 || !!(judgeResult.rule && ADDRESSED_RULES.has(judgeResult.rule));
+    const baseTurnCallOpts = job.turnContext || instructionInfo || latenessSec !== undefined
       ? {
           signal: job.turnContext?.signal,
           burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext?.burstMessageIds : undefined,
@@ -330,6 +334,7 @@ export async function generateAndSendReplies(args: {
             : undefined,
         }
       : undefined;
+    const turnCallOpts = { ...(baseTurnCallOpts ?? {}), isAddressed: isAddressedForCommands };
     const genStartMs = Date.now();
     // Multi-Agent:flag + 灰度群命中时走编排器(Router+专家并行+Writer),否则原写手。
     // 路由接缝抽到 writer-selector.ts(可单测);两者返回同型 ReplyResult,下游不变。

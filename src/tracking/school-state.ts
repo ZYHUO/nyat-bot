@@ -176,7 +176,7 @@ function getOverride(bjDate: string): SchoolOverride | undefined {
   try {
     const row = getDb()
       .prepare(
-        `SELECT kind, note, makeup_dow, end_min FROM school_overrides WHERE date = ? LIMIT 1`,
+        `SELECT kind, note, makeup_dow, end_min FROM school_overrides WHERE bj_date = ? LIMIT 1`,
       )
       .get(bjDate) as
       | { kind: string; note: string | null; makeup_dow: number | null; end_min: number | null }
@@ -189,7 +189,10 @@ function getOverride(bjDate: string): SchoolOverride | undefined {
       endMin: row.end_min ?? undefined,
     };
   } catch (err) {
-    logger.debug({ err, bjDate }, 'getOverride failed (non-critical)');
+    // warn 而非 debug:这里唯一可能的错误是 schema 漂移(列不存在/表缺失),属于启动即
+    // 可发现的硬错误。debug 在生产(LOG_LEVEL=info)不落盘,曾让 `WHERE date` 打错列名
+    // 静默失效 —— 整个人工登记的调休/补课/考试 override 被忽略而无任何日志。
+    logger.warn({ err, bjDate }, 'getOverride failed — school_overrides unreadable');
     return undefined;
   }
 }

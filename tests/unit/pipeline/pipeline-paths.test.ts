@@ -8,7 +8,6 @@ import type {
 const mockFormatMessage = vi.fn();
 const mockAddMessage = vi.fn();
 const mockGetRecent = vi.fn();
-const mockGetRecentCount = vi.fn();
 const mockAddAssistant = vi.fn();
 const mockJudge = vi.fn();
 const mockDescribeImage = vi.fn();
@@ -61,7 +60,6 @@ vi.mock("../../../src/pipeline/formatter.js", () => ({
 vi.mock("../../../src/pipeline/context/manager.js", () => ({
   addMessage: (...args: unknown[]) => mockAddMessage(...args),
   getRecent: (...args: unknown[]) => mockGetRecent(...args),
-  getRecentCount: (...args: unknown[]) => mockGetRecentCount(...args),
   addAssistant: (...args: unknown[]) => mockAddAssistant(...args),
 }));
 
@@ -235,7 +233,6 @@ describe("processPipeline path branching", () => {
     mockFormatMessage.mockReturnValue(makeFormattedMessage());
     mockAddMessage.mockResolvedValue(undefined);
     mockGetRecent.mockResolvedValue([]);
-    mockGetRecentCount.mockResolvedValue([]);
     mockAddAssistant.mockResolvedValue(undefined);
     mockDescribeImage.mockResolvedValue(null);
     mockRetrieveContext.mockResolvedValue(makeRetrievedContext());

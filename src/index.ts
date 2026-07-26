@@ -18,7 +18,7 @@ import { createAdminApi } from './admin/api.js';
 import { createMonitorApi } from './admin/monitor.js';
 import { startCronJobs, stopCronJobs } from './cron/scheduler.js';
 import { initBotTracker } from './tracking/interaction.js';
-import { isMemoryAvailable } from './memory/chroma.js';
+import { isMemoryAvailable, warmEmbedder } from './memory/chroma.js';
 import { callAllowlistReviewModel } from './allowlist/ai-call.js';
 import type { AllowlistConfig } from './allowlist/types.js';
 import { getStartupOwnership } from './startup/ownership.js';
@@ -265,11 +265,14 @@ async function main(): Promise<void> {
     logger.info({ ownership }, 'Meta loop skipped on ingress-only (Redis Attention → worker)');
   }
 
-  // 12.1 Warm up ChromaDB + embedder (fire-and-forget) only on processes that use memory-dependent paths
+  // 12.1 Warm up Qdrant + embedder (fire-and-forget) only on processes that use memory-dependent paths
   if (shouldWarmMemory(ownership)) {
     isMemoryAvailable().then((ok) => {
       logger.info({ ok }, 'Memory availability check');
     }).catch(() => { /* non-critical */ });
+    // 这行注释原先写着 "Warm up ChromaDB + embedder",但函数体只 ping 了 Qdrant ——
+    // getEmbedder() 从不在启动期被调用。补上真正的 embedder 预热。
+    warmEmbedder();
   } else {
     logger.info({ ownership }, 'Skipping memory warmup in non-owner process');
   }

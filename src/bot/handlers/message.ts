@@ -36,7 +36,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
   const isEdit = !!(ctx.editedMessage ?? ctx.editedChannelPost);
 
   try {
-    if (await isDuplicate(chatId, messageId, isEdit)) return;
+    if (await isDuplicate(chatId, messageId, isEdit, msg.edit_date)) return;
   } catch (err) {
     logger.warn({ err, chatId, messageId }, 'Dedup check failed, proceeding');
   }

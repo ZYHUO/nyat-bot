@@ -135,6 +135,11 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   let raw: string;
   try {
     const result = await callWithFallback({
+      // stepfun 这类中文小模型吐脏 JSON(单引号 / Python dict / markdown 围栏)不算罕见,
+      // 而 parseHeart 失败会把**整份** prompt(heart.md + persona core + 群聊上下文)重发
+      // 一遍。provider 已支持 jsonMode(provider.ts:197),heart 的两次调用原先都没传 ——
+      // heart 是全系统调用频次最高的 LLM,这一行的杠杆很高。
+      jsonMode: true,
       usage: 'judge',
       messages: [
         { role: 'system', content: systemPrompt },
@@ -170,6 +175,11 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
   if ((!parsed || !raw.trim()) && !input.signal?.aborted) {
     try {
       const retry = await callWithFallback({
+      // stepfun 这类中文小模型吐脏 JSON(单引号 / Python dict / markdown 围栏)不算罕见,
+      // 而 parseHeart 失败会把**整份** prompt(heart.md + persona core + 群聊上下文)重发
+      // 一遍。provider 已支持 jsonMode(provider.ts:197),heart 的两次调用原先都没传 ——
+      // heart 是全系统调用频次最高的 LLM,这一行的杠杆很高。
+      jsonMode: true,
         usage: 'judge',
         messages: [
           { role: 'system', content: systemPrompt },
