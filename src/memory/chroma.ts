@@ -18,7 +18,7 @@ import { createHash } from 'node:crypto';
 import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
-import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility } from './visibility.js';
+import { defaultVisibilityForChat, isPrivateChat, scrubMemoryHits, type MemoryVisibility } from './visibility.js';
 import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 
@@ -41,6 +41,12 @@ const VECTOR_SIZE = 384;
 const DEDUP_TIMEOUT_MS = 300;
 /** 混合检索时每一路的超取倍数 —— 融合后才截到 topK,单路取满 topK 会让融合无从选择。 */
 const HYBRID_OVERFETCH = 2;
+/**
+ * 自动注入 prompt 的相关性硬地板。独立于 MEMORY_MIN_SCORE,且**不可通过 env 调低** ——
+ * 后者默认 0(纯 topK),若注入路径跟着它走,语义就变成"从本会话历史随机抽几条贴进
+ * prompt"。生产实测:同会话随机两条的相似度 p90 = 0.470,真实命中第 1 名 p10 = 0.635。
+ */
+const INJECTION_MIN_SCORE_FLOOR = 0.5;
 
 /**
  * Collection 名走 env,好让"重嵌入到新库 → 切换 → 保留旧库回滚"成为改一行配置的事。
@@ -561,6 +567,59 @@ async function _searchMemoryByUserInner(
     logger.info({ uid, boundChatId, dropped, kept: kept.length }, 'per-user memory scrubbed cross-context private');
   }
   return kept.slice(0, topK);
+}
+
+/**
+ * 供**自动注入 prompt** 的检索出口。与 searchMemory 的区别不在检索,而在守卫。
+ *
+ * 为什么单独开一个出口而不是让调用方自己过滤:searchMemory 只锁 chatId,那保证的是
+ * "检索没跨会话",**不等于"取出来的东西可以进这个 prompt"** —— DM 与
+ * MEMORY_SENSITIVE_CHAT_IDS 群里的每一条记忆按 defaultVisibilityForChat 都是
+ * private。而注入进 prompt 的内容会被模型复述、被摘要、被写进日记,再扩散到别处。
+ * chroma.ts:493-501 那次事故(私聊原文被念到群里)的复盘结论就是:守卫必须放在唯一
+ * 出口,靠调用方自觉一定会漏。所以这里是硬守卫,调用方无法绕过、也没有 flag 能关掉。
+ *
+ * 三道闸,全部 fail-closed:
+ *  1. 私聊/敏感会话一律不返回 —— 它们的记忆整体是 private。
+ *  2. 逐条丢弃 visibility !== public|contextual,**包括缺字段的存量点**(宁严勿松:
+ *     存量点写入时还没有 visibility 字段,无法证明它安全)。
+ *  3. sourceChatId 必须等于 chatId。Qdrant filter 用的是 payload.chatId,而渲染与
+ *     记账用 sourceChatId,超级群迁移等场景下两者可能不一致 —— 那时"检索锁的会话"
+ *     与"这条记忆真正的来源"就不是同一个。
+ *
+ * 另外强制一个非零相关性下限:MEMORY_MIN_SCORE 默认 0(纯 topK),那样这个函数的
+ * 真实语义会变成"从本会话历史里随机抽几条塞进 prompt",越是无关的旧话被复述,
+ * 参与者越预期不到。拿不到分数的命中(词法路/融合路)一律丢弃。
+ */
+export async function searchMemoryForInjection(
+  chatId: number,
+  query: string,
+  topK = 4,
+  timeoutMs = 400,
+): Promise<ScoredMessage[]> {
+  // 闸 1:私聊 / 敏感群整体不参与自动注入。
+  if (isPrivateChat(chatId)) return [];
+  if (!query.trim()) return [];
+
+  const hits = await searchMemory(chatId, query, topK, timeoutMs);
+  if (hits.length === 0) return [];
+
+  const floor = Math.max(env().MEMORY_MIN_SCORE, INJECTION_MIN_SCORE_FLOOR);
+  const kept = hits.filter((m) => {
+    // 闸 2:只放行明确标记为可共享的。缺字段 = 丢。
+    if (m.visibility !== 'public' && m.visibility !== 'contextual') return false;
+    // 闸 3:来源必须就是本会话。
+    if (m.sourceChatId !== chatId) return false;
+    return typeof m.score === 'number' && m.score >= floor;
+  });
+
+  const dropped = hits.length - kept.length;
+  if (dropped > 0) {
+    incrCounter('memory_injection_dropped_total', {}, dropped);
+    // info 级:这是隐私防线的实际拦截量,必须在生产可见(生产 LOG_LEVEL=info)。
+    logger.info({ chatId, dropped, kept: kept.length, floor }, 'memory injection guard dropped hits');
+  }
+  return kept;
 }
 
 /** Delete memory entries by their string id (`${chatId}_${messageId}`). */

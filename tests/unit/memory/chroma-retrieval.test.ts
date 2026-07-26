@@ -20,6 +20,8 @@ vi.mock('../../../src/shared/logger.js', () => ({
 vi.mock('../../../src/memory/visibility.js', () => ({
   defaultVisibilityForChat: () => 'contextual',
   scrubMemoryHits: (hits: unknown[]) => ({ kept: hits, dropped: 0 }),
+  // 与真实实现同语义:chatId > 0 = 私聊。注入守卫的第一道闸靠它。
+  isPrivateChat: (id: number) => id > 0,
 }));
 
 const recordCreated = vi.fn();
@@ -68,7 +70,7 @@ vi.mock('@xenova/transformers', () => ({
   },
 }));
 
-const { searchMemory, memorizeMessage, deleteMemories } = await import('../../../src/memory/chroma.js');
+const { searchMemory, memorizeMessage, deleteMemories, searchMemoryForInjection } = await import('../../../src/memory/chroma.js');
 
 const CHAT = -100;
 function payload(text: string, messageId: number) {
@@ -276,5 +278,63 @@ describe('chroma 检索与写入', () => {
   it('空 query 直接短路,不打 Qdrant', async () => {
     expect(await searchMemory(CHAT, '   ')).toEqual([]);
     expect(searchSpy).not.toHaveBeenCalled();
+  });
+
+  // ── 自动注入 prompt 的专用出口 ────────────────────────────
+  // searchMemory 只锁 chatId,那保证的是「检索没跨会话」,不等于「取出来的东西可以
+  // 进这个 prompt」。注入的内容会被模型复述、被摘要、再扩散。守卫必须在这个唯一
+  // 出口上,不能靠调用方自觉 —— 那正是「私聊原文被念到群里」那次事故的复盘结论。
+  describe('searchMemoryForInjection 的隐私守卫', () => {
+    function injHit(text: string, over: Record<string, unknown> = {}) {
+      return {
+        payload: { ...payload(text, 1), visibility: 'contextual', ...over },
+        score: 0.8,
+      };
+    }
+
+    it('私聊(chatId > 0)一律不注入,且根本不查', async () => {
+      searchHits = [injHit('私聊内容')];
+      expect(await searchMemoryForInjection(12345, '查询')).toEqual([]);
+      expect(searchSpy).not.toHaveBeenCalled();
+    });
+
+    it('visibility=private 的命中被丢', async () => {
+      searchHits = [injHit('私密', { visibility: 'private' })];
+      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+    });
+
+    // 存量点写入时还没有 visibility 字段 —— 无法证明它安全,所以宁严勿松。
+    it('缺 visibility 字段的存量点被丢', async () => {
+      searchHits = [{ payload: payload('存量', 1), score: 0.8 }];
+      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+    });
+
+    it('public 与 contextual 放行', async () => {
+      searchHits = [injHit('公开', { visibility: 'public' }), injHit('群内', { visibility: 'contextual' })];
+      expect(await searchMemoryForInjection(CHAT, '查询')).toHaveLength(2);
+    });
+
+    // Qdrant filter 用 payload.chatId,而渲染/记账用 sourceChatId,超级群迁移等
+    // 场景下两者可能不一致 —— 那时「检索锁的会话」不是「这条记忆真正的来源」。
+    it('sourceChatId 与当前会话不一致的被丢', async () => {
+      searchHits = [injHit('别处来的', { sourceChatId: -777 })];
+      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+    });
+
+    it('低于注入硬地板的被丢,即使 MEMORY_MIN_SCORE 被调成 0', async () => {
+      envState.MEMORY_MIN_SCORE = 0;
+      searchHits = [{ payload: { ...payload('勉强', 1), visibility: 'contextual' }, score: 0.3 }];
+      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+    });
+
+    it('没有分数的命中被丢(词法/融合路可能没有可比分数)', async () => {
+      searchHits = [{ payload: { ...payload('无分', 1), visibility: 'contextual' } } as never];
+      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+    });
+
+    it('空 query 不查', async () => {
+      expect(await searchMemoryForInjection(CHAT, '  ')).toEqual([]);
+      expect(searchSpy).not.toHaveBeenCalled();
+    });
   });
 });

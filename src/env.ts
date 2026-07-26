@@ -273,6 +273,26 @@ const envSchema = z.object({
   // (无关句对都有 0.72),0.93 在旧向量空间里会命中几乎一切,等于把记忆写没了。默认关。
   MEMORY_DEDUP_ENABLED: booleanFromEnv.default(false),
   MEMORY_DEDUP_THRESHOLD: z.coerce.number().min(0).max(1).default(0.93),
+  // ── CodeAct 自动注入长期记忆 ──────────────────────────────
+  // 接在 subagent/executor.ts(真正生成话语的那层),**不是** Meta 编排器 ——
+  // Meta 的引擎跨所有会话,其输出经 digest/梦境日记扩散到每个群的 prompt,
+  // 私聊记忆进 Meta 就有一条通往别的群的洗白路径(与那次"私聊原文被念到群里"同源)。
+  SUBAGENT_MEMORY_ENABLED: booleanFromEnv.default(false),
+  // 灰度名单。**空 = 关闭**,与本仓其他 flag 的「空 = 全量」刻意相反:
+  // 这是隐私相关特性,配错的代价不对称 —— 漏开只是没效果,误开是内容外泄。
+  SUBAGENT_MEMORY_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
+  SUBAGENT_MEMORY_TOPK: z.coerce.number().int().min(1).max(10).default(3),
+  // 上下界都要:下界防 `TIMEOUT-50` 变成 0 导致「记忆永远为空且与无命中不可区分」,
+  // 上界防有人调大后阻塞 CodeAct(那是生产热路径)。
+  SUBAGENT_MEMORY_TIMEOUT_MS: z.coerce.number().int().min(100).max(1000).default(400),
+  SUBAGENT_MEMORY_MAX_CHARS: z.coerce.number().int().min(100).max(2000).default(600),
   // 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。
   TOPIC_REGISTRY_ENABLED: booleanFromEnv.default(false),
   TOPIC_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(8),
