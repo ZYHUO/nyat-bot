@@ -103,7 +103,12 @@ describe('callModel', () => {
     expect(generateText).not.toHaveBeenCalled();
   });
 
-  it('forceRaw + 空 content 时回退 reasoning_content', async () => {
+  it('forceRaw + 空 content 时仅回退结构化 reasoning_content（WRITE/JSON）', async () => {
+    const label: AILabel = {
+      name: 'grok45', endpoint: 'http://relay/v1', apiKeys: ['k'],
+      model: 'grok-4.5', forceRaw: true, reasoningEffort: 'low',
+    };
+
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
       JSON.stringify({
         choices: [{ message: { content: '', reasoning_content: 'WRITE\n\n本喵困了' } }],
@@ -111,12 +116,20 @@ describe('callModel', () => {
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     )));
-    const label: AILabel = {
-      name: 'grok45', endpoint: 'http://relay/v1', apiKeys: ['k'],
-      model: 'grok-4.5', forceRaw: true, reasoningEffort: 'low',
-    };
-    const result = await callModel(label, [{ role: 'user', content: '日记' }], { maxTokens: 50 });
-    expect(result.content).toContain('本喵困了');
+    const diary = await callModel(label, [{ role: 'user', content: '日记' }], { maxTokens: 50 });
+    expect(diary.content).toContain('本喵困了');
+
+    // 裸 CoT 散文不得当正文（会进群）——当作空响应
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({
+        choices: [{ message: { content: '', reasoning_content: '让我想想用户在说什么…' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 2 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    await expect(callModel(label, [{ role: 'user', content: 'hi' }], { maxTokens: 50 })).rejects.toMatchObject({
+      code: 'AI_EMPTY',
+    });
   });
 
   it('returns stream token usage for stream-only providers', async () => {

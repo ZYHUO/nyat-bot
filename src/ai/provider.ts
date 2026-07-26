@@ -364,6 +364,8 @@ function looksLikeStructuredReply(s: string): boolean {
   if (/^```(?:json)?\s*\{[\s\S]*\}\s*```$/.test(t)) return true;
   if (/<response>[\s\S]*<\/response>/i.test(t)) return true;
   if (/"reply_?[cC]ontent"\s*:/.test(t)) return true;
+  // Dream journal / directive contracts: first line WRITE|SKIP (not bare CoT prose).
+  if (/^(WRITE|SKIP)\b/im.test(t)) return true;
   return false;
 }
 

@@ -62,7 +62,7 @@ describe('parseEnv', () => {
     expect(() => parseEnv({ ...validEnv, LOG_LEVEL: 'verbose' })).toThrow();
   });
 
-  it('multi-agent 新开关默认值(T4):全开 + researcher 6 步 + best-of-N 2 + ASI 全量', () => {
+  it('multi-agent 新开关默认值(T4):全开 + researcher 6 步 + best-of-N 1 + ASI 抽样', () => {
     const env = parseEnv(validEnv);
     expect(env.MULTI_AGENT_ENABLED).toBe(true);
     expect(env.MULTI_AGENT_CHAT_SPECIALISTS).toBe(true);
@@ -73,10 +73,12 @@ describe('parseEnv', () => {
     expect(env.MULTI_AGENT_CRITIC_MAX_ROUNDS).toBe(2);
     expect(env.MULTI_AGENT_CRITIC_ON_LOOKUP).toBe(false);
     expect(env.MULTI_AGENT_RESEARCHER_MAX_STEPS).toBe(6);
-    expect(env.WRITER_BEST_OF_N).toBe(2);
+    // 默认 1：闲聊不常开 best-of-N（token ×写手）；需要时按 replyTier / env 提升
+    expect(env.WRITER_BEST_OF_N).toBe(1);
     expect(env.WRITER_SELECTOR_ENABLED).toBe(true);
     expect(env.REALTIME_LEARN_ENABLED).toBe(true);
-    expect(env.ASI_SAMPLE_RATE).toBe(1);
+    // 默认 0.2：与 realtime-learn 重叠打分，全量浪费
+    expect(env.ASI_SAMPLE_RATE).toBe(0.2);
   });
 
   it('multi-agent 开关可被 env 覆盖(T4)', () => {

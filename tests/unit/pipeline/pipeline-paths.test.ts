@@ -334,7 +334,7 @@ describe("processPipeline path branching", () => {
       "direct",
       "normal",
       undefined,
-      undefined, // turn-actor callOpts (legacy path: none)
+      expect.objectContaining({ isAddressed: true }), // mention_self → NL 命令可触发
     );
   });
 
@@ -364,7 +364,7 @@ describe("processPipeline path branching", () => {
       "direct",
       "normal",
       undefined,
-      undefined, // turn-actor callOpts (legacy path: none)
+      expect.objectContaining({ isAddressed: false }),
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -471,7 +471,7 @@ describe("processPipeline path branching", () => {
       "planned",
       "pro",
       undefined,
-      undefined, // turn-actor callOpts (legacy path: none)
+      expect.objectContaining({ isAddressed: false }),
     );
     expect(mockLogger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -529,7 +529,7 @@ describe("processPipeline path branching", () => {
       "planned",
       "normal",
       undefined,
-      undefined, // turn-actor callOpts (legacy path: none)
+      expect.objectContaining({ isAddressed: false }),
     );
   });
 

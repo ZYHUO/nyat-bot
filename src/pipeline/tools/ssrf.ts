@@ -285,7 +285,7 @@ function requestOnce(opts: {
     protocol,
     hostnameForSni,
     address,
-    family,
+    // family intentionally unused: http.request hostname must be bare (no [::1] brackets).
     port,
     path,
     method,
