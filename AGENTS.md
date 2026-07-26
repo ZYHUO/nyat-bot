@@ -32,7 +32,8 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 ## Baseline & known noise
 
 - Vitest suite is **fully green**. A failing test is a real regression — fix it, don't skip it.
-- `tsc --noEmit` may report a pre-existing unused-var warning in `prompt-builder.ts:169`. Filter that out; anything else is new.
+- `tsc --noEmit` and `eslint` are **clean — zero warnings**. Anything they print is new. (This file used to claim one known `prompt-builder.ts:169` warning and CLAUDE.md claimed two; both were stale.)
+- ⚠️ **Use the service's Node when running tests**: `/usr/local/bin/node` is v25, the service runs v22 (`/root/.hermes/node/bin/node`), and `better-sqlite3`'s prebuilt binary only loads under v22. Wrong Node → **226 spurious failures** (`Module did not self-register`). Prefix with `export PATH=/root/.hermes/node/bin:$PATH`.
 
 ## Non-obvious conventions (these bite)
 
@@ -70,6 +71,6 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 
 ## Before you commit
 
-- Run `npm run typecheck && npm run lint && npm run test` — all must be green (minus the two known `tsc` warnings).
+- Run `export PATH=/root/.hermes/node/bin:$PATH && npm run typecheck && npm run lint && npm run test` — all must be **completely** clean; there are no known-noise exceptions.
 - New feature → new `env` flag (default OFF) + graylist; new schema → new `migrations/00NN_*.sql` (idempotent, never edit old ones); new cron task → wrap in `safeRun`, flag-gate it.
 - Match surrounding code: comment density, naming, ESM `import type` discipline, no `process.env` reads outside `env.ts`.

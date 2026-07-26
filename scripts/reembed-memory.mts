@@ -9,9 +9,17 @@
 //
 // 用法:
 //   npx tsx scripts/reembed-memory.mts --probe                     # 只看样本,不写
-//   npx tsx scripts/reembed-memory.mts                             # 全量
+//   npx tsx scripts/reembed-memory.mts                             # 全量(10 万条约 90 分钟)
 //   npx tsx scripts/reembed-memory.mts --resume                    # 断点续跑
-//   nice -n 19 npx tsx scripts/reembed-memory.mts --sleep=80       # 让出 CPU 给生产 bot
+//   npx tsx scripts/reembed-memory.mts --delta                     # 只补目标缺的(几十条约 1 分钟)
+//   taskset -c 0-3 nice -n 19 npx tsx ... --sleep=80               # 让出 CPU 给生产 bot
+//
+// ⚠️ 限制 CPU 时 taskset 不够:ONNX Runtime 会给自己线程池里的线程**单独设**亲和性,
+// 覆盖掉从父进程继承的掩码。实测 8 核机器上 `nice -n 19 taskset -c 0-2` 仍吃到 548% CPU,
+// 有线程跑在掩码外的核 7 上。补救是对**运行中**的进程再来一次 `taskset -acp 0-3 <pid>`
+// (-a 才作用于全部线程),但新生成的线程还会跑掉 —— 要彻底管住得用 cgroup:
+//   systemd-run --scope -p CPUQuota=300% -- npx tsx scripts/reembed-memory.mts ...
+// nice 本身是生效的,所以生产 bot 始终有优先级;高 load average 主要是观感问题。
 import { QdrantClient } from '@qdrant/js-client-rest';
 import Database from 'better-sqlite3';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
@@ -36,6 +44,17 @@ const PROGRESS = '/tmp/reembed-memory.progress.json';
 const probe = has('probe');
 const resume = has('resume');
 const withFts = !has('no-fts');
+/**
+ * 增量模式:只补目标库里缺的点。
+ *
+ * 用途 —— 回填是一次性快照,而 bot 在回填期间仍在往**旧库**写。切换完成后,
+ * 「回填开始 → 切换生效」这段窗口内的记忆只存在于旧库,新库检索不到。
+ * 全量重跑虽然幂等但要 90 分钟,而缺口通常只有几十条。
+ *
+ * 做法:scroll 时不嵌入,先按 id 批量 retrieve 目标库,只对**确实缺失**的那些
+ * 做 embed + upsert。scroll 本身不算贵(不取向量),嵌入才是瓶颈。
+ */
+const delta = has('delta');
 
 const qdrant = new QdrantClient({
   host: process.env['QDRANT_HOST'] ?? '127.0.0.1',
@@ -74,8 +93,13 @@ const srcCount = srcInfo.points_count ?? 0;
 console.log(`源 ${SOURCE}: ${srcCount} points, dim=${(srcInfo.config?.params?.vectors as { size?: number })?.size}`);
 
 const targetExists = collections.some((c) => c.name === TARGET);
-if (targetExists && !resume && !probe) {
-  console.error(`目标 collection 已存在: ${TARGET}\n重跑请先删除,或加 --resume 续跑。`);
+// --delta 的**前提**就是目标已存在(它只补缺失),所以这里必须放行,否则增量模式永远跑不了。
+if (targetExists && !resume && !probe && !delta) {
+  console.error(`目标 collection 已存在: ${TARGET}\n重跑请先删除,或加 --resume 续跑,或加 --delta 只补缺失。`);
+  process.exit(1);
+}
+if (delta && !targetExists) {
+  console.error(`--delta 需要目标 collection 已存在,但 ${TARGET} 不存在。先跑一次全量。`);
   process.exit(1);
 }
 
@@ -132,8 +156,8 @@ if (db) {
 }
 
 // ── 回填 ────────────────────────────────────────────────────
-type Progress = { offset: string | number | null; done: number; skipped: number; fts: number };
-let prog: Progress = { offset: null, done: 0, skipped: 0, fts: 0 };
+type Progress = { offset: string | number | null; done: number; skipped: number; fts: number; existing: number };
+let prog: Progress = { offset: null, done: 0, skipped: 0, fts: 0, existing: 0 };
 if (resume && existsSync(PROGRESS)) {
   prog = JSON.parse(readFileSync(PROGRESS, 'utf8')) as Progress;
   console.log(`续跑:已完成 ${prog.done},从 offset=${String(prog.offset).slice(0, 12)}… 继续`);
@@ -153,7 +177,18 @@ for (;;) {
   const upserts: Array<{ id: string | number; vector: number[]; payload: Record<string, unknown> }> = [];
   const ftsRows: Array<{ chromaId: string; chatId: number; text: string }> = [];
 
-  for (const p of points) {
+  // 增量:先问目标库这一批里哪些已经有了,只处理缺的。retrieve 不返回向量,很便宜。
+  let todo = points;
+  if (delta) {
+    const existing = await withRetry('retrieve', () =>
+      qdrant.retrieve(TARGET, { ids: points.map((p) => p.id), with_payload: false, with_vector: false }));
+    const have = new Set(existing.map((p) => String(p.id)));
+    todo = points.filter((p) => !have.has(String(p.id)));
+    // 与 skipped(缺原文)分开计:两者含义完全不同,混在一起报表就没法读。
+    prog.existing += points.length - todo.length;
+  }
+
+  for (const p of todo) {
     const payload = (p.payload ?? {}) as Record<string, unknown>;
     const text = payload['text'];
     // 没有原文就无法重嵌入 —— 计数报告,不静默丢弃。
@@ -198,14 +233,19 @@ for (let i = 0; i < 30; i++) {
 }
 
 console.log('\n──────── 结果 ────────');
+console.log(`模式:              ${delta ? 'delta(只补缺失)' : 'full(全量)'}`);
 console.log(`源 ${SOURCE}:      ${srcCount}`);
 console.log(`目标 ${TARGET}:    ${tgtCount}`);
-console.log(`已重嵌入:          ${prog.done}`);
+console.log(`本次写入:          ${prog.done}`);
+if (delta) console.log(`已存在跳过:        ${prog.existing}`);
 console.log(`无原文跳过:        ${prog.skipped}`);
 console.log(`FTS 行:            ${prog.fts}`);
 console.log(`耗时:              ${Math.round((Date.now() - started) / 1000)}s`);
 
-const ok = tgtCount === prog.done && prog.done + prog.skipped >= srcCount;
+// 全量:目标点数应等于本次写入。增量:目标已含存量,只要覆盖到源的全部即可。
+const ok = delta
+  ? prog.done + prog.existing + prog.skipped >= srcCount
+  : tgtCount === prog.done && prog.done + prog.skipped >= srcCount;
 if (ok) {
   unlinkSync(PROGRESS);
   console.log('\n✅ 校验通过。切换方式(改 .env 后重启):');
