@@ -445,12 +445,14 @@ function applyMinScore<T extends ScoredMessage>(hits: T[], ctx: Record<string, u
   if (min <= 0) return hits;
   const kept = hits.filter((m) => (m.score ?? 0) >= min);
   const dropped = hits.length - kept.length;
+  // 计数器而非日志:生产是 LOG_LEVEL=info,debug 根本不落盘 —— 只写 debug 等于
+  // 开了一个看不见效果的开关,阈值调高调低都无从判断。计数器走 /metrics。
+  //
+  // kept 无条件记(不能塞进 `if (dropped > 0)`):否则"一条都没滤掉"的检索完全
+  // 不留痕,分母缺失,滤除率就没法算 —— 那正是判断阈值定得高不高的唯一依据。
+  incrCounter('memory_hits_kept_total', {}, kept.length);
   if (dropped > 0) {
-    // 计数器而非日志:生产是 LOG_LEVEL=info,debug 根本不落盘 —— 只写 debug 等于
-    // 开了一个看不见效果的开关,阈值调高调低都无从判断。计数器走 /metrics,
-    // 既能观测又不刷屏。keep/drop 两个都记,光看 drop 数不知道分母。
     incrCounter('memory_hits_filtered_total', { reason: 'below_min_score' }, dropped);
-    incrCounter('memory_hits_kept_total', {}, kept.length);
     logger.debug({ ...ctx, min, dropped, kept: kept.length }, 'memory hits below MEMORY_MIN_SCORE');
   }
   return kept;

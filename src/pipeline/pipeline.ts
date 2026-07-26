@@ -91,11 +91,9 @@ function buildDeferEntry(job: ChatJob, formatted: FormattedMessage): PendingEntr
 
 export async function processPipeline(job: ChatJob): Promise<void> {
   const start = performance.now();
-  // G8 A/B 基线:回复/消息比的分母。记在管线入口 —— 这里是"bot 看见了一条消息"
-  // 的唯一收口,L0 规则命中、心流 pass、gate 拦截都在此之后,不会漏计。
-  void import('../metrics/social-ledger.js')
-    .then(({ recordMessageSeen }) => recordMessageSeen(job.chatId))
-    .catch(() => { /* telemetry never breaks the pipeline */ });
+  // 注:msg_seen 不在这里记 —— 它挪到了 bot/handlers/message.ts 的 handleUpdate。
+  // 生产开着 META_SUBAGENT_ENABLED,Meta 路径在入队之前就分流走了,记在这里会
+  // 漏掉主路径(实测决策 38 次而这里只记到 4)。
   const timings: Record<string, number> = {};
   const lockState: ChatLockState = {
     release: await acquireChatLock(job.chatId),

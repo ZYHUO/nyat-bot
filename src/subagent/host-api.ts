@@ -326,6 +326,14 @@ export function createHostApi(
               lastMessageId = messageId;
               lastSentNorm = part;
               rememberBotText(chatId, part);
+              // G8 A/B 基线:Meta/CodeAct 是生产的主回复路径,它不经过
+              // stages/deliver.ts,所以那边的埋点在这条路上完全记不到(实测
+              // decision_reply=16 而 reply_sent=0)。这里不带端到端耗时 ——
+              // Meta 的任务边界与"收到消息→发出回复"不是同一个跨度,
+              // 硬凑一个口径不一致的延迟比没有更糟。
+              void import('../metrics/social-ledger.js')
+                .then(({ recordReplySent }) => recordReplySent(chatId))
+                .catch(() => { /* telemetry never breaks delivery */ });
               await track(
                 import('../pipeline/context/manager.js')
                   .then(({ addAssistant }) => addAssistant(chatId, { textContent: part, messageId }))
