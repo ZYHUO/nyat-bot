@@ -103,6 +103,9 @@ if (!targetExists) {
 const db = withFts ? new Database(DB_PATH) : undefined;
 if (db) {
   db.pragma('journal_mode = WAL');
+  // 生产 bot 正拿着同一个库的写锁。WAL 只允许单写者,批量事务撞上它会立刻 SQLITE_BUSY。
+  // 给足退避时间,宁可这个离线脚本等,也不要让它把回填做崩、或反过来拖慢线上写入。
+  db.pragma('busy_timeout = 15000');
   db.exec(
     "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(chroma_id UNINDEXED, chat, seg, tokenize='unicode61')",
   );
