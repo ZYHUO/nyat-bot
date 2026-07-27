@@ -82,6 +82,7 @@
 - 🏷️ **人物外号持久记忆** — 自动捕获"X 的外号是 Y"，跨会话不忘（migration 0027）
 - 📖 **群共同经历记忆** — cron 把群里发生的事摘要成"往事"，聊天命中时注入「群里的往事」让本喵像老群友一样 callback；相关性评分召回（distinct 关键词 × salience 门槛），杜绝"今天/这个"式偶然重叠的误召回（migration 0035）
 - 🧵 **持续内心（Mind）** — 上一个念头/立场跨消息延续，判断与写作共用同一段第一人称自我叙述，不再每条消息失忆重启
+- 🧲 **长期语义记忆（多语言 + 混合检索）** — 本地嵌入 `paraphrase-multilingual-MiniLM-L12-v2`（中文群聊；旧英文 MiniLM 中文区分度接近随机）+ Qdrant 向量召回；可选 FTS5 BM25 词法旁路经 RRF 融合（专名/黑话/型号）；`MEMORY_MIN_SCORE` 相关性下限滤噪声；写入侧近重复合并与保护/永久档（migrations 0051–0052，flag 门控）。整库重嵌入用 `scripts/reembed-memory.mts`（`--delta` / `--fts-only`）
 - 🧩 **记忆重要度 + 遗忘** — 记忆按重要度评分，低价值记忆随时间淡忘（migration 0030），梦境式整理 cron
 - 📚 **黑话学习** — 自动挖掘群内黑话/梗，多阶段精炼释义（migration 0016/0026）
 - 📇 **结构化用户画像** — 7 分节画像（身份/关系/稳定事实/偏好/近况…，migration 0025）
@@ -91,7 +92,7 @@
 
 **基础设施**
 - 📦 **BullMQ 消息队列** — Redis 支撑的高并发处理（可配置并发数）
-- 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪）+ **Qdrant**（语义记忆，int8 量化，进程内本地嵌入）
+- 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪、FTS5 词法索引）+ **Qdrant**（语义记忆，int8 量化，进程内多语言本地嵌入）
 - 🔁 **Ingress 自动故障转移** — 默认长轮询（不对外开放端口）；轮询挂掉自动切 webhook 备用，由 Redis 标志 + 看门狗控制
 - 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，macOS 窗口风格 UI，运行时配置管理
 - ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控；日志表 90/180 天滚动 retention）
@@ -101,7 +102,7 @@
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
 - 🎨 **359 个贴纸意图 + 常驻贴纸包** — AI 按意图自主选贴纸（top-N 截断 + Levenshtein 模糊 + 反感反馈）;指定贴纸包作「常驻主力」（走视觉识图生成情绪标签、忽略 emoji,选择时预留多数候选槽,其余学习来的贴纸仍可用）（migrations 0042-0043）
 - 🚀 **一键部署** — `scripts/deploy.sh` 端到端：依赖 → Qdrant → 构建 → systemd → 自检
-- 🧪 **1666 单元测试** — vitest 全绿基线；49 个 SQLite 迁移自动按序应用
+- 🧪 **单元测试** — vitest 全绿基线（`npm run test`）；53 个 SQLite 迁移自动按序应用
 - 🪦 **优雅关机契约** — worker 排干在飞任务、游离的自我接话统一中止信号排干、写缓冲落盘,SIGTERM 不丢消息不留孤儿锁
 
 ### 🏗️ 架构
@@ -185,7 +186,7 @@ src/
 ├── db/                   # Redis (ioredis) + SQLite (better-sqlite3)
 ├── knowledge/            # 知识库 + 贴纸 + 人物外号
 ├── learners/             # 黑话挖掘/释义 + 表达学习门控 + 学习并发门
-├── memory/               # Qdrant 语义记忆 (int8量化) + 重要度/遗忘
+├── memory/               # Qdrant 语义记忆 (多语言嵌入/混合检索/保护档) + 重要度/遗忘
 ├── meta/                 # Meta 编排 (Attention / loop / CodeAct session)
 ├── subagent/             # Subagent CodeAct + host API (telegram/memory/stickers)
 ├── context-engine/       # static|delta|ephemeral|volatile 上下文组装
@@ -233,7 +234,7 @@ scripts/                  # 安装 / 更新 / 迁移（deploy.sh · auto-update.
 | 消息队列 | [BullMQ](https://bullmq.io/) (Redis) |
 | 数据库 | SQLite ([better-sqlite3](https://github.com/WiseLibs/better-sqlite3), WAL mode) |
 | 缓存/队列 | Redis ([ioredis](https://github.com/redis/ioredis)) |
-| 向量库 | [Qdrant](https://qdrant.tech/) (HNSW + int8 量化) · 本地嵌入 [@xenova/transformers](https://github.com/xenova/transformers.js) (all-MiniLM-L6-v2) |
+| 向量库 | [Qdrant](https://qdrant.tech/) (HNSW + int8 量化) · 本地嵌入 [@xenova/transformers](https://github.com/xenova/transformers.js) (`paraphrase-multilingual-MiniLM-L12-v2`，384 维；可 `MEMORY_EMBED_MODEL` 覆盖) · 可选 FTS5 BM25 混合检索 |
 | 日志 | [pino](https://getpino.io/) |
 | 校验 | [zod](https://zod.dev/) |
 | Token 计算 | [tiktoken](https://github.com/openai/tiktoken) |
