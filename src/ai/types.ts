@@ -91,6 +91,13 @@ export interface AICallOptions {
    * a meaningful success.
    */
   rejectEmpty?: boolean;
+  /**
+   * 归属会话,纯观测用途,不影响任何调用行为。透传进 llmEvents,让 social-ledger
+   * 能把 LLM 调用摊到具体群上 —— "每回复几次调用"是 G8(合并人格决策)A/B 的
+   * 核心成本指标,没有归属就只能看全局,而各群活跃度差异远大于 G8 本身的效应。
+   * 不传的调用点(cron / 后台任务)不计入任何群。
+   */
+  chatId?: number;
 }
 
 export interface AICallResult {

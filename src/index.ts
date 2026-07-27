@@ -183,6 +183,10 @@ async function main(): Promise<void> {
   // 持久化 token 记账(重启不清零;补 Prometheus 内存计数器之短)。无 flag,始终开。
   const { initTokenLedger } = await import('./metrics/token-ledger.js');
   initTokenLedger();
+  // 社交决策记账(G8 A/B 基线)。同样无 flag、始终开 —— 基线要连续攒一周,
+  // 一个默认关的观测开关等于没有观测。
+  const { initSocialLedger } = await import('./metrics/social-ledger.js');
+  initSocialLedger();
 
   const app = new Hono();
   app.get('/health', (c) => c.json({ status: 'ok', uptime: process.uptime() }));
@@ -340,6 +344,7 @@ async function main(): Promise<void> {
       await closeQueue();
       // token 记账最后 flush 一次(别丢最后一分钟的账),需在 closeDb 之前。
       try { const { stopTokenLedger } = await import('./metrics/token-ledger.js'); stopTokenLedger(); } catch { /* non-critical */ }
+      try { const { stopSocialLedger } = await import('./metrics/social-ledger.js'); stopSocialLedger(); } catch { /* non-critical */ }
       step('redis+db');
       await closeRedis();
       closeDb();

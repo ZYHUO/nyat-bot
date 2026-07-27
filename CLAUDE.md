@@ -11,7 +11,13 @@ NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot. TypeScript, Node ≥22,
 - Lint: `npm run lint` (`eslint src/`). Format: `npm run format` (prettier).
 - Dev: `npm run dev` (`tsx watch src/index.ts`). Prod is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dist/index.js`; logs to `logs/app.log` as JSON lines — `tail -c … logs/app.log | python3 -c '…json.loads…'` to inspect, not `journalctl`).
 
-Baseline: the vitest suite is **fully green**; any failure is a real regression. `tsc --noEmit` has two known pre-existing unused-var warnings (`message.ts:57`, `prompt-builder.ts:169`) — filter those out, treat anything else as new.
+Baseline: `npm run typecheck`, `npm run lint` and the vitest suite are **all clean** — zero warnings, zero failures. Any output is a real regression. (Earlier revisions of this file claimed two known unused-var warnings in `message.ts:57` / `prompt-builder.ts:169`, and AGENTS.md claimed one; both were stale — those warnings no longer exist.)
+
+⚠️ **Run tests with the same Node the service uses.** `/usr/local/bin/node` is v25.x, but the systemd unit runs `/root/.hermes/node/bin/node` (v22), and `better-sqlite3`'s prebuilt binary is compiled for the v22 ABI. Under v25 the native module fails to load and **226 tests fail spuriously** with `Module did not self-register`. Always:
+
+```bash
+export PATH=/root/.hermes/node/bin:$PATH && npm run test
+```
 
 ## Non-obvious conventions
 

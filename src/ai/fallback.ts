@@ -68,13 +68,13 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         const result = await hedgedCall(
           label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown,
           options.rejectEmpty ?? false, options.maxTimeoutMs,
-          options.usage, options.suppressMetrics ?? false,
+          options.usage, options.suppressMetrics ?? false, options.chatId,
         );
         // rejectEmpty 已在 hedgedCall 内对两跳都施加;这里再兜一层,空则落到下个 backup。
         if (options.rejectEmpty && !result.content.trim()) {
           throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
         }
-        if (!options.suppressMetrics) emitLlmResult(options.usage, result);
+        if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
         return result;
       }
 
@@ -90,7 +90,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
           'Fallback label used',
         );
       }
-      if (!options.suppressMetrics) emitLlmResult(options.usage, result);
+      if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
       return result;
     } catch (err) {
       errors.push(err instanceof Error ? err : new Error(String(err)));
@@ -119,7 +119,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       }
 
       // Metrics: this attempt failed (visible per-label so retries/429 storms show up).
-      if (!options.suppressMetrics) emitLlmError(options.usage, labelName, label.model);
+      if (!options.suppressMetrics) emitLlmError(options.usage, labelName, label.model, options.chatId);
       logger.warn({ label: labelName, err: errors.at(-1)?.message }, 'Label failed, trying next');
     }
   }
@@ -156,6 +156,7 @@ async function hedgedCall(
   maxTimeoutMs: number | undefined,
   usage: string,
   suppressMetrics: boolean,
+  chatId: number | undefined,
 ): Promise<AICallResult> {
   const toError = (err: unknown) => (err instanceof Error ? err : new Error(String(err)));
 
@@ -190,7 +191,7 @@ async function hedgedCall(
       // —— 于是 llm_token_daily 与 llm_tokens_total 系统性少算了 hedge 那一份,
       // 这也正是"hedge 不取消输家"能长期没被发现的原因。这里把它记成 discarded。
       if (settledWinner !== null && settledWinner !== label.name && !suppressMetrics) {
-        emitLlmResult(usage, r);
+        emitLlmResult(usage, r, chatId);
         logger.info(
           { usage, label: label.name, tokens: r.tokenUsage.total },
           'Hedge loser completed anyway — tokens billed, counted as discarded',

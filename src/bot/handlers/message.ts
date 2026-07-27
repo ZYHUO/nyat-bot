@@ -41,6 +41,15 @@ async function handleUpdate(ctx: Context): Promise<void> {
     logger.warn({ err, chatId, messageId }, 'Dedup check failed, proceeding');
   }
 
+  // G8 A/B 基线的分母。**必须记在这里**:原先埋在 processPipeline 入口,但生产
+  // 开着 META_SUBAGENT_ENABLED,Meta 路径从本函数下方直接分流到 heart-adapter,
+  // 根本不进队列也不进 processPipeline —— 实测决策 38 次而 msg_seen 只有 4,
+  // 分母漏掉了主路径。handleUpdate 是四种 Telegram 事件的唯一收口,记在去重之后
+  // (重复投递不算"又看见一条")、分流之前,两条路都覆盖得到。
+  void import('../../metrics/social-ledger.js')
+    .then(({ recordMessageSeen }) => recordMessageSeen(chatId))
+    .catch(() => { /* telemetry never breaks ingest */ });
+
   try {
     if (userId && (await isRateLimited(userId))) return;
   } catch (err) {

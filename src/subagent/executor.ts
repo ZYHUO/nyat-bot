@@ -222,13 +222,18 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // Pin the exact user bubble this task must answer (models otherwise latch onto prior thread).
   let targetBlock = '';
+  // 供长期记忆检索用:锚点正文当查询词,最近消息 id 用来排除重复注入。
+  let anchorText = '';
+  const recentMessageIds = new Set<number>();
   if (replyAnchor && replyAnchor > 0) {
     try {
       const { getRecent } = await import('../pipeline/context/manager.js');
       const { isShortFollowUpText, isBarePingText } = await import('../meta/reply-context.js');
       const recent = await getRecent(task.chatId, 80);
+      for (const m of recent) recentMessageIds.add(m.messageId);
       const hit = recent.find((m) => m.messageId === replyAnchor && m.role !== 'assistant');
       if (hit) {
+        anchorText = (hit.textContent || '').slice(0, 240);
         const who = hit.username ? `@${hit.username}` : hit.fullName || `uid:${hit.uid}`;
         const userText = (hit.textContent || '').slice(0, 240);
         const followUp = isShortFollowUpText(userText) || isBarePingText(userText);
@@ -328,6 +333,24 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     }
   }
 
+  // 长期记忆(「相关往事」)。放在 selfState 之后、assemble 之前 —— 需要 targetBlock
+  // 已经算好的锚点正文当查询词。整段永不抛、有硬超时,失败一律空串。
+  let memoryBlock = '';
+  try {
+    const { buildSubagentMemoryBlock } = await import('./memory-context.js');
+    // 查询词 = 本轮要回的那句 + 任务方向。只用方向会太笼统(它是「短方向」不是台词),
+    // 只用锚点正文则在「快点告诉我」这类短接话上几乎没有信息量,两者相加最稳。
+    const query = [anchorText, task.contentDirection].filter(Boolean).join(' ').slice(0, 200);
+    memoryBlock = await buildSubagentMemoryBlock({
+      chatId: task.chatId,
+      query,
+      // 最近聊天里已有的不重复贴,否则同一条消息在 prompt 里出现两次。
+      excludeMessageIds: recentMessageIds,
+    });
+  } catch {
+    /* non-critical — 调用点再兜一层,异常绝不能冒泡进 CodeAct 主链路 */
+  }
+
   // 此刻自我状态（上课/作息）— 与 legacy Heart/reply 对齐，避免「人设上学但 CodeAct 全天闲聊」。
   let selfStateLine = '';
   try {
@@ -347,6 +370,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-roster', roster ? `## 群成员\n${roster}` : ''),
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
+    // 恒定传入(空时传 ''),与同组的 sub-permanent / sub-journal 一致 ——
+    // 不用条件展开把 id 从数组里摘掉:引擎实现在外部包里,"这次缺了这个 id"
+    // 在 delta/ephemeral 语义下是否等于"沿用上次的值"无法从代码证实,而赌错
+    // 的后果是上一轮的记忆黏在这一轮的 prompt 上。
+    ephemeralText('sub-memory', memoryBlock ? `## 相关往事(仅供参考,不是本轮要回的话)\n${memoryBlock}` : ''),
     ephemeralText('sub-target', targetBlock),
     deltaText(
       'sub-direction',

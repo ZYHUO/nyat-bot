@@ -91,6 +91,9 @@ function buildDeferEntry(job: ChatJob, formatted: FormattedMessage): PendingEntr
 
 export async function processPipeline(job: ChatJob): Promise<void> {
   const start = performance.now();
+  // 注:msg_seen 不在这里记 —— 它挪到了 bot/handlers/message.ts 的 handleUpdate。
+  // 生产开着 META_SUBAGENT_ENABLED,Meta 路径在入队之前就分流走了,记在这里会
+  // 漏掉主路径(实测决策 38 次而这里只记到 4)。
   const timings: Record<string, number> = {};
   const lockState: ChatLockState = {
     release: await acquireChatLock(job.chatId),
