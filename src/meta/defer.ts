@@ -34,8 +34,6 @@ export interface MetaDeferEntry {
   payload?: Record<string, unknown>;
   /** 本条已被 defer 的次数（首次为 0，每次 drain 递增）。 */
   deferCount: number;
-  /** 原始 createdAt 保留，避免重评时被 MAX_AGE_MS 判过期。 */
-  originalCreatedAt: number;
 }
 
 /** 调用方短路层用：该条目是否还有 defer 预算（没有 → 放行给 LLM）。 */
@@ -49,7 +47,7 @@ export function hasMetaDeferBudget(deferCount: number | undefined): boolean {
  */
 export async function scheduleMetaDeferReeval(args: {
   chatId: number;
-  entry: Omit<MetaDeferEntry, 'deferCount' | 'originalCreatedAt'>;
+  entry: Omit<MetaDeferEntry, 'deferCount'>;
   deferCount: number;
   retryAfterMs: number;
   reason: string;
@@ -70,7 +68,6 @@ export async function scheduleMetaDeferReeval(args: {
   const stored: MetaDeferEntry = {
     ...args.entry,
     deferCount: args.deferCount + 1,
-    originalCreatedAt: Date.now(),
   };
   const member = JSON.stringify(stored);
 

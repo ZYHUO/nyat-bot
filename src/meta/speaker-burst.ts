@@ -98,16 +98,14 @@ export async function clearSpeakerBurst(chatId: number, uid?: number): Promise<v
   if (!(chatId < 0)) return;
   try {
     if (uid && uid > 0) {
-      // CAS: only delete if the stored value matches this uid's claim.
+      // Atomic compare-and-delete via Lua: avoids the TOCTOU race where
+      // another follow-up claims the key between our GET and DEL. Without
+      // this, the new claim would be wiped, allowing a second follow-up to
+      // also force-L0 → duplicate reply bubble.
       const redis = getRedis();
-      const val = await redis.get(KEY(chatId));
-      if (val === String(uid)) {
-        await redis.del(KEY(chatId));
-      }
-      const onceVal = await redis.get(ONCE_KEY(chatId));
-      if (onceVal === String(uid)) {
-        await redis.del(ONCE_KEY(chatId));
-      }
+      const luaScript = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`;
+      await redis.eval(luaScript, 1, KEY(chatId), String(uid));
+      await redis.eval(luaScript, 1, ONCE_KEY(chatId), String(uid));
     } else {
       // No uid = legacy caller: unconditional clear (backward compat).
       await getRedis().del(KEY(chatId), ONCE_KEY(chatId));

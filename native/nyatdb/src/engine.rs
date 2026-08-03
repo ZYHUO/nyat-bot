@@ -402,7 +402,6 @@ impl Engine {
                 self.insert_into_chain(self.recall_page_id, PageType::Recall, payload, lsn)?;
             }
             WalType::Checkpoint => self.checkpoint_lsn = lsn + 1,
-            WalType::AllocPage => {}
         }
         Ok(())
     }
@@ -856,16 +855,33 @@ impl Engine {
         let mut page_id = start_page_id;
         loop {
             let frame = self.pool.get(&mut self.heap, page_id)?;
+            // Decode every tuple before unpinning so a malformed tuple can't
+            // leak a pin-count: the `?` must never run while the page is still
+            // pinned. Stash the outcome (hit or decode error) and propagate it
+            // only after `unpin` has released the frame.
             let mut next = 0;
+            let mut outcome: Option<Result<Option<Vec<u8>>>> = None;
             for tuple in frame.page.all_tuples() {
-                let (candidate, value, expires_at) = decode_hot(&tuple)?;
-                if candidate == key {
-                    self.pool.unpin(page_id, false);
-                    return Ok((expires_at == 0 || expires_at > Self::now_ms()).then_some(value));
+                match decode_hot(&tuple) {
+                    Ok((candidate, value, expires_at)) => {
+                        if candidate == key {
+                            outcome = Some(Ok(
+                                (expires_at == 0 || expires_at > Self::now_ms()).then_some(value),
+                            ));
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        outcome = Some(Err(e));
+                        break;
+                    }
                 }
             }
             next = frame.page.next_page_id();
             self.pool.unpin(page_id, false);
+            if let Some(res) = outcome {
+                return res;
+            }
             if next == 0 {
                 break;
             }
@@ -1006,42 +1022,6 @@ impl Engine {
             lsn: self.lsn,
             pool: self.pool.stats(),
         }
-    }
-
-    pub fn pages(&self) -> u32 {
-        self.heap.size_pages()
-    }
-
-    pub fn pool_stats(&self) -> (usize, usize) {
-        self.pool.stats()
-    }
-
-    /// Compatibility wrappers for the Step 2 native smoke interface.
-    pub fn storage_smoke_write(&mut self, payload: &[u8]) -> Result<(u32, u16)> {
-        let message_id = self.msg_index.size() as u32 + 1;
-        self.chat_append(
-            0,
-            message_id,
-            Self::now_ms(),
-            0,
-            2,
-            String::from_utf8_lossy(payload).into_owned(),
-            false,
-        )?;
-        let (page_id, slot) = unpack_loc(self.msg_index.get_packed(0, message_id).unwrap());
-        Ok((page_id, slot))
-    }
-
-    pub fn storage_smoke_read(&mut self, page_id: u32, slot: u16) -> Result<Vec<u8>> {
-        self.ensure_open()?;
-        let tuple = self
-            .pool
-            .peek(&mut self.heap, page_id)?
-            .get_tuple(slot)
-            .ok_or_else(|| NyatError::Msg("missing tuple".into()))?;
-        Ok(decode_chat_tuple(&tuple)
-            .map(|item| item.text.into_bytes())
-            .unwrap_or(tuple))
     }
 
     pub fn close(&mut self, skip_checkpoint: bool) -> Result<()> {

@@ -7,7 +7,7 @@ import { logger } from '../shared/logger.js';
 import { getBotDisplayName, getBotUid } from '../bot/bot.js';
 import { heartDecision } from '../pipeline/heart/decision.js';
 import { composeSelfState } from '../pipeline/heart/self-state.js';
-import { computeEngagement, HARD_PASS_BUDGET } from '../pipeline/heart/engagement.js';
+import { computeEngagement, HARD_PASS_BUDGET, type Engagement } from '../pipeline/heart/engagement.js';
 import {
   getChatState,
   getGateCooldownRemainingMs,
@@ -87,6 +87,7 @@ export async function evaluateMetaHeart(opts: {
   const nowSec = Math.floor(Date.now() / 1000);
   const messagesLast5Min = recentMessages.filter((m) => nowSec - (m.timestamp || 0) < 300).length;
 
+  let engagement: Engagement | undefined;
   let tstate;
   try {
     tstate = await getChatState(chatId);
@@ -107,7 +108,7 @@ export async function evaluateMetaHeart(opts: {
       /* fail-open to heart */
     }
 
-    const engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
+    engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
     if (engagement.budget <= HARD_PASS_BUDGET) {
       logger.info(
         {
@@ -128,9 +129,9 @@ export async function evaluateMetaHeart(opts: {
     lastSpokeSecAgo = (Date.now() - tstate.lastBotReplyAt) / 1000;
   }
 
-  const engagementNote = continuation
-    ? undefined
-    : computeEngagement(recentMessages, botUid, messagesLast5Min).note ?? undefined;
+  // Reuse the engagement already computed above (identical args) instead of
+  // recomputing — avoids a redundant pass over recentMessages.
+  const engagementNote = continuation ? undefined : engagement?.note ?? undefined;
 
   const heart = await heartDecision({
     chatId,

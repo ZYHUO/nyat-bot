@@ -168,23 +168,39 @@ export class AttentionAccumulator {
     }
 
     // Drop stale + already-answered (restart / busy-requeue leftovers)
-    const fresh: AttentionItem[] = [];
+    // Batch the answered-check into a single MGET instead of N serial GETs.
+    const notStale: AttentionItem[] = [];
     let droppedStale = 0;
-    let droppedAnswered = 0;
     for (const it of byId.values()) {
       if (now - (it.createdAt || 0) > MAX_AGE_MS) {
         droppedStale += 1;
         continue;
       }
+      notStale.push(it);
+    }
+
+    let droppedAnswered = 0;
+    const fresh: AttentionItem[] = [];
+    const toCheck: Array<{ chatId: number; messageId: number }> = [];
+    for (const it of notStale) {
       if (it.messageId && it.messageId > 0) {
-        try {
-          const { isMessageAnswered } = await import('./answered.js');
-          if (await isMessageAnswered(it.chatId, it.messageId)) {
-            droppedAnswered += 1;
-            continue;
-          }
-        } catch {
-          /* keep */
+        toCheck.push({ chatId: it.chatId, messageId: it.messageId });
+      }
+    }
+    let answeredSet: Set<string> | null = null;
+    if (toCheck.length) {
+      try {
+        const { batchMessagesAnswered } = await import('./answered.js');
+        answeredSet = await batchMessagesAnswered(toCheck);
+      } catch {
+        /* fail-open: keep all */
+      }
+    }
+    for (const it of notStale) {
+      if (answeredSet && it.messageId && it.messageId > 0) {
+        if (answeredSet.has(`${it.chatId}:${it.messageId}`)) {
+          droppedAnswered += 1;
+          continue;
         }
       }
       fresh.push(it);

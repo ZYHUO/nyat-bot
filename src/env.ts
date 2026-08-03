@@ -628,13 +628,9 @@ const envSchema = z.object({
   MULTI_AGENT_RESEARCHER_MAX_STEPS: z.coerce.number().int().positive().default(6),
   // Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。
   MULTI_AGENT_MEMORY_ENABLED: booleanFromEnv.default(true),
-  MULTI_AGENT_MEMORY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-  MULTI_AGENT_MEMORY_MAX_STEPS: z.coerce.number().int().positive().default(3),
   // Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、
   // 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。
   MULTI_AGENT_PERSONA_ENABLED: booleanFromEnv.default(true),
-  MULTI_AGENT_PERSONA_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
-  MULTI_AGENT_PERSONA_MAX_STEPS: z.coerce.number().int().positive().default(3),
   // 导演专家(写手前):读上下文+念头,产出"情绪/姿态/切入点"块喂写手。全路由并行。
   MULTI_AGENT_DIRECTOR_ENABLED: booleanFromEnv.default(true),
   MULTI_AGENT_DIRECTOR_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
