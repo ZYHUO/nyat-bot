@@ -653,6 +653,18 @@ export class NyatDb {
   }
 
   /**
+   * Batch point lookup — one result per requested id (null if missing).
+   * Mirrors the native `chat_get_batch` so the union `NyatDbHandle` exposes
+   * the same surface whether preferNative falls back to TS or not.
+   */
+  chatGetBatch(
+    chatId: number,
+    messageIds: number[],
+  ): Array<(ChatTuple & { roleName: string }) | null> {
+    return messageIds.map((id) => this.chatGet(chatId, id));
+  }
+
+  /**
    * Keep only the last `keep` messages for a chat; free older pages.
    * Updates secondary index + ring.
    */

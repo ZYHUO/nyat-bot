@@ -32,8 +32,10 @@ export class GlobalState {
   putTask(task: DispatchTask): void {
     this.tasks.set(task.id, task);
     if (this.tasks.size > MAX_TASKS) {
-      const oldest = Array.from(this.tasks.values()).sort((a, b) => a.createdAt - b.createdAt)[0];
-      if (oldest) this.tasks.delete(oldest.id);
+      // Map preserves insertion order; tasks are only set (never re-inserted),
+      // so the first key is the oldest — no need to sort.
+      const oldest = this.tasks.keys().next().value;
+      if (oldest) this.tasks.delete(oldest);
     }
   }
 

@@ -301,7 +301,23 @@ async function interceptDiaryAttention(
     }
   }
 
-  return remaining.filter((a) => !handledChats.has(a.chatId));
+  // Only filter diary-type items for handled chats; non-diary items (L0 mentions,
+  // L1 questions) must still reach autoDispatchL0 / Meta LLM even if a diary was
+  // processed for the same chat in this batch.
+  return remaining.filter((a) => {
+    if (!handledChats.has(a.chatId)) return true;
+    // If the chat had a diary handled, only drop diary-type items
+    const text = a.textPreview ?? '';
+    const ackOnly = a.reason.startsWith('diary_ack:');
+    const reqAction = subagentRequestAction(a.reason);
+    const userAsk = !ackOnly && !reqAction && looksLikeDiaryRequest(text);
+    const nudge = a.reason.startsWith('diary:');
+    const journalReq =
+      reqAction === 'journal.write' ||
+      reqAction === 'journal.trywrite' ||
+      reqAction === 'journal.recent';
+    return !(ackOnly || userAsk || nudge || journalReq);
+  });
 }
 
 async function loadBackgroundDreaming(): Promise<string> {
@@ -366,12 +382,17 @@ async function runMetaCode(
     ...args: string[]
   ) => (...args: unknown[]) => Promise<unknown>;
   const fn = new AsyncFunction(...Object.keys(api), 'console', `"use strict";\n${code}`);
-  await Promise.race([
-    fn(...Object.values(api), console),
-    new Promise((_, rej) =>
-      setTimeout(() => rej(new Error('meta_code_timeout')), env().CODEACT_TIMEOUT_MS),
-    ),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      fn(...Object.values(api), console),
+      new Promise((_, rej) => {
+        timer = setTimeout(() => rej(new Error('meta_code_timeout')), env().CODEACT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function autoDispatchL0(

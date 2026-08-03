@@ -38,3 +38,29 @@ export async function allQuotesAnswered(chatId: number, quotes: number[]): Promi
   }
   return true;
 }
+
+/**
+ * Batch check which messages are already answered — single MGET round-trip
+ * instead of N serial GETs. Returns a Set of `"chatId:messageId"` strings
+ * for messages that were already replied-to.
+ */
+export async function batchMessagesAnswered(
+  entries: ReadonlyArray<{ chatId: number; messageId: number }>,
+): Promise<Set<string>> {
+  const valid = entries
+    .map((e) => ({ chatId: e.chatId, mid: Math.floor(Number(e.messageId)) }))
+    .filter((e) => Number.isFinite(e.chatId) && Number.isFinite(e.mid) && e.mid > 0);
+  if (!valid.length) return new Set();
+  const keys = valid.map((e) => key(e.chatId, e.mid));
+  try {
+    const vals = (await getRedis().mget(...keys)) as (string | null)[];
+    const answered = new Set<string>();
+    for (let i = 0; i < valid.length; i++) {
+      const entry = valid[i];
+      if (entry && vals[i] === '1') answered.add(`${entry.chatId}:${entry.mid}`);
+    }
+    return answered;
+  } catch {
+    return new Set();
+  }
+}

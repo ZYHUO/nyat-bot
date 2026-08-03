@@ -18,7 +18,6 @@ pub enum PageType {
   Impulse = 4,
   Bond = 5,
   Recall = 6,
-  Catalog = 7,
 }
 
 impl PageType {
@@ -31,7 +30,6 @@ impl PageType {
       4 => Self::Impulse,
       5 => Self::Bond,
       6 => Self::Recall,
-      7 => Self::Catalog,
       _ => return None,
     })
   }
@@ -40,7 +38,6 @@ impl PageType {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalType {
-  AllocPage = 1,
   InsertTuple = 2,
   SetHot = 3,
   EnqueueImpulse = 4,
@@ -56,7 +53,6 @@ pub enum WalType {
 impl WalType {
   pub fn from_u8(v: u8) -> Option<Self> {
     Some(match v {
-      1 => Self::AllocPage,
       2 => Self::InsertTuple,
       3 => Self::SetHot,
       4 => Self::EnqueueImpulse,

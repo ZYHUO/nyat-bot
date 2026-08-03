@@ -79,11 +79,6 @@ export class CompactMsgIndex {
   }
 }
 
-/** @deprecated prefer CompactMsgIndex */
-export function msgKey(chatId: number, messageId: number): string {
-  return `${chatId}:${messageId >>> 0}`;
-}
-
 /** Persist secondary index: (chatId, messageId) → page/slot. */
 export function saveMsgIndex(
   dir: string,

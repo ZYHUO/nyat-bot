@@ -16,11 +16,9 @@ export const enum PageType {
   Impulse = 4,
   Bond = 5,
   Recall = 6,
-  Catalog = 7,
 }
 
 export const enum WalType {
-  AllocPage = 1,
   InsertTuple = 2,
   SetHot = 3,
   EnqueueImpulse = 4,

@@ -55,10 +55,18 @@ export async function takeMetaWaitAnchor(chatId: number): Promise<MetaWaitAnchor
   try {
     const redis = getRedis();
     const key = waitAnchorKey(chatId);
-    const raw = await redis.get(key);
+    // Atomic get-and-delete (Redis 6.2+ GETDEL): avoids the non-atomic
+    // GET → DEL → JSON.parse race where a parse failure after DEL would
+    // permanently lose the anchor. If parse fails the data is already
+    // consumed (acceptable — better than silent loss via DEL-before-parse).
+    const raw = await redis.getdel(key);
     if (!raw) return null;
-    await redis.del(key);
-    return JSON.parse(raw) as MetaWaitAnchor;
+    try {
+      return JSON.parse(raw) as MetaWaitAnchor;
+    } catch (err) {
+      logger.warn({ err, chatId, key }, 'Meta wait anchor JSON parse failed (already consumed via GETDEL)');
+      return null;
+    }
   } catch {
     return null;
   }
