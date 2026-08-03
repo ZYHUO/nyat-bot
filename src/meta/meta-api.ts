@@ -110,7 +110,9 @@ export function buildMetaApiContext(opts?: {
       try {
         const { allQuotesAnswered } = await import('./answered.js');
         if (await allQuotesAnswered(cid, quotes)) {
-          // Keep claimed — do not gap-fill the same already-answered quotes.
+          // Already answered — unclaim so gap-fill can still dispatch a
+          // *different* (unanswered) L0 in the same chat this session.
+          unclaim();
           logger.info({ chatId: cid, quotes }, 'Meta dispatch skipped (already answered quotes)');
           return { taskId: 'skipped_answered' };
         }

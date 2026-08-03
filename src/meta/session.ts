@@ -131,15 +131,34 @@ async function interceptDiaryAttention(
 
   const handledChats = new Set<number>();
 
+  /** Max requeue attempts for diary ack when chat is busy (prevents infinite retry loop). */
+  const DIARY_ACK_MAX_RETRIES = 3;
+
   async function ackDiary(
     a: AttentionItem,
     result: { wrote: boolean; reason?: string; snippet?: string | null },
   ): Promise<void> {
-    if (!isMetaSubagentChat(a.chatId)) return;
     const snip = (result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
     const direction = result.wrote
       ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
       : diarySkipAckDirection(result.reason);
+
+    // Non-Meta chats: dispatch.taskToGroup would throw, so send a short ack
+    // directly via Telegram. Without this, users in chats not on the Meta path
+    // would write a diary but receive no confirmation.
+    if (!isMetaSubagentChat(a.chatId)) {
+      try {
+        const { sendMessage } = await import('../bot/sender/telegram.js');
+        const ackText = result.wrote
+          ? `日记已写好啦～${snip ? `「${snip}」` : ''}`
+          : diarySkipAckDirection(result.reason).slice(0, 200);
+        await sendMessage(a.chatId, ackText, a.messageId);
+      } catch (err) {
+        logger.warn({ err, chatId: a.chatId }, 'Meta diary ack direct send failed');
+      }
+      return;
+    }
+
     const dispatched = await dispatch.taskToGroup(a.chatId, {
       contentDirection: direction,
       toneGuidance: '短、傲娇、像发微信；别小作文',
@@ -147,6 +166,17 @@ async function interceptDiaryAttention(
       targetUserId: a.userId && a.userId > 0 ? a.userId : undefined,
     });
     if (dispatched.taskId !== 'skipped_busy') return;
+    // Cap retries: without this, a busy chat requeues diary_ack every tick →
+    // interceptDiaryAttention re-dispatches the same ack → duplicate bubbles.
+    const retryCount =
+      typeof a.payload?.['ackRetry'] === 'number' ? (a.payload['ackRetry'] as number) : 0;
+    if (retryCount >= DIARY_ACK_MAX_RETRIES) {
+      logger.warn(
+        { chatId: a.chatId, retryCount, messageId: a.messageId },
+        'Meta diary ack requeue cap reached — dropping ack',
+      );
+      return;
+    }
     try {
       const { getAttentionAccumulator } = await import('./attention.js');
       await getAttentionAccumulator().requeue([
@@ -162,6 +192,7 @@ async function interceptDiaryAttention(
             wrote: result.wrote,
             reason: result.reason,
             snippet: result.snippet ?? null,
+            ackRetry: retryCount + 1,
           },
         },
       ]);

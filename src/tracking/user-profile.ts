@@ -58,12 +58,12 @@ function flushBuffer(key: string): void {
         full_name    = excluded.full_name,
         sender_tag   = COALESCE(excluded.sender_tag, sender_tag),
         pending_messages = CASE
-          WHEN json_array_length(pending_messages) >= ${MAX_PENDING}
+          WHEN json_array_length(pending_messages) >= ?
           THEN json_insert(json_remove(pending_messages, '$[0]'), '$[#]', ?)
           ELSE json_insert(pending_messages, '$[#]', ?)
         END,
         updated_at   = unixepoch()
-    `).run(entry.chatId, entry.uid, entry.username, entry.fullName, entry.senderTag ?? null, text, text, text);
+    `).run(entry.chatId, entry.uid, entry.username, entry.fullName, entry.senderTag ?? null, text, MAX_PENDING, text, text);
   }
 }
 

@@ -80,7 +80,17 @@ export async function handleDeferResume(args: {
   const entries = args.deferResume?.entries ?? [];
   if (entries.length === 0) return;
   const injected = await reinjectDeferEntries(args.chatId, args.dedupToken, entries);
-  await scheduleTurn(args.chatId, { trigger: 'gate_defer', delayMsOverride: 0 });
+  // scheduleTurn 失败必须抛出让 BullMQ 重试:吞掉的话条目已注入 pending 却永远
+  // 没有回合去 drain(直到下一条消息碰巧触发)。重试时 dedupToken 保证不重复注入。
+  try {
+    await scheduleTurn(args.chatId, { trigger: 'gate_defer', delayMsOverride: 0 });
+  } catch (err) {
+    logger.warn(
+      { err, chatId: args.chatId, entryCount: entries.length, dedupToken: args.dedupToken },
+      'defer-resume: entries injected but scheduleTurn failed — rethrowing for retry',
+    );
+    throw err;
+  }
   logger.info(
     { chatId: args.chatId, entryCount: entries.length, injected, dedupToken: args.dedupToken },
     injected === -1

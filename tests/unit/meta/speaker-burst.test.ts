@@ -81,11 +81,32 @@ describe('speaker-burst', () => {
     expect(await shouldForceSameSpeakerL0(-1001, 8)).toBe(false);
   });
 
-  it('clearSpeakerBurst deletes both keys', async () => {
+  it('clearSpeakerBurst deletes both keys (legacy, no uid)', async () => {
     await clearSpeakerBurst(-1001);
     expect(redisDel).toHaveBeenCalledWith(
       'xxb:meta:speaker_burst:-1001',
       'xxb:meta:speaker_burst_once:-1001',
     );
+  });
+
+  it('clearSpeakerBurst with uid only deletes keys owned by that uid (CAS)', async () => {
+    // KEY owned by uid 42 → delete; ONCE_KEY owned by uid 99 → keep
+    redisGet.mockImplementation(async (key: string) => {
+      if (key === 'xxb:meta:speaker_burst:-1001') return '42';
+      if (key === 'xxb:meta:speaker_burst_once:-1001') return '99';
+      return null;
+    });
+    await clearSpeakerBurst(-1001, 42);
+    // KEY should be deleted (owned by 42)
+    expect(redisDel).toHaveBeenCalledWith('xxb:meta:speaker_burst:-1001');
+    // ONCE_KEY should NOT be deleted (owned by 99, not 42) — check del was
+    // only called once (for KEY), not for ONCE_KEY
+    expect(redisDel).toHaveBeenCalledTimes(1);
+  });
+
+  it('clearSpeakerBurst with uid skips keys not owned by uid', async () => {
+    redisGet.mockResolvedValue('99'); // both keys owned by 99
+    await clearSpeakerBurst(-1001, 42);
+    expect(redisDel).not.toHaveBeenCalled();
   });
 });

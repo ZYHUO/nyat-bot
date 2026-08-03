@@ -67,8 +67,18 @@ export function runMigrations(migrationsDir: string): void {
   for (const file of files) {
     if (applied.has(file)) continue;
     const sql = readFileSync(resolve(migrationsDir, file), 'utf-8');
-    applyMigration(sql, file);
-    logger.info({ migration: file }, 'Migration applied');
+    try {
+      applyMigration(sql, file);
+      logger.info({ migration: file }, 'Migration applied');
+    } catch (err) {
+      // 多进程同时启动的竞态:另一方已插入同名 _migrations 记录。迁移 SQL 本身
+      // 幂等(IF NOT EXISTS),约束冲突说明对方已经应用,安全跳过而不是崩掉。
+      if (err instanceof Error && err.message.includes('_migrations')) {
+        logger.info({ migration: file }, 'Migration already applied by concurrent process — skipped');
+        continue;
+      }
+      throw err;
+    }
   }
 }
 

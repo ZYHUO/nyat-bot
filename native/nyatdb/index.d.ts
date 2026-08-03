@@ -22,7 +22,7 @@ export declare class NyatDbNative {
   bondUpsert(b: BondJs): void
   bondList(limit?: number | undefined | null): Array<BondJs>
   recallUpsert(chatId: number, messageId: number, vector: Float64Array, visibility?: number | undefined | null): void
-  recallSearch(query: Float64Array, chatId?: number | undefined | null, topK?: number | undefined | null): Array<RecallHitJs>
+  recallSearch(query: Float64Array, chatId?: number | undefined | null, topK?: number | undefined | null, minVisibility?: number | undefined | null): Array<RecallHitJs>
   close(skipCheckpoint?: boolean | undefined | null): void
   ping(): string
 }

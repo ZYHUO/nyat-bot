@@ -34,8 +34,6 @@ export type ScoredMessage = FormattedMessage & {
   sourceChatId?: number | null;
 };
 
-const QDRANT_HOST = process.env['QDRANT_HOST'] ?? '127.0.0.1';
-const QDRANT_PORT = parseInt(process.env['QDRANT_PORT'] ?? '6333', 10);
 const VECTOR_SIZE = 384;
 /** 去重查询的硬超时。写入是 fire-and-forget,但仍然跑在消息处理的任务里。 */
 const DEDUP_TIMEOUT_MS = 300;
@@ -113,7 +111,9 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
     });
 
     _embedder = async (texts: string[]): Promise<number[][]> => {
-      const keys = texts.map((t) => t.slice(0, 512));
+      // key 带长度前缀:两条不同长文本前 512 字符相同就会共享 embedding(review 指出的
+      // 截断碰撞)。长度不同 ⇒ key 必然不同;同长同前缀的残余碰撞概率可忽略。
+      const keys = texts.map((t) => `${t.length}:${t.slice(0, 512)}`);
       const results: (number[] | null)[] = new Array(keys.length).fill(null);
       const uncachedIndices: number[] = [];
 
@@ -158,7 +158,9 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
 
 function client(): QdrantClient {
   if (!_client) {
-    _client = new QdrantClient({ host: QDRANT_HOST, port: QDRANT_PORT, https: false });
+    // env() 校验过 QDRANT_PORT(非法值启动期就报错,不会再连到 NaN 端口)。
+    const e = env();
+    _client = new QdrantClient({ host: e.QDRANT_HOST, port: e.QDRANT_PORT, https: false });
   }
   return _client;
 }
@@ -183,13 +185,13 @@ function getStore(): Promise<QdrantClient> {
       await c.createPayloadIndex(collectionName(), {
         field_name: 'chatId', field_schema: 'integer', wait: true,
       });
-      logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection created');
+      logger.info({ host: env().QDRANT_HOST, port: env().QDRANT_PORT }, 'Qdrant collection created');
     }
     // 机制1/4:uid index 支撑 per-user 跨上下文检索(searchMemoryByUser)。
     // 幂等——已存在的 collection(首建分支不跑)也要补建;createPayloadIndex
     // 对已有 index 是 no-op,包 try/catch 防并发/竞态噪声。
     await ensurePayloadIndex(c, 'uid', 'integer');
-    logger.info({ host: QDRANT_HOST, port: QDRANT_PORT }, 'Qdrant collection ready');
+    logger.info({ host: env().QDRANT_HOST, port: env().QDRANT_PORT }, 'Qdrant collection ready');
     return c;
   })().catch((err) => {
     _ready = undefined; // allow retry
@@ -298,13 +300,15 @@ async function findNearDuplicate(
   const threshold = env().MEMORY_DEDUP_THRESHOLD;
   try {
     const hits = await Promise.race([
+      // 超时赢了的场景下底层 search 仍在后台跑;挂 catch 把它迟到的 reject 消化掉,
+      // 否则变成一个 unhandled rejection(结果本就被丢弃,catch 代价为零)。
       store.search(collectionName(), {
         vector,
         limit: 1,
         filter: { must: [{ key: 'chatId', match: { value: chatId } }] },
         with_payload: true,
         params: { quantization: { rescore: true, oversampling: 2.0 } },
-      }),
+      }).catch(() => [] as never[]),
       new Promise<never[]>((resolve) => setTimeout(() => resolve([]), DEDUP_TIMEOUT_MS)),
     ]);
     const top = hits[0];
@@ -345,7 +349,8 @@ export async function searchMemory(
 
   try {
     const result = await Promise.race([
-      _searchMemoryInner(chatId, query, topK),
+      // 同上:超时胜出时 inner 仍在后台跑,reject 需被消化,不能漏成 unhandled rejection。
+      _searchMemoryInner(chatId, query, topK).catch(() => [] as ScoredMessage[]),
       new Promise<ScoredMessage[]>((resolve) =>
         setTimeout(() => resolve([]), timeoutMs)
       ),
@@ -467,7 +472,13 @@ function applyMinScore<T extends ScoredMessage>(hits: T[], ctx: Record<string, u
 /** Qdrant hit → ScoredMessage(带 visibility/sourceChatId);无文本返回 null。 */
 function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: number }): ScoredMessage | null {
   const meta = (hit.payload ?? {}) as Record<string, unknown>;
-  const doc = meta['text'] as string | undefined;
+  // payload 来自外部存储,不做盲 cast:类型不符时回退默认值,uid 拿不到真实数字就
+  // 归 0(与真实 uid=0 无法区分,但 payload 损坏时总好过把一个字符串当 number 用)。
+  const asNum = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  const asStr = (v: unknown): string | undefined =>
+    typeof v === 'string' ? v : undefined;
+  const doc = asStr(meta['text']);
   if (!doc) return null;
   // Qdrant Cosine returns similarity directly (higher = closer); clamp to [0,1].
   const score = typeof hit.score === 'number'
@@ -478,17 +489,17 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
     ? rawVis
     : undefined;
   return {
-    role: (meta['role'] as 'user' | 'assistant') ?? 'user',
-    uid: (meta['uid'] as number) ?? 0,
-    username: (meta['username'] as string) ?? '',
-    fullName: (meta['fullName'] as string) ?? '',
-    timestamp: (meta['timestamp'] as number) ?? 0,
-    messageId: (meta['messageId'] as number) ?? 0,
+    role: meta['role'] === 'assistant' ? 'assistant' : 'user',
+    uid: asNum(meta['uid']) ?? 0,
+    username: asStr(meta['username']) ?? '',
+    fullName: asStr(meta['fullName']) ?? '',
+    timestamp: asNum(meta['timestamp']) ?? 0,
+    messageId: asNum(meta['messageId']) ?? 0,
     textContent: doc,
     isForwarded: false,
     score,
     visibility,
-    sourceChatId: (meta['sourceChatId'] as number) ?? (meta['chatId'] as number) ?? null,
+    sourceChatId: asNum(meta['sourceChatId']) ?? asNum(meta['chatId']) ?? null,
   };
 }
 
@@ -641,6 +652,13 @@ export async function deleteMemories(ids: string[]): Promise<number> {
       } catch (err) {
         logger.warn({ err, count: ids.length }, 'lexical delete failed — FTS index may now leak');
       }
+    }
+    // importance sidecar 同步删:否则 memory_meta 行随遗忘 cron 永久孤儿堆积。
+    try {
+      const { deleteMeta } = await import('./importance.js');
+      deleteMeta(ids);
+    } catch (err) {
+      logger.warn({ err, count: ids.length }, 'memory_meta delete failed — sidecar rows orphaned');
     }
     return ids.length;
   } catch (err) {

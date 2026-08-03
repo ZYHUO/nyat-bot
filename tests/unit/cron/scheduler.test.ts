@@ -48,25 +48,32 @@ vi.mock('../../../src/tracking/stats.js', () => ({
   flushDailyStats: vi.fn(),
 }));
 
-// Ensure deterministic env BEFORE scheduler module is imported (env() caches once).
-// .env file on the host may have these enabled — explicitly disable here.
-process.env['PROACTIVE_SCAN_ENABLED'] = 'false';
-process.env['VERIFY_ENABLED'] = 'false';
-process.env['LEARNER_ENABLED'] = 'false';
-process.env['SLEEP_SCHEDULE_ENABLED'] = 'false';
-process.env['BOT_COMMAND_LEARN_ENABLED'] = 'false';
-process.env['PM_NUDGE_ENABLED'] = 'false';
-process.env['SCHOOL_SCHEDULE_ENABLED'] = 'false';
-process.env['TOPIC_REGISTRY_ENABLED'] = 'false';
-process.env['CACHE_WARMUP_ENABLED'] = 'false';
-process.env['RESIDENT_STICKER_PACKS'] = '';
-process.env['PROFILE_MERGE_ENABLED'] = 'false';
-process.env['REFLECTION_ENABLED'] = 'false';
-process.env['STEPFUN_CONSUMER_ENABLED'] = 'false';
-process.env['TIC_PENALTY_ENABLED'] = 'false';
-process.env['DREAM_JOURNAL_ENABLED'] = 'false';
-process.env['DREAM_JOURNAL_HOOK_SLEEP'] = 'false';
-process.env['META_SUBAGENT_ENABLED'] = 'false';
+// scheduler.ts reads env().CRON_ENABLED (zod schema, cached once). Mock env()
+// so we can control CRON_ENABLED per-test without process.env timing issues.
+const envOverrides: Record<string, unknown> = { CRON_ENABLED: true };
+vi.mock('../../../src/env.js', () => ({
+  env: () => ({
+    CRON_ENABLED: envOverrides['CRON_ENABLED'] ?? true,
+    PROACTIVE_SCAN_ENABLED: false,
+    VERIFY_ENABLED: false,
+    LEARNER_ENABLED: false,
+    SLEEP_SCHEDULE_ENABLED: false,
+    BOT_COMMAND_LEARN_ENABLED: false,
+    PM_NUDGE_ENABLED: false,
+    SCHOOL_SCHEDULE_ENABLED: false,
+    TOPIC_REGISTRY_ENABLED: false,
+    CACHE_WARMUP_ENABLED: false,
+    RESIDENT_STICKER_PACKS: '',
+    PROFILE_MERGE_ENABLED: false,
+    REFLECTION_ENABLED: false,
+    STEPFUN_CONSUMER_ENABLED: false,
+    TIC_PENALTY_ENABLED: false,
+    DREAM_JOURNAL_ENABLED: false,
+    DREAM_JOURNAL_HOOK_SLEEP: false,
+    META_SUBAGENT_ENABLED: false,
+    KNOWLEDGE_CRON_SCHEDULE: '30 * * * *',
+  }),
+}));
 
 const { startCronJobs, stopCronJobs, isStarted } = await import(
   '../../../src/cron/scheduler.js'
@@ -74,7 +81,7 @@ const { startCronJobs, stopCronJobs, isStarted } = await import(
 
 describe('CronScheduler', () => {
   beforeEach(() => {
-    process.env['VERIFY_ENABLED'] = 'false';
+    envOverrides['CRON_ENABLED'] = true;
     mockSchedule.mockClear();
     mockStop.mockClear();
     // Ensure clean state
@@ -83,7 +90,7 @@ describe('CronScheduler', () => {
 
   afterEach(() => {
     stopCronJobs();
-    delete process.env['VERIFY_ENABLED'];
+    envOverrides['CRON_ENABLED'] = true;
   });
 
   it('should register cron jobs on start', () => {
@@ -126,11 +133,11 @@ describe('CronScheduler', () => {
   });
 
   it('should not start jobs when CRON_ENABLED is false', () => {
-    process.env['CRON_ENABLED'] = 'false';
+    envOverrides['CRON_ENABLED'] = false;
     stopCronJobs(); // reset state
     startCronJobs();
 
     expect(mockSchedule).toHaveBeenCalledTimes(0);
-    process.env['CRON_ENABLED'] = undefined;
+    envOverrides['CRON_ENABLED'] = true;
   });
 });

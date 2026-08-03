@@ -301,14 +301,16 @@ async function handleUpdate(ctx: Context): Promise<void> {
             return 'done';
           }
 
-          // Heart off: L2 旁观硬丢（旧行为）
-          if (layerDec.layer === 'L2') {
+          // Heart off: L2 旁观硬丢（旧行为）。META_DEFER_ENABLED 时放行进 gate，
+          // 让 talk-value 频率阈值 + LLM 决定是否回复，而非无条件丢弃。
+          if (layerDec.layer === 'L2' && !env().META_DEFER_ENABLED) {
             logger.debug({ chatId, messageId }, 'Meta path: L2 drop (no Attention)');
             return 'done';
           }
         }
 
-        // Timing gate — only for L0/direct (and Heart-off L1). Heart path skips this.
+        // Timing gate — for L0/direct (bypasses to allow), Heart-off L1, and
+        // (with META_DEFER_ENABLED) L2. Heart path skips this.
         try {
           const { evaluateMetaTiming } = await import('../../meta/timing-adapter.js');
           const timing = await evaluateMetaTiming({

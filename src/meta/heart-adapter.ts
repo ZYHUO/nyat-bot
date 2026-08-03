@@ -182,9 +182,12 @@ export async function evaluateMetaHeart(opts: {
       );
       await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
     } catch (err) {
-      // Prefer silence over half-armed wait (anchor without WAIT state → duplicate resume).
-      logger.warn({ err, chatId }, 'Meta heart wait setup failed — silence');
-      return { verdict: 'silence', layer: 'L1', reason: 'heart_wait_setup_failed' };
+      // Wait setup failed (anchor written but WAIT transition/enqueue failed).
+      // Fail-open to allow (like timing-adapter does) — the message enters
+      // Attention so Meta/CodeAct can still handle it, rather than being
+      // silently dropped. The orphaned anchor expires via TTL on its own.
+      logger.warn({ err, chatId }, 'Meta heart wait setup failed — fail-open allow');
+      return { verdict: 'allow', layer: 'L1', reason: 'heart_wait_setup_failed' };
     }
     logger.info({ chatId, why: heart.why, waitSec, messageId: formatted.messageId }, 'Meta heart: wait');
     return { verdict: 'silence', layer: 'L1', reason: `heart_wait:${heart.why}` };

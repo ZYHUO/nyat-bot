@@ -387,27 +387,41 @@ export class NyatDb {
   private writeHotLocal(key: string, value: Buffer, expiresAt: number, lsn: bigint): void {
     const tup = encodeHot(key, value, expiresAt);
     const pageId = this.hotPageId;
-    const f = this.pool.get(pageId);
-    // replace existing key in page chain — MVP: only page 1
+
+    // Phase 1: Walk the full page chain, collect all non-matching tuples,
+    // and clear every page in the chain. The old MVP code only looked at page 1
+    // and dropped all other keys on overflow — a silent data-loss bug.
     const kept: Buffer[] = [];
-    for (const t of f.page.allTuples()) {
-      const h = decodeHot(t);
-      if (h.key !== key) kept.push(t);
+    const chainPageIds: number[] = [];
+    let chainPageId = pageId;
+    for (;;) {
+      const cf = this.pool.get(chainPageId);
+      chainPageIds.push(chainPageId);
+      for (const t of cf.page.allTuples()) {
+        const h = decodeHot(t);
+        if (h.key !== key) kept.push(t);
+      }
+      const next = cf.page.nextPageId;
+      // Clear the page and break the chain link.
+      const cleared = Page.alloc(chainPageId, PageType.Hot);
+      cf.page.buf.set(cleared.buf);
+      cf.page.setLsn(lsn);
+      this.pool.unpin(chainPageId, true);
+      if (!next) break;
+      chainPageId = next;
     }
-    // rebuild page
-    const fresh = Page.alloc(pageId, PageType.Hot);
-    for (const t of kept) fresh.insert(t);
-    if (fresh.insert(tup) < 0) {
-      // page full — keep last write only for this key in overflow later; for MVP drop oldest
-      const compact = Page.alloc(pageId, PageType.Hot);
-      compact.insert(tup);
-      f.page.buf.set(compact.buf);
-    } else {
-      f.page.buf.set(fresh.buf);
+
+    // Phase 2: Re-insert all kept tuples + the new tuple via insertIntoChain
+    // starting from the first page. This naturally distributes across overflow
+    // pages (reusing the cleared chain pages or allocating new ones).
+    const allTuples = [...kept, tup];
+    for (const t of allTuples) {
+      this.insertIntoChain(pageId, PageType.Hot, t, lsn);
     }
-    f.page.setLsn(lsn);
+
+    // Update hot_index: the key is now somewhere in the chain.
+    // We don't track per-key page placement (MVP), but hotGet walks the chain.
     this.hotIndex.set(key, pageId);
-    this.pool.unpin(pageId, true);
   }
 
   private insertIntoChain(rootId: number, type: PageType, tuple: Buffer, lsn: bigint): number {
@@ -740,19 +754,28 @@ export class NyatDb {
   }
 
   hotGet(key: string): Buffer | null {
-    const pageId = this.hotIndex.get(key) ?? this.hotPageId;
-    const f = this.pool.get(pageId);
-    let found: Buffer | null = null;
-    for (const t of f.page.allTuples()) {
-      const h = decodeHot(t);
-      if (h.key === key) {
-        if (h.expiresAt > 0 && h.expiresAt <= Date.now()) break;
-        found = h.value;
-        break;
+    const startPageId = this.hotIndex.get(key) ?? this.hotPageId;
+    // Walk the page chain — the key may be on an overflow page.
+    let pageId = startPageId;
+    for (;;) {
+      const f = this.pool.get(pageId);
+      for (const t of f.page.allTuples()) {
+        const h = decodeHot(t);
+        if (h.key === key) {
+          if (h.expiresAt > 0 && h.expiresAt <= Date.now()) {
+            this.pool.unpin(pageId, false);
+            return null;
+          }
+          this.pool.unpin(pageId, false);
+          return h.value;
+        }
       }
+      const next = f.page.nextPageId;
+      this.pool.unpin(pageId, false);
+      if (!next) break;
+      pageId = next;
     }
-    this.pool.unpin(pageId, false);
-    return found;
+    return null;
   }
 
   hotGetString(key: string): string | null {
@@ -767,19 +790,33 @@ export class NyatDb {
   }
 
   private deleteHotLocal(key: string, lsn: bigint): void {
-    const pageId = this.hotIndex.get(key) ?? this.hotPageId;
-    const f = this.pool.get(pageId);
-    const kept: Buffer[] = [];
-    for (const t of f.page.allTuples()) {
-      const h = decodeHot(t);
-      if (h.key !== key) kept.push(t);
+    const startPageId = this.hotIndex.get(key) ?? this.hotPageId;
+    // Walk the full chain and remove the key from whichever page it's on.
+    let pageId = startPageId;
+    for (;;) {
+      const f = this.pool.get(pageId);
+      let found = false;
+      const kept: Buffer[] = [];
+      for (const t of f.page.allTuples()) {
+        const h = decodeHot(t);
+        if (h.key === key) {
+          found = true;
+        } else {
+          kept.push(t);
+        }
+      }
+      if (found) {
+        const fresh = Page.alloc(pageId, PageType.Hot);
+        for (const t of kept) fresh.insert(t);
+        f.page.buf.set(fresh.buf);
+        f.page.setLsn(lsn);
+      }
+      const next = f.page.nextPageId;
+      this.pool.unpin(pageId, found);
+      if (!next) break;
+      pageId = next;
     }
-    const fresh = Page.alloc(pageId, PageType.Hot);
-    for (const t of kept) fresh.insert(t);
-    f.page.buf.set(fresh.buf);
-    f.page.setLsn(lsn);
     this.hotIndex.delete(key);
-    this.pool.unpin(pageId, true);
   }
 
   // ── Impulse ──
@@ -895,11 +932,17 @@ export class NyatDb {
 
   recallSearch(
     query: Float32Array | number[],
-    opts?: { chatId?: number; topK?: number },
+    opts?: { chatId?: number; topK?: number; minVisibility?: number },
   ): Array<{ chatId: number; messageId: number; score: number }> {
     const q = query instanceof Float32Array ? query : Float32Array.from(query);
     const topK = opts?.topK ?? 5;
+    // visibility: 0=private, 1=contextual, 2=public. Higher = more accessible.
+    // minVisibility filters OUT memories below the threshold. Default 1
+    // excludes private (0) — cross-context callers shouldn't see private
+    // memories from other chats. Set to 0 to include everything (admin/debug).
+    const minVis = opts?.minVisibility ?? 1;
     const scored = this.recallMem
+      .filter((r) => r.visibility >= minVis)
       .filter((r) => (opts?.chatId === undefined ? true : r.chatId === opts.chatId))
       .map((r) => ({
         chatId: r.chatId,

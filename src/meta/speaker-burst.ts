@@ -87,11 +87,31 @@ export async function shouldForceSameSpeakerL0(chatId: number, uid: number): Pro
   return false;
 }
 
-/** Drop burst markers when CodeAct finishes so we don't keep elevating. */
-export async function clearSpeakerBurst(chatId: number): Promise<void> {
+/**
+ * Drop burst markers when CodeAct finishes so we don't keep elevating.
+ * CAS (compare-and-swap): only delete KEY/ONCE_KEY if they still belong to
+ * `uid`. Without this, a new follow-up message that claimed ONCE_KEY *after*
+ * the CodeAct started but *before* it finishes would have its claim wiped,
+ * allowing a second follow-up to also force-L0 → duplicate reply bubble.
+ */
+export async function clearSpeakerBurst(chatId: number, uid?: number): Promise<void> {
   if (!(chatId < 0)) return;
   try {
-    await getRedis().del(KEY(chatId), ONCE_KEY(chatId));
+    if (uid && uid > 0) {
+      // CAS: only delete if the stored value matches this uid's claim.
+      const redis = getRedis();
+      const val = await redis.get(KEY(chatId));
+      if (val === String(uid)) {
+        await redis.del(KEY(chatId));
+      }
+      const onceVal = await redis.get(ONCE_KEY(chatId));
+      if (onceVal === String(uid)) {
+        await redis.del(ONCE_KEY(chatId));
+      }
+    } else {
+      // No uid = legacy caller: unconditional clear (backward compat).
+      await getRedis().del(KEY(chatId), ONCE_KEY(chatId));
+    }
   } catch {
     /* non-critical */
   }

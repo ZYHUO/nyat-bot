@@ -389,10 +389,16 @@ impl NyatDbNative {
     query: Float64Array,
     chat_id: Option<f64>,
     top_k: Option<u32>,
+    min_visibility: Option<u32>,
   ) -> Result<Vec<RecallHitJs>> {
     let q: Vec<f32> = query.as_ref().iter().map(|x| *x as f32).collect();
     self.with_mut(|e| {
-      let hits = e.recall_search(&q, chat_id.map(|c| c as i64), top_k.unwrap_or(5) as usize);
+      let hits = e.recall_search(
+        &q,
+        chat_id.map(|c| c as i64),
+        top_k.unwrap_or(5) as usize,
+        min_visibility.unwrap_or(1) as u8,
+      );
       Ok(
         hits
           .into_iter()

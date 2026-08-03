@@ -461,55 +461,85 @@ impl Engine {
         lsn: u64,
     ) -> Result<()> {
         let tuple = encode_hot(key, value, expires_at);
-        let page_id = *self.hot_index.get(key).unwrap_or(&self.hot_page_id);
-        let frame = self.pool.get(&mut self.heap, page_id)?;
-        let kept: Vec<Vec<u8>> = frame
-            .page
-            .all_tuples()
-            .into_iter()
-            .filter(|t| {
-                decode_hot(t)
-                    .map(|(existing, _, _)| existing != key)
-                    .unwrap_or(true)
-            })
-            .collect();
-        let mut fresh = Page::alloc(page_id, PageType::Hot);
-        for item in kept {
-            let _ = fresh.insert(&item);
+        let page_id = self.hot_page_id;
+
+        // Phase 1: Walk the full page chain, collect all non-matching tuples,
+        // and clear every page in the chain. The old MVP code only looked at
+        // page 1 and dropped all other keys on overflow — a silent data-loss bug.
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        let mut chain_page_id = page_id;
+        loop {
+            let cf = self.pool.get(&mut self.heap, chain_page_id)?;
+            for t in cf.page.all_tuples() {
+                if let Some((existing, _, _)) = decode_hot(&t) {
+                    if existing != key {
+                        kept.push(t);
+                    }
+                } else {
+                    kept.push(t);
+                }
+            }
+            let next = cf.page.next_page_id();
+            // Clear the page and break the chain link.
+            let cleared = Page::alloc(chain_page_id, PageType::Hot);
+            cf.page.copy_from(&cleared);
+            cf.page.set_lsn(lsn);
+            self.pool.unpin(chain_page_id, true);
+            if next == 0 {
+                break;
+            }
+            chain_page_id = next;
         }
-        if fresh.insert(&tuple).is_none() {
-            fresh = Page::alloc(page_id, PageType::Hot);
-            fresh
-                .insert(&tuple)
-                .ok_or_else(|| NyatError::Msg("hot tuple too large".into()))?;
+
+        // Phase 2: Re-insert all kept tuples + the new tuple via insert_into_chain.
+        kept.push(tuple);
+        for t in &kept {
+            self.insert_into_chain(page_id, PageType::Hot, t, lsn)?;
         }
-        fresh.set_lsn(lsn);
-        frame.page.copy_from(&fresh);
-        self.pool.unpin(page_id, true);
+
         self.hot_index.insert(key.to_owned(), page_id);
         Ok(())
     }
 
     fn delete_hot_local(&mut self, key: &str, lsn: u64) -> Result<()> {
-        let page_id = *self.hot_index.get(key).unwrap_or(&self.hot_page_id);
-        let frame = self.pool.get(&mut self.heap, page_id)?;
-        let kept: Vec<Vec<u8>> = frame
-            .page
-            .all_tuples()
-            .into_iter()
-            .filter(|t| {
-                decode_hot(t)
-                    .map(|(existing, _, _)| existing != key)
-                    .unwrap_or(true)
-            })
-            .collect();
-        let mut fresh = Page::alloc(page_id, PageType::Hot);
-        for item in kept {
-            let _ = fresh.insert(&item);
+        let start_page_id = *self.hot_index.get(key).unwrap_or(&self.hot_page_id);
+        // Walk the full chain — the key may be on an overflow page.
+        let mut page_id = start_page_id;
+        loop {
+            let frame = self.pool.get(&mut self.heap, page_id)?;
+            let mut found = false;
+            let kept: Vec<Vec<u8>> = frame
+                .page
+                .all_tuples()
+                .into_iter()
+                .filter(|t| {
+                    decode_hot(t)
+                        .map(|(existing, _, _)| {
+                            if existing == key {
+                                found = true;
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .unwrap_or(true)
+                })
+                .collect();
+            if found {
+                let mut fresh = Page::alloc(page_id, PageType::Hot);
+                for item in kept {
+                    let _ = fresh.insert(&item);
+                }
+                fresh.set_lsn(lsn);
+                frame.page.copy_from(&fresh);
+            }
+            let next = frame.page.next_page_id();
+            self.pool.unpin(page_id, found);
+            if next == 0 {
+                break;
+            }
+            page_id = next;
         }
-        fresh.set_lsn(lsn);
-        frame.page.copy_from(&fresh);
-        self.pool.unpin(page_id, true);
         self.hot_index.remove(key);
         Ok(())
     }
@@ -821,13 +851,25 @@ impl Engine {
 
     pub fn hot_get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         self.ensure_open()?;
-        let page_id = *self.hot_index.get(key).unwrap_or(&self.hot_page_id);
-        let page = self.pool.peek(&mut self.heap, page_id)?;
-        for tuple in page.all_tuples() {
-            let (candidate, value, expires_at) = decode_hot(&tuple)?;
-            if candidate == key {
-                return Ok((expires_at == 0 || expires_at > Self::now_ms()).then_some(value));
+        let start_page_id = *self.hot_index.get(key).unwrap_or(&self.hot_page_id);
+        // Walk the page chain — the key may be on an overflow page.
+        let mut page_id = start_page_id;
+        loop {
+            let frame = self.pool.get(&mut self.heap, page_id)?;
+            let mut next = 0;
+            for tuple in frame.page.all_tuples() {
+                let (candidate, value, expires_at) = decode_hot(&tuple)?;
+                if candidate == key {
+                    self.pool.unpin(page_id, false);
+                    return Ok((expires_at == 0 || expires_at > Self::now_ms()).then_some(value));
+                }
             }
+            next = frame.page.next_page_id();
+            self.pool.unpin(page_id, false);
+            if next == 0 {
+                break;
+            }
+            page_id = next;
         }
         Ok(None)
     }
@@ -908,10 +950,12 @@ impl Engine {
         query: &[f32],
         chat_id: Option<i64>,
         top_k: usize,
+        min_visibility: u8,
     ) -> Vec<(i64, u32, f32)> {
         let mut out: Vec<_> = self
             .recall_mem
             .iter()
+            .filter(|rec| rec.visibility >= min_visibility)
             .filter(|rec| chat_id.is_none_or(|id| rec.chat_id == id))
             .map(|rec| (rec.chat_id, rec.message_id, cosine(query, &rec.vector)))
             .collect();
