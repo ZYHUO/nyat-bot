@@ -104,8 +104,8 @@ const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   jitterFactor: 0.2,
 
   emojiReplyEnabled: true,
-  emojiReplyRate: 0.15,
-  emojiReplyMaxLength: 15,
+  emojiReplyRate: 0.25,
+  emojiReplyMaxLength: 20,
   emojiPool: ['👌', '😂', '🙏', '👍', '❤️', '😊', '🤔', '😅', '😍', '🥺', '💪', '🎉', '👀', '💀', '🫡', '🙃'],
 
   // 同上:"我想想/等下"占位气泡默认关闭
@@ -425,9 +425,9 @@ export interface StickerOnlyReplyResult {
 
 /** Common intents for short sticker replies mimicking human behavior */
 const STICKER_REPLY_INTENTS = [
-  'positive', 'acknowledgment', 'agreement', 'happy',
-  'thinking', 'surprise', 'neutral',
-];
+  'happy', 'cute', 'cheerful', 'playful',
+  'thinking', 'surprised', 'shy', 'content',
+] as const;
 
 /**
  * Decide whether to replace a short reply with a sticker-only message.
