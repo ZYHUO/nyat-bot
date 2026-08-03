@@ -69,7 +69,7 @@ function isNoSendPermissionError(err: unknown): boolean {
 // P2:贴纸冷却/去重 per-chat 化 —— 旧的模块级全局让 A 群发贴纸重置 B 群
 // 的冷却(跨群共享状态,行为相互污染)。
 const MAX_RECENT_STICKERS = 50;
-const STICKER_COOLDOWN_REPLIES = 6;
+const STICKER_COOLDOWN_REPLIES = 3;
 interface StickerState { ids: Set<string>; queue: string[]; repliesSince: number }
 const _stickerStates = new Map<number, StickerState>();
 function _stickerState(chatId: number): StickerState {
