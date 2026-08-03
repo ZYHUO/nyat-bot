@@ -150,9 +150,10 @@ export function parseGateResponse(raw: string): GateDecision | null {
   }
 
   if (!obj) {
-    // Last-resort keyword match
+    // Last-resort keyword match — 用整词边界:否则 "await"/"waiting" 里的 "wait"
+    // 子串会把一句拒绝/叙述误判成 wait 指令(review finding)。
     const lower = cleaned.toLowerCase();
-    if (lower.includes('no_action') || lower.includes('no-action')) {
+    if (/\bno[_-]?action\b/.test(lower)) {
       return {
         action: 'no_action',
         reason: 'keyword-extracted',
@@ -160,8 +161,8 @@ export function parseGateResponse(raw: string): GateDecision | null {
         latencyMs: 0,
       };
     }
-    if (lower.includes('wait')) {
-      const m = lower.match(/wait[^0-9]*(\d{1,4})/);
+    if (/\bwait\b/.test(lower)) {
+      const m = lower.match(/\bwait\b[^0-9]*(\d{1,4})/);
       const waitSec = m?.[1] ? Number(m[1]) : undefined;
       return {
         action: 'wait',
@@ -171,7 +172,7 @@ export function parseGateResponse(raw: string): GateDecision | null {
         latencyMs: 0,
       };
     }
-    if (lower.includes('continue')) {
+    if (/\bcontinue\b/.test(lower)) {
       return {
         action: 'continue',
         reason: 'keyword-extracted',

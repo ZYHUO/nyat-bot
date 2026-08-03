@@ -64,8 +64,10 @@ export function isCrossContextPrivate(
   if (src !== null && src === boundChatId) return false; // 本会话恒保留
   if (item.visibility === 'private') return true;
   if (item.visibility === 'public') return false;
-  // contextual 或缺失 → 看来源会话私密性(缺 src 时无法判定来源,保守视作可跨界的
-  // contextual;调用方对存量无 src 的数据应尽量补 sourceChatId)。
+  // 缺 src **且**缺 visibility:既无法证明来源、也无法证明级别,fail-closed 视作
+  // 私密丢弃(宁严勿松——存量无 provenance 数据的泄漏面比误杀面贵,review finding)。
+  if (src === null && item.visibility === undefined) return true;
+  // contextual + 有 src → 看来源会话私密性。
   return isPrivateChat(src);
 }
 

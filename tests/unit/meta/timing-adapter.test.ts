@@ -7,6 +7,7 @@ const transitionToRunning = vi.fn(async () => undefined);
 const recordGateContinue = vi.fn(async () => undefined);
 const recordUserMessage = vi.fn(async () => undefined);
 const recordGateNoAction = vi.fn(async () => undefined);
+const scheduleMetaDeferReeval = vi.fn(async () => true);
 
 vi.mock('../../../src/pipeline/timing/gate.js', () => ({
   runTimingGate: (...args: unknown[]) => runTimingGate(...args),
@@ -23,13 +24,19 @@ vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
 vi.mock('../../../src/pipeline/timing/state-store.js', () => ({
   recordGateNoAction: (...args: unknown[]) => recordGateNoAction(...args),
 }));
-vi.mock('../../../src/env.js', () => ({
-  env: () => ({
+vi.mock('../../../src/meta/defer.js', () => ({
+  scheduleMetaDeferReeval: (...args: unknown[]) => scheduleMetaDeferReeval(...args),
+}));
+vi.mock('../../../src/env.js', () => {
+  const base = {
     TIMING_GATE_ENABLED: true,
     META_SUBAGENT_ENABLED: true,
     TIMING_WAIT_MIN_SEC: 5,
-  }),
-}));
+    META_DEFER_ENABLED: true,
+    TURN_GATE_DEFER_MAX_REPLAYS: 1,
+  };
+  return { env: () => base };
+});
 vi.mock('../../../src/bot/bot.js', () => ({
   getBotUid: () => 1,
   getBotDisplayName: () => '啾咪囝',
@@ -52,6 +59,7 @@ describe('evaluateMetaTiming', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     isChatSuppressed.mockResolvedValue(false);
+    scheduleMetaDeferReeval.mockResolvedValue(true);
   });
 
   const fm = {
@@ -77,7 +85,7 @@ describe('evaluateMetaTiming', () => {
     expect(runTimingGate).not.toHaveBeenCalled();
   });
 
-  it('silences L2 on no_action', async () => {
+  it('silences L2 on no_action (non-defer)', async () => {
     runTimingGate.mockResolvedValueOnce({
       action: 'no_action',
       reason: 'quiet',
@@ -93,6 +101,7 @@ describe('evaluateMetaTiming', () => {
     });
     expect(r.verdict).toBe('silence');
     expect(recordGateNoAction).toHaveBeenCalled();
+    expect(scheduleMetaDeferReeval).not.toHaveBeenCalled();
   });
 
   it('waits L1 and transitions to WAIT', async () => {
@@ -112,5 +121,68 @@ describe('evaluateMetaTiming', () => {
     });
     expect(r.verdict).toBe('silence');
     expect(transitionToWait).toHaveBeenCalled();
+  });
+
+  it('passes canDefer=true to gate when META_DEFER_ENABLED', async () => {
+    runTimingGate.mockResolvedValueOnce({
+      action: 'continue',
+      reason: 'continuation_window',
+      shortCircuited: true,
+      latencyMs: 1,
+      continuation: true,
+    });
+    const { evaluateMetaTiming } = await import('../../../src/meta/timing-adapter.js');
+    await evaluateMetaTiming({
+      chatId: -1001,
+      formatted: fm,
+      isDirect: false,
+      layer: 'L1',
+    });
+    const gateArgs = runTimingGate.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(gateArgs).toBeTruthy();
+    expect(gateArgs['canDefer']).toBe(true);
+  });
+
+  it('defers on deferOnly decision and schedules re-eval', async () => {
+    runTimingGate.mockResolvedValueOnce({
+      action: 'no_action',
+      reason: 'cooldown_defer',
+      shortCircuited: true,
+      latencyMs: 1,
+      deferOnly: true,
+      retryAfterMs: 15_000,
+    });
+    const { evaluateMetaTiming } = await import('../../../src/meta/timing-adapter.js');
+    const r = await evaluateMetaTiming({
+      chatId: -1001,
+      formatted: fm,
+      isDirect: false,
+      layer: 'L1',
+    });
+    expect(r.verdict).toBe('silence');
+    expect(r.reason).toContain('defer:');
+    expect(scheduleMetaDeferReeval).toHaveBeenCalledTimes(1);
+    expect(recordGateNoAction).not.toHaveBeenCalled();
+  });
+
+  it('fail-open allows on deferOnly when schedule fails (budget exhausted)', async () => {
+    runTimingGate.mockResolvedValueOnce({
+      action: 'no_action',
+      reason: 'talk_value_below_threshold',
+      shortCircuited: true,
+      latencyMs: 1,
+      deferOnly: true,
+      retryAfterMs: 30_000,
+    });
+    scheduleMetaDeferReeval.mockResolvedValueOnce(false);
+    const { evaluateMetaTiming } = await import('../../../src/meta/timing-adapter.js');
+    const r = await evaluateMetaTiming({
+      chatId: -1001,
+      formatted: fm,
+      isDirect: false,
+      layer: 'L2',
+    });
+    expect(r.verdict).toBe('allow');
+    expect(r.reason).toContain('defer_exhausted:');
   });
 });

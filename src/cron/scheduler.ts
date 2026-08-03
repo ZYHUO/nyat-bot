@@ -30,7 +30,7 @@ export function startCronJobs(deps?: CronDeps): void {
   _started = true;
   if (deps) _deps = deps;
 
-  const enabled = process.env['CRON_ENABLED'] !== 'false' && process.env['CRON_ENABLED'] !== '0';
+  const enabled = env().CRON_ENABLED;
   if (!enabled) {
     logger.info('Cron jobs disabled via CRON_ENABLED');
     return;

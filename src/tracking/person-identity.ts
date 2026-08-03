@@ -55,8 +55,18 @@ const _refreshing = new Set<number>();
 // MERGE_TRIGGER_COOLDOWN 内不重复触发。
 const _mergeTriggeredAt = new Map<number, number>();
 const MERGE_TRIGGER_COOLDOWN_SEC = 300;
+// 无界增长兜底:正常时条目数≈活跃用户数,但长寿进程 + 大量一次性用户会缓慢堆积。
+// 超过上限时先清掉冷却窗外的旧条目;若全在窗内(异常突发)直接清空——代价只是
+// 允许一批 merge 重新触发,不会错合并。
+const MERGE_TRIGGER_MAP_CAP = 10_000;
 
 function shouldTriggerMerge(uid: number, nowSec: number): boolean {
+  if (_mergeTriggeredAt.size > MERGE_TRIGGER_MAP_CAP) {
+    for (const [k, ts] of _mergeTriggeredAt) {
+      if (nowSec - ts >= MERGE_TRIGGER_COOLDOWN_SEC) _mergeTriggeredAt.delete(k);
+    }
+    if (_mergeTriggeredAt.size > MERGE_TRIGGER_MAP_CAP) _mergeTriggeredAt.clear();
+  }
   const last = _mergeTriggeredAt.get(uid) ?? 0;
   if (nowSec - last < MERGE_TRIGGER_COOLDOWN_SEC) return false;
   _mergeTriggeredAt.set(uid, nowSec);

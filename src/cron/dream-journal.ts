@@ -98,7 +98,10 @@ async function loadChatEvidence(day: string): Promise<{ text: string; msgCount: 
       continue;
     }
     const today = msgs.filter((m) => (m.timestamp ?? 0) >= dayStart);
-    const pick = (today.length > 0 ? today : msgs).slice(-30);
+    // Only use today's messages as evidence — stale/prior-day chats fed under
+    // a "today" label let the model write about non-today events as if they
+    // happened today. If no fresh messages, this chat contributes no evidence.
+    const pick = today.slice(-30);
     const lines = pick.map(formatEvidenceLine).filter(Boolean);
     if (!lines.length) continue;
     msgCount += lines.length;
@@ -203,15 +206,21 @@ export function parseDiaryDecision(raw: string): {
       headerReason = (m[2] || '').trim();
       break;
     }
-    // Chinese skip without English keyword
-    if (/^(跳过|不写了?|没空写|没什么好写|没啥好写|不硬编)/.test(line)) {
+    // Chinese skip without English keyword — match anywhere in the line, not
+    // just at the start. A model output like "今天没什么好写的本喵就不写了"
+    // would otherwise fall through to implicit_write and be saved as diary body.
+    if (/(?:跳过|不写了?|没空写|没什么好写|没啥好写|不硬编|就不写了?|不想写|算了不写)/.test(line)) {
       return { action: 'SKIP', body: '', reason: line.slice(0, 80) };
     }
   }
 
   if (!action) {
-    // Model forgot the header — if looks like diary, treat as WRITE
-    if (text.length >= 40 && /本喵|今天|群里/.test(text)) {
+    // Model forgot the header — only treat as WRITE if it clearly looks like
+    // diary content (first-person narration, not a skip/refusal sentence).
+    // The old check (≥40 chars + 本喵|今天|群里) was too loose: a SKIP sentence
+    // like "今天没什么好写的，本喵就不写了" matched and got saved as a diary entry.
+    const looksLikeSkipSentence = /(?:没什么.*写|没啥.*写|不写了?|不想写|没素材|没空|算了|跳过|不硬编)/.test(text);
+    if (text.length >= 40 && /本喵|今天|群里/.test(text) && !looksLikeSkipSentence) {
       return { action: 'WRITE', body: text, reason: 'implicit_write' };
     }
     return { action: 'SKIP', body: '', reason: 'unparsed' };
@@ -338,6 +347,21 @@ ${existing.slice(0, 2500) || '(空)'}
     { path: outPath, slot, chars: body.length, evidenceMsgs: evidence.msgCount },
     'Dream journal entry appended',
   );
+
+  // Cross-path mutex: set the cooldown key after a successful write so that
+  // the cron path (runDreamJournal → runDreamJournalInner) and the sleep-edge
+  // force-write path also block a subsequent Meta nudge from double-writing.
+  // Without this, three trigger paths (cron / sleep-edge / Meta nudge) have no
+  // shared gate — the cooldown was only set by tryWriteDreamJournal (which cron
+  // bypasses entirely) and was skipped by force:true (which sleep-edge uses).
+  try {
+    const { getRedis } = await import('../db/redis.js');
+    const cdKey = `xxb:dream:meta-cd:${day}:${slot}`;
+    const cdSec = slot === 'free' ? 900 : 1800;
+    await getRedis().set(cdKey, '1', 'EX', cdSec);
+  } catch {
+    /* non-critical — cooldown is best-effort */
+  }
 
   const postText = `📔 ${day} ${clock}（${slotLabel(slot)}）\n\n${body.slice(0, 3500)}`;
 

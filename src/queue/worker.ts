@@ -2,7 +2,7 @@
 // BullMQ Worker — message 处理流水线
 // ────────────────────────────────────────
 
-import { Worker } from "bullmq";
+import { Worker, UnrecoverableError } from "bullmq";
 import type { Job } from "bullmq";
 import { QUEUE_NAME } from "./jobs.js";
 import type { MessageJobData } from "./jobs.js";
@@ -16,7 +16,19 @@ import { env } from "../env.js";
 
 let _worker: Worker<MessageJobData> | undefined;
 
+const KNOWN_JOB_TYPES = new Set<MessageJobData['type']>([
+  'message', 'allowlist_review', 'wait_resume', 'chat_turn', 'defer_resume',
+]);
+
 async function processMessage(job: Job<MessageJobData>): Promise<void> {
+  // 畸形 job(未知 type)直接 UnrecoverableError:重试无意义,也不会让它带着
+  // 缺字段的载荷摔进 processPipeline(review finding:无类型校验)。
+  if (!job.data || !KNOWN_JOB_TYPES.has(job.data.type)) {
+    throw new UnrecoverableError(
+      `Unknown job type: ${String((job.data as MessageJobData | undefined)?.type)}`,
+    );
+  }
+
   // Turn actor: per-chat cognition turn (drains the pending burst itself)
   if (job.data.type === 'chat_turn') {
     await runChatTurn(job.data, job.id);
@@ -64,16 +76,20 @@ export function startWorker(): Worker<MessageJobData> {
   _worker = new Worker<MessageJobData>(QUEUE_NAME, processMessage, {
     connection: getRedis(),
     concurrency,
-    lockDuration: 180_000,     // 3 min — AI calls can be slow
+    // AI 调用可能很慢:lock 太短会被 stalled checker 判死重新投递 → 同一 job
+    // 重复执行(duplicate reply)。5min 是"正常回合不会碰到、真卡死又不会等太久"
+    // 的折中;更长的生成应改用 job.extendLock。
+    lockDuration: 300_000,     // 5 min
     stalledInterval: 120_000,  // check stalls every 2 min
   });
 
   _worker.on("failed", (job, err) => {
-    logger.error({ jobId: job?.id, err: err.message }, "Job failed");
+    // 记完整 err 对象(stack+context),只记 message 时生产排障等于盲排。
+    logger.error({ jobId: job?.id, jobType: job?.data?.type, err }, "Job failed");
   });
 
   _worker.on("error", (err) => {
-    logger.error({ err: err.message }, "Worker error");
+    logger.error({ err }, "Worker error");
   });
 
   logger.info({ concurrency }, "BullMQ worker started");

@@ -126,4 +126,30 @@ describe('dream-journal', () => {
     expect(parseDiaryDecision('跳过，今天不想写')).toMatchObject({ action: 'SKIP' });
     expect(parseDiaryDecision('好的收到')).toMatchObject({ action: 'SKIP', reason: 'unparsed' });
   });
+
+  it('parseDiaryDecision does not treat skip-intent sentences as implicit WRITE', async () => {
+    const { parseDiaryDecision } = await import('../../../src/cron/dream-journal.js');
+    // A sentence that says "nothing to write about, won't write" but lacks the
+    // exact SKIP keyword — old code matched 本喵|今天 and saved it as diary body.
+    expect(parseDiaryDecision('今天没什么好写的，本喵就不写了')).toMatchObject({
+      action: 'SKIP',
+    });
+    expect(parseDiaryDecision('今天没素材，本喵不想写日记了')).toMatchObject({
+      action: 'SKIP',
+    });
+    expect(parseDiaryDecision('算了不写了，今天群里没啥动静')).toMatchObject({
+      action: 'SKIP',
+    });
+  });
+
+  it('parseDiaryDecision still recognizes genuine implicit WRITE', async () => {
+    const { parseDiaryDecision } = await import('../../../src/cron/dream-journal.js');
+    // First-person narration without header should still be WRITE (≥40 chars,
+    // no skip keywords).
+    expect(
+      parseDiaryDecision(
+        '本喵今天在群里看到有人签到，觉得挺有趣的，大家都在聊周末的计划。睡前碎碎念一下。',
+      ),
+    ).toMatchObject({ action: 'WRITE', reason: 'implicit_write' });
+  });
 });

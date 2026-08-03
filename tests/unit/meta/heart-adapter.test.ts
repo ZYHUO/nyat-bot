@@ -164,4 +164,20 @@ describe('evaluateMetaHeart', () => {
     expect(r.verdict).toBe('silence');
     expect(r.reason).toBe('heart_refractory');
   });
+
+  it('wait setup failure → fail-open allow (not silence)', async () => {
+    heartDecision.mockResolvedValue({
+      act: 'wait',
+      path: 'chat',
+      why: '等TA说完',
+      latencyMs: 10,
+      judgeResult: { action: 'IGNORE', level: 'L2_AI', rule: 'heart', latencyMs: 10 },
+    });
+    // Anchor set succeeds, but transitionToWait fails
+    redisSet.mockResolvedValue('OK');
+    transitionToWait.mockRejectedValueOnce(new Error('BullMQ down'));
+    const r = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L2' });
+    expect(r.verdict).toBe('allow');
+    expect(r.reason).toBe('heart_wait_setup_failed');
+  });
 });

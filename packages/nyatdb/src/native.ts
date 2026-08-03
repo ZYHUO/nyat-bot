@@ -4,25 +4,55 @@
  */
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
-/** Resolve addon dir for package src/dist, repo root, and host cwd. */
+/**
+ * Resolve addon dir for package src/dist, repo root, and host cwd.
+ *
+ * After tsup bundles @nyat/nyatdb into dist/index.js, `import.meta.url`
+ * points at dist/ — the old relative paths (../../../native/nyatdb) break.
+ * We probe multiple anchors and walk up from each looking for native/nyatdb.
+ */
 function resolveNativeDir(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(process.cwd(), 'native/nyatdb'),
-    join(here, '../../../native/nyatdb'), // packages/nyatdb/src → repo root
-    join(here, '../../../../native/nyatdb'), // packages/nyatdb/dist
-    join(here, '../../native/nyatdb'), // legacy src/nyatdb path
-    join(here, '../native/nyatdb'),
+
+  // Build candidate root anchors — each is walked up a few levels.
+  const anchors = [
+    process.cwd(), // systemd WorkingDirectory or dev cwd
+    here, // this file's dir (src/ or dist/ or packages/nyatdb/src)
+    dirname(process.argv[1] ?? ''), // main script dir (node dist/index.js)
   ];
-  for (const dir of candidates) {
-    if (existsSync(join(dir, 'index.js'))) return dir;
+
+  const probe = (root: string): string | null => {
+    let dir = resolve(root);
+    for (let i = 0; i < 6; i++) {
+      const candidate = join(dir, 'native/nyatdb');
+      if (existsSync(join(candidate, 'index.js'))) return candidate;
+      const parent = dirname(dir);
+      if (parent === dir) break; // filesystem root
+      dir = parent;
+    }
+    return null;
+  };
+
+  for (const anchor of anchors) {
+    const found = probe(anchor);
+    if (found) return found;
   }
-  return candidates[0]!;
+
+  // Last resort: try require.resolve on the optional peer package.
+  try {
+    const resolved = require.resolve('@nyat/nyatdb-native');
+    return dirname(resolved);
+  } catch {
+    /* fall through */
+  }
+
+  // Fallback to cwd-based path (legacy behavior) so error messages are useful.
+  return join(process.cwd(), 'native/nyatdb');
 }
 
 const NATIVE_DIR = resolveNativeDir();
@@ -103,6 +133,7 @@ export type NyatDbNativeHandle = {
     query: Float64Array | number[],
     chatId?: number | null,
     topK?: number,
+    minVisibility?: number,
   ): Array<{ chatId: number; messageId: number; score: number }>;
   close(skipCheckpoint?: boolean | null): void;
   ping(): string;

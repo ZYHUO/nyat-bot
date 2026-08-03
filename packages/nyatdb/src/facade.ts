@@ -144,11 +144,17 @@ export class NyatDbNativeFacade {
 
   recallSearch(
     query: Float32Array | Float64Array | number[],
-    opts?: { chatId?: number; topK?: number },
+    opts?: { chatId?: number; topK?: number; minVisibility?: number },
   ): Array<{ chatId: number; messageId: number; score: number }> {
     const q =
       query instanceof Float64Array ? query : Float64Array.from(query as ArrayLike<number>);
-    return this.inner.recallSearch(q, opts?.chatId ?? null, opts?.topK);
+    // Native handle uses positional args (not an opts object).
+    return this.inner.recallSearch(
+      q,
+      opts?.chatId ?? null,
+      opts?.topK,
+      opts?.minVisibility,
+    );
   }
 
   checkpoint(): void {

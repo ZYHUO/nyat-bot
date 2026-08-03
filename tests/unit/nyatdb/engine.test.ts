@@ -131,4 +131,56 @@ describe('NyatDB production primitives', () => {
     expect(msg.sticker?.emoji).toBe('🐱');
     db.close();
   });
+
+  it('recallSearch filters by visibility', () => {
+    dir = mkdtempSync(join(tmpdir(), 'nyatdb-recall-'));
+    const db = NyatDb.open({ path: dir, syncEvery: 1, poolFrames: 16 });
+    const v1 = new Float32Array(RECALL_DIM);
+    v1[0] = 1;
+    const v2 = new Float32Array(RECALL_DIM);
+    v2[0] = 1;
+    const v0 = new Float32Array(RECALL_DIM);
+    v0[0] = 1;
+    // public(2), contextual(1), private(0)
+    db.recallUpsert({ chatId: -1, messageId: 10, vector: v1, visibility: 2 });
+    db.recallUpsert({ chatId: -1, messageId: 11, vector: v2, visibility: 1 });
+    db.recallUpsert({ chatId: -1, messageId: 12, vector: v0, visibility: 0 });
+
+    const q = new Float32Array(RECALL_DIM);
+    q[0] = 1;
+
+    // Default (minVisibility=1): excludes private(0), includes contextual+public
+    const noPrivate = db.recallSearch(q, { topK: 10 });
+    expect(noPrivate).toHaveLength(2);
+    expect(noPrivate.map((r) => r.messageId).sort()).toEqual([10, 11]);
+
+    // minVisibility=0: include everything
+    const all = db.recallSearch(q, { topK: 10, minVisibility: 0 });
+    expect(all).toHaveLength(3);
+
+    // minVisibility=2: only public
+    const onlyPublic = db.recallSearch(q, { topK: 10, minVisibility: 2 });
+    expect(onlyPublic).toHaveLength(1);
+    expect(onlyPublic[0]!.messageId).toBe(10);
+    db.close();
+  });
+
+  it('HotState preserves all keys on page overflow (no silent data loss)', () => {
+    dir = mkdtempSync(join(tmpdir(), 'nyatdb-hot-overflow-'));
+    const db = NyatDb.open({ path: dir, syncEvery: 1, poolFrames: 16 });
+    // Write enough keys to overflow a single 4KB page.
+    // Each hot tuple is ~key_len + value_len + ~20 overhead. Use 200-byte values.
+    const val = 'x'.repeat(200);
+    const keys: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const key = `hotkey_${String(i).padStart(3, '0')}`;
+      db.hotSet(key, val);
+      keys.push(key);
+    }
+    // All keys should survive — the old MVP code dropped all other keys on overflow.
+    for (const key of keys) {
+      expect(db.hotGetString(key)).toBe(val);
+    }
+    db.close();
+  });
 });

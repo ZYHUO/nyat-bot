@@ -517,7 +517,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     stopTyping();
     try {
       const { clearSpeakerBurst } = await import('../meta/speaker-burst.js');
-      await clearSpeakerBurst(task.chatId);
+      await clearSpeakerBurst(task.chatId, task.targetUserId);
     } catch {
       /* non-critical */
     }

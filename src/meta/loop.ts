@@ -27,6 +27,36 @@ export async function metaTick(): Promise<void> {
       });
     }
 
+    // Drain due Meta defer items → re-ingest as Attention for Meta session to
+    // reconsider. 不重跑 gate（与 wait-resume 一致：defer-resume 直接进 Attention，
+    // Meta 的 autoDispatch + LLM 是最终仲裁者）。
+    if (env().META_DEFER_ENABLED) {
+      try {
+        const { drainDueMetaDefers } = await import('./defer.js');
+        const due = await drainDueMetaDefers();
+        for (const d of due) {
+          await acc.ingestAsync({
+            chatId: d.chatId,
+            layer: d.layer,
+            reason: `defer_replay:${d.reason}`,
+            messageId: d.messageId,
+            userId: d.userId,
+            textPreview: d.textPreview,
+            pressure: d.pressure,
+            payload: {
+              ...(d.payload ?? {}),
+              deferCount: d.deferCount,
+            },
+          });
+        }
+        if (due.length) {
+          logger.info({ count: due.length }, 'Meta defer: re-ingested due items');
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Meta defer drain in metaTick failed (non-critical)');
+      }
+    }
+
     if ((await acc.size()) === 0) return;
     flushed = await acc.flush();
     if (flushed.length === 0 && callbacks.length === 0) return;

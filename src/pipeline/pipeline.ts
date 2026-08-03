@@ -221,7 +221,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     if (job.chatId < 0 && !formatted.isBot && env().NETWORK_BURST_ENABLED) {
       import("./games/network-burst.js")
         .then(({ maybeNetworkBurst }) => maybeNetworkBurst(job.chatId, formatted, botUid))
-        .catch(() => {});
+        .catch((err) => logger.debug({ err, chatId: job.chatId }, 'network-burst failed (non-critical)'));
     }
 
     // 3.1g「深想」— @bot 的硬技术问题 → 后台 mundo 深答补发(fire-and-forget,
@@ -231,7 +231,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         .then(({ maybeDeepThink }) => maybeDeepThink(job.chatId, job.update as never, formatted, {
           uid: botUid, username: botIdentity.username, nicknames: botIdentity.nicknames,
         }))
-        .catch(() => {});
+        .catch((err) => logger.debug({ err, chatId: job.chatId }, 'deep-think failed (non-critical)'));
     }
 
     // 3.34 First-DM onboarding (fire-and-forget) — once per user, then continue
@@ -241,7 +241,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       redis.set(onboardKey, '1', 'NX').then(async (set) => {
         if (set === null) return; // already onboarded
         const { buildOnboardingText } = await import('../bot/handlers/help.js');
-        await sender.sendDirect(job.chatId, buildOnboardingText(), formatted.messageId).catch(() => {});
+        await sender.sendDirect(job.chatId, buildOnboardingText(), formatted.messageId).catch((err) => logger.debug({ err, chatId: job.chatId }, 'onboarding send failed (non-critical)'));
       }).catch((err) => logger.debug({ err }, 'Onboarding check failed (non-critical)'));
     }
 
@@ -347,7 +347,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // 3.55 P1-C talk_value:攒消息计数(gate 真实评估/bot 回复时清零)。
     // 在 !isWaitReplay && !isDeferReplay 的入册块里 → defer/wait 回放不会重复计数。
     if (e.TIMING_GATE_ENABLED && !formatted.isBot) {
-      bumpGatePendingCount(job.chatId).catch(() => {});
+      bumpGatePendingCount(job.chatId).catch((err) => logger.debug({ err, chatId: job.chatId }, 'bumpGatePendingCount failed (non-critical)'));
     }
 
     // 3.51 Stats (fire-and-forget)
@@ -360,7 +360,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       try {
         const watchers = checkWatches(job.chatId, formatted.textContent, formatted.uid);
         for (const uid of watchers) {
-          sendMessage(uid, `📢 有人聊到了你追踪的话题喵~`).catch(() => {});
+          sendMessage(uid, `📢 有人聊到了你追踪的话题喵~`).catch((err) => logger.debug({ err, uid }, 'topic-watch notify failed (non-critical)'));
         }
       } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Topic watch check failed'); }
     }
@@ -496,7 +496,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         (formatted.botClass === "chat" || formatted.botClass === "cmd_result")) {
       import("./games/peer-reaction.js")
         .then(({ maybePeerReaction }) => maybePeerReaction(job.chatId, formatted, botUid))
-        .catch(() => {});
+        .catch((err) => logger.debug({ err, chatId: job.chatId }, 'peer-reaction failed (non-critical)'));
     }
 
     // 3.95 Phase 1/4: tracking-only paths skip judge/reply.
@@ -840,7 +840,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           });
         } else {
         // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
-        import("./heart/mind.js").then(({ noteThought }) => noteThought(job.chatId, heart.why)).catch(() => {});
+        import("./heart/mind.js").then(({ noteThought }) => noteThought(job.chatId, heart.why)).catch((err) => logger.debug({ err, chatId: job.chatId }, 'noteThought failed (non-critical)'));
         if (heart.act === 'wait') {
           // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)。
           // review R3(被 verifier 误判 refuted,经代码对比确认真实):必须与
@@ -869,9 +869,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         }
         if (heart.act === 'pass') {
           if (e.TURN_FOCUS_ENABLED) {
-            import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
+            import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch((err) => logger.debug({ err, chatId: job.chatId }, 'bumpFocus failed (non-critical)'));
           }
-          await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
+          await recordGateNoAction(job.chatId, formatted.uid).catch((err) => logger.debug({ err, chatId: job.chatId }, 'recordGateNoAction failed (non-critical)'));
           logger.info({ chatId: job.chatId, why: heart.why, triggerUid: formatted.uid }, "Pipeline complete (heart=pass, still present)");
           return;
         }
@@ -1092,7 +1092,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
       if (gateDecision.action === 'wait') {
         if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
-          import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_wait')).catch(() => {});
+          import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_wait')).catch((err) => logger.debug({ err, chatId: job.chatId }, 'bumpFocus failed (non-critical)'));
         }
         const waitSecBounded = gateDecision.waitSec ?? e.TIMING_WAIT_MIN_SEC;
         // G5: actor 模式暂存锚点条目,wait 到期后重注入 pending 真正回访
@@ -1180,14 +1180,14 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           }
         } else {
         if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
-          import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch(() => {});
+          import("./turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_no_action')).catch((err) => logger.debug({ err, chatId: job.chatId }, 'bumpFocus failed (non-critical)'));
         }
         // actor 模式:no_action = 这条不接,但**人还在场**(只记冷却,不 STOP)。
         // 旧 enterStop 会把 chat 锁死到被 @ 才醒 → "说几下就跑了"。
         if (job.turnContext) {
-          await recordGateNoAction(job.chatId, formatted.uid).catch(() => {});
+          await recordGateNoAction(job.chatId, formatted.uid).catch((err) => logger.debug({ err, chatId: job.chatId }, 'recordGateNoAction failed (non-critical)'));
           if (job.turnContext.obligationId) {
-            await updateObligationState(job.chatId, job.turnContext.obligationId, 'dropped', { reason: gateDecision.reason || 'gate_no_action' }).catch(() => {});
+            await updateObligationState(job.chatId, job.turnContext.obligationId, 'dropped', { reason: gateDecision.reason || 'gate_no_action' }).catch((err) => logger.debug({ err, chatId: job.chatId }, 'updateObligationState failed (non-critical)'));
           }
         } else {
           await transitionToStop(job.chatId, formatted.uid);

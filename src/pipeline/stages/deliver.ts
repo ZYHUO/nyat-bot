@@ -426,7 +426,7 @@ export async function generateAndSendReplies(args: {
     if (
       job.chatId < 0 &&
       !instructionInfo &&
-      process.env['NODE_ENV'] !== 'test' && // 3% 骰子会让测试薛定谔
+      env().NODE_ENV !== 'test' && // 3% 骰子会让测试薛定谔
       !(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)) &&
       Math.random() < 0.03
     ) {

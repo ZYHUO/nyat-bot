@@ -3,6 +3,11 @@
 // META_L0_COALESCE_MS in Attention.flush (quiet window), NOT TIMING_TALK_VALUE
 // / gate wait. Gate wait would drop mid-burst messages from Attention.
 // L1/L2: continue → Attention; wait → WAIT + delayed re-ingest; no_action → silence.
+//
+// META_DEFER_ENABLED 开启后，canDefer=true 传给 runTimingGate，让 gate 的
+// 冷却/talk-value 短路层产出 deferOnly 决策。deferOnly 由 scheduleMetaDeferReeval
+// 排 Redis ZSET 延迟重评（metaTick 到点 drain 重新 ingest），而非永久丢弃。
+// 这对齐了老版 pipeline + turn actor 的 defer-not-drop 语义。
 
 import type { FormattedMessage, JudgeResult } from '../shared/types.js';
 import { env } from '../env.js';
@@ -21,6 +26,7 @@ import {
 import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
+import { scheduleMetaDeferReeval } from './defer.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
@@ -95,6 +101,10 @@ function stubJudge(isDirect: boolean): JudgeResult {
 
 /**
  * Run timing gate for a Meta-path message before Attention ingest.
+ *
+ * META_DEFER_ENABLED 开启时传 canDefer=true 给 gate，让冷却/talk-value 短路层
+ * 产出 deferOnly 决策（延迟重评而非永久丢弃），并对齐老版 pipeline 的
+ * continuation 免检、talk-value 频率门控。关闭时保持旧行为（canDefer=false）。
  */
 export async function evaluateMetaTiming(opts: {
   chatId: number;
@@ -102,6 +112,8 @@ export async function evaluateMetaTiming(opts: {
   isDirect: boolean;
   layer: AttentionLayer;
   directKind?: string | null;
+  /** 本条消息已被 defer 的次数（来自 Attention payload，首次为 0/undefined）。 */
+  deferCount?: number;
 }): Promise<{ verdict: MetaTimingVerdict; reason: string }> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) {
@@ -109,6 +121,8 @@ export async function evaluateMetaTiming(opts: {
   }
 
   const { chatId, formatted, isDirect, layer, directKind } = opts;
+  const deferEnabled = !!e.META_DEFER_ENABLED;
+  const deferCount = opts.deferCount ?? 0;
 
   void recordUserMessage(chatId).catch(() => {});
 
@@ -180,7 +194,8 @@ export async function evaluateMetaTiming(opts: {
     isDirectInteraction: false,
     lastSpokeSecAgo,
     prefetchedState,
-    canDefer: false,
+    canDefer: deferEnabled,
+    deferCount,
   });
 
   if (decision.action === 'continue') {
@@ -217,6 +232,53 @@ export async function evaluateMetaTiming(opts: {
     }
     logger.info({ chatId, layer, waitSec, reason: decision.reason }, 'Meta timing: wait');
     return { verdict: 'silence', reason: `wait:${decision.reason}` };
+  }
+
+  // no_action — 可能是 deferOnly（冷却/talk-value/llm-failed），也可能是真正的 no_action
+  if (decision.deferOnly && deferEnabled) {
+    const retryAfterMs = decision.retryAfterMs ?? 45_000;
+    const scheduled = await scheduleMetaDeferReeval({
+      chatId,
+      entry: {
+        chatId,
+        layer,
+        reason: decision.reason,
+        messageId: formatted.messageId,
+        userId: formatted.uid,
+        textPreview: (formatted.textContent || '').slice(0, 200),
+        pressure: layer === 'L1' ? 60 : 30,
+        payload: {
+          username: formatted.username || undefined,
+          fullName: formatted.fullName || undefined,
+          ...(formatted.replyTo
+            ? {
+                replyTo: {
+                  messageId: formatted.replyTo.messageId,
+                  uid: formatted.replyTo.uid,
+                  fullName: formatted.replyTo.fullName,
+                  textSnippet: (formatted.replyTo.textSnippet ?? '').slice(0, 200),
+                },
+              }
+            : {}),
+        },
+      },
+      deferCount,
+      retryAfterMs,
+      reason: decision.reason,
+    });
+    if (scheduled) {
+      logger.info(
+        { chatId, layer, reason: decision.reason, retryAfterMs, deferCount },
+        'Meta timing: defer → scheduled re-eval',
+      );
+      return { verdict: 'silence', reason: `defer:${decision.reason}` };
+    }
+    // 预算耗尽或 ZADD 失败 → 放行给 Attention（兜底是多回一次，不是丢消息）
+    logger.info(
+      { chatId, layer, reason: decision.reason, deferCount },
+      'Meta timing: defer budget exhausted — fail-open allow',
+    );
+    return { verdict: 'allow', reason: `defer_exhausted:${decision.reason}` };
   }
 
   try {

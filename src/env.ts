@@ -20,6 +20,14 @@ const envSchema = z.object({
   // SQLite
   SQLITE_PATH: z.string().default('./data/xxb.db'),
 
+  // Qdrant (vector memory) — zod-coerced; a non-numeric QDRANT_PORT now fails
+  // validation at startup instead of producing `port: NaN` at connect time.
+  QDRANT_HOST: z.string().min(1).default('127.0.0.1'),
+  QDRANT_PORT: z.coerce.number().int().positive().max(65535).default(6333),
+
+  // Cron master switch — read via env() like every other flag (kilo review).
+  CRON_ENABLED: booleanFromEnv.default(true),
+
   // NyatDB — NyatBot-only embedded engine (MemTable+WAL+zstd). Default off.
   NYATDB_ENABLED: booleanFromEnv.default(false),
   NYATDB_PATH: z.string().default('./data/nyatdb'),
@@ -505,6 +513,12 @@ const envSchema = z.object({
    * 防群里同一话题连珠炮（三连赖账）。L0/@/回 bot 不受影响。0 = 关闭。默认 45s。
    */
   META_HEART_REFRACTORY_MS: z.coerce.number().int().nonnegative().default(45_000),
+  /**
+   * Meta 路径 defer 延迟重评：canDefer=true 传给 runTimingGate，让冷却/talk-value
+   * 短路层产出 deferOnly 决策，再由 scheduleMetaDeferReeval 排 Redis ZSET 延迟重评，
+   * 而非永久丢弃。需 TIMING_GATE_ENABLED + META_SUBAGENT_ENABLED 同开。默认关。
+   */
+  META_DEFER_ENABLED: booleanFromEnv.default(false),
   // 单次 Meta flush 最多处理几个 attention 条目。
   META_ATTENTION_TOP_N: z.coerce.number().int().positive().default(8),
   // Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。
