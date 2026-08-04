@@ -2,6 +2,7 @@
 // Telegram Sender — API wrapper with retry
 // ────────────────────────────────────────
 
+import { InputFile } from 'grammy';
 import { getBot } from '../bot.js';
 import { toMarkdownV2 } from './markdown.js';
 import { shardMarkdownV2, TG_TEXT_LIMIT } from './shard.js';

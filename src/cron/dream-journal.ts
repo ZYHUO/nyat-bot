@@ -142,9 +142,12 @@ async function loadDigestContext(): Promise<string> {
 
 const DIARY_SYSTEM = `你是啾咪囝，决定要不要写一段日记，以及写什么。第一人称「本喵」。短段、有情绪、不是工作汇报。
 
-输出格式（严格）：
+输出格式（严格，违反则作废）：
 - 第一行只能是：WRITE 或 SKIP（可跟空格+短原因，如 SKIP 没什么新事）
 - 若 WRITE：空一行后写本段 markdown 正文（不要代码块，不要重复已有段落）
+- 一次输出，直接给最终版。禁止输出思考过程、自我检查、草稿对比、规则复述。
+- 禁止出现「等下」「再精简」「检查规则」「会不会太长」「再顺一遍」等元评论。
+- 禁止多次 WRITE——只输出一次 WRITE + 一段正文。
 
 硬规则：
 1. 只能写「真实聊天记录」里出现过的人、事、话题、情绪；没有的一律不写。
@@ -180,8 +183,41 @@ function normalizeDiaryHeaderLine(line: string): string {
 }
 
 /**
+ * Strip meta-commentary lines the model emits when thinking out loud
+ * (self-correction, rule-checking, draft comparison). These are not diary
+ * content — they're the model's internal monologue leaking into output.
+ */
+function stripMetaCommentary(body: string): string {
+  const lines = body.split(/\r?\n/);
+  const cleaned: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Stop at a second WRITE header (shouldn't happen after our fix, but be safe)
+    if (/^(WRITE|SKIP)\b/i.test(trimmed)) break;
+    // Skip meta-commentary patterns (Chinese self-correction / rule-checking)
+    if (
+      /^(等下|哦等下|对了[，,]?|对[，,]|哦对[，,]?|再精简|再顺|检查规则|会不会太|或者再|这样行|那个)/.test(trimmed) ||
+      /(?:再精简|再顺一遍|检查规则|会不会太长|会不会太啰嗦|代码块|重复已有|规则复述|草稿|第一行是WRITE|没有虚构|符合.*人设|没有和.*重复)/.test(trimmed) ||
+      // Lines that are clearly about the writing process, not diary content
+      /^(对[，,]这个|对[，,]这个是新的|等下检查|等下再顺|等下会不会)/.test(trimmed)
+    ) {
+      continue; // skip this line
+    }
+    cleaned.push(line);
+  }
+  // Trim trailing empty lines
+  while (cleaned.length > 0 && !cleaned[cleaned.length - 1]!.trim()) {
+    cleaned.pop();
+  }
+  return cleaned.join('\n').trim();
+}
+
+/**
  * Parse WRITE/SKIP decision. Tolerates fences, bold, leading chatter,
  * and WRITE/SKIP not on the absolute first line (common with summarize models).
+ *
+ * Robust against models that output multiple WRITE drafts with meta-commentary:
+ * finds the LAST WRITE (model's final attempt) and strips self-correction lines.
  */
 export function parseDiaryDecision(raw: string): {
   action: 'WRITE' | 'SKIP';
@@ -192,48 +228,83 @@ export function parseDiaryDecision(raw: string): {
   if (!text) return { action: 'SKIP', body: '', reason: 'empty_output' };
 
   const lines = text.split(/\r?\n/);
-  let headerIdx = -1;
-  let action: 'WRITE' | 'SKIP' | null = null;
-  let headerReason = '';
 
-  for (let i = 0; i < Math.min(lines.length, 16); i++) {
+  // Pass 1: scan entire output for all WRITE/SKIP lines (not just first 16).
+  // Models that think out loud may have WRITE on line 5, then again on line 15.
+  const writeIdxs: number[] = [];
+  let skipIdx = -1;
+  let skipReason = '';
+
+  for (let i = 0; i < lines.length; i++) {
     const line = normalizeDiaryHeaderLine(lines[i] ?? '');
     if (!line) continue;
     const m = line.match(/^(WRITE|SKIP)(?:\s*[:：\-—]\s*|\s+|$)(.*)$/i);
     if (m?.[1]) {
-      headerIdx = i;
-      action = m[1].toUpperCase() as 'WRITE' | 'SKIP';
-      headerReason = (m[2] || '').trim();
-      break;
+      if (m[1].toUpperCase() === 'WRITE') {
+        writeIdxs.push(i);
+      } else {
+        // SKIP — but only honor it if no WRITE found yet
+        if (writeIdxs.length === 0 && skipIdx < 0) {
+          skipIdx = i;
+          skipReason = (m[2] || '').trim();
+        }
+      }
+      continue;
     }
-    // Chinese skip without English keyword — match anywhere in the line, not
-    // just at the start. A model output like "今天没什么好写的本喵就不写了"
-    // would otherwise fall through to implicit_write and be saved as diary body.
-    if (/(?:跳过|不写了?|没空写|没什么好写|没啥好写|不硬编|就不写了?|不想写|算了不写)/.test(line)) {
+    // Chinese skip without English keyword — only if no WRITE found yet
+    if (writeIdxs.length === 0 && skipIdx < 0 &&
+        /(?:跳过|不写了?|没空写|没什么好写|没啥好写|不硬编|就不写了?|不想写|算了不写)/.test(line)) {
       return { action: 'SKIP', body: '', reason: line.slice(0, 80) };
     }
   }
 
-  if (!action) {
-    // Model forgot the header — only treat as WRITE if it clearly looks like
-    // diary content (first-person narration, not a skip/refusal sentence).
-    // The old check (≥40 chars + 本喵|今天|群里) was too loose: a SKIP sentence
-    // like "今天没什么好写的，本喵就不写了" matched and got saved as a diary entry.
-    const looksLikeSkipSentence = /(?:没什么.*写|没啥.*写|不写了?|不想写|没素材|没空|算了|跳过|不硬编)/.test(text);
-    if (text.length >= 40 && /本喵|今天|群里/.test(text) && !looksLikeSkipSentence) {
-      return { action: 'WRITE', body: text, reason: 'implicit_write' };
+  // Pass 2: if we found WRITE lines, use the LAST one (model's final version).
+  // Walk backwards from the last WRITE in case it's truncated (too short or no ending punctuation).
+  for (let j = writeIdxs.length - 1; j >= 0; j--) {
+    const wIdx = writeIdxs[j]!;
+    const nextWrite = j < writeIdxs.length - 1 ? writeIdxs[j + 1]! : lines.length;
+    const bodyRaw = lines
+      .slice(wIdx + 1, nextWrite)
+      .join('\n')
+      .trim()
+      .replace(/^```(?:markdown|md|text)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+      .trim();
+    const body = stripMetaCommentary(bodyRaw);
+    if (body.length >= 15) {
+      // Check for truncation: if body doesn't end with sentence punctuation
+      // and there are more WRITE attempts to try, prefer the previous one.
+      const endsWithPunctuation = /[。！？!?.…]"?」?）?\]?$/.test(body);
+      if (!endsWithPunctuation && j > 0) {
+        // Likely truncated by max_tokens — try previous WRITE
+        continue;
+      }
+      return {
+        action: 'WRITE',
+        body,
+        reason: writeIdxs.length > 1 ? `last_of_${writeIdxs.length}` : '',
+      };
     }
-    return { action: 'SKIP', body: '', reason: 'unparsed' };
+    // This WRITE's body is too short (likely truncated) — try previous WRITE
   }
 
-  const body = lines
-    .slice(headerIdx + 1)
-    .join('\n')
-    .trim()
-    .replace(/^```(?:markdown|md|text)?\s*/i, '')
-    .replace(/\s*```\s*$/i, '')
-    .trim();
-  return { action, body, reason: headerReason };
+  // Pass 3: no usable WRITE body — check SKIP
+  if (skipIdx >= 0) {
+    return { action: 'SKIP', body: '', reason: skipReason };
+  }
+
+  // Pass 4: implicit_write — model forgot the header but wrote diary content.
+  // Only trigger if no WRITE was found at all (WRITE with empty body ≠ implicit).
+  if (writeIdxs.length === 0) {
+    const looksLikeSkipSentence = /(?:没什么.*写|没啥.*写|不写了?|不想写|没素材|没空|算了|跳过|不硬编)/.test(text);
+    if (text.length >= 40 && /本喵|今天|群里/.test(text) && !looksLikeSkipSentence) {
+      const cleaned = stripMetaCommentary(text);
+      if (cleaned.length >= 15) {
+        return { action: 'WRITE', body: cleaned, reason: 'implicit_write' };
+      }
+    }
+  }
+  return { action: 'SKIP', body: '', reason: 'unparsed' };
 }
 
 export type DreamJournalRunResult = { path: string | null; reason: string };
@@ -297,7 +368,7 @@ ${existing.slice(0, 2500) || '(空)'}
 请输出 WRITE/SKIP；若 WRITE 只写本段新内容。`,
         },
       ],
-      maxTokens: 700,
+      maxTokens: 1200,
       temperature: 0.55,
       rejectEmpty: true,
     });

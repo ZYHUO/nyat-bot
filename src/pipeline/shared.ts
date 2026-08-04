@@ -4,8 +4,25 @@
 // ────────────────────────────────────────
 
 import { StreamingSender } from "../bot/sender/streaming.js";
+import type { ChatJob, FormattedMessage } from "../shared/types.js";
+import type { PendingEntry } from "./turn/types.js";
 
 export const sender = new StreamingSender();
+
+// review R3#5:gate 路径与心流路径的 defer 暂存条目曾各自手写、字段漂移过
+// (R2#3/#7 就是心流那份漏了 obligation)。抽成单一构造点,新增字段只改这里,
+// 两条 defer 路径永远同构。
+export function buildDeferEntry(job: ChatJob, formatted: FormattedMessage): PendingEntry {
+  return {
+    update: job.update,
+    chatId: job.chatId,
+    messageId: formatted.messageId,
+    enqueuedAt: job.enqueuedAt,
+    obligationId: job.turnContext?.obligationId,
+    obligationTargetUid: job.turnContext?.obligationTargetUid,
+    obligationStrong: job.turnContext?.obligationStrong,
+  };
+}
 
 export const TEMP_MUTE_CLEAR_RULES = new Set([
   "reply_to_self",

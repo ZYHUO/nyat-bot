@@ -581,6 +581,24 @@ const envSchema = z.object({
   IDLE_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
   IDLE_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
 
+  // ── P2-A: 主动搭话记忆驱动 ──
+  // 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题"
+  PROACTIVE_MEMORY_ENABLED: booleanFromEnv.default(false),
+
+  // ── P2-A: 主动搭话统一调度 ──
+  // 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限
+  PROACTIVE_COORDINATOR_ENABLED: booleanFromEnv.default(false),
+  PROACTIVE_HOURLY_MAX_PER_CHAT: z.coerce.number().int().positive().default(3),
+
+  // ── P2-B: RSS 信息流监控 ──
+  // 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用
+  RSS_MONITOR_ENABLED: booleanFromEnv.default(false),
+  RSS_MONITOR_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // JSON 数组: [{url, chatId, autoPost?, sourceName?}]
+  RSS_FEEDS_JSON: z.string().default('[]'),
+  // 自动发送时使用的 LLM 路由
+  RSS_USAGE: z.string().default('summarize'),
+
   // ── 借力其他 bot(学其他 bot 的命令,需要时代发)──
   // P1:观察学习每个 bot 的命令档案(怎么用/场景/needs_reply/needs_admin/output_type)
   BOT_COMMAND_LEARN_ENABLED: booleanFromEnv.default(false),
@@ -698,14 +716,7 @@ const envSchema = z.object({
   DM_GREET_MAX_USERS: z.coerce.number().int().default(2),       // 每个边沿最多几人
   DM_PROACTIVE_COOLDOWN_HOURS: z.coerce.number().default(20),    // 同人两次主动 DM 最小间隔
   // B3:群里@催pm(高好感但从没 DM)。最危险,默认关灰度。
-  PM_NUDGE_ENABLED: booleanFromEnv.default(false),
-  PM_NUDGE_AFFINITY_MIN: z.coerce.number().default(45),          // 较高门槛(用户要求达高好感才主动)
-  PM_NUDGE_MIN_INTERACTIONS: z.coerce.number().int().default(20),
-  PM_NUDGE_MAX_ATTEMPTS: z.coerce.number().int().default(3),     // 三家建议≤3
-  PM_NUDGE_INTERVAL_DAYS: z.string().default('3,5,7'),           // 递增间隔
-  PM_NUDGE_GLOBAL_DAILY_MAX: z.coerce.number().int().default(2), // 全局每日主动@上限(防封号生命线)
-  PM_NUDGE_EXHAUST_PENALTY: z.coerce.number().default(15),       // 催满未果扣好感
-  PM_NUDGE_COOLDOWN_DAYS: z.coerce.number().default(30),         // exhausted 后冷却
+
 
   // 常驻贴纸包(逗号分隔的贴纸包 set_name):作为 bot 主力贴纸,选择时占多数候选槽。
   RESIDENT_STICKER_PACKS: z.string().optional(),
@@ -752,6 +763,18 @@ const envSchema = z.object({
   // Cutover (optional — only used by scripts/cutover.sh)
   TS_WEBHOOK_URL: z.string().url().optional(),
   PHP_WEBHOOK_URL: z.string().url().optional(),
+
+  // ── TTS voice messages (edge-tts, free local Python) ──
+  // 把短回复概率性转成语音发送(适合短促亲昵/深夜私聊/情绪强烈的回复)。
+  // edge-tts 生成 MP3 → ffmpeg 转 OGG/Opus(Telegram 语音消息要求 OggS+Opus)。
+  // 全部默认关;开启需系统装好 `python3 -m edge_tts` 与 `ffmpeg`。
+  TTS_ENABLED: booleanFromEnv.default(false),
+  // edge-tts 语音名(中文默认晓晓;也可换 zh-CN-XiaoyiNeural 等)。
+  TTS_VOICE: z.string().default('zh-CN-XiaoxiaoNeural'),
+  // 每条满足条件的短回复转语音的概率(0..1)。
+  TTS_VOICE_PROBABILITY: z.coerce.number().min(0).max(1).default(0.15),
+  // 仅对不超过此字符数的回复转语音(长消息发语音很烦)。
+  TTS_MAX_CHARS: z.coerce.number().int().positive().default(100),
 });
 
 export type Env = z.infer<typeof envSchema>;

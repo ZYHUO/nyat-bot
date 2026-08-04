@@ -174,17 +174,6 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
-  // 功能 B3:@催pm 扫描(默认关灰度)。内部还有好感门/递增间隔/全局每日上限/
-  // allowlist+mute+成员+isAsleep 安全门;每 3 小时扫一次,实际发送受日上限封顶。
-  if (env().PM_NUDGE_ENABLED) {
-    tasks.push(schedule('13 */3 * * *', () => {
-      void safeRun('pm-nudge', async () => {
-        const { runPmNudge } = await import('./pm-nudge.js');
-        await runPmNudge();
-      });
-    }));
-  }
-
   // 功能 A3:每日「今日感想」生成(每小时跑,内部按 BJ 日去重,只生成一次)。
   if (env().SCHOOL_SCHEDULE_ENABLED) {
     tasks.push(schedule('40 * * * *', () => {
@@ -310,6 +299,16 @@ export function startCronJobs(deps?: CronDeps): void {
   if (env().PROACTIVE_SCAN_ENABLED) {
     tasks.push(schedule(`*/${env().PROACTIVE_SCAN_INTERVAL_MIN} * * * *`, () => {
       void safeRun('proactive-scan', runProactiveScan);
+    }));
+  }
+
+  // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
+  if (env().RSS_MONITOR_ENABLED) {
+    tasks.push(schedule(`*/${env().RSS_MONITOR_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('rss-monitor', async () => {
+        const { runRssMonitor } = await import('./rss-monitor.js');
+        await runRssMonitor();
+      });
     }));
   }
 

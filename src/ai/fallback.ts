@@ -82,6 +82,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       if (options.rejectEmpty && !result.content.trim()) {
         throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
       }
+      // 成功 → 重置熔断失败计数
+      await cooldown.recordSuccess(label.model);
       // 观测:落到 backup(主模型失败/被拒后换的第 i 跳)成功时记 label+usage+耗时,
       // 便于盯 fallback 命中(尤其回复链里 mundo)与其真实耗时。只在 fallback 时打。
       if (i > 0) {
@@ -104,18 +106,21 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       }
 
       // Content safety rejection — **继续试下一个 provider**,不再一拒就放弃整条链。
-      // StepFun 等中国厂商对机场/VPS/翻墙这类**正常话题**误报"敏感"极频繁,而链里
-      // 后面的 gpt-5.5(sub2api)不受此审查口径约束、通常能正常作答。一误报就短路
-      // 会把厂商的过度审查放大成 bot 级拒答(reply 层弹"这个话题不方便聊")。
-      // 只有**全链都拒**时 errors.at(-1) 仍是 AI_CONTENT_REJECTED → reply 层才弹兜底
-      // 话术(此时才是真被拦)。fall through 到下面的 metrics + "trying next"。
       if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
         logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter, trying next provider');
       }
 
-      // Set cooldown on 429
+      // 429 → 短期冷却
       if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
         await cooldown.setCooldown(label.model);
+      }
+
+      // 所有失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）
+      const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
+      const tripped = await cooldown.recordFailure(label.model, errCode);
+      if (tripped) {
+        const remaining = await cooldown.getRemainingSeconds(label.model);
+        logger.warn({ label: labelName, model: label.model, errCode, breakerSec: remaining }, 'Circuit breaker tripped');
       }
 
       // Metrics: this attempt failed (visible per-label so retries/429 storms show up).
@@ -209,6 +214,11 @@ async function hedgedCall(
     if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
       void cooldown.setCooldown(primaryLabel.model);
     }
+    // 熔断记录
+    const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
+    void cooldown.recordFailure(primaryLabel.model, errCode).then((tripped) => {
+      if (tripped) logger.warn({ label: primaryLabel.name, model: primaryLabel.model, errCode }, 'Circuit breaker tripped (hedge primary)');
+    });
     return Promise.reject(toError(err));
   });
 
@@ -221,8 +231,15 @@ async function hedgedCall(
         return;
       }
       hedgeStarted = true;
-      attempt(hedgeLabel).then(resolve, (err: unknown) => {
+      attempt(hedgeLabel).then((r) => {
+        void cooldown.recordSuccess(hedgeLabel.model);
+        return r;
+      }).then(resolve, (err: unknown) => {
         if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
+        const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
+        void cooldown.recordFailure(hedgeLabel.model, errCode).then((tripped) => {
+          if (tripped) logger.warn({ label: hedgeLabel.name, model: hedgeLabel.model, errCode }, 'Circuit breaker tripped (hedge backup)');
+        });
         reject(toError(err));
       });
     }, hedgeDelayMs);
@@ -237,6 +254,10 @@ async function hedgedCall(
       // 赢家返回前先掐掉输家在飞的请求 —— 否则它跑到底并被计费。
       settledWinner = r.label;
       abortLosers(r.label);
+      // 赢家成功 → 只重置赢家自己的熔断失败计数
+      // (primary 失败但 hedge 赢时，primary 的计数不应被重置 — 否则永远不熔断)
+      if (r.label === primaryLabel.name) void cooldown.recordSuccess(primaryLabel.model);
+      if (r.label === hedgeLabel.name) void cooldown.recordSuccess(hedgeLabel.model);
       if (hedgeStarted) {
         logger.info(
           { winner: r.label, primary: primaryLabel.name, hedge: hedgeLabel.name },

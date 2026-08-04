@@ -21,6 +21,7 @@ import { getBotUid } from '../bot/bot.js';
 import { loadCachedPrompt } from '../shared/config.js';
 import { isAsleep } from '../tracking/sleep.js';
 import type { FormattedMessage } from '../shared/types.js';
+import { tryAcquireProactiveSlot, markProactiveSent } from './proactive-coordinator.js';
 
 const PROACTIVE_LAST_PREFIX = 'xxb:proactive:last:';
 const ACTIVE_GROUPS_MAX_AGE = 30 * 86400;
@@ -348,8 +349,12 @@ export async function runProactiveScan(): Promise<void> {
         continue;
       }
 
+      // P2-A: 统一调度 — 防止和 idle 同窗口双发
+      if (!(await tryAcquireProactiveSlot(chatId, 'proactive-scan'))) continue;
+
       // 8. send
       await sender.sendDirect(chatId, text);
+      await markProactiveSent(chatId, 'proactive-scan');
       await markBotSpoke(chatId);
       // pressure:真开口了 → 清零 ignored
       if (e.PROACTIVE_PRESSURE_ENABLED) {

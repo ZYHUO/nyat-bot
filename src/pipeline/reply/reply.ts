@@ -127,6 +127,11 @@ function detectExactReplyCountRequest(message: FormattedMessage): number | undef
     return 2;
   }
 
+  // "帮我回X" / "回复X" / "去怼X" / "告诉X" — 需要先回指令者、再回目标
+  if (/(帮我回|帮我怼|帮我告诉|去回他|去回复|回复.{0,6}给他|回一下.{0,6}跟他|转告|帮我@)/i.test(text)) {
+    return 2;
+  }
+
   if (/(发我三条|发三条|三条消息|三句)/i.test(text)) {
     return 3;
   }

@@ -18,6 +18,7 @@ import { isTurnActorChat } from '../pipeline/turn/flags.js';
 import { generatePersonaProactiveText } from '../pipeline/turn/proactive-turn.js';
 import { getBotUid } from '../bot/bot.js';
 import { isAsleep } from '../tracking/sleep.js';
+import { tryAcquireProactiveSlot, markProactiveSent } from './proactive-coordinator.js';
 
 const ACTIVE_GROUPS_MAX_AGE = 30 * 86400; // prune groups unseen for 30 days
 const LAST_POKE_PREFIX = 'xxb:last_poke:';
@@ -185,7 +186,11 @@ export async function runIdleCheck(): Promise<void> {
         continue;
       }
 
+      // P2-A: 统一调度 — 防止和 proactive-scan 同窗口双发
+      if (!(await tryAcquireProactiveSlot(chatId, 'idle'))) continue;
+
       await sender.sendDirect(chatId, text);
+      await markProactiveSent(chatId, 'idle');
       await markBotSpoke(chatId);
       // G9: 主动开口同样拉升 focus(bumpFocus 在 flag off 时自身 no-op)
       import('../pipeline/turn/focus.js').then(({ bumpFocus }) => bumpFocus(chatId, 'bot_spoke')).catch(() => {});
