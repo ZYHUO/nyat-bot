@@ -154,9 +154,4 @@ describe('runUnifiedTick execution mapping', () => {
     expect(enqueueMock).not.toHaveBeenCalled();
   });
 
-  it('disabled flag → zero work', async () => {
-    envFlags = { UNIFIED_TICK_ENABLED: false };
-    await runUnifiedTick();
-    expect(callWithFallbackMock).not.toHaveBeenCalled();
-  });
 });

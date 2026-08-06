@@ -35,6 +35,7 @@ const replyOutputSchema = z.object({
   replyContent: z.string().min(1),
   targetMessageId: z.number().int(),
   stickerIntent: z.union([z.string(), z.array(z.string())]).optional(),
+  voice: z.boolean().optional(),
 });
 
 export interface ParsedReply {
@@ -43,6 +44,8 @@ export interface ParsedReply {
   stickerIntent?: string[];
   handoffToSplitter?: boolean;
   replyQuote?: boolean;
+  /** True to send this reply as a voice message (TTS) instead of text */
+  voice?: boolean;
   /** True if this segment was inserted by the humanizer as a filler (e.g. "我想想") — skip typo/afterthought/delete-resend */
   isInterjection?: boolean;
   /**

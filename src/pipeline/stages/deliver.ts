@@ -786,6 +786,22 @@ export async function generateAndSendReplies(args: {
               logger.warn({ chatId: job.chatId, maxPlaceholderMsgId }, 'Placeholder edit failed — reply not recorded as sent');
             }
           } else {
+            // ── Voice reply (P5): model marked this reply as voice ──
+            if (reply.voice === true && e.TTS_ENABLED) {
+              try {
+                const { synthesizeVoice } = await import('../../ai/tts.js');
+                const { sendVoice } = await import('../../bot/sender/telegram.js');
+                const ogg = await synthesizeVoice(effectiveText.slice(0, 500));
+                if (ogg) {
+                  await sendVoice(job.chatId, ogg, { replyToId });
+                  sentMessages.push({ messageId: 0, text: `[voice] ${effectiveText}` });
+                  logger.info({ chatId: job.chatId }, 'Voice reply sent');
+                  continue;
+                }
+              } catch (err) {
+                logger.warn({ err, chatId: job.chatId }, 'Voice synthesis failed — falling back to text');
+              }
+            }
             const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
             // Mark this target quoted only after a real text reply went out with the quote.
             if (replyToId !== undefined) quotedTargets.add(replyToId);

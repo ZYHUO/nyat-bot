@@ -79,6 +79,8 @@ export interface ReplyOutput {
   modelStickerAct?: boolean;
   /** G10: 模型的投递意图 — 这句想停顿酝酿一拍再发 */
   hesitateBefore?: boolean;
+  /** P5: 用 TTS 语音发送而非文字 */
+  voice?: boolean;
 }
 
 export interface RetrievedContext {

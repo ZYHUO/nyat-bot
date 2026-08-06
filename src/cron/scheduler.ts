@@ -303,8 +303,8 @@ export function startCronJobs(deps?: CronDeps): void {
   // （原 proactive-scan / proactive-thinker / self-play / goal-check 的独立
   // 注册已移除——决策统一由 unified-tick 做出，执行器在 tick 内部调用。）
 
-  // P4-C: Self-reflect — 每天凌晨复盘自己的回复表现（自我模型）
-  tasks.push(schedule('37 3 * * *', () => {
+  // P4-C: Self-reflect — 每 6h 复盘自己的回复表现（自我模型，加快学习循环）
+  tasks.push(schedule('17 */6 * * *', () => {
     void safeRun('self-reflect', async () => {
       const { runSelfReflect } = await import('./self-reflect.js');
       await runSelfReflect();

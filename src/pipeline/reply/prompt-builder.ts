@@ -15,10 +15,10 @@ import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/con
 import { env } from '../../env.js';
 import { getTopExpressions, reinforceExpressions } from '../../learners/expression-learner.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
+import { getActiveSelfNotes } from '../../tracking/self-model.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildCrossGroupInjection } from '../../tracking/person-identity.js';
 import { getTopicLine } from '../../tracking/topic-registry.js';
-import { getActiveSelfNotes } from '../../tracking/self-model.js';
 import { scratchPromptBlockSync } from '../../tracking/scratchpad.js';
 import { buildProfileInjection, getBotTagForAddressing } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';

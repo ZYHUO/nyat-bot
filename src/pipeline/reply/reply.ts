@@ -1032,6 +1032,7 @@ export async function generateReply(
       replyQuote: p.replyQuote,
       modelStickerAct: p.modelStickerAct,
       hesitateBefore: p.hesitateBefore,
+      voice: p.voice,
     })),
     toolsUsed: result.toolsUsed,
     toolExecutionFailed,
