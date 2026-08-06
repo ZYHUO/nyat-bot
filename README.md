@@ -35,8 +35,8 @@
 - 🛠️ **工具调用** — 联网搜索（**Gemini Google-Search grounding** 主路由 → xAI / SearxNG / DDG 回退）、网页抓取、IP 查询、定时器
 - 🎒 **真实身份 · 上学日程** — 16 岁高中生人设:确定性周课表 + 节假日/补课 override，上课偷瞄手机回得短、课间/放学话变多、每天一句「今日感想」,作息与睡眠层联动（migration 0040）
 - 🎯 **多模型路由** — Judge / Reply / Reply Pro / Vision / Summarize 分配不同模型；Redis 运行时可覆盖
-- 🏎️ **Hedged Request** — 主模型超时自动发备用请求，谁快用谁（可关闭省 token）
-- 👁️ **视觉理解** — 图片/表情描述，结果缓存复用（migration 0028）
+- 🏎️ **Hedged Request + 熔断器** — 主模型 2s 未回自动并发备用请求谁快用谁；连续失败指数退避熔断（`xxb:circuit:*`，成功自动恢复）；hedge 输家的 abort 不污染熔断计数
+- 👁️ **视觉理解** — 图片/表情描述，结果缓存复用（migration 0028）；主 stepfun，备份 Kimi / grok-4.3
 
 **拟人回复（Humanizer V2）**
 - ✍️ **错别字 + 编辑纠正** — 30% 概率注入错别字，1.5s 后 editMessage 静默修正
@@ -365,10 +365,11 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `BOT_TOKEN` | Telegram Bot Token | (必填) |
-| `AI_BASE_URL` | AI API 地址 (OpenAI 兼容) | (必填) |
+| `AI_PROVIDER_<NAME>_*` | Provider 定义：`ENDPOINT`/`KEY`/`MODEL`/`REASONING`(none/low/…)/`TIMEOUT`/`RAW` 等 | — |
+| `AI_USAGE_<ROLE>_LABEL` / `_BACKUPS` | Usage 路由：reply / judge / vision / summarize / reply_pro 各自的主备链 | — |
 | `AI_API_KEY` | AI API 密钥 | (必填) |
-| `AI_MODEL_REPLY` | 回复用模型 | `gpt-4o-mini` |
-| `AI_MODEL_JUDGE` | 判断用模型（建议轻量） | `gpt-4o-mini` |
+| `AI_MODEL_REPLY` | 回复用模型（兼容旧式简化配置；实际路由以 provider/usage 为准） | `gpt-4o-mini` |
+| `AI_MODEL_JUDGE` | 判断用模型（同上） | `gpt-4o-mini` |
 | `REDIS_URL` | Redis 连接地址 | `redis://127.0.0.1:6379/0` |
 | `HEDGE_DELAY_MS` | Hedged request 延迟（0=关闭） | `2000` |
 | `CONTEXT_MAX_LENGTH` | Redis 上下文最大消息数 | `600` |
@@ -380,8 +381,11 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 | `FIRECRAWL_API_KEY` / `FIRECRAWL_API_URL` | 抓取兜底（自托管可填 localhost） | (可选) |
 | `RESIDENT_STICKER_PACKS` | 常驻贴纸包 set_name（逗号分隔） | (可选) |
 | `META_SUBAGENT_ENABLED` | 启用 Meta+Subagent+CodeAct 编排 | `false` |
-| `META_SUBAGENT_CHAT_IDS` | 灰度 chatId（逗号分隔；空=全开） | (空) |
+| `META_SUBAGENT_CHAT_IDS` | 灰度 chatId（逗号分隔；**空=全开**，所有 graylist flag 统一语义） | (空=全开) |
 | `META_TICK_MS` / `META_USAGE` | Meta loop 间隔 / 廉价模型 usage | `5000` / `judge` |
+| `TIMING_GATE_TIMEOUT_MS` | Heart/gate 每跳 LLM 预算（主+hedge 共享） | `15000` |
+| `SUBAGENT_MEMORY_ENABLED` | Subagent CodeAct 注入长期记忆段（隐私由 visibility 层 scrub 兜底） | `true` |
+| `REFLECTION_ENABLED` / `REFLECTION_INTERVAL_MIN` / `REFLECTION_WINDOW_MSGS` | 深度反思 cron（每群滚动近况→注入 [本群近况]）；全灭时打 `STARVED` 告警 | `true` / `10` / `200` |
 | `CODEACT_USAGE` / `CODEACT_MAX_TURNS` | Subagent CodeAct 模型与轮数 | `reply` / `6` |
 | `CONTEXT_ENGINE_ENABLED` | Context Engine 分段组装 | `true` |
 | `DREAM_JOURNAL_ENABLED` | 梦境日记 cron（可发频道） | `false` |

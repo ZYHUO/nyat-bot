@@ -40,18 +40,20 @@ describe('CodeAct 长期记忆注入', () => {
     searchSpy.mockResolvedValue([hit()]);
   });
 
-  describe('门控 —— 空名单必须等于关闭(与仓库其他 flag 刻意相反)', () => {
+  describe('门控 —— 空名单 = 全开(2026-08-07 起与其他 flag 一致;隐私靠 visibility 层 scrub)', () => {
     it('flag 关时返回空,且不查检索', async () => {
       envState.SUBAGENT_MEMORY_ENABLED = false;
       expect(await buildSubagentMemoryBlock({ chatId: CHAT, query: '日本' })).toBe('');
       expect(searchSpy).not.toHaveBeenCalled();
     });
 
-    // 这条是隐私特性最关键的门:配错的代价不对称 —— 漏开只是没效果,误开是内容外泄。
-    it('灰度名单为空 = 关闭,不是全量生效', async () => {
+    // 空名单语义已翻转:空 = 全量生效,与其他 graylist flag 一致。隐私保护在检索
+    // 侧的 visibility scrub(private/contextual 记忆不会跨 chat 泄漏),不在门控。
+    it('灰度名单为空 = 全开(语义已翻转)', async () => {
       envState.SUBAGENT_MEMORY_CHAT_IDS = [];
-      expect(await buildSubagentMemoryBlock({ chatId: CHAT, query: '日本' })).toBe('');
-      expect(searchSpy).not.toHaveBeenCalled();
+      const out = await buildSubagentMemoryBlock({ chatId: CHAT, query: '日本' });
+      expect(searchSpy).toHaveBeenCalled();
+      expect(out).not.toBe('');
     });
 
     it('不在名单里的会话不注入', async () => {

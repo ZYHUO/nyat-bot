@@ -73,13 +73,14 @@ export interface MemoryContextInput {
   excludeMessageIds?: ReadonlySet<number>;
 }
 
-/** 灰度判定。**空列表 = 关闭**,与仓库其他 flag 的「空 = 全量」刻意相反 —— */
-/** 这是隐私相关特性,配错的代价是不对称的:漏开只是没效果,误开是内容外泄。 */
+/** 灰度判定。**空列表 = 全开**,与仓库其他 flag 一致(2026-08-07 起,用户拍板全量)。 */
+/** 隐私风险改由 visibility 层兜底:DM/sensitive 记忆本身就带 private 标记,跨上下文检索会被 */
+/** scrub(memory/visibility.ts),注入进 subagent prompt 的只是该 chat 可见的内容,不是全库。 */
 function isEnabledForChat(chatId: number): boolean {
   const e = env();
   if (!e.SUBAGENT_MEMORY_ENABLED) return false;
   const list = e.SUBAGENT_MEMORY_CHAT_IDS;
-  return list.length > 0 && list.includes(chatId);
+  return list.length === 0 || list.includes(chatId);
 }
 
 /**
