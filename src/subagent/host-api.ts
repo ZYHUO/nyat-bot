@@ -71,6 +71,8 @@ export interface HostApi {
   runtime: {
     endTask: (summary: string) => void;
     didSendText: () => boolean;
+    /** 有产出（文字或文件都算）——长任务续跑判断用。 */
+    didProduce: () => boolean;
     /** Await ctx/timing writes so Meta callback sees the reply. */
     flushBookkeeping: () => Promise<void>;
   };
@@ -165,6 +167,7 @@ export function createHostApi(
   let ended = false;
   let defaultQuoteUsed = false;
   let textSent = 0;
+  let fileSent = 0;
   let lastSentNorm = '';
   let metaRequested = false;
   const maxTextSends = opts.maxTextSends ?? 2;
@@ -517,6 +520,7 @@ export function createHostApi(
                 messageThreadId: opts.messageThreadId,
               });
               if (messageId > 0) {
+                fileSent++;
                 await track(
                   import('../pipeline/context/manager.js')
                     .then(({ addAssistant }) =>
@@ -720,6 +724,10 @@ export function createHostApi(
       },
       didSendText() {
         return textSent > 0;
+      },
+      /** 有产出（文字或文件都算）——长任务续跑判断用。 */
+      didProduce() {
+        return textSent > 0 || fileSent > 0;
       },
       async flushBookkeeping() {
         // Drain until idle — fire-and-forget sends may still be registering.

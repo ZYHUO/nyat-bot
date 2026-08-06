@@ -563,7 +563,7 @@ history.push({
       const canResume =
         loopEnabled &&
         segment + 1 < maxSegments &&
-        host.runtime.didSendText();
+        host.runtime.didProduce();
 
       if (canResume) {
         let progressSummary = resumeSummary;
