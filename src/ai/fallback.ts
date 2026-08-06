@@ -235,11 +235,17 @@ async function hedgedCall(
         void cooldown.recordSuccess(hedgeLabel.model);
         return r;
       }).then(resolve, (err: unknown) => {
-        if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
-        const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
-        void cooldown.recordFailure(hedgeLabel.model, errCode).then((tripped) => {
-          if (tripped) logger.warn({ label: hedgeLabel.name, model: hedgeLabel.model, errCode }, 'Circuit breaker tripped (hedge backup)');
-        });
+        // 2026-08-07 事故修复:hedge 输掉 race 被 abort 不是真实故障,不计熔断。
+        // 原实现把输家的 abort 也 recordFailure —— k27code "Empty response"(真故障)
+        // + hedge 输家 timeout(无辜)双杀,把熔断退避刷到 405s+,冻死 summarize 链,
+        // deep-reflection 12 群全灭。settledWinner 非空说明已有赢家,hedge 是被掐掉的。
+        if (settledWinner === null || settledWinner === hedgeLabel.name) {
+          if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
+          const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
+          void cooldown.recordFailure(hedgeLabel.model, errCode).then((tripped) => {
+            if (tripped) logger.warn({ label: hedgeLabel.name, model: hedgeLabel.model, errCode }, 'Circuit breaker tripped (hedge backup)');
+          });
+        }
         reject(toError(err));
       });
     }, hedgeDelayMs);

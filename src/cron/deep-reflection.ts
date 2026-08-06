@@ -44,12 +44,15 @@ export async function reflectChat(chatId: number): Promise<number> {
       ],
       maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
       temperature: 0.4,
+      // 蒸馏是后台批任务,不该为单群烧满 provider 超时(22s)再串行降级 ×4 跳 ——
+      // 一次 tick 12 群能把整条链的熔断计数全刷爆(2026-08-07 事故)。每跳 12s 封顶。
+      maxTimeoutMs: 12000,
     });
     digest = result.content.trim().slice(0, 600);
   } catch (err) {
-    // info 级(只在失败时打,不刷屏):灰度排障要能看见 LLM 到底为啥没产出。
+    // warn 级:蒸馏失败 = AGI 记忆链断供,不能埋在 info 里无声烂掉(2026-08-07 12群全灭无人知)。
     const em = err instanceof Error ? err.message : String(err);
-    logger.info({ chatId, msgs: msgs.length, err: em.slice(0, 120) }, 'deep-reflection: LLM failed');
+    logger.warn({ chatId, msgs: msgs.length, err: em.slice(0, 120) }, 'deep-reflection: LLM failed');
     return 0;
   }
   if (digest.length < 10) {
@@ -92,10 +95,14 @@ export async function runDeepReflection(): Promise<void> {
   // 估算日 token,便于手调旋钮到目标(输入+输出粗算 ×1.15)。
   const ticksPerDay = Math.max(1, Math.round(1440 / e.REFLECTION_INTERVAL_MIN));
   const estPerDay = Math.round(approxInputTokens * 1.15 * ticksPerDay);
-  logger.info(
-    { reflected, chats: chatIds.length, approxInputTokens, estTokensPerDay: estPerDay, ticksPerDay },
-    'deep-reflection tick complete',
-  );
+  const summary = { reflected, chats: chatIds.length, approxInputTokens, estTokensPerDay: estPerDay, ticksPerDay };
+  // 全灭要亮红灯:蒸馏链静默断供是最难察觉的 AGI 退化(2026-08-07 两连 tick 12/12 全灭,
+  // info 级日志没人看,直到排查才发现)。有产出时维持 info 不刷屏。
+  if (reflected === 0) {
+    logger.warn(summary, 'deep-reflection tick STARVED — 0 chats reflected');
+  } else {
+    logger.info(summary, 'deep-reflection tick complete');
+  }
 }
 
 /** 回复注入用:该群的近况摘要(无则 null)。 */
