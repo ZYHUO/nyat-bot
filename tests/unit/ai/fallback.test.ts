@@ -6,21 +6,26 @@ import { parseJudgeAction } from '../../../src/pipeline/judge/micro.js';
 
 describe('parseJudgeAction', () => {
   it('parses valid JSON response', () => {
-    const result = parseJudgeAction('{"action": "REPLY", "replyPath": "planned", "replyTier": "pro", "confidence": 0.9, "reasoning": "asked a question"}');
+    const result = parseJudgeAction('{"action": "REPLY", "replyPath": "planned", "confidence": 0.9, "reasoning": "asked a question"}');
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
     expect(result!.replyPath).toBe('planned');
-    expect(result!.replyTier).toBe('pro');
     expect(result!.confidence).toBe(0.9);
     expect(result!.reasoning).toBe('asked a question');
   });
 
-  it('maps legacy REPLY_PRO to REPLY + planned + pro', () => {
+  it('maps legacy REPLY_PRO to REPLY + planned', () => {
     const result = parseJudgeAction('{"action": "REPLY_PRO", "confidence": 0.85}');
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
     expect(result!.replyPath).toBe('planned');
-    expect(result!.replyTier).toBe('pro');
+  });
+
+  it('maps legacy REPLY_MAX to REPLY + planned', () => {
+    const result = parseJudgeAction('{"action": "REPLY_MAX", "confidence": 0.85}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
   });
 
   it('parses IGNORE', () => {
@@ -48,7 +53,7 @@ describe('parseJudgeAction', () => {
   });
 
   it('extracts action from messy JSON', () => {
-    const result = parseJudgeAction('Sure, here is my decision:\n{"action": "REPLY", "replyTier": "normal"}\nLet me explain...');
+    const result = parseJudgeAction('Sure, here is my decision:\n{"action": "REPLY"}\nLet me explain...');
     // This won't parse as JSON directly, but regex should catch it
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
@@ -61,12 +66,11 @@ describe('parseJudgeAction', () => {
     expect(result!.confidence).toBe(0.3);
   });
 
-  it('maps REPLY_PRO keyword extraction to planned pro reply', () => {
+  it('maps REPLY_PRO keyword extraction to REPLY + planned', () => {
     const result = parseJudgeAction('This deserves a REPLY_PRO response');
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
     expect(result!.replyPath).toBe('planned');
-    expect(result!.replyTier).toBe('pro');
   });
 
   it('returns null for completely unparseable response', () => {
@@ -78,16 +82,14 @@ describe('parseJudgeAction', () => {
     const result = parseJudgeAction('{"action": "REPLY"}');
     expect(result).not.toBeNull();
     expect(result!.replyPath).toBe('direct');
-    expect(result!.replyTier).toBe('normal');
     expect(result!.confidence).toBe(0.5);
   });
 
   it('handles lowercase action values', () => {
-    const result = parseJudgeAction('{"action": "reply", "replyTier": "pro"}');
+    const result = parseJudgeAction('{"action": "reply"}');
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
     expect(result!.replyPath).toBe('direct');
-    expect(result!.replyTier).toBe('pro');
   });
 
   it('falls back to default reply path when replyPath is invalid', () => {
@@ -95,14 +97,6 @@ describe('parseJudgeAction', () => {
     expect(result).not.toBeNull();
     expect(result!.action).toBe('REPLY');
     expect(result!.replyPath).toBe('planned');
-    expect(result!.replyTier).toBe('pro');
-  });
-
-  it('defaults replyTier to normal for REPLY when omitted', () => {
-    const result = parseJudgeAction('{"action": "REPLY", "replyPath": "direct"}');
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe('REPLY');
-    expect(result!.replyTier).toBe('normal');
   });
 });
 
@@ -118,7 +112,7 @@ describe('Fallback chain logic', () => {
 
   it('callWithFallback is importable', async () => {
     // Verify the module can be imported without errors
-    const mod = await import('../../../src/ai/fallback.js');
-    expect(typeof mod.callWithFallback).toBe('function');
+    const { callWithFallback } = await import('../../../src/ai/fallback.js');
+    expect(typeof callWithFallback).toBe('function');
   });
 });

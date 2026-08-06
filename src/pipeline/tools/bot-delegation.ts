@@ -222,7 +222,7 @@ async function answerFromDelegation(
   if (recent.length === 0) return;
   const current = recent.at(-1)!;
   const contextStr = slimContextForAI(recent.slice(0, -1), current, botUid);
-  const systemPrompt = buildSystemPrompt('normal', undefined, chatId);
+  const systemPrompt = buildSystemPrompt(undefined, chatId);
   const userMsg =
     `[群聊上下文]\n${contextStr}\n\n` +
     `[代发结果] 你刚才替群里某人向 @${pending.bot} 发了 ${pending.command}${pending.args ? ' ' + pending.args : ''},它回的结果是:\n「${resultText}」\n\n` +

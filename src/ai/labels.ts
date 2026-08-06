@@ -3,7 +3,7 @@
 // ────────────────────────────────────────
 
 import type { AILabel, AIUsage } from './types.js';
-import { getProviders, getUsageRouting, getReplyMaxLabels, env } from '../env.js';
+import { getProviders, getUsageRouting, env } from '../env.js';
 import { AIConfigError } from '../shared/errors.js';
 
 let _labels: Map<string, AILabel> | undefined;
@@ -54,7 +54,7 @@ function ensureUsageLabelsExist(usageName: string, usage: AIUsage): AIUsage {
 
 /**
  * 核心部门（配 AI_USAGE_*）:
- *   reply / reply_pro / reply_max / judge / summarize / vision / deep_think
+ *   reply / judge / summarize / vision / deep_think
  * 可选: audio / mundo
  *
  * 历史名 → 核心部门（旧调用/旧 .env 仍可解析）
@@ -76,7 +76,6 @@ export function resolveUsageName(name: string): string {
 // Fallback defaults — 仅核心 + 可选重活；别名不在此表
 const USAGE_DEFAULTS: Record<string, AIUsage> = {
   reply:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
-  reply_pro: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 90_000 },
   vision:    { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
   audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
   judge:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 800,  temperature: 0 },
@@ -89,20 +88,6 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
 
 export function getUsage(name: string): AIUsage {
   const resolved = resolveUsageName(name);
-
-  // reply_max: randomly rotate from AI_USAGE_REPLY_MAX_LABELS
-  if (resolved === 'reply_max') {
-    const maxLabels = getReplyMaxLabels();
-    if (maxLabels.length === 0) {
-      throw new AIConfigError('AI_USAGE_REPLY_MAX_LABELS not configured');
-    }
-    const shuffled = [...maxLabels].sort(() => Math.random() - 0.5);
-    return ensureUsageLabelsExist(resolved, {
-      label: shuffled[0]!,
-      backups: shuffled.slice(1),
-      timeout: 180_000,
-    });
-  }
 
   // Check env-defined usage routing first
   const envUsage = getUsageRouting().get(resolved);

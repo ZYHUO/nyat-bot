@@ -13,7 +13,6 @@
 //   - 仅在 TIMING_GATE_ENABLED=true 时启用
 //   - 直接交互（mention/reply to self/private/command）跳过 gate（continue）
 //   - cooldown 期间跳过 gate（continue），避免短时反复消耗 token
-//   - 上一轮 judge.replyTier=max 时跳过 gate（用户都开 max 了别犹豫）
 //   - LLM 失败 / 解析失败 / 超时 → fail-open continue，避免节奏控制误屏蔽
 
 import type { FormattedMessage, JudgeResult } from '../../shared/types.js';
@@ -236,11 +235,6 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   if (input.isDirectInteraction) {
     return makeShortCircuit('continue', 'direct_interaction_bypass', start);
   }
-  // Bypass gate for highest-tier replies (user explicitly invoked max)
-  if (input.judgeResult.replyTier === 'max') {
-    return makeShortCircuit('continue', 'reply_tier_max_bypass', start);
-  }
-
   // 后续短路都要读 timing state:优先用 pipeline 预读快照(审计 #38),没有再读。
   let state: ChatTimingState | undefined = input.prefetchedState;
   if (state === undefined) {
@@ -345,7 +339,7 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   }
 
   const ctxStr = slimContextForAI(input.recentMessages, input.message, input.botUid);
-  const judgeSummary = `judge.action=${input.judgeResult.action} judge.rule=${input.judgeResult.rule ?? 'n/a'} judge.tier=${input.judgeResult.replyTier ?? 'normal'}`;
+  const judgeSummary = `judge.action=${input.judgeResult.action} judge.rule=${input.judgeResult.rule ?? 'n/a'}`;
   // P1-D gate 有状态化(MaiBot:gate 与 planner 共享历史,看得到自己过往节奏
   // 判断):把最近几次真实 LLM 决策注入,防反复横跳/连续 wait 拖延。
   let historyBlock: string | undefined;

@@ -4,7 +4,7 @@
 // post-send bookkeeping (extracted from pipeline.ts)
 // ────────────────────────────────────────
 
-import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath, ReplyTier } from "../../shared/types.js";
+import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath } from "../../shared/types.js";
 import { getRecent, addAssistant } from "../context/manager.js";
 import { retrieveContext } from "../context/retriever.js";
 import { runWriterRoute } from "../multiagent/writer-selector.js";
@@ -44,10 +44,6 @@ import {
 import { loadOverrideCached } from "../../admin/runtime-config.js";
 import { isMaster } from "../../admin/auth.js";
 import { getRedis } from "../../db/redis.js";
-import {
-  getRemainingMaxQuota,
-  consumeMaxQuota,
-} from "../../tracking/reply-max-quota.js";
 import { acquireChatLock } from "../../queue/chat-lock.js";
 import { AIError } from "../../shared/errors.js";
 import { isCallerAbort } from "../../shared/abort.js";
@@ -104,7 +100,6 @@ export async function generateAndSendReplies(args: {
   judgeResult: JudgeResult;
   botUid: number;
   effectiveReplyPath: ReplyPath;
-  effectiveReplyTier: ReplyTier;
   e: ReturnType<typeof env>;
   start: number;
   timings: Record<string, number>;
@@ -113,7 +108,7 @@ export async function generateAndSendReplies(args: {
 }): Promise<void> {
   const {
     job, formatted, judgeResult, botUid,
-    effectiveReplyPath, effectiveReplyTier,
+    effectiveReplyPath,
     e, start, timings, lockState, releaseHeldChatLock,
   } = args;
   let sendPermissionDenied = false;
@@ -189,17 +184,6 @@ export async function generateAndSendReplies(args: {
           logger.debug({ err, chatId: job.chatId }, "directive classify failed (non-critical)");
         }
       }
-    }
-
-    // 6. reply_max: quota check + thinking placeholder
-    if (effectiveReplyTier === "max") {
-      const remaining = getRemainingMaxQuota(formatted.uid);
-      if (remaining <= 0) {
-        await sender.sendDirect(job.chatId, "今天的深度思考次数已用完喵（每人每天3次）~", formatted.messageId);
-        logger.info({ chatId: job.chatId, uid: formatted.uid }, "reply_max quota exhausted");
-        return;
-      }
-      maxPlaceholderMsgId = await sendMessage(job.chatId, "💭 思考中…");
     }
 
     // 6b. Send typing indicator
@@ -347,7 +331,6 @@ export async function generateAndSendReplies(args: {
         chatId: job.chatId,
         botUid,
         replyPath: effectiveReplyPath,
-        replyTier: effectiveReplyTier,
         segmenterConfig,
         turnCallOpts,
       },
@@ -967,12 +950,6 @@ export async function generateAndSendReplies(args: {
       }
     }
 
-    // Consume max quota only after successful reply
-    if (effectiveReplyTier === "max") {
-      consumeMaxQuota(formatted.uid);
-      logger.info({ chatId: job.chatId, uid: formatted.uid }, "reply_max quota consumed after success");
-    }
-
     await reflectChatPathPolicy({
       chatId: job.chatId,
       message: formatted,
@@ -1122,7 +1099,7 @@ export async function generateAndSendReplies(args: {
       {
         chatId: job.chatId, messageId: formatted.messageId,
         action: judgeResult.action, replyPath: effectiveReplyPath,
-        replyTier: effectiveReplyTier, retrievalMode,
+        retrievalMode,
         recentCount: retrievedContext.recent.length,
         semanticCount: retrievedContext.semantic.length,
         threadCount: retrievedContext.thread.length,

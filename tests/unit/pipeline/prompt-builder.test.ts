@@ -17,7 +17,6 @@ vi.mock('../../../src/shared/config.js', () => {
     'contract/reply-schema.json': '{"type":"object","required":["replyContent"]}',
     'style/tone.md': '# L4 Style\nBe concise.',
     'task/reply.md': '# Reply Task\nReply to the message.',
-    'task/reply-pro.md': '# Reply Pro Task\nReply with depth.',
   };
 
   return {
@@ -30,6 +29,7 @@ vi.mock('../../../src/shared/config.js', () => {
     getConfig: () => ({
       promptsDir: '/mock/prompts',
       migrationsDir: '/mock/migrations',
+      personaDir: '/mock/persona',
     }),
     _resetPromptCache: () => {},
   };
@@ -42,37 +42,22 @@ describe('Prompt Builder', () => {
 
   describe('buildSystemPrompt', () => {
     it('builds correct 5-layer prompt for normal tier', () => {
-      const prompt = buildSystemPrompt('normal');
+      const prompt = buildSystemPrompt();
       expect(prompt).toContain('# L1 Identity');
       expect(prompt).toContain('# L2 Safety');
       expect(prompt).toContain('# L3 — 输出契约');
       expect(prompt).toContain('# L4 Style');
       expect(prompt).toContain('# Reply Task');
-      expect(prompt).not.toContain('Reply Pro Task');
-    });
-
-    it('pro tier keeps the reply.md base and appends the pro addendum', () => {
-      // reply.md 是基座(目标选择等硬规则),pro/max 是差异附录 —— 替换式
-      // 装配会让深度回复丢失 targetMessageId 硬规则(回错人)。
-      const prompt = buildSystemPrompt('pro');
-      expect(prompt).toContain('# L1 Identity');
-      expect(prompt).toContain('# L2 Safety');
-      expect(prompt).toContain('# L3 — 输出契约');
-      expect(prompt).toContain('# L4 Style');
-      expect(prompt).toContain('# Reply Task');
-      expect(prompt).toContain('# Reply Pro Task');
-      // 附录在基座之后
-      expect(prompt.indexOf('# Reply Pro Task')).toBeGreaterThan(prompt.indexOf('# Reply Task'));
     });
 
     it('includes JSON schema in contract layer', () => {
-      const prompt = buildSystemPrompt('normal');
+      const prompt = buildSystemPrompt();
       expect(prompt).toContain('"type":"object"');
       expect(prompt).toContain('"replyContent"');
     });
 
     it('uses section separators between layers', () => {
-      const prompt = buildSystemPrompt('normal');
+      const prompt = buildSystemPrompt();
       expect(prompt).toContain('---');
     });
   });

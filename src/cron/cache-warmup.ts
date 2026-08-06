@@ -24,7 +24,7 @@ export async function runCacheWarmup(): Promise<void> {
   try {
     // 与**主流 normal 档、默认人设**回复同一份 system 前缀(DeepSeek 自动缓存最长公共前缀 = 这段 system)。
     // 注:pro/max 档、per-user persona、merged-tools 的 system 前缀不同,预热不覆盖那些少数路径。
-    const system = buildSystemPrompt('normal');
+    const system = buildSystemPrompt();
     await callWithFallback({
       usage: 'reply',
       messages: [

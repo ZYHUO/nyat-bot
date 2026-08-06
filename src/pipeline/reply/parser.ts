@@ -315,6 +315,14 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
     return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
   }
 
+  // 3.95 CoT 泄漏安全网:模型把英文推理过程当正文吐出来(无 <think> 标签包裹)。
+  // kimi-k3 经 newapi 偶发 —— "Let me look at the context…" / "Let me think about this…"
+  // 这类文本绝不该发到群里 → 降级沉默 + warn 留痕。
+  if (looksLikeChainOfThought(trimmed)) {
+    logger.warn({ rawHead: trimmed.slice(0, 120) }, 'AI leaked chain-of-thought as reply — degrading to silent');
+    return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
+  }
+
   // 4. Plain text fallback — treat entire response as reply content
   logger.debug('Using plain text fallback for AI response');
   return truncateReply({
@@ -328,6 +336,23 @@ function looksLikeReplySchema(s: string): boolean {
   // 真回复的 replyContent 是 string 值,不会出现 "$schema": / "title": / "oneOf" / "$defs" 这种 JSON 键
   if (!/"(?:\$schema|title)"\s*:\s*"/.test(s)) return false;
   return /"oneOf"|"properties"|"\$defs"/.test(s);
+}
+
+/**
+ * 检测模型是否把英文推理过程(CoT)当正文吐出来。
+ * kimi-k3 经 newapi 偶发无标签推理文本:"Let me look at the context…" / "Let me think about this…"
+ * 这类文本绝不该发到群里。
+ */
+function looksLikeChainOfThought(s: string): boolean {
+  const t = s.trim();
+  if (t.length < 20) return false;
+  // 英文推理开头模式:Let me / Let me look / Let me think / I need to / Looking at / This is a …
+  // 且后续内容像分析/推理(提到 context / channel / chat / message / reply)
+  const startsWithReasoning = /^(?:Let me |Let me look |Let me think |I need to |Looking at |This is a |I should |I'll |I will |First, |First let me |Okay, |OK, |So, |Alright, )/i.test(t);
+  if (!startsWithReasoning) return false;
+  // 确认是推理而非正常回复:包含分析性词汇
+  const hasAnalysisWords = /(?:context|channel|chat|message|reply|respond|user|group|analyze|check|verify|consider|think|reason|figure|decide|determine)/i.test(t);
+  return hasAnalysisWords;
 }
 
 /**

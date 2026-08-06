@@ -323,7 +323,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         level: "L0_RULE",
         rule: l0?.action === "REPLY" && l0.rule ? l0.rule : "turn_replan",
         replyPath: l0?.action === "REPLY" ? l0.replyPath : undefined,
-        replyTier: l0?.action === "REPLY" ? l0.replyTier : undefined,
         confidence: 1,
         latencyMs: 0,
       };

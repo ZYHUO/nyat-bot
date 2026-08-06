@@ -2,9 +2,9 @@
 // Reply Orchestrator — generate reply via AI
 // ────────────────────────────────────────
 
-import { resolveReplyPath, resolveReplyTier } from '../../shared/types.js';
+import { resolveReplyPath } from '../../shared/types.js';
 import { isDM } from '../../shared/chat.js';
-import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath, ReplyTier } from '../../shared/types.js';
+import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath } from '../../shared/types.js';
 import type { JudgeAction } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
 import { AIError } from '../../shared/errors.js';
@@ -43,11 +43,9 @@ import { assembleBurstHint, type CtxPart } from './burst-hint.js';
 const MAX_DUPLICATE_RETRIES = 1;
 const MAX_MULTI_REPLY_RETRIES = 1;
 const MAX_TOOL_ARTIFACT_RETRIES = 1;
-const REPLY_CONTEXT_BUDGET: Record<ReplyTier, number> = {
-  normal: 48_000,
-  pro: 72_000,
-  max: 100_000,
-};
+// Context token budget for the reply model. Was tiered (normal/pro/max = 48k/72k/100k);
+// tier system removed — single budget, former 'pro' value as the balance point.
+const REPLY_CONTEXT_BUDGET = 72_000;
 
 const MAX_EMPTY_RETRIES = 1; // 1 retry:大多空响应一次即恢复;避免和下游 6 个 regen 分支叠乘放大调用数
 const stripThinking = (s: string): string => s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
@@ -183,7 +181,6 @@ export async function generateReply(
   chatId: number,
   botUid: number,
   replyPath?: ReplyPath,
-  replyTier?: ReplyTier,
   segmenterConfig?: Partial<SegmenterConfig>,
   callOpts?: {
     signal?: AbortSignal;
@@ -270,15 +267,14 @@ export async function generateReply(
   // burstHint 在 stateParts 组装完成后再拼(见 memberRoster 之后)
   const start = performance.now();
   const effectiveReplyPath = resolveReplyPath(action, replyPath) ?? 'direct';
-  const effectiveReplyTier = resolveReplyTier(action, replyTier) ?? 'normal';
 
   // 1. Build system prompt (5-layer)
-  const systemPrompt = buildSystemPrompt(effectiveReplyTier, message.uid, chatId);
+  const systemPrompt = buildSystemPrompt(message.uid, chatId);
 
   // 2. Compress and format context — 复用 retriever 已算好的 slim 串与 token 数,
   //    避免对同一份 merged 再 slim+tiktoken 一遍(同步编码阻塞 event loop)。
   const contextStr = retrievedContext.contextStr ?? slimContextForAI(retrievedContext.merged, message, botUid);
-  const budget = REPLY_CONTEXT_BUDGET[effectiveReplyTier];
+  const budget = REPLY_CONTEXT_BUDGET;
   // Fast path: for CJK-heavy content, use ~2 chars/token heuristic to skip the
   // tokenizer when clearly over budget; reuse retriever's exact count when present.
   const contextTokens = retrievedContext.contextStr !== undefined
@@ -375,7 +371,9 @@ export async function generateReply(
     }
   }
 
-  const useRichContext = effectiveReplyPath === 'planned' || effectiveReplyTier === 'pro' || effectiveReplyTier === 'max';
+  // Was: planned path OR pro/max tier → rich context. Tier removed; planned-only
+  // would silently drop member roster/persona for direct chat — keep rich for all.
+  const useRichContext = true;
   const exactReplyCount = detectExactReplyCountRequest(message);
 
   // 3.6-3.9 Fetch rich context in parallel where possible
@@ -509,8 +507,7 @@ export async function generateReply(
     // gemini 爱啰嗦→压极简)。keep=2 必留、order=77 紧贴 CURRENT。用主 label 的 model
     // (fallback 到 backup 的少数情况仍用主模型的补丁,可接受)。
     try {
-      const replyUsage = effectiveReplyTier === 'pro' ? 'reply_pro' : 'reply';
-      const nudge = modelStyleNudge(getLabel(getUsage(replyUsage).label).model);
+      const nudge = modelStyleNudge(getLabel(getUsage('reply').label).model);
       if (nudge) stateParts.pushP(77, 2, nudge);
     } catch { /* non-critical:label 解析失败就不补 */ }
     // 微反应群提示(千雪对标):本群说话都很短 → bot 也要敢发 2-10 字
@@ -643,9 +640,7 @@ export async function generateReply(
   let toolResultsBlock: string | undefined = callOpts?.prebuiltToolResults;
   // 编排器已做工具决策(研究员跑过)→ 写手纯文本,不再自己调工具/重新决策。
   const orchestratorHandled = callOpts?.toolDecisionHandled === true;
-  const usage = effectiveReplyTier === 'max' ? 'reply_max'
-    : effectiveReplyTier === 'pro' ? 'reply_pro'
-    : 'reply';
+  const usage = 'reply';
   let toolsUsed: string[] = [];
   let toolExecutionFailed = false;
 
@@ -1016,7 +1011,6 @@ export async function generateReply(
     chatId,
     action,
     replyPath: effectiveReplyPath,
-    replyTier: effectiveReplyTier,
     model: result.model,
     tokens: result.tokenUsage.total,
     latencyMs,

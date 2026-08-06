@@ -2,8 +2,8 @@
 // L1 Micro model judge
 // ────────────────────────────────────────
 
-import { resolveReplyPath, resolveReplyTier } from '../../shared/types.js';
-import type { FormattedMessage, JudgeAction, JudgeResult, ReplyPath, ReplyTier } from '../../shared/types.js';
+import { resolveReplyPath } from '../../shared/types.js';
+import type { FormattedMessage, JudgeAction, JudgeResult, ReplyPath } from '../../shared/types.js';
 import type { AICallResult } from '../../ai/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
 import { slimContextForAI } from '../context/slim.js';
@@ -12,10 +12,9 @@ import { getConfig } from '../../shared/config.js';
 import { logger } from '../../shared/logger.js';
 import { AIConfigError } from '../../shared/errors.js';
 
-const VALID_ACTIONS = new Set(['REPLY', 'REPLY_PRO', 'REPLY_MAX', 'IGNORE', 'REJECT'] as const);
-type RawJudgeAction = 'REPLY' | 'REPLY_PRO' | 'REPLY_MAX' | 'IGNORE' | 'REJECT';
+const VALID_ACTIONS = new Set(['REPLY', 'IGNORE', 'REJECT'] as const);
+type RawJudgeAction = 'REPLY' | 'IGNORE' | 'REJECT';
 const VALID_REPLY_PATHS = new Set<ReplyPath>(['direct', 'planned']);
-const VALID_REPLY_TIERS = new Set<ReplyTier>(['normal', 'pro', 'max']);
 
 function parseReplyPath(raw: unknown): ReplyPath | undefined {
   if (typeof raw !== 'string') return undefined;
@@ -24,32 +23,17 @@ function parseReplyPath(raw: unknown): ReplyPath | undefined {
   return normalized as ReplyPath;
 }
 
-function parseReplyTier(raw: unknown): ReplyTier | undefined {
-  if (typeof raw !== 'string') return undefined;
-  const normalized = raw.toLowerCase();
-  if (!VALID_REPLY_TIERS.has(normalized as ReplyTier)) return undefined;
-  return normalized as ReplyTier;
-}
-
 function normalizeJudgeDecision(
   actionRaw: string,
   replyPath?: ReplyPath,
-  replyTier?: ReplyTier,
-): { action: JudgeAction; replyPath?: ReplyPath; replyTier?: ReplyTier } | null {
+): { action: JudgeAction; replyPath?: ReplyPath } | null {
   const normalizedAction = actionRaw.toUpperCase();
-  if (normalizedAction === 'REPLY_PRO') {
+  // Legacy tier actions (REPLY_PRO / REPLY_MAX): model may still emit them from a cached prompt.
+  // Tier system removed — degrade gracefully to plain REPLY instead of parse failure.
+  if (normalizedAction === 'REPLY_PRO' || normalizedAction === 'REPLY_MAX') {
     return {
       action: 'REPLY',
       replyPath: 'planned',
-      replyTier: 'pro',
-    };
-  }
-
-  if (normalizedAction === 'REPLY_MAX') {
-    return {
-      action: 'REPLY',
-      replyPath: 'planned',
-      replyTier: 'max',
     };
   }
 
@@ -61,11 +45,10 @@ function normalizeJudgeDecision(
   return {
     action,
     replyPath: resolveReplyPath(action, replyPath),
-    replyTier: resolveReplyTier(action, replyTier),
   };
 }
 
-export function parseJudgeAction(raw: string): { action: JudgeAction; replyPath?: ReplyPath; replyTier?: ReplyTier; confidence: number; reasoning: string } | null {
+export function parseJudgeAction(raw: string): { action: JudgeAction; replyPath?: ReplyPath; confidence: number; reasoning: string } | null {
   // Strip markdown code blocks
   let cleaned = raw.trim();
   cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
@@ -75,15 +58,13 @@ export function parseJudgeAction(raw: string): { action: JudgeAction; replyPath?
   try {
     const parsed = JSON.parse(cleaned) as Record<string, unknown>;
     const action = (parsed['action'] ?? parsed['ACTION']) as string | undefined;
-    if (action && VALID_ACTIONS.has(action.toUpperCase() as RawJudgeAction)) {
+    if (action) {
       const replyPath = parseReplyPath(parsed['replyPath'] ?? parsed['reply_path'] ?? parsed['REPLY_PATH']);
-      const replyTier = parseReplyTier(parsed['replyTier'] ?? parsed['reply_tier'] ?? parsed['REPLY_TIER']);
-      const decision = normalizeJudgeDecision(action, replyPath, replyTier);
+      const decision = normalizeJudgeDecision(action, replyPath);
       if (!decision) return null;
       return {
         action: decision.action,
         replyPath: decision.replyPath,
-        replyTier: decision.replyTier,
         confidence: typeof parsed['confidence'] === 'number' ? parsed['confidence'] : 0.5,
         reasoning: typeof parsed['reasoning'] === 'string' ? parsed['reasoning'] : '',
       };
@@ -96,17 +77,14 @@ export function parseJudgeAction(raw: string): { action: JudgeAction; replyPath?
   const jsonMatch = cleaned.match(/"(?:action|ACTION)"\s*:\s*"(REPLY_MAX|REPLY_PRO|REPLY|IGNORE|REJECT)"/i);
   if (jsonMatch?.[1]) {
     const replyPathMatch = cleaned.match(/"(?:replyPath|reply_path|REPLY_PATH)"\s*:\s*"(direct|planned)"/i);
-    const replyTierMatch = cleaned.match(/"(?:replyTier|reply_tier|REPLY_TIER)"\s*:\s*"(normal|pro|max)"/i);
     const decision = normalizeJudgeDecision(
       jsonMatch[1],
       parseReplyPath(replyPathMatch?.[1]),
-      parseReplyTier(replyTierMatch?.[1]),
     );
     if (!decision) return null;
     return {
       action: decision.action,
       replyPath: decision.replyPath,
-      replyTier: decision.replyTier,
       confidence: 0.5,
       reasoning: '',
     };
@@ -121,7 +99,6 @@ export function parseJudgeAction(raw: string): { action: JudgeAction; replyPath?
       return {
         action: decision.action,
         replyPath: decision.replyPath,
-        replyTier: decision.replyTier,
         confidence: 0.3,
         reasoning: '',
       };
@@ -197,7 +174,6 @@ export async function microJudge(
   return {
     action: parsed.action,
     replyPath: parsed.replyPath,
-    replyTier: parsed.replyTier,
     level: 'L1_MICRO',
     confidence: parsed.confidence,
     reasoning: parsed.reasoning,

@@ -84,7 +84,6 @@ function toJudgeResult(act: HeartAct, path: 'chat' | 'lookup', latencyMs: number
     level: 'L2_AI',
     rule: 'heart',
     replyPath: path === 'lookup' ? 'planned' : 'direct',
-    replyTier: 'normal',
     confidence: 1,
     latencyMs,
   };

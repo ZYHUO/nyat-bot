@@ -81,7 +81,7 @@ export async function generatePersonaProactiveText(
     if (recent.length === 0) return null;
     const current = recent.at(-1)!;
     const contextStr = slimContextForAI(recent.slice(0, -1), current, botUid);
-    const systemPrompt = buildSystemPrompt('normal', undefined, chatId);
+    const systemPrompt = buildSystemPrompt(undefined, chatId);
 
     // P2-A: 记忆驱动 — 搜索 Qdrant 相关记忆
     let memoryBlock = '';

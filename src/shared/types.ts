@@ -51,22 +51,15 @@ export interface FormattedMessage {
 
 export type JudgeAction = 'REPLY' | 'IGNORE' | 'REJECT';
 export type ReplyPath = 'direct' | 'planned';
-export type ReplyTier = 'normal' | 'pro' | 'max';
 
 export function resolveReplyPath(action: JudgeAction, replyPath?: ReplyPath): ReplyPath | undefined {
   if (action === 'REPLY') return replyPath ?? 'direct';
   return undefined;
 }
 
-export function resolveReplyTier(action: JudgeAction, replyTier?: ReplyTier): ReplyTier | undefined {
-  if (action === 'REPLY') return replyTier ?? 'normal';
-  return undefined;
-}
-
 export interface JudgeResult {
   action: JudgeAction;
   replyPath?: ReplyPath;
-  replyTier?: ReplyTier;
   level: 'L0_RULE' | 'L1_MICRO' | 'L2_AI';
   rule?: string;
   confidence?: number;

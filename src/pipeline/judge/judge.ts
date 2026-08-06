@@ -120,7 +120,6 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
         rule: l0Result.rule,
         action: l0Result.action,
         replyPath: l0Result.replyPath,
-        replyTier: l0Result.replyTier,
         ms: l0Result.latencyMs,
       },
       "L0 rule matched",
@@ -158,7 +157,6 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
       {
         action: l1Result.action,
         replyPath: l1Result.replyPath,
-        replyTier: l1Result.replyTier,
         confidence: l1Result.confidence,
         ms: l1Result.latencyMs,
       },
@@ -188,11 +186,9 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     {
       action: l2Result.action,
       replyPath: l2Result.replyPath,
-      replyTier: l2Result.replyTier,
       confidence: l2Result.confidence,
       l1Action: l1Result.action,
       l1ReplyPath: l1Result.replyPath,
-      l1ReplyTier: l1Result.replyTier,
       l1Confidence: l1Result.confidence,
       totalMs,
     },

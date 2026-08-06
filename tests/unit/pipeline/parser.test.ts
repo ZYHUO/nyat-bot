@@ -200,9 +200,38 @@ describe('Reply Parser', () => {
     });
 
     it('schema 反刍(带 ```json 围栏)→ 仍降级 silent', () => {
-      const raw = '```json\n{"$schema":"http://json-schema.org/draft-07/schema#","title":"ReplyOutput","oneOf":[...],"$defs":{}}\n```';
+      const raw = '```json\\n{"$schema":"http://json-schema.org/draft-07/schema#","title":"ReplyOutput","oneOf":[...],"$defs":{}}\\n```';
       const result = parseSingle(raw, fallbackId);
       expect(result.action).toBe('silent');
+    });
+
+    it('CoT 泄漏(英文推理文本)→ 降级 silent,绝不发到群里(kimi-k3 偶发)', () => {
+      const cotSamples = [
+        'Let me look at the context. This is a channel (频道) "啾咪囝の碎碎念" — which seems to be my own channel actually',
+        'Let me think about this. The chat is a channel called "碎碎念" and I need to figure out what to reply',
+        'I need to check the context before responding to this message from the user',
+        'Looking at the messages, I should consider what the group is talking about',
+        'Okay, let me analyze this conversation and decide how to reply to the user',
+        'This is a group chat message and I need to determine the appropriate response',
+      ];
+      for (const raw of cotSamples) {
+        const result = parseSingle(raw, fallbackId);
+        expect(result.action).toBe('silent');
+        expect(result.replyContent).toBe('');
+      }
+    });
+
+    it('正常回复不会被误判为 CoT(中文/短句/无分析词)', () => {
+      const okSamples = [
+        '本喵觉得你说得对呢',
+        'Let me tell you a story about cats',
+        'So cute! 我也想养一只喵',
+        '好的马上去',
+      ];
+      for (const raw of okSamples) {
+        const result = parseSingle(raw, fallbackId);
+        expect(result.replyContent).not.toBe('');
+      }
     });
 
     it('正常回复里偶尔出现 "title" 字样不会被误判为 schema', () => {

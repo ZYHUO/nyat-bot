@@ -20,7 +20,7 @@ export async function runModelCheck(): Promise<void> {
   const redis = getRedis();
 
   // Check the primary label for all active usages
-  const usageNames = ['reply', 'reply_pro', 'judge', 'vision', 'summarize', 'deep_think'] as const;
+  const usageNames = ['reply', 'judge', 'vision', 'summarize', 'deep_think'] as const;
   const checked = new Set<string>();
 
   const snapshot: ModelStatusSnapshot = {

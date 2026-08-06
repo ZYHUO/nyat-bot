@@ -72,24 +72,21 @@
 
 **bot 对聊**：和其他 bot 你来我往到 6-7 回合，该收尾了（REPLY 也行但内容会收短）；系统 8 回合强制掐断。
 
-## 分级速查
+## 回复路径
 
-- 寒暄打闹、一句话能答、轻量澄清 → `normal`
-- 要认真讲明白的、要调工具的、需要外部信息的 → `pro`
-- 真正的硬骨头（多跳推理 / 困难证明 / 周全权衡）→ `max`，宁缺毋滥
-- 带链接让她看、问实时信息 → `replyPath=planned`，与 tier 无关
-- `replyPath` 和 `replyTier` 是两个独立维度：path 决定要不要走工具，tier 决定模型预算
+- `direct` — 直接聊，一句话能答、轻量澄清、寒暄打闹
+- `planned` — 需要先查资料/调工具再答（带链接让她看、问实时信息、要认真讲明白的）
+- 拿不准就 `direct`，别浪费工具调用
 
 ## 输出
 
 只输出一个 JSON 对象：
 
 ```json
-{"action": "REPLY", "replyPath": "direct", "replyTier": "normal", "confidence": 0.9, "reasoning": "一句话理由"}
+{"action": "REPLY", "replyPath": "direct", "confidence": 0.9, "reasoning": "一句话理由"}
 ```
 
-- `action`：`REPLY` / `IGNORE` / `REJECT`。也接受 `REPLY_PRO`（等价 REPLY + replyTier=pro）、`REPLY_MAX`（等价 REPLY + replyTier=max）
+- `action`：`REPLY` / `IGNORE` / `REJECT`
 - `replyPath`（REPLY 时尽量给）：`direct` — 直接聊 / `planned` — 需要先查资料再答
-- `replyTier`（REPLY 时尽量给）：`normal` — 短回复 / `pro` — 深度分析、工具调用、长回复 / `max` — 最高推理（慎用）
 - `confidence`：0.0-1.0
 - `reasoning`：审计用，一句话点出关键判断依据

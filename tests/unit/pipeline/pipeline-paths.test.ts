@@ -77,7 +77,6 @@ vi.mock("../../../src/pipeline/judge/micro.js", () => ({
   microJudge: vi.fn().mockResolvedValue({
     action: "REPLY",
     replyPath: "direct",
-    replyTier: "normal",
     level: "L1_MICRO",
     latencyMs: 0,
   }),
@@ -315,7 +314,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       rule: "mention_self",
       level: "L0_RULE",
       latencyMs: 0,
@@ -332,7 +330,6 @@ describe("processPipeline path branching", () => {
       -100123,
       9999,
       "direct",
-      "normal",
       undefined,
       expect.objectContaining({ isAddressed: true }), // mention_self → NL 命令可触发
     );
@@ -342,7 +339,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -362,7 +358,6 @@ describe("processPipeline path branching", () => {
       -100123,
       9999,
       "direct",
-      "normal",
       undefined,
       expect.objectContaining({ isAddressed: false }),
     );
@@ -370,7 +365,6 @@ describe("processPipeline path branching", () => {
       expect.objectContaining({
         action: "REPLY",
         replyPath: "direct",
-        replyTier: "normal",
         retrievalMode: "direct",
         recentCount: 1,
         semanticCount: 1,
@@ -400,7 +394,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -420,7 +413,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -449,7 +441,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "planned",
-      replyTier: "pro",
       level: "L2_AI",
       latencyMs: 30,
     });
@@ -469,7 +460,6 @@ describe("processPipeline path branching", () => {
       -100123,
       9999,
       "planned",
-      "pro",
       undefined,
       expect.objectContaining({ isAddressed: false }),
     );
@@ -477,7 +467,6 @@ describe("processPipeline path branching", () => {
       expect.objectContaining({
         action: "REPLY",
         replyPath: "planned",
-        replyTier: "pro",
         retrievalMode: "planned",
         recentCount: 1,
         semanticCount: 1,
@@ -502,7 +491,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -527,7 +515,6 @@ describe("processPipeline path branching", () => {
       -100123,
       9999,
       "planned",
-      "normal",
       undefined,
       expect.objectContaining({ isAddressed: false }),
     );
@@ -558,7 +545,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -590,7 +576,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -629,7 +614,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 12,
     });
@@ -665,7 +649,6 @@ describe("processPipeline path branching", () => {
       action: "REPLY",
       rule: "reply_to_self",
       replyPath: "direct",
-      replyTier: "normal",
       level: "L0_RULE",
       latencyMs: 0,
     });
@@ -696,7 +679,6 @@ describe("processPipeline path branching", () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",
       replyPath: "chat",
-      replyTier: "normal",
       level: "L1_MICRO",
       latencyMs: 0,
     });

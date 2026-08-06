@@ -17,7 +17,7 @@ describe('cache-warmup', () => {
 
   it('pings with the static normal-tier system prefix and suppresses metrics', async () => {
     await runCacheWarmup();
-    expect(mockBuildSystem).toHaveBeenCalledWith('normal');
+    expect(mockBuildSystem).toHaveBeenCalledWith();
     expect(mockCall).toHaveBeenCalledTimes(1);
     const arg = mockCall.mock.calls[0]![0] as { usage: string; messages: Array<{ role: string; content: string }>; suppressMetrics: boolean; maxTokens: number };
     expect(arg.usage).toBe('reply');

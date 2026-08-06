@@ -7,7 +7,6 @@ import { ModelTier } from './types.js';
 const USAGE_TIER_MAP: Record<string, ModelTier> = {
   judge: ModelTier.M1_MICRO,
   reply: ModelTier.M2_FAST,
-  reply_pro: ModelTier.M3_MAIN,
   vision: ModelTier.M3_MAIN,
   summarize: ModelTier.M1_MICRO,
 };
