@@ -23,7 +23,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT_DIR"
 QDRANT_VERSION="${QDRANT_VERSION:-1.18.1}"
 QDRANT_BIN="/usr/local/bin/qdrant"
 QDRANT_STORAGE="${ROOT_DIR}/data/qdrant"
-AI_PROVIDERS=(REPLY REPLY_PRO VISION JUDGE SUMMARIZE ALLOWLIST_REVIEW)
+AI_PROVIDERS=(REPLY VISION JUDGE SUMMARIZE ALLOWLIST_REVIEW)
 
 [ -f "$ROOT_DIR/package.json" ] || { echo "找不到项目根（别用 curl|bash，请先 git clone 再 cd 进去运行 ./scripts/deploy.sh）" >&2; exit 1; }
 
