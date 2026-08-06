@@ -369,6 +369,11 @@ const envSchema = z.object({
   EPISODE_DISTILL_ENABLED: booleanFromEnv.default(false),
   EPISODE_RECALL_ENABLED: booleanFromEnv.default(false),
   DISTILL_USAGE: z.string().default('summarize'),
+  // ── AGI Level 4 P4-B: 好奇心目标追踪 ───────────────────────────────
+  // 把「值得持续关注的事」固化为 goal，周期性 CodeAct 查进展并汇报。
+  GOAL_TRACKER_ENABLED: booleanFromEnv.default(false),
+  GOAL_CHECK_INTERVAL_MIN: z.coerce.number().int().positive().default(120),
+  GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(5),
   // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),

@@ -710,11 +710,26 @@ history.push({
           )
           .then((r) => {
             if (r?.followUpGoal) {
-              // P4-B 钩子占位：goal tracker 落地后接 createGoal。
-              logger.info({ taskId: task.id, followUpGoal: r.followUpGoal }, 'distill suggests follow-up goal');
+              // P4-B 钩子：复盘发现值得持续关注的事 → 立 goal。
+              void import('../agent/goals.js').then(({ createGoal }) =>
+                createGoal({ topic: r.followUpGoal!, origin: `episode:${task.id}`, chatId: task.chatId }, env().GOAL_MAX_ACTIVE),
+              );
             }
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'episode distill failed'));
+      }
+
+      // P4-B: goal 任务的检查结果回写 —— endTask 摘要解析 finding。
+      // 模型按 contentDirection 要求输出 "found: …" 或 "no_update"。
+      if (env().GOAL_TRACKER_ENABLED) {
+        const goalMatch = task.contentDirection.match(/\[goal:(\d+)\]/);
+        if (goalMatch) {
+          const goalId = Number(goalMatch[1]);
+          const found = endSummary.match(/^found:\s*(.+)$/im)?.[1]?.trim();
+          void import('../agent/goals.js')
+            .then(({ recordCheck }) => recordCheck(goalId, found ? found.slice(0, 500) : null))
+            .catch((err) => logger.warn({ err, goalId }, 'goal recordCheck failed'));
+        }
       }
 
       await state.enqueueCallbackAsync({

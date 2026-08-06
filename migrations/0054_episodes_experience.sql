@@ -31,3 +31,6 @@ END;
 CREATE TRIGGER IF NOT EXISTS experience_ad AFTER DELETE ON experience_entries BEGIN
   INSERT INTO experience_fts(experience_fts, rowid, content, tags) VALUES('delete', old.id, old.content, old.tags);
 END;
+-- 注意：FTS 外部内容表标准三触发器里缺 AFTER UPDATE 是**故意的**——
+-- content/tags 字段永不被 UPDATE（只有 use_count/last_used_at 会变）。
+-- 若未来要 UPDATE content/tags，必须先补 experience_au 触发器，否则索引不同步。

@@ -322,6 +322,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // P4-B: Goal check — 周期性推进持续关注的目标（有自己的事）
+  if (env().GOAL_TRACKER_ENABLED) {
+    tasks.push(schedule(`*/${env().GOAL_CHECK_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('goal-check', async () => {
+        const { runGoalCheck } = await import('./goal-check.js');
+        await runGoalCheck();
+      });
+    }));
+  }
+
   // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
   if (env().RSS_MONITOR_ENABLED) {
     tasks.push(schedule(`*/${env().RSS_MONITOR_INTERVAL_MIN} * * * *`, () => {

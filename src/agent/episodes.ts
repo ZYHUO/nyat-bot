@@ -114,8 +114,8 @@ export function findRelevantExperience(query: string, limit = 3): ExperienceHit[
       )
       .all(ftsQuery, limit * 3) as { id: number; content: string; kind: string }[];
     if (!rows.length) return [];
-    // 优先低使用次数的（新经验优先曝光），截到 limit
-    rows.sort((a, b) => a.id - b.id);
+    // FTS rank（相关性）优先，相关性相当时新经验优先曝光。
+    // ORDER BY rank 已按相关性排好，这里只在截取前按 id DESC 稳定同分序，不再重排。
     const picked = rows.slice(0, limit);
     const bump = db.prepare(`UPDATE experience_entries SET use_count = use_count + 1, last_used_at = ? WHERE id = ?`);
     const ts = nowSec();

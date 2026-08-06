@@ -25,6 +25,7 @@ interface SelfPlayVerdict {
   idea: string;
   plan: string[];
   reason: string;
+  followUpGoal?: string | null;
 }
 
 function parseVerdict(raw: string): SelfPlayVerdict | null {
@@ -36,11 +37,16 @@ function parseVerdict(raw: string): SelfPlayVerdict | null {
     const plan = Array.isArray(obj['plan'])
       ? (obj['plan'] as unknown[]).filter((x): x is string => typeof x === 'string').slice(0, 6)
       : [];
+    const followUpGoal =
+      typeof obj['follow_up_goal'] === 'string' && (obj['follow_up_goal'] as string).trim().length >= 4
+        ? (obj['follow_up_goal'] as string).trim().slice(0, 100)
+        : null;
     return {
       play: obj['play'] === true,
       idea: typeof obj['idea'] === 'string' ? (obj['idea'] as string).slice(0, 200) : '',
       plan,
       reason: typeof obj['reason'] === 'string' ? (obj['reason'] as string).slice(0, 120) : '',
+      followUpGoal,
     };
   } catch {
     return null;
@@ -93,7 +99,9 @@ play=false 的正当理由：
 - plan: 2-5 步计划（每一步是可执行的：写文件→运行→验证→迭代）
 - reason: 为什么现在想做这个
 
-只输出 JSON：{"play": true/false, "idea": "…", "plan": ["…"], "reason": "…"}`;
+只输出 JSON：{"play": true/false, "idea": "…", "plan": ["…"], "reason": "…", "follow_up_goal": "…" 或 null}
+
+follow_up_goal（可选）：玩的过程中如果发现某件事值得**长期持续关注**（不是这次玩完就结束的），用一句话说出要关注什么，系统会替你定期检查进展。例如"主人的 Sub2API 项目版本更新"。没有就输出 null。`;
 
   try {
     const result = await Promise.race([
@@ -195,6 +203,18 @@ export async function runSelfPlay(): Promise<void> {
 
   // 5. 模型自主决策
   const verdict = await decideSelfPlay(recentText, history, e);
+
+  // P4-B: 发现值得持续关注的事就立 goal —— 好奇心不依赖行动力，
+  // 即使这次决定不玩（play=false）也保留这颗种子。
+  if (verdict.followUpGoal && env().GOAL_TRACKER_ENABLED) {
+    try {
+      const { createGoal } = await import('../agent/goals.js');
+      createGoal({ topic: verdict.followUpGoal, origin: 'self', chatId: masterUid > 0 ? masterUid : null }, env().GOAL_MAX_ACTIVE);
+    } catch (err) {
+      logger.debug({ err }, 'self-play follow-up goal failed');
+    }
+  }
+
   if (!verdict.play || !verdict.idea.trim()) {
     logger.info({ reason: verdict.reason }, 'Self-play: stay quiet');
     return;
