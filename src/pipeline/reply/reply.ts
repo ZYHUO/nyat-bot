@@ -805,64 +805,81 @@ export async function generateReply(
   // 6. Parse response (now returns array)
   let parsedReplies = parseReplyResponse(result.content, message.messageId);
 
-  if (parsedReplies.some((reply) => containsToolArtifact(reply.replyContent))) {
-    logger.warn({ chatId }, 'Tool artifact detected in final reply draft, regenerating');
-    for (let i = 0; i < MAX_TOOL_ARTIFACT_RETRIES; i++) {
-      result = await generateReplyModelOutput(appendToolArtifactRetryInstruction(messages), usage, {
-        temperatureOverride: 0,
-        signal: interruptSignal,
-      });
-      result.toolsUsed = toolsUsed;
-      parsedReplies = parseReplyResponse(result.content, message.messageId);
-      if (!parsedReplies.some((reply) => containsToolArtifact(reply.replyContent))) break;
-    }
-  }
-
-  // 7. Duplicate detection — check first reply only (the main content)
-  if (parsedReplies[0] && await isDuplicateReply(chatId, parsedReplies[0].replyContent)) {
-    logger.info({ chatId }, 'Duplicate reply detected, regenerating');
-    for (let i = 0; i < MAX_DUPLICATE_RETRIES; i++) {
-      result = await generateReplyModelOutput(messages, usage, {
-        temperatureOverride: 1.0,
-        signal: interruptSignal,
-      });
-      result.toolsUsed = toolsUsed;
-      parsedReplies = parseReplyResponse(result.content, message.messageId);
-      if (!parsedReplies[0] || !(await isDuplicateReply(chatId, parsedReplies[0].replyContent))) break;
-    }
-  }
-
-  // 7.5 G13: near-duplicate guard — "我是不是刚说过非常像的话?"
-  // exact-match 之外抓"换汤不换药";命中则带约束重生成一次(MaiBot
-  // after_response retry-with-constraint 语义)。ANTI_REPEAT_ENABLED 门控。
-  if (parsedReplies[0]) {
-    try {
-      const dup = await checkNearDuplicate(chatId, parsedReplies[0].replyContent);
-      if (dup.isNearDuplicate) {
-        logger.info({ chatId, ratio: dup.ratio }, 'Near-duplicate reply detected, regenerating with constraint');
-        const constrained = messages.map((m, idx) =>
+  // 6.5 P5-C: 统一回复自检管线（guards.ts）——tool-artifact / exact-dup / near-dup
+  // 三块原手写 regen 迁移为声明式 guard。行为语义完全保留：
+  // - 空占位 regen 不覆盖第一版（防静默）
+  // - 重试耗尽仍命中 → 保留第一版（已尽力）
+  // - 检测自身抛错 = 跳过该 guard
+  {
+    const { runGuardPipeline } = await import('./guards.js');
+    const regenerate = async (opts: { temperature: number; constraintHint?: string; instructionHint?: string }) => {
+      let regenMessages = messages;
+      if (opts.constraintHint) {
+        regenMessages = messages.map((m, idx) =>
           idx === messages.length - 1 && m.role === 'user'
-            ? {
-                ...m,
-                content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n你刚刚说过非常类似的话（「${(dup.collidedWith ?? '').slice(0, 80)}…」）。换一个说法、换个角度、或者补充新的信息——禁止复读自己。`,
-              }
+            ? { ...m, content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n${opts.constraintHint}` }
             : m,
         );
-        result = await generateReplyModelOutput(constrained, usage, {
-          temperatureOverride: 1.0,
-          signal: interruptSignal,
-        });
-        result.toolsUsed = toolsUsed;
-        const regenerated = parseReplyResponse(result.content, message.messageId);
-        // 重写后仍复读 → 保留第一版(已尽力,别为了不复读发更差的)。
-        // 同样:regen 若返回空/「…」占位(DeepSeek 空响应),别用占位覆盖掉本来不错的第一版 → 那会变静默。
-        if (regenerated[0] && !isBlankReply(regenerated[0].replyContent) && !(await checkNearDuplicate(chatId, regenerated[0].replyContent)).isNearDuplicate) {
-          parsedReplies = regenerated;
-        }
+      } else if (opts.instructionHint) {
+        regenMessages = appendToolArtifactRetryInstruction(messages);
       }
-    } catch (err) {
-      logger.debug({ err, chatId }, 'Near-duplicate check failed (non-critical)');
+      const out = await generateReplyModelOutput(regenMessages, usage, {
+        temperatureOverride: opts.temperature,
+        signal: interruptSignal,
+      });
+      out.toolsUsed = toolsUsed;
+      result = out;
+      return parseReplyResponse(out.content, message.messageId);
+    };
+
+    const guarded = await runGuardPipeline(
+      [
+        {
+          name: 'tool-artifact',
+          check: async (_c, d) =>
+            d.some((r) => containsToolArtifact(r.replyContent)) ? { detail: 'artifact in draft' } : null,
+          maxRetries: MAX_TOOL_ARTIFACT_RETRIES,
+          temperature: 0,
+          hintMode: 'instruction',
+          // artifact 检查针对数组任一元素，accept 条件 = 全干净
+          acceptRegen: async (_c, r) => !r.some((x) => containsToolArtifact(x.replyContent)),
+        },
+        {
+          name: 'exact-dup',
+          check: async (c, d) =>
+            d[0] && (await isDuplicateReply(c, d[0].replyContent)) ? { detail: 'exact duplicate' } : null,
+          maxRetries: MAX_DUPLICATE_RETRIES,
+          temperature: 1.0,
+          hintMode: 'none',
+          acceptRegen: async (c, r) => !r[0] || !(await isDuplicateReply(c, r[0].replyContent)),
+        },
+        // G13 near-dup：ANTI_REPEAT_ENABLED 门控保留在 guard 内部
+        ...(env().ANTI_REPEAT_ENABLED
+          ? [{
+              name: 'near-dup',
+              check: async (c: number, d: typeof parsedReplies) => {
+                if (!d[0]) return null;
+                const dup = await checkNearDuplicate(c, d[0].replyContent);
+                return dup.isNearDuplicate
+                  ? { detail: 'near duplicate', collidedWith: dup.collidedWith ?? undefined, metric: dup.ratio }
+                  : null;
+              },
+              maxRetries: 1,
+              temperature: 1.0,
+              hintMode: 'constraint' as const,
+              acceptRegen: async (c: number, r: typeof parsedReplies) =>
+                !r[0] || !(await checkNearDuplicate(c, r[0].replyContent)).isNearDuplicate,
+            }]
+          : []),
+      ],
+      parsedReplies,
+      { chatId, regenerate, isBlank: isBlankReply },
+    );
+    // 管线可能返回 regen 版（result 已被 regenerate 内部更新）
+    if (guarded !== parsedReplies) {
+      logger.info({ chatId }, 'reply guard pipeline replaced draft with regenerated version');
     }
+    parsedReplies = guarded;
   }
 
   // ── P5 归一化管线:动作拆分 ∘ 目标守卫 ∘ 占位过滤(幂等,所有 regen 必经)──
