@@ -241,7 +241,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
         temperature: 0.3,
         rejectEmpty: true,
         signal: input.signal,
-        // 反思模型是 dsv4flash(轻思考,~5-6s),放宽到 10s;超了就放弃、用原念头。
+        // 反思模型是 newapiv4pro(轻思考,~2-6s),放宽到 10s;超了就放弃、用原念头。
         maxTimeoutMs: 10_000,
       });
       const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
