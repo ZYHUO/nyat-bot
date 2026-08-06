@@ -363,6 +363,12 @@ const envSchema = z.object({
   REFLECTION_CHATS_PER_TICK: z.coerce.number().int().positive().default(20),
   REFLECTION_WINDOW_MSGS: z.coerce.number().int().positive().default(250),
   REFLECTION_USAGE: z.string().default('summarize'),
+  // ── AGI Level 4 P4-A: 经验沉淀 ──────────────────────────────────────
+  // 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection
+  // 检索相关经验注入 executor prompt。复盘走便宜链，失败静默不重试。
+  EPISODE_DISTILL_ENABLED: booleanFromEnv.default(false),
+  EPISODE_RECALL_ENABLED: booleanFromEnv.default(false),
+  DISTILL_USAGE: z.string().default('summarize'),
   // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),

@@ -410,6 +410,20 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     }
   }
 
+  // AGI Level 4 P4-A: 开工前注入过往经验 —— 犯过的错不再犯第二遍。
+  if (env().EPISODE_RECALL_ENABLED) {
+    try {
+      const { findRelevantExperience } = await import('../agent/episodes.js');
+      const hints = findRelevantExperience(task.contentDirection, 3);
+      if (hints.length) {
+        systemPrompt += `\n\n[过往经验]\n${hints.map((h) => `- (${h.kind}) ${h.content}`).join('\n')}\n以上是之前做类似事总结的教训，能用就用，不适用就忽略。`;
+        logger.info({ taskId: task.id, hintCount: hints.length }, 'experience recall injected');
+      }
+    } catch {
+      /* recall is best-effort */
+    }
+  }
+
   const { prompt, manifest } = await engine.assemble([
     staticText('sub-system', systemPrompt),
     staticText('sub-identity', identity),
@@ -676,6 +690,33 @@ history.push({
       await persistCodeActTask(task);
       // 任务终态：解除 chat → task 索引，恢复该 chat 的正常 dispatch。
       await unregisterAgentChat(task.chatId, task.id);
+
+      // AGI Level 4 P4-A: 终态复盘蒸馏 —— 只留下过痕迹的任务才复盘
+      // （纯闲聊 sendText 一句就结束的也蒸，成本极低；失败任务重点挖 pitfall）。
+      // fire-and-forget：复盘失败静默 warn，不阻塞 callback、不烧重试。
+      if (env().EPISODE_DISTILL_ENABLED && host.runtime.didProduce()) {
+        const tailText = history
+          .slice(-12)
+          .map((m) => `${m.role}: ${m.content.slice(0, 250)}`)
+          .join('\n');
+        void import('../agent/distiller.js')
+          .then(({ distillEpisode }) =>
+            distillEpisode({
+              task,
+              outcome: task.status === 'done' ? 'done' : 'failed',
+              progressSummary: resumeSummary ?? endSummary,
+              tailText,
+            }),
+          )
+          .then((r) => {
+            if (r?.followUpGoal) {
+              // P4-B 钩子占位：goal tracker 落地后接 createGoal。
+              logger.info({ taskId: task.id, followUpGoal: r.followUpGoal }, 'distill suggests follow-up goal');
+            }
+          })
+          .catch((err) => logger.warn({ err, taskId: task.id }, 'episode distill failed'));
+      }
+
       await state.enqueueCallbackAsync({
         id: randomUUID(),
         taskId: task.id,
