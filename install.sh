@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════════════
-#  🐱 NyatBot 真·一键安装 (bootstrap)
+#  🐱 NyatBot 一键安装 (bootstrap)
 #
 #    curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash
 #
-#  它负责：装 git → 拉源码 → 交给部署向导 scripts/deploy.sh（问答填 token/AI，全自动）。
+#  它负责：装 git → 拉源码 → 交给安装向导 scripts/install.sh（交互填配置，全自动）。
 #
 #  传参（注意管道形式要用 `-s --`）：
 #    curl -fsSL .../install.sh | sudo bash -s -- --china        # 国内镜像
@@ -63,8 +63,8 @@ else
   ok "源码就绪"
 fi
 
-# ── 交给部署向导 ─────────────────────────────────────────────────────────────
-say "进入部署向导（接下来会问你 BOT_TOKEN 和 AI 接口）"
+# ── 交给安装向导 ─────────────────────────────────────────────────────────────
+say "进入安装向导（接下来会问你 bot token、AI 接口、主人 UID 等）"
 cd "$DIR"
-chmod +x scripts/deploy.sh 2>/dev/null || true
-exec bash scripts/deploy.sh "$@"
+chmod +x scripts/install.sh 2>/dev/null || true
+exec bash scripts/install.sh "$@"
