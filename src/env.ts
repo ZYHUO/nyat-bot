@@ -374,6 +374,10 @@ const envSchema = z.object({
   GOAL_TRACKER_ENABLED: booleanFromEnv.default(false),
   GOAL_CHECK_INTERVAL_MIN: z.coerce.number().int().positive().default(120),
   GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(5),
+  // ── AGI Level 4 P4-C: 自我模型 ─────────────────────────────────────
+  // 每天凌晨复盘自己 24h 的回复表现 → ≤5 条自我认知注入回复 prompt。
+  SELF_REFLECT_ENABLED: booleanFromEnv.default(false),
+  SELF_REFLECT_USAGE: z.string().default('judge'),
   // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),

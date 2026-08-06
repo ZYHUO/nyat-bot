@@ -332,6 +332,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // P4-C: Self-reflect — 每天凌晨复盘自己的回复表现（自我模型）
+  if (env().SELF_REFLECT_ENABLED) {
+    tasks.push(schedule('37 3 * * *', () => {
+      void safeRun('self-reflect', async () => {
+        const { runSelfReflect } = await import('./self-reflect.js');
+        await runSelfReflect();
+      });
+    }));
+  }
+
   // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
   if (env().RSS_MONITOR_ENABLED) {
     tasks.push(schedule(`*/${env().RSS_MONITOR_INTERVAL_MIN} * * * *`, () => {

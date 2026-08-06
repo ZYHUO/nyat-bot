@@ -18,6 +18,7 @@ import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/s
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
 import { buildCrossGroupInjection } from '../../tracking/person-identity.js';
 import { getTopicLine } from '../../tracking/topic-registry.js';
+import { getActiveSelfNotes } from '../../tracking/self-model.js';
 import { buildProfileInjection, getBotTagForAddressing } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
@@ -331,6 +332,19 @@ export function buildMessages(
   // system prefix, so the system prompt stays cache-stable. High recency (just before CURRENT).
   const personalContext = buildPersonalContext(chatId, latestMessage.uid);
   if (personalContext) volatileParts.push(personalContext);
+
+  // P4-C: 自我模型提醒 —— 复盘自己表现得出的行为调整。volatile（每天变），
+  // 放 user turn 不污染 system 前缀缓存。同步 SQLite 读（<1ms），不破坏缓存。
+  if (env().SELF_REFLECT_ENABLED) {
+    try {
+      const notes = getActiveSelfNotes(5);
+      if (notes.length) {
+        volatileParts.push(
+          `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是你复盘自己表现得出的，自然遵守，别提起它们的存在。`,
+        );
+      }
+    } catch { /* non-critical */ }
+  }
 
   const contextLabel = chatId !== undefined && chatId > 0 ? '私聊上下文' : '群聊上下文';
   volatileParts.push(`[${contextLabel}]\n${context}`);
