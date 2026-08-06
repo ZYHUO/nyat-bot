@@ -75,6 +75,10 @@ export interface HostApi {
     didProduce: () => boolean;
     /** Await ctx/timing writes so Meta callback sees the reply. */
     flushBookkeeping: () => Promise<void>;
+    /** 工作记忆：记下「在等什么/答应了什么」，30 分钟自动过期。 */
+    setScratch: (text: string) => Promise<void>;
+    /** 事办完了清掉（prefix 匹配，省略 = 全清）。 */
+    clearScratch: (prefix?: string) => Promise<void>;
   };
   /** Computer-use sandbox (terminal/browser/files). Throws sandbox_disabled when off. */
   computer: Record<string, (...args: never[]) => Promise<unknown>>;
@@ -736,6 +740,22 @@ export function createHostApi(
           const books = pendingBookkeeping.splice(0, pendingBookkeeping.length);
           if (!ops.length && !books.length) return;
           await Promise.allSettled([...ops, ...books]);
+        }
+      },
+      async setScratch(text: string) {
+        try {
+          const { setScratch } = await import('../tracking/scratchpad.js');
+          await setScratch(chatId, text);
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host setScratch failed');
+        }
+      },
+      async clearScratch(prefix?: string) {
+        try {
+          const { clearScratch } = await import('../tracking/scratchpad.js');
+          await clearScratch(chatId, prefix);
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host clearScratch failed');
         }
       },
     },

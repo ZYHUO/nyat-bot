@@ -69,7 +69,9 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
 8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
 9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。
-10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。`;
+10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
+11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
+`;
 
 function extractJs(text: string): string | null {
   const m = text.match(/```(?:js|javascript)?\s*([\s\S]*?)```/i);
@@ -235,6 +237,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   try {
     const { readRecentDreamSnippet } = await import('../cron/dream-journal.js');
     journal = (await readRecentDreamSnippet(300)) ?? '';
+  } catch { /* optional */ }
+
+  // P5-B: 工作记忆 —— 回填进程缓存 + 读当前惦记的事注入 prompt（常驻）。
+  let scratchBlock = '';
+  try {
+    const { warmScratchCache, scratchPromptBlockSync } = await import('../tracking/scratchpad.js');
+    await warmScratchCache(task.chatId);
+    scratchBlock = scratchPromptBlockSync(task.chatId) ?? '';
   } catch { /* optional */ }
 
   const { buildCodeActIdentityPrompt } = await import('../pipeline/reply/prompt-builder.js');
@@ -410,18 +420,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     }
   }
 
-  // AGI Level 4 P4-A: 开工前注入过往经验 —— 犯过的错不再犯第二遍。
-  if (env().EPISODE_RECALL_ENABLED) {
-    try {
-      const { findRelevantExperience } = await import('../agent/episodes.js');
-      const hints = findRelevantExperience(task.contentDirection, 3);
-      if (hints.length) {
-        systemPrompt += `\n\n[过往经验]\n${hints.map((h) => `- (${h.kind}) ${h.content}`).join('\n')}\n以上是之前做类似事总结的教训，能用就用，不适用就忽略。`;
-        logger.info({ taskId: task.id, hintCount: hints.length }, 'experience recall injected');
-      }
-    } catch {
-      /* recall is best-effort */
+  // AGI Level 4 P4-A: 开工前注入过往经验 —— 犯过的错不再犯第二遍（常驻）。
+  try {
+    const { findRelevantExperience } = await import('../agent/episodes.js');
+    const hints = findRelevantExperience(task.contentDirection, 3);
+    if (hints.length) {
+      systemPrompt += `\n\n[过往经验]\n${hints.map((h) => `- (${h.kind}) ${h.content}`).join('\n')}\n以上是之前做类似事总结的教训，能用就用，不适用就忽略。`;
+      logger.info({ taskId: task.id, hintCount: hints.length }, 'experience recall injected');
     }
+  } catch {
+    /* recall is best-effort */
   }
 
   const { prompt, manifest } = await engine.assemble([
@@ -432,6 +440,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-roster', roster ? `## 群成员\n${roster}` : ''),
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
+    ephemeralText('sub-scratch', scratchBlock ? `${scratchBlock}` : ''),
     // 恒定传入(空时传 ''),与同组的 sub-permanent / sub-journal 一致 ——
     // 不用条件展开把 id 从数组里摘掉:引擎实现在外部包里,"这次缺了这个 id"
     // 在 delta/ephemeral 语义下是否等于"沿用上次的值"无法从代码证实,而赌错
@@ -691,10 +700,10 @@ history.push({
       // 任务终态：解除 chat → task 索引，恢复该 chat 的正常 dispatch。
       await unregisterAgentChat(task.chatId, task.id);
 
-      // AGI Level 4 P4-A: 终态复盘蒸馏 —— 只留下过痕迹的任务才复盘
+      // AGI Level 4 P4-A: 终态复盘蒸馏 —— 只留下过痕迹的任务才复盘（常驻）
       // （纯闲聊 sendText 一句就结束的也蒸，成本极低；失败任务重点挖 pitfall）。
       // fire-and-forget：复盘失败静默 warn，不阻塞 callback、不烧重试。
-      if (env().EPISODE_DISTILL_ENABLED && host.runtime.didProduce()) {
+      if (host.runtime.didProduce()) {
         const tailText = history
           .slice(-12)
           .map((m) => `${m.role}: ${m.content.slice(0, 250)}`)
@@ -710,7 +719,7 @@ history.push({
           )
           .then((r) => {
             if (r?.followUpGoal) {
-              // P4-B 钩子：复盘发现值得持续关注的事 → 立 goal。
+              // P4-B 钩子：复盘发现值得持续关注的事 → 立 goal（常驻）。
               void import('../agent/goals.js').then(({ createGoal }) =>
                 createGoal({ topic: r.followUpGoal!, origin: `episode:${task.id}`, chatId: task.chatId }, env().GOAL_MAX_ACTIVE),
               );
@@ -719,9 +728,9 @@ history.push({
           .catch((err) => logger.warn({ err, taskId: task.id }, 'episode distill failed'));
       }
 
-      // P4-B: goal 任务的检查结果回写 —— endTask 摘要解析 finding。
+      // P4-B: goal 任务的检查结果回写 —— endTask 摘要解析 finding（常驻）。
       // 模型按 contentDirection 要求输出 "found: …" 或 "no_update"。
-      if (env().GOAL_TRACKER_ENABLED) {
+      {
         const goalMatch = task.contentDirection.match(/\[goal:(\d+)\]/);
         if (goalMatch) {
           const goalId = Number(goalMatch[1]);

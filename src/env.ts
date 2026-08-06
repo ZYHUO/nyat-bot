@@ -211,12 +211,7 @@ const envSchema = z.object({
   JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
   JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),
 
-  // ── Proactive Scan Cron (Stage C) ──
-  PROACTIVE_SCAN_ENABLED: booleanFromEnv.default(false),
-  PROACTIVE_SCAN_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
-  PROACTIVE_SCAN_USAGE: z.string().default('judge'),
-  PROACTIVE_SCAN_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(900),
-  PROACTIVE_SCAN_MAX_CHATS_PER_TICK: z.coerce.number().int().positive().default(3),
+  // （原 PROACTIVE_SCAN_* 灰度已移除——独立 scan cron 被 unified-tick 取代）
   // Attention pressure(借鉴 CGM):主动扫群按 pressure 排序挑 Top-N,而非随机。默认关。
   PROACTIVE_PRESSURE_ENABLED: booleanFromEnv.default(false),
   // 到点提醒唤醒 LLM(用群里上下文、自己的语气说),而非念稿「⏰定时提醒:X」。默认关。
@@ -315,12 +310,6 @@ const envSchema = z.object({
   SLEEP_WAKE_WINDOW_MIN: z.coerce.number().int().positive().default(20),
   // 回复写手强制合法 JSON(DeepSeek/OpenAI json_object)——根治单引号/Python-dict 脏输出。默认关。
   REPLY_JSON_MODE: booleanFromEnv.default(false),
-  PROACTIVE_SCAN_RECENT_MSG_COUNT: z.coerce.number().int().positive().default(15),
-  PROACTIVE_SCAN_MIN_HUMAN_MSGS: z.coerce.number().int().positive().default(5),
-  PROACTIVE_SCAN_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
-  PROACTIVE_SCAN_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
-  // shouldChimeIn LLM call timeout (ms). Default 10s — should accommodate fallback chains.
-  PROACTIVE_SCAN_CHIME_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
 
   // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
   // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。
@@ -363,21 +352,26 @@ const envSchema = z.object({
   REFLECTION_CHATS_PER_TICK: z.coerce.number().int().positive().default(20),
   REFLECTION_WINDOW_MSGS: z.coerce.number().int().positive().default(250),
   REFLECTION_USAGE: z.string().default('summarize'),
-  // ── AGI Level 4 P4-A: 经验沉淀 ──────────────────────────────────────
+  // ── AGI Level 4 P4-A: 经验沉淀（常驻）─────────────────────────────────
   // 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection
   // 检索相关经验注入 executor prompt。复盘走便宜链，失败静默不重试。
-  EPISODE_DISTILL_ENABLED: booleanFromEnv.default(false),
-  EPISODE_RECALL_ENABLED: booleanFromEnv.default(false),
   DISTILL_USAGE: z.string().default('summarize'),
-  // ── AGI Level 4 P4-B: 好奇心目标追踪 ───────────────────────────────
-  // 把「值得持续关注的事」固化为 goal，周期性 CodeAct 查进展并汇报。
-  GOAL_TRACKER_ENABLED: booleanFromEnv.default(false),
-  GOAL_CHECK_INTERVAL_MIN: z.coerce.number().int().positive().default(120),
+  // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
+  // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
   GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(5),
-  // ── AGI Level 4 P4-C: 自我模型 ─────────────────────────────────────
+  // ── AGI Level 4 P4-C: 自我模型（常驻）────────────────────────────────
   // 每天凌晨复盘自己 24h 的回复表现 → ≤5 条自我认知注入回复 prompt。
-  SELF_REFLECT_ENABLED: booleanFromEnv.default(false),
   SELF_REFLECT_USAGE: z.string().default('judge'),
+  // ── AGI Level 5 P5-A: 统一唤醒循环（常驻）───────────────────────────
+  // 决策合并：一次 tick 一次 LLM 决定干什么（关心主人/群冒泡/自玩/查goal/安静），
+  // 执行保留旧 cron 的执行器。已取代 idle/proactive-scan/thinker/self-play/goal-check。
+  UNIFIED_TICK_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
+  UNIFIED_TICK_USAGE: z.string().default('judge'),
+  UNIFIED_TICK_HOUR_START: z.coerce.number().int().min(0).max(23).default(8),
+  UNIFIED_TICK_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
+  // 两次 self-play 的最小间隔（tick 内 self_play 动作的冷却否决）
+  SELF_PLAY_COOLDOWN_SEC: z.coerce.number().int().positive().default(4 * 3600),
+  // （SCRATCHPAD_ENABLED 已移除——工作记忆常驻）
   // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),
@@ -602,15 +596,6 @@ const envSchema = z.object({
   JARGON_INFERENCE_THRESHOLDS: z.string().default('3,8,25,100'),
   JARGON_QUERY_ENABLED: booleanFromEnv.default(false),
 
-  // ── Idle proactive cron (group has been silent → poke) ──
-  // Bot 在群沉默超过 N 秒后，以 P 概率主动发一句活跃群聊。
-  // 同一群两次主动开口的最小间隔（默认 24h，一天最多 1 次）
-  IDLE_PROACTIVE_INTERVAL_SEC: z.coerce.number().int().positive().default(86400),
-  IDLE_THRESHOLD_SEC: z.coerce.number().int().positive().default(3600),
-  IDLE_TRIGGER_PROBABILITY: z.coerce.number().min(0).max(1).default(0.1),
-  IDLE_HOUR_START: z.coerce.number().int().min(0).max(23).default(10),
-  IDLE_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
-
   // ── P2-A: 主动搭话记忆驱动 ──
   // 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题"
   PROACTIVE_MEMORY_ENABLED: booleanFromEnv.default(false),
@@ -619,28 +604,6 @@ const envSchema = z.object({
   // 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限
   PROACTIVE_COORDINATOR_ENABLED: booleanFromEnv.default(false),
   PROACTIVE_HOURLY_MAX_PER_CHAT: z.coerce.number().int().positive().default(3),
-
-  // ── P2: 主人 DM 主动关心（模型自主决策）──
-  // 定时让模型判断：主人这么久没说话，该不该主动关心一句？
-  PROACTIVE_THINKER_ENABLED: booleanFromEnv.default(false),
-  PROACTIVE_THINKER_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
-  // 主人 DM 沉默超过该秒数才考虑主动关心（默认 4 小时）
-  PROACTIVE_THINKER_MIN_SILENCE_SEC: z.coerce.number().int().positive().default(4 * 3600),
-  PROACTIVE_THINKER_USAGE: z.string().default('judge'),
-  PROACTIVE_THINKER_HOUR_START: z.coerce.number().int().min(0).max(23).default(9),
-  PROACTIVE_THINKER_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
-
-  // ── P2: 自主行动 Self-Play（无聊了自己找事做）──
-  // 主人/群沉默时，模型自主决定"想不想写点什么玩"→ CodeAct 执行
-  SELF_PLAY_ENABLED: booleanFromEnv.default(false),
-  SELF_PLAY_INTERVAL_MIN: z.coerce.number().int().positive().default(60),
-  // 主人 DM 沉默超过该秒数才允许 self-play（不打扰真人时自己玩）
-  SELF_PLAY_MIN_IDLE_SEC: z.coerce.number().int().positive().default(2 * 3600),
-  // 两次 self-play 的最小间隔
-  SELF_PLAY_COOLDOWN_SEC: z.coerce.number().int().positive().default(4 * 3600),
-  SELF_PLAY_USAGE: z.string().default('judge'),
-  SELF_PLAY_HOUR_START: z.coerce.number().int().min(0).max(23).default(9),
-  SELF_PLAY_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
 
   // ── P2-B: RSS 信息流监控 ──
   // 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用
