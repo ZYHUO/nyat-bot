@@ -34,6 +34,12 @@ export interface DispatchTask {
   trackingKey?: string;
   createdAt: number;
   status: 'queued' | 'running' | 'done' | 'failed';
+  /** 长时间 Agent 循环：当前是第几段（0-based）。 */
+  segment?: number;
+  /** checkpoint 在 Redis 里的 key；续跑时据此恢复 history。 */
+  checkpointKey?: string;
+  /** 该任务累计已消耗的轮数（跨段）。 */
+  totalTurns?: number;
   resultSummary?: string;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;

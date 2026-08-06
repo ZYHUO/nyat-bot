@@ -51,6 +51,32 @@ export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
   }
 }
 
+/**
+ * 长时间 Agent 循环：续跑入队。独立 jobId（避免覆盖正在跑的 segment job），
+ * attempts=1（checkpoint 本身 durable，失败下段重入队即可，重试 8 次只会放大问题）。
+ */
+export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void> {
+  const state = getGlobalState();
+  task.status = 'queued';
+  state.putTask(task);
+  await persistCodeActTask(task);
+
+  try {
+    await getCodeActQueue().add(
+      'codeact',
+      task,
+      {
+        jobId: `codeact-${task.id}-seg${task.segment ?? 0}`,
+        attempts: 1,
+      },
+    );
+  } catch (err) {
+    logger.warn({ err, taskId: task.id }, 'CodeAct resume enqueue failed — in-process fallback');
+    const { enqueueSubagentTaskLocal } = await import('./executor.js');
+    enqueueSubagentTaskLocal(task);
+  }
+}
+
 async function processCodeActJob(job: Job<DispatchTask>, token?: string): Promise<void> {
   const task = job.data;
   const got = await tryMarkCodeActActive(task.chatId, task.id);

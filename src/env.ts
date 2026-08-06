@@ -528,6 +528,14 @@ const envSchema = z.object({
   CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   // CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。
   CODEACT_CONCURRENCY: z.coerce.number().int().positive().default(4),
+  // 长时间 Agent 循环：分段续跑 + checkpoint + 上下文压缩。默认关，灰度开。
+  AGENT_LOOP_ENABLED: booleanFromEnv.default(false),
+  // 单个任务最多跑几段（每段 CODEACT_MAX_TURNS 轮）。超限强制诚实收尾。
+  AGENT_MAX_SEGMENTS: z.coerce.number().int().positive().default(10),
+  // history 超过多少轮触发 LLM 压缩早期轮次。
+  AGENT_COMPACT_AFTER_TURNS: z.coerce.number().int().positive().default(50),
+  // 上下文压缩用的 AI usage 名（便宜模型即可）。
+  AGENT_COMPACT_USAGE: z.string().default('judge'),
   // Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。
   CODEACT_WEB_SEARCH_ENABLED: booleanFromEnv.default(true),
   // Context Engine:组装 Meta/Subagent prompt 时打 Manifest(可观测+稳定前缀)。

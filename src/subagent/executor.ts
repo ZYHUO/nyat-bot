@@ -8,6 +8,9 @@ import { createHostApi, type HostApi } from './host-api.js';
 import { sendChatAction } from '../bot/sender/telegram.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
+import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat } from '../agent/checkpoint.js';
+import { drainInterrupts } from '../agent/interrupts.js';
+import { compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
 function startTypingHeartbeat(chatId: number): () => void {
@@ -390,6 +393,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const maxTurns = 30;
   const timeoutMs = 120_000;
 
+  // 长时间 Agent 循环：段号 + checkpoint 恢复 + 用户 interrupt 注入。
+  const loopEnabled = env().AGENT_LOOP_ENABLED;
+  const segment = task.segment ?? 0;
+
   // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
   const isSelfPlay = task.contentDirection.includes('[selfplay]');
   let systemPrompt = EXECUTOR_SYSTEM;
@@ -423,6 +430,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         (task.toneGuidance ? `\ntoneGuidance=${task.toneGuidance}` : '') +
         (task.quoteMessageIds?.length ? `\nquotes=${task.quoteMessageIds.join(',')}` : '') +
         (task.targetUserId ? `\ntargetUserId=${task.targetUserId}` : '') +
+        (loopEnabled && segment > 0
+          ? `\n[长时间任务续跑] 这是第 ${segment + 1} 段（每段最多 ${maxTurns} 轮）。上面有此前执行摘要。继续完成任务；本段结束时若未完成，系统会自动保存进度并在下段继续，你无需在段末强行收尾，但每完成一个里程碑就 sendText 汇报一次进展。`
+          : '') +
+        (loopEnabled && segment + 1 >= env().AGENT_MAX_SEGMENTS
+          ? `\n[硬性提醒] 这是最后一段。本段结束前必须收尾：sendText 总结做了什么/卡在哪/产出在哪，然后 runtime.endTask。`
+          : '') +
 (replyAnchor && replyAnchor > 0
           ? `\\\\n\\\\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。私聊可省略 replyTo；群聊省略时系统会补 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
           : '') +
@@ -442,17 +455,59 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     'CodeAct task start',
   );
 
-  const stopTyping = startTypingHeartbeat(task.chatId);
-  try {
-    const history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [
+  // 长时间 Agent 循环：checkpoint 恢复 + 用户 interrupt 注入（loopEnabled/segment 见上方）。
+  let resumeSummary = '';
+  let restoredHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> | null = null;
+  if (loopEnabled && task.checkpointKey) {
+    try {
+      const cp = await loadCheckpoint(task.checkpointKey);
+      if (cp) {
+        restoredHistory = restoreMessagesFromCompacted(cp);
+        resumeSummary = cp.progressSummary;
+        task.totalTurns = cp.totalTurns ?? task.totalTurns ?? 0;
+      }
+    } catch (err) {
+      logger.warn({ err, taskId: task.id }, 'agent checkpoint restore failed — starting fresh');
+    }
+  }
+
+  let history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  if (restoredHistory && restoredHistory.length > 0) {
+    history = restoredHistory;
+  } else {
+    history = [
       { role: 'system', content: prompt },
       {
         role: 'user',
-        content: '执行任务。上下文已注入，根据 contentDirection 自行决定：是聊天就回一句，是干活就规划步骤逐步执行。每步写一个 ```js 代码块调用 API，观察结果后继续下一步。完成后 sendText 报告结果，然后 runtime.endTask。',
+        content:
+          '执行任务。上下文已注入，根据 contentDirection 自行决定：是聊天就回一句，是干活就规划步骤逐步执行。每步写一个 ```js 代码块调用 API，观察结果后继续下一步。完成后 sendText 报告结果，然后 runtime.endTask。',
       },
     ];
+  }
 
+  // 任务进行中，主人/群友发来的新消息 → 注入本轮，模型先响应再继续。
+  if (loopEnabled && segment > 0) {
+    try {
+      const interrupts = await drainInterrupts(task.id);
+      if (interrupts.length > 0) {
+        const block = interrupts
+          .map((i) => `- (${new Date(i.at).toLocaleString('zh-CN', { hour12: false })}) ${i.from}: ${i.text}`)
+          .join('\n');
+        history.push({
+          role: 'user',
+          content: `[任务进行中，${interrupts.length > 1 ? '有人' : '有人'}发来新消息]\n${block}\n先简短回应这些消息（问进度就汇报当前进度；让停就停下收尾；补充需求就纳入计划），然后继续当前任务。`,
+        });
+      }
+    } catch {
+      /* non-critical */
+    }
+  }
+
+  const stopTyping = startTypingHeartbeat(task.chatId);
+  try {
+    let turnsRun = 0;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
+      turnsRun++;
       let llmText = '';
       try {
         const result = await callWithFallback({
@@ -502,7 +557,72 @@ history.push({
     }
 
     if (!ended && !closed) {
-      if (host.runtime.didSendText()) {
+      // 长时间 Agent 循环：段末未完成 + 已有产出 → checkpoint + 重入队续跑。
+      // 30 轮不是天花板，任务可以跨段跑几十分钟/几小时（像 Hermes 的持久 agent）。
+      const maxSegments = env().AGENT_MAX_SEGMENTS;
+      const canResume =
+        loopEnabled &&
+        segment + 1 < maxSegments &&
+        host.runtime.didSendText();
+
+      if (canResume) {
+        let progressSummary = resumeSummary;
+        try {
+          const total = (task.totalTurns ?? 0) + turnsRun;
+          if (total >= env().AGENT_COMPACT_AFTER_TURNS) {
+            const c = await compactHistory({
+              history,
+              progressSummary: resumeSummary,
+              contentDirection: task.contentDirection,
+            });
+            progressSummary = c.summary;
+          } else {
+            // 轮数不多：用模型本段最后一句当进度摘要，不调 LLM。
+            const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant');
+            if (lastAssistant) {
+              progressSummary =
+                `${resumeSummary ? `${resumeSummary}\n` : ''}[段 ${segment + 1}] ${lastAssistant.content.slice(0, 500)}`.slice(
+                  0,
+                  2000,
+                );
+            }
+          }
+        } catch (err) {
+          logger.warn({ err, taskId: task.id }, 'agent segment summary failed');
+        }
+
+        const key = await saveCheckpoint(task, {
+          history,
+          progressSummary,
+          artifacts: [],
+          segment: segment + 1,
+          totalTurns: (task.totalTurns ?? 0) + turnsRun,
+        });
+
+        task.segment = segment + 1;
+        task.checkpointKey = key;
+        task.totalTurns = (task.totalTurns ?? 0) + turnsRun;
+        task.status = 'queued';
+        state.putTask(task);
+        await persistCodeActTask(task);
+        // 注册 chat → task 索引：任务等待下一段期间用户消息走 interrupt 而不是 dispatch。
+        await registerAgentChat(task.chatId, task.id);
+
+        const { enqueueResumeCodeActJob } = await import('./queue.js');
+        await enqueueResumeCodeActJob(task);
+        endSummary = `resumed_seg${segment + 1}`;
+        logger.info(
+          {
+            taskId: task.id,
+            chatId: task.chatId,
+            segment: segment + 1,
+            totalTurns: task.totalTurns,
+            maxSegments,
+          },
+          'agent task checkpointed & re-enqueued for next segment',
+        );
+        // 注意：不 enqueueCallback —— 任务未完成，Meta 不应收到完成回调。
+      } else if (host.runtime.didSendText()) {
         endSummary = 'ended_without_endTask';
       } else {
         // Failsafe: bot didn't produce anything — generate an honest report
@@ -547,18 +667,24 @@ history.push({
     // Ensure ctx write + any fire-and-forget sends finished before Meta sees callback.
     await host.runtime.flushBookkeeping();
 
-    task.status = endSummary.startsWith('failed') ? 'failed' : 'done';
-    task.resultSummary = endSummary || 'done';
-    state.putTask(task);
-    await persistCodeActTask(task);
-    await state.enqueueCallbackAsync({
-      id: randomUUID(),
-      taskId: task.id,
-      chatId: task.chatId,
-      summary: task.resultSummary,
-      ok: task.status === 'done',
-      createdAt: Date.now(),
-    });
+    // 续跑任务不进入终态：保持 queued，等下一段完成/超限后再收尾。
+    const resumed = endSummary.startsWith('resumed_seg');
+    if (!resumed) {
+      task.status = endSummary.startsWith('failed') ? 'failed' : 'done';
+      task.resultSummary = endSummary || 'done';
+      state.putTask(task);
+      await persistCodeActTask(task);
+      // 任务终态：解除 chat → task 索引，恢复该 chat 的正常 dispatch。
+      await unregisterAgentChat(task.chatId, task.id);
+      await state.enqueueCallbackAsync({
+        id: randomUUID(),
+        taskId: task.id,
+        chatId: task.chatId,
+        summary: task.resultSummary,
+        ok: task.status === 'done',
+        createdAt: Date.now(),
+      });
+    }
   } finally {
     // Flush before closing so late sendText (no await) still delivers.
     await host.runtime.flushBookkeeping().catch(() => undefined);

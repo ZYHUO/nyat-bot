@@ -444,6 +444,33 @@ async function autoDispatchL0(
 
   for (const [chatId, siblings] of l0ByChat) {
     const withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
+    // 长时间 Agent 循环：该 chat 有活跃长任务 → 消息走 interrupt（下一段模型
+    // 会看到并响应），不重复 dispatch，避免同 chat 并发/重复回复。
+    if (env().AGENT_LOOP_ENABLED) {
+      try {
+        const { getAgentTaskIdForChat } = await import('../agent/checkpoint.js');
+        const { pushInterrupt } = await import('../agent/interrupts.js');
+        const agentTaskId = await getAgentTaskIdForChat(chatId);
+        if (agentTaskId) {
+          for (const s of withIds) {
+            const from = s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人';
+            await pushInterrupt(agentTaskId, {
+              text: (s.textPreview ?? '').slice(0, 500),
+              from,
+              messageId: s.messageId,
+            });
+          }
+          logger.info(
+            { chatId, agentTaskId, intercepted: withIds.length },
+            'agent: message routed to running long task as interrupt',
+          );
+          continue;
+        }
+      } catch {
+        /* non-critical — 索引查询失败则走正常 dispatch */
+      }
+    }
+
     const latest =
       withIds.length > 0
         ? withIds.reduce((best, cur) =>
