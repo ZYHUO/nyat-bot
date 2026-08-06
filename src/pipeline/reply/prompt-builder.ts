@@ -19,6 +19,7 @@ import { getRelationship, relationshipPromptHint } from '../../tracking/relation
 import { buildCrossGroupInjection } from '../../tracking/person-identity.js';
 import { getTopicLine } from '../../tracking/topic-registry.js';
 import { getActiveSelfNotes } from '../../tracking/self-model.js';
+import { scratchPromptBlockSync } from '../../tracking/scratchpad.js';
 import { buildProfileInjection, getBotTagForAddressing } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
@@ -343,6 +344,15 @@ export function buildMessages(
           `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是你复盘自己表现得出的，自然遵守，别提起它们的存在。`,
         );
       }
+    } catch { /* non-critical */ }
+  }
+
+  // P5-B: 工作记忆 —— 在等什么/答应了什么（30 分钟易失）。
+  // 同步进程内缓存读（buildMessages 是同步函数，prompt 缓存契约不可破）。
+  if (env().SCRATCHPAD_ENABLED && chatId !== undefined) {
+    try {
+      const block = scratchPromptBlockSync(chatId);
+      if (block) volatileParts.push(block);
     } catch { /* non-critical */ }
   }
 

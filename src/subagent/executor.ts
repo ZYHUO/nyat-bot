@@ -69,7 +69,9 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
 8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
 9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。
-10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。`;
+10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
+11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
+`;
 
 function extractJs(text: string): string | null {
   const m = text.match(/```(?:js|javascript)?\s*([\s\S]*?)```/i);
@@ -236,6 +238,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     const { readRecentDreamSnippet } = await import('../cron/dream-journal.js');
     journal = (await readRecentDreamSnippet(300)) ?? '';
   } catch { /* optional */ }
+
+  // P5-B: 工作记忆 —— 回填进程缓存 + 读当前惦记的事注入 prompt。
+  let scratchBlock = '';
+  if (env().SCRATCHPAD_ENABLED) {
+    try {
+      const { warmScratchCache, scratchPromptBlockSync } = await import('../tracking/scratchpad.js');
+      await warmScratchCache(task.chatId);
+      scratchBlock = scratchPromptBlockSync(task.chatId) ?? '';
+    } catch { /* optional */ }
+  }
 
   const { buildCodeActIdentityPrompt } = await import('../pipeline/reply/prompt-builder.js');
   const { buildMasterIdentityBlock } = await import('../shared/master-identity.js');
@@ -432,6 +444,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-roster', roster ? `## 群成员\n${roster}` : ''),
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
+    ephemeralText('sub-scratch', scratchBlock ? `${scratchBlock}` : ''),
     // 恒定传入(空时传 ''),与同组的 sub-permanent / sub-journal 一致 ——
     // 不用条件展开把 id 从数组里摘掉:引擎实现在外部包里,"这次缺了这个 id"
     // 在 delta/ephemeral 语义下是否等于"沿用上次的值"无法从代码证实,而赌错

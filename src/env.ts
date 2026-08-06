@@ -386,6 +386,9 @@ const envSchema = z.object({
   UNIFIED_TICK_USAGE: z.string().default('judge'),
   UNIFIED_TICK_HOUR_START: z.coerce.number().int().min(0).max(23).default(8),
   UNIFIED_TICK_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
+  // ── AGI Level 5 P5-B: 工作记忆 scratchpad ──────────────────────────
+  // 「在等什么/答应了什么」Redis per-chat 30min TTL，注入回复/CodeAct prompt。
+  SCRATCHPAD_ENABLED: booleanFromEnv.default(false),
   // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),
