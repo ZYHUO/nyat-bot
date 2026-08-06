@@ -61,7 +61,7 @@ export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmot
       messages: [
         { role: 'user', content: [{ type: 'image', image: dataUrl }, { type: 'text', text: prompt }] },
       ],
-      maxTokens: 300,
+      maxTokens: 4000,
     });
     const raw = result.content.trim();
     const json = raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1);
@@ -157,7 +157,7 @@ export async function describeImage(fileId: string): Promise<string> {
           ],
         },
       ],
-      maxTokens: 300,
+      maxTokens: 4000,
     });
 
     const description = result.content.trim();
