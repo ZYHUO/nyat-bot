@@ -39,6 +39,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - console.log(...)
 
 ## 电脑使用（SANDBOX_ENABLED 时可用）
+- computer.env() — 查看可用运行时（python3/go/node 版本）
 - computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}
 - computer.writeFile(path, content) — 写文件到沙盒目录
 - computer.readFile(path) — 读沙盒文件
@@ -389,8 +390,21 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const maxTurns = 30;
   const timeoutMs = 120_000;
 
+  // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
+  const isSelfPlay = task.contentDirection.includes('[selfplay]');
+  let systemPrompt = EXECUTOR_SYSTEM;
+  if (isSelfPlay) {
+    try {
+      const { loadCachedPrompt } = await import('../shared/config.js');
+      const selfPlayPrompt = loadCachedPrompt('task/self-play.md');
+      if (selfPlayPrompt) systemPrompt = selfPlayPrompt;
+    } catch {
+      /* fall back to EXECUTOR_SYSTEM */
+    }
+  }
+
   const { prompt, manifest } = await engine.assemble([
-    staticText('sub-system', EXECUTOR_SYSTEM),
+    staticText('sub-system', systemPrompt),
     staticText('sub-identity', identity),
     ephemeralText('sub-master', masterBlock),
     ephemeralText('sub-permanent', permanent ? `## 永久知识\n${permanent}` : ''),

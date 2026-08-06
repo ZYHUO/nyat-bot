@@ -607,6 +607,18 @@ const envSchema = z.object({
   PROACTIVE_THINKER_HOUR_START: z.coerce.number().int().min(0).max(23).default(9),
   PROACTIVE_THINKER_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
 
+  // ── P2: 自主行动 Self-Play（无聊了自己找事做）──
+  // 主人/群沉默时，模型自主决定"想不想写点什么玩"→ CodeAct 执行
+  SELF_PLAY_ENABLED: booleanFromEnv.default(false),
+  SELF_PLAY_INTERVAL_MIN: z.coerce.number().int().positive().default(60),
+  // 主人 DM 沉默超过该秒数才允许 self-play（不打扰真人时自己玩）
+  SELF_PLAY_MIN_IDLE_SEC: z.coerce.number().int().positive().default(2 * 3600),
+  // 两次 self-play 的最小间隔
+  SELF_PLAY_COOLDOWN_SEC: z.coerce.number().int().positive().default(4 * 3600),
+  SELF_PLAY_USAGE: z.string().default('judge'),
+  SELF_PLAY_HOUR_START: z.coerce.number().int().min(0).max(23).default(9),
+  SELF_PLAY_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
+
   // ── P2-B: RSS 信息流监控 ──
   // 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用
   RSS_MONITOR_ENABLED: booleanFromEnv.default(false),

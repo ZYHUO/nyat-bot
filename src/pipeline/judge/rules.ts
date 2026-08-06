@@ -8,11 +8,6 @@ import type {
   JudgeResult,
   JudgeAction,
 } from "../../shared/types.js";
-import {
-  looksLikeExternalLookupRequest,
-  looksLikeFollowupLookupRequest,
-} from "../path-patterns.js";
-import { env } from "../../env.js";
 
 export interface RuleContext {
   message: FormattedMessage;
@@ -99,64 +94,10 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function stripLeadingBotAddress(
-  text: string,
-  botUsername: string,
-  botNicknames: string[],
-): string {
-  let remaining = text.trim();
-  const candidates = [`@${botUsername}`, ...botNicknames.filter(Boolean)].sort(
-    (a, b) => b.length - a.length,
-  );
-
-  for (const candidate of candidates) {
-    const pattern = new RegExp(
-      `^${escapeRegex(candidate)}(?:[\\s,，:：!！。．、~～-]+)?`,
-      "i",
-    );
-    if (pattern.test(remaining)) {
-      remaining = remaining.replace(pattern, "").trim();
-      break;
-    }
-  }
-
-  return remaining;
-}
-
 const STICKER_DISLIKE_PATTERN =
   /不喜欢|换一个|丑|难看|什么鬼|别发(?:贴纸|表情|这个|这种)|不要.*?(?:贴纸|表情)|不好看|恶心|太丑|好丑|不可爱|不合适|发错/;
 export function looksLikeStickerDislike(text: string): boolean {
   return STICKER_DISLIKE_PATTERN.test(text);
-}
-
-// Reads like a question / prompt expecting an answer. Used so the bot doesn't go
-// silent when someone answers a question it just asked (without a TG-reply / @).
-const QUESTION_PATTERN =
-  /[?？]|怎么|怎样|咋|什么|啥|为什么|为啥|干嘛|干啥|干什么|是不是|有没有|要不要|能不能|可不可以|行不行|去不去|对不对|好不好|多少|多久|多大|几[点个天号时]|哪[儿里位个]|谁|吗[\s~～!！。.…]*$|呢[\s~～!！。.…]*$/;
-export function looksLikeQuestion(text: string): boolean {
-  const t = (text || "").trim();
-  return t.length > 0 && QUESTION_PATTERN.test(t);
-}
-
-/** True if the text @-mentions a user other than the bot. */
-function mentionsOtherUser(text: string, botUsername: string): boolean {
-  const matches = text.match(/@(\w+)/g);
-  if (!matches) return false;
-  return matches.some((m) => m.toLowerCase() !== `@${botUsername.toLowerCase()}`);
-}
-
-function mentionsAnyOtherAddressing(text: string, botUsername: string, botNicknames: string[]): boolean {
-  if (mentionsOtherUser(text, botUsername)) return true;
-  const lowered = text.toLowerCase();
-  for (const nick of botNicknames) {
-    if (!nick) continue;
-    const nickLower = nick.toLowerCase();
-    if (!nickLower) continue;
-    if (isMentioningSelf(text, botUsername, botNicknames)) return false;
-    if (/[a-z0-9_]/i.test(nickLower)) continue;
-    if (lowered.includes(nickLower)) return true;
-  }
-  return false;
 }
 
 // ── Active-conversation window ───────────────────────────────────────────────
@@ -169,12 +110,6 @@ export const ACTIVE_CONV_ENABLED = true;        // tunable — master switch
 export const ACTIVE_CONV_MAX_INDEX = 4;         // tunable — bot among the last N messages == a live exchange
                                                 //   (covers a brief interjection / addAssistant lag between turns)
 export const ACTIVE_CONV_MAX_HOT_5MIN = 25;     // tunable — disable the relaxation at/above this burst rate
-const ACTIVE_CONV_MIN_LEN = 2;                  // tunable — skip ultra-short noise (single emoji / "?")
-// When someone speaks right after the bot and neither side asked a question, the bot
-// continues the exchange this fraction of the time — MaiBot talk-frequency style:
-// engages declarative follow-ups "适时" without replying to literally everything. The
-// rest fall through to the L1/L2 judge. Dial up = chattier, down = quieter.
-const ACTIVE_CONV_ENGAGE_RATE = 0.6;            // tunable — 0..1
 
 /**
  * True when the bot is in a live exchange: it is one of the last few messages AND the
@@ -193,15 +128,9 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     botUid,
     botUsername,
     botNicknames,
-    groupActivity,
     lastBotReplyIndex,
   } = ctx;
   const text = msg.textContent || msg.captionContent || "";
-  // Recent message texts for context-aware URL detection (last 3 non-bot messages)
-  const recentTexts = ctx.recentMessages
-    .slice(-3)
-    .map((m) => m.textContent || m.captionContent || "")
-    .filter(Boolean);
 
   // 1. Bot message — allow bot-to-bot conversations with round limits
   if (msg.isBot && msg.uid !== botUid) {
@@ -245,16 +174,6 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     if (looksLikeStickerDislike(text)) {
       return makeResult("REPLY", "sticker_dislike");
     }
-    if (looksLikeFollowupLookupRequest(msg, botUid)) {
-      return makeResult("REPLY", "reply_to_self_followup_lookup", {
-        replyPath: "planned",
-      });
-    }
-    if (looksLikeExternalLookupRequest(text, recentTexts)) {
-      return makeResult("REPLY", "reply_to_self_lookup", {
-        replyPath: "planned",
-      });
-    }
     return makeResult("REPLY", "reply_to_self", { skipPathResolution: true });
   }
 
@@ -275,18 +194,7 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
 
   // 4. Direct @self or nickname mention → REPLY
   if (isMentioningSelf(text, botUsername, botNicknames)) {
-    const addressedText = stripLeadingBotAddress(
-      text,
-      botUsername,
-      botNicknames,
-    );
     // mute/unmute/记住/忘掉 关键词触发已下线 → directive.ts(回复前 LLM 指令分类)。
-    void addressedText;
-    if (looksLikeExternalLookupRequest(text, recentTexts)) {
-      return makeResult("REPLY", "mention_self_lookup", {
-        replyPath: "planned",
-      });
-    }
     return makeResult("REPLY", "mention_self", { skipPathResolution: true });
   }
 
@@ -301,68 +209,24 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     return makeResult("REPLY", "private_chat", { skipPathResolution: true });
   }
 
-  // 6. Hot chat — 概率降级而非直接沉默
-  // 25-39条/5min：30% 跳过；≥40条：70% 跳过；≥60条：100% 跳过
-  // Lowered thresholds vs before to allow bot to participate in active but not
-  // overwhelming conversations
-  if (groupActivity.messagesLast5Min >= 25) {
-    const skip =
-      groupActivity.messagesLast5Min >= 60 ? true :
-      groupActivity.messagesLast5Min >= 40 ? Math.random() < 0.7 :
-      Math.random() < 0.3;
-    if (skip) {
-      // Proactive engagement: when enabled, occasionally let hot_chat fall through to L1/L2
-      const e = env();
-      if (e.JUDGE_PROACTIVE_ENABLED) {
-        const intervalOk =
-          !ctx.lastBotReplyAt ||
-          (Date.now() - ctx.lastBotReplyAt) >= e.JUDGE_PROACTIVE_MIN_INTERVAL_SEC * 1000;
-        const enoughHumans =
-          (ctx.recentHumanMsgCount ?? 0) >= e.JUDGE_PROACTIVE_MIN_RECENT_MSGS;
-        if (Math.random() < e.JUDGE_PROACTIVE_RATE && intervalOk && enoughHumans) {
-          return null; // fallthrough to L1/L2
-        }
-      }
-      return makeResult('IGNORE', 'hot_chat');
-    }
-  }
+  // 6. 热群：不再用概率跳过（纯 LLM 驱动原则 2026-08-06）——
+  //    该不该插话交给 Heart LLM 决定（Heart prompt 自带"群很活跃时克制"人格）。
+  //    fallthrough → L1/L2 → Heart。
 
-  // 7. Active-conversation engagement + recent-reply cooldown.
-  // When the bot is in a live exchange — it spoke within the last few messages
-  // (ACTIVE_CONV_MAX_INDEX, which tolerates a brief interjection / addAssistant lag)
-  // and the thread is calm — keep it engaged instead of going silent:
-  //   • a question from EITHER side (bot just asked, or the user is asking) → REPLY;
-  //   • a plain statement right after the bot → continue "适时" (engage a share);
-  //   • everything else → defer to the L1/L2 judge.
-  const calm = groupActivity.messagesLast5Min < ACTIVE_CONV_MAX_HOT_5MIN;
-  const hasContent = text.trim().length >= ACTIVE_CONV_MIN_LEN;
-  const inActiveExchange =
-    ACTIVE_CONV_ENABLED &&
-    lastBotReplyIndex >= 0 &&
-    lastBotReplyIndex < ACTIVE_CONV_MAX_INDEX &&
-    calm &&
-    hasContent &&
-    !mentionsAnyOtherAddressing(text, botUsername, botNicknames);
+  // 7. 纯 LLM 驱动（2026-08-06）：
+  //    - active-conv engage 概率（0.6 随机继续聊）→ 删除，由 Heart LLM 判断
+  //    - followup_to_bot 问题正则 → 删除，由 Heart LLM 判断
+  //    原逻辑:bot 发言后短暂窗口内的自然跟进（无 @）会 REPLY/概率 engage。
+  //    现:统一 fallthrough 到 Heart —— 模型读上下文决定接不接。
 
-  if (inActiveExchange) {
-    const botLast = ctx.recentMessages[ctx.recentMessages.length - 1 - lastBotReplyIndex];
-    const botLastText = botLast ? botLast.textContent || botLast.captionContent || "" : "";
-    if (looksLikeQuestion(botLastText) || looksLikeQuestion(text)) {
-      return makeResult("REPLY", "followup_to_bot", { skipPathResolution: true });
-    }
-    if (lastBotReplyIndex === 0 && Math.random() < ACTIVE_CONV_ENGAGE_RATE) {
-      return makeResult("REPLY", "active_conv_engage", { skipPathResolution: true });
-    }
-    return null; // let L1/L2 decide instead of a hard ignore
-  }
-
-  // Residual cooldown: bot spoke in the last 2 messages but this didn't qualify as a
-  // continuation (hot thread / @others / no real content) → stay quiet, don't dominate.
+  // 8. 残留冷却（保留——成本保护 + 防复读，非意图引擎）：
+  //    bot 刚说过话（最近 2 条内）且未命中上面任何协议性规则 → 保持安静。
+  //    这是防"bot 自言自语刷屏"的基础设施，不是"该不该回"的意图判断。
   if (lastBotReplyIndex >= 0 && lastBotReplyIndex < 2) {
     return makeResult("IGNORE", "recent_reply");
   }
 
-  // 8. @others → IGNORE
+  // 9. @others → IGNORE（协议性：话题指向别人，bot 不该抢话）
   const atOtherMatch = text.match(/@(\w+)/g);
   if (atOtherMatch) {
     const mentionsOther = atOtherMatch.some(
@@ -373,6 +237,6 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
     }
   }
 
-  // No rule matched → pass to L1
+  // No rule matched → fallthrough to L1/L2 → Heart LLM decides.
   return null;
 }

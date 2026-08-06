@@ -64,3 +64,21 @@ function truncate(s: string | Buffer): string {
   const str = typeof s === 'string' ? s : s.toString('utf8');
   return str.length > MAX_OUTPUT ? str.slice(0, MAX_OUTPUT) + '\n... (truncated)' : str;
 }
+
+/** Probe available runtimes in the sandbox (python3/go/node). Never throws. */
+export async function getSandboxEnvInfo(): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const [name, cmd] of [
+    ['python3', 'python3 --version'],
+    ['go', 'go version'],
+    ['node', 'node --version'],
+  ] as const) {
+    try {
+      const r = await executeCommand(cmd, { timeoutMs: 5000 });
+      out[name] = r.exitCode === 0 ? r.stdout.trim().split('\n')[0] ?? 'available' : `unavailable (${r.stderr.trim().slice(0, 60) || 'not found'})`;
+    } catch {
+      out[name] = 'unavailable';
+    }
+  }
+  return out;
+}

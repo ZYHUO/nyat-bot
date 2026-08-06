@@ -91,6 +91,10 @@ function buildComputerApi(): Record<string, (...args: never[]) => Promise<unknow
     }) as Record<string, (...args: never[]) => Promise<unknown>>;
   }
   return {
+    async env() {
+      const { getSandboxEnvInfo } = await import('../sandbox/terminal.js');
+      return getSandboxEnvInfo();
+    },
     async run(command: never) {
       const { executeCommand } = await import('../sandbox/terminal.js');
       return executeCommand(String(command));

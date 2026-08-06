@@ -31,6 +31,10 @@ export function isBarePingText(text: string | undefined | null): boolean {
 /**
  * Short follow-ups that only make sense with the prior turn
  * (「快点告诉我」「为什么」「然后呢」). Not a bare @ping / not a new topic.
+ *
+ * 纯 LLM 驱动定位 (2026-08-06): 这不是"该不该回"的决策规则——它只影响
+ * CodeAct 的 prompt 拼接（告诉模型"这是接话，别当新开场"），回复与否
+ * 由模型自己决定。属上下文增强，保留。
  */
 export function isShortFollowUpText(text: string | undefined | null): boolean {
   const t = String(text ?? '')

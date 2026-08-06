@@ -23,10 +23,12 @@ describe('classifyAttentionLayer', () => {
     ).toBe('L0');
   });
 
-  it('passive question → L1 only with ? and interrogative', () => {
+  it('passive question → L2 (Heart LLM decides; no regex layer guessing)', () => {
+    // 纯 LLM 驱动 (2026-08-06)：L1 正则问题检测已删除，被动消息一律 L2，
+    // 由 Heart LLM 决定是否插话。
     const d = classifyAttentionLayer({ chatId: -100, isDirect: false, text: '这是什么意思？' });
-    expect(d.layer).toBe('L1');
-    expect(d.reason).toBe('passive_question');
+    expect(d.layer).toBe('L2');
+    expect(d.reason).toBe('passive');
   });
 
   it('casual 吗-chatter stays L2', () => {

@@ -103,7 +103,7 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("reply_to_self");
   });
 
-  it("reply to self with a URL → REPLY planned", () => {
+  it("reply to self with a URL → REPLY (LLM decides lookup in reply layer)", () => {
     const ctx = makeCtx({
       message: makeMsg({
         textContent: "这个呢 https://example.com",
@@ -118,22 +118,20 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.replyPath).toBe("planned");
-    expect(result!.rule).toBe("reply_to_self_lookup");
+    expect(result!.rule).toBe("reply_to_self");
   });
 
-  it("mention self with explicit lookup wording and domain → REPLY planned", () => {
+  it("mention self with explicit lookup wording and domain → REPLY (LLM decides lookup)", () => {
     const ctx = makeCtx({
       message: makeMsg({ textContent: "@xxb_bot 看一下这个 nodeseek.com" }),
     });
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.replyPath).toBe("planned");
-    expect(result!.rule).toBe("mention_self_lookup");
+    expect(result!.rule).toBe("mention_self");
   });
 
-  it("reply to self with realtime weather request → REPLY planned", () => {
+  it("reply to self with realtime weather request → REPLY (LLM decides lookup)", () => {
     const ctx = makeCtx({
       message: makeMsg({
         textContent: "看看今天新加坡天气",
@@ -148,11 +146,10 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.replyPath).toBe("planned");
-    expect(result!.rule).toBe("reply_to_self_lookup");
+    expect(result!.rule).toBe("reply_to_self");
   });
 
-  it("reply to self with explicit stock request → REPLY planned", () => {
+  it("reply to self with explicit stock request → REPLY (LLM decides lookup)", () => {
     const ctx = makeCtx({
       message: makeMsg({
         textContent: "看看Microsoft的股票",
@@ -167,11 +164,10 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.replyPath).toBe("planned");
-    expect(result!.rule).toBe("reply_to_self_lookup");
+    expect(result!.rule).toBe("reply_to_self");
   });
 
-  it("reply to self with follow-up stock request → REPLY planned", () => {
+  it("reply to self with follow-up stock request → REPLY (LLM decides lookup)", () => {
     const ctx = makeCtx({
       message: makeMsg({
         textContent: "老黄的呢",
@@ -187,8 +183,7 @@ describe("L0 Rules Engine", () => {
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.replyPath).toBe("planned");
-    expect(result!.rule).toBe("reply_to_self_followup_lookup");
+    expect(result!.rule).toBe("reply_to_self");
   });
 
   it("reply to self with exact mute phrase → mute_soft_request", () => {
@@ -283,15 +278,14 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("mention_self");
   });
 
-  it("mention self with shorthand realtime weather request → REPLY planned", () => {
+  it("mention self with shorthand realtime weather request → REPLY (LLM decides lookup)", () => {
     const ctx = makeCtx({
       message: makeMsg({ textContent: "xxb 今天莫斯科天气" }),
     });
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
-    expect(result!.replyPath).toBe("planned");
-    expect(result!.rule).toBe("mention_self_lookup");
+    expect(result!.rule).toBe("mention_self");
   });
 
   it("slash command /checkin → REPLY", () => {
@@ -341,17 +335,12 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("forwarded");
   });
 
-  it("hot chat (5min ≥ 25 msgs) → IGNORE", () => {
-    // 25 msgs falls in the <40 band → skip = Math.random() < 0.3, so mock below 0.3
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.1);
+  it("hot chat (5min ≥ 25 msgs) → fallthrough to Heart LLM", () => {
+    // 纯 LLM 驱动：热群不再概率跳过，交给 Heart LLM 判断该不该插话。
     const ctx = makeCtx({
       groupActivity: { messagesLast5Min: 25, messagesLast1Hour: 100 },
     });
-    const result = evaluateRules(ctx);
-    randomSpy.mockRestore();
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("IGNORE");
-    expect(result!.rule).toBe("hot_chat");
+    expect(evaluateRules(ctx)).toBeNull();
   });
 
   it("hot chat but @self → REPLY", () => {
@@ -373,7 +362,8 @@ describe("L0 Rules Engine", () => {
     expect(result!.rule).toBe("recent_reply");
   });
 
-  it("answer to the bot's own question (no @/reply) → REPLY followup_to_bot", () => {
+  it("answer to the bot's own question (no @/reply) → recent_reply cooldown (Heart LLM decides)", () => {
+    // 纯 LLM 驱动：bot 刚说过话，自然跟进交给 Heart LLM 判断（不再正则猜问题）。
     const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "今天怎么这么早叫啾咪呀～" });
     const ctx = makeCtx({
       message: makeMsg({ textContent: "叫你起床呀" }),
@@ -382,11 +372,11 @@ describe("L0 Rules Engine", () => {
     });
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
-    expect(result!.action).toBe("REPLY");
-    expect(result!.rule).toBe("followup_to_bot");
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("recent_reply");
   });
 
-  it("user's OWN question right after the bot (e.g. 几点了) → REPLY followup_to_bot", () => {
+  it("user's OWN question right after the bot (e.g. 几点了) → recent_reply cooldown (Heart LLM decides)", () => {
     const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "主人又叫本喵干嘛喵～" });
     const ctx = makeCtx({
       message: makeMsg({ textContent: "几点了" }),
@@ -394,11 +384,11 @@ describe("L0 Rules Engine", () => {
       lastBotReplyIndex: 0,
     });
     const result = evaluateRules(ctx);
-    expect(result!.action).toBe("REPLY");
-    expect(result!.rule).toBe("followup_to_bot");
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("recent_reply");
   });
 
-  it("statement after the bot's colloquial question (干嘛) → REPLY (bot asked)", () => {
+  it("statement after the bot's colloquial question (干嘛) → recent_reply cooldown (Heart LLM decides)", () => {
     const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "主人又叫本喵干嘛喵～" });
     const ctx = makeCtx({
       message: makeMsg({ textContent: "笨猫" }),
@@ -406,8 +396,8 @@ describe("L0 Rules Engine", () => {
       lastBotReplyIndex: 0,
     });
     const result = evaluateRules(ctx);
-    expect(result!.action).toBe("REPLY");
-    expect(result!.rule).toBe("followup_to_bot");
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("recent_reply");
   });
 
   it("immediate follow-up that @s someone else → still IGNORE", () => {
@@ -422,7 +412,7 @@ describe("L0 Rules Engine", () => {
     expect(result!.action).toBe("IGNORE");
   });
 
-  it("index-1 plain continuation in a calm thread → null (defer to L1)", () => {
+  it("index-1 plain continuation in a calm thread → recent_reply cooldown (Heart LLM decides)", () => {
     const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵也想吃火锅" });
     const human = makeMsg({ uid: 1002, textContent: "我也是" });
     const ctx = makeCtx({
@@ -431,42 +421,39 @@ describe("L0 Rules Engine", () => {
       lastBotReplyIndex: 1,
       groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 }, // calm
     });
-    expect(evaluateRules(ctx)).toBeNull();
+    const result = evaluateRules(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("recent_reply");
   });
 
-  it("statement right after a bot STATEMENT, engaged roll → REPLY active_conv_engage", () => {
-    const rnd = vi.spyOn(Math, "random").mockReturnValue(0.1); // < ACTIVE_CONV_ENGAGE_RATE
-    try {
-      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
-      const ctx = makeCtx({
-        message: makeMsg({ textContent: "好梦呀" }), // statement, neither side asks
-        recentMessages: [botMsg],
-        lastBotReplyIndex: 0,
-        groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
-      });
-      const r = evaluateRules(ctx);
-      expect(r).not.toBeNull();
-      expect(r!.action).toBe("REPLY");
-      expect(r!.rule).toBe("active_conv_engage");
-    } finally {
-      rnd.mockRestore();
-    }
+  it("statement right after a bot STATEMENT → recent_reply cooldown (Heart LLM decides)", () => {
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "好梦呀" }), // statement, neither side asks
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+      groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
+    });
+    const r = evaluateRules(ctx);
+    expect(r).not.toBeNull();
+    expect(r!.action).toBe("IGNORE");
+    expect(r!.rule).toBe("recent_reply");
   });
 
-  it("statement right after a bot STATEMENT, NOT engaged this roll → null (defer to L1)", () => {
-    const rnd = vi.spyOn(Math, "random").mockReturnValue(0.95); // >= ACTIVE_CONV_ENGAGE_RATE
-    try {
-      const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
-      const ctx = makeCtx({
-        message: makeMsg({ textContent: "好梦呀" }),
-        recentMessages: [botMsg],
-        lastBotReplyIndex: 0,
-        groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
-      });
-      expect(evaluateRules(ctx)).toBeNull();
-    } finally {
-      rnd.mockRestore();
-    }
+  it("statement right after a bot STATEMENT (same as engaged — no RNG anymore) → recent_reply", () => {
+    // 纯 LLM 驱动：engage 概率已删除，行为确定——recent_reply 冷却。
+    const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "本喵去睡觉啦" });
+    const ctx = makeCtx({
+      message: makeMsg({ textContent: "好梦呀" }),
+      recentMessages: [botMsg],
+      lastBotReplyIndex: 0,
+      groupActivity: { messagesLast5Min: 6, messagesLast1Hour: 40 },
+    });
+    const r = evaluateRules(ctx);
+    expect(r).not.toBeNull();
+    expect(r!.action).toBe("IGNORE");
+    expect(r!.rule).toBe("recent_reply");
   });
 
   it("isActiveConv: live only when the bot is among the last few msgs in a calm thread", () => {
@@ -477,20 +464,21 @@ describe("L0 Rules Engine", () => {
     expect(isActiveConv(-1, 5)).toBe(false);  // bot never spoke
   });
 
-  it("user's question after someone else interjected (bot still in last few msgs) → REPLY", () => {
+  it("user's question after someone else interjected (bot still in last few msgs) → recent_reply cooldown", () => {
     // bot spoke, another user interjected, then the user asks the bot a question.
+    // 纯 LLM 驱动：正则问题检测已删，index 1 < 2 → recent_reply 冷却，Heart LLM 决定。
     const botMsg = makeMsg({ uid: 9999, role: "assistant", textContent: "九点十九啦主人～" });
     const other = makeMsg({ uid: 2002, fullName: "千雪", textContent: "又收到一只啾咪啦" });
     const ctx = makeCtx({
       message: makeMsg({ uid: 1001, textContent: "是不是要起床啦" }), // 是不是 → question
       recentMessages: [botMsg, other],
-      lastBotReplyIndex: 1, // bot is 2nd-to-last; even at index 2 (addAssistant lag) it still qualifies
+      lastBotReplyIndex: 1, // bot is 2nd-to-last
       groupActivity: { messagesLast5Min: 8, messagesLast1Hour: 50 },
     });
     const result = evaluateRules(ctx);
     expect(result).not.toBeNull();
-    expect(result!.action).toBe("REPLY");
-    expect(result!.rule).toBe("followup_to_bot");
+    expect(result!.action).toBe("IGNORE");
+    expect(result!.rule).toBe("recent_reply");
   });
 
   it("@others → IGNORE", () => {
@@ -556,67 +544,23 @@ describe("L0 Rules — Proactive Engagement (Stage B)", () => {
     });
   }
 
-  it("proactive disabled: hot_chat still IGNOREs", () => {
+  it("hot chat always falls through to Heart LLM (no probability skip, no proactive RNG)", () => {
+    // 纯 LLM 驱动 (2026-08-06)：hot_chat 概率跳过和 JUDGE_PROACTIVE 随机全部删除。
+    // 热群消息统一 fallthrough，由 Heart LLM 决定该不该插话。
     envValues['JUDGE_PROACTIVE_ENABLED'] = false;
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
-    const result = evaluateRules(hotCtx());
-    randomSpy.mockRestore();
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("IGNORE");
-    expect(result!.rule).toBe("hot_chat");
-  });
+    expect(evaluateRules(hotCtx())).toBeNull();
 
-  it("proactive enabled but recent bot reply: IGNORE", () => {
     envValues['JUDGE_PROACTIVE_ENABLED'] = true;
-    // First random() < 0.7 → skip=true; second random() < 0.05 → proactive RNG passes
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
-    const result = evaluateRules(hotCtx({
-      lastBotReplyAt: Date.now() - 60_000, // 1 min ago (< 600s)
-    }));
-    randomSpy.mockRestore();
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("IGNORE");
-    expect(result!.rule).toBe("hot_chat");
-  });
-
-  it("proactive enabled, no recent reply, but RNG > rate: IGNORE", () => {
-    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
-    // 30 msgs → skip band is Math.random() < 0.3
-    // First random() for skip: 0.2 < 0.3 → skip=true
-    // Second random() for proactive: 0.2 > 0.05 → proactive declines → IGNORE
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.2);
-    const result = evaluateRules(hotCtx({
-      lastBotReplyAt: Date.now() - 700_000, // > 600s
-    }));
-    randomSpy.mockRestore();
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("IGNORE");
-    expect(result!.rule).toBe("hot_chat");
-  });
-
-  it("proactive enabled, all conditions met: returns null (fallthrough to L1)", () => {
-    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
-    // Both random() calls return 0.01: skip=true (0.01 < 0.7), proactive=true (0.01 < 0.05)
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
-    const result = evaluateRules(hotCtx({
-      lastBotReplyAt: Date.now() - 700_000, // > 600s
-      recentHumanMsgCount: 5,
-    }));
-    randomSpy.mockRestore();
-    expect(result).toBeNull();
-  });
-
-  it("proactive enabled but not enough human messages: IGNORE", () => {
-    envValues['JUDGE_PROACTIVE_ENABLED'] = true;
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.01);
-    const result = evaluateRules(hotCtx({
+    expect(evaluateRules(hotCtx({
+      lastBotReplyAt: Date.now() - 60_000,
+    }))).toBeNull();
+    expect(evaluateRules(hotCtx({
       lastBotReplyAt: Date.now() - 700_000,
-      recentHumanMsgCount: 1, // < 3
-    }));
-    randomSpy.mockRestore();
-    expect(result).not.toBeNull();
-    expect(result!.action).toBe("IGNORE");
-    expect(result!.rule).toBe("hot_chat");
+    }))).toBeNull();
+    expect(evaluateRules(hotCtx({
+      lastBotReplyAt: Date.now() - 700_000,
+      recentHumanMsgCount: 2,
+    }))).toBeNull();
   });
 });
 

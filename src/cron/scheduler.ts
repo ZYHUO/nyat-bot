@@ -312,6 +312,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // P2: Self-play — 无聊了自己找事做（自主行动）
+  if (env().SELF_PLAY_ENABLED) {
+    tasks.push(schedule(`*/${env().SELF_PLAY_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('self-play', async () => {
+        const { runSelfPlay } = await import('./self-play.js');
+        await runSelfPlay();
+      });
+    }));
+  }
+
   // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
   if (env().RSS_MONITOR_ENABLED) {
     tasks.push(schedule(`*/${env().RSS_MONITOR_INTERVAL_MIN} * * * *`, () => {

@@ -6,17 +6,14 @@ export interface AttentionLayerDecision {
   pressureBoost?: number;
 }
 
-const QUESTION_MARK = /[?？]/;
-// Strict question cues — avoid bare 吗/呢 (too common in casual chatter).
-// No \b after CJK (JS word-boundary is ASCII-oriented).
-const QUESTION_CUES =
-  /(?:谁|哪个|哪[里兒儿]|什么|什麼|咋|怎么|怎麼|为何|為何|为什么|為什麼|几|幾|多少|有没有|有沒有|是不是)|^(?:who|what|where|when|why|how)\b/i;
-
 /**
  * Classify Attention layer for Meta ingress.
- * L0: DM / @ / reply-to-bot / nickname direct
- * L1: rare — clear question marks / interrogatives only (not soft 吗-chatter)
- * L2: passive (Meta must default to silence)
+ * 纯 LLM 驱动原则 (2026-08-06)：不再用正则猜测"这是不是问题"——
+ * 被动消息一律 L2，由 Heart LLM 决定是否插话（Heart 已接管"该不该回"）。
+ *
+ * 只保留**协议性**判定（不可由 LLM 替代的事实）：
+ * L0: DM / @ / reply-to-bot / nickname direct（Telegram 协议语义）
+ * L2: 其余一切被动消息（交给 Heart / Meta LLM）
  */
 export function classifyAttentionLayer(opts: {
   chatId: number;
@@ -34,15 +31,6 @@ export function classifyAttentionLayer(opts: {
     };
   }
 
-  const text = (opts.text || '').trim().replace(/^@\S+\s*/, '');
-  // Only elevate short, clear questions — Meta still decides; bar is high.
-  if (text.length >= 4 && text.length <= 80 && QUESTION_MARK.test(text) && QUESTION_CUES.test(text)) {
-    return {
-      layer: 'L1',
-      reason: 'passive_question',
-      pressureBoost: 10,
-    };
-  }
-
+  // 被动消息：不猜意图，统一 L2 → Heart LLM 决定插话与否。
   return { layer: 'L2', reason: 'passive' };
 }
