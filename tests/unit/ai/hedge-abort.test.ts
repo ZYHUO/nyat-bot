@@ -12,6 +12,8 @@ vi.mock("../../../src/ai/cooldown.js", () => ({
   CooldownTracker: class {
     isCoolingDown = vi.fn().mockResolvedValue(false);
     setCooldown = vi.fn().mockResolvedValue(undefined);
+    recordSuccess = vi.fn().mockResolvedValue(undefined);
+    recordFailure = vi.fn().mockResolvedValue(false);
   },
 }));
 vi.mock("../../../src/ai/labels.js", () => ({

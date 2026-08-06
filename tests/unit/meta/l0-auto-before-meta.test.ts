@@ -62,6 +62,9 @@ describe('L0 autoDispatch before Meta LLM', () => {
   beforeEach(() => {
     _resetGlobalState();
     callWithFallback.mockReset();
+    // classifyWorkIntent calls callWithFallback during autoDispatchL0;
+    // default: return 'chat' so L0 takes the normal short-reply path.
+    callWithFallback.mockResolvedValue({ content: 'chat' });
     enqueueCodeActJob.mockClear();
     isCodeActBusy.mockReset();
     isCodeActBusy.mockResolvedValue(false);
@@ -97,6 +100,7 @@ describe('L0 autoDispatch before Meta LLM', () => {
     const result = await runMetaSession(attention, []);
 
     expect(result.digest).toBe('l0_auto_only');
+    // Unified CodeAct: autoDispatchL0 is pure rules — NO LLM classifier, NO Meta LLM.
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(enqueueCodeActJob).toHaveBeenCalledOnce();
     const task = enqueueCodeActJob.mock.calls[0]![0] as {
@@ -131,6 +135,7 @@ describe('L0 autoDispatch before Meta LLM', () => {
 
     const result = await runMetaSession(attention, []);
     expect(result.digest).toBe('l0_auto_only');
+    // Unified CodeAct: autoDispatchL0 is pure rules — no LLM classifier involved.
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(enqueueCodeActJob).not.toHaveBeenCalled();
   });

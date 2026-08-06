@@ -18,6 +18,8 @@ vi.mock('../../../src/shared/logger.js', () => ({ logger: { warn: vi.fn(), info:
 vi.mock('../../../src/ai/cooldown.js', () => ({
   CooldownTracker: class {
     async setCooldown(): Promise<void> {}
+    async recordSuccess(): Promise<void> {}
+    async recordFailure(): Promise<boolean> { return false; }
     async isCoolingDown(): Promise<boolean> { return false; }
     async getRemainingSeconds(): Promise<number> { return 0; }
   },

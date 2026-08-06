@@ -43,6 +43,10 @@ export interface HostApi {
   telegram: {
     sendText: (text: string, replyToMessageId?: number) => Promise<{ messageId: number }>;
     sendSticker: (fileId: string) => Promise<{ messageId: number }>;
+    /** Deliver a sandbox file to the user (sendDocument). Path is sandbox-relative. */
+    sendFile: (path: string, caption?: string) => Promise<{ messageId: number }>;
+    /** Synthesize + send a voice message (TTS). Falls back to {skipped} when TTS disabled. */
+    sendVoice: (text: string) => Promise<{ messageId: number } | { skipped: true; reason: string }>;
     react: (messageId: number, emoji: string) => Promise<boolean>;
   };
   memory: {
@@ -70,6 +74,72 @@ export interface HostApi {
     /** Await ctx/timing writes so Meta callback sees the reply. */
     flushBookkeeping: () => Promise<void>;
   };
+  /** Computer-use sandbox (terminal/browser/files). Throws sandbox_disabled when off. */
+  computer: Record<string, (...args: never[]) => Promise<unknown>>;
+}
+
+/** Computer-use namespace — terminal, browser, files. Disabled proxy when SANDBOX_ENABLED=false. */
+function buildComputerApi(): Record<string, (...args: never[]) => Promise<unknown>> {
+  if (!env().SANDBOX_ENABLED) {
+    // Return a proxy that throws on any property access — model gets a clear error.
+    // Guard against `then` to avoid thenable trap if model writes `await computer`.
+    return new Proxy({}, {
+      get(_t, key) {
+        if (key === 'then') return undefined;
+        return () => Promise.reject(new Error('sandbox_disabled'));
+      },
+    }) as Record<string, (...args: never[]) => Promise<unknown>>;
+  }
+  return {
+    async run(command: never) {
+      const { executeCommand } = await import('../sandbox/terminal.js');
+      return executeCommand(String(command));
+    },
+    async writeFile(path: never, content: never) {
+      const { sandboxWriteFile } = await import('../sandbox/files.js');
+      return sandboxWriteFile(String(path), String(content));
+    },
+    async readFile(path: never) {
+      const { sandboxReadFile } = await import('../sandbox/files.js');
+      return sandboxReadFile(String(path));
+    },
+    async listFiles(dir?: never) {
+      const { sandboxListFiles } = await import('../sandbox/files.js');
+      return sandboxListFiles(dir ? String(dir) : undefined);
+    },
+    async browse(url: never) {
+      const { browserOpen } = await import('../sandbox/browser.js');
+      return browserOpen(String(url));
+    },
+    async screenshot() {
+      const { browserScreenshot } = await import('../sandbox/browser.js');
+      return browserScreenshot();
+    },
+    async click(selector: never) {
+      const { browserClick } = await import('../sandbox/browser.js');
+      return browserClick(String(selector));
+    },
+    async type(selector: never, text: never) {
+      const { browserType } = await import('../sandbox/browser.js');
+      return browserType(String(selector), String(text));
+    },
+    async getText(selector?: never) {
+      const { browserGetText } = await import('../sandbox/browser.js');
+      return browserGetText(selector ? String(selector) : undefined);
+    },
+    async eval(js: never) {
+      const { browserEval } = await import('../sandbox/browser.js');
+      return browserEval(String(js));
+    },
+    async scroll(direction: never, amount?: never) {
+      const { browserScroll } = await import('../sandbox/browser.js');
+      return browserScroll(String(direction) as 'up' | 'down', amount ? Number(amount) : undefined);
+    },
+    async closeBrowser() {
+      const { browserClose } = await import('../sandbox/browser.js');
+      return browserClose();
+    },
+  };
 }
 
 export function createHostApi(
@@ -77,10 +147,14 @@ export function createHostApi(
   opts: {
     onEnd: (summary: string) => void;
     defaultReplyTo?: number;
-    /** Burst siblings — mark answered only after successful sendText. */
+    /** Burst siblings - mark answered only after successful sendText. */
     relatedQuoteIds?: number[];
     isClosed?: () => boolean;
     taskId?: string;
+    /** Max sendText calls (default 2; work mode may pass 5). */
+    maxTextSends?: number;
+    /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
+    messageThreadId?: number;
   },
 ): HostApi {
   const banned = env().CODEACT_BANNED_WORDS;
@@ -89,7 +163,7 @@ export function createHostApi(
   let textSent = 0;
   let lastSentNorm = '';
   let metaRequested = false;
-  const maxTextSends = 2;
+  const maxTextSends = opts.maxTextSends ?? 2;
   const pendingBookkeeping: Promise<unknown>[] = [];
   /** In-flight telegram/web ops — models often forget `await` before endTask. */
   const inflightOps = new Set<Promise<unknown>>();
@@ -322,7 +396,7 @@ export function createHostApi(
                   'host sendText continuation',
                 );
               }
-              const messageId = await sendMessage(chatId, part, replyTo);
+              const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               lastMessageId = messageId;
               lastSentNorm = part;
               rememberBotText(chatId, part);
@@ -336,7 +410,7 @@ export function createHostApi(
                 .catch(() => { /* telemetry never breaks delivery */ });
               await track(
                 import('../pipeline/context/manager.js')
-                  .then(({ addAssistant }) => addAssistant(chatId, { textContent: part, messageId }))
+                  .then(({ addAssistant }) => addAssistant(chatId, { textContent: part, messageId }, opts.messageThreadId))
                   .catch((err) => logger.debug({ err, chatId }, 'host addAssistant failed')),
               );
               void import('../memory/chroma.js')
@@ -396,7 +470,7 @@ export function createHostApi(
                 await track(
                   import('../pipeline/context/manager.js')
                     .then(({ addAssistant }) =>
-                      addAssistant(chatId, { textContent: '[sticker]', messageId }),
+                      addAssistant(chatId, { textContent: '[sticker]', messageId }, opts.messageThreadId),
                     )
                     .catch((err) => logger.debug({ err, chatId }, 'host addAssistant sticker failed')),
                 );
@@ -414,6 +488,89 @@ export function createHostApi(
             } catch (err) {
               logger.warn({ err, chatId }, 'host sendSticker failed (non-fatal)');
               return { messageId: 0 };
+            }
+          })(),
+        );
+      },
+      sendFile(path: string, caption?: string) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            const raw = String(path ?? '').trim();
+            if (!raw) {
+              logger.warn({ chatId }, 'host sendFile rejected empty path');
+              return { messageId: 0 };
+            }
+            try {
+              const { resolveInsideSandbox } = await import('../sandbox/paths.js');
+              const { basename } = await import('node:path');
+              const target = resolveInsideSandbox(raw); // throws on path escape
+              const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
+              await sendChatAction(chatId, 'upload_photo');
+              const { messageId } = await tgSendFile(chatId, target, {
+                caption: caption ? String(caption).slice(0, 1000) : undefined,
+                replyToId: opts.defaultReplyTo,
+                messageThreadId: opts.messageThreadId,
+              });
+              if (messageId > 0) {
+                await track(
+                  import('../pipeline/context/manager.js')
+                    .then(({ addAssistant }) =>
+                      addAssistant(
+                        chatId,
+                        { textContent: `[file] ${basename(target)}${caption ? `: ${String(caption).slice(0, 80)}` : ''}`, messageId },
+                        opts.messageThreadId,
+                      ),
+                    )
+                    .catch((err) => logger.debug({ err, chatId }, 'host addAssistant file failed')),
+                );
+                const answeredIds = new Set<number>();
+                if (opts.defaultReplyTo && opts.defaultReplyTo > 0) answeredIds.add(opts.defaultReplyTo);
+                for (const mid of opts.relatedQuoteIds ?? []) {
+                  if (mid > 0) answeredIds.add(mid);
+                }
+                await Promise.all(
+                  [...answeredIds].map((mid) => markMessageAnswered(chatId, mid).catch(() => undefined)),
+                );
+              }
+              return { messageId };
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn({ err, chatId, path: raw }, 'host sendFile failed (non-fatal)');
+              return { messageId: 0, error: msg } as { messageId: number };
+            }
+          })(),
+        );
+      },
+      sendVoice(text: string) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            const clean = String(text ?? '').trim();
+            if (!clean) return { skipped: true as const, reason: 'empty_text' };
+            try {
+              const { synthesizeVoice } = await import('../ai/tts.js');
+              const { sendVoice: tgSendVoice } = await import('../bot/sender/telegram.js');
+              const ogg = await synthesizeVoice(clean.slice(0, 500));
+              if (!ogg) return { skipped: true as const, reason: 'tts_disabled' };
+              await sendChatAction(chatId, 'record_voice');
+              const { messageId } = await tgSendVoice(chatId, ogg, {
+                replyToId: opts.defaultReplyTo,
+                messageThreadId: opts.messageThreadId,
+              });
+              if (messageId > 0) {
+                await track(
+                  import('../pipeline/context/manager.js')
+                    .then(({ addAssistant }) =>
+                      addAssistant(chatId, { textContent: `[voice] ${clean.slice(0, 60)}`, messageId }, opts.messageThreadId),
+                    )
+                    .catch((err) => logger.debug({ err, chatId }, 'host addAssistant voice failed')),
+                );
+              }
+              return { messageId };
+            } catch (err) {
+              logger.warn({ err, chatId }, 'host sendVoice failed — fall back to text');
+              return { skipped: true as const, reason: 'tts_error' };
             }
           })(),
         );
@@ -470,7 +627,7 @@ export function createHostApi(
           const { getRecent } = await import('../pipeline/context/manager.js');
           const { slimSingleMessage } = await import('../pipeline/context/slim.js');
           const { getBotUid } = await import('../bot/bot.js');
-          const msgs = await getRecent(chatId, limit);
+          const msgs = await getRecent(chatId, limit, opts.messageThreadId);
           if (!msgs.length) return '(empty)';
           const botUid = getBotUid() || 0;
           const masterUid = env().MASTER_UID;
@@ -570,5 +727,6 @@ export function createHostApi(
         }
       },
     },
+    computer: buildComputerApi(),
   };
 }

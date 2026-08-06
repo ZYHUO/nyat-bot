@@ -30,6 +30,12 @@ async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
   if (!msg) return;
 
+  // Skip forum topic service messages (topic created/edited/closed/reopened) — no user content.
+  const msgRecord = msg as unknown as Record<string, unknown>;
+  if (msgRecord['forum_topic_created'] || msgRecord['forum_topic_edited'] || msgRecord['forum_topic_closed'] || msgRecord['forum_topic_reopened']) {
+    return;
+  }
+
   const chatId = msg.chat.id;
   const messageId = msg.message_id;
   const userId = msg.from?.id;
@@ -110,7 +116,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
       const finishMeta = async (fm: typeof formatted): Promise<'done' | 'legacy'> => {
         try {
           const { addMessage } = await import('../../pipeline/context/manager.js');
-          await addMessage(chatId, fm);
+          await addMessage(chatId, fm, fm.messageThreadId);
         } catch (err) {
           logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
         }
@@ -192,6 +198,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                 userId,
                 textPreview,
                 pressure: 100,
+                messageThreadId: fm.messageThreadId,
                 payload: {
                   username: fm.username || undefined,
                   fullName: fm.fullName || undefined,
@@ -245,6 +252,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                   userId,
                   textPreview,
                   pressure: basePressure + elevBoost,
+                  messageThreadId: fm.messageThreadId,
                   payload: {
                     username: fm.username || undefined,
                     fullName: fm.fullName || undefined,
@@ -278,6 +286,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                     userId,
                     textPreview,
                     pressure: 55,
+                    messageThreadId: fm.messageThreadId,
                     payload: {
                       username: fm.username || undefined,
                       fullName: fm.fullName || undefined,
@@ -344,6 +353,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
           userId,
           textPreview,
           pressure: basePressure + (layerDec.pressureBoost ?? 0),
+          messageThreadId: fm.messageThreadId,
           payload: {
             username: fm.username || undefined,
             fullName: fm.fullName || undefined,

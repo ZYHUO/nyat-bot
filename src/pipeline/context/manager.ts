@@ -33,8 +33,21 @@ redis.call('EXPIRE', key, tonumber(ARGV[4]))
 return len
 `;
 
-function ctxKey(chatId: number): string {
-  return CTX_PREFIX + chatId;
+function ctxKey(chatId: number, threadId?: number): string {
+  // General topic (thread_id=1) is the default topic → plain key (backward compat).
+  // Non-forum chats / undefined threadId → plain key.
+  if (!threadId || threadId <= 1) return CTX_PREFIX + chatId;
+  return `${CTX_PREFIX}${chatId}:t${threadId}`;
+}
+
+/**
+ * NyatDB ChatLog is keyed by numeric chatId; topic-specific context needs a
+ * synthetic numeric key. Use chatId * 100000 + threadId ONLY when threadId > 1
+ * (General topic / non-forum reuse the plain chatId → backward compatible).
+ */
+function nyatChatKey(chatId: number, threadId?: number): number {
+  if (!threadId || threadId <= 1) return chatId;
+  return chatId * 100000 + threadId;
 }
 
 function nyatWriteEnabled(): boolean {
@@ -65,27 +78,27 @@ function sanitizeMessage(message: FormattedMessage): FormattedMessage {
   return { ...message, textContent: inner };
 }
 
-function appendToNyatDb(chatId: number, message: FormattedMessage): void {
+function appendToNyatDb(chatId: number, message: FormattedMessage, threadId?: number): void {
   const ndb = getNyatDb();
   if (!ndb) throw new Error('nyatdb_unavailable');
   if (!(message.messageId > 0)) {
     logger.debug({ chatId }, 'skip NyatDB append (no messageId)');
     return;
   }
-  ndb.chatAppend(chatId, chatAppendFromFormatted(message));
+  ndb.chatAppend(nyatChatKey(chatId, threadId), chatAppendFromFormatted(message));
   const keep = env().NYATDB_MAX_MESSAGES_PER_CHAT;
   if (keep > 0 && message.messageId % 64 === 0) {
-    ndb.chatTrimKeepLast(chatId, keep);
+    ndb.chatTrimKeepLast(nyatChatKey(chatId, threadId), keep);
   }
 }
 
-async function appendToRedisCtx(chatId: number, message: FormattedMessage): Promise<void> {
+async function appendToRedisCtx(chatId: number, message: FormattedMessage, threadId?: number): Promise<void> {
   const redis = getRedis();
   const maxLen = env().CONTEXT_MAX_LENGTH;
   await redis.eval(
     RPUSH_TRIM_LUA,
     1,
-    ctxKey(chatId),
+    ctxKey(chatId, threadId),
     JSON.stringify(message),
     String(maxLen),
     String(maxLen - TRUNCATE_SIZE),
@@ -93,13 +106,13 @@ async function appendToRedisCtx(chatId: number, message: FormattedMessage): Prom
   );
 }
 
-export async function addMessage(chatId: number, message: FormattedMessage): Promise<void> {
+export async function addMessage(chatId: number, message: FormattedMessage, threadId?: number): Promise<void> {
   message = sanitizeMessage(message);
 
   let nyatOk = false;
   if (nyatWriteEnabled()) {
     try {
-      appendToNyatDb(chatId, message);
+      appendToNyatDb(chatId, message, threadId);
       nyatOk = true;
     } catch (err) {
       logger.warn({ err, chatId, messageId: message.messageId }, 'NyatDB append failed');
@@ -109,7 +122,7 @@ export async function addMessage(chatId: number, message: FormattedMessage): Pro
   // Redis ctx: mirror, or primary fallback when NyatDB write failed / disabled
   if (redisCtxWriteEnabled() || !nyatOk) {
     try {
-      await appendToRedisCtx(chatId, message);
+      await appendToRedisCtx(chatId, message, threadId);
       // Redis moved ahead of NyatDB — allow catch-up on next getRecent
       if (!nyatOk) {
         catchUpSettled.delete(chatId);
@@ -195,12 +208,12 @@ function fromNyatChatRows(
   );
 }
 
-function readFromNyatDb(chatId: number, count: number): FormattedMessage[] | null {
+function readFromNyatDb(chatId: number, count: number, threadId?: number): FormattedMessage[] | null {
   if (!env().NYATDB_ENABLED || !env().NYATDB_READ) return null;
   try {
     const ndb = getNyatDb();
     if (!ndb) return null;
-    const rows = ndb.chatRecent(chatId, count);
+    const rows = ndb.chatRecent(nyatChatKey(chatId, threadId), count);
     if (!rows.length) return null;
     return fromNyatChatRows(rows);
   } catch (err) {
@@ -209,31 +222,32 @@ function readFromNyatDb(chatId: number, count: number): FormattedMessage[] | nul
   }
 }
 
-async function readFromRedis(chatId: number, count: number): Promise<FormattedMessage[]> {
+async function readFromRedis(chatId: number, count: number, threadId?: number): Promise<FormattedMessage[]> {
   const redis = getRedis();
-  const raw = await redis.lrange(ctxKey(chatId), -count, -1);
+  const raw = await redis.lrange(ctxKey(chatId, threadId), -count, -1);
   return safeParseMessages(raw);
 }
 
 /** Lazy migrate Redis → NyatDB when NyatDB is empty but Redis still has history. */
-function backfillNyatFromRedis(chatId: number, msgs: FormattedMessage[]): void {
+function backfillNyatFromRedis(chatId: number, msgs: FormattedMessage[], threadId?: number): void {
   if (!nyatWriteEnabled() || !msgs.length) return;
   try {
     const ndb = getNyatDb();
     if (!ndb) return;
-    const existing = ndb.chatRecent(chatId, 1);
+    const nk = nyatChatKey(chatId, threadId);
+    const existing = ndb.chatRecent(nk, 1);
     if (existing.length) return;
     let n = 0;
     for (const m of msgs) {
       if (!(m.messageId > 0)) continue;
       try {
-        ndb.chatAppend(chatId, chatAppendFromFormatted(m));
+        ndb.chatAppend(nk, chatAppendFromFormatted(m));
         n += 1;
       } catch {
         /* skip bad rows */
       }
     }
-    if (n) logger.info({ chatId, n }, 'NyatDB backfilled from Redis ctx');
+    if (n) logger.info({ chatId, threadId, n }, 'NyatDB backfilled from Redis ctx');
   } catch (err) {
     logger.warn({ err, chatId }, 'NyatDB backfill failed');
   }
@@ -255,28 +269,29 @@ export function _resetNyatCatchUpStateForTests(): void {
  * from the broken dual-write era). Uses chatRecent ring for membership — native chatGet
  * index can miss rows that are already in the ring.
  */
-async function catchUpNyatFromRedis(chatId: number): Promise<number> {
+async function catchUpNyatFromRedis(chatId: number, threadId?: number): Promise<number> {
   if (!nyatWriteEnabled() || catchUpSettled.has(chatId)) return 0;
   try {
     const ndb = getNyatDb();
     if (!ndb) return 0;
 
+    const nk = nyatChatKey(chatId, threadId);
     const redis = getRedis();
-    const tipRaw = await redis.lindex(ctxKey(chatId), -1);
+    const tipRaw = await redis.lindex(ctxKey(chatId, threadId), -1);
     if (!tipRaw) {
       catchUpSettled.add(chatId);
       return 0;
     }
 
     const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX, env().CONTEXT_MAX_LENGTH);
-    const known = new Set(ndb.chatRecent(chatId, ringMax).map((r) => r.messageId));
-    const fromRedis = await readFromRedis(chatId, env().CONTEXT_MAX_LENGTH);
+    const known = new Set(ndb.chatRecent(nk, ringMax).map((r) => r.messageId));
+    const fromRedis = await readFromRedis(chatId, env().CONTEXT_MAX_LENGTH, threadId);
     if (!fromRedis.length) {
       catchUpSettled.add(chatId);
       return 0;
     }
 
-    const tipRow = ndb.chatRecent(chatId, 1)[0];
+    const tipRow = ndb.chatRecent(nk, 1)[0];
     const nyatLastId = tipRow?.messageId ?? 0;
     let redisLastId = 0;
     try {
@@ -292,7 +307,7 @@ async function catchUpNyatFromRedis(chatId: number): Promise<number> {
       if (!(m.messageId > nyatLastId)) continue;
       if (known.has(m.messageId)) continue;
       try {
-        ndb.chatAppend(chatId, chatAppendFromFormatted(m));
+        ndb.chatAppend(nk, chatAppendFromFormatted(m));
         known.add(m.messageId);
         n += 1;
       } catch {
@@ -300,7 +315,7 @@ async function catchUpNyatFromRedis(chatId: number): Promise<number> {
       }
     }
     if (n) {
-      logger.info({ chatId, n, from: nyatLastId, to: redisLastId }, 'NyatDB catch-up from Redis ctx');
+      logger.info({ chatId, threadId, n, from: nyatLastId, to: redisLastId }, 'NyatDB catch-up from Redis ctx');
     }
     catchUpSettled.add(chatId);
     return n;
@@ -331,13 +346,13 @@ function mergeRecentWithRedis(
   return merged.slice(-count);
 }
 
-export async function getRecent(chatId: number, count: number): Promise<FormattedMessage[]> {
+export async function getRecent(chatId: number, count: number, threadId?: number): Promise<FormattedMessage[]> {
   // Heal tip-ahead gaps before preferring NyatDB.
   if (nyatWriteEnabled() && env().NYATDB_READ) {
-    await catchUpNyatFromRedis(chatId);
+    await catchUpNyatFromRedis(chatId, threadId);
   }
 
-  const fromNyat = readFromNyatDb(chatId, count);
+  const fromNyat = readFromNyatDb(chatId, count, threadId);
 
   // After catch-up + one clean merge, skip Redis LRANGE (hot path).
   if (
@@ -358,6 +373,7 @@ export async function getRecent(chatId: number, count: number): Promise<Formatte
   const fromRedis = await readFromRedis(
     chatId,
     needForMerge ? Math.max(count, env().CONTEXT_MAX_LENGTH) : count,
+    threadId,
   );
 
   if (fromNyat && fromNyat.length > 0) {
@@ -365,7 +381,7 @@ export async function getRecent(chatId: number, count: number): Promise<Formatte
     if (!env().NYATDB_REDIS_MIRROR && catchUpSettled.has(chatId)) {
       const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX, env().CONTEXT_MAX_LENGTH);
       const ringIds = new Set(
-        (readFromNyatDb(chatId, ringMax) ?? fromNyat).map((m) => m.messageId).filter((id) => id > 0),
+        (readFromNyatDb(chatId, ringMax, threadId) ?? fromNyat).map((m) => m.messageId).filter((id) => id > 0),
       );
       const hasHole = fromRedis.some((m) => m.messageId > 0 && !ringIds.has(m.messageId));
       if (hasHole) redisPeekSkip.delete(chatId);
@@ -374,24 +390,28 @@ export async function getRecent(chatId: number, count: number): Promise<Formatte
     // Mirror off: keep legacy Redis hole copy alive until peek-skip settles.
     if (fromRedis.length > 0 && !env().NYATDB_REDIS_MIRROR && !redisPeekSkip.has(chatId)) {
       getRedis()
-        .expire(ctxKey(chatId), CTX_TTL)
+        .expire(ctxKey(chatId, threadId), CTX_TTL)
         .catch(() => {});
     }
     return merged;
   }
 
   if (fromRedis.length > 0) {
-    backfillNyatFromRedis(chatId, fromRedis);
+    backfillNyatFromRedis(chatId, fromRedis, threadId);
     return fromRedis.slice(-count);
   }
   return [];
 }
 
-export async function getAll(chatId: number, limit = 500): Promise<FormattedMessage[]> {
-  return getRecent(chatId, limit);
+export async function getAll(chatId: number, limit = 500, threadId?: number): Promise<FormattedMessage[]> {
+  return getRecent(chatId, limit, threadId);
 }
 
-export async function addAssistant(chatId: number, reply: { textContent: string; messageId: number }): Promise<void> {
+export async function addAssistant(
+  chatId: number,
+  reply: { textContent: string; messageId: number },
+  threadId?: number,
+): Promise<void> {
   const assistantMsg: FormattedMessage = {
     role: 'assistant',
     uid: 0,
@@ -402,7 +422,7 @@ export async function addAssistant(chatId: number, reply: { textContent: string;
     textContent: reply.textContent,
     isForwarded: false,
   };
-  await addMessage(chatId, assistantMsg);
+  await addMessage(chatId, assistantMsg, threadId);
 }
 
 export interface GroupMember {

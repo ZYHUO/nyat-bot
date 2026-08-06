@@ -18,6 +18,8 @@ export interface DispatchArgs {
    * jump into every group message (replaces Heart's silence bias).
    */
   interrupt?: boolean;
+  /** Telegram forum topic (supergroup thread) id; routes reply into the correct topic. */
+  messageThreadId?: number;
 }
 
 export function buildMetaApiContext(opts?: {
@@ -143,6 +145,7 @@ export function buildMetaApiContext(opts?: {
         trackingKey: args.trackingKey,
         createdAt: Date.now(),
         status: 'queued',
+        messageThreadId: args.messageThreadId,
       };
 
       // Atomic quote + chat locks BEFORE enqueue (kills same-ms double dispatch).

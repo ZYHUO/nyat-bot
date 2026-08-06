@@ -14,6 +14,8 @@ export interface AttentionItem {
   textPreview?: string;
   createdAt: number;
   payload?: Record<string, unknown>;
+  /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
+  messageThreadId?: number;
 }
 
 export interface DispatchTask {
@@ -33,6 +35,8 @@ export interface DispatchTask {
   createdAt: number;
   status: 'queued' | 'running' | 'done' | 'failed';
   resultSummary?: string;
+  /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
+  messageThreadId?: number;
 }
 
 export interface SubagentCallback {

@@ -14,6 +14,7 @@ export default defineConfig({
   shims: false,
   external: [
     'better-sqlite3',
+    'playwright',
     // Native addon loaded via createRequire at runtime (@nyat/nyatdb → native/nyatdb).
     /native\/nyatdb/,
     /@nyat\/nyatdb-native/,

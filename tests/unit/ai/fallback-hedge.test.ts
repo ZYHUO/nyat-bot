@@ -15,6 +15,8 @@ vi.mock('../../../src/ai/cooldown.js', () => ({
   CooldownTracker: class {
     isCoolingDown = async (): Promise<boolean> => false;
     setCooldown = async (): Promise<void> => {};
+    recordSuccess = async (): Promise<void> => {};
+    recordFailure = async (): Promise<boolean> => false;
   },
 }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: vi.fn(() => ({})) }));

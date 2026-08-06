@@ -524,7 +524,7 @@ const envSchema = z.object({
   // Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。
   META_USAGE: z.string().default('judge'),
   CODEACT_USAGE: z.string().default('reply'),
-  CODEACT_MAX_TURNS: z.coerce.number().int().positive().default(6),
+  CODEACT_MAX_TURNS: z.coerce.number().int().positive().default(8),
   CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   // CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。
   CODEACT_CONCURRENCY: z.coerce.number().int().positive().default(4),
@@ -550,6 +550,13 @@ const envSchema = z.object({
     .string()
     .default('是吧,对吧,作为一个AI,作为人工智能')
     .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean)),
+
+  // ── Computer-use sandbox (Playwright + terminal) ──
+  SANDBOX_ENABLED: booleanFromEnv.default(false),
+  SANDBOX_TERMINAL_ENABLED: booleanFromEnv.default(true),
+  SANDBOX_BROWSER_ENABLED: booleanFromEnv.default(true),
+  SANDBOX_ALLOWED_COMMANDS: z.string().default(''),
+  SANDBOX_BLOCKED_COMMANDS: z.string().default('rm -rf,shutdown,reboot,mkfs,halt,dd if=,chmod 777'),
 
   // ── Learner (Expression + Jargon, Stage D) ──
   LEARNER_ENABLED: booleanFromEnv.default(false),
@@ -589,6 +596,16 @@ const envSchema = z.object({
   // 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限
   PROACTIVE_COORDINATOR_ENABLED: booleanFromEnv.default(false),
   PROACTIVE_HOURLY_MAX_PER_CHAT: z.coerce.number().int().positive().default(3),
+
+  // ── P2: 主人 DM 主动关心（模型自主决策）──
+  // 定时让模型判断：主人这么久没说话，该不该主动关心一句？
+  PROACTIVE_THINKER_ENABLED: booleanFromEnv.default(false),
+  PROACTIVE_THINKER_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // 主人 DM 沉默超过该秒数才考虑主动关心（默认 4 小时）
+  PROACTIVE_THINKER_MIN_SILENCE_SEC: z.coerce.number().int().positive().default(4 * 3600),
+  PROACTIVE_THINKER_USAGE: z.string().default('judge'),
+  PROACTIVE_THINKER_HOUR_START: z.coerce.number().int().min(0).max(23).default(9),
+  PROACTIVE_THINKER_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
 
   // ── P2-B: RSS 信息流监控 ──
   // 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用

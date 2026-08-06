@@ -9,6 +9,8 @@ export interface FormattedMessage {
   fullName: string;
   timestamp: number;
   messageId: number;
+  /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
+  messageThreadId?: number;
   textContent: string;
   captionContent?: string;
   sticker?: {

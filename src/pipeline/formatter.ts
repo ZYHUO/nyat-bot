@@ -73,6 +73,8 @@ interface TgMessage {
   date: number;
   edit_date?: number;
   chat: { id: number; type: string };
+  /** Telegram supergroup forum topic (thread) id. */
+  message_thread_id?: number;
   text?: string;
   caption?: string;
   sticker?: TgSticker;
@@ -193,6 +195,7 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
     isBot,
     ...(isAnonymous && { isAnonymous, anonymousType }),
     ...(msg.sender_tag && { senderTag: msg.sender_tag }),
+    ...(msg.message_thread_id && { messageThreadId: msg.message_thread_id }),
   };
 
   if (msg.caption) {

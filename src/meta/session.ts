@@ -125,6 +125,7 @@ async function interceptDiaryAttention(
         toneGuidance?: string;
         quotes?: number[];
         targetUserId?: number;
+        messageThreadId?: number;
       },
     ) => Promise<{ taskId: string }>;
   };
@@ -152,7 +153,7 @@ async function interceptDiaryAttention(
         const ackText = result.wrote
           ? `日记已写好啦～${snip ? `「${snip}」` : ''}`
           : diarySkipAckDirection(result.reason).slice(0, 200);
-        await sendMessage(a.chatId, ackText, a.messageId);
+        await sendMessage(a.chatId, ackText, a.messageId, a.messageThreadId);
       } catch (err) {
         logger.warn({ err, chatId: a.chatId }, 'Meta diary ack direct send failed');
       }
@@ -164,6 +165,7 @@ async function interceptDiaryAttention(
       toneGuidance: '短、傲娇、像发微信；别小作文',
       quotes: a.messageId ? [a.messageId] : undefined,
       targetUserId: a.userId && a.userId > 0 ? a.userId : undefined,
+      messageThreadId: a.messageThreadId,
     });
     if (dispatched.taskId !== 'skipped_busy') return;
     // Cap retries: without this, a busy chat requeues diary_ack every tick →
@@ -244,6 +246,7 @@ async function interceptDiaryAttention(
             contentDirection: '日记功能关着。短回说明一下，别编日记。',
             toneGuidance: '短、像发微信',
             quotes: a.messageId ? [a.messageId] : undefined,
+            messageThreadId: a.messageThreadId,
           });
           continue;
         }
@@ -255,6 +258,7 @@ async function interceptDiaryAttention(
             : '暂时没有可念的日记片段。短回说明，别编。',
           toneGuidance: '短、傲娇、像发微信；别小作文',
           quotes: a.messageId ? [a.messageId] : undefined,
+          messageThreadId: a.messageThreadId,
         });
         logger.info({ chatId: a.chatId }, 'Meta subagent_request journal.recent');
         continue;
@@ -273,6 +277,7 @@ async function interceptDiaryAttention(
               contentDirection: '日记功能关着。短回说明一下，别假装写完。',
               toneGuidance: '短、像发微信',
               quotes: a.messageId ? [a.messageId] : undefined,
+              messageThreadId: a.messageThreadId,
             });
           }
           continue;
@@ -420,6 +425,7 @@ async function autoDispatchL0(
         quotes?: number[];
         relatedQuotes?: number[];
         targetUserId?: number;
+        messageThreadId?: number;
       },
     ) => Promise<{ taskId: string }>;
   };
@@ -501,8 +507,8 @@ async function autoDispatchL0(
         /* optional */
       }
     }
-    const r = await d.taskToGroup(chatId, {
-      contentDirection: buildL0ContentDirection({
+    // Unified contentDirection — model decides chat vs work based on context
+    const contentDirection = buildL0ContentDirection({
         who,
         messageId: latest.messageId,
         textPreview: latest.textPreview,
@@ -510,11 +516,15 @@ async function autoDispatchL0(
         replyToIsSelf,
         burstHint: `${burstHint}${heartHint}`,
         masterHint,
-      }),
-      toneGuidance: '短、像发微信；群聊微反应；别小作文；别复读',
+      });
+
+    const r = await d.taskToGroup(chatId, {
+      contentDirection,
+      toneGuidance: '自然接话或干活，根据用户消息自行决定。',
       quotes: latest.messageId ? [latest.messageId] : undefined,
       relatedQuotes: relatedQuotes.length ? relatedQuotes : undefined,
       targetUserId: latest.userId && latest.userId > 0 ? latest.userId : undefined,
+      messageThreadId: latest.messageThreadId,
     });
     if (r.taskId === 'skipped_busy') busyChatIds.add(chatId);
     else if (skipChatIds) skipChatIds.add(chatId);

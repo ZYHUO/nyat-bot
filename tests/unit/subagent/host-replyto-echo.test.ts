@@ -80,7 +80,7 @@ describe('host sendText replyTo + self-echo', () => {
       onEnd: () => {},
     });
     await host.telegram.sendText('喵？');
-    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', 392277);
+    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', 392277, undefined);
   });
 
   it('segments long reply: first bubble quotes, later bubbles plain', async () => {
@@ -106,7 +106,7 @@ describe('host sendText replyTo + self-echo', () => {
       onEnd: () => {},
     });
     await host.telegram.sendText('哼，才不告诉你');
-    expect(sendMessage).toHaveBeenCalledWith(6251541967, '哼，才不告诉你', undefined);
+    expect(sendMessage).toHaveBeenCalledWith(6251541967, '哼，才不告诉你', undefined, undefined);
   });
 
   it('DM rejects foreign replyTo ≠ task quote (no group→DM 串台)', async () => {

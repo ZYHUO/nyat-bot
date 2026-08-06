@@ -271,10 +271,12 @@ export function parseDiaryDecision(raw: string): {
       .replace(/\s*```\s*$/i, '')
       .trim();
     const body = stripMetaCommentary(bodyRaw);
-    if (body.length >= 15) {
+    // 完整句子（带句末标点）≥5 字符即有效；无标点的短残片才可能是 max_tokens 截断。
+    const endsWithPunctuation = /[。！？!?.…]"?」?）?\]?$/.test(body);
+    const bodyComplete = body.length >= 15 || (body.length >= 5 && endsWithPunctuation);
+    if (bodyComplete) {
       // Check for truncation: if body doesn't end with sentence punctuation
       // and there are more WRITE attempts to try, prefer the previous one.
-      const endsWithPunctuation = /[。！？!?.…]"?」?）?\]?$/.test(body);
       if (!endsWithPunctuation && j > 0) {
         // Likely truncated by max_tokens — try previous WRITE
         continue;

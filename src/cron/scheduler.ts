@@ -302,6 +302,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // P2: Proactive thinker — model-driven DM care for master (autonomy)
+  if (env().PROACTIVE_THINKER_ENABLED) {
+    tasks.push(schedule(`*/${env().PROACTIVE_THINKER_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('proactive-thinker', async () => {
+        const { runProactiveThinker } = await import('./proactive-thinker.js');
+        await runProactiveThinker();
+      });
+    }));
+  }
+
   // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
   if (env().RSS_MONITOR_ENABLED) {
     tasks.push(schedule(`*/${env().RSS_MONITOR_INTERVAL_MIN} * * * *`, () => {

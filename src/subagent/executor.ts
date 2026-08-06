@@ -26,7 +26,7 @@ function startTypingHeartbeat(chatId: number): () => void {
 
 const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct：写 JavaScript 调用 host API。
 
-人格 / 认人 / 短回见下方 identity + 主人块 + 当前状态 —— 遵守，勿另起客服腔。
+人格 / 认人 / 回复风格见下方 identity + 主人块 + 当前状态 —— 遵守，勿另起客服腔。
 
 可用全局对象:
 - telegram.sendText(text, replyToMessageId?)  // **必须 await**，再 endTask
@@ -38,14 +38,34 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - runtime.endTask(summary)  // 结束时调用
 - console.log(...)
 
-规则:
-1. 下方已注入最近聊天；通常不必再调 recentContext。
-2. **私聊**默认不传 replyTo；**群聊**第一条务必 \`sendText(text, quotes里的messageId)\`（或省略 replyTo，host 会填 quotes）。**禁止**传上下文里其它旧 #id —— 传错会 \`reply_to_mismatch\`，应省略 replyTo 或只用 quotes 里的 id 重试，不要改气泡正文去贴错人。
-3. 一轮优先 1 条文字（host 会按标点自动拆成多气泡，首条 quote、后续不 quote）；真要另起一轮最多再 sendText 一次。输出：极短思考 + 一个 \`\`\`js 代码块。
-4. **await 完 send* 再** runtime.endTask("一句话摘要")。禁止 fire-and-forget send。
-5. 无日记工具；要写/读日记 → meta.request。禁止编造「写完了」。
-6. 需要外部信息 → web.search；消化成短人话。
-7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。`;
+## 电脑使用（SANDBOX_ENABLED 时可用）
+- computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}
+- computer.writeFile(path, content) — 写文件到沙盒目录
+- computer.readFile(path) — 读沙盒文件
+- computer.listFiles(dir) — 列出沙盒目录文件
+- computer.browse(url) — 打开浏览器访问网页
+- computer.screenshot() — 截屏当前页面
+- computer.click(selector) / computer.type(selector, text) — 操作网页元素
+- computer.getText(selector?) — 提取网页文本
+- computer.eval(js) — 在页面执行 JS
+- computer.scroll(direction, amount) — 滚动页面
+- computer.closeBrowser() — 关闭浏览器
+
+## 行为准则
+1. 根据用户消息**自然决定**是聊天还是干活：
+   - 如果用户要求产出物（写代码、写文件、查询信息生成报告等）→ 规划步骤、逐步执行、完成后 sendText 报告结果
+   - 如果只是闲聊、问候、吐槽 → 1-2 轮内 sendText 回复然后 endTask
+   - 如果是简单问题（查天气、问时间、搜资料）→ web.search 查完消化成短人话回复
+   - **创建了文件（代码/HTML/脚本/图片等）→ 必须用 \`telegram.sendFile(相对路径, caption)\` 把文件发给用户**，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。
+2. 下方已注入最近聊天；通常不必再调 recentContext。
+3. **私聊**默认不传 replyTo；**群聊**第一条务必 \`sendText(text, quotes里的messageId)\`（或省略 replyTo，host 会填 quotes）。**禁止**传上下文里其它旧 #id —— 传错会 \`reply_to_mismatch\`，应省略 replyTo 或只用 quotes 里的 id 重试，不要改气泡正文去贴错人。
+4. 一轮优先 1 条文字（host 会按标点自动拆成多气泡，首条 quote、后续不 quote）；真要另起一轮最多再 sendText 一次。输出：极短思考 + 一个 \`\`\`js 代码块。
+5. **await 完 send* 再** runtime.endTask("一句话摘要")。禁止 fire-and-forget send。
+6. 无日记工具；要写/读日记 → meta.request。禁止编造「写完了」。
+7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
+8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
+9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。
+10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。`;
 
 function extractJs(text: string): string | null {
   const m = text.match(/```(?:js|javascript)?\s*([\s\S]*?)```/i);
@@ -55,9 +75,9 @@ function extractJs(text: string): string | null {
 async function runHostCode(
   code: string,
   host: HostApi,
-  opts: { isClosed: () => boolean; onTimeout: () => void },
+  opts: { isClosed: () => boolean; onTimeout: () => void; timeoutMs?: number },
 ): Promise<{ ok: boolean; output: string }> {
-  const timeoutMs = env().CODEACT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? env().CODEACT_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -70,11 +90,12 @@ async function runHostCode(
       'web',
       'meta',
       'runtime',
+      'computer',
       'console',
       `"use strict";\n${code}`,
     );
     const out = await Promise.race([
-      fn(host.telegram, host.memory, host.stickers, host.web, host.meta, host.runtime, console),
+      fn(host.telegram, host.memory, host.stickers, host.web, host.meta, host.runtime, host.computer, console),
       new Promise((_, rej) => {
         timer = setTimeout(() => {
           opts.onTimeout();
@@ -200,6 +221,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ended = true;
       endSummary = summary;
     },
+    maxTextSends: 5, // enough for both chat (1-2) and work (5)
+    messageThreadId: task.messageThreadId,
   });
 
   const engine = getContextEngine(`subagent:${task.chatId}`);
@@ -229,7 +252,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     try {
       const { getRecent } = await import('../pipeline/context/manager.js');
       const { isShortFollowUpText, isBarePingText } = await import('../meta/reply-context.js');
-      const recent = await getRecent(task.chatId, 80);
+      const recent = await getRecent(task.chatId, 80, task.messageThreadId);
       for (const m of recent) recentMessageIds.add(m.messageId);
       const hit = recent.find((m) => m.messageId === replyAnchor && m.role !== 'assistant');
       if (hit) {
@@ -270,7 +293,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         if (parentId && parentId > 0) {
           let parent = recent.find((m) => m.messageId === parentId);
           if (!parent) {
-            const wider = await getRecent(task.chatId, 120);
+            const wider = await getRecent(task.chatId, 120, task.messageThreadId);
             parent = wider.find((m) => m.messageId === parentId);
           }
           const parentWho = parent
@@ -362,6 +385,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     /* optional */
   }
 
+  // Unified CodeAct: 30 turns, 120s timeout, 4000 maxTokens — model decides chat vs work
+  const maxTurns = 30;
+  const timeoutMs = 120_000;
+
   const { prompt, manifest } = await engine.assemble([
     staticText('sub-system', EXECUTOR_SYSTEM),
     staticText('sub-identity', identity),
@@ -382,10 +409,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         (task.toneGuidance ? `\ntoneGuidance=${task.toneGuidance}` : '') +
         (task.quoteMessageIds?.length ? `\nquotes=${task.quoteMessageIds.join(',')}` : '') +
         (task.targetUserId ? `\ntargetUserId=${task.targetUserId}` : '') +
-        (replyAnchor && replyAnchor > 0
-          ? `\n\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。私聊可省略 replyTo；群聊省略时系统会补 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
+(replyAnchor && replyAnchor > 0
+          ? `\\\\n\\\\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。私聊可省略 replyTo；群聊省略时系统会补 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
           : '') +
-        `\n\n硬提醒：短回。群聊微反应；别写小作文。看 ## Now 的日段（北京时间）。禁止复读自己上一句。`,
+        `\\\\n\\\\n根据用户消息自行决定：简单聊天就 1-2 轮回复，需要做事就多轮工具调用，完成后 sendText 报告结果。看 ## Now 的日段（北京时间）。禁止复读用户原话。`,
     ),
     ephemeralText('sub-banned', `## Banned substrings\n${env().CODEACT_BANNED_WORDS.join(', ')}`),
     ephemeralText('sub-journal', journal ? `## Recent diary snippet\n${journal}` : ''),
@@ -407,18 +434,17 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       { role: 'system', content: prompt },
       {
         role: 'user',
-        content: '执行任务。上下文已注入；按 direction 短回（telegram.sendText），最后 runtime.endTask。',
+        content: '执行任务。上下文已注入，根据 contentDirection 自行决定：是聊天就回一句，是干活就规划步骤逐步执行。每步写一个 ```js 代码块调用 API，观察结果后继续下一步。完成后 sendText 报告结果，然后 runtime.endTask。',
       },
     ];
 
-    const maxTurns = env().CODEACT_MAX_TURNS;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
       let llmText = '';
       try {
         const result = await callWithFallback({
           usage: env().CODEACT_USAGE,
           messages: history,
-          maxTokens: 1500,
+          maxTokens: 4000,
           temperature: 0.7,
         });
         llmText = result.content ?? '';
@@ -442,9 +468,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       const exec = await runHostCode(code, host, {
         isClosed: () => closed,
         onTimeout: () => {
-          // Soft mark — do not flip closed yet so in-flight sendText can finish.
+          // Soft mark - do not flip closed yet so in-flight sendText can finish.
           logger.warn({ taskId: task.id }, 'CodeAct host code timed out (will flush then close)');
         },
+        timeoutMs,
       });
       if (exec.output === 'codeact_timeout') {
         closed = true;
@@ -452,11 +479,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       const mismatchHint = !exec.ok && /reply_to_mismatch/.test(exec.output)
         ? `\n提示：群聊 replyTo 只能是 quotes 里的 #${replyAnchor ?? '?'}（或省略让 host 填）。不要换旧 #id，也不要复用错人的气泡正文。`
         : '';
-      history.push({
+history.push({
         role: 'user',
         content: exec.ok
-          ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : '继续或 endTask。'}`
-          : `[observation:error]\n${exec.output}${mismatchHint}\n修正后重试或换策略，仍要 endTask。`,
+          ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : `已完成步骤 ${turn + 1}/${maxTurns}。继续下一步，或完成后 runtime.endTask("结果摘要")。`}`
+          : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? '这是最后一轮，sendText 说明进展然后 endTask。' : ''}`,
       });
     }
 
@@ -464,6 +491,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       if (host.runtime.didSendText()) {
         endSummary = 'ended_without_endTask';
       } else {
+        // Failsafe: bot didn't produce anything — generate an honest report
         try {
           const ctx = await host.memory.recentContext(8);
           const fallback = await callWithFallback({
@@ -473,19 +501,26 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
                 role: 'system',
                 content:
                   buildCodeActIdentityPrompt() +
-                  '\n\n现在只输出一句纯文本短回复，不要 JSON，不要代码。',
+                  '\n\n现在只输出一句纯文本回复，不要 JSON，不要代码。诚实说明没搞定，别假装完成了。',
               },
               {
                 role: 'user',
-                content: `direction: ${task.contentDirection}\ncontext:\n${ctx.slice(0, 1500)}\n\n短回一句。禁止复读用户原话。`,
+                content: `direction: ${task.contentDirection}\ncontext:\n${ctx.slice(0, 1500)}\n\n诚实说明情况。如果是在做任务没完成，说原因；如果是聊天没回上，随便接一句。`,
               },
             ],
-            maxTokens: 120,
-            temperature: 0.8,
+            maxTokens: 300,
+            temperature: 0.5,
           });
-          const text = (fallback.content ?? '').trim().slice(0, 200);
-          if (text && !closed) await host.telegram.sendText(text);
-          endSummary = 'fallback_plain_reply';
+          const text = (fallback.content ?? '').trim().slice(0, 300);
+          if (text && !closed) {
+            try {
+              const { sendMessage } = await import('../bot/sender/telegram.js');
+              await sendMessage(task.chatId, text, task.quoteMessageIds?.[0]);
+            } catch {
+              /* ultimate fallback */
+            }
+          }
+          endSummary = 'failsafe_plain_reply';
         } catch (err) {
           logger.warn({ err, taskId: task.id }, 'CodeAct failsafe reply failed');
           endSummary = 'failed_silent';
