@@ -18,7 +18,7 @@ export function isWithinActiveHours(start: number, end: number): boolean {
   return hour >= start && hour < end;
 }
 
-const GROUPS_ZSET = 'xxb:meta:active_groups';
+const GROUPS_ZSET = 'xxb:active_groups';
 
 /** 从活跃群 zset 发现 group chat ids（负数 chatId）。Redis 挂返回空数组。
  * zset key 与 pipeline/context/manager.ts 写入的活跃群索引保持一致——原
