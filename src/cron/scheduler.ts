@@ -10,8 +10,8 @@ import { runModelCheck } from './model-check.js';
 import { runCleanup, type CleanupDeps } from './cleanup.js';
 import { runKnowledgeSync } from './knowledge-sync.js';
 import { runUserProfileSync } from '../tracking/user-profile.js';
-import { runIdleCheck } from './idle.js';
-import { runProactiveScan } from './proactive-scan.js';
+// idle.ts / proactive-thinker.ts / self-play.ts / goal-check.ts / proactive-scan.ts
+// 已被 unified-tick 取代并删除；活跃时段判断在 active-hours.ts。
 import { runLearnerScan } from './learner-scan.js';
 import { runChannelSync } from './channel-sync.js';
 import { flushDailyStats } from '../tracking/stats.js';
@@ -234,25 +234,15 @@ export function startCronJobs(deps?: CronDeps): void {
     void safeRun('user-profile-sync', runUserProfileSync);
   }));
 
-  // P5-A: Unified tick — 决策合并的统一唤醒循环。开启时旁路下面 5 个旧决策型
-  // cron（idle/proactive-scan/thinker/self-play/goal-check 的「要不要动」由
-  // tick 一次 LLM 决定，执行仍走它们各自的执行器）。回退：关掉 flag 即恢复旧 cron。
-  const unifiedTick = env().UNIFIED_TICK_ENABLED;
-  if (unifiedTick) {
-    tasks.push(schedule(`*/${env().UNIFIED_TICK_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('unified-tick', async () => {
-        const { runUnifiedTick } = await import('./unified-tick.js');
-        await runUnifiedTick();
-      });
-    }));
-  }
-
-  // Idle proactive messaging — every 5 minutes, poke silent group chats
-  if (!unifiedTick) {
-    tasks.push(schedule('*/5 * * * *', () => {
-      void safeRun('idle-check', runIdleCheck);
-    }));
-  }
+  // P5-A: Unified tick —— 决策合并的统一唤醒循环（常驻）。
+  // 已取代 idle / proactive-scan / proactive-thinker / self-play / goal-check
+  // 五个决策型 cron（它们的执行器保留在 tick 内部复用）。
+  tasks.push(schedule(`*/${env().UNIFIED_TICK_INTERVAL_MIN} * * * *`, () => {
+    void safeRun('unified-tick', async () => {
+      const { runUnifiedTick } = await import('./unified-tick.js');
+      await runUnifiedTick();
+    });
+  }));
 
   // Dream journal — multi cron (UTC, comma-separated); model WRITE/SKIP; append entries
   if (env().DREAM_JOURNAL_ENABLED) {
@@ -310,52 +300,16 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
-  // Proactive scan — periodic chat-aware engagement (Stage C)
-  if (env().PROACTIVE_SCAN_ENABLED && !unifiedTick) {
-    tasks.push(schedule(`*/${env().PROACTIVE_SCAN_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('proactive-scan', runProactiveScan);
-    }));
-  }
-
-  // P2: Proactive thinker — model-driven DM care for master (autonomy)
-  if (env().PROACTIVE_THINKER_ENABLED && !unifiedTick) {
-    tasks.push(schedule(`*/${env().PROACTIVE_THINKER_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('proactive-thinker', async () => {
-        const { runProactiveThinker } = await import('./proactive-thinker.js');
-        await runProactiveThinker();
-      });
-    }));
-  }
-
-  // P2: Self-play — 无聊了自己找事做（自主行动）
-  if (env().SELF_PLAY_ENABLED && !unifiedTick) {
-    tasks.push(schedule(`*/${env().SELF_PLAY_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('self-play', async () => {
-        const { runSelfPlay } = await import('./self-play.js');
-        await runSelfPlay();
-      });
-    }));
-  }
-
-  // P4-B: Goal check — 周期性推进持续关注的目标（有自己的事）
-  if (env().GOAL_TRACKER_ENABLED && !unifiedTick) {
-    tasks.push(schedule(`*/${env().GOAL_CHECK_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('goal-check', async () => {
-        const { runGoalCheck } = await import('./goal-check.js');
-        await runGoalCheck();
-      });
-    }));
-  }
+  // （原 proactive-scan / proactive-thinker / self-play / goal-check 的独立
+  // 注册已移除——决策统一由 unified-tick 做出，执行器在 tick 内部调用。）
 
   // P4-C: Self-reflect — 每天凌晨复盘自己的回复表现（自我模型）
-  if (env().SELF_REFLECT_ENABLED) {
-    tasks.push(schedule('37 3 * * *', () => {
-      void safeRun('self-reflect', async () => {
-        const { runSelfReflect } = await import('./self-reflect.js');
-        await runSelfReflect();
-      });
-    }));
-  }
+  tasks.push(schedule('37 3 * * *', () => {
+    void safeRun('self-reflect', async () => {
+      const { runSelfReflect } = await import('./self-reflect.js');
+      await runSelfReflect();
+    });
+  }));
 
   // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
   if (env().RSS_MONITOR_ENABLED) {

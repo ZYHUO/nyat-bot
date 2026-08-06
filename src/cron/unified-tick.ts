@@ -16,7 +16,7 @@ import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { isAsleep } from '../tracking/sleep.js';
-import { isWithinActiveHours } from './proactive-scan.js';
+import { isWithinActiveHours } from './active-hours.js';
 
 // ── 动作类型 ──────────────────────────────
 
@@ -103,14 +103,12 @@ export async function buildWorldState(): Promise<WorldState> {
     groups.sort((a, b) => a.silentSec - b.silentSec);
   } catch { /* keep empty */ }
 
-  // 到期 goals
+  // 到期 goals（常驻——goal 追踪是核心能力）
   let dueGoals: WorldState['dueGoals'] = [];
-  if (e.GOAL_TRACKER_ENABLED) {
-    try {
-      const { listDueGoals } = await import('../agent/goals.js');
-      dueGoals = listDueGoals(now).map((g) => ({ id: g.id, topic: g.topic, lastFinding: g.last_finding }));
-    } catch { /* keep empty */ }
-  }
+  try {
+    const { listDueGoals } = await import('../agent/goals.js');
+    dueGoals = listDueGoals(now).map((g) => ({ id: g.id, topic: g.topic, lastFinding: g.last_finding }));
+  } catch { /* keep empty */ }
 
   // RSS fuel（所有群的 fuel 总量，粗粒度即可）
   let rssNewCount = 0;
@@ -367,7 +365,6 @@ export function parseTickVerdictForTest(raw: string): TickVerdict | null {
 
 export async function runUnifiedTick(): Promise<void> {
   const e = env();
-  if (!e.UNIFIED_TICK_ENABLED) return;
   try {
     if (!isWithinActiveHours(e.UNIFIED_TICK_HOUR_START, e.UNIFIED_TICK_HOUR_END)) return;
     if (await isAsleep()) {

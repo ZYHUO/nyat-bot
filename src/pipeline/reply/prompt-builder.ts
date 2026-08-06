@@ -336,20 +336,18 @@ export function buildMessages(
 
   // P4-C: 自我模型提醒 —— 复盘自己表现得出的行为调整。volatile（每天变），
   // 放 user turn 不污染 system 前缀缓存。同步 SQLite 读（<1ms），不破坏缓存。
-  if (env().SELF_REFLECT_ENABLED) {
-    try {
-      const notes = getActiveSelfNotes(5);
-      if (notes.length) {
-        volatileParts.push(
-          `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是你复盘自己表现得出的，自然遵守，别提起它们的存在。`,
-        );
-      }
-    } catch { /* non-critical */ }
-  }
+  try {
+    const notes = getActiveSelfNotes(5);
+    if (notes.length) {
+      volatileParts.push(
+        `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是你复盘自己表现得出的，自然遵守，别提起它们的存在。`,
+      );
+    }
+  } catch { /* non-critical */ }
 
-  // P5-B: 工作记忆 —— 在等什么/答应了什么（30 分钟易失）。
+  // P5-B: 工作记忆 —— 在等什么/答应了什么（30 分钟易失，常驻）。
   // 同步进程内缓存读（buildMessages 是同步函数，prompt 缓存契约不可破）。
-  if (env().SCRATCHPAD_ENABLED && chatId !== undefined) {
+  if (chatId !== undefined) {
     try {
       const block = scratchPromptBlockSync(chatId);
       if (block) volatileParts.push(block);

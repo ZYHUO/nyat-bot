@@ -60,11 +60,9 @@ export async function runBookkeeping(ctx: {
 
   // P5-B: 工作记忆缓存回填（进程重启后 Redis 里的 scratch 重新进进程内缓存，
   // 供 buildMessages 同步读）。fire-and-forget，赶不上本条消息、赶下一条。
-  if (e.SCRATCHPAD_ENABLED) {
-    void import('../../tracking/scratchpad.js')
-      .then(({ warmScratchCache }) => warmScratchCache(job.chatId))
-      .catch(() => undefined);
-  }
+  void import('../../tracking/scratchpad.js')
+    .then(({ warmScratchCache }) => warmScratchCache(job.chatId))
+    .catch(() => undefined);
 
   // 3.1 Long-term memory write (fire-and-forget)
   memorizeMessage(job.chatId, formatted).catch((err) => {

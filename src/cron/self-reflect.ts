@@ -76,7 +76,6 @@ async function activeGroups24h(): Promise<number[]> {
 }
 
 export async function runSelfReflect(): Promise<void> {
-  if (!env().SELF_REFLECT_ENABLED) return;
   try {
     const masterUid = env().MASTER_UID;
     const groups = await activeGroups24h();

@@ -9,7 +9,7 @@
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getRecent } from '../pipeline/context/manager.js';
-import { discoverActiveGroupChats } from './proactive-scan.js';
+import { discoverActiveGroupChats } from './active-hours.js';
 import { observeTopic, tickLifecycle, getActiveTopics, pruneDeadTopics } from '../tracking/topic-registry.js';
 import { callWithFallback } from '../ai/fallback.js';
 

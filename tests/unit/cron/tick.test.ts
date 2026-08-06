@@ -25,7 +25,7 @@ vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: (...args: unknown[]) => callWithFallbackMock(...args),
 }));
 vi.mock('../../../src/tracking/sleep.js', () => ({ isAsleep: async () => false }));
-vi.mock('../../../src/cron/proactive-scan.js', () => ({ isWithinActiveHours: () => true }));
+vi.mock('../../../src/cron/active-hours.js', () => ({ isWithinActiveHours: () => true }));
 vi.mock('../../../src/cron/proactive-coordinator.js', () => ({
   tryAcquireProactiveSlot: (...args: unknown[]) => acquireSlotMock(...args),
   markProactiveSent: async () => {},
