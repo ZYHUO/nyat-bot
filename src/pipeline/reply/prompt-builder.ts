@@ -10,7 +10,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { FormattedMessage, ReplyTier } from '../../shared/types.js';
+import type { FormattedMessage } from '../../shared/types.js';
 import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { getTopExpressions, reinforceExpressions } from '../../learners/expression-learner.js';
@@ -48,14 +48,14 @@ function loadPersonaForUser(userId: number | undefined): string {
 }
 
 /**
- * Build the 5-layer system prompt. Kept a near-pure function of (replyTier) so the prefix
- * stays byte-stable for DeepSeek/Claude auto prefix-cache. Per-user volatile data
- * (relationship / self-history) lives in the user turn now — see buildPersonalContext.
+ * Build the 5-layer system prompt. Prefix stays byte-stable for DeepSeek/Claude
+ * auto prefix-cache. Per-user volatile data (relationship / self-history) lives
+ * in the user turn now — see buildPersonalContext.
  * @param userId — optional; only used to load a per-user persona override
  *   (prompts/persona/{userId}.md|.txt) when present — rare, intentionally busts cache for that user.
  * @param _chatId — deprecated/unused (kept for call-site signature compatibility).
  */
-export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: number, _chatId?: number): string {
+export function buildSystemPrompt(userId?: number, _chatId?: number): string {
   void _chatId;
   const layers: string[] = [];
 
@@ -94,12 +94,9 @@ export function buildSystemPrompt(replyTier: ReplyTier = 'normal', userId?: numb
   // 已迁到 user turn(见 buildPersonalContext / buildMessages),system 前缀保持逐字节稳定。
   layers.push(loadCachedPrompt('style/tone.md'));
 
-  // L5: Task — reply.md 是基座(目标选择/事实纪律/命令等硬规则),
-  // pro/max 是叠加的"差异附录"。旧的替换式装配让 pro/max 模式下连
-  // targetMessageId 硬规则都消失,深度回复反而最容易回错人。
+  // L5: Task — reply.md 是基座(目标选择/事实纪律/命令等硬规则)。
+  // (reply-pro.md / reply-max.md tier 附录已随 tier 系统删除。)
   layers.push(loadCachedPrompt('task/reply.md'));
-  if (replyTier === 'pro') layers.push(loadCachedPrompt('task/reply-pro.md'));
-  else if (replyTier === 'max') layers.push(loadCachedPrompt('task/reply-max.md'));
 
   return layers.filter(Boolean).join(SECTION_SEP);
 }

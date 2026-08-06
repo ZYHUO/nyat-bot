@@ -178,7 +178,7 @@ export function buildModelRoutingAdminView(): Record<string, unknown> {
     ]),
   );
 
-  const usageNames = ['reply', 'reply_pro', 'judge', 'vision', 'summarize', 'deep_think'];
+  const usageNames = ['reply', 'judge', 'vision', 'summarize', 'deep_think'];
   const effective: Record<string, unknown> = {};
   for (const name of usageNames) {
     try {

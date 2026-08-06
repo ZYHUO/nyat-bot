@@ -14,7 +14,6 @@ const args = {
   chatId: -100,
   botUid: 9,
   replyPath: 'planned' as never,
-  replyTier: 'normal' as never,
   segmenterConfig: undefined,
   turnCallOpts: { signal: undefined } as never,
 };
@@ -46,8 +45,7 @@ describe('runWriterRoute (L3 deliver 分支接缝)', () => {
     expect(c[3]).toBe(args.chatId);
     expect(c[4]).toBe(args.botUid);
     expect(c[5]).toBe(args.replyPath);
-    expect(c[6]).toBe(args.replyTier);
-    expect(c[7]).toBe(args.segmenterConfig);
-    expect(c[8]).toBe(args.turnCallOpts);
+    expect(c[6]).toBe(args.segmenterConfig);
+    expect(c[7]).toBe(args.turnCallOpts);
   });
 });

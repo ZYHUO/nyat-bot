@@ -62,7 +62,6 @@ describe("L0 Rules Engine", () => {
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
     expect(result!.replyPath).toBe("direct");
-    expect(result!.replyTier).toBe("normal");
     expect(result!.rule).toBe("bot_mentions_self");
   });
 
@@ -74,7 +73,6 @@ describe("L0 Rules Engine", () => {
     expect(result).not.toBeNull();
     expect(result!.action).toBe("REPLY");
     expect(result!.replyPath).toBeUndefined();
-    expect(result!.replyTier).toBe("normal");
     expect(result!.rule).toBe("mention_self");
   });
 

@@ -4,8 +4,8 @@
 // Extracted from pipeline.ts (pure extraction, no logic changes).
 // ────────────────────────────────────────
 
-import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath, ReplyTier } from "../../shared/types.js";
-import { resolveReplyPath, resolveReplyTier } from "../../shared/types.js";
+import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath } from "../../shared/types.js";
+import { resolveReplyPath } from "../../shared/types.js";
 import { applyChatPathPolicy } from "../path-policy.js";
 import { TEMP_MUTE_CLEAR_RULES, DIRECT_INTERACTION_RULES, buildDeferEntry } from "../shared.js";
 import { tryMuteCommandIntercepts, tryPreMuteIntercepts, tryPostMuteIntercepts } from "./intercepts.js";
@@ -73,25 +73,22 @@ export async function runPostJudge(ctx: {
         job.turnContext?.signal, burstHint,
       );
       if (pathResult.replyPath) judgeResult.replyPath = pathResult.replyPath;
-      if (pathResult.replyTier) judgeResult.replyTier = pathResult.replyTier;
     }
   }
 
   const rawReplyPath = resolveReplyPath(judgeResult.action, judgeResult.replyPath);
-  const effectiveReplyTier = resolveReplyTier(judgeResult.action, judgeResult.replyTier);
   const pathPolicyDecision =
     judgeResult.action === "REPLY" && rawReplyPath
       ? await applyChatPathPolicy({ chatId: job.chatId, message: formatted, botUid, rawReplyPath })
       : { replyPath: rawReplyPath ?? "direct", matchedPatterns: [], source: "raw" as const };
   const effectiveReplyPath: ReplyPath = pathPolicyDecision.replyPath;
-  const replyTierForReply: ReplyTier = effectiveReplyTier ?? "normal";
 
   logger.debug(
     {
       chatId: job.chatId, messageId: formatted.messageId,
       from: formatted.username || formatted.fullName,
       action: judgeResult.action, rawReplyPath, replyPath: effectiveReplyPath,
-      replyTier: replyTierForReply, pathPolicySource: pathPolicyDecision.source,
+      pathPolicySource: pathPolicyDecision.source,
       pathPolicyPatterns: pathPolicyDecision.matchedPatterns,
       level: judgeResult.level, rule: judgeResult.rule,
       confidence: judgeResult.confidence, judgeMs: judgeResult.latencyMs,
@@ -369,7 +366,7 @@ export async function runPostJudge(ctx: {
   // 6-11: Reply generation, send, and post-send bookkeeping
   await generateAndSendReplies({
     job, formatted, judgeResult, botUid,
-    effectiveReplyPath, effectiveReplyTier: replyTierForReply,
+    effectiveReplyPath,
     e, start, timings, lockState, releaseHeldChatLock,
   });
 

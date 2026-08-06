@@ -102,7 +102,6 @@ function stubJudge(isDirect: boolean): JudgeResult {
     action: 'REPLY',
     level: isDirect ? 'L0_RULE' : 'L1_MICRO',
     rule: isDirect ? 'private_chat' : 'meta_passive',
-    replyTier: 'normal',
     latencyMs: 0,
   };
 }

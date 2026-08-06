@@ -78,7 +78,6 @@ const setEnv = (o: EnvOpts = {}): void => {
 
 const baseInput = (
   replyPath: 'direct' | 'planned' | undefined,
-  replyTier: 'normal' | 'pro' | 'max' = 'normal',
 ) => ({
   message: { textContent: '查下今天天气', captionContent: '', messageId: 1, uid: 100 } as never,
   retrievedContext: { contextStr: 'CTX', merged: [] } as never,
@@ -86,13 +85,12 @@ const baseInput = (
   chatId: -100,
   botUid: 9,
   replyPath,
-  replyTier,
   segmenterConfig: undefined,
   turnCallOpts: { signal: undefined } as never,
 });
 
 const writerOpts = (callIdx = 0): { prebuiltToolResults?: string; memoryFindings?: string; directorHint?: string; contextDigest?: string; toolDecisionHandled?: boolean } =>
-  (generateReply as unknown as ReturnType<typeof vi.fn>).mock.calls[callIdx]![8] as {
+  (generateReply as unknown as ReturnType<typeof vi.fn>).mock.calls[callIdx]![7] as {
     prebuiltToolResults?: string;
     memoryFindings?: string;
     directorHint?: string;
@@ -148,12 +146,13 @@ describe('runMultiAgentReply (Phase 2-5 + Best-of-N + 人设Critic)', () => {
   });
 
   it('deep:研究员+记忆员+人设员+核查+Critic 全跑', async () => {
+    setEnv({ criticOnLookup: true });
     (runResearcher as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(researcherOk('RES'));
     (runMemorySpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(memoryOk('MEM'));
     (runPersonaSpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(personaOk('PER'));
     (runFactChecker as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('[核查员]\n第2条可疑');
     (runCritic as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ needsRewrite: false });
-    await runMultiAgentReply(baseInput('direct', 'max'));
+    await runMultiAgentReply(baseInput('planned'));
     expect(runFactChecker).toHaveBeenCalledTimes(1);
     expect(runCritic).toHaveBeenCalledTimes(1);
     expect(writerOpts().prebuiltToolResults).toContain('[核查员]');
@@ -239,7 +238,7 @@ describe('runMultiAgentReply (Phase 2-5 + Best-of-N + 人设Critic)', () => {
   });
 
   it('M1:deep 路径 critic 回炉后人设Critic 又回炉 → prebuilt 同时含 [二审反馈]+[人设反馈]', async () => {
-    setEnv({ personaCritic: true, criticMaxRounds: 2 });
+    setEnv({ personaCritic: true, criticMaxRounds: 2, criticOnLookup: true });
     (runResearcher as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(researcherOk('RES'));
     (runMemorySpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(memoryOk());
     (runPersonaSpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(personaOk());
@@ -249,7 +248,7 @@ describe('runMultiAgentReply (Phase 2-5 + Best-of-N + 人设Critic)', () => {
       .mockResolvedValueOnce({ needsRewrite: false });
     // 人设 critic:needsRewrite → 回炉
     (runPersonaCritic as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ needsRewrite: true, feedback: '把主人叫成妹妹' });
-    await runMultiAgentReply(baseInput('direct', 'max'));
+    await runMultiAgentReply(baseInput('planned'));
     // 初稿 + critic 回炉1次 + 人设回炉1次 = 3 次写手
     expect(generateReply).toHaveBeenCalledTimes(3);
     // 最后一次(人设回炉)的 prebuilt 应同时带两个反馈块(M1:不丢 critic 反馈)
@@ -261,12 +260,12 @@ describe('runMultiAgentReply (Phase 2-5 + Best-of-N + 人设Critic)', () => {
   });
 
   it('Critic 循环:连续 needsRewrite,回炉到 MAX_ROUNDS=2 后停', async () => {
-    setEnv({ criticMaxRounds: 2 });
+    setEnv({ criticMaxRounds: 2, criticOnLookup: true });
     (runResearcher as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(researcherOk('RES'));
     (runMemorySpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(memoryOk());
     (runPersonaSpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(personaOk());
     (runCritic as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ needsRewrite: true, feedback: '还是跑题' });
-    await runMultiAgentReply(baseInput('direct', 'max'));
+    await runMultiAgentReply(baseInput('planned'));
     expect(runCritic).toHaveBeenCalledTimes(2); // 两轮都 needsRewrite
     expect(generateReply).toHaveBeenCalledTimes(3); // 初稿 + 2 次回炉
   });

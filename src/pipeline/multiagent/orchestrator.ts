@@ -17,9 +17,9 @@
 // =false → 写手回退自己的 web 工具决策。turn 打断 → 从专家上抛 AI_ABORTED → replan。
 // feature-flag 关时调用方走原 generateReply,本模块不参与。
 
-import type { FormattedMessage, JudgeAction, ReplyPath, ReplyTier, RetrievedContext } from '../../shared/types.js';
+import type { FormattedMessage, JudgeAction, ReplyPath, RetrievedContext } from '../../shared/types.js';
 import { generateReply } from '../reply/reply.js';
-import { routeReply, routeNeedsSpecialists, routeIsDeep, type AgentRoute } from './router.js';
+import { routeReply, routeNeedsSpecialists, type AgentRoute } from './router.js';
 import { runResearcher } from './researcher.js';
 import { runMemorySpecialist } from './memory-specialist.js';
 import { runPersonaSpecialist } from './persona-specialist.js';
@@ -35,7 +35,7 @@ import { recallEpisodes, type GroupEpisode } from '../../tracking/group-episodes
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
-type ReplyCallOpts = NonNullable<Parameters<typeof generateReply>[8]>;
+type ReplyCallOpts = NonNullable<Parameters<typeof generateReply>[7]>;
 type ReplyResult = Awaited<ReturnType<typeof generateReply>>;
 
 type SpecialistResult = { toolResultsBlock?: string; toolsUsed: string[]; failed: boolean } | null;
@@ -47,8 +47,7 @@ export interface MultiAgentInput {
   chatId: number;
   botUid: number;
   replyPath: ReplyPath | undefined;
-  replyTier: ReplyTier | undefined;
-  segmenterConfig?: Parameters<typeof generateReply>[7];
+  segmenterConfig?: Parameters<typeof generateReply>[6];
   turnCallOpts?: ReplyCallOpts;
 }
 
@@ -74,17 +73,16 @@ function settleSpecialist(
   if (v && !v.failed) onValue(v.toolResultsBlock, v.toolsUsed);
 }
 
-/** deep 总跑 Critic;lookup 在 MULTI_AGENT_CRITIC_ON_LOOKUP 开时也跑;chat 不跑。 */
+/** lookup 在 MULTI_AGENT_CRITIC_ON_LOOKUP 开时跑 Critic;chat 不跑。(deep 档已删。) */
 function routeRunsCritic(route: AgentRoute, e: ReturnType<typeof env>): boolean {
   if (!e.MULTI_AGENT_CRITIC_ENABLED) return false;
-  if (routeIsDeep(route)) return true;
   if (route === 'lookup') return e.MULTI_AGENT_CRITIC_ON_LOOKUP;
   return false;
 }
 
 export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyResult> {
   const e = env();
-  const route = routeReply(input.replyPath, input.replyTier);
+  const route = routeReply(input.replyPath);
   const queryText = (input.message.textContent || input.message.captionContent || '').trim();
   const turnSignal = input.turnCallOpts?.signal;
 
@@ -237,7 +235,7 @@ export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyR
       try {
         result = await generateReply(
           input.message, input.retrievedContext, input.action,
-          input.chatId, input.botUid, input.replyPath, input.replyTier,
+          input.chatId, input.botUid, input.replyPath,
           input.segmenterConfig, buildCallOpts(currentPrebuilt),
         );
       } catch (err) {
@@ -260,7 +258,7 @@ export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyR
           const personaPrebuilt = `${currentPrebuilt ? currentPrebuilt + '\n\n' : ''}[人设反馈]\n${verdict.feedback}`;
           result = await generateReply(
             input.message, input.retrievedContext, input.action,
-            input.chatId, input.botUid, input.replyPath, input.replyTier,
+            input.chatId, input.botUid, input.replyPath,
             input.segmenterConfig, buildCallOpts(personaPrebuilt),
           );
           currentPrebuilt = personaPrebuilt;
@@ -294,14 +292,14 @@ async function runBestOfNWriter(
   if (n <= 1) {
     return generateReply(
       input.message, input.retrievedContext, input.action,
-      input.chatId, input.botUid, input.replyPath, input.replyTier,
+      input.chatId, input.botUid, input.replyPath,
       input.segmenterConfig, draftOpts,
     );
   }
   const draftPs = Array.from({ length: n }, () =>
     generateReply(
       input.message, input.retrievedContext, input.action,
-      input.chatId, input.botUid, input.replyPath, input.replyTier,
+      input.chatId, input.botUid, input.replyPath,
       input.segmenterConfig, draftOpts,
     ),
   );

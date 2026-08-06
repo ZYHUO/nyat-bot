@@ -139,7 +139,7 @@ async function runSelfContinue(chatId: number, botUid: number): Promise<void> {
     if (!(current.role === 'assistant' || current.uid === botUid)) return;
 
     const contextStr = slimContextForAI(recent.slice(0, -1), current, botUid);
-    const systemPrompt = buildSystemPrompt('normal', undefined, chatId);
+    const systemPrompt = buildSystemPrompt(undefined, chatId);
     // 自己刚发的话(最多 2 条)— 明确喂给模型,禁止换皮重答
     const ownRecentTexts = recent
       .filter((m) => m.role === 'assistant' || m.uid === botUid)

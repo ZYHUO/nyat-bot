@@ -691,7 +691,7 @@ const envSchema = z.object({
   // 默认 1。best-of-N 对 direct 闲聊路由没有降级(orchestrator.ts:281),等于让一个
   // maxTokens:20 的小选择器在两条猫娘语气短句里挑一条,代价是写手 token ×2 —— 而写手是
   // 全链最贵的一次调用(5 层 system ≈ 19KB ≈ ~5k token + user turn ~3k)。需要多稿时按
-  // replyTier 提升,而不是全局常开。
+  // 按需在具体群/场景提升,而不是全局常开。
   WRITER_BEST_OF_N: z.coerce.number().int().positive().default(1),
   WRITER_SELECTOR_ENABLED: booleanFromEnv.default(true),
   WRITER_SELECTOR_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
@@ -840,7 +840,6 @@ export interface EnvUsage {
 
 let _providers: Map<string, EnvProvider> | undefined;
 let _usages: Map<string, EnvUsage> | undefined;
-let _replyMaxLabels: string[] | undefined;
 
 function readBool(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
@@ -883,11 +882,6 @@ function buildLegacyProviders(source: NodeJS.ProcessEnv, providers: Map<string, 
     endpoint: primaryEndpoint,
     apiKey: primaryKey,
     model: source['AI_MODEL_REPLY'],
-  });
-  addProviderIfMissing(providers, 'reply_pro', {
-    endpoint: primaryEndpoint,
-    apiKey: primaryKey,
-    model: source['AI_MODEL_REPLY_PRO'],
   });
   addProviderIfMissing(providers, 'vision', {
     endpoint: primaryEndpoint,
@@ -962,11 +956,7 @@ function buildLegacyUsageRouting(source: NodeJS.ProcessEnv, usages: Map<string, 
 
   addUsageIfMissing(usages, 'reply', {
     label: 'reply',
-    backups: source['AI_MODEL_REPLY_PRO'] ? ['reply_pro'] : [],
-  });
-  addUsageIfMissing(usages, 'reply_pro', {
-    label: source['AI_MODEL_REPLY_PRO'] ? 'reply_pro' : 'reply',
-    backups: source['AI_MODEL_REPLY'] ? ['reply'] : [],
+    backups: [],
   });
   addUsageIfMissing(usages, 'vision', {
     label: source['AI_MODEL_VISION'] ? 'vision' : 'reply',
@@ -1114,20 +1104,7 @@ export function getUsageRouting(): Map<string, EnvUsage> {
   return _usages;
 }
 
-/**
- * Parse AI_USAGE_REPLY_MAX_LABELS (comma-separated provider names for rotating reply_max pool).
- */
-export function getReplyMaxLabels(): string[] {
-  if (_replyMaxLabels) return _replyMaxLabels;
-  const raw = process.env['AI_USAGE_REPLY_MAX_LABELS'];
-  _replyMaxLabels = raw
-    ? raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
-    : [];
-  return _replyMaxLabels;
-}
-
 export function _resetEnvRoutingCache(): void {
   _providers = undefined;
   _usages = undefined;
-  _replyMaxLabels = undefined;
 }

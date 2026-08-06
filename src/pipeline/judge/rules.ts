@@ -2,7 +2,7 @@
 // L0 本地规则引擎 (0-5ms)
 // ────────────────────────────────────────
 
-import { resolveReplyPath, resolveReplyTier } from "../../shared/types.js";
+import { resolveReplyPath } from "../../shared/types.js";
 import type {
   FormattedMessage,
   JudgeResult,
@@ -49,7 +49,6 @@ function makeResult(
   return {
     action,
     replyPath: opts?.skipPathResolution ? undefined : resolveReplyPath(action, opts?.replyPath),
-    replyTier: resolveReplyTier(action),
     level: "L0_RULE",
     rule,
     latencyMs: 0,

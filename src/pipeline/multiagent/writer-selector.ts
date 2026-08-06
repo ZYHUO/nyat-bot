@@ -21,7 +21,6 @@ export async function runWriterRoute(args: MultiAgentInput, multiAgent: boolean)
     args.chatId,
     args.botUid,
     args.replyPath,
-    args.replyTier,
     args.segmenterConfig,
     args.turnCallOpts,
   );

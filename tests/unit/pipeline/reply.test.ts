@@ -200,7 +200,7 @@ describe('generateReply', () => {
 
     const result = await generateReply(
       makeMessage({ messageId: 196242, textContent: '什么时候支持支付宝口令支付' }),
-      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+      ctx, 'REPLY', 123, 9999, 'direct',
     );
 
     expect(result.replies[0]!.targetMessageId).toBe(196242); // 拉回提问者
@@ -217,7 +217,7 @@ describe('generateReply', () => {
 
     const result = await generateReply(
       makeMessage({ messageId: 196242, textContent: '帮我怼一下楼上那条' }),
-      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+      ctx, 'REPLY', 123, 9999, 'direct',
     );
 
     expect(result.replies[0]!.targetMessageId).toBe(196230); // 明确委托 → 保留
@@ -234,7 +234,7 @@ describe('generateReply', () => {
 
     const result = await generateReply(
       makeMessage({ messageId: 196242, uid: 1001, textContent: '我觉得不是这样' }),
-      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+      ctx, 'REPLY', 123, 9999, 'direct',
     );
 
     expect(result.replies[0]!.targetMessageId).toBe(196242);
@@ -256,7 +256,7 @@ describe('generateReply', () => {
         textContent: '不是，我是回复他这句',
         replyTo: { messageId: 196230, uid: 777, fullName: 'Bob', textSnippet: '我先说一句' },
       }),
-      ctx, 'REPLY', 123, 9999, 'direct', 'normal',
+      ctx, 'REPLY', 123, 9999, 'direct',
     );
 
     expect(result.replies[0]!.targetMessageId).toBe(196230);
@@ -267,28 +267,26 @@ describe('generateReply', () => {
       .mockResolvedValueOnce({ content: '', tokenUsage: { prompt: 10, completion: 0, total: 10 }, model: 'm', label: 'reply', latencyMs: 5 })
       .mockResolvedValueOnce({ content: 'recovered reply', tokenUsage: { prompt: 12, completion: 4, total: 16 }, model: 'm', label: 'reply', latencyMs: 8 });
 
-    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct');
 
     expect(mockCallWithFallback).toHaveBeenCalledTimes(2); // 1 empty + 1 constrained retry
     expect(result.replies[0]!.replyContent).toBe('recovered reply');
   });
 
   it('uses direct execution without tools when replyPath is direct', async () => {
-    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct');
 
     expect(mockCallWithFallback).toHaveBeenCalledTimes(1);
     expect(mockCallWithFallback).toHaveBeenCalledWith(expect.objectContaining({
       usage: 'reply',
       messages: mockBuildMessages.mock.results[0]!.value,
     }));
-    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('normal', 1001, 123);
-    expect(mockCompressContext).not.toHaveBeenCalled();
+    expect(mockBuildSystemPrompt).toHaveBeenCalledWith(1001, 123);
     expect(mockPlanReply).not.toHaveBeenCalled();
     expect(mockExecuteToolPlan).not.toHaveBeenCalled();
     expect(mockGetGroupMembers).not.toHaveBeenCalled();
     expect(mockGetBotTracker).not.toHaveBeenCalled();
     expect(mockGetUserProfilePrompt).toHaveBeenCalledWith(123, 1001);
-    expect(mockGetReflection).not.toHaveBeenCalled();
     expect(result).toEqual({
       replies: [{ replyContent: 'direct reply', targetMessageId: 42, stickerIntent: undefined }],
       toolsUsed: [],
@@ -297,7 +295,7 @@ describe('generateReply', () => {
   });
 
   it('logs context size fields on reply generation', async () => {
-    await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
+    await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct');
     const [payload, msg] = (logger.info as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
       (call) => call[1] === 'Reply generated (1 message(s))',
     ) ?? [];
@@ -315,9 +313,8 @@ describe('generateReply', () => {
   });
 
   it('uses planner + explicit tool execution when replyPath is planned', async () => {
-    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned', 'normal');
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned');
 
-    expect(mockCompressContext).not.toHaveBeenCalled();
     expect(mockPlanReply).toHaveBeenCalledTimes(1);
     expect(mockExecuteToolPlan).toHaveBeenCalledTimes(1);
     expect(mockCallWithFallback).toHaveBeenCalledTimes(1);
@@ -368,7 +365,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
       return [{ replyContent: content, targetMessageId: fallbackId }];
     });
 
-    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned', 'normal');
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned');
 
     expect(mockCallWithFallback).toHaveBeenCalledTimes(2);
     expect(mockCallWithFallback).toHaveBeenNthCalledWith(2, expect.objectContaining({
@@ -391,24 +388,13 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
     expect(mockPlanReply).not.toHaveBeenCalled();
   });
 
-  it('defaults REPLY to direct + normal when both replyPath and replyTier are omitted', async () => {
+  it('defaults REPLY to direct execution when replyPath is omitted', async () => {
     await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999);
 
     expect(mockCallWithFallback).toHaveBeenCalledWith(expect.objectContaining({
       usage: 'reply',
     }));
-    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('normal', 1001, 123);
-    expect(mockPlanReply).not.toHaveBeenCalled();
-  });
-
-  it('uses pro tier model selection without changing direct path', async () => {
-    await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'pro');
-
-    expect(mockCompressContext).not.toHaveBeenCalled();
-    expect(mockCallWithFallback).toHaveBeenCalledWith(expect.objectContaining({
-      usage: 'reply_pro',
-    }));
-    expect(mockBuildSystemPrompt).toHaveBeenCalledWith('pro', 1001, 123);
+    expect(mockBuildSystemPrompt).toHaveBeenCalledWith(1001, 123);
     expect(mockPlanReply).not.toHaveBeenCalled();
   });
 
@@ -419,7 +405,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
       steps: [],
     });
 
-    await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned', 'normal');
+    await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned');
 
     expect(mockPlanReply).toHaveBeenCalledTimes(1);
     expect(mockExecuteToolPlan).not.toHaveBeenCalled();
@@ -429,7 +415,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
   it('planned path degrades safely when tool execution fails', async () => {
     mockExecuteToolPlan.mockRejectedValue(new Error('Unknown or non-executable tool: MADE_UP_TOOL'));
 
-    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned', 'normal');
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'planned');
 
     expect(mockPlanReply).toHaveBeenCalledTimes(1);
     expect(mockExecuteToolPlan).toHaveBeenCalledTimes(2); // retried once
@@ -498,7 +484,7 @@ Search results for "Cloudflare NET stock 2026 year performance YTD":
     // Local segmenter splits the long reply into two messages
     mockSegmentReply.mockReturnValue({ segments: ['第一段短句', '第二段短句'], originalText: longReply });
 
-    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct', 'normal');
+    const result = await generateReply(makeMessage(), makeContext(), 'REPLY', 123, 9999, 'direct');
 
     // Only ONE AI call — segmentation is now local code, not a second model call
     expect(mockCallWithFallback).toHaveBeenCalledTimes(1);
