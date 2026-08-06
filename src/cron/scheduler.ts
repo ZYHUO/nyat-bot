@@ -234,10 +234,25 @@ export function startCronJobs(deps?: CronDeps): void {
     void safeRun('user-profile-sync', runUserProfileSync);
   }));
 
+  // P5-A: Unified tick — 决策合并的统一唤醒循环。开启时旁路下面 5 个旧决策型
+  // cron（idle/proactive-scan/thinker/self-play/goal-check 的「要不要动」由
+  // tick 一次 LLM 决定，执行仍走它们各自的执行器）。回退：关掉 flag 即恢复旧 cron。
+  const unifiedTick = env().UNIFIED_TICK_ENABLED;
+  if (unifiedTick) {
+    tasks.push(schedule(`*/${env().UNIFIED_TICK_INTERVAL_MIN} * * * *`, () => {
+      void safeRun('unified-tick', async () => {
+        const { runUnifiedTick } = await import('./unified-tick.js');
+        await runUnifiedTick();
+      });
+    }));
+  }
+
   // Idle proactive messaging — every 5 minutes, poke silent group chats
-  tasks.push(schedule('*/5 * * * *', () => {
-    void safeRun('idle-check', runIdleCheck);
-  }));
+  if (!unifiedTick) {
+    tasks.push(schedule('*/5 * * * *', () => {
+      void safeRun('idle-check', runIdleCheck);
+    }));
+  }
 
   // Dream journal — multi cron (UTC, comma-separated); model WRITE/SKIP; append entries
   if (env().DREAM_JOURNAL_ENABLED) {
@@ -296,14 +311,14 @@ export function startCronJobs(deps?: CronDeps): void {
   }
 
   // Proactive scan — periodic chat-aware engagement (Stage C)
-  if (env().PROACTIVE_SCAN_ENABLED) {
+  if (env().PROACTIVE_SCAN_ENABLED && !unifiedTick) {
     tasks.push(schedule(`*/${env().PROACTIVE_SCAN_INTERVAL_MIN} * * * *`, () => {
       void safeRun('proactive-scan', runProactiveScan);
     }));
   }
 
   // P2: Proactive thinker — model-driven DM care for master (autonomy)
-  if (env().PROACTIVE_THINKER_ENABLED) {
+  if (env().PROACTIVE_THINKER_ENABLED && !unifiedTick) {
     tasks.push(schedule(`*/${env().PROACTIVE_THINKER_INTERVAL_MIN} * * * *`, () => {
       void safeRun('proactive-thinker', async () => {
         const { runProactiveThinker } = await import('./proactive-thinker.js');
@@ -313,7 +328,7 @@ export function startCronJobs(deps?: CronDeps): void {
   }
 
   // P2: Self-play — 无聊了自己找事做（自主行动）
-  if (env().SELF_PLAY_ENABLED) {
+  if (env().SELF_PLAY_ENABLED && !unifiedTick) {
     tasks.push(schedule(`*/${env().SELF_PLAY_INTERVAL_MIN} * * * *`, () => {
       void safeRun('self-play', async () => {
         const { runSelfPlay } = await import('./self-play.js');
@@ -323,7 +338,7 @@ export function startCronJobs(deps?: CronDeps): void {
   }
 
   // P4-B: Goal check — 周期性推进持续关注的目标（有自己的事）
-  if (env().GOAL_TRACKER_ENABLED) {
+  if (env().GOAL_TRACKER_ENABLED && !unifiedTick) {
     tasks.push(schedule(`*/${env().GOAL_CHECK_INTERVAL_MIN} * * * *`, () => {
       void safeRun('goal-check', async () => {
         const { runGoalCheck } = await import('./goal-check.js');

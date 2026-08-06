@@ -378,6 +378,14 @@ const envSchema = z.object({
   // 每天凌晨复盘自己 24h 的回复表现 → ≤5 条自我认知注入回复 prompt。
   SELF_REFLECT_ENABLED: booleanFromEnv.default(false),
   SELF_REFLECT_USAGE: z.string().default('judge'),
+  // ── AGI Level 5 P5-A: 统一唤醒循环 ─────────────────────────────────
+  // 决策合并：一次 tick 一次 LLM 决定干什么（关心主人/群冒泡/自玩/查goal/安静），
+  // 执行保留旧 cron 的执行器。开启时旁路 idle/proactive-scan/thinker/self-play/goal-check。
+  UNIFIED_TICK_ENABLED: booleanFromEnv.default(false),
+  UNIFIED_TICK_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
+  UNIFIED_TICK_USAGE: z.string().default('judge'),
+  UNIFIED_TICK_HOUR_START: z.coerce.number().int().min(0).max(23).default(8),
+  UNIFIED_TICK_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
   // C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大
   // 直接影响全局画像刷新频率与 token 消耗。
   PROFILE_MERGE_STALE_HOURS: z.coerce.number().int().positive().default(72),
