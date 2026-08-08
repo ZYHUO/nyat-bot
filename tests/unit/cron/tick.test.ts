@@ -20,6 +20,7 @@ vi.mock('../../../src/db/redis.js', () => ({
 }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getRecent: (...args: unknown[]) => getRecentMock(...args),
+  addAssistant: async () => {},
 }));
 vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: (...args: unknown[]) => callWithFallbackMock(...args),

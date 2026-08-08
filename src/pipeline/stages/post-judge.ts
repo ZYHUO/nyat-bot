@@ -357,7 +357,7 @@ export async function runPostJudge(ctx: {
   }
 
   // 5.5-5.7 Post-mute-gate intercepts
-  if (await tryPostMuteIntercepts(job.chatId, formatted, judgeResult, e)) {
+  if (await tryPostMuteIntercepts(job.chatId, formatted, judgeResult)) {
     return { completed: true };
   }
 

@@ -1,6 +1,6 @@
 // ────────────────────────────────────────
 // Bookkeeping stage — context save, memory write, activity/profile tracking,
-// DM intercepts (confide / group-selection / verification / game input).
+// DM intercepts (verification / game input).
 // Extracted from pipeline.ts (pure extraction, no logic changes).
 // ────────────────────────────────────────
 
@@ -19,11 +19,6 @@ import { maybeReact } from "../reactions.js";
 import { recordInteraction } from "../../tracking/social-graph.js";
 import { getRedis } from "../../db/redis.js";
 import { callWithFallback } from "../../ai/fallback.js";
-import { handlePendingGroupSelection } from "../dm-relay/relay.js";
-import {
-  getPendingGroupSelection,
-  clearPendingGroupSelection,
-} from "../dm-relay/group-resolver.js";
 import { sendMessage } from "../../bot/sender/telegram.js";
 import { getBotUid } from "../../bot/bot.js";
 import { env } from "../../env.js";
@@ -140,67 +135,6 @@ export async function runBookkeeping(ctx: {
     })();
   }
 
-  // 3.35 DM pending confide intercept (before judge, DM only) —
-  // when user said "树洞" earlier and we asked for content, treat the next
-  // DM message as that content and dispatch via doConfide.
-  if (job.chatId > 0) {
-    const { hasPendingConfide, clearPendingConfide, doConfide } = await import('../dm-relay/handlers/confide.js');
-    if (await hasPendingConfide(formatted.uid)) {
-      const text = (formatted.textContent || "").trim();
-      if (text) {
-        await clearPendingConfide(formatted.uid);
-        const { resolveGroup } = await import('../dm-relay/group-resolver.js');
-        const result = await resolveGroup(formatted.uid);
-        if (result.ok) {
-          try {
-            await doConfide(
-              { uid: formatted.uid, chatId: job.chatId, messageId: formatted.messageId },
-              sender,
-              text,
-              result.group.chatId,
-            );
-          } catch (err) {
-            logger.error({ err, chatId: job.chatId }, "Pending confide handler failed");
-            await sender.sendDirect(job.chatId, "处理失败了喵，稍后再试~", formatted.messageId);
-          }
-        } else if (result.reason === 'multiple_groups') {
-          const { savePendingGroupSelection } = await import('../dm-relay/group-resolver.js');
-          await savePendingGroupSelection(formatted.uid, {
-            intent: 'confide',
-            groups: result.groups,
-            content: text,
-          });
-          await sender.sendDirect(job.chatId, result.reply, formatted.messageId);
-        } else {
-          await sender.sendDirect(job.chatId, result.reply, formatted.messageId);
-        }
-        return { shouldAbort: true, reason: "confide intercept" };
-      }
-    }
-  }
-
-  // 3.4 DM pending group selection intercept (before judge, DM only)
-  if (job.chatId > 0) {
-    const trimmedText = (formatted.textContent || "").trim();
-    const num = parseInt(trimmedText, 10);
-    if (!isNaN(num) && num > 0 && trimmedText === String(num)) {
-      const pending = await getPendingGroupSelection(formatted.uid);
-      if (pending && num <= pending.groups.length) {
-        const selectedGroup = pending.groups[num - 1]!;
-        logger.info({ uid: formatted.uid, selectedGroup: selectedGroup.title, intent: pending.intent }, "Pending group selection resolved");
-        try {
-          await handlePendingGroupSelection(job.chatId, formatted, selectedGroup, pending.intent, pending.targetHandle, pending.content);
-        } catch (err) {
-          logger.error({ err, chatId: job.chatId }, "Pending group selection handler failed");
-          await sender.sendDirect(job.chatId, "处理失败了喵，稍后再试~", formatted.messageId);
-        }
-        // Clear AFTER handler completes (handlers may re-read state)
-        await clearPendingGroupSelection(formatted.uid);
-        return { shouldAbort: true, reason: "group selection" };
-      }
-    }
-  }
-
   // 3.41 DM verification intercept (before judge, DM only)
   if (job.chatId > 0) {
     const redis = getRedis();
@@ -239,45 +173,6 @@ export async function runBookkeeping(ctx: {
         sendMessage(uid, `📢 有人聊到了你追踪的话题喵~`).catch((err) => logger.debug({ err, uid }, 'topic-watch notify failed (non-critical)'));
       }
     } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Topic watch check failed'); }
-  }
-
-  // 3.53 Relay queue on_speak trigger (fire-and-forget)
-  if (job.chatId < 0 && !formatted.isBot && formatted.uid) {
-    try {
-      const { getPendingRelayForTarget, deliverRelay, setRelayStatus } = await import('../dm-relay/relay-queue.js');
-      const { recheckDeliverySafety } = await import('../dm-relay/safety.js');
-      const pendingRelays = getPendingRelayForTarget(formatted.uid, job.chatId);
-      for (const relay of pendingRelays) {
-        try {
-          // Atomic: only deliver if still pending (prevents duplicate delivery)
-          const delivered = deliverRelay(relay.id);
-          if (!delivered) continue;
-          // Re-check safety: sender may have been banned or left the group during the hold
-          if (!(await recheckDeliverySafety(relay.sender_id, job.chatId))) {
-            setRelayStatus(relay.id, 'cancelled');
-            logger.info({ relayId: relay.id, senderUid: relay.sender_id }, 'On-speak relay dropped: sender no longer eligible');
-            continue;
-          }
-          const relayText = `${formatted.fullName}，有人让本喵转告你：${relay.content}`;
-          await sendMessage(job.chatId, relayText);
-          // Notify sender
-          try {
-            await sendMessage(relay.sender_id, `✅ 你的捎话已送达 ${formatted.fullName} 喵~`);
-          } catch { /* sender may have blocked bot */ }
-          logger.info({ relayId: relay.id, targetUid: formatted.uid, groupChatId: job.chatId }, 'On-speak relay delivered');
-        } catch (err) {
-          logger.error({ err, relayId: relay.id }, 'Failed to deliver on-speak relay');
-        }
-      }
-    } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Relay on_speak check failed'); }
-  }
-
-  // 3.54 Profile notification hook (fire-and-forget)
-  if (job.chatId < 0 && !formatted.isBot && formatted.uid) {
-    try {
-      const { checkProfileNotifications } = await import('../dm-relay/handlers/profile.js');
-      await checkProfileNotifications(job.chatId, formatted);
-    } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Profile notification check failed'); }
   }
 
   // 3.6 Bot interaction tracking(D 降噪:ad/verify/echo 不进 digest/学习)

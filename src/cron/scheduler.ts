@@ -63,41 +63,6 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
-  // Scheduled messages execution — every minute
-  tasks.push(schedule('* * * * *', () => {
-    void safeRun('scheduled-messages', async () => {
-      const { executeScheduledMessages } = await import('../pipeline/dm-relay/handlers/schedule.js');
-      await executeScheduledMessages();
-    });
-  }));
-
-  // Relay queue expiry — every 5 minutes
-  tasks.push(schedule('*/5 * * * *', () => {
-    void safeRun('relay-expiry', async () => {
-      const { expireOldRelays } = await import('../pipeline/dm-relay/relay-queue.js');
-      const count = expireOldRelays();
-      if (count > 0) logger.info({ count }, 'Expired relay queue items');
-    });
-  }));
-
-  // Scheduled relays — every minute, deliver due time-based relays
-  tasks.push(schedule('* * * * *', () => {
-    void safeRun('scheduled-relays', async () => {
-      const { executeDueScheduledRelays } = await import('../pipeline/dm-relay/relay-queue.js');
-      const count = await executeDueScheduledRelays();
-      if (count > 0) logger.info({ count }, 'Delivered scheduled relays');
-    });
-  }));
-
-  // Anonymous notes — close the 24h guess window (hint auto-drip removed; it spammed)
-  tasks.push(schedule('17 * * * *', () => {
-    void safeRun('note-close', async () => {
-      const { closeExpiredNotes } = await import('../pipeline/dm-relay/handlers/note.js');
-      const closed = await closeExpiredNotes();
-      if (closed > 0) logger.info({ closed }, 'Note close tick');
-    });
-  }));
-
   // Behavioral role tagging — every 2h during active hours (8:00–22:00 CST-ish)
   tasks.push(schedule('23 8-22/2 * * *', () => {
     void safeRun('behavioral-roles', async () => {

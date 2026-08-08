@@ -266,7 +266,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       if (!(await tryAcquireProactiveSlot(e.MASTER_UID, 'unified-tick'))) return;
       try {
         const { sendMessage } = await import('../bot/sender/telegram.js');
-        await sendMessage(e.MASTER_UID, a.text);
+        const { addAssistant } = await import('../pipeline/context/manager.js');
+        const messageId = await sendMessage(e.MASTER_UID, a.text);
+        if (messageId) {
+          await addAssistant(e.MASTER_UID, { textContent: a.text, messageId });
+        }
         await redis.set(LAST_CARE_KEY + e.MASTER_UID, String(now));
         await markProactiveSent(e.MASTER_UID, 'unified-tick');
         logger.info({ text: a.text.slice(0, 60) }, 'unified tick: cared for master');
@@ -297,7 +301,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         return;
       }
       const { sendMessage } = await import('../bot/sender/telegram.js');
-      await sendMessage(a.chatId, text);
+      const { addAssistant } = await import('../pipeline/context/manager.js');
+      const messageId = await sendMessage(a.chatId, text);
+      if (messageId) {
+        await addAssistant(a.chatId, { textContent: text, messageId });
+      }
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');
       logger.info({ chatId: a.chatId }, 'unified tick: spoke in group');

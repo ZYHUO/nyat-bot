@@ -96,8 +96,9 @@ describe('CronScheduler', () => {
   it('should register cron jobs on start', () => {
     startCronJobs();
 
-    // 无条件 job 基线 ≥18；flag 偶发漂移时不要把 CI 钉死在精确数。
-    expect(mockSchedule.mock.calls.length).toBeGreaterThanOrEqual(18);
+    // 无条件 job 基线 ≥15（2026-08-08 删 dm-relay 4 个 cron：scheduled-messages/
+    // relay-expiry/scheduled-relays/note-close）；flag 偶发漂移时不要把 CI 钉死在精确数。
+    expect(mockSchedule.mock.calls.length).toBeGreaterThanOrEqual(15);
     expect(isStarted()).toBe(true);
   });
 

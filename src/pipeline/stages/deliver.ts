@@ -30,7 +30,6 @@ import { getShutdownSignal } from "../turn/abort-registry.js";
 import { scheduleDeferredTypoFix, shouldSuppressStaleReply } from "./stale-reply.js";
 import {
   sendChatAction,
-  sendMessage,
   sendSticker,
   deleteMessage,
   editMessage,
@@ -1069,23 +1068,6 @@ export async function generateAndSendReplies(args: {
     );
     timings["saveAssistant"] = Math.round(performance.now() - t7);
     await releaseHeldChatLock();
-
-    // 10.5 Post-reply action hook (DM only) — detect if bot promised an action
-    if (job.chatId > 0 && sentMessages.length > 0) {
-      const userText = formatted.textContent || '';
-      const botText = sentMessages.map(s => s.text).join('\n');
-      import('../dm-relay/post-action.js').then(({ executePostAction }) => {
-        executePostAction(job.chatId, formatted.uid, userText, botText).then((confirmMsg) => {
-          if (confirmMsg) {
-            sendMessage(job.chatId, confirmMsg).catch((err) => {
-              logger.debug({ err }, 'Post-action confirmation send failed');
-            });
-          }
-        }).catch((err) => {
-          logger.debug({ err }, 'Post-action hook failed (non-critical)');
-        });
-      }).catch(() => {});
-    }
 
     // 11. Record reply outcome for FIRST reply (primary)
     if (e.OUTCOME_TRACKING_ENABLED && sentMessages.length > 0) {
