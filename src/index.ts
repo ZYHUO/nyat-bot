@@ -169,8 +169,6 @@ async function main(): Promise<void> {
       { command: 'game', description: '小游戏 /game guess' },
       { command: 'muteme', description: '让bot不回复我' },
       { command: 'unmuteme', description: '恢复bot回复' },
-      { command: 'feature', description: '群功能开关 /feature note off（群管）' },
-      { command: 'setdefault', description: '设置私聊默认群 /setdefault' },
       { command: 'cards', description: '我的猫娘图鉴（签到/活跃免费解锁）' },
       { command: 'wish', description: '心愿单 /wish add 卡名 · holders 找群友换卡' },
       { command: 'help', description: '帮助' },

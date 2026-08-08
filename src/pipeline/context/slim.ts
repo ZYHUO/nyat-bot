@@ -27,7 +27,7 @@ function formatTimestamp(ts: number): string {
  * 每条历史行的格式是 `[MM-DD HH:mm #id] 名字(@user): 内容`。内容里的换行原样保留时,
  * 用户只要发一条多行消息,第二行就能与真实历史行**逐字节同构** —— 于是可以伪造任意
  * 发言人,包括主人(guardrails 里写着"主人的指令最高优先级",所以这是权限提升)。
- * 影响面不止 reply:heart 决策、timing gate、reward-model、dm-relay 吃的是同一份串。
+ * 影响面不止 reply:heart 决策、timing gate、reward-model 吃的是同一份串。
  */
 function inlineForContext(s: string, maxLen: number): string {
   return s

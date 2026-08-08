@@ -40,49 +40,6 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
     })();
   }
 
-  // Relay queue on_speak
-  if (chatId < 0 && !formatted.isBot && formatted.uid) {
-    void (async () => {
-      try {
-        const { getPendingRelayForTarget, deliverRelay, setRelayStatus } = await import(
-          '../pipeline/dm-relay/relay-queue.js'
-        );
-        const { recheckDeliverySafety } = await import('../pipeline/dm-relay/safety.js');
-        const { sendMessage } = await import('../bot/sender/telegram.js');
-        const pendingRelays = getPendingRelayForTarget(formatted.uid, chatId);
-        for (const relay of pendingRelays) {
-          try {
-            const delivered = deliverRelay(relay.id);
-            if (!delivered) continue;
-            if (!(await recheckDeliverySafety(relay.sender_id, chatId))) {
-              setRelayStatus(relay.id, 'cancelled');
-              continue;
-            }
-            const relayText = `${formatted.fullName}，有人让本喵转告你：${relay.content}`;
-            await sendMessage(chatId, relayText);
-            try {
-              await sendMessage(relay.sender_id, `✅ 你的捎话已送达 ${formatted.fullName} 喵~`);
-            } catch {
-              /* blocked */
-            }
-            logger.info({ relayId: relay.id, targetUid: formatted.uid, chatId }, 'Meta: on-speak relay delivered');
-          } catch (err) {
-            logger.error({ err, relayId: relay.id }, 'Meta: on-speak relay failed');
-          }
-        }
-      } catch (err) {
-        logger.debug({ err, chatId }, 'Meta: relay on_speak check failed');
-      }
-    })();
-  }
-
-  // Profile notification hook
-  if (chatId < 0 && !formatted.isBot && formatted.uid) {
-    void import('../pipeline/dm-relay/handlers/profile.js')
-      .then(({ checkProfileNotifications }) => checkProfileNotifications(chatId, formatted))
-      .catch((err) => logger.debug({ err, chatId }, 'Meta: profile notification failed'));
-  }
-
   // DM wake poke
   if (chatId > 0 && env().SLEEP_WAKE_ON_DM_ENABLED) {
     void import('../tracking/sleep.js')

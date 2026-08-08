@@ -1,7 +1,6 @@
 // ────────────────────────────────────────
 // Pipeline stage: command & feature intercepts — mute commands, slash/NL
-// command dispatch, consent replies, sticker dislike, remember/forget,
-// DM relay (extracted from pipeline.ts)
+// command dispatch, sticker dislike, remember/forget,
 // ────────────────────────────────────────
 
 import type { FormattedMessage, JudgeResult } from "../../shared/types.js";
@@ -15,11 +14,6 @@ import {
   recordStickerDislike,
   getStickerScore,
 } from "../../knowledge/sticker/store.js";
-import { sendChatAction } from "../../bot/sender/telegram.js";
-import { detectDmIntentWithAI } from "../dm-relay/detector.js";
-import { handleDmRelay } from "../dm-relay/relay.js";
-import { detectConsentReply, setConsent } from "../dm-relay/consent.js";
-import { isMaster } from "../../admin/auth.js";
 import { env } from "../../env.js";
 import { logger } from "../../shared/logger.js";
 import { addWatch, removeWatch, listWatches } from "../../tracking/topic-watch.js";
@@ -125,31 +119,10 @@ export async function dispatchCommand(
     if (reply) { await sender.sendDirect(chatId, reply, formatted.messageId); return true; }
   }
 
-  // /feature — group feature toggles (group only)
-  if (cmd === "/feature" && chatId < 0) {
-    const { handleFeatureCommand } = await import("../dm-relay/feature-gate.js");
-    const isMasterUser = isMaster(formatted.uid, env().MASTER_UID);
-    const reply = await handleFeatureCommand(chatId, formatted.uid, arg, isMasterUser);
-    await sender.sendDirect(chatId, reply, formatted.messageId);
-    return true;
-  }
-
   // /help — list all features
   if (cmd === "/help") {
     const { buildHelpText } = await import("../../bot/handlers/help.js");
     await sender.sendDirect(chatId, buildHelpText(), formatted.messageId);
-    return true;
-  }
-
-  // /setdefault — set default group for DM features (DM only)
-  if (cmd === "/setdefault" && chatId > 0) {
-    const { handleDmRelay } = await import("../dm-relay/relay.js");
-    const idxArg = arg.trim();
-    const idx = idxArg ? parseInt(idxArg, 10) : undefined;
-    await handleDmRelay(chatId, formatted, {
-      type: "set_default_group",
-      groupIndex: idx !== undefined && !isNaN(idx) ? idx : undefined,
-    });
     return true;
   }
 
@@ -208,18 +181,6 @@ export async function tryPreMuteIntercepts(
     }
   }
 
-  // Consent reply detection (group, replying to bot's consent question)
-  if (chatId < 0 && judgeResult.rule === "reply_to_self" && formatted.replyTo) {
-    const consentResult = detectConsentReply(formatted.textContent || "", formatted.replyTo.textSnippet);
-    if (consentResult) {
-      setConsent(chatId, formatted.uid, consentResult.approved ? "approved" : "denied");
-      const ack = consentResult.approved ? "好的，已记录同意~" : "好的，不会转发消息给你~";
-      await sender.sendDirect(chatId, ack, formatted.messageId);
-      logger.info({ chatId, uid: formatted.uid, approved: consentResult.approved }, "Consent reply processed");
-      return true;
-    }
-  }
-
   return false;
 }
 
@@ -229,7 +190,6 @@ export async function tryPostMuteIntercepts(
   chatId: number,
   formatted: FormattedMessage,
   judgeResult: JudgeResult,
-  e: ReturnType<typeof env>,
 ): Promise<boolean> {
   // Sticker dislike interception
   if (judgeResult.rule === "sticker_dislike" && formatted.replyTo) {
@@ -248,31 +208,6 @@ export async function tryPostMuteIntercepts(
 
   // 记住/查看/忘掉偏好的关键词拦截已下线 —— remember/forget 改由 directive.ts
   // (回复前 LLM 指令分类)静默执行 + emoji ack。
-
-  // DM relay intercept (private chat only) — always run AI intent detection
-  if (chatId > 0 && judgeResult.rule === "private_chat") {
-    const text = formatted.textContent || "";
-    if (text.trim()) {
-      await sendChatAction(chatId, "typing");
-      const intent = await detectDmIntentWithAI(text, e.BOT_USERNAME);
-      if (intent.type !== "normal_chat") {
-        // Flag to suppress post-action rerun on the same user message
-        try {
-          const { markIntentHandled } = await import("../dm-relay/post-action.js");
-          await markIntentHandled(formatted.uid, text);
-        } catch (err) {
-          logger.debug({ err }, "markIntentHandled failed (non-critical)");
-        }
-        try {
-          await handleDmRelay(chatId, formatted, intent);
-        } catch (err) {
-          logger.error({ err, chatId }, "DM relay failed");
-          await sender.sendDirect(chatId, "处理失败了喵，稍后再试~", formatted.messageId);
-        }
-        return true;
-      }
-    }
-  }
 
   return false;
 }
