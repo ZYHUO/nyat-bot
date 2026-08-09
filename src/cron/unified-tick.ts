@@ -23,6 +23,7 @@ import { isWithinActiveHours } from './active-hours.js';
 export type TickAction =
   | { type: 'care_master'; text: string }
   | { type: 'group_speak'; chatId: number }
+  | { type: 'remember_user'; chatId: number; name: string; absentDays: number }
   | { type: 'self_play'; idea: string; plan: string[] }
   | { type: 'check_goal'; goalId: number }
   | { type: 'quiet'; reason: string };
@@ -39,6 +40,8 @@ export interface WorldState {
   masterSilentSec: number | null; // null = MASTER_UID 未配
   masterLastText: string;
   groups: { chatId: number; silentSec: number; lastTexts: string }[];
+  /** 3+ 天没出现的熟面孔(交互≥5 次)——"想起某人"的数据源。 */
+  absentUsers: { chatId: number; name: string; absentDays: number }[];
   dueGoals: { id: number; topic: string; lastFinding: string | null }[];
   rssNewCount: number;
   selfPlayCooldownLeftSec: number;
@@ -138,11 +141,47 @@ export async function buildWorldState(): Promise<WorldState> {
     if (raw) lastCareAgoSec = now - parseInt(raw, 10);
   } catch { /* keep max */ }
 
+  // 熟面孔缺席检测(Opus 评审: 主动消息要有理由——"想起某人三天没出现")。
+  // 从 chat_relationships 找 3+ 天没交互且累计交互 ≥5 次的用户;只取最近活跃群。
+  let absentUsers: WorldState['absentUsers'] = [];
+  if (e.UNIFIED_TICK_ABSENT_USERS_ENABLED && groups.length > 0) {
+    try {
+      const { getDb } = await import('../db/sqlite.js');
+      const absentCutoff = now - 3 * 86400;
+      const activeChatIds = groups.map((g) => g.chatId);
+      const placeholders = activeChatIds.map(() => '?').join(',');
+      const rows = getDb()
+        .prepare(
+          `SELECT chat_id AS chatId, uid, last_summary AS summary, last_interaction_at AS lastAt
+           FROM chat_relationships
+           WHERE chat_id IN (${placeholders}) AND interaction_count >= 5 AND last_interaction_at < ?
+           ORDER BY last_interaction_at ASC LIMIT 6`,
+        )
+        .all(...activeChatIds, absentCutoff) as {
+        chatId: number; uid: number; summary: string; lastAt: number;
+      }[];
+      absentUsers = rows
+        .filter((r) => r.uid > 0) // 只认真实用户,匿名/频道身份跳过
+        .map((r) => {
+          // 从 last_summary 或 uid 取名(尽力而为;summary 常是叙述性文本)
+          const nameMatch = r.summary ? r.summary.slice(0, 20) : String(r.uid);
+          return {
+            chatId: r.chatId,
+            name: nameMatch,
+            absentDays: Math.max(1, Math.floor((now - r.lastAt) / 86400)),
+          };
+        });
+    } catch (err) {
+      logger.debug({ err }, 'unified tick: absent users query failed');
+    }
+  }
+
   return {
     hourBeijing: hourBeijing(),
     masterSilentSec,
     masterLastText: masterLastText.slice(0, 400),
     groups,
+    absentUsers,
     dueGoals,
     rssNewCount,
     selfPlayCooldownLeftSec,
@@ -166,6 +205,17 @@ function parseTickVerdict(raw: string): TickVerdict | null {
     if (type === 'group_speak' && typeof obj['chatId'] === 'number') {
       return { action: { type, chatId: obj['chatId'] as number }, reason };
     }
+    if (type === 'remember_user' && typeof obj['chatId'] === 'number' && typeof obj['name'] === 'string') {
+      return {
+        action: {
+          type,
+          chatId: obj['chatId'] as number,
+          name: (obj['name'] as string).slice(0, 40),
+          absentDays: typeof obj['absentDays'] === 'number' ? (obj['absentDays'] as number) : 3,
+        },
+        reason,
+      };
+    }
     if (type === 'self_play' && typeof obj['idea'] === 'string' && (obj['idea'] as string).trim()) {
       const plan = Array.isArray(obj['plan'])
         ? (obj['plan'] as unknown[]).filter((x): x is string => typeof x === 'string').slice(0, 5)
@@ -186,6 +236,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 可选动作（只能选一个）：
 - care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。主人沉默 <4h 通常不该选。
 - group_speak: 某个群冷场了，去冒个泡。chatId=目标群。沉默 <60min 的群不该选；选沉默最久且最近聊得不错的。
+- remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
 - self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索）。idea+plan。
 - check_goal: 有到期关注目标，去查查进展。goalId。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
@@ -195,7 +246,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - 深夜（23-8 点）除非主人刚发过消息，否则 quiet。
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
 
-只输出 JSON：{"action": "quiet|care_master|group_speak|self_play|check_goal", "chatId": 数字(可选), "goalId": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "reason": "一句话为什么"}`;
+只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "reason": "一句话为什么"}`;
 
 /** 单次 LLM 决策。失败 → quiet（fail-closed）。 */
 export async function decideTick(state: WorldState): Promise<TickVerdict> {
@@ -207,6 +258,11 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
   const goalLines = state.dueGoals.length
     ? state.dueGoals.map((g) => `  goal#${g.id}: 「${g.topic}」${g.lastFinding ? `上次发现: ${g.lastFinding.slice(0, 60)}` : '(首次检查)'}`).join('\n')
     : '  (无到期目标)';
+  const absentLines = (state.absentUsers ?? []).length
+    ? state.absentUsers
+        .map((u) => `  ${u.name}(群 ${u.chatId})已 ${u.absentDays} 天没出现`)
+        .join('\n')
+    : '  (没有长时间缺席的熟面孔)';
   const user = [
     `现在北京时间 ${state.hourBeijing} 点。`,
     ``,
@@ -215,6 +271,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `群:`,
     groupLines,
+    ``,
+    `缺席的熟面孔:`,
+    absentLines,
     ``,
     `到期关注目标:`,
     goalLines,
@@ -309,6 +368,37 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');
       logger.info({ chatId: a.chatId }, 'unified tick: spoke in group');
+      return;
+    }
+
+    case 'remember_user': {
+      // 校验 chatId 是真实群(防模型编造);校验 absentDays 与状态一致(宽松)
+      if (!state.groups.some((g) => g.chatId === a.chatId)) {
+        logger.info({ chatId: a.chatId }, 'unified tick: remember_user rejected — unknown chat');
+        return;
+      }
+      const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
+      if (!(await tryAcquireProactiveSlot(a.chatId, 'unified-tick-remember'))) return;
+      const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
+      const { getBotUid } = await import('../bot/bot.js');
+      const text = await generatePersonaProactiveText(
+        a.chatId,
+        getBotUid(),
+        `[主动开口·想起某人] ${a.name} 已经 ${a.absentDays} 天没在这个群出现了。自然地提一句 TA(像朋友想起朋友,不是查户口,也别刷屏)。如果群里正好在聊 TA 相关的话题就顺带带一句,否则简单问候一下。禁止自我介绍、禁止「大家好」式开场。`,
+      );
+      if (!text) {
+        logger.debug({ chatId: a.chatId }, 'unified tick: persona declined remember_user');
+        return;
+      }
+      const { sendMessage } = await import('../bot/sender/telegram.js');
+      const { addAssistant } = await import('../pipeline/context/manager.js');
+      const messageId = await sendMessage(a.chatId, text);
+      if (messageId) {
+        await addAssistant(a.chatId, { textContent: text, messageId });
+      }
+      await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
+      await markProactiveSent(a.chatId, 'unified-tick-remember');
+      logger.info({ chatId: a.chatId, name: a.name, absentDays: a.absentDays }, 'unified tick: remembered user');
       return;
     }
 

@@ -253,9 +253,31 @@ export async function generateAndSendReplies(args: {
     // #4 ASI self-tune: per-chat humanizer override (set by asi-scoring when the
     // rolling uncanny-risk EMA crosses thresholds). Shallow-merge over the
     // computed config so dialed-down rates win. Null-safe: no override → unchanged.
-    // 合并顺序:群风格 underlay < 运营 override < ASI 自调 per-chat override
+    // 合并顺序:群风格 underlay < mood-tune(情绪) < 运营 override < ASI 自调 per-chat override
     let humanizerConfig: Partial<HumanizerConfig> | undefined =
       styleHum || baseHumanizerConfig ? { ...(styleHum ?? {}), ...(baseHumanizerConfig ?? {}) } : undefined;
+    // Opus 评审 #1: 情绪自相关 —— 累/被怼时参数不同。mood-tune 是 underlay,
+    // 其输出可被后续 override 覆盖;取不到 mood/energy 时 fail-soft 跳过。
+    if (e.MOOD_TUNE_ENABLED) {
+      try {
+        const { getLifeState } = await import("../../tracking/life-state.js");
+        const { getChatMood } = await import("../../tracking/mood.js");
+        const { moodTuneHumanizer } = await import("../reply/mood-tune.js");
+        const life = getLifeState();
+        const mood = getChatMood(job.chatId);
+        const tune = moodTuneHumanizer({
+          energy: life.energy,
+          valence: (mood?.valence ?? 0) / 100, // -100..100 → -1..1
+        });
+        humanizerConfig = { ...tune, ...(humanizerConfig ?? {}) };
+        logger.debug(
+          { chatId: job.chatId, energy: life.energy, valence: mood?.valence, tune },
+          "Humanizer: mood-tune applied",
+        );
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "Humanizer mood-tune failed (non-critical)");
+      }
+    }
     try {
       const chatOverrideRaw = await getRedis().get(`xxb:humanizer:override:${job.chatId}`);
       if (chatOverrideRaw) {
