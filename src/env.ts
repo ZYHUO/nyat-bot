@@ -411,6 +411,26 @@ const envSchema = z.object({
   // P2-F wait 到点回访时注入 [等待结束] 提示(仅 TURN_WAIT_RESUME_ENABLED 路径)。
   TIMING_WAIT_HINT_ENABLED: booleanFromEnv.default(false),
 
+  // 心情/精力 → humanizer 参数调制 (Opus 评审: 随机性不该是 IID;
+  // 累/被怼时回复更短更敷衍, 心情好时更活泼)。合并序: 群风格 < mood-tune <
+  // 运营 override < ASI self-tune。
+  MOOD_TUNE_ENABLED: booleanFromEnv.default(false),
+
+  // 好感非对称动力学 (Opus 评审: 信任慢升快降 —— 伤害一次掉很多,
+  // 修复要几十次正交互)。开启后正 delta × UP(慢), 负 delta × DOWN(快)。
+  RELATIONSHIP_ASYMMETRY_ENABLED: booleanFromEnv.default(false),
+  RELATIONSHIP_ASYMMETRY_UP: z.coerce.number().nonnegative().default(0.5),
+  RELATIONSHIP_ASYMMETRY_DOWN: z.coerce.number().nonnegative().default(1.5),
+
+  // 机制5: bot 自己的历史发言语义检索(Opus 评审: 翻旧账/自洽能力)。
+  // 检索本群与当前话题相关的自发言, 作为独立参考块注入(不进 merged)。
+  OWN_HISTORY_RETRIEVAL_ENABLED: booleanFromEnv.default(false),
+
+  // unified-tick 熟面孔缺席检测(Opus 评审: 主动消息要有理由——
+  // "想起某人三天没出现")。开启后世界状态会带 absentUsers,
+  // 决策模型可选 remember_user 动作。
+  UNIFIED_TICK_ABSENT_USERS_ENABLED: booleanFromEnv.default(false),
+
   // ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ──
   // 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。
   // G1: per-chat 回合 actor。开启后消息进 xxb:pending:{chatId}，由 turn job 统一消化。

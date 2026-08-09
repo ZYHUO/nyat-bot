@@ -12,6 +12,7 @@ import { getRecent, getAll } from './manager.js';
 import { countTokens } from '../../ai/token-counter.js';
 import { slimContextForAI, slimSingleMessage } from './slim.js';
 import { searchMemory, searchMemoryByUser, type ScoredMessage } from '../../memory/chroma.js';
+import type { SelfReply } from '../../tracking/self-history.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
@@ -320,6 +321,63 @@ function appendExtrasWithinBudget(
 }
 
 /**
+ * 机制5:bot 自己的历史立场(Opus 评审 #3)—— 检索本群自己说过的、
+ * 与当前话题相关的发言(翻旧账/自洽能力)。轻量实现:SQLite 关键词重叠
+ * 打分,无 embedding 调用;fail-soft 返回 []。
+ */
+export async function retrieveOwnHistory(
+  chatId: number,
+  query: string,
+  topK = 3,
+  withinDays = 30,
+): Promise<SelfReply[]> {
+  try {
+    const { getDb } = await import('../../db/sqlite.js');
+    const tokens = (query || '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 2)
+      .slice(0, 8);
+    if (!tokens.length) return [];
+    const db = getDb();
+    const cutoff = Math.floor(Date.now() / 1000) - withinDays * 86400;
+    const rows = db
+      .prepare(
+        `SELECT reply_text AS text, ts FROM self_replies
+         WHERE chat_id = ? AND ts >= ? ORDER BY ts DESC, id DESC LIMIT 200`,
+      )
+      .all(chatId, cutoff) as { text: string; ts: number }[];
+    // 关键词重叠打分:每个词出现 +1;取 topK。
+    const scored = rows
+      .map((r) => {
+        const lower = (r.text || '').toLowerCase();
+        let hits = 0;
+        for (const t of tokens) if (lower.includes(t)) hits += 1;
+        return { ...r, hits };
+      })
+      .filter((r) => r.hits > 0)
+      .sort((a, b) => b.hits - a.hits || b.ts - a.ts)
+      .slice(0, topK);
+    return scored.map(({ text, ts }) => ({ text, ts }));
+  } catch {
+    return [];
+  }
+}
+
+/** 格式化为独立参考块(不进 merged,防污染回复目标)。 */
+export function formatOwnHistoryBlock(own: SelfReply[]): string {
+  if (!own.length) return '';
+  const lines = own.map((r) => {
+    const dt = new Date(r.ts * 1000);
+    const stamp = `${dt.getMonth() + 1}/${dt.getDate()}`;
+    const text = r.text.length > 80 ? r.text.slice(0, 80) + '…' : r.text;
+    return `- ${stamp}: ${text}`;
+  });
+  return `【你自己之前说过的相关的话】\n${lines.join('\n')}\n保持一致,不要自相矛盾;如果发现前后矛盾,可以自然地承认或圆回来。`;
+}
+
+/**
  * Retrieve context using 4-way parallel strategy.
  */
 export async function retrieveContext(
@@ -329,6 +387,7 @@ export async function retrieveContext(
   config: Partial<RetrieverConfig> = {},
 ): Promise<RetrievedContext> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
+  const e = env();
   const queryText = message.textContent || message.captionContent || '';
 
   if (cfg.mode === 'direct') {
@@ -336,19 +395,25 @@ export async function retrieveContext(
     const recentContextStr = slimContextForAI(recent, message, botUid);
     const recentTokens = countTokens(recentContextStr);
     const overBudget = recentTokens >= cfg.totalTokenBudget;
-    const [semantic, crossContext] = await Promise.all([
+    const [semantic, crossContext, ownHistory] = await Promise.all([
       overBudget ? Promise.resolve([] as FormattedMessage[]) : retrieveSemantic(chatId, queryText, cfg.semanticTopK),
       // 机制4:DM(direct 模式常是私聊)里也召回该用户在别处说过的可跨界内容
       // (如"我上次在群里说的那个X")。gated + 已 scrub。
       overBudget ? Promise.resolve([] as FormattedMessage[]) : retrieveCrossContext(chatId, message, queryText, cfg.semanticTopK),
+      // 机制5:bot 自己的历史相关发言(翻旧账)。独立参考块,不进 merged。
+      !e.OWN_HISTORY_RETRIEVAL_ENABLED || overBudget
+        ? Promise.resolve([] as { text: string; ts: number }[])
+        : retrieveOwnHistory(chatId, queryText, 3),
     ]);
     // crossContext 不进 merged(同 planned 模式);作为独立参考块追加。
     const merged = semantic.length > 0
       ? appendExtrasWithinBudget(recent, semantic, message, botUid, cfg.totalTokenBudget)
       : recent;
     const crossBlock = formatCrossContextBlock(crossContext, botUid);
-    const contextStr = crossBlock
-      ? `${slimContextForAI(merged, message, botUid)}\n\n${crossBlock}`
+    const ownBlock = formatOwnHistoryBlock(ownHistory);
+    const extraBlock = [crossBlock, ownBlock].filter(Boolean).join('\n\n');
+    const contextStr = extraBlock
+      ? `${slimContextForAI(merged, message, botUid)}\n\n${extraBlock}`
       : slimContextForAI(merged, message, botUid);
     const tokenCount = countTokens(contextStr);
 
@@ -358,6 +423,7 @@ export async function retrieveContext(
       recent: recent.length,
       semantic: semantic.length,
       crossContext: crossContext.length,
+      ownHistory: ownHistory.length,
       thread: 0,
       entity: 0,
       merged: merged.length,
@@ -370,6 +436,7 @@ export async function retrieveContext(
       thread: [],
       entity: [],
       crossContext,
+      ownHistory,
       merged,
       tokenCount,
       contextStr,
@@ -409,11 +476,15 @@ export async function retrieveContext(
   const needsAllMessages = !!message.replyTo || (queryText.match(/@\w+/g) ?? []).length > 0;
   const allMessages = needsAllMessages ? await getAll(chatId) : [];
 
-  const [semantic, thread, entity, crossContext] = await Promise.all([
+  const [semantic, thread, entity, crossContext, ownHistory] = await Promise.all([
     retrieveSemantic(chatId, queryText, cfg.semanticTopK),
     retrieveThread(chatId, message, cfg.threadMaxDepth, allMessages),
     retrieveEntity(chatId, message, cfg.entityMaxMessages, allMessages),
     retrieveCrossContext(chatId, message, queryText, cfg.semanticTopK),
+    // 机制5:bot 自己的历史相关发言(翻旧账)。独立参考块,不进 merged。
+    !e.OWN_HISTORY_RETRIEVAL_ENABLED
+      ? Promise.resolve([] as { text: string; ts: number }[])
+      : retrieveOwnHistory(chatId, queryText, 3),
   ]);
 
   // Merge with priority: thread > recent > semantic > entity。
@@ -428,8 +499,10 @@ export async function retrieveContext(
   // Truncate to token budget
   const merged = appendExtrasWithinBudget(recent, deduped, message, botUid, cfg.totalTokenBudget);
   const crossBlock = formatCrossContextBlock(crossContext, botUid);
-  const contextStr = crossBlock
-    ? `${slimContextForAI(merged, message, botUid)}\n\n${crossBlock}`
+  const ownBlock = formatOwnHistoryBlock(ownHistory);
+  const extraBlock = [crossBlock, ownBlock].filter(Boolean).join('\n\n');
+  const contextStr = extraBlock
+    ? `${slimContextForAI(merged, message, botUid)}\n\n${extraBlock}`
     : slimContextForAI(merged, message, botUid);
   const tokenCount = countTokens(contextStr);
 
@@ -441,9 +514,10 @@ export async function retrieveContext(
     thread: thread.length,
     entity: entity.length,
     crossContext: crossContext.length,
+    ownHistory: ownHistory.length,
     merged: merged.length,
     tokenCount,
   }, 'Context retrieved');
 
-  return { recent, semantic, thread, entity, crossContext, merged, tokenCount, contextStr };
+  return { recent, semantic, thread, entity, crossContext, ownHistory, merged, tokenCount, contextStr };
 }

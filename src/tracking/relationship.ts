@@ -115,7 +115,13 @@ export function applyRelationshipEvent(
       | { affinity: number; interaction_count: number }
       | undefined;
 
-    const nextAffinity = clampAffinity((existing?.affinity ?? 0) + delta);
+    // Opus 评审: 好感慢升快降 —— 正 delta 缩水(需要很多次正交互才涨),
+    // 负 delta 放大(一次伤害掉很多)。env 门控, 默认关(行为与旧版一致)。
+    const asymEnabled = env().RELATIONSHIP_ASYMMETRY_ENABLED;
+    const scaledDelta = asymEnabled
+      ? delta * (delta > 0 ? env().RELATIONSHIP_ASYMMETRY_UP : env().RELATIONSHIP_ASYMMETRY_DOWN)
+      : delta;
+    const nextAffinity = clampAffinity((existing?.affinity ?? 0) + scaledDelta);
     const nextCount = (existing?.interaction_count ?? 0) + 1;
     const nextSummary = summary && summary.trim() ? summary.slice(0, 200) : (existing ? undefined : '');
 

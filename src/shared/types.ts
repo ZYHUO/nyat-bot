@@ -90,6 +90,8 @@ export interface RetrievedContext {
   entity: FormattedMessage[];
   /** 机制4:跨上下文人物记忆(锚点用户在别的场景说过的、经 visibility scrub 的内容)。 */
   crossContext?: FormattedMessage[];
+  /** 机制5:bot 自己的历史相关发言(翻旧账/自洽)。 */
+  ownHistory?: { text: string; ts: number }[];
   merged: FormattedMessage[];
   tokenCount: number;
   /**
