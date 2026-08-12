@@ -310,6 +310,10 @@ const envSchema = z.object({
   SLEEP_WAKE_WINDOW_MIN: z.coerce.number().int().positive().default(20),
   // 回复写手强制合法 JSON(DeepSeek/OpenAI json_object)——根治单引号/Python-dict 脏输出。默认关。
   REPLY_JSON_MODE: booleanFromEnv.default(false),
+  // P2 多模态直读:回复写手调用直接带原图(默认关 = 只用文本描述)。
+  // 开前确保回复链主 label 声明 AI_PROVIDER_<NAME>_VISION=true,
+  // 纯文本 label 声明 VISION=false 让 fallback 跳过(不白烧 400)。
+  REPLY_VISION_ENABLED: booleanFromEnv.default(false),
 
   // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
   // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。
@@ -563,6 +567,9 @@ const envSchema = z.object({
   AGENT_MAX_SEGMENTS: z.coerce.number().int().positive().default(10),
   // history 超过多少轮触发 LLM 压缩早期轮次。
   AGENT_COMPACT_AFTER_TURNS: z.coerce.number().int().positive().default(50),
+  // 长任务进度可见性(P1):跨段续跑且从未发言时,每 10min 发一条"还在做"的
+  // 确定性进度 ping(模型里程碑汇报不可靠 —— 能续跑的任务按定义从没 sendText 过)。
+  AGENT_PROGRESS_PING_ENABLED: booleanFromEnv.default(false),
   // 上下文压缩用的 AI usage 名（便宜模型即可）。
   AGENT_COMPACT_USAGE: z.string().default('judge'),
   // Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。
@@ -660,6 +667,12 @@ const envSchema = z.object({
   // 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段
   // (默认关,灰度;失败自动回退老两段路径)
   REPLY_MERGED_TOOLS_ENABLED: booleanFromEnv.default(false),
+  // P3:direct(普通闲聊)路径也挂工具 —— 现状是 judge 判 direct 后写手完全无工具,
+  // 群里随口问"这链接是啥/现在油价多少"只能瞎编。开启后 direct 也走合并写手,
+  // 但只给只读子集(搜索/抓页/记忆/画像/历史/bot知识/黑话),不给 ADD_TIMER/
+  // CREATE_POLL/USE_BOT_COMMAND 这类有副作用的,防闲聊途中误建投票定时器。
+  // 前置依赖 REPLY_MERGED_TOOLS_ENABLED;不调工具时 ≈ 纯文本写手速度。
+  REPLY_DIRECT_TOOLS_ENABLED: booleanFromEnv.default(false),
   REPLY_TOOLS_MAX_STEPS: z.coerce.number().int().min(2).max(6).default(4),
 
   // ── Multi-Agent 协调(Orchestrator + 专家 + Writer)──
@@ -848,6 +861,9 @@ export interface EnvProvider {
   timeout?: number;
   /** per-provider maxTokens 覆盖;给推理模型(如 mundo)单独放宽,防被小 maxTokens 截断成空。 */
   maxTokens?: number;
+  /** 声明是否支持图片输入(P2 多模态回复)。undefined=未知(照发,provider 自己拒);
+   *  false=明确不支持(带图调用直接跳过该 label,不白烧一跳)。 */
+  vision?: boolean;
 }
 
 export interface EnvUsage {
@@ -1037,7 +1053,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'RAW'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'RAW', 'VISION'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -1069,6 +1085,7 @@ export function getProviders(): Map<string, EnvProvider> {
       forceRaw: readBool(fields['RAW']),
       timeout: (() => { const n = fields['TIMEOUT'] ? parseInt(fields['TIMEOUT'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
       maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
+      vision: readBool(fields['VISION']),
     });
   }
 

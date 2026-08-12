@@ -9,8 +9,8 @@ import { logger } from '../shared/logger.js';
 import { getDb } from '../db/sqlite.js';
 import { getStickerDescription, storeAnalysisResult } from '../knowledge/sticker/store.js';
 
-/** 下载 Telegram 图片为 data URL(静态图;webm/tgs 返回 null)。供描述/识图复用。 */
-async function fetchImageDataUrl(fileId: string): Promise<string | null> {
+/** 下载 Telegram 图片为 data URL(静态图;webm/tgs 返回 null)。供描述/识图/回复直读复用。 */
+export async function fetchImageDataUrl(fileId: string): Promise<string | null> {
   const bot = getBot();
   const file = await bot.api.getFile(fileId);
   const filePath = file.file_path;
@@ -93,8 +93,10 @@ export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmot
 /**
  * Describe an image via vision model.
  * Downloads from Telegram, sends to vision model, returns description.
+ * @param question 用户发图时附带的话(P2 问题聚焦):通用描述常常漏掉用户真正问的
+ *  细节(截图问"多少钱"→ 描述只说"一张截图")。带上它让描述覆盖相关内容。
  */
-export async function describeImage(fileId: string): Promise<string> {
+export async function describeImage(fileId: string, question?: string): Promise<string> {
   try {
     // 1. Get file URL from Telegram
     const bot = getBot();
@@ -144,7 +146,11 @@ export async function describeImage(fileId: string): Promise<string> {
     const config = getConfig();
     const visionPrompt = loadPrompt('task/vision.md', config.promptsDir);
 
-    // 5. Call vision model
+    // 5. Call vision model(带用户的问题时,描述聚焦相关内容)
+    const q = question?.trim().slice(0, 300);
+    const askText = q
+      ? `请描述这张图片。用户发图时还说：「${q}」——描述时务必覆盖与这句话相关的内容（如图中文字、价格、型号、界面细节），别只给泛泛概述。`
+      : '请描述这张图片。';
     const result = await callWithFallback({
       usage: 'vision',
       messages: [
@@ -153,7 +159,7 @@ export async function describeImage(fileId: string): Promise<string> {
           role: 'user',
           content: [
             { type: 'image', image: dataUrl },
-            { type: 'text', text: '请描述这张图片。' },
+            { type: 'text', text: askText },
           ],
         },
       ],
@@ -191,9 +197,12 @@ function saveImageDescription(fileUniqueId: string, description: string): void {
  * Describe an image with a SQLite cache keyed by file_unique_id (stable across
  * links). Reposted/forwarded images reuse their description instead of being
  * re-downloaded and re-VLM'd. Falls back to a plain describe when no unique id.
+ * 带 question 的问题聚焦描述**不进缓存**:它是针对当次提问定制的,缓存会让
+ * 同一张图下次被问到别的内容时读到答非所问的旧描述。
  */
-export async function describeImageCached(fileId: string, fileUniqueId?: string): Promise<string> {
-  if (!fileUniqueId) return describeImage(fileId);
+export async function describeImageCached(fileId: string, fileUniqueId?: string, question?: string): Promise<string> {
+  const q = question?.trim();
+  if (!fileUniqueId || q) return describeImage(fileId, q);
   const cached = getImageDescription(fileUniqueId);
   if (cached) {
     logger.debug({ fileUniqueId }, 'Image description cache hit');

@@ -21,7 +21,7 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
   if (hasMedia) {
     await Promise.all([
       formatted.imageFileId
-        ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId)
+        ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId, formatted.textContent?.trim() || undefined)
             .then((d) => { if (d) formatted.imageDescriptions = [d]; })
             .catch((err) => logger.warn({ err }, "Vision failed, continuing"))
         : Promise.resolve(),
@@ -55,7 +55,8 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
       formatted.documentFileId = undefined;
     } else if (formatted.replyTo.imageFileId) {
       try {
-        const description = await describeImage(formatted.replyTo.imageFileId);
+        // 用户回复一张图说话(如"这个多少钱")→ 问题聚焦描述,别给泛泛概述
+        const description = await describeImage(formatted.replyTo.imageFileId, formatted.textContent?.trim() || undefined);
         if (description) {
           formatted.imageDescriptions = [description];
         }

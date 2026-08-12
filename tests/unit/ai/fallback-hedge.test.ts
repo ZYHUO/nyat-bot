@@ -55,4 +55,25 @@ describe('callWithFallback hedge + rejectEmpty (codex #1)', () => {
     byLabel({ primary: '', hedge: '', last: '' });
     await expect(callWithFallback(opts)).rejects.toThrow();
   });
+
+  it('allowHedge:false → 慢 primary 不触发 hedge 双发(后台批任务不翻倍账单)', async () => {
+    callModelMock.mockImplementation((label?: { name: string }) =>
+      new Promise((resolve) =>
+        setTimeout(() => resolve(res(label?.name === 'primary' ? 'primary-ok' : 'hedge-ok')),
+          label?.name === 'primary' ? 50 : 1)));
+    const r = await callWithFallback({ ...opts, allowHedge: false });
+    expect(r.content).toBe('primary-ok');
+    // HEDGE_DELAY_MS=5 << primary 50ms:若 hedge 生效必然双发
+    expect(callModelMock).toHaveBeenCalledTimes(1);
+    expect(callModelMock.mock.calls[0]![0].name).toBe('primary');
+  });
+
+  it('默认(allowHedge 未传)→ 慢 primary 触发 hedge,hedge 先返回即赢', async () => {
+    callModelMock.mockImplementation((label?: { name: string }) =>
+      new Promise((resolve) =>
+        setTimeout(() => resolve(res(label?.name === 'primary' ? 'primary-ok' : 'hedge-ok')),
+          label?.name === 'primary' ? 50 : 1)));
+    const r = await callWithFallback(opts);
+    expect(r.content).toBe('hedge-ok');
+  });
 });

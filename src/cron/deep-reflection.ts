@@ -16,6 +16,10 @@ import { getRecent } from '../pipeline/context/manager.js';
 import { getRedis } from '../db/redis.js';
 
 const MIN_MSGS = 20; // 太冷的群不值得反思
+const FAIL_PREFIX = 'xxb:reflect:fail:';
+// 链全灭的群冷却 30min 再试 —— 不退避则每个死群每 tick 白烧整条链 ×12s
+// (2026-08-07 两连 tick 12/12 全灭;dsv4flash flaky + stepfun 订阅失效期间每 tick 照烧)。
+const FAIL_COOLDOWN_SEC = 1800;
 
 const SYSTEM_PROMPT =
   '你是群聊的长期记忆整理器。下面是一个群最近的聊天记录。请提炼一份**给 bot 看的**"本群近况"' +
@@ -26,6 +30,8 @@ const SYSTEM_PROMPT =
 /** 反思单个群:大窗口历史 → 近况摘要,写回 chat_reflection。返回本次输入的近似 token。 */
 export async function reflectChat(chatId: number): Promise<number> {
   const e = env();
+  const redis = getRedis();
+  if (await redis.get(FAIL_PREFIX + chatId).catch(() => null)) return 0; // 失败冷却中
   const recent = await getRecent(chatId, e.REFLECTION_WINDOW_MSGS);
   const msgs = recent.filter((m) => !m.isBot && (m.textContent || m.captionContent || '').trim());
   if (msgs.length < MIN_MSGS) return 0;
@@ -47,9 +53,12 @@ export async function reflectChat(chatId: number): Promise<number> {
       // 蒸馏是后台批任务,不该为单群烧满 provider 超时(22s)再串行降级 ×4 跳 ——
       // 一次 tick 12 群能把整条链的熔断计数全刷爆(2026-08-07 事故)。每跳 12s 封顶。
       maxTimeoutMs: 12000,
+      allowHedge: false, // 后台批任务:hedge 双发纯翻倍账单
     });
     digest = result.content.trim().slice(0, 600);
+    await redis.del(FAIL_PREFIX + chatId).catch(() => {});
   } catch (err) {
+    await redis.set(FAIL_PREFIX + chatId, '1', 'EX', FAIL_COOLDOWN_SEC).catch(() => {});
     // warn 级:蒸馏失败 = AGI 记忆链断供,不能埋在 info 里无声烂掉(2026-08-07 12群全灭无人知)。
     const em = err instanceof Error ? err.message : String(err);
     logger.warn({ chatId, msgs: msgs.length, err: em.slice(0, 120) }, 'deep-reflection: LLM failed');

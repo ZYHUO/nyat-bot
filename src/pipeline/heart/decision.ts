@@ -20,6 +20,7 @@ import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { getReflection } from '../../tracking/outcome.js';
 import type { SelfState } from './self-state.js';
 
 export type HeartAct = 'reply' | 'wait' | 'pass';
@@ -126,10 +127,21 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
       personaCore = style ? `${identity}\n\n${style}` : identity;
       if (personaCore.length > 2400) personaCore = personaCore.slice(0, 2400);
     } catch { /* persona optional for the heart call */ }
+    // 反馈学习闭环:outcome 追踪学到的「哪些该接/哪些不该接」规则,过去只注入
+    // 回复写手(reply.ts),决定**接不接**的心流反而看不到 —— 学了个寂寞。
+    // 这里把心流也接上:规则来自本群真实回复反馈(outcome.ts 蒸馏),空则整块塌陷。
+    let learnedRules = '';
+    if (e.OUTCOME_TRACKING_ENABLED) {
+      try {
+        const r = getReflection(input.chatId)?.trim();
+        if (r) learnedRules = `## 你之前在这个群学到的经验教训(来自真实回复反馈,优先遵守)\n\n${r}\n\n`;
+      } catch { /* non-critical */ }
+    }
     systemPrompt = loadCachedPrompt('task/heart.md')
       .replace(/\{bot_name\}/g, input.botName)
       .replace(/\{persona_core\}/g, personaCore || `${input.botName} 是群聊里的猫娘成员`)
-      .replace(/\{self_state\}/g, input.selfState.narration);
+      .replace(/\{self_state\}/g, input.selfState.narration)
+      .replace(/\{learned_rules\}/g, learnedRules);
   } catch (err) {
     logger.warn({ err }, 'heart prompt load failed, fail-closed pass');
     const latencyMs = Math.round(performance.now() - start);

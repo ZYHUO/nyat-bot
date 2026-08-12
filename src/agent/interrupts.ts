@@ -64,3 +64,16 @@ export async function hasActiveInterrupts(taskId: string): Promise<boolean> {
     return false;
   }
 }
+
+// ── 硬停词:用户明确喊停 → 立即终止任务,不等模型自觉 ──
+// 只匹配**短消息**(≤12 字):长句里的"停"多半是内容不是指令
+// ("停更公告""别停下来"都不是喊停)。任务进行中收到"算了/别做了"，
+// 语义上就是取消当前任务。
+const HARD_STOP_ZH = /^(停|停下|停下来|停止|停一下|打住|住手|算了|取消|不用了|别弄了|别做了|别搞了|别画了|别写了|别发了|别说了|先别做|先停|停停停)[!！~。.吧吗啊呀呢]*$/;
+const HARD_STOP_EN = /^(stop|cancel|halt|quit)( it| this)?[!.]*$/i;
+
+export function isHardStop(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 12) return false;
+  return HARD_STOP_ZH.test(t) || HARD_STOP_EN.test(t);
+}
