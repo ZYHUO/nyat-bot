@@ -5,6 +5,8 @@
 #    curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash
 #
 #  它负责：装 git → 拉源码 → 交给安装向导 scripts/install.sh（交互填配置，全自动）。
+#  向导可可选安装 Rust 并编译 NyatDB native（https://github.com/ZYHUO/nyatdb ，公开仓库）；
+#  不装 Rust 则用 TS 引擎。NyatDB 默认关，见 .env.example 的 NYATDB_*。
 #
 #  传参（注意管道形式要用 `-s --`）：
 #    curl -fsSL .../install.sh | sudo bash -s -- --china        # 国内镜像
@@ -65,6 +67,7 @@ fi
 
 # ── 交给安装向导 ─────────────────────────────────────────────────────────────
 say "进入安装向导（接下来会问你 bot token、AI 接口、主人 UID 等）"
+ok "可选：向导可装 Rust 编 NyatDB native（公开仓库 https://github.com/ZYHUO/nyatdb ；默认关）"
 cd "$DIR"
 chmod +x scripts/install.sh 2>/dev/null || true
 exec bash scripts/install.sh "$@"

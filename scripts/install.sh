@@ -3,11 +3,12 @@
 #  🐱 NyatBot — 交互式安装向导
 #
 #  从零到机器人跑起来：环境检查 → 填配置（bot token / AI / 主人 / 功能开关）→
-#  依赖 → 构建 → systemd → 自检。幂等，可反复执行。
+#  依赖 →（可选）NyatDB native（需 Rust；https://github.com/ZYHUO/nyatdb）→ 构建 →
+#  systemd → 自检。幂等，可反复执行。NyatDB 默认关（.env.example NYATDB_*）。
 #
 #  用法：
 #    sudo ./scripts/install.sh                全新安装（交互引导）
-#    sudo ./scripts/install.sh --update       快速更新（git pull + 重建 + 重启）
+#    sudo ./scripts/install.sh --update       快速更新：git pull + 重建(+nyatdb) + 重启
 #    sudo ./scripts/install.sh --doctor       只体检，不改任何东西
 #    sudo ./scripts/install.sh --uninstall    停服并卸载（保留数据）
 #    sudo ./scripts/install.sh --reconfigure  只重填配置
@@ -123,6 +124,9 @@ if [ "$DOCTOR" = 1 ]; then
   printf "  redis:    %s\n" "$(redis-cli ping 2>/dev/null || echo '不可达')"
   printf "  qdrant:   %s (%s)\n" "$(systemctl is-active qdrant 2>/dev/null || echo n/a)" "$(curl -fsS localhost:6333/healthz 2>/dev/null || echo no-health)"
   printf "  nyatbot:  %s\n" "$(systemctl is-active nyatbot 2>/dev/null || echo n/a)"
+  printf "  cargo:    %s\n" "$(command -v cargo >/dev/null && rustc --version 2>/dev/null || echo '未安装（NyatDB 可用 TS 引擎）')"
+  if ls native/nyatdb/*.node >/dev/null 2>&1; then printf "  nyatdb:   native addon 已编译 (%s)\n" "$(ls native/nyatdb/*.node 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+  else printf "  nyatdb:   无 native .node（默认关；引擎 https://github.com/ZYHUO/nyatdb ）\n"; fi
   printf "  内存:     %s | 磁盘: %s\n" "$(free -h | awk 'NR==2{print $7" 可用"}')" "$(df -h "$ROOT_DIR" | awk 'NR==2{print $4" 可用"}')"
   printf "  master:   %s\n" "$(get_env MASTER_UID)"
   printf "  bot:      @%s\n" "$(get_env BOT_USERNAME)"
@@ -154,6 +158,17 @@ if [ "$UPDATE" = 1 ]; then
   if [ -d .git ]; then run git pull --ff-only || die_fix "git pull 失败" "git stash 或 git reset --hard origin/main 后重跑"
   else warn "非 git 仓库，跳过 pull"; fi
   if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund; else run npm install --no-audit --no-fund; fi
+  if [ -f native/nyatdb/package.json ]; then
+    run bash -c 'cd native/nyatdb && NODE_ENV=development npm install --no-audit --no-fund' || true
+    # shellcheck disable=SC1090
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    if command -v cargo >/dev/null 2>&1; then
+      run npm run build:nyatdb || warn "NyatDB native 编译失败（将用 TS 引擎）"
+    else
+      info "无 cargo，跳过 NyatDB native（https://github.com/ZYHUO/nyatdb ）"
+    fi
+  fi
   run npm run build
   if [ "$NO_RESTART" = 1 ] || [ "$DRY" = 1 ]; then ok "已更新（未重启）"; exit 0; fi
   # 兼容旧服务名
@@ -190,7 +205,7 @@ if [ "$(node_major)" -ge 22 ]; then ok "node $(node -v)"; else
   else die_fix "缺少 Node.js ≥ 22" "安装 Node 22+ 后重跑"; fi
 fi
 
-# 编译工具
+# 编译工具（better-sqlite3 + 可选 NyatDB Rust addon）
 if command -v g++ >/dev/null && command -v python3 >/dev/null && command -v make >/dev/null; then ok "编译工具齐全"
 else
   warn "缺少编译工具（better-sqlite3 需要）"
@@ -199,6 +214,20 @@ else
       dnf|yum) run "$pm" groupinstall -y "Development Tools"; run "$pm" install -y python3 ;;
       *) warn "请手动安装" ;; esac
   fi
+fi
+
+# Rust（可选：NyatDB native；缺省则走 TS 引擎）
+# 引擎独立仓库：https://github.com/ZYHUO/nyatdb
+if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+  ok "Rust $(rustc --version 2>/dev/null | awk '{print $2}')（可编 NyatDB native）"
+elif [ "$MINIMAL" = 0 ] && confirm "安装 Rust（用于可选的 NyatDB native 加速；不装则用 TS 引擎）？"; then
+  run bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+  # shellcheck disable=SC1090
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  command -v cargo >/dev/null && ok "Rust 已安装" || warn "Rust 安装后仍不可用，将跳过 NyatDB native"
+else
+  info "未装 Rust：NyatDB 将用 TS 引擎（默认关；见 .env.example NYATDB_*）"
 fi
 
 # 内存
@@ -445,8 +474,13 @@ fi
 step "安装依赖" "首次较慢，原生模块要编译"
 if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund || run npm install --no-audit --no-fund
 else run npm install --no-audit --no-fund; fi
+# NyatDB native 的 @napi-rs/cli（devDep）；失败不挡主路径
+if [ -f native/nyatdb/package.json ]; then
+  run bash -c 'cd native/nyatdb && NODE_ENV=development npm install --no-audit --no-fund' \
+    || warn "NyatDB native 依赖装失败（可稍后 npm run build:nyatdb）"
+fi
 if [ "$DRY" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-  chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules 2>/dev/null || true
+  chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules native/nyatdb/node_modules 2>/dev/null || true
 fi
 ok "依赖就绪"
 
@@ -477,8 +511,17 @@ else step "Qdrant 向量库" "已跳过"; fi
 
 # ── 8. 构建 + systemd + 自检 ────────────────────────────────────────────────
 if [ "$SKIP_BUILD" = 0 ]; then
-  step "构建" "约 1-3 分钟"
+  step "构建" "约 1-3 分钟（含可选 NyatDB native）"
   [ "$MEM_MB" -lt 1800 ] && export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=1536"
+  # shellcheck disable=SC1090
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  if [ -f native/nyatdb/package.json ] && command -v cargo >/dev/null 2>&1; then
+    run npm run build:nyatdb && ok "NyatDB native 已编译" \
+      || warn "NyatDB native 编译失败 → 运行时用 TS 引擎（功能可用）。引擎源码：https://github.com/ZYHUO/nyatdb"
+  elif [ -f native/nyatdb/package.json ]; then
+    info "无 cargo，跳过 NyatDB native（需要时：装 Rust 后 npm run build:nyatdb）"
+  fi
   run npm run build || die_fix "构建失败" "看上面的报错；内存小可加 swap 后重跑"
   ok "构建完成 dist/"
 else step "构建" "已跳过"; fi

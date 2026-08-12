@@ -2,12 +2,17 @@
 FROM node:22-slim AS builder
 WORKDIR /app
 
-# Native module build deps (better-sqlite3)
+# Native module build deps (better-sqlite3).
+# NyatDB: image ships the TS engine via @nyat/nyatdb (default OFF via env).
+# Rust napi addon is not built here — use host install (deploy.sh / install.sh) for NYATDB_NATIVE.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
+COPY packages/ packages/
+COPY native/nyatdb/package.json native/nyatdb/package-lock.json ./native/nyatdb/
+COPY miniapp-web/package.json ./miniapp-web/
 RUN npm ci
 
 COPY tsconfig.json tsup.config.ts ./
@@ -28,6 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
+COPY packages/ packages/
+COPY native/nyatdb/package.json native/nyatdb/package-lock.json ./native/nyatdb/
+COPY miniapp-web/package.json ./miniapp-web/
 RUN npm ci --omit=dev \
     && apt-get purge -y python3 make g++ \
     && apt-get autoremove -y \
@@ -37,6 +45,7 @@ COPY --from=builder /app/dist ./dist
 COPY prompts/ prompts/
 COPY migrations/ migrations/
 
+# data/ holds sqlite, qdrant, and optional NyatDB (./data/nyatdb) via compose volume
 RUN mkdir -p /app/data
 
 EXPOSE 3000
