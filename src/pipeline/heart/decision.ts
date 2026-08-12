@@ -20,6 +20,7 @@ import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { incrCounter } from '../../metrics/registry.js';
 import { getReflection } from '../../tracking/outcome.js';
 import type { SelfState } from './self-state.js';
 
@@ -134,7 +135,10 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     if (e.OUTCOME_TRACKING_ENABLED) {
       try {
         const r = getReflection(input.chatId)?.trim();
-        if (r) learnedRules = `## 你之前在这个群学到的经验教训(来自真实回复反馈,优先遵守)\n\n${r}\n\n`;
+        if (r) {
+          learnedRules = `## 你之前在这个群学到的经验教训(来自真实回复反馈,优先遵守)\n\n${r}\n\n`;
+          incrCounter('heart_learned_rules_injected_total', { chat: input.chatId });
+        }
       } catch { /* non-critical */ }
     }
     systemPrompt = loadCachedPrompt('task/heart.md')

@@ -34,6 +34,8 @@ async function maybeSendProgressPing(task: DispatchTask): Promise<void> {
     const key = `xxb:agent:ping:${task.id}`;
     const got = await getRedis().set(key, '1', 'EX', 600, 'NX');
     if (!got) return;
+    const { incrCounter } = await import('../metrics/registry.js');
+    incrCounter('codeact_progress_ping_total', { chat: task.chatId });
     const { sendMessage } = await import('../bot/sender/telegram.js');
     const steps = task.totalTurns ?? 0;
     await sendMessage(
@@ -566,6 +568,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           if (interrupts.length > 0) {
             if (interrupts.some((i) => isHardStop(i.text))) {
               logger.info({ taskId: task.id, chatId: task.chatId, turn }, 'agent task hard-stopped by user');
+              const { incrCounter } = await import('../metrics/registry.js');
+              incrCounter('codeact_hardstop_total', { chat: task.chatId });
               try {
                 const { sendMessage } = await import('../bot/sender/telegram.js');
                 await sendMessage(task.chatId, '好，停下了喵～（任务已取消）', task.quoteMessageIds?.[0], task.messageThreadId);

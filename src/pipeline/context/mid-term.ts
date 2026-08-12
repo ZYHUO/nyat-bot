@@ -13,6 +13,7 @@
 
 import { getRedis } from '../../db/redis.js';
 import { callWithFallback } from '../../ai/fallback.js';
+import { incrCounter } from '../../metrics/registry.js';
 import { loadPrompt, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
@@ -93,7 +94,10 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
   const chunk = e.MTM_CHUNK;
 
   try {
-    if (await redis.get(FAIL_PREFIX + chatId)) return; // 失败冷却中
+    if (await redis.get(FAIL_PREFIX + chatId)) {
+      incrCounter('bgllm_cooldown_total', { task: 'midterm', event: 'skip' });
+      return; // 失败冷却中
+    }
     const len = await redis.llen(ctxKey);
     if (len < threshold) return;
 
@@ -127,6 +131,7 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
         });
       } catch (err) {
         await redis.set(FAIL_PREFIX + chatId, '1', 'EX', FAIL_COOLDOWN_SEC).catch(() => {});
+        incrCounter('bgllm_cooldown_total', { task: 'midterm', event: 'enter' });
         throw err;
       }
       const summaryText = result.content.trim();
@@ -151,6 +156,7 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
         return;
       }
       await redis.del(FAIL_PREFIX + chatId).catch(() => {});
+      incrCounter('bgllm_cooldown_total', { task: 'midterm', event: 'clear' });
 
       logger.info(
         { chatId, compressed: messages.length, summaryChars: entry.summary.length },
@@ -179,7 +185,10 @@ async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
   const ringMax = Math.max(e.NYATDB_CHAT_RING_MAX, e.CONTEXT_MAX_LENGTH + chunk);
 
   try {
-    if (await redis.get(FAIL_PREFIX + chatId)) return; // 失败冷却中
+    if (await redis.get(FAIL_PREFIX + chatId)) {
+      incrCounter('bgllm_cooldown_total', { task: 'midterm', event: 'skip' });
+      return; // 失败冷却中
+    }
     const rows = ndb.chatRecent(chatId, ringMax);
     if (rows.length < threshold) return;
 
@@ -226,6 +235,7 @@ async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
         });
       } catch (err) {
         await redis.set(FAIL_PREFIX + chatId, '1', 'EX', FAIL_COOLDOWN_SEC).catch(() => {});
+        incrCounter('bgllm_cooldown_total', { task: 'midterm', event: 'enter' });
         throw err;
       }
       const summaryText = result.content.trim();
@@ -247,6 +257,7 @@ async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
         .set(cursorKey, String(lastId), 'EX', MTM_TTL)
         .del(FAIL_PREFIX + chatId)
         .exec();
+      incrCounter('bgllm_cooldown_total', { task: 'midterm', event: 'clear' });
 
       logger.info(
         { chatId, compressed: messages.length, summaryChars: entry.summary.length, lastId },

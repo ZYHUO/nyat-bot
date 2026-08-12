@@ -7,6 +7,7 @@ import { isDM } from '../../shared/chat.js';
 import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath } from '../../shared/types.js';
 import type { JudgeAction } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
+import { incrCounter } from '../../metrics/registry.js';
 import type { ContentPart } from '../../ai/types.js';
 import { AIError } from '../../shared/errors.js';
 import { buildSystemPrompt, buildMessages } from './prompt-builder.js';
@@ -774,9 +775,11 @@ export async function generateReply(
             }
           }
           logger.info({ chatId, messageId: message.messageId }, 'reply vision: image attached to writer call');
+          incrCounter('reply_vision_attach_total', { chat: chatId, outcome: 'ok' });
         }
       } catch (err) {
         logger.debug({ err, chatId }, 'reply vision attach failed (non-critical, text-only fallback)');
+        incrCounter('reply_vision_attach_total', { chat: chatId, outcome: 'fail' });
       }
     }
   }
@@ -810,6 +813,9 @@ export async function generateReply(
       });
       // strip <think> 后再判空:think-only 响应原始 content 非空但剥完是空,以前会漏过空兜底变静默
       const mergedContent = merged.content ? stripThinking(merged.content) : '';
+      const mergedPath = directToolsActive ? 'direct' : 'planned';
+      incrCounter('reply_merged_writer_total', { path: mergedPath, outcome: !merged.failed && mergedContent ? 'ok' : 'fallback' });
+      for (const t of merged.toolsUsed) incrCounter('reply_tools_used_total', { chat: chatId, tool: t });
       if (!merged.failed && mergedContent) {
         result = {
           content: mergedContent,

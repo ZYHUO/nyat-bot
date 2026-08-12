@@ -14,6 +14,7 @@ import { logger } from '../shared/logger.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { getRedis } from '../db/redis.js';
+import { incrCounter } from '../metrics/registry.js';
 
 const MIN_MSGS = 20; // 太冷的群不值得反思
 const FAIL_PREFIX = 'xxb:reflect:fail:';
@@ -31,7 +32,10 @@ const SYSTEM_PROMPT =
 export async function reflectChat(chatId: number): Promise<number> {
   const e = env();
   const redis = getRedis();
-  if (await redis.get(FAIL_PREFIX + chatId).catch(() => null)) return 0; // 失败冷却中
+  if (await redis.get(FAIL_PREFIX + chatId).catch(() => null)) {
+    incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'skip' });
+    return 0; // 失败冷却中
+  }
   const recent = await getRecent(chatId, e.REFLECTION_WINDOW_MSGS);
   const msgs = recent.filter((m) => !m.isBot && (m.textContent || m.captionContent || '').trim());
   if (msgs.length < MIN_MSGS) return 0;
@@ -57,8 +61,10 @@ export async function reflectChat(chatId: number): Promise<number> {
     });
     digest = result.content.trim().slice(0, 600);
     await redis.del(FAIL_PREFIX + chatId).catch(() => {});
+    incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'clear' });
   } catch (err) {
     await redis.set(FAIL_PREFIX + chatId, '1', 'EX', FAIL_COOLDOWN_SEC).catch(() => {});
+    incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'enter' });
     // warn 级:蒸馏失败 = AGI 记忆链断供,不能埋在 info 里无声烂掉(2026-08-07 12群全灭无人知)。
     const em = err instanceof Error ? err.message : String(err);
     logger.warn({ chatId, msgs: msgs.length, err: em.slice(0, 120) }, 'deep-reflection: LLM failed');

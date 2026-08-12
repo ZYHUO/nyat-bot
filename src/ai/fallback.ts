@@ -11,6 +11,7 @@ import { AIError } from '../shared/errors.js';
 import { isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../db/redis.js';
+import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 
 export async function callWithFallback(options: AICallOptions): Promise<AICallResult> {
@@ -53,6 +54,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
 
     if (hasImageParts && label.capabilities?.vision === false) {
       logger.debug({ label: labelName, model: label.model }, 'Skipping text-only label for image call');
+      incrCounter('llm_vision_label_skipped_total', { label: labelName });
       continue;
     }
 
