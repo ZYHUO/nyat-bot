@@ -41,7 +41,7 @@ export interface WorldState {
   masterLastText: string;
   groups: { chatId: number; silentSec: number; lastTexts: string }[];
   /** 3+ 天没出现的熟面孔(交互≥5 次)——"想起某人"的数据源。 */
-  absentUsers: { chatId: number; name: string; absentDays: number }[];
+  absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
   dueGoals: { id: number; topic: string; lastFinding: string | null }[];
   rssNewCount: number;
   selfPlayCooldownLeftSec: number;
@@ -51,6 +51,30 @@ export interface WorldState {
 const LAST_CARE_KEY = 'xxb:proactive:last_care:';
 const LAST_POKE_PREFIX = 'xxb:last_poke:';
 const SELFPLAY_LAST_KEY = 'xxb:selfplay:last';
+const REMEMBER_USER_KEY = 'xxb:proactive:remember:'; // + chatId:uid
+
+/** care_master 硬门槛：与 TICK_SYSTEM「沉默 <4h 通常不该选」对齐，LLM 软约束不够。 */
+const CARE_MASTER_MIN_SILENT_SEC = 4 * 3600;
+/** 两次主动关心最少间隔，防「刚关心完又关心」刷屏。 */
+const CARE_MASTER_MIN_INTERVAL_SEC = 4 * 3600;
+/** group_speak 硬门槛：与 prompt「沉默 <60min 不该选」对齐。 */
+const GROUP_SPEAK_MIN_SILENT_SEC = 60 * 60;
+/** 同一群两次主动冒泡最少间隔（读 LAST_POKE，此前只写不读）。 */
+const GROUP_POKE_MIN_INTERVAL_SEC = 2 * 3600;
+/** remember_user 同一人冷却。 */
+const REMEMBER_USER_COOLDOWN_SEC = 7 * 86400;
+/** care_master 禁止推销自玩产物（4h 间隔挡频率，挡不住「头像喜欢吗」内容）。 */
+const CARE_PEDDLE_RE =
+  /喜欢吗|要不要再|再画一个|头像工具|发给你看|Q\s*版猫猫|放沙盒|生成工具/;
+
+function isPlausibleDisplayName(name: string): boolean {
+  const n = name.trim();
+  if (n.length < 1 || n.length > 32) return false;
+  if (/^[\d\s._-]+$/.test(n)) return false;
+  if (/negative:|repair_loop|ignored|unknown|null|undefined/i.test(n)) return false;
+  if (/[{}\[\]<>]/.test(n) || n.includes(':')) return false;
+  return true;
+}
 
 function hourBeijing(): number {
   return parseInt(
@@ -152,25 +176,29 @@ export async function buildWorldState(): Promise<WorldState> {
       const placeholders = activeChatIds.map(() => '?').join(',');
       const rows = getDb()
         .prepare(
-          `SELECT chat_id AS chatId, uid, last_summary AS summary, last_interaction_at AS lastAt
-           FROM chat_relationships
-           WHERE chat_id IN (${placeholders}) AND interaction_count >= 5 AND last_interaction_at < ?
-           ORDER BY last_interaction_at ASC LIMIT 6`,
+          `SELECT r.chat_id AS chatId, r.uid AS uid, r.last_interaction_at AS lastAt,
+                  COALESCE(
+                    NULLIF(TRIM(p.sender_tag), ''),
+                    NULLIF(TRIM(p.full_name), ''),
+                    NULLIF(TRIM(p.username), ''),
+                    CAST(r.uid AS TEXT)
+                  ) AS name
+           FROM chat_relationships r
+           LEFT JOIN user_profiles p ON p.chat_id = r.chat_id AND p.uid = r.uid
+           WHERE r.chat_id IN (${placeholders}) AND r.interaction_count >= 5 AND r.last_interaction_at < ?
+           ORDER BY r.last_interaction_at ASC LIMIT 6`,
         )
         .all(...activeChatIds, absentCutoff) as {
-        chatId: number; uid: number; summary: string; lastAt: number;
+        chatId: number; uid: number; name: string; lastAt: number;
       }[];
       absentUsers = rows
-        .filter((r) => r.uid > 0) // 只认真实用户,匿名/频道身份跳过
-        .map((r) => {
-          // 从 last_summary 或 uid 取名(尽力而为;summary 常是叙述性文本)
-          const nameMatch = r.summary ? r.summary.slice(0, 20) : String(r.uid);
-          return {
-            chatId: r.chatId,
-            name: nameMatch,
-            absentDays: Math.max(1, Math.floor((now - r.lastAt) / 86400)),
-          };
-        });
+        .filter((r) => r.uid > 0 && isPlausibleDisplayName(String(r.name ?? '')))
+        .map((r) => ({
+          chatId: r.chatId,
+          uid: r.uid,
+          name: String(r.name).trim().slice(0, 32),
+          absentDays: Math.max(1, Math.floor((now - r.lastAt) / 86400)),
+        }));
     } catch (err) {
       logger.debug({ err }, 'unified tick: absent users query failed');
     }
@@ -234,10 +262,10 @@ function parseTickVerdict(raw: string): TickVerdict | null {
 const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟你醒一次，看一眼世界，决定这一个周期做**一件**事——或者继续安静。
 
 可选动作（只能选一个）：
-- care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。主人沉默 <4h 通常不该选。
+- care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
 - group_speak: 某个群冷场了，去冒个泡。chatId=目标群。沉默 <60min 的群不该选；选沉默最久且最近聊得不错的。
 - remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
-- self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索）。idea+plan。
+- self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索）。idea+plan。自玩是私下练习，不是给主人表演；不要把自玩主题写进 care_master。
 - check_goal: 有到期关注目标，去查查进展。goalId。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
 
@@ -245,6 +273,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - 真人不会每 5 分钟都想说话。quiet 是默认，其他动作要有真实理由。
 - 深夜（23-8 点）除非主人刚发过消息，否则 quiet。
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
+- 上下文里刚出现过你自己的自玩汇报时，下一周期优先 quiet，不要用 care_master 继续推销。
 
 只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "reason": "一句话为什么"}`;
 
@@ -321,6 +350,30 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
 
     case 'care_master': {
       if (e.MASTER_UID <= 0) return;
+      // 硬否决：prompt 写「沉默 <4h 通常不该选」，但模型仍会连发「头像喜欢吗」类空转。
+      // 世界状态已算好 silent/lastCare，这里强制执行，不再赌 LLM 自律。
+      if (state.masterSilentSec !== null && state.masterSilentSec < CARE_MASTER_MIN_SILENT_SEC) {
+        logger.info(
+          { silentSec: state.masterSilentSec, text: a.text.slice(0, 40) },
+          'unified tick: care_master vetoed — master not silent long enough',
+        );
+        return;
+      }
+      if (state.lastCareAgoSec < CARE_MASTER_MIN_INTERVAL_SEC) {
+        logger.info(
+          { lastCareAgoSec: state.lastCareAgoSec, text: a.text.slice(0, 40) },
+          'unified tick: care_master vetoed — cared too recently',
+        );
+        return;
+      }
+      if (a.text.includes('[object Object]')) {
+        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — corrupt text');
+        return;
+      }
+      if (CARE_PEDDLE_RE.test(a.text)) {
+        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — self-play peddle');
+        return;
+      }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
       if (!(await tryAcquireProactiveSlot(e.MASTER_UID, 'unified-tick'))) return;
       try {
@@ -341,15 +394,36 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
 
     case 'group_speak': {
       // 校验 chatId 是世界状态里的真实群（防模型编造）
-      if (!state.groups.some((g) => g.chatId === a.chatId)) {
+      const group = state.groups.find((g) => g.chatId === a.chatId);
+      if (!group) {
         logger.info({ chatId: a.chatId }, 'unified tick: group_speak rejected — unknown chat');
         return;
       }
+      if (group.silentSec < GROUP_SPEAK_MIN_SILENT_SEC) {
+        logger.info(
+          { chatId: a.chatId, silentSec: group.silentSec },
+          'unified tick: group_speak vetoed — not cold enough',
+        );
+        return;
+      }
+      try {
+        const lastPokeRaw = await redis.get(LAST_POKE_PREFIX + a.chatId);
+        if (lastPokeRaw) {
+          const ago = now - parseInt(lastPokeRaw, 10);
+          if (Number.isFinite(ago) && ago < GROUP_POKE_MIN_INTERVAL_SEC) {
+            logger.info(
+              { chatId: a.chatId, ago },
+              'unified tick: group_speak vetoed — poked too recently',
+            );
+            return;
+          }
+        }
+      } catch { /* fail-open on redis */ }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
       if (!(await tryAcquireProactiveSlot(a.chatId, 'unified-tick'))) return;
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
       const { getBotUid } = await import('../bot/bot.js');
-      const silentMin = Math.floor((state.groups.find((g) => g.chatId === a.chatId)?.silentSec ?? 0) / 60);
+      const silentMin = Math.floor(group.silentSec / 60);
       const text = await generatePersonaProactiveText(
         a.chatId,
         getBotUid(),
@@ -372,11 +446,39 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
     }
 
     case 'remember_user': {
-      // 校验 chatId 是真实群(防模型编造);校验 absentDays 与状态一致(宽松)
-      if (!state.groups.some((g) => g.chatId === a.chatId)) {
-        logger.info({ chatId: a.chatId }, 'unified tick: remember_user rejected — unknown chat');
+      const match = state.absentUsers.find(
+        (u) => u.chatId === a.chatId && (u.name === a.name || u.name.includes(a.name) || a.name.includes(u.name)),
+      );
+      if (!match) {
+        logger.info(
+          { chatId: a.chatId, name: a.name },
+          'unified tick: remember_user rejected — not in absentUsers',
+        );
         return;
       }
+      if (!isPlausibleDisplayName(match.name)) {
+        logger.info({ name: match.name }, 'unified tick: remember_user rejected — bad name');
+        return;
+      }
+      const group = state.groups.find((g) => g.chatId === a.chatId);
+      if (!group || group.silentSec < GROUP_SPEAK_MIN_SILENT_SEC) {
+        logger.info(
+          { chatId: a.chatId, silentSec: group?.silentSec },
+          'unified tick: remember_user vetoed — group not quiet',
+        );
+        return;
+      }
+      const rememberKey = REMEMBER_USER_KEY + `${a.chatId}:${match.uid}`;
+      try {
+        const lastRaw = await redis.get(rememberKey);
+        if (lastRaw) {
+          const ago = now - parseInt(lastRaw, 10);
+          if (Number.isFinite(ago) && ago < REMEMBER_USER_COOLDOWN_SEC) {
+            logger.info({ chatId: a.chatId, uid: match.uid, ago }, 'unified tick: remember_user vetoed — cooldown');
+            return;
+          }
+        }
+      } catch { /* fail-open */ }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
       if (!(await tryAcquireProactiveSlot(a.chatId, 'unified-tick-remember'))) return;
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
@@ -384,7 +486,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const text = await generatePersonaProactiveText(
         a.chatId,
         getBotUid(),
-        `[主动开口·想起某人] ${a.name} 已经 ${a.absentDays} 天没在这个群出现了。自然地提一句 TA(像朋友想起朋友,不是查户口,也别刷屏)。如果群里正好在聊 TA 相关的话题就顺带带一句,否则简单问候一下。禁止自我介绍、禁止「大家好」式开场。`,
+        `[主动开口·想起某人] ${match.name} 已经 ${match.absentDays} 天没在这个群出现了。自然地提一句 TA(像朋友想起朋友,不是查户口,也别刷屏)。如果群里正好在聊 TA 相关的话题就顺带带一句,否则简单问候一下。禁止自我介绍、禁止「大家好」式开场。`,
       );
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined remember_user');
@@ -397,8 +499,12 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         await addAssistant(a.chatId, { textContent: text, messageId });
       }
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
+      await redis.set(rememberKey, String(now), 'EX', REMEMBER_USER_COOLDOWN_SEC);
       await markProactiveSent(a.chatId, 'unified-tick-remember');
-      logger.info({ chatId: a.chatId, name: a.name, absentDays: a.absentDays }, 'unified tick: remembered user');
+      logger.info(
+        { chatId: a.chatId, name: match.name, uid: match.uid, absentDays: match.absentDays },
+        'unified tick: remembered user',
+      );
       return;
     }
 
@@ -407,13 +513,20 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         logger.info('unified tick: self_play vetoed by cooldown');
         return;
       }
+      if (e.MASTER_UID <= 0) {
+        logger.info('unified tick: self_play skipped — no MASTER_UID');
+        return;
+      }
       const { enqueueCodeActJob } = await import('../subagent/queue.js');
       const planText = a.plan.length ? `\n计划:\n${a.plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}` : '';
       await enqueueCodeActJob({
         id: `selfplay_${now}_${Math.floor(Math.random() * 1e6)}`,
-        chatId: e.MASTER_UID > 0 ? e.MASTER_UID : 0,
-        contentDirection: `[selfplay] 自主行动：${a.idea}${planText}\n没有人在等你，自己完成它。做完了 sendText 汇报，产物存沙盒。`,
-        toneGuidance: '自主、专注、完成后自然汇报',
+        chatId: e.MASTER_UID,
+        contentDirection:
+          `[selfplay] 自主行动：${a.idea}${planText}\n` +
+          `没有人在等你，自己完成它。默认产物只留沙盒；全程最多 sendText 一次收尾（可省略），最多 sendFile 一次。` +
+          `禁止过程连发、禁止追问「喜欢吗」。sendFile/sendText 返回值是 {messageId}，禁止拼进字符串。`,
+        toneGuidance: '自主、专注；默默做完，别刷屏',
         createdAt: Date.now(),
         status: 'queued',
       });
@@ -428,23 +541,30 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         return;
       }
       try {
-        const { listGoals } = await import('../agent/goals.js');
+        const { listGoals, recordCheck } = await import('../agent/goals.js');
         const goal = listGoals('active').find((g) => g.id === a.goalId);
         if (!goal) return;
+        const targetChat = goal.chat_id ?? (e.MASTER_UID > 0 ? e.MASTER_UID : 0);
+        if (!targetChat) return;
+        const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
+        if (!(await tryAcquireProactiveSlot(targetChat, 'unified-tick-goal'))) return;
+        // 派发即占坑，避免下个 tick 同一 goal 再入队（真正 finding 仍由 executor 终态覆盖）。
+        recordCheck(goal.id, null);
         const { enqueueCodeActJob } = await import('../subagent/queue.js');
         await enqueueCodeActJob({
           id: `goal_${goal.id}_${now}_${Math.floor(Math.random() * 1e6)}`,
-          chatId: goal.chat_id ?? (e.MASTER_UID > 0 ? e.MASTER_UID : 0),
+          chatId: targetChat,
           contentDirection:
             `[goal:${goal.id}] 持续关注：「${goal.topic}」。` +
             `用 web.search 搜一下最新进展，或翻看最近聊天里有没有相关话题。` +
             (goal.last_finding ? `上次发现：${goal.last_finding}——看看有没有新进展。` : `这是第一次检查。`) +
-            `有新发现就 sendText 简短汇报，没有就什么都不说直接 runtime.endTask。` +
+            `有新发现就 sendText 简短汇报一次，没有就什么都不说直接 runtime.endTask。` +
             `最后必须 runtime.endTask("found: …" 或 "no_update")。`,
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
           status: 'queued',
         });
+        await markProactiveSent(targetChat, 'unified-tick-goal');
         logger.info({ goalId: goal.id, topic: goal.topic.slice(0, 60) }, 'unified tick: goal check dispatched');
       } catch (err) {
         logger.warn({ err, goalId: a.goalId }, 'unified tick: check_goal failed');

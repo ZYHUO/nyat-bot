@@ -39,6 +39,21 @@ function isCrossChatBotEcho(
   return undefined;
 }
 
+/**
+ * Telegram ack that stringifies safely in template literals.
+ * Without this, `${await sendFile(...)}` becomes the literal "[object Object]".
+ */
+function makeSendAck(
+  label: string,
+  messageId: number,
+): { messageId: number; toString(): string; [Symbol.toPrimitive](): string } {
+  return {
+    messageId,
+    toString: () => label,
+    [Symbol.toPrimitive]: () => label,
+  };
+}
+
 export interface HostApi {
   telegram: {
     sendText: (text: string, replyToMessageId?: number) => Promise<{ messageId: number }>;
@@ -163,6 +178,8 @@ export function createHostApi(
     taskId?: string;
     /** Max sendText calls (default 2; work mode may pass 5). */
     maxTextSends?: number;
+    /** Max sendFile calls (default unlimited; self-play passes 1). */
+    maxFileSends?: number;
     /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
     messageThreadId?: number;
   },
@@ -175,6 +192,7 @@ export function createHostApi(
   let lastSentNorm = '';
   let metaRequested = false;
   const maxTextSends = opts.maxTextSends ?? 2;
+  const maxFileSends = opts.maxFileSends ?? Number.POSITIVE_INFINITY;
   const pendingBookkeeping: Promise<unknown>[] = [];
   /** In-flight telegram/web ops — models often forget `await` before endTask. */
   const inflightOps = new Set<Promise<unknown>>();
@@ -251,8 +269,18 @@ export function createHostApi(
             if (textSent >= maxTextSends) {
               throw new Error(`sendText_limit:${maxTextSends}`);
             }
+            // Models often do `sendText(\`...\${await sendFile(...)}\`)` — sendFile returns
+            // `{messageId}`, and String/template coercion becomes the literal "[object Object]".
+            if (text !== null && text !== undefined && typeof text !== 'string' && typeof text !== 'number') {
+              throw new Error('sendText_non_string: pass plain text only; do not interpolate API return objects');
+            }
             const clean = String(text ?? '').trim();
             if (!clean) throw new Error('empty text');
+            if (clean.includes('[object Object]')) {
+              throw new Error(
+                'sendText_object_coercion: text contains "[object Object]" — sendFile/sendText return {messageId}; send the file, then describe it in a separate plain-text sendText without interpolating the return value',
+              );
+            }
             assertNotBanned(clean);
 
             // Reject parroting the user's latest line(s) — common when direction embeds user text.
@@ -461,7 +489,7 @@ export function createHostApi(
                 .catch((err) => logger.debug({ err, chatId }, 'host noteMetaBotReply failed')),
             );
 
-            return { messageId: lastMessageId };
+            return makeSendAck(`text_sent#${lastMessageId}`, lastMessageId);
           })(),
         );
       },
@@ -507,10 +535,13 @@ export function createHostApi(
         assertOpen();
         return trackInflight(
           (async () => {
+            if (fileSent >= maxFileSends) {
+              throw new Error(`sendFile_limit:${maxFileSends}`);
+            }
             const raw = String(path ?? '').trim();
             if (!raw) {
               logger.warn({ chatId }, 'host sendFile rejected empty path');
-              return { messageId: 0 };
+              return makeSendAck('file_send_failed:empty_path', 0);
             }
             try {
               const { resolveInsideSandbox } = await import('../sandbox/paths.js');
@@ -545,11 +576,12 @@ export function createHostApi(
                   [...answeredIds].map((mid) => markMessageAnswered(chatId, mid).catch(() => undefined)),
                 );
               }
-              return { messageId };
+              // toString/toPrimitive: template `${await sendFile(...)}` must not become "[object Object]".
+              return makeSendAck(messageId > 0 ? `file_sent:${basename(target)}#${messageId}` : 'file_send_failed', messageId);
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
               logger.warn({ err, chatId, path: raw }, 'host sendFile failed (non-fatal)');
-              return { messageId: 0, error: msg } as { messageId: number };
+              return makeSendAck(`file_send_failed:${msg}`, 0);
             }
           })(),
         );

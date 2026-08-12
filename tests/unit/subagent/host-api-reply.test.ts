@@ -61,6 +61,23 @@ describe('host sendText reply_to policy', () => {
     sendMessage.mockClear();
   });
 
+  it('rejects text that already contains [object Object] coercion junk', async () => {
+    const { createHostApi } = await import('../../../src/subagent/host-api.js');
+    const host = createHostApi(7624515600, { onEnd: () => {} });
+    await expect(
+      host.telegram.sendText('1. Q版猫猫:\n[object Object]\n喜欢吗？'),
+    ).rejects.toThrow(/sendText_object_coercion/);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-string sendText payloads', async () => {
+    const { createHostApi } = await import('../../../src/subagent/host-api.js');
+    const host = createHostApi(7624515600, { onEnd: () => {} });
+    await expect(
+      host.telegram.sendText({ messageId: 1 } as unknown as string),
+    ).rejects.toThrow(/sendText_non_string/);
+  });
+
   it('DM: no default reply_to; explicit still works', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
     const host = createHostApi(7624515600, { onEnd: () => {}, defaultReplyTo: 99 });
