@@ -92,7 +92,7 @@
 
 **基础设施**
 - 📦 **BullMQ 消息队列** — Redis 支撑的高并发处理（可配置并发数）
-- 🗃️ **双存储 + 向量库** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪、FTS5 词法索引）+ **Qdrant**（语义记忆，int8 量化，进程内多语言本地嵌入）
+- 🗃️ **双存储 + 向量库 + NyatDB** — Redis（上下文、缓存、速率限制）+ SQLite（持久化、知识库、追踪、FTS5 词法索引）+ **Qdrant**（语义记忆，int8 量化，进程内多语言本地嵌入）+ 可选 [**NyatDB**](https://github.com/ZYHUO/nyatdb)（页式嵌入 ChatLog，双写/可读，默认关）
 - 🔁 **Ingress 自动故障转移** — 默认长轮询（不对外开放端口）；轮询挂掉自动切 webhook 备用，由 Redis 标志 + 看门狗控制
 - 📊 **Admin Mini App** — Telegram WebApp HMAC 认证，macOS 窗口风格 UI，运行时配置管理
 - ⏰ **Cron 定时任务** — 模型健康检查、用户画像同步、空闲主动消息、频道抓取、记忆整理、学习扫描、数据清理（并发门控；日志表 90/180 天滚动 retention）
@@ -101,7 +101,7 @@
 - 🔥 **Firecrawl 抓取兜底** — JS 重页面 / Cloudflare 验证页:免费路由（直连 → 本地浏览器绕过 → Jina Reader）全失败后落到自托管 Firecrawl（无头浏览器过 CF JS Challenge）。NodeSeek 等强 CF 站点直接走 Firecrawl,默认关、配 key 才启用
 - 🔌 **Skill 插件系统** — data/skills/*.json 添加自定义工具，支持 HTTP 调用，内置 SSRF 防护
 - 🎨 **359 个贴纸意图 + 常驻贴纸包** — AI 按意图自主选贴纸（top-N 截断 + Levenshtein 模糊 + 反感反馈）;指定贴纸包作「常驻主力」（走视觉识图生成情绪标签、忽略 emoji,选择时预留多数候选槽,其余学习来的贴纸仍可用）（migrations 0042-0043）
-- 🚀 **一键部署** — `scripts/deploy.sh` 端到端：依赖 → Qdrant → 构建 → systemd → 自检
+- 🚀 **一键部署** — `scripts/deploy.sh` / `scripts/install.sh` 端到端：依赖 → Qdrant →（可选）NyatDB native → 构建 → systemd → 自检
 - 🧪 **单元测试** — vitest 全绿基线（`npm run test`）；53 个 SQLite 迁移自动按序应用
 - 🪦 **优雅关机契约** — worker 排干在飞任务、游离的自我接话统一中止信号排干、写缓冲落盘,SIGTERM 不丢消息不留孤儿锁
 
@@ -127,7 +127,7 @@ grammy Bot
                  │
                  Pipeline Orchestrator (pipeline.ts)
                      │
-                 Formatter ──→ Context (Redis)
+                 Formatter ──→ Context (Redis ± NyatDB 双写)
                      │
                  L0 rules ──未命中──→ ❤️ Heart (心流: reply/wait/pass)
                      │                    │   (+ 可选念头反思)
@@ -190,6 +190,7 @@ src/
 ├── meta/                 # Meta 编排 (Attention / loop / CodeAct session)
 ├── subagent/             # Subagent CodeAct + host API (telegram/memory/stickers)
 ├── context-engine/       # static|delta|ephemeral|volatile 上下文组装
+├── nyatdb/               # 宿主适配：NYATDB_* → @nyat/nyatdb（引擎在 packages/nyatdb）
 ├── ingress/              # 长轮询 ⇄ webhook 故障转移
 ├── pipeline/             # 核心消息管线（Heart / Turn Actor；非 Meta 灰度路径）
 │   ├── pipeline.ts       #   编排器 (orchestrator)
@@ -219,8 +220,11 @@ prompts/                  # AI Prompt 模板 (Markdown)
 ├── meta/                 #   Meta/Subagent 人设方向 (background-dreaming 等)
 └── system/               #   系统级 prompt (摘要等)
 migrations/               # SQLite 迁移脚本
+packages/nyatdb/          # @nyat/nyatdb 页式引擎（TS；宿主无 Telegram 依赖）
+native/nyatdb/            # NyatDB Rust napi addon（可选；https://github.com/ZYHUO/nyatdb）
 docs/meta-subagent/       # Meta+Subagent+CodeAct 开关 / 切流 / 日记
-scripts/                  # 安装 / 更新 / 迁移（deploy.sh · auto-update.sh）
+docs/nyatdb/              # NyatDB 生产说明
+scripts/                  # 安装 / 更新 / 迁移（deploy.sh · install.sh · auto-update.sh · migrate-to-nyatdb.ts）
 ```
 
 ### 🛠️ 技术栈
@@ -235,6 +239,7 @@ scripts/                  # 安装 / 更新 / 迁移（deploy.sh · auto-update.
 | 数据库 | SQLite ([better-sqlite3](https://github.com/WiseLibs/better-sqlite3), WAL mode) |
 | 缓存/队列 | Redis ([ioredis](https://github.com/redis/ioredis)) |
 | 向量库 | [Qdrant](https://qdrant.tech/) (HNSW + int8 量化) · 本地嵌入 [@xenova/transformers](https://github.com/xenova/transformers.js) (`paraphrase-multilingual-MiniLM-L12-v2`，384 维；可 `MEMORY_EMBED_MODEL` 覆盖) · 可选 FTS5 BM25 混合检索 |
+| 嵌入式 ChatLog（可选） | [NyatDB](https://github.com/ZYHUO/nyatdb)（`@nyat/nyatdb` TS / Rust napi，默认关） |
 | 日志 | [pino](https://getpino.io/) |
 | 校验 | [zod](https://zod.dev/) |
 | Token 计算 | [tiktoken](https://github.com/openai/tiktoken) |
@@ -270,13 +275,13 @@ git clone https://github.com/ZYHUO/nyat-bot.git && cd nyat-bot
 sudo ./scripts/deploy.sh        # 跟着问答走，不用手动编辑任何文件
 ```
 
-`deploy.sh` 是个端到端、可重复执行的安装向导：
+`deploy.sh` / `scripts/install.sh` 是端到端、可重复执行的安装向导：
 - **交互填配置**：问你 BOT_TOKEN（用 Telegram `getMe` 当场验证、自动填用户名）+ 一个 AI 接口（自动铺到所有用途）→ 写好 `.env`（权限 600）。配置没填好不会假装成功。
-- **环境自检/自愈**：架构(x86_64/ARM64)、Node 22(可自动装)、编译工具、内存/swap、磁盘、Redis(必需，可自动起)。
-- **装好一切**：依赖 → Qdrant(musl 静态版 + systemd) → 构建 → `xxb-ts.service` → **红绿灯自检**(Qdrant/Redis/服务/Bot started)，结尾给脱敏 `deploy-report.txt`。
+- **环境自检/自愈**：架构(x86_64/ARM64)、Node 22(可自动装)、编译工具、**可选 Rust**（编 [NyatDB](https://github.com/ZYHUO/nyatdb) native；不装则用 TS 引擎）、内存/swap、磁盘、Redis(必需，可自动起)。
+- **装好一切**：依赖 → Qdrant(musl 静态版 + systemd) →（可选）`npm run build:nyatdb` → 构建 → systemd → **红绿灯自检**(Qdrant/Redis/服务/Bot started)，结尾给脱敏 `deploy-report.txt`。
 
 ```bash
-sudo ./scripts/deploy.sh --update        # 秒级更新：git pull + 重建 + 重启
+sudo ./scripts/deploy.sh --update        # 秒级更新：git pull + 重建（含 NyatDB native 如有 Rust）+ 重启
 sudo ./scripts/deploy.sh --doctor        # 只体检，不改动
 sudo ./scripts/deploy.sh --reconfigure   # 重填 token / AI 配置
 sudo ./scripts/deploy.sh --uninstall     # 停服并移除单元（保留数据）
@@ -287,11 +292,12 @@ sudo ./scripts/deploy.sh --uninstall     # 停服并移除单元（保留数据�
 #### 日常更新
 
 ```bash
+# 手动（推荐）：pull + 依赖 + 可选编 NyatDB native + 构建 + 重启
 sudo ./scripts/deploy.sh --update
 # 或：curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash -s -- --update
 ```
 
-生产机也可挂 `scripts/systemd/xxb-autoupdate.{timer,service}`（每 5 分钟对齐 `origin/main`；构建失败自动回滚不重启）。日志：`logs/auto-update.log`。
+生产机也可挂 `scripts/systemd/xxb-autoupdate.{timer,service}`（每 5 分钟对齐 `origin/main`）：`package-lock` / `native/nyatdb` 变了会 `npm ci` / `npm run build:nyatdb`，主构建失败自动回滚不重启。日志：`logs/auto-update.log`。
 
 #### 手动安装
 
@@ -299,10 +305,14 @@ sudo ./scripts/deploy.sh --update
 git clone https://github.com/ZYHUO/nyat-bot.git
 cd nyat-bot
 npm install
+# 可选：编译 NyatDB native（需 Rust；不编则用 TS 引擎）
+#   curl https://sh.rustup.rs -sSf | sh && npm run build:nyatdb
 cp .env.example .env
 # 编辑 .env，填入你的 Bot Token 和 AI API 配置
 # 可选开启 Meta：META_SUBAGENT_ENABLED=true（建议先设 META_SUBAGENT_CHAT_IDS 灰度）
 # 详见 docs/meta-subagent/
+# 可选开启 NyatDB：NYATDB_ENABLED=true（建议先 DUAL_WRITE，再考虑 READ）
+# 引擎独立仓库：https://github.com/ZYHUO/nyatdb
 ```
 
 #### 从 PHP 版 (xxb) 迁移数据
@@ -316,6 +326,7 @@ cp .env.example .env
 ```bash
 npm run dev            # tsx watch 热重载
 npm run build          # 生产构建
+npm run build:nyatdb   # 可选：编 Rust ChatLog 引擎（需 Rust；不编则用 TS）
 npm run start          # 启动生产服务
 npm run test           # vitest 运行测试
 npm run lint           # ESLint 检查
@@ -390,8 +401,13 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 | `CONTEXT_ENGINE_ENABLED` | Context Engine 分段组装 | `true` |
 | `DREAM_JOURNAL_ENABLED` | 梦境日记 cron（可发频道） | `false` |
 | `DREAM_JOURNAL_CHAT_ID` | 日记发送目标（频道/群，可写正数自动转 `-100…`） | `0` |
+| `NYATDB_ENABLED` | 启用 [NyatDB](https://github.com/ZYHUO/nyatdb) 嵌入式 ChatLog | `false` |
+| `NYATDB_DUAL_WRITE` | 写入 ChatLog（历史名；`REDIS_MIRROR=false` 时是唯一写） | `false` |
+| `NYATDB_READ` | 读路径优先 NyatDB（空则回退 Redis） | `false` |
+| `NYATDB_REDIS_MIRROR` | 同时写 Redis ctx（`DUAL_WRITE` 开时生效） | `false` |
+| `NYATDB_NATIVE` | 用 Rust addon（需先 `npm run build:nyatdb`） | `false` |
 
-> 实际模型路由用 `AI_PROVIDER_<NAME>_*` + `AI_USAGE_<NAME>_*`(provider/usage 分离,Redis `xxb:admin:model_routing:override` 可运行时覆盖);上表 `AI_*` 为兼容旧式简化配置。功能开关一律 `*_ENABLED`(默认关,灰度上线):如 `SCHOOL_SCHEDULE_ENABLED` / `SLEEP_DM_ENABLED` / `PM_NUDGE_ENABLED` / `META_SUBAGENT_ENABLED`。编排与日记详见 [`docs/meta-subagent/`](docs/meta-subagent/)。
+> 实际模型路由用 `AI_PROVIDER_<NAME>_*` + `AI_USAGE_<NAME>_*`(provider/usage 分离,Redis `xxb:admin:model_routing:override` 可运行时覆盖);上表 `AI_*` 为兼容旧式简化配置。功能开关一律 `*_ENABLED`(默认关,灰度上线):如 `SCHOOL_SCHEDULE_ENABLED` / `SLEEP_DM_ENABLED` / `PM_NUDGE_ENABLED` / `META_SUBAGENT_ENABLED`。编排与日记详见 [`docs/meta-subagent/`](docs/meta-subagent/)；NyatDB 详见 [`docs/nyatdb/README.md`](docs/nyatdb/README.md)。
 
 ### 📊 Prompt 体系
 
@@ -513,7 +529,7 @@ xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts 
 
 - **AI-provider agnostic** — Uses [Vercel AI SDK](https://sdk.vercel.ai/) with OpenAI-compatible endpoints. Works with OpenAI, Google Gemini, Anthropic, or any compatible proxy.
 - **Dual path cognition** — default Heart/Turn Actor pipeline, or optional Meta+Subagent CodeAct loop (mutually exclusive per chat graylist).
-- **Dual storage** — Redis for hot data (context, rate limits, member registry) + SQLite for cold data (knowledge, tracking, checkins).
+- **Dual storage + optional NyatDB** — Redis for hot data (context, rate limits, member registry) + SQLite for cold data + optional [NyatDB](https://github.com/ZYHUO/nyatdb) page-store ChatLog (dual-write / read, default off; Rust napi or TS engine).
 - **Context Engine** — `static|delta|ephemeral|volatile` assembly with a stable prefix for prompt-cache-friendly providers.
 - **Split prompt system** — Reply path keeps 5 layers (Identity / Safety / Contract / Style / Task). Decision path uses a slim `behavior-style.md` for Timing/Heart so “whether to speak” isn’t stuffed with full persona prose. All prompts are Markdown; edit + restart, no rebuild.
 - **4-way context retrieval** — Recent window + reply thread trace + entity mentions + semantic search (future), merged and token-budget-capped.
@@ -535,22 +551,24 @@ Manual:
 git clone https://github.com/ZYHUO/nyat-bot.git
 cd nyat-bot
 npm install
+# optional native ChatLog engine (needs Rust): npm run build:nyatdb
 cp .env.example .env
 # Edit .env — optional Meta: META_SUBAGENT_ENABLED (see docs/meta-subagent/)
+# optional NyatDB: NYATDB_ENABLED / DUAL_WRITE / READ (see .env.example)
 npm run build && npm start
 ```
 
-Or with Docker:
+Or with Docker (TS NyatDB engine only; enable via env — no Rust native in the image):
 
 ```bash
 docker compose up -d
 ```
 
-See the [Chinese section](#中文) for detailed configuration and architecture documentation.
+See the [Chinese section](#中文) for detailed configuration and architecture documentation. Engine repo: https://github.com/ZYHUO/nyatdb
 
 ### Tech Stack
 
-Node.js 22+ · TypeScript · grammy · Vercel AI SDK · Hono · BullMQ · SQLite · Redis · Qdrant · pino · zod · tiktoken · tsup · vitest · Docker / PM2
+Node.js 22+ · TypeScript · grammy · Vercel AI SDK · Hono · BullMQ · SQLite · Redis · Qdrant · [NyatDB](https://github.com/ZYHUO/nyatdb) (optional) · pino · zod · tiktoken · tsup · vitest · Docker / PM2
 ---
 
 ## 📄 License

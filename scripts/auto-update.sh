@@ -7,8 +7,10 @@
 #   - 本地 == 远端 → 无事发生(静默)
 #   - 工作区有**已跟踪文件**改动(开发中)→ 跳过,绝不动工作区
 #   - 本地领先/分叉(本机就是开发机,常见)→ 跳过,只在**严格落后**时更新
-#   - 严格落后 → git pull --ff-only → (lockfile 变了则 npm ci)→ build →
-#     build 成功才 restart;失败**自动回滚**到原 commit 并重建,不重启(保住线上)
+#   - 严格落后 → git pull --ff-only → (lockfile 变了则 npm ci) →
+#     (native/nyatdb 变了且有 cargo 则 build:nyatdb，失败不挡主路径) →
+#     build → 成功才 restart;失败**自动回滚**到原 commit 并重建,不重启(保住线上)
+#   NyatDB 引擎: https://github.com/ZYHUO/nyatdb （默认关；无 Rust 用 TS 引擎）
 # 日志:logs/auto-update.log(带时间戳,只在有动作/出错时写)
 
 set -u
@@ -44,7 +46,7 @@ fi
 log "updating: $LOCAL -> $REMOTE"
 git pull --ff-only -q origin main 2>>"$LOG" || { log "pull failed"; exit 1; }
 
-# lockfile 变了才重装依赖
+# lockfile 或 NyatDB native 源码变了才重装/重编
 if ! git diff --quiet "$LOCAL" HEAD -- package-lock.json; then
   log "package-lock changed, npm ci"
   npm ci --no-audit --no-fund >>"$LOG" 2>&1 || {
@@ -52,6 +54,29 @@ if ! git diff --quiet "$LOCAL" HEAD -- package-lock.json; then
     git reset --hard -q "$LOCAL"; npm ci --no-audit --no-fund >>"$LOG" 2>&1
     exit 1
   }
+fi
+
+# NyatDB native（可选；失败不挡主构建）
+# 条件：源码/根 package.json 变了，或已有 cargo 但还没有 .node（首次补编）
+need_nyatdb=0
+if [ -f native/nyatdb/package.json ]; then
+  if ! git diff --quiet "$LOCAL" HEAD -- native/nyatdb package.json packages/nyatdb 2>/dev/null; then
+    need_nyatdb=1
+  elif command -v cargo >/dev/null 2>&1 && ! ls native/nyatdb/*.node >/dev/null 2>&1; then
+    need_nyatdb=1
+  fi
+fi
+if [ "$need_nyatdb" = 1 ]; then
+  log "native/nyatdb: rebuild addon (best-effort)"
+  # shellcheck disable=SC1090
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  ( cd native/nyatdb && NODE_ENV=development npm install --no-audit --no-fund >>"$LOG" 2>&1 ) || true
+  if command -v cargo >/dev/null 2>&1; then
+    npm run build:nyatdb >>"$LOG" 2>&1 || log "build:nyatdb failed (TS engine fallback)"
+  else
+    log "no cargo; skip build:nyatdb"
+  fi
 fi
 
 if npm run build >>"$LOG" 2>&1; then

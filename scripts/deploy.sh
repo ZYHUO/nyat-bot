@@ -5,11 +5,12 @@
 #    sudo ./scripts/deploy.sh
 #
 #  从零到机器人跑起来：环境检查 → 交互填配置(验证 token) → 依赖 → Qdrant →
-#  构建 → systemd → 红绿灯自检。幂等，可反复执行。
+#  （可选）NyatDB native（需 Rust；https://github.com/ZYHUO/nyatdb）→ 构建 → systemd →
+#  红绿灯自检。幂等，可反复执行。NyatDB 默认关（.env.example NYATDB_*）。
 #
 #  常用：
 #    sudo ./scripts/deploy.sh                 全新/更新部署（缺配置会交互引导）
-#    sudo ./scripts/deploy.sh --update        快速更新：git pull + 重建 + 重启
+#    sudo ./scripts/deploy.sh --update        快速更新：git pull + 重建(+nyatdb) + 重启
 #    sudo ./scripts/deploy.sh --doctor        只体检，不改任何东西
 #    sudo ./scripts/deploy.sh --uninstall     停服并卸载 systemd 单元（保留数据）
 #    sudo ./scripts/deploy.sh --dry-run       打印将执行的命令，不真正执行
@@ -102,6 +103,9 @@ if [ "$DOCTOR" = 1 ]; then
   printf "  redis:  %s\n" "$(redis-cli ping 2>/dev/null || echo '不可达')"
   printf "  qdrant: %s (%s)\n" "$(systemctl is-active qdrant 2>/dev/null || echo n/a)" "$(curl -fsS localhost:6333/healthz 2>/dev/null || echo no-health)"
   printf "  xxb-ts: %s\n" "$(systemctl is-active xxb-ts 2>/dev/null || echo n/a)"
+  printf "  cargo:  %s\n" "$(command -v cargo >/dev/null && rustc --version 2>/dev/null || echo '未安装（NyatDB 可用 TS 引擎）')"
+  if ls native/nyatdb/*.node >/dev/null 2>&1; then printf "  nyatdb: native addon 已编译 (%s)\n" "$(ls native/nyatdb/*.node 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+  else printf "  nyatdb: 无 native .node（默认关；引擎 https://github.com/ZYHUO/nyatdb ）\n"; fi
   printf "  内存:   %s | 磁盘(本目录): %s\n" "$(free -h | awk 'NR==2{print $7" 可用"}')" "$(df -h "$ROOT_DIR" | awk 'NR==2{print $4" 可用"}')"
   echo "  最近日志:"; { tail -n 15 logs/app.log 2>/dev/null || journalctl -u xxb-ts -n 15 --no-pager 2>/dev/null; } | sed 's/^/    /'
   exit 0
@@ -130,6 +134,17 @@ if [ "$UPDATE" = 1 ]; then
   if [ -d .git ]; then run git pull --ff-only || die_fix "git pull 失败（有本地改动？）" "git stash 或 git reset --hard origin/main 后重跑 --update"
   else warn "非 git 仓库，跳过 pull"; fi
   if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund; else run npm install --no-audit --no-fund; fi
+  if [ -f native/nyatdb/package.json ]; then
+    run bash -c 'cd native/nyatdb && NODE_ENV=development npm install --no-audit --no-fund' || true
+    # shellcheck disable=SC1090
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    if command -v cargo >/dev/null 2>&1; then
+      run npm run build:nyatdb || warn "NyatDB native 编译失败（将用 TS 引擎）"
+    else
+      info "无 cargo，跳过 NyatDB native（https://github.com/ZYHUO/nyatdb ）"
+    fi
+  fi
   run npm run build
   if [ "$NO_RESTART" = 1 ] || [ "$DRY" = 1 ]; then ok "已更新（未重启，按需 systemctl restart xxb-ts）"; exit 0; fi
   run systemctl restart xxb-ts.service; sleep 5
@@ -160,7 +175,7 @@ if [ "$(node_major)" -ge 22 ]; then ok "node $(node -v)"; else
   else die_fix "缺少 Node.js ≥ 22" "安装 Node 22+（推荐 fnm/nvm）后重跑"; fi
 fi
 
-# 编译工具（better-sqlite3 native build）
+# 编译工具（better-sqlite3 + 可选 NyatDB Rust addon）
 if command -v g++ >/dev/null && command -v python3 >/dev/null && command -v make >/dev/null; then ok "编译工具齐全"
 else
   warn "缺少编译工具（装 sqlite 原生模块需要 g++/python3/make）"
@@ -169,6 +184,20 @@ else
       dnf|yum) run "$pm" groupinstall -y "Development Tools"; run "$pm" install -y python3 ;;
       *) warn "请手动安装 build 工具" ;; esac
   else warn "稍后 npm install 可能编译失败：sudo apt install -y build-essential python3"; fi
+fi
+
+# Rust（可选：NyatDB native；缺省则走 TS 引擎，功能可用但点查更慢）
+# 引擎独立仓库：https://github.com/ZYHUO/nyatdb
+if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+  ok "Rust $(rustc --version 2>/dev/null | awk '{print $2}')（可编 NyatDB native）"
+elif [ "$MINIMAL" = 0 ] && confirm "安装 Rust（用于可选的 NyatDB native 加速；不装则用 TS 引擎）？"; then
+  run bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+  # shellcheck disable=SC1090
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  command -v cargo >/dev/null && ok "Rust 已安装" || warn "Rust 安装后仍不可用，将跳过 NyatDB native"
+else
+  info "未装 Rust：NyatDB 将用 TS 引擎（默认关；见 .env.example NYATDB_*）"
 fi
 
 # 内存 / swap （探测失败时退化为 0，不让算术在 set -e 下崩）
@@ -253,9 +282,14 @@ if [ "$SKIP_DEPS" = 0 ]; then
   if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund || run npm install --no-audit --no-fund
   else run npm install --no-audit --no-fund; fi
   if [ "$MINIMAL" = 0 ] && [ -d miniapp-web ]; then run npm --prefix miniapp-web install --no-audit --no-fund || warn "miniapp 依赖装失败（不影响 bot 本体）"; fi
+  # NyatDB native 的 @napi-rs/cli（devDep）；失败不挡主路径
+  if [ -f native/nyatdb/package.json ]; then
+    run bash -c 'cd native/nyatdb && NODE_ENV=development npm install --no-audit --no-fund' \
+      || warn "NyatDB native 依赖装失败（可稍后 npm run build:nyatdb）"
+  fi
   # 用户 clone、sudo 跑时，把 node_modules 还给该用户，免得之后 git pull/npm 报 EACCES
   if [ "$DRY" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-    chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules miniapp-web/node_modules 2>/dev/null || true
+    chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules miniapp-web/node_modules native/nyatdb/node_modules 2>/dev/null || true
   fi
   ok "依赖就绪"
 else step "安装依赖" "已跳过 (--skip-deps)"; fi
@@ -288,8 +322,18 @@ else step "Qdrant 向量库" "已跳过（--skip-qdrant/--minimal，语义记忆
 
 # ── 5. 构建 ──────────────────────────────────────────────────────────────────
 if [ "$SKIP_BUILD" = 0 ]; then
-  step "构建" "约 1-3 分钟"
+  step "构建" "约 1-3 分钟（含可选 NyatDB native）"
   [ "$MEM_MB" -lt 1800 ] && export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=1536"
+  # PATH 可能刚装了 rustup
+  # shellcheck disable=SC1090
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  if [ -f native/nyatdb/package.json ] && command -v cargo >/dev/null 2>&1; then
+    run npm run build:nyatdb && ok "NyatDB native 已编译" \
+      || warn "NyatDB native 编译失败 → 运行时用 TS 引擎（功能可用）。引擎源码：https://github.com/ZYHUO/nyatdb"
+  elif [ -f native/nyatdb/package.json ]; then
+    info "无 cargo，跳过 NyatDB native（需要时：装 Rust 后 npm run build:nyatdb）"
+  fi
   run npm run build || die_fix "构建失败" "看上面的报错；内存小可加 swap 后重跑"
   if [ "$MINIMAL" = 0 ] && [ -d miniapp-web ]; then run npm run build:miniapp || warn "miniapp 构建失败（管理后台 UI 受影响，bot 本体不受影响）"; fi
   ok "构建完成 dist/"

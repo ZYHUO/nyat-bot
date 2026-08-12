@@ -1,5 +1,5 @@
 [Unit]
-Description=xxb-ts auto-update (align with GitHub origin/main)
+Description=xxb-ts auto-update (align with GitHub origin/main; rebuilds NyatDB native when needed)
 After=network-online.target
 
 [Service]
