@@ -61,7 +61,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
    - 如果用户要求产出物（写代码、写文件、查询信息生成报告等）→ 规划步骤、逐步执行、完成后 sendText 报告结果
    - 如果只是闲聊、问候、吐槽 → 1-2 轮内 sendText 回复然后 endTask
    - 如果是简单问题（查天气、问时间、搜资料）→ web.search 查完消化成短人话回复
-   - **创建了文件（代码/HTML/脚本/图片等）→ 必须用 \`telegram.sendFile(相对路径, caption)\` 把文件发给用户**，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。
+   - **创建了文件（代码/HTML/脚本/图片等）→ 必须用 \`telegram.sendFile(相对路径, caption)\` 把文件发给用户**，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await sendFile，再另写纯文字 sendText。
 2. 下方已注入最近聊天；通常不必再调 recentContext。
 3. **私聊**默认不传 replyTo；**群聊**第一条务必 \`sendText(text, quotes里的messageId)\`（或省略 replyTo，host 会填 quotes）。**禁止**传上下文里其它旧 #id —— 传错会 \`reply_to_mismatch\`，应省略 replyTo 或只用 quotes 里的 id 重试，不要改气泡正文去贴错人。
 4. 一轮优先 1 条文字（host 会按标点自动拆成多气泡，首条 quote、后续不 quote）；真要另起一轮最多再 sendText 一次。输出：极短思考 + 一个 \`\`\`js 代码块。
@@ -219,6 +219,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     logger.warn({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
   }
 
+  // Self-play / goal-check: clamp delivery (prod: avatar-tool spam + goal re-queue piles).
+  const isSelfPlay = task.contentDirection.includes('[selfplay]');
+  const isGoalCheck = /\[goal:\d+\]/.test(task.contentDirection);
   const host = createHostApi(task.chatId, {
     taskId: task.id,
     defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
@@ -228,7 +231,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ended = true;
       endSummary = summary;
     },
-    maxTextSends: 5, // enough for both chat (1-2) and work (5)
+    maxTextSends: isSelfPlay || isGoalCheck ? 1 : 5,
+    maxFileSends: isSelfPlay ? 1 : undefined,
     messageThreadId: task.messageThreadId,
   });
 
@@ -409,7 +413,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const segment = task.segment ?? 0;
 
   // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
-  const isSelfPlay = task.contentDirection.includes('[selfplay]');
   let systemPrompt = EXECUTOR_SYSTEM;
   if (isSelfPlay) {
     try {
@@ -648,6 +651,10 @@ history.push({
         // 注意：不 enqueueCallback —— 任务未完成，Meta 不应收到完成回调。
       } else if (host.runtime.didSendText()) {
         endSummary = 'ended_without_endTask';
+      } else if (isSelfPlay) {
+        // Self-play is private practice — never bypass maxTextSends with a failsafe DM.
+        endSummary = 'selfplay_silent';
+        logger.info({ taskId: task.id }, 'CodeAct self-play ended without send (ok)');
       } else {
         // Failsafe: bot didn't produce anything — generate an honest report
         try {
