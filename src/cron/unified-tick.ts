@@ -521,12 +521,13 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const planText = a.plan.length ? `\n计划:\n${a.plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}` : '';
       await enqueueCodeActJob({
         id: `selfplay_${now}_${Math.floor(Math.random() * 1e6)}`,
+        // chatId 仍用主人：沙盒/记忆挂靠身份；host 层 maxText/File=0，禁止任何投递。
         chatId: e.MASTER_UID,
         contentDirection:
           `[selfplay] 自主行动：${a.idea}${planText}\n` +
-          `没有人在等你，自己完成它。默认产物只留沙盒；全程最多 sendText 一次收尾（可省略），最多 sendFile 一次。` +
-          `禁止过程连发、禁止追问「喜欢吗」。sendFile/sendText 返回值是 {messageId}，禁止拼进字符串。`,
-        toneGuidance: '自主、专注；默默做完，别刷屏',
+          `没有人在等你。这是私下练习：禁止 telegram.sendText / sendFile / sendVoice / sendSticker（会失败）。` +
+          `产物只写沙盒，用 computer.listFiles 确认后 runtime.endTask("做了什么/学到什么")。`,
+        toneGuidance: '自主、专注、零打扰',
         createdAt: Date.now(),
         status: 'queued',
       });

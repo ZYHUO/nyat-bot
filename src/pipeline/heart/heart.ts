@@ -14,7 +14,7 @@ import {
 } from "../timing/chat-runtime.js";
 import { isTurnActorChat } from "../turn/flags.js";
 import { scheduleGateDeferReeval, hasDeferBudget } from "../timing/defer.js";
-import { computeEngagement, filterForTurnStart, HARD_PASS_BUDGET } from "./engagement.js";
+import { computeEngagement, filterForTurnStart, HARD_PASS_BUDGET, isBotMonologueTrail } from "./engagement.js";
 import { composeSelfState } from "./self-state.js";
 import { heartDecision } from "./decision.js";
 import { getBotDisplayName } from "../../bot/bot.js";
@@ -147,6 +147,14 @@ export async function runHeartBranch(ctx: {
     // 兄弟组已发的回复),只让"回合开始前"的真实状态计入预算;用户消息
     // 与回合开始前就存在的历史 bot 消息不受影响,跨回合防刷照常生效。
     const engagementMessages = filterForTurnStart(recentMessages, botUid, job.turnContext?.turnStartedAt);
+    // 自发言环：continuation 免检时也拦（群里自己接自己话）。
+    if (isBotMonologueTrail(engagementMessages, botUid, 8, formatted.messageId)) {
+      logger.info(
+        { chatId: job.chatId, uid: formatted.uid },
+        "Heart skipped (bot monologue trail), pass",
+      );
+      return { shouldReturn: true };
+    }
     const engagement = computeEngagement(engagementMessages, botUid, messagesLast5Min);
     // 硬阈三处修正(2026-07-04 吞消息诊断):
     // (1) defer 回放豁免 —— defer 的意义是"到点让心流重评",回放后作为
