@@ -92,6 +92,12 @@ export interface AICallOptions {
    */
   rejectEmpty?: boolean;
   /**
+   * Set to false to disable the hedged request (primary+backup raced in parallel).
+   * Hedging buys latency at 2x token cost — right for user-facing paths (reply/heart),
+   * pure waste for fire-and-forget background batch (summarize/reflection/distill).
+   */
+  allowHedge?: boolean;
+  /**
    * 归属会话,纯观测用途,不影响任何调用行为。透传进 llmEvents,让 social-ledger
    * 能把 LLM 调用摊到具体群上 —— "每回复几次调用"是 G8(合并人格决策)A/B 的
    * 核心成本指标,没有归属就只能看全局,而各群活跃度差异远大于 G8 本身的效应。

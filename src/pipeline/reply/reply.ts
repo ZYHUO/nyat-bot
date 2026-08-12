@@ -7,6 +7,7 @@ import { isDM } from '../../shared/chat.js';
 import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath } from '../../shared/types.js';
 import type { JudgeAction } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
+import type { ContentPart } from '../../ai/types.js';
 import { AIError } from '../../shared/errors.js';
 import { buildSystemPrompt, buildMessages } from './prompt-builder.js';
 import { modelStyleNudge } from './model-style.js';
@@ -50,8 +51,17 @@ const REPLY_CONTEXT_BUDGET = 72_000;
 const MAX_EMPTY_RETRIES = 1; // 1 retry:大多空响应一次即恢复;避免和下游 6 个 regen 分支叠乘放大调用数
 const stripThinking = (s: string): string => s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
+// P2 多模态直读:带图回复时最后一条 user 消息是 ContentPart[](图+文),
+// 各 regen/retry 分支不能再直接字符串拼接 content。
+type ReplyMessage = { role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] };
+
+function appendReplyText(m: ReplyMessage, suffix: string): ReplyMessage {
+  if (typeof m.content === 'string') return { ...m, content: m.content + suffix };
+  return { ...m, content: [...m.content, { type: 'text' as const, text: suffix }] };
+}
+
 async function generateReplyModelOutput(
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  messages: ReplyMessage[],
   usage: string,
   opts?: { temperatureOverride?: number; signal?: AbortSignal },
 ) {
@@ -72,7 +82,7 @@ async function generateReplyModelOutput(
     logger.warn({ usage, attempt }, 'Empty model output, retrying with constraint');
     const constrained = messages.map((m, idx) =>
       idx === messages.length - 1 && m.role === 'user'
-        ? { ...m, content: `${m.content}\n\n[RETRY] 上次输出为空。你必须输出合法的 reply JSON(replyContent 非空),不允许空响应。` }
+        ? appendReplyText(m, '\n\n[RETRY] 上次输出为空。你必须输出合法的 reply JSON(replyContent 非空),不允许空响应。')
         : m,
     );
     result = await callWithFallback({
@@ -102,18 +112,14 @@ function containsToolArtifact(text: string): boolean {
 }
 
 function appendToolArtifactRetryInstruction(
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+  messages: ReplyMessage[],
+): ReplyMessage[] {
   return messages.map((message, index) => {
     if (index !== messages.length - 1 || message.role !== 'user') return message;
-    return {
-      ...message,
-      content: [
-        message.content,
-        '[RETRY_INSTRUCTION]',
-        '上一次输出泄露了工具原始结果。必须把 [TOOL_RESULTS] 综合成自然语言回复，并严格输出 reply JSON；禁止原样复制 <web_search>、Search results、Title/URL 列表或 [TOOL_RESULTS] 标记。',
-      ].join('\n\n'),
-    };
+    return appendReplyText(
+      message,
+      '\n\n[RETRY_INSTRUCTION]\n上一次输出泄露了工具原始结果。必须把 [TOOL_RESULTS] 综合成自然语言回复，并严格输出 reply JSON；禁止原样复制 <web_search>、Search results、Title/URL 列表或 [TOOL_RESULTS] 标记。',
+    );
   });
 }
 
@@ -647,7 +653,19 @@ export async function generateReply(
   // 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段。
   // 启用时跳过下面的预跑工具块(工具由写手自己边写边调),toolResultsBlock 留空。
   // prebuiltToolResults 在场 / orchestratorHandled 时禁用 merged(编排器已收口)。
-  const mergedToolsActive = effectiveReplyPath === 'planned' && env().REPLY_MERGED_TOOLS_ENABLED && !toolResultsBlock && !orchestratorHandled;
+  // P3:direct 路径也可挂工具(REPLY_DIRECT_TOOLS_ENABLED,默认关)——只给只读子集,
+  // 让普通闲聊能查实时信息/回忆,又不给闲聊写手建投票/定时器/指挥别的 bot 的副作用口子。
+  const directToolsActive = effectiveReplyPath === 'direct' && env().REPLY_DIRECT_TOOLS_ENABLED;
+  const mergedToolsActive =
+    env().REPLY_MERGED_TOOLS_ENABLED &&
+    !toolResultsBlock &&
+    !orchestratorHandled &&
+    (effectiveReplyPath === 'planned' || directToolsActive);
+  // direct 路径的只读工具白名单(副作用工具一律不给)
+  const DIRECT_TOOL_SUBSET = [
+    'SEARCH', 'FETCH', 'RECALL', 'QUERY_MEMORY', 'QUERY_PERSON_PROFILE',
+    'FETCH_HISTORY', 'BOT_KNOWLEDGE', 'QUERY_JARGON',
+  ];
 
   if (effectiveReplyPath === 'planned' && !mergedToolsActive && !toolResultsBlock && !orchestratorHandled) {
     // ── Agentic 循环(MaiBot Maisaka 借鉴):多轮 plan→act,失败回退旧路 ──
@@ -713,7 +731,7 @@ export async function generateReply(
   // 中期记忆 pinned 块(flag off 时为 null,零开销)
   const midTermMemory = await getMidTermBlock(chatId).catch(() => null);
 
-  const messages = buildMessages(
+  const messages: ReplyMessage[] = buildMessages(
     systemPrompt,
     contextStr,
     message,
@@ -732,14 +750,50 @@ export async function generateReply(
     midTermMemory ?? undefined,
   );
 
+  // P2 多模态直读(默认关):触发消息带图(或回复的是图)时,把原图直接喂给回复
+  // 模型 —— 通用文本描述是"概述",丢细节;直读让模型自己看图回答"多少钱/哪个好/
+  // 图上写了啥"。带图后 fallback 链自动跳过声明 VISION=false 的纯文本 label。
+  if (env().REPLY_VISION_ENABLED) {
+    const imgFileId = message.imageFileId ?? message.replyTo?.imageFileId;
+    if (imgFileId) {
+      try {
+        const { fetchImageDataUrl } = await import('../vision.js');
+        const dataUrl = await fetchImageDataUrl(imgFileId);
+        if (dataUrl) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i]!;
+            if (m.role === 'user') {
+              messages[i] = {
+                ...m,
+                content: [
+                  { type: 'image', image: dataUrl },
+                  { type: 'text', text: typeof m.content === 'string' ? m.content : '' },
+                ],
+              };
+              break;
+            }
+          }
+          logger.info({ chatId, messageId: message.messageId }, 'reply vision: image attached to writer call');
+        }
+      } catch (err) {
+        logger.debug({ err, chatId }, 'reply vision attach failed (non-critical, text-only fallback)');
+      }
+    }
+  }
+
   // 合并写手:在 system 末尾加工具约束——工具是中间步,最终必须只吐 reply JSON。
   if (mergedToolsActive && messages[0]?.role === 'system') {
+    const toolHint = directToolsActive
+      ? '\n\n[工具]\n你可以调用工具(搜索/抓网页/回忆本群旧事/查群友画像)来回答你不确定的实时信息或旧事。' +
+        '工具调用是中间步骤、不展示给用户;拿到结果后,**最终输出必须且只能是 reply JSON**' +
+        '(格式与不调工具时完全一样)。闲聊能直接答就别调工具,别为一句话查半天。'
+      : '\n\n[工具]\n你可以调用工具(查资料/借力本群其他 bot)来获取你不知道的实时信息。' +
+        '工具调用是中间步骤、不展示给用户;拿到结果后,**最终输出必须且只能是 reply JSON**' +
+        '(格式与不调工具时完全一样)。能直接答就别调工具。';
+    const sysBase = typeof messages[0].content === 'string' ? messages[0].content : '';
     messages[0] = {
       ...messages[0],
-      content: messages[0].content +
-        '\n\n[工具]\n你可以调用工具(查资料/借力本群其他 bot)来获取你不知道的实时信息。' +
-        '工具调用是中间步骤、不展示给用户;拿到结果后,**最终输出必须且只能是 reply JSON**' +
-        '(格式与不调工具时完全一样)。能直接答就别调工具。',
+      content: sysBase + toolHint,
     };
   }
 
@@ -752,6 +806,7 @@ export async function generateReply(
       const { generateReplyWithTools } = await import('./reply-with-tools.js');
       const merged = await generateReplyWithTools({
         messages, usage, chatId, userId: message.uid, signal: interruptSignal,
+        toolsOnly: directToolsActive ? DIRECT_TOOL_SUBSET : undefined,
       });
       // strip <think> 后再判空:think-only 响应原始 content 非空但剥完是空,以前会漏过空兜底变静默
       const mergedContent = merged.content ? stripThinking(merged.content) : '';
@@ -812,7 +867,7 @@ export async function generateReply(
       if (opts.constraintHint) {
         regenMessages = messages.map((m, idx) =>
           idx === messages.length - 1 && m.role === 'user'
-            ? { ...m, content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n${opts.constraintHint}` }
+            ? appendReplyText(m, `\n\n[REGENERATE_CONSTRAINT]\n${opts.constraintHint}`)
             : m,
         );
       } else if (opts.instructionHint) {
@@ -943,7 +998,7 @@ export async function generateReply(
     logger.info({ chatId }, 'Instruction reply came back silent, regenerating with constraint');
     const constrained = messages.map((m, idx) =>
       idx === messages.length - 1 && m.role === 'user'
-        ? { ...m, content: `${m.content}\n\n[REGENERATE_CONSTRAINT]\n这是对你的直接指令,不允许沉默或只发贴纸。必须输出实际执行指令的文字回复;确实做不到就明确说做不到+原因。` }
+        ? appendReplyText(m, '\n\n[REGENERATE_CONSTRAINT]\n这是对你的直接指令,不允许沉默或只发贴纸。必须输出实际执行指令的文字回复;确实做不到就明确说做不到+原因。')
         : m,
     );
     try {

@@ -23,12 +23,14 @@ import { logger } from '../../shared/logger.js';
 
 export interface ReplyWithToolsInput {
   /** 完整消息数组(含 system 5 层人格 + user 上下文),与纯文本写手同源 */
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | import('../../ai/types.js').ContentPart[] }>;
   usage: string;        // 'reply' / 'reply_pro' / ...
   chatId: number;
   userId: number;
   signal?: AbortSignal;
   temperature?: number;
+  /** P3:工具白名单子集(direct 路径只给只读工具);不传 = 全量 */
+  toolsOnly?: string[];
 }
 
 export interface ReplyWithToolsResult {
@@ -48,7 +50,7 @@ export interface ReplyWithToolsResult {
 export async function generateReplyWithTools(input: ReplyWithToolsInput): Promise<ReplyWithToolsResult> {
   const e = env();
   const usage = getUsage(input.usage);
-  const tools = buildToolSet(input.chatId, input.userId);
+  const tools = buildToolSet(input.chatId, input.userId, input.toolsOnly);
   const maxSteps = Math.max(2, e.REPLY_TOOLS_MAX_STEPS);
   const start = performance.now();
 

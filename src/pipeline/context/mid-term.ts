@@ -22,8 +22,12 @@ import { getNyatDb, unpackChatLogRow } from '../../nyatdb/index.js';
 const MTM_PREFIX = 'xxb:mtm:';
 const LOCK_PREFIX = 'xxb:mtm:lock:';
 const NYAT_CURSOR_PREFIX = 'xxb:mtm:nyat_cursor:';
+const FAIL_PREFIX = 'xxb:mtm:fail:';
 const MTM_TTL = 7 * 86400; // 与 ctx 同寿命
 const LOCK_TTL_SEC = 180;
+// 链全灭后的失败冷却。本函数在 ctx 近满时**每条消息**都被 addMessage 触发,
+// 不退避 = 链挂期间每条消息白烧一整条 fallback 链(2026-08-12 事故:976 连失败)。
+const FAIL_COOLDOWN_SEC = 1800;
 
 interface MidTermSummary {
   summary: string;
@@ -89,6 +93,7 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
   const chunk = e.MTM_CHUNK;
 
   try {
+    if (await redis.get(FAIL_PREFIX + chatId)) return; // 失败冷却中
     const len = await redis.llen(ctxKey);
     if (len < threshold) return;
 
@@ -108,15 +113,22 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
 
       const config = getConfig();
       const systemPrompt = loadPrompt('task/mid-term-summary.md', config.promptsDir);
-      const result = await callWithFallback({
-        usage: 'summarize',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: renderForCompression(messages).slice(0, e.MTM_INPUT_MAX_CHARS) },
-        ],
-        maxTokens: 400,
-        temperature: 0,
-      });
+      let result;
+      try {
+        result = await callWithFallback({
+          usage: 'summarize',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: renderForCompression(messages).slice(0, e.MTM_INPUT_MAX_CHARS) },
+          ],
+          maxTokens: 400,
+          temperature: 0,
+          allowHedge: false, // 后台批任务:hedge 双发纯翻倍账单
+        });
+      } catch (err) {
+        await redis.set(FAIL_PREFIX + chatId, '1', 'EX', FAIL_COOLDOWN_SEC).catch(() => {});
+        throw err;
+      }
       const summaryText = result.content.trim();
       if (!summaryText) return;
 
@@ -138,6 +150,7 @@ export async function maybeCompressMidTerm(chatId: number): Promise<void> {
         logger.info({ chatId }, 'Mid-term compression discarded (ctx head moved during LLM call)');
         return;
       }
+      await redis.del(FAIL_PREFIX + chatId).catch(() => {});
 
       logger.info(
         { chatId, compressed: messages.length, summaryChars: entry.summary.length },
@@ -166,6 +179,7 @@ async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
   const ringMax = Math.max(e.NYATDB_CHAT_RING_MAX, e.CONTEXT_MAX_LENGTH + chunk);
 
   try {
+    if (await redis.get(FAIL_PREFIX + chatId)) return; // 失败冷却中
     const rows = ndb.chatRecent(chatId, ringMax);
     if (rows.length < threshold) return;
 
@@ -198,15 +212,22 @@ async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
       const messages = compressible.slice(0, chunk);
       const config = getConfig();
       const systemPrompt = loadPrompt('task/mid-term-summary.md', config.promptsDir);
-      const result = await callWithFallback({
-        usage: 'summarize',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: renderForCompression(messages).slice(0, e.MTM_INPUT_MAX_CHARS) },
-        ],
-        maxTokens: 400,
-        temperature: 0,
-      });
+      let result;
+      try {
+        result = await callWithFallback({
+          usage: 'summarize',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: renderForCompression(messages).slice(0, e.MTM_INPUT_MAX_CHARS) },
+          ],
+          maxTokens: 400,
+          temperature: 0,
+          allowHedge: false, // 后台批任务:hedge 双发纯翻倍账单
+        });
+      } catch (err) {
+        await redis.set(FAIL_PREFIX + chatId, '1', 'EX', FAIL_COOLDOWN_SEC).catch(() => {});
+        throw err;
+      }
       const summaryText = result.content.trim();
       if (!summaryText) return;
 
@@ -224,6 +245,7 @@ async function maybeCompressMidTermFromNyat(chatId: number): Promise<void> {
         .ltrim(mtmKey(chatId), -e.MTM_MAX_SUMMARIES, -1)
         .expire(mtmKey(chatId), MTM_TTL)
         .set(cursorKey, String(lastId), 'EX', MTM_TTL)
+        .del(FAIL_PREFIX + chatId)
         .exec();
 
       logger.info(
@@ -261,5 +283,5 @@ export async function getMidTermBlock(chatId: number): Promise<string | null> {
 
 /** 测试用 */
 export async function _clearMidTerm(chatId: number): Promise<void> {
-  await getRedis().del(mtmKey(chatId), LOCK_PREFIX + chatId, NYAT_CURSOR_PREFIX + chatId);
+  await getRedis().del(mtmKey(chatId), LOCK_PREFIX + chatId, NYAT_CURSOR_PREFIX + chatId, FAIL_PREFIX + chatId);
 }

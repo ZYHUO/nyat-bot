@@ -17,7 +17,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   const usage = getUsage(options.usage);
   const labelNames = [usage.label, ...usage.backups];
   const cooldown = new CooldownTracker(getRedis());
-  const hedgeDelayMs = env().HEDGE_DELAY_MS;
+  // 后台批任务(allowHedge:false)不 hedge —— 2s 后双发对延迟无感,纯翻倍账单。
+  const hedgeDelayMs = options.allowHedge === false ? 0 : env().HEDGE_DELAY_MS;
 
   const callOpts = {
     maxTokens: options.maxTokens ?? usage.maxTokens,
@@ -36,6 +37,12 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   const errors: Error[] = [];
   let hedgeTriedLabel: string | undefined;
 
+  // P2 多模态:带图调用跳过明确声明 VISION=false 的 label(纯文本模型收到
+  // image_url 必 400,白烧一跳还刷熔断)。undefined(未声明)照发,保持现状。
+  const hasImageParts = options.messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image'),
+  );
+
   for (let i = 0; i < labelNames.length; i++) {
     const labelName = labelNames[i]!;
 
@@ -43,6 +50,11 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     if (labelName === hedgeTriedLabel) continue;
 
     const label = getLabel(labelName);
+
+    if (hasImageParts && label.capabilities?.vision === false) {
+      logger.debug({ label: labelName, model: label.model }, 'Skipping text-only label for image call');
+      continue;
+    }
 
     // Skip if cooling down
     if (await cooldown.isCoolingDown(label.model)) {

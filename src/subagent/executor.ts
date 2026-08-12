@@ -9,7 +9,7 @@ import { sendChatAction } from '../bot/sender/telegram.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
 import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat } from '../agent/checkpoint.js';
-import { drainInterrupts } from '../agent/interrupts.js';
+import { drainInterrupts, isHardStop } from '../agent/interrupts.js';
 import { compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
@@ -25,6 +25,26 @@ function startTypingHeartbeat(chatId: number): () => void {
     stopped = true;
     clearInterval(timer);
   };
+}
+
+/** 长任务进度 ping:每任务 10min 最多一条(SET NX),失败静默。 */
+async function maybeSendProgressPing(task: DispatchTask): Promise<void> {
+  try {
+    const { getRedis } = await import('../db/redis.js');
+    const key = `xxb:agent:ping:${task.id}`;
+    const got = await getRedis().set(key, '1', 'EX', 600, 'NX');
+    if (!got) return;
+    const { sendMessage } = await import('../bot/sender/telegram.js');
+    const steps = task.totalTurns ?? 0;
+    await sendMessage(
+      task.chatId,
+      `（还在干活喵～已经跑了 ${steps > 0 ? `${steps} 步` : '好一会儿'}了，做完会说一声的）`,
+      task.quoteMessageIds?.[0],
+      task.messageThreadId,
+    );
+  } catch (err) {
+    logger.debug({ err, taskId: task.id }, 'agent progress ping failed (non-critical)');
+  }
 }
 
 const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct：写 JavaScript 调用 host API。
@@ -222,6 +242,22 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // Self-play: sandbox-only (0 delivery). Goal-check: at most one report bubble.
   const isSelfPlay = task.contentDirection.includes('[selfplay]');
   const isGoalCheck = /\[goal:\d+\]/.test(task.contentDirection);
+
+  // 长任务实时干预(P1):任务**一开始**就注册 chat→task 索引 —— 原来只在续跑时
+  // 注册,首段 30 轮/120s 内用户消息会重复 dispatch 新任务,喊停/问进度永远到不了。
+  // self-play/goal-check 不注册:后台任务不该劫持该 chat 的正常消息流。
+  const interruptible = !isSelfPlay && !isGoalCheck;
+  if (interruptible) {
+    await registerAgentChat(task.chatId, task.id);
+  }
+
+  // 进度可见性(P1):续跑段开头,若任务从头到尾没发过言(canResume 的定义决定
+  // 了续跑任务从未 sendText),每 10min 一条确定性进度 ping —— 否则长任务在群里
+  // 闷头跑几十分钟,用户既不知道活着也不知道卡没卡。
+  if (interruptible && env().AGENT_PROGRESS_PING_ENABLED && env().AGENT_LOOP_ENABLED && (task.segment ?? 0) > 0) {
+    await maybeSendProgressPing(task);
+  }
+
   const host = createHostApi(task.chatId, {
     taskId: task.id,
     defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
@@ -512,24 +548,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ];
   }
 
-  // 任务进行中，主人/群友发来的新消息 → 注入本轮，模型先响应再继续。
-  if (loopEnabled && segment > 0) {
-    try {
-      const interrupts = await drainInterrupts(task.id);
-      if (interrupts.length > 0) {
-        const block = interrupts
-          .map((i) => `- (${new Date(i.at).toLocaleString('zh-CN', { hour12: false })}) ${i.from}: ${i.text}`)
-          .join('\n');
-        history.push({
-          role: 'user',
-          content: `[任务进行中，${interrupts.length > 1 ? '有人' : '有人'}发来新消息]\n${block}\n先简短回应这些消息（问进度就汇报当前进度；让停就停下收尾；补充需求就纳入计划），然后继续当前任务。`,
-        });
-      }
-    } catch {
-      /* non-critical */
-    }
-  }
-
   const stopTyping = startTypingHeartbeat(task.chatId);
   try {
     let turnsRun = 0;
@@ -538,8 +556,40 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 1;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
       turnsRun++;
+
+      // 实时干预(P1):每轮开头排一次用户 interrupt —— 原来只在续跑段开头排一次,
+      // 段内 30 轮/120s 里用户喊停/问进度/补充需求全都到不了。硬停词立即终止。
+      let injectedInterrupts = false;
+      if (interruptible) {
+        try {
+          const interrupts = await drainInterrupts(task.id);
+          if (interrupts.length > 0) {
+            if (interrupts.some((i) => isHardStop(i.text))) {
+              logger.info({ taskId: task.id, chatId: task.chatId, turn }, 'agent task hard-stopped by user');
+              try {
+                const { sendMessage } = await import('../bot/sender/telegram.js');
+                await sendMessage(task.chatId, '好，停下了喵～（任务已取消）', task.quoteMessageIds?.[0], task.messageThreadId);
+              } catch { /* ack best-effort */ }
+              host.runtime.endTask('user_stopped');
+              break;
+            }
+            const block = interrupts
+              .map((i) => `- (${new Date(i.at).toLocaleString('zh-CN', { hour12: false })}) ${i.from}: ${i.text}`)
+              .join('\n');
+            history.push({
+              role: 'user',
+              content: `[任务进行中，有人发来新消息]\n${block}\n先简短回应这些消息（问进度就汇报当前进度；让停就停下收尾；补充需求就纳入计划），然后继续当前任务。`,
+            });
+            injectedInterrupts = true;
+            // 用户又说话了 → 任务重新有了"该回应的人",重置 sendText 后的自动收尾计数,
+            // 否则模型刚 sendText 汇报过、用户追问一句,任务在回应前就被 auto_end 掐掉。
+            postSendTurns = 0;
+          }
+        } catch { /* non-critical */ }
+      }
+
       // Already delivered: don't keep burning turns waiting for a forgotten endTask.
-      if (host.runtime.didSendText() && postSendTurns > postSendGrace) {
+      if (!injectedInterrupts && host.runtime.didSendText() && postSendTurns > postSendGrace) {
         host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
         break;
       }
@@ -793,6 +843,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await host.runtime.flushBookkeeping().catch(() => undefined);
     closed = true;
     stopTyping();
+    // P1:异常逃逸路径兜底解注册(正常终态已在上面解过;续跑段不能解 ——
+    // 任务还在等下一段,索引没了用户消息就退回重复 dispatch)。
+    if (interruptible && !endSummary.startsWith('resumed_seg')) {
+      await unregisterAgentChat(task.chatId, task.id).catch(() => {});
+    }
     try {
       const { clearSpeakerBurst } = await import('../meta/speaker-burst.js');
       await clearSpeakerBurst(task.chatId, task.targetUserId);

@@ -5,6 +5,7 @@ const lists = new Map<string, string[]>();
 const kv = new Map<string, string>();
 
 const redisMock = {
+  get: vi.fn(async (k: string) => kv.get(k) ?? null),
   llen: vi.fn(async (k: string) => (lists.get(k) ?? []).length),
   lrange: vi.fn(async (k: string, a: number, b: number) => {
     const l = lists.get(k) ?? [];
@@ -183,6 +184,28 @@ describe('mid-term memory', () => {
     kv.set(`xxb:mtm:lock:${CHAT}`, '1');
     await maybeCompressMidTerm(CHAT);
     expect(callWithFallbackMock).not.toHaveBeenCalled();
+  });
+
+  it('LLM 链全灭 → 进失败冷却,冷却中每条消息不再白烧链;成功后冷却清除', async () => {
+    fillCtx(385);
+    callWithFallbackMock.mockRejectedValue(new Error('All labels exhausted'));
+    await maybeCompressMidTerm(CHAT);
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
+    expect(kv.get(`xxb:mtm:fail:${CHAT}`)).toBe('1');
+    // 原文未被裁(压缩没发生)
+    expect(lists.get(CTX_KEY)).toHaveLength(385);
+
+    // 冷却中:再来消息直接跳过
+    await maybeCompressMidTerm(CHAT);
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
+
+    // 链恢复(冷却过期)后正常压缩,冷却键被清除
+    kv.delete(`xxb:mtm:fail:${CHAT}`);
+    callWithFallbackMock.mockResolvedValue({ content: '群里在聊代理协议,小明宣布退群又回来了' });
+    await maybeCompressMidTerm(CHAT);
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(2);
+    expect(lists.get(MTM_KEY)).toHaveLength(1);
+    expect(kv.has(`xxb:mtm:fail:${CHAT}`)).toBe(false);
   });
 
   it('flag off:压缩与注入都是 no-op', async () => {

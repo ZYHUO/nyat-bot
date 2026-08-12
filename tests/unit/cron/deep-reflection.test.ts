@@ -12,14 +12,22 @@ vi.mock('../../../src/shared/logger.js', () => ({
 const envValues: Record<string, unknown> = {};
 vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
-const { callWithFallbackMock, getRecentMock, zrangeMock } = vi.hoisted(() => ({
+const { callWithFallbackMock, getRecentMock, zrangeMock, redisKv } = vi.hoisted(() => ({
   callWithFallbackMock: vi.fn(),
   getRecentMock: vi.fn(async (): Promise<Array<Record<string, unknown>>> => []),
   zrangeMock: vi.fn(async (): Promise<string[]> => []),
+  redisKv: new Map<string, string>(),
 }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: callWithFallbackMock }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent: getRecentMock }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ zrange: zrangeMock }) }));
+vi.mock('../../../src/db/redis.js', () => ({
+  getRedis: () => ({
+    zrange: zrangeMock,
+    get: async (k: string) => redisKv.get(k) ?? null,
+    set: async (k: string, v: string) => { redisKv.set(k, v); return 'OK'; },
+    del: async (...ks: string[]) => { let n = 0; for (const k of ks) if (redisKv.delete(k)) n++; return n; },
+  }),
+}));
 
 import { reflectChat, runDeepReflection, getChatReflection } from '../../../src/cron/deep-reflection.js';
 
@@ -36,6 +44,7 @@ beforeEach(() => {
     REFLECTION_WINDOW_MSGS: 250, REFLECTION_USAGE: 'summarize',
   });
   vi.clearAllMocks();
+  redisKv.clear();
   getRecentMock.mockResolvedValue([]);
   zrangeMock.mockResolvedValue([]);
   callWithFallbackMock.mockResolvedValue({ content: '本群最近在聊显卡和原神,氛围活跃,有个"光帆拉"的梗。' });
@@ -71,6 +80,24 @@ describe('reflectChat', () => {
     callWithFallbackMock.mockResolvedValue({ content: '短' });
     expect(await reflectChat(-1001)).toBe(0);
     expect(getChatReflection(-1001)).toBeNull();
+  });
+
+  it('LLM 链全灭 → 进失败冷却,冷却中不再调 LLM;成功后冷却清除', async () => {
+    getRecentMock.mockResolvedValue(msgs(40));
+    callWithFallbackMock.mockRejectedValue(new Error('All labels exhausted'));
+    expect(await reflectChat(-1001)).toBe(0);
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
+    expect(redisKv.get('xxb:reflect:fail:-1001')).toBe('1');
+
+    // 冷却中:直接跳过,不再烧链
+    expect(await reflectChat(-1001)).toBe(0);
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
+
+    // 链恢复后(冷却过期/被成功清除)正常反思
+    redisKv.clear();
+    callWithFallbackMock.mockResolvedValue({ content: '本群最近在聊显卡和原神,氛围活跃,有个"光帆拉"的梗。' });
+    expect(await reflectChat(-1001)).toBeGreaterThan(0);
+    expect(redisKv.has('xxb:reflect:fail:-1001')).toBe(false);
   });
 });
 

@@ -98,6 +98,7 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
       ],
       maxTokens: 1200,
       temperature: 0.3,
+      allowHedge: false, // fire-and-forget 复盘:hedge 双发纯翻倍账单
     });
 
     const parsed = parseDistillOutput(res.content ?? '');
