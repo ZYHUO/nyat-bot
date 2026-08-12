@@ -7,7 +7,12 @@ import { logger } from '../shared/logger.js';
 import { getBotDisplayName, getBotUid } from '../bot/bot.js';
 import { heartDecision } from '../pipeline/heart/decision.js';
 import { composeSelfState } from '../pipeline/heart/self-state.js';
-import { computeEngagement, HARD_PASS_BUDGET, type Engagement } from '../pipeline/heart/engagement.js';
+import {
+  computeEngagement,
+  HARD_PASS_BUDGET,
+  isBotMonologueTrail,
+  type Engagement,
+} from '../pipeline/heart/engagement.js';
 import {
   getChatState,
   getGateCooldownRemainingMs,
@@ -96,6 +101,15 @@ export async function evaluateMetaHeart(opts: {
   }
 
   const continuation = tstate !== undefined && isInContinuation(tstate);
+
+  // 自发言环：即便在 continuation 免检窗也硬拦（否则刚回完又对下一条被动消息连珠炮）。
+  if (isBotMonologueTrail(recentMessages, botUid, 8, formatted.messageId)) {
+    logger.info(
+      { chatId, messageId: formatted.messageId },
+      'Meta heart: bot monologue trail — silence',
+    );
+    return { verdict: 'silence', layer, reason: 'heart_bot_monologue' };
+  }
 
   if (!continuation) {
     try {

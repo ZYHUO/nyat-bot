@@ -189,7 +189,7 @@ describe('runUnifiedTick execution mapping', () => {
     const task = enqueueMock.mock.calls[0]![0] as { contentDirection: string };
     expect(task.contentDirection).toContain('[selfplay]');
     expect(task.contentDirection).toContain('写个贪吃蛇');
-    expect(task.contentDirection).toContain('最多 sendText 一次');
+    expect(task.contentDirection).toContain('禁止 telegram.sendText');
     expect(redisStore.get('xxb:selfplay:last')).toBeTruthy();
   });
 

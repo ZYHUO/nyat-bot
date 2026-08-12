@@ -45,9 +45,11 @@ vi.mock('../../../src/bot/bot.js', () => ({
 }));
 vi.mock('../../../src/pipeline/heart/decision.js', () => ({ heartDecision }));
 vi.mock('../../../src/pipeline/heart/self-state.js', () => ({ composeSelfState }));
+const isBotMonologueTrail = vi.fn(() => false);
 vi.mock('../../../src/pipeline/heart/engagement.js', () => ({
   computeEngagement,
   HARD_PASS_BUDGET: 0.12,
+  isBotMonologueTrail: (...args: unknown[]) => isBotMonologueTrail(...args),
 }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent }));
 vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
@@ -84,6 +86,7 @@ describe('evaluateMetaHeart', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     computeEngagement.mockReturnValue({ budget: 0.8, note: null, factors: [] });
+    isBotMonologueTrail.mockReturnValue(false);
     getGateCooldownRemainingMs.mockResolvedValue(0);
     isInContinuation.mockReturnValue(false);
     isCodeActBusy.mockResolvedValue(false);
@@ -124,6 +127,15 @@ describe('evaluateMetaHeart', () => {
     const r = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L2' });
     expect(r.verdict).toBe('silence');
     expect(r.reason).toBe('heart_engagement');
+    expect(heartDecision).not.toHaveBeenCalled();
+  });
+
+  it('bot monologue trail → silence even when engagement would allow', async () => {
+    isBotMonologueTrail.mockReturnValue(true);
+    computeEngagement.mockReturnValue({ budget: 0.9, note: null, factors: [] });
+    const r = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L2' });
+    expect(r.verdict).toBe('silence');
+    expect(r.reason).toBe('heart_bot_monologue');
     expect(heartDecision).not.toHaveBeenCalled();
   });
 

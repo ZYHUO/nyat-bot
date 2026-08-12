@@ -219,7 +219,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     logger.warn({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
   }
 
-  // Self-play / goal-check: clamp delivery (prod: avatar-tool spam + goal re-queue piles).
+  // Self-play: sandbox-only (0 delivery). Goal-check: at most one report bubble.
   const isSelfPlay = task.contentDirection.includes('[selfplay]');
   const isGoalCheck = /\[goal:\d+\]/.test(task.contentDirection);
   const host = createHostApi(task.chatId, {
@@ -231,8 +231,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ended = true;
       endSummary = summary;
     },
-    maxTextSends: isSelfPlay || isGoalCheck ? 1 : 5,
-    maxFileSends: isSelfPlay ? 1 : undefined,
+    maxTextSends: isSelfPlay ? 0 : isGoalCheck ? 1 : 5,
+    maxFileSends: isSelfPlay ? 0 : undefined,
     messageThreadId: task.messageThreadId,
   });
 
@@ -533,8 +533,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const stopTyping = startTypingHeartbeat(task.chatId);
   try {
     let turnsRun = 0;
+    /** Turns observed after the first successful send* — used to auto endTask. */
+    let postSendTurns = 0;
+    const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 1;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
       turnsRun++;
+      // Already delivered: don't keep burning turns waiting for a forgotten endTask.
+      if (host.runtime.didSendText() && postSendTurns > postSendGrace) {
+        host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
+        break;
+      }
       let llmText = '';
       try {
         const result = await callWithFallback({
@@ -554,9 +562,15 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       history.push({ role: 'assistant', content: llmText });
       const code = extractJs(llmText);
       if (!code) {
+        if (host.runtime.didSendText()) {
+          host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
+          break;
+        }
         history.push({
           role: 'user',
-          content: '请用 ```js 代码块调用 API；完成后 runtime.endTask。',
+          content: isSelfPlay
+            ? '请用 ```js 代码块调用 API；做完后 runtime.endTask("摘要")。禁止 sendText/sendFile。'
+            : '请用 ```js 代码块调用 API；完成后 runtime.endTask。',
         });
         continue;
       }
@@ -575,22 +589,37 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       const mismatchHint = !exec.ok && /reply_to_mismatch/.test(exec.output)
         ? `\n提示：群聊 replyTo 只能是 quotes 里的 #${replyAnchor ?? '?'}（或省略让 host 填）。不要换旧 #id，也不要复用错人的气泡正文。`
         : '';
-history.push({
+      const sentHint =
+        !ended && host.runtime.didSendText()
+          ? '\n[系统] 你已经向用户发过消息。下一动作必须是 runtime.endTask("一句话摘要")，禁止再 sendText。'
+          : '';
+      history.push({
         role: 'user',
         content: exec.ok
-          ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : `已完成步骤 ${turn + 1}/${maxTurns}。继续下一步，或完成后 runtime.endTask("结果摘要")。`}`
-          : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? '这是最后一轮，sendText 说明进展然后 endTask。' : ''}`,
+          ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : `已完成步骤 ${turn + 1}/${maxTurns}。继续下一步，或完成后 runtime.endTask("结果摘要")。`}${sentHint}`
+          : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? (isSelfPlay ? '这是最后一轮，runtime.endTask 收尾。' : '这是最后一轮，sendText 说明进展然后 endTask。') : ''}`,
       });
+      if (!ended && host.runtime.didSendText()) {
+        if (postSendTurns >= postSendGrace) {
+          host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
+          break;
+        }
+        postSendTurns += 1;
+      }
     }
 
     if (!ended && !closed) {
       // 长时间 Agent 循环：段末未完成 + 已有产出 → checkpoint + 重入队续跑。
       // 30 轮不是天花板，任务可以跨段跑几十分钟/几小时（像 Hermes 的持久 agent）。
+      // goal/self-play 不续跑；已经 sendText 汇报过的也不续跑（防 ended_without_endTask 拖段）。
       const maxSegments = env().AGENT_MAX_SEGMENTS;
       const canResume =
         loopEnabled &&
+        !isGoalCheck &&
+        !isSelfPlay &&
         segment + 1 < maxSegments &&
-        host.runtime.didProduce();
+        host.runtime.didProduce() &&
+        !host.runtime.didSendText();
 
       if (canResume) {
         let progressSummary = resumeSummary;
@@ -650,10 +679,11 @@ history.push({
         );
         // 注意：不 enqueueCallback —— 任务未完成，Meta 不应收到完成回调。
       } else if (host.runtime.didSendText()) {
-        endSummary = 'ended_without_endTask';
+        // Model delivered but forgot endTask — synthesize so Meta gets a clean callback.
+        host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
       } else if (isSelfPlay) {
         // Self-play is private practice — never bypass maxTextSends with a failsafe DM.
-        endSummary = 'selfplay_silent';
+        host.runtime.endTask('selfplay_silent');
         logger.info({ taskId: task.id }, 'CodeAct self-play ended without send (ok)');
       } else {
         // Failsafe: bot didn't produce anything — generate an honest report

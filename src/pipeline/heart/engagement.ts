@@ -53,6 +53,42 @@ export function filterForTurnStart(
   });
 }
 
+/**
+ * Bot 自发言反馈环：最近窗口里 bot 已占主导，且「当前消息之前」末尾仍是 bot
+ * （刚说过话又想对被动消息再插一嘴）。continuation 窗口会跳过 engagement
+ * 硬阈，必须单独拦住，否则群里会变成自己接自己话。
+ *
+ * @param excludeMessageId 当前正在判定的用户消息（已入 ctx），必须排除后看尾迹
+ */
+export function isBotMonologueTrail(
+  recentMessages: FormattedMessage[],
+  botUid: number,
+  lookback = 8,
+  excludeMessageId?: number,
+): boolean {
+  if (botUid <= 0) return false;
+  const isBot = (m: FormattedMessage) => m.role === 'assistant' || m.uid === botUid;
+  const source =
+    excludeMessageId && excludeMessageId > 0
+      ? recentMessages.filter((m) => m.messageId !== excludeMessageId)
+      : recentMessages;
+  const collapsed: FormattedMessage[] = [];
+  for (const m of source) {
+    const prev = collapsed[collapsed.length - 1];
+    if (prev && isBot(prev) && isBot(m)) {
+      collapsed[collapsed.length - 1] = m;
+      continue;
+    }
+    collapsed.push(m);
+  }
+  const win = collapsed.slice(-lookback);
+  if (win.length < 4) return false;
+  const botCount = win.filter(isBot).length;
+  const last = win[win.length - 1];
+  // 当前消息前一条是 bot，且窗口内 bot ≥ 半 → 独角戏，别再接
+  return !!last && isBot(last) && botCount >= Math.ceil(win.length / 2) && botCount >= 3;
+}
+
 export function computeEngagement(
   recentMessages: FormattedMessage[],
   botUid: number,
