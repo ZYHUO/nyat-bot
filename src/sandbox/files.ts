@@ -28,8 +28,32 @@ export async function sandboxWriteFile(path: string, content: string): Promise<{
   if (lastSlash > 0) {
     await mkdir(target.slice(0, lastSlash), { recursive: true });
   }
-  await writeFile(target, content, 'utf8');
+  // HTML charset 兜底:模型常漏 <meta charset>,Telegram 发出去用户本地打开
+  // 中文乱码。这里写 HTML 时自动注入(幂等:已带的跳过;只处理 .html/.htm)。
+  let finalContent = content;
+  if (/\.html?$/i.test(path)) {
+    finalContent = ensureHtmlCharset(content);
+  }
+  await writeFile(target, finalContent, 'utf8');
   return { ok: true, path: relToSandbox(target) };
+}
+
+/** 检查 HTML 是否已声明 charset;没有则在 <head> 开头注入 UTF-8。幂等,非 HTML 原样返回。 */
+export function ensureHtmlCharset(content: string): string {
+  if (/<meta[^>]*charset\s*=/i.test(content)) return content; // 已有 charset,不动
+  // 有 <head> → 插到 <head> 后(紧贴开头);无 <head> 但像 HTML → 插到 <html> 后;都没有 → 文件头。
+  const headMatch = /<head([^>]*)>/i.exec(content);
+  if (headMatch) {
+    const at = headMatch.index + headMatch[0].length;
+    return content.slice(0, at) + '\n  <meta charset="UTF-8">' + content.slice(at);
+  }
+  const htmlMatch = /<html([^>]*)>/i.exec(content);
+  if (htmlMatch) {
+    const at = htmlMatch.index + htmlMatch[0].length;
+    return content.slice(0, at) + '\n  <meta charset="UTF-8">' + content.slice(at);
+  }
+  // 完全不像 HTML(<head>/<html> 都没有)——可能是片段或纯文本,不注入避免破坏。
+  return content;
 }
 
 /** Binary-safe write (HTML/PNG/screenshot artifacts). Returns sandbox-relative path. */
