@@ -234,6 +234,20 @@ export function startCronJobs(deps?: CronDeps): void {
     if (any) logger.info({ crons: exprs }, 'Dream journal cron enabled');
   }
 
+  // Silence alert — bot 沉默检测(端到端回复健康)。
+  // 每 SILENCE_ALERT_INTERVAL_MIN 分钟扫一次「活跃但 bot 未回复」的 chat。
+  // 默认关;开时配 SILENCE_ALERT_CHAT_ID 才真正发送,否则只打日志。
+  if (env().SILENCE_ALERT_ENABLED) {
+    const intervalMin = env().SILENCE_ALERT_INTERVAL_MIN;
+    tasks.push(schedule(`*/${intervalMin} * * * *`, () => {
+      void safeRun('silence-alert', async () => {
+        const { runSilenceAlert } = await import('./silence-alert.js');
+        await runSilenceAlert();
+      });
+    }));
+    logger.info({ intervalMin }, 'Silence alert cron enabled');
+  }
+
   // 借力其他 bot:周期观察学命令档案(P1,纯观察,flag 默认关)
   if (env().BOT_COMMAND_LEARN_ENABLED) {
     tasks.push(schedule(`*/${env().BOT_COMMAND_LEARN_INTERVAL_MIN} * * * *`, () => {

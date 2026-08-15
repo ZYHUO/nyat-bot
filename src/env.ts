@@ -589,6 +589,22 @@ const envSchema = z.object({
   // 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。
   DREAM_JOURNAL_CHAT_ID: z.coerce.number().int().default(0),
   DREAM_JOURNAL_USAGE: z.string().default('reply'),
+  // ── Silence Alert —— bot 沉默检测(端到端回复健康)──
+  // 监控「最近有人类活跃但 bot 超阈值没回复」的 chat,告警到 owner DM。
+  // 默认关;开时需配 SILENCE_ALERT_CHAT_ID(owner DM chatId)才真正发送,否则只打日志。
+  SILENCE_ALERT_ENABLED: booleanFromEnv.default(false),
+  // 扫描周期(分钟)。
+  SILENCE_ALERT_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
+  // 告警目标(owner DM chatId,正数)。0=只打日志不发送。
+  SILENCE_ALERT_CHAT_ID: z.coerce.number().int().default(0),
+  // 人类最后发言距今超过该分钟数 = 不算活跃(潜水群不告警)。
+  SILENCE_ALERT_HUMAN_STALE_MIN: z.coerce.number().int().positive().default(60),
+  // bot 最后回复距今超过该分钟数 = 判定沉默。
+  SILENCE_ALERT_THRESHOLD_MIN: z.coerce.number().int().positive().default(30),
+  // 同一 chat 两次告警的最小间隔(去重,防刷屏)。
+  SILENCE_ALERT_COOLDOWN_MIN: z.coerce.number().int().positive().default(120),
+  // 单轮最多告警几个 chat(防告警风暴)。
+  SILENCE_ALERT_MAX_PER_RUN: z.coerce.number().int().positive().default(5),
   // CodeAct 禁词(逗号分隔),出站文本命中则拒发并要求重写。
   CODEACT_BANNED_WORDS: z
     .string()
