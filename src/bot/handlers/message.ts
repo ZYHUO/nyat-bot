@@ -1,5 +1,6 @@
 import type { Bot, Context } from 'grammy';
 import { logger } from '../../shared/logger.js';
+import { isDM } from '../../shared/chat.js';
 import { isDuplicate } from '../middleware/dedup.js';
 import { isRateLimited } from '../middleware/rate-limit.js';
 import { enqueue } from '../../queue/producer.js';
@@ -91,9 +92,19 @@ async function handleUpdate(ctx: Context): Promise<void> {
 
   // Silence-alert 数据源:人类消息入站埋点(排除 bot 自己 / 匿名频道)。
   // 放在去重+限流之后、Meta/legacy 分流之前——两条路径都覆盖。
+  // direct = DM/私聊、@bot、昵称、回复 bot、命令 —— 这类消息 bot 必须接,
+  // 群聊普通消息不记 direct(决定不插话是正常行为,不触发沉默告警)。
   if (userId && msg.from && !msg.from.is_bot && userId !== 1087968824) {
+    const direct =
+      isDM(chatId) ||
+      detectDirectInteraction(ctx.update, {
+        botUid: getBotIdentity().uid,
+        botUsername: getBotIdentity().username,
+        botNicknames: getBotIdentity().nicknames,
+        editByContentOnly: true,
+      }) !== null;
     void import('../../tracking/reply-activity.js')
-      .then(({ recordHumanMessage }) => recordHumanMessage(chatId))
+      .then(({ recordHumanMessage }) => recordHumanMessage(chatId, { direct }))
       .catch(() => {});
   }
 
