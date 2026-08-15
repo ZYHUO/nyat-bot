@@ -10,18 +10,30 @@
 import { getRedis } from '../db/redis.js';
 
 const HUMAN_KEY = (chatId: number): string => `xxb:activity:lastHuman:${chatId}`;
+// 「直接对 bot 说话」的独立时间戳(DM/@/昵称/回复 bot/命令)。
+// 群聊普通消息不更新它 —— bot 决定不插话是正常行为,不该触发沉默告警。
+const HUMAN_DIRECT_KEY = (chatId: number): string => `xxb:activity:lastHumanDirect:${chatId}`;
 const REPLY_KEY = (chatId: number): string => `xxb:activity:lastReply:${chatId}`;
 // 24h 无人类消息的 chat 自动过期,扫描时自然消失(不主动清)。
 const TTL_SEC = 24 * 3600;
 
-/** 记一条人类消息(fire-and-forget,永不抛)。 */
-export function recordHumanMessage(chatId: number, now: Date = new Date()): void {
+/** 记一条人类消息(fire-and-forget,永不抛)。direct=true 时同时更新 direct 时间戳。 */
+export function recordHumanMessage(
+  chatId: number,
+  opts: { direct?: boolean } = {},
+  now: Date = new Date(),
+): void {
   try {
     const redis = getRedis();
-    const key = HUMAN_KEY(chatId);
+    const ts = now.getTime();
     redis
-      .set(key, now.getTime(), 'EX', TTL_SEC)
+      .set(HUMAN_KEY(chatId), ts, 'EX', TTL_SEC)
       .catch(() => {});
+    if (opts.direct) {
+      redis
+        .set(HUMAN_DIRECT_KEY(chatId), ts, 'EX', TTL_SEC)
+        .catch(() => {});
+    }
   } catch {
     /* fail-soft */
   }
@@ -59,10 +71,11 @@ export interface ScanOptions {
 /**
  * 扫描活跃但沉默的 chat。Redis 故障时返回空数组(告警静默,不误报)。
  *
- * 正确语义(修复 2026-08-15 误报):「人类最后一条消息 bot 有没有接」,
- * 不是「bot 最近多久没说话」。人类发言后 bot 回过话 → 之后群安静潜水是
- * 正常行为,不告警。只有人类最后发言后 bot 一直没接才判定沉默,
- * silentForMin 从人类最后发言算起。
+ * 正确语义(两次修复后):
+ *  1. 「人类最后一条消息 bot 有没有接」,不是「bot 最近多久没说话」。
+ *  2. 只统计「直接对 bot 说话」的消息(DM/@/昵称/回复 bot/命令)——
+ *     群聊普通消息 bot 决定不插话是正常行为(Heart gate/cooldown),不告警。
+ *  3. direct 时间戳存在且 bot 没接,才判定沉默。
  */
 export async function scanSilentChats(opts: ScanOptions): Promise<ChatActivity[]> {
   const { humanStaleMin, replyStaleMin, max = 20 } = opts;
@@ -79,7 +92,8 @@ export async function scanSilentChats(opts: ScanOptions): Promise<ChatActivity[]
   }
 
   try {
-    const stream = redis.scanStream({ match: 'xxb:activity:lastHuman:*', count: 200 });
+    // 只扫 direct key:没有 direct 消息的 chat(DM 天然有,群聊仅 @/回复时)不参与判定。
+    const stream = redis.scanStream({ match: 'xxb:activity:lastHumanDirect:*', count: 200 });
     const silent: ChatActivity[] = [];
 
     for await (const keys of stream) {
@@ -87,30 +101,28 @@ export async function scanSilentChats(opts: ScanOptions): Promise<ChatActivity[]
       const chatIds = (keys as string[]).map((k) => Number(k.split(':').at(-1)));
       if (chatIds.length === 0) continue;
 
-      const humanVals = await redis.mget(chatIds.map((c) => HUMAN_KEY(c)));
+      const humanVals = await redis.mget(chatIds.map((c) => HUMAN_DIRECT_KEY(c)));
       const replyVals = await redis.mget(chatIds.map((c) => REPLY_KEY(c)));
 
       for (let i = 0; i < chatIds.length; i++) {
         const chatId = chatIds[i]!;
         const humanTs = Number(humanVals[i] ?? 0);
-        // 人类消息过期/丢失 → 不活跃,跳过。
+        // direct 消息过期/丢失 → 不活跃,跳过。
         if (!humanTs || humanTs < humanCutoff) continue;
 
         const replyTsRaw = replyVals[i];
         const replyTs = replyTsRaw ? Number(replyTsRaw) : null;
-        // 人类最后发言后 bot 回过话 → 不是沉默(之后潜水是正常)。
+        // bot 在该 direct 消息之后回过话 → 不是沉默(已接)。
         if (replyTs && replyTs >= humanTs) continue;
-        // bot 回过话但比人类最后发言晚,且距今 < replyStaleMin → 正常(给 bot 接话时间)。
-        // 注:上面已覆盖;这里只保留人类发言后 bot 完全没接的情形。
 
-        // 人类最后发言距今还没到阈值(给 bot 缓冲时间)→ 不判定。
+        // direct 消息距今还没到阈值(给 bot 接话时间)→ 不判定。
         if (now - humanTs < replyStaleMin * 60_000) continue;
 
         silent.push({
           chatId,
           lastHumanAt: humanTs,
           lastReplyAt: replyTs,
-          // 从人类最后发言算起(bot 一直没接的时间)。
+          // 从人类 direct 发言算起(bot 一直没接的时间)。
           silentForMin: Math.round((now - humanTs) / 60_000),
         });
         if (silent.length >= max) return silent;
