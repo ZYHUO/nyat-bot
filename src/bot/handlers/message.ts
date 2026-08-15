@@ -89,6 +89,14 @@ async function handleUpdate(ctx: Context): Promise<void> {
     enqueuedAt: Date.now(),
   };
 
+  // Silence-alert 数据源:人类消息入站埋点(排除 bot 自己 / 匿名频道)。
+  // 放在去重+限流之后、Meta/legacy 分流之前——两条路径都覆盖。
+  if (userId && msg.from && !msg.from.is_bot && userId !== 1087968824) {
+    void import('../../tracking/reply-activity.js')
+      .then(({ recordHumanMessage }) => recordHumanMessage(chatId))
+      .catch(() => {});
+  }
+
   // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
   // Slash / checkin·stats NL → legacy. Gacha/game/DM-relay → Meta ingress intercepts.
   if (isMetaSubagentChat(chatId) && !isEdit) {

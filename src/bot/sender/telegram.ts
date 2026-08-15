@@ -6,6 +6,7 @@ import { getBot } from '../bot.js';
 import { toMarkdownV2 } from './markdown.js';
 import { shardMarkdownV2, TG_TEXT_LIMIT } from './shard.js';
 import { recordSpeech } from '../../tracking/speech-meter.js';
+import { recordBotReply } from '../../tracking/reply-activity.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RETRIES = 3;
@@ -123,10 +124,12 @@ export async function sendMessage(
       if (i === 0) first = id;
     }
     recordSpeech();
+    recordBotReply(chatId);
     return first;
   }
   const messageId = await sendMarkdownOnce(chatId, shards[0]!, text, replyToId, messageThreadId);
   recordSpeech();
+  recordBotReply(chatId);
   return messageId;
 }
 
@@ -230,6 +233,7 @@ export async function sendSticker(
   return withRetry(async () => {
     const bot = getBot();
     const result = await bot.api.sendSticker(chatId, stickerId);
+    recordBotReply(chatId);
     return result.message_id;
   }, 'sendSticker', /* idempotent */ false);
 }
@@ -269,6 +273,7 @@ export async function sendFile(
     message_thread_id: threadId,
   });
   recordSpeech();
+  recordBotReply(chatId);
   return { messageId: result.message_id };
 }
 
@@ -296,6 +301,7 @@ export async function sendVoice(
     message_thread_id: threadId,
   });
   recordSpeech();
+  recordBotReply(chatId);
   return { messageId: result.message_id };
 }
 
