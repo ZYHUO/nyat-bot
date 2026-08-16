@@ -9,6 +9,11 @@
 //
 // 按难度分配算力: "早上好"→N=1; "帮我分析这段代码"→N=16+verifier。
 // 难度由 judge pipeline 的 action/confidence 近似。
+//
+// ⚠️ 接线状态: Phase 15.3 核心已就绪但**尚未接入 reply 管线**(plan 排最后)。
+//    BEST_OF_N_BASE>1 时目前无效果 —— 待 Phase 15.3 在 reply.ts 按
+//    estimateDifficulty 接入 pickBestOfN(Humanizer 3-8s 延迟窗口内并行采样)。
+//    review 后手动确认前不要误以为线上已生效。
 // ────────────────────────────────────────
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
@@ -25,10 +30,10 @@ export function estimateDifficulty(reply: string, addressed: boolean): 1 | 2 | 3
   if (!addressed) return 1;
   const len = reply.length;
   if (len > 400) return 3;                    // 长回复: 可能复杂
-  // 技术词(排除"怎么样"这类寒暄)
-  if (/怎么样|如何/.test(reply)) return 1;
+  // 技术词(排除"怎么样/咋样"寒暄)——技术判断在前,寒暄排除在后
   if (/代码|分析|比较|为什么|原理|实现|方案|架构|性能/.test(reply)) return 3;
   if (len > 150) return 2;
+  if (/怎么样|咋样|如何/.test(reply)) return 1;   // 寒暄
   return 1;
 }
 

@@ -306,6 +306,35 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // "说什么"(MaiBot: 打断后跳过 gate 直接回 planner)。否则锚点换成
     // 用户那句简短补充后,judge 单看它会 IGNORE → 本该有的回复凭空消失。
     // 模型仍可用 {"action":"silent"} 反悔,所以这不是强制说话。
+
+    // AGI L6 Phase 13: 任务接管 —— 用户 @ bot 且像「帮我查 X」→ 建 Task + 入队,
+    // judge 不再走常规回复路径(bot 已经回了「我去查」)。
+    // 安全铁律: 只有被 @ 的直接请求能建任务(群聊随便一句话永不建)。
+    // 放在 judge 决策链之前(含 Heart/TurnActor 分支): Heart 是生产主路径,
+    // 只挂在普通 else 分支会让群聊主场景永不建任务(reviewer finding)。
+    if (
+      !formatted.isBot && !formatted.isAnonymous &&
+      e.TASK_EXECUTOR_ENABLED &&
+      !job.turnContext?.isReplan && !job.turnContext?.isWaitReplay
+    ) {
+      const mentioned = isMentioningSelf(
+        formatted.textContent || formatted.captionContent || '',
+        botIdentity.username,
+        botIdentity.nicknames,
+      );
+      if (mentioned) {
+        const taken = await tryCreateResearchTask(
+          job.chatId, formatted.uid,
+          formatted.textContent || formatted.captionContent || '',
+          true,
+        );
+        if (taken) {
+          logger.info({ chatId: job.chatId, uid: formatted.uid }, 'Pipeline complete (task created, judge skipped)');
+          return;
+        }
+      }
+    }
+
     let judgeResult: JudgeResult;
     if (job.turnContext?.isReplan || job.turnContext?.isWaitReplay) {
       // 用 L0 规则(0ms,无 LLM)恢复锚点的自然 rule:拦截器(mute 命令/
@@ -340,31 +369,6 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       if (heartResult.shouldReturn) return;
       judgeResult = heartResult.judgeResult!;
     } else {
-      // AGI L6 Phase 13: 任务接管 —— 用户 @ bot 且像「帮我查 X」→ 建 Task + 入队,
-      // judge 不再走常规回复路径(bot 已经回了「我去查」)。
-      // 安全铁律: 只有被 @ 的直接请求能建任务(群聊随便一句话永不建)。
-      if (
-        !formatted.isBot && !formatted.isAnonymous &&
-        e.TASK_EXECUTOR_ENABLED &&
-        !job.turnContext?.isReplan && !job.turnContext?.isWaitReplay
-      ) {
-        const mentioned = isMentioningSelf(
-          formatted.textContent || formatted.captionContent || '',
-          botIdentity.username,
-          botIdentity.nicknames,
-        );
-        if (mentioned) {
-          const taken = await tryCreateResearchTask(
-            job.chatId, formatted.uid,
-            formatted.textContent || formatted.captionContent || '',
-            true,
-          );
-          if (taken) {
-            logger.info({ chatId: job.chatId, uid: formatted.uid }, 'Pipeline complete (task created, judge skipped)');
-            return;
-          }
-        }
-      }
       judgeResult = await judge({
         message: formatted, recentMessages,
         recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),

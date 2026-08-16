@@ -25,6 +25,7 @@ export interface TaskRow {
   result: string | null;
   search_round: number;
   max_rounds: number;
+  retry_count: number;
   created_at: number;
   updated_at: number;
 }
@@ -34,6 +35,10 @@ export interface LedgerEntry {
   result: string;
   ts: number;
 }
+
+/** 失败重试退避(分钟): 15min → 2h → 1d,上限 3 次后放弃。 */
+export const RETRY_BACKOFF_MIN = [15, 120, 1440] as const;
+export const MAX_RETRIES = RETRY_BACKOFF_MIN.length;
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
@@ -52,6 +57,7 @@ function rowToTask(r: Record<string, unknown>): TaskRow {
     result: r.result as string | null,
     search_round: r.search_round as number,
     max_rounds: r.max_rounds as number,
+    retry_count: r.retry_count as number,
     created_at: r.created_at as number,
     updated_at: r.updated_at as number,
   };
@@ -165,6 +171,28 @@ export function cancelTask(id: number): void {
   getDb()
     .prepare(`UPDATE tasks SET state = 'cancelled', next_wake = NULL, updated_at = ? WHERE id = ?`)
     .run(nowSec(), id);
+}
+
+/**
+ * 失败退避重试: 递增 retry_count,按 15min/2h/1d 安排 next_wake。
+ * 返回 true = 已安排重试;false = 达到上限(调用方应发"放弃了"文案并终止)。
+ */
+export function retryTask(id: number): boolean {
+  const t = getTask(id);
+  if (!t) return false;
+  const next = t.retry_count + 1;
+  if (next > MAX_RETRIES) {
+    // 放弃: 终止任务,防止 listDueTasks 无限重派
+    getDb()
+      .prepare(`UPDATE tasks SET state = 'blocked', next_wake = NULL, retry_count = ?, updated_at = ? WHERE id = ?`)
+      .run(next, nowSec(), id);
+    return false;
+  }
+  const delayMin = RETRY_BACKOFF_MIN[next - 1] ?? 1440;
+  getDb()
+    .prepare(`UPDATE tasks SET state = 'pending', next_wake = ?, retry_count = ?, updated_at = ? WHERE id = ?`)
+    .run(nowSec() + delayMin * 60, next, nowSec(), id);
+  return true;
 }
 
 /** 是否有活跃任务(judge L0 用)。 */

@@ -11,7 +11,7 @@ vi.mock('../../../src/env.js', () => ({ env: () => ({ TASK_EXECUTOR_ENABLED: tru
 const {
   createTask, getTask, listActiveTasks, listDueTasks, setTaskState,
   appendLedger, setProgress, bumpSearchRound, completeTask, scheduleWake,
-  cancelTask, hasActiveTask,
+  cancelTask, hasActiveTask, retryTask,
 } = await import('../../../src/agent/task-store.js');
 
 beforeEach(() => {
@@ -85,5 +85,31 @@ describe('task-store', () => {
     const id = createTask({ ownerUid: 42, chatId: -100, goal: 'g' });
     setProgress(id, ['还差搜索', '卡在 API']);
     expect(JSON.parse(getTask(id)!.progress)).toEqual(['还差搜索', '卡在 API']);
+  });
+
+  it('retryTask backoffs and gives up after 3 tries (regression major #4)', () => {
+    const id = createTask({ ownerUid: 42, chatId: -100, goal: 'g' });
+    const now = Math.floor(Date.now() / 1000);
+    // 第 1 次: 15min 后重试
+    expect(retryTask(id)).toBe(true);
+    let t = getTask(id)!;
+    expect(t.state).toBe('pending');
+    expect(t.retry_count).toBe(1);
+    expect(t.next_wake).toBeGreaterThan(now + 14 * 60);
+    // 第 2 次: 2h 后
+    expect(retryTask(id)).toBe(true);
+    t = getTask(id)!;
+    expect(t.retry_count).toBe(2);
+    expect(t.next_wake).toBeGreaterThan(now + 119 * 60);
+    // 第 3 次: 1d 后
+    expect(retryTask(id)).toBe(true);
+    t = getTask(id)!;
+    expect(t.retry_count).toBe(3);
+    // 第 4 次: 放弃 → blocked + next_wake NULL(cron 不再重派)
+    expect(retryTask(id)).toBe(false);
+    t = getTask(id)!;
+    expect(t.state).toBe('blocked');
+    expect(t.next_wake).toBeNull();
+    expect(listDueTasks(now + 999999)).toHaveLength(0);
   });
 });

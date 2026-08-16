@@ -24,12 +24,14 @@ export async function recordBotMessageForConnectivity(
 ): Promise<void> {
   if (!env().CONNECTIVITY_TRACKING_ENABLED) return;
   try {
+    // 防御双入口: 上层可能传 ms(1e12 量级)或 s(1e9 量级),统一归一化为秒。
+    const tsSec = ts > 1e11 ? Math.floor(ts / 1000) : ts;
     getDb()
       .prepare(
         `INSERT OR IGNORE INTO connectivity_windows (chat_id, bot_mid, bot_username, bot_ts, window_end, human_rounds, calculated)
          VALUES (?, ?, ?, ?, ?, 0, 0)`,
       )
-      .run(chatId, botMid, botUsername, ts, ts + 300); // 5 分钟窗口
+      .run(chatId, botMid, botUsername, tsSec, tsSec + 300); // 5 分钟窗口
   } catch (err) {
     logger.debug({ err }, 'connectivity window record failed');
   }
@@ -65,6 +67,11 @@ export async function calculateConnectivityWindows(nowSec = Math.floor(Date.now(
       .run(rounds, w.id);
     updated++;
   }
+  // 清理: 每轮顺手删掉 7 天前已计算的窗口(防无界累积;活跃群日增数百行)
+  const cutoff = nowSec - 7 * 86400;
+  getDb()
+    .prepare(`DELETE FROM connectivity_windows WHERE calculated = 1 AND bot_ts < ?`)
+    .run(cutoff);
   return updated;
 }
 

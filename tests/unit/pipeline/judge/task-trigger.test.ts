@@ -51,6 +51,28 @@ describe('parseResearchRequest', () => {
   it('strips @bot and punctuation', () => {
     expect(parseResearchRequest('@bot,帮我找找 Whisper 中文模型')).toBe('Whisper 中文模型');
   });
+
+  it('rejects 帮我查一下,不过先别急 (tail clause, regression major #3)', () => {
+    expect(parseResearchRequest('@bot 帮我查一下,不过先别急')).toBeNull();
+  });
+
+  it('rejects 你看看这个 (casual 看 is not research, regression major #3)', () => {
+    expect(parseResearchRequest('@bot 你看看这个')).toBeNull();
+  });
+
+  it('rejects pronouns/demonstratives at target start', () => {
+    expect(parseResearchRequest('@bot 帮我看看这是什么')).toBeNull();
+    expect(parseResearchRequest('@bot 帮我查一下那个')).toBeNull();
+  });
+
+  it('rejects direct questions ending with 吗/?', () => {
+    expect(parseResearchRequest('@bot 帮我查一下 Qwen 最新版本吗')).toBeNull();
+    expect(parseResearchRequest('@bot 帮我查一下这个?')).toBeNull();
+  });
+
+  it('still accepts 帮我查一下 Rust 异步最佳实践 with 一下', () => {
+    expect(parseResearchRequest('@bot 帮我查一下 Rust 异步最佳实践')).toBe('Rust 异步最佳实践');
+  });
 });
 
 describe('tryCreateResearchTask', () => {

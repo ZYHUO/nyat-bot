@@ -135,13 +135,13 @@ export async function sendMessage(
     }
     recordSpeech();
     recordBotReply(chatId);
-    recordConnectivityWindow(chatId, first, Date.now());
+    recordConnectivityWindow(chatId, first, Math.floor(Date.now() / 1000));
     return first;
   }
   const messageId = await sendMarkdownOnce(chatId, shards[0]!, text, replyToId, messageThreadId);
   recordSpeech();
   recordBotReply(chatId);
-  recordConnectivityWindow(chatId, messageId, Date.now());
+  recordConnectivityWindow(chatId, messageId, Math.floor(Date.now() / 1000));
   return messageId;
 }
 

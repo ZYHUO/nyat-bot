@@ -15,7 +15,7 @@ import { executeSearch } from '../pipeline/tools/search.js';
 import { sendMessage } from '../bot/sender/telegram.js';
 import {
   getTask, setTaskState, appendLedger, setProgress, bumpSearchRound,
-  completeTask, tasksEnabled,
+  completeTask, retryTask, tasksEnabled,
 } from '../agent/task-store.js';
 
 export const TASK_QUEUE_NAME = 'task-executor';
@@ -79,6 +79,12 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
 
     // 收尾: 综合所有搜索结果
     const combined = results.join('\n\n---\n\n');
+    if (!combined.trim()) {
+      // 所有轮次都没拿到有效结果(重派时 search_round 可能已满)
+      completeTask(taskId, combined);
+      await sendMessage(chatId, `「${goal}」我没查到新东西,要换个关键词再试吗?`);
+      return null;
+    }
     const summary = combined.slice(0, 6000);
     completeTask(taskId, summary);
 
@@ -89,9 +95,16 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
     return summary;
   } catch (err) {
     logger.error({ err, taskId }, 'task execution failed');
-    setTaskState(taskId, 'blocked');
-    setProgress(taskId, [`任务中断: ${err instanceof Error ? err.message : String(err)}`]);
-    await sendMessage(chatId, `⚠️ 「${goal}」查的时候卡住了:${err instanceof Error ? err.message : String(err)}。要我换个方式再试吗?`);
+    // 止损: 失败 → 退避重试(15min/2h/1d,上限 3 次),期间不再被 cron 重派。
+    // 达上限则终止任务并发"放弃了"文案(reviewer: blocked 死锁 + 无限重派修复)。
+    const willRetry = retryTask(taskId);
+    setProgress(taskId, [`任务中断: ${err instanceof Error ? err.message : String(err)} (${willRetry ? '稍后重试' : '已放弃'})`]);
+    if (willRetry) {
+      appendLedger(taskId, { step: '失败', result: `第 ${getTask(taskId)?.retry_count ?? '?'} 次失败: ${err instanceof Error ? err.message : String(err)}`, ts: Math.floor(Date.now() / 1000) });
+      await sendMessage(chatId, `⚠️ 「${goal}」查的时候卡住了,我等会儿换个方式再试。`);
+    } else {
+      await sendMessage(chatId, `⚠️ 「${goal}」试了几次都没查成,先放着吧,你想的话我再找别的方法。`);
+    }
     return null;
   }
 }

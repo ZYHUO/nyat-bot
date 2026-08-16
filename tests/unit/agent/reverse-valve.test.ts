@@ -6,6 +6,7 @@ import { join } from 'node:path';
 let db: Database.Database;
 const envMock = vi.fn();
 const recentMock = vi.fn();
+const nowSecTest = (): number => Math.floor(Date.now() / 1000);
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 vi.mock('../../../src/env.js', () => ({ env: () => envMock() }));
@@ -62,6 +63,25 @@ describe('connectivity windows', () => {
     expect(n).toBe(1);
     const w = db.prepare('SELECT human_rounds FROM connectivity_windows').get() as { human_rounds: number };
     expect(w.human_rounds).toBe(0); // 只有 1 条有效人类消息,无轮次
+  });
+
+  it('normalizes ms input to seconds (regression: reviewer critical #1)', async () => {
+    // 上层误传 ms(1e12 量级) → 入口归一化为秒,window 能正常到期
+    await recordBotMessageForConnectivity(-100, 500, 'bot', 1000 * 1000 * 1000 + 500);
+    const row = db.prepare('SELECT bot_ts, window_end FROM connectivity_windows').get() as { bot_ts: number; window_end: number };
+    expect(row.window_end).toBeLessThan(1e10);   // 秒量级,不是毫秒
+    expect(row.window_end - row.bot_ts).toBe(300);
+  });
+
+  it('cleans up stale calculated windows > 7 days', async () => {
+    await recordBotMessageForConnectivity(-100, 500, 'bot', nowSecTest());
+    db.prepare('UPDATE connectivity_windows SET calculated = 1').run();
+    // 旧窗口(20 天前)
+    db.prepare(`INSERT OR IGNORE INTO connectivity_windows (chat_id, bot_mid, bot_username, bot_ts, window_end, human_rounds, calculated)
+                VALUES (-100, 1, 'bot', ?, ?, 0, 1)`).run(nowSecTest() - 20 * 86400, nowSecTest() - 20 * 86400 + 300);
+    await calculateConnectivityWindows(nowSecTest());
+    const remaining = db.prepare('SELECT COUNT(*) c FROM connectivity_windows').get() as { c: number };
+    expect(remaining.c).toBe(1); // 只有新窗口,20 天前的被清理
   });
 
   it('flag off → no record', async () => {
