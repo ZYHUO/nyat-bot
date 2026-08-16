@@ -35,6 +35,9 @@ export interface PersonIdentityRow {
   source_context_ids?: string | null; // JSON number[]
   confidence?: number;
   last_merged_at?: number | null;
+  // AGI L5 L6: 记忆陈旧标记(0064)—— stale=1 时 prompt 注明可能过时
+  last_confirmed_at?: number | null;
+  stale?: number;
 }
 
 export function getPersonIdentity(uid: number): PersonIdentityRow | null {

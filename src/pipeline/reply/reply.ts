@@ -430,6 +430,12 @@ export async function generateReply(
   if ((useRichContext || chatId > 0) && !message.isBot && !message.isAnonymous) {
     try {
       userProfile = getUserProfilePrompt(chatId, message.uid) ?? undefined;
+      // AGI L5 L6: 记忆陈旧注记 —— 该用户有 stale 旧资料时提示可能过时。
+      if (userProfile && env().MEMORY_FRESHNESS_ENABLED) {
+        const { staleCaveat } = await import('../../agent/memory-freshness.js');
+        const caveat = staleCaveat(message.uid, chatId);
+        if (caveat) userProfile += `\n${caveat}`;
+      }
     } catch (err) {
       logger.debug({ err, chatId }, 'Failed to fetch user profile (non-critical)');
     }
@@ -588,6 +594,11 @@ export async function generateReply(
   const heartPart = callOpts?.heartWhy
     ? `[你的念头] 你看到这条消息时心里想的是:「${callOpts.heartWhy}」。顺着这个念头说,别另起炉灶。`
     : undefined;
+  // AGI L5 L4: ToM 心智状态 —— 回复前先想 3 行:对方想要什么/什么情绪/期待什么反应。
+  // 白捡的收益:让回复更有针对性,而不是答录机。(群聊 + flag 开启)
+  const tomPart = env().TOM_STATE_ENABLED && chatId !== undefined && chatId < 0
+    ? '[对方此刻的心智] 动笔前先在脑内过一遍:他这句话想要什么?他现在什么情绪?他期待我什么反应?想完直接写正文,不要把这 3 行输出出来。'
+    : undefined;
   // 作息 v2:补觉回复注记 —— 在场时压掉迟到注记(两者语义重叠,只留一个)
   const catchupPart = callOpts?.sleepCatchup
     ? '[补觉回复] 这条消息是你睡觉时错过的,刚睡醒(或半夜迷迷糊糊摸到手机)才看到,现在补个回复。开头自然带一句"刚睡醒看到""昨晚睡了才看到喵"之类,轻描淡写;如果话题明显已经翻篇/不需要回了,就输出 {"action":"silent"}。'
@@ -600,6 +611,8 @@ export async function generateReply(
   // 排在氛围块之后、紧贴 CURRENT_MESSAGE —— 越是"怎么写这条"的指令越贴近消息。
   if (instructionPart) stateParts.pushP(80, 1, instructionPart);
   if (heartPart) stateParts.pushP(99, 2, heartPart);
+  // AGI L5 L4: ToM 心智引导 —— 优先级 98 贴近念头,但不压过它。
+  if (tomPart) stateParts.pushP(98, 2, tomPart);
   // Multi-Agent 导演/上下文理解专家产出:keep 调到 6/10 —— 是"建议"非硬约束,
   // 预算紧时让位于念头/指令/对话上下文,别挤掉真正必要的块(M7)。
   if (callOpts?.directorHint) stateParts.pushP(98, 6, callOpts.directorHint);
