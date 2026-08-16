@@ -108,9 +108,13 @@ describe('migrations: full-chain apply', () => {
   });
 
   it('contains no embedded BEGIN/COMMIT (runMigrations wraps each file in a transaction)', () => {
-    const offenders = migrationFiles().filter((f) =>
-      /^\s*(BEGIN|COMMIT)\b/im.test(readFileSync(join(MIGRATIONS_DIR, f), 'utf-8')),
-    );
+    // 排除 CREATE TRIGGER 体内的 BEGIN/END —— 触发器必须用 BEGIN 包体,是合法 SQL,
+    // 不是事务语句。只检查"裸"事务语句(不在 CREATE TRIGGER ... END 块内)。
+    const offenders = migrationFiles().filter((f) => {
+      const sql = readFileSync(join(MIGRATIONS_DIR, f), 'utf-8');
+      const stripped = sql.replace(/CREATE TRIGGER[\s\S]*?END\s*;?/gi, '');
+      return /^\s*(BEGIN|COMMIT)\b/im.test(stripped);
+    });
     expect(offenders).toEqual([]);
   });
 });

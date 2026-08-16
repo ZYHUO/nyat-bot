@@ -218,6 +218,14 @@ export async function runBookkeeping(ctx: {
   if (!formatted.isBot && !formatted.isAnonymous && formatted.textContent.trim()) {
     try {
       recordUserMessage(job.chatId, formatted.uid, formatted.username, formatted.fullName, formatted.senderTag, formatted.textContent);
+      // AGI L5 L6: 记忆陈旧写侧 —— 每次用户发言刷新确认时间;含变化词时标记旧资料 stale。
+      // (reviewer 指出:只接 staleCaveat 读侧,写侧是 no-op,这里补上)
+      if (env().MEMORY_FRESHNESS_ENABLED) {
+        const { confirmFresh, detectChangeInMessage } = await import('../../agent/memory-freshness.js');
+        confirmFresh(formatted.uid, job.chatId);
+        const caveat = detectChangeInMessage(formatted.uid, formatted.textContent, job.chatId);
+        if (caveat) logger.info({ uid: formatted.uid, chatId: job.chatId }, 'memory marked stale by change words');
+      }
     } catch (err) {
       logger.debug({ err, chatId: job.chatId }, "User profile record failed (non-critical)");
     }

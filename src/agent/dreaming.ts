@@ -65,6 +65,8 @@ export function parseDreamOutput(raw: string): DreamResult | null {
             const winnerId = typeof eo['winner_id'] === 'number' ? eo['winner_id'] : null;
             const resolution = typeof eo['resolution'] === 'string' ? eo['resolution'].trim().slice(0, 300) : '';
             if (idA === null || idB === null || winnerId === null || !resolution) return null;
+            // reviewer: winner 必须是冲突双方之一,否则 loserId 推算会删错行
+            if (winnerId !== idA && winnerId !== idB) return null;
             return { idA, idB, resolution, winnerId };
           })
           .filter((e): e is { idA: number; idB: number; resolution: string; winnerId: number } => e !== null)
