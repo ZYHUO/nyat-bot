@@ -408,6 +408,8 @@ const envSchema = z.object({
   // ── AGI Level 6 Phase 14: 反向阀门 L7 ───────────────────────────────
   // 连接率埋点(新核心指标)+ 私聊风险分档。初期只记录不改行为。
   CONNECTIVITY_TRACKING_ENABLED: booleanFromEnv.default(false),
+  // 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。
+  SYCOPHANCY_AUDIT_ENABLED: booleanFromEnv.default(false),
   MEMORY_STALE_AFTER_DAYS: z.coerce.number().int().min(7).default(90),
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
