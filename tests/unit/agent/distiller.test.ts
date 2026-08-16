@@ -37,6 +37,8 @@ const baseTask = {
 beforeEach(() => {
   db = new Database(':memory:');
   db.exec(readFileSync(join(__dirname, '../../../migrations/0054_episodes_experience.sql'), 'utf8'));
+  db.exec(readFileSync(join(__dirname, '../../../migrations/0057_experience_verify.sql'), 'utf8'));
+  db.exec(readFileSync(join(__dirname, '../../../migrations/0061_experience_share.sql'), 'utf8'));
   callWithFallbackMock.mockReset();
 });
 
@@ -154,5 +156,41 @@ describe('distillEpisode', () => {
     expect(c).toBe(1);
     const { c: ec } = db.prepare('SELECT COUNT(*) AS c FROM experience_entries').get() as { c: number };
     expect(ec).toBe(0);
+  });
+
+  it('AGI L5 L1: drops instance-level experiences (person name / single event), keeps principle-level', async () => {
+    callWithFallbackMock.mockResolvedValue({
+      content: JSON.stringify({
+        summary: '复盘的摘要',
+        lessons: [],
+        tags: ['测试'],
+        experience: [
+          { kind: 'preference', content: '上次这样回复小明他笑了', tags: ['回复'] }, // 实例级 → drop
+          { kind: 'trick', content: '当有人自嘲时接梗比安慰更有效', tags: ['回复'] }, // 原则级 → keep
+        ],
+        follow_up_goal: null,
+      }),
+    });
+    const r = await distillEpisode({ task: baseTask, outcome: 'done', progressSummary: '完成了', tailText: 'tail' });
+    expect(r).not.toBeNull();
+    const rows = db.prepare('SELECT content FROM experience_entries').all() as { content: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toContain('自嘲');
+  });
+
+  it('AGI L5 L1: keeps principle-level experience without specific names', async () => {
+    callWithFallbackMock.mockResolvedValue({
+      content: JSON.stringify({
+        summary: '复盘的摘要',
+        lessons: [],
+        tags: ['测试'],
+        experience: [{ kind: 'trick', content: '交付文件前先验证路径存在', tags: ['交付'] }],
+        follow_up_goal: null,
+      }),
+    });
+    const r = await distillEpisode({ task: baseTask, outcome: 'done', progressSummary: '完成了', tailText: 'tail' });
+    expect(r).not.toBeNull();
+    const rows = db.prepare('SELECT content FROM experience_entries').all() as { content: string }[];
+    expect(rows).toHaveLength(1);
   });
 });
