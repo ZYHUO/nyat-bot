@@ -77,7 +77,24 @@ export async function dispatchCommand(
   cmd: string,
   arg: string,
 ): Promise<boolean> {
-  if (cmd === "/watch" && arg && chatId < 0) {
+  if (cmd === "/watch" && arg) {
+    // DM(主人)指派 → P4-B goals 表:周期性 CodeAct 去查进展并汇报。
+    // 群聊 → 老的关键词追踪(addWatch,群里聊到就提醒)。
+    if (chatId > 0) {
+      const { createGoal } = await import("../../agent/goals.js");
+      const id = createGoal(
+        { topic: arg, origin: "master", chatId },
+        env().GOAL_MAX_ACTIVE,
+      );
+      await sender.sendDirect(
+        chatId,
+        id
+          ? `好喵～本喵会定期盯「${arg}」的最新进展，有发现就告诉你～`
+          : `喵…这个目标没立上（本喵最多同时盯 ${env().GOAL_MAX_ACTIVE} 个，或主题太短/重复了），换个说法试试喵～`,
+        formatted.messageId,
+      );
+      return true;
+    }
     addWatch(chatId, formatted.uid, arg);
     await sender.sendDirect(chatId, `好的，有人聊到「${arg}」本喵会叫你喵~`, formatted.messageId);
     return true;
