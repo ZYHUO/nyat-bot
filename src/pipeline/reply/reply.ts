@@ -4,6 +4,7 @@
 
 import { resolveReplyPath } from '../../shared/types.js';
 import { isDM } from '../../shared/chat.js';
+import { bestOfNBase, estimateDifficulty } from '../../agent/best-of-n.js';
 import type { FormattedMessage, RetrievedContext, ReplyOutput, ReplyPath } from '../../shared/types.js';
 import type { JudgeAction } from '../../shared/types.js';
 import { callWithFallback } from '../../ai/fallback.js';
@@ -1079,6 +1080,46 @@ export async function generateReply(
 
   // 终态:归一化后没有任何可发文本 = 主动沉默(react 仍可执行)
   const modelSilent = parsedReplies.length === 0 ? true : undefined;
+
+  // ── 8.5 Best-of-N 增强(Phase 15.3 接入,2026-08-16)──
+  // 仅难度 3(技术/长回复)启用,采样 N=2(原版 + 一个温度更高的变体),
+  // verifier(judge)二选一;任何失败回退原版(零风险)。
+  // 不做全量 N 采样: 主模型是 sonnet46(非 plan 假设的小模型),N 份采样成本线性翻倍,
+  // 且同模型同 prompt 的采样方差小,收益主要来自挑掉偶发差回复。
+  if (
+    bestOfNBase() >= 2 &&
+    parsedReplies.length > 0 &&
+    !parsedReplies[0]!.action &&
+    !modelSilent &&
+    !parsedReplies[0]!.stickerIntent
+  ) {
+    const primary = parsedReplies[0]!;
+    const addressed = action === 'REPLY';
+    if (estimateDifficulty(primary.replyContent, addressed) === 3) {
+      try {
+        const { pickBestOfN } = await import('../../agent/best-of-n.js');
+        const variant = await generateReplyModelOutput(messages, usage, {
+          temperatureOverride: 0.9,
+          signal: interruptSignal,
+        });
+        variant.toolsUsed = toolsUsed;
+        const variantDraft = normalizeDraft(parseReplyResponse(variant.content, message.messageId));
+        const v = variantDraft.find((p) => !p.action && !isBlankReply(p.replyContent));
+        if (v) {
+          const ctxHint = `群聊回复,主题: ${(message.textContent || '').slice(0, 100)}`;
+          const { best, score } = await pickBestOfN([primary.replyContent, v.replyContent], ctxHint);
+          if (best !== primary.replyContent && best === v.replyContent) {
+            logger.info({ chatId, score, primaryLen: primary.replyContent.length, variantLen: v.replyContent.length }, 'best-of-N picked variant over primary');
+            primary.replyContent = v.replyContent;
+          } else {
+            logger.debug({ chatId, score }, 'best-of-N kept primary');
+          }
+        }
+      } catch (err) {
+        logger.debug({ err }, 'best-of-n enhancement skipped');
+      }
+    }
+  }
 
   const latencyMs = Math.round(performance.now() - start);
   logger.info({

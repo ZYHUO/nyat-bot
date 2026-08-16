@@ -10,10 +10,9 @@
 // 按难度分配算力: "早上好"→N=1; "帮我分析这段代码"→N=16+verifier。
 // 难度由 judge pipeline 的 action/confidence 近似。
 //
-// ⚠️ 接线状态: Phase 15.3 核心已就绪但**尚未接入 reply 管线**(plan 排最后)。
-//    BEST_OF_N_BASE>1 时目前无效果 —— 待 Phase 15.3 在 reply.ts 按
-//    estimateDifficulty 接入 pickBestOfN(Humanizer 3-8s 延迟窗口内并行采样)。
-//    review 后手动确认前不要误以为线上已生效。
+// ⚠️ 接线状态: 2026-08-16 已接入 reply.ts §8.5 —— 仅难度 3(技术/长回复)
+//    启用,采样 N=2(原版+高温度变体),verifier 二选一,失败回退原版。
+//    不做全量 N 采样(主模型 sonnet46 成本线性翻倍 + 同 prompt 方差小)。
 // ────────────────────────────────────────
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
