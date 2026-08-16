@@ -1,5 +1,11 @@
 # NyatBot AGI Level 5 — 经验自进化闭环 + 生活型主动性 Implementation Plan
 
+> **状态(8/16):✅ 全部 12 Phase 完成 + 独立 reviewer 通过 + 全量开启部署**
+> - PR #30 squash merged(main),reviewer 修复 commit 26e2c8b(直推)
+> - reviewer 发现并修复:memory-freshness 写侧 no-op、触发器 churn、winner_id 校验
+> - 17 个 flags 已全量开启(.env bak-l5-on-1786853652),不灰度
+> - Claude 讨论(链接)后续方向:Task 架构/反向阀门/小模型增强 → 见 claude-discussion-notes.md
+
 > **For Hermes:** 分 Phase 实现,每个 Phase 独立测试 + commit + PR(用户偏好按逻辑组拆 PR)。
 
 **Goal:** 把 bot 的经验系统从「记录」升级到「验证-压缩-进化」闭环,并把目标系统升级为「跨周持续关注、能发现世界悄悄变化」的生活型主动性。

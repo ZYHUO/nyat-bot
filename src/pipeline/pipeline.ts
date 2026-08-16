@@ -6,6 +6,8 @@ import type { ChatJob, JudgeResult } from "../shared/types.js";
 import { formatMessage } from "./formatter.js";
 import { getRecent } from "./context/manager.js";
 import { judge, l0Rule } from "./judge/judge.js";
+import { isMentioningSelf } from "./judge/rules.js";
+import { tryCreateResearchTask } from "./judge/task-trigger.js";
 import { processMedia } from "./stages/media.js";
 import { runBookkeeping } from "./stages/bookkeeping.js";
 import { runPostJudge } from "./stages/post-judge.js";
@@ -338,6 +340,31 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       if (heartResult.shouldReturn) return;
       judgeResult = heartResult.judgeResult!;
     } else {
+      // AGI L6 Phase 13: 任务接管 —— 用户 @ bot 且像「帮我查 X」→ 建 Task + 入队,
+      // judge 不再走常规回复路径(bot 已经回了「我去查」)。
+      // 安全铁律: 只有被 @ 的直接请求能建任务(群聊随便一句话永不建)。
+      if (
+        !formatted.isBot && !formatted.isAnonymous &&
+        e.TASK_EXECUTOR_ENABLED &&
+        !job.turnContext?.isReplan && !job.turnContext?.isWaitReplay
+      ) {
+        const mentioned = isMentioningSelf(
+          formatted.textContent || formatted.captionContent || '',
+          botIdentity.username,
+          botIdentity.nicknames,
+        );
+        if (mentioned) {
+          const taken = await tryCreateResearchTask(
+            job.chatId, formatted.uid,
+            formatted.textContent || formatted.captionContent || '',
+            true,
+          );
+          if (taken) {
+            logger.info({ chatId: job.chatId, uid: formatted.uid }, 'Pipeline complete (task created, judge skipped)');
+            return;
+          }
+        }
+      }
       judgeResult = await judge({
         message: formatted, recentMessages,
         recentMessagesL2Fetcher: () => getRecent(job.chatId, e.JUDGE_WINDOW_SIZE * 3),

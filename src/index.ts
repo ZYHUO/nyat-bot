@@ -9,6 +9,7 @@ import { getRedis, closeRedis } from './db/redis.js';
 import { runMigrations, closeDb } from './db/sqlite.js';
 import { createBot, stopBot } from './bot/bot.js';
 import { startWorker, closeWorker } from './queue/worker.js';
+import { startTaskWorker } from './queue/task-worker.js';
 import { closeQueue } from './queue/producer.js';
 import { freeEncoder } from './ai/token-counter.js';
 import { createAllowlistMiddleware } from './bot/middleware/allowlist.js';
@@ -103,6 +104,7 @@ async function main(): Promise<void> {
   // 8. Start BullMQ worker
   if (ownership.worker) {
     startWorker();
+    startTaskWorker();
     if (config.META_SUBAGENT_ENABLED) {
       startCodeActWorker();
     }

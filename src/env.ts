@@ -401,6 +401,10 @@ const envSchema = z.object({
   // 超期未确认 → stale 降权;变化词(换工作/分手) → 相关旧属性 stale。
   // 只检测不自动删;检索到 stale 时注明可能过时。
   MEMORY_FRESHNESS_ENABLED: booleanFromEnv.default(false),
+  // ── AGI Level 6 Phase 13: Task 对象架构 ─────────────────────────────
+  // 补 harness 的「执行+状态」:BullMQ 独立队列跑任务,与消息处理隔离。
+  TASK_EXECUTOR_ENABLED: booleanFromEnv.default(false),
+  TASK_MAX_ROUNDS: z.coerce.number().int().min(1).default(6),
   MEMORY_STALE_AFTER_DAYS: z.coerce.number().int().min(7).default(90),
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。

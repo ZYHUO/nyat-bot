@@ -55,7 +55,7 @@ function makeResult(
   };
 }
 
-function isMentioningSelf(
+export function isMentioningSelf(
   text: string,
   botUsername: string,
   botNicknames: string[],

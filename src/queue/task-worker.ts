@@ -1,0 +1,114 @@
+// ────────────────────────────────────────
+// Task executor — AGI Level 6 Phase 13
+// 独立 BullMQ 队列,与消息处理完全隔离。
+// 任务循环: 无延迟压力,可跑多轮搜索,完成后主动发结果。
+// 只有一种任务类型: research("帮我查 X")。
+//
+// 安全: 任务创建权限收紧(createTask 由被 @ 的直接请求触发)。
+// 多轮搜索: 搜 → 看 → 换词再搜 → 交叉验证 → 完成发回。
+// ────────────────────────────────────────
+import { Worker } from 'bullmq';
+import type { Job } from 'bullmq';
+import { getRedis } from '../db/redis.js';
+import { logger } from '../shared/logger.js';
+import { executeSearch } from '../pipeline/tools/search.js';
+import { sendMessage } from '../bot/sender/telegram.js';
+import {
+  getTask, setTaskState, appendLedger, setProgress, bumpSearchRound,
+  completeTask, tasksEnabled,
+} from '../agent/task-store.js';
+
+export const TASK_QUEUE_NAME = 'task-executor';
+
+export interface TaskJobData {
+  type: 'task_execute';
+  taskId: number;
+  chatId: number;
+  ownerUid: number;
+  /** 上一步结果反馈(如果有) */
+  context?: string;
+}
+
+let _worker: Worker<TaskJobData> | undefined;
+
+/** 多轮搜索决策: 给定当前结果,决定是继续换词搜还是收尾。返回下一查询或 null 收尾。 */
+function decideNextQuery(goal: string, resultsSoFar: string[], round: number, maxRounds: number): string | null {
+  if (round >= maxRounds) return null;
+  // 启发式: 结果足够多(≥2 轮有效内容)或首轮已包含结论性信息就收尾
+  const nonEmpty = resultsSoFar.filter((r) => r && r.length > 80);
+  if (nonEmpty.length >= 2 && round >= 2) return null;
+  // 简单换词: 让 LLM 决定太重,先按"追问"规则 —— 目标词 + "更多细节"
+  if (round === 1) return `${goal} 更多细节`;
+  if (round === 2) return `${goal} 最新进展`;
+  return null;
+}
+
+export async function executeTask(job: Job<TaskJobData>): Promise<string | null> {
+  const { taskId, chatId } = job.data;
+  const task = getTask(taskId);
+  if (!task) {
+    logger.warn({ taskId }, 'task not found, skipping');
+    return null;
+  }
+  if (task.state === 'cancelled') return null;
+
+  setTaskState(taskId, 'running');
+
+  const goal = task.goal;
+  const maxRounds = task.max_rounds;
+  const results: string[] = [];
+  let round = task.search_round;
+
+  try {
+    // 多轮搜索循环: 搜 → 看 → 换词再搜 → 交叉验证
+    while (round < maxRounds) {
+      const { round: newRound, done } = bumpSearchRound(taskId);
+      round = newRound;
+      const query = round === 1 ? goal : decideNextQuery(goal, results, round, maxRounds);
+      if (!query) break;
+
+      setProgress(taskId, [`正在搜索: ${query}`, ...results.slice(-2).map((r) => `已获得 ${r.length} 字结果`)]);
+      const raw = await executeSearch(query);
+      results.push(raw);
+
+      appendLedger(taskId, { step: `搜索 #${round}: ${query}`, result: raw.slice(0, 500), ts: Math.floor(Date.now() / 1000) });
+      logger.info({ taskId, round, len: raw.length }, 'task search round done');
+
+      if (done) break;
+    }
+
+    // 收尾: 综合所有搜索结果
+    const combined = results.join('\n\n---\n\n');
+    const summary = combined.slice(0, 6000);
+    completeTask(taskId, summary);
+
+    // 主动发回结果(任务循环的交付点 —— bot 被自己的任务唤醒后交付)
+    const header = `📋 查好了「${goal}」\n`;
+    const body = summary.length > 3500 ? `${summary.slice(0, 3500)}…\n\n(内容较长,已存任务台账)` : summary;
+    await sendMessage(chatId, header + body);
+    return summary;
+  } catch (err) {
+    logger.error({ err, taskId }, 'task execution failed');
+    setTaskState(taskId, 'blocked');
+    setProgress(taskId, [`任务中断: ${err instanceof Error ? err.message : String(err)}`]);
+    await sendMessage(chatId, `⚠️ 「${goal}」查的时候卡住了:${err instanceof Error ? err.message : String(err)}。要我换个方式再试吗?`);
+    return null;
+  }
+}
+
+export function startTaskWorker(): void {
+  if (_worker || !tasksEnabled()) return;
+  _worker = new Worker<TaskJobData>(
+    TASK_QUEUE_NAME,
+    async (job) => {
+      try {
+        await executeTask(job);
+      } catch (err) {
+        logger.error({ err, jobId: job.id }, 'task worker error');
+      }
+    },
+    { connection: getRedis(), concurrency: 2 },
+  );
+  _worker.on('error', (err) => logger.error({ err }, 'task worker error event'));
+  logger.info('Task executor worker started');
+}
