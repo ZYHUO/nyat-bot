@@ -12,6 +12,7 @@ import type { Job } from 'bullmq';
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
 import { executeSearch } from '../pipeline/tools/search.js';
+import { callWithFallback } from '../ai/fallback.js';
 import { sendMessage } from '../bot/sender/telegram.js';
 import {
   getTask, setTaskState, appendLedger, setProgress, bumpSearchRound,
@@ -41,6 +42,46 @@ function decideNextQuery(goal: string, resultsSoFar: string[], round: number, ma
   if (round === 1) return `${goal} 更多细节`;
   if (round === 2) return `${goal} 最新进展`;
   return null;
+}
+
+/**
+ * LLM 综合搜索结果 → 一份连贯、结论先行的回答。
+ * 作用: 去重、消解矛盾(取多数/最新)、按用户问题组织、标来源。
+ * 失败回退 null(调用方用原始拼接)。"AGI 感"的关键一步 —— 查完要"理解并组织",
+ * 不是把两个搜索块平铺给对方看。
+ */
+async function synthesizeResults(goal: string, results: string[]): Promise<string | null> {
+  const raw = results.join('\n\n---\n\n').slice(0, 12_000);
+  // 一次调用能容下的搜索块;过长截断
+  const budget = raw.slice(0, 12_000);
+  const prompt = `你是研究助手: 用户让我查「${goal}」,下面是几轮搜索结果(可能重复、矛盾、噪音)。
+请综合成一份回答:
+1. 直接先给结论(一两句),再给关键细节;不要复述"搜索结果"本身
+2. 数字/事实冲突时取多数来源或更新的那一个,并给出最可信的值;矛盾明显时如实说明
+3. 去重、去掉噪音和无关内容
+4. 保留 2-4 个最有用的来源名(放在末尾 "来源:" 一行)
+5. 纯文本,不啰嗦,总量 500 字以内;禁止 markdown/粗体/**列表符号**/* 编号,不要任何标题
+
+搜索结果:
+${budget}`;
+  try {
+    const res = await callWithFallback({
+      usage: 'summarize',
+      messages: [
+        { role: 'system', content: '你是精炼准确的研究综合助手。输出只有正文,不要 JSON、不要标题重复、不要复述输入。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.3,
+      maxTokens: 1200,
+      maxTimeoutMs: 90_000,
+    });
+    const text = (res.content ?? '').trim();
+    if (!text || text.length < 10) return null;
+    return text;
+  } catch (err) {
+    logger.warn({ err, taskId: undefined }, 'synthesize failed, falling back to raw');
+    return null;
+  }
 }
 
 export async function executeTask(job: Job<TaskJobData>): Promise<string | null> {
@@ -77,7 +118,7 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
       if (done) break;
     }
 
-    // 收尾: 综合所有搜索结果
+    // 收尾: 先尝试 LLM 综合(去重/消矛盾/结论先行),失败回退原始拼接
     const combined = results.join('\n\n---\n\n');
     if (!combined.trim()) {
       // 所有轮次都没拿到有效结果(重派时 search_round 可能已满)
@@ -85,8 +126,10 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
       await sendMessage(chatId, `「${goal}」我没查到新东西,要换个关键词再试吗?`);
       return null;
     }
-    const summary = combined.slice(0, 6000);
+    const synthesized = await synthesizeResults(goal, results);
+    const summary = (synthesized ?? combined).slice(0, 6000);
     completeTask(taskId, summary);
+    appendLedger(taskId, { step: '综合', result: synthesized ? `LLM 综合(${summary.length}字)` : '原始拼接(LLM 综合失败)', ts: Math.floor(Date.now() / 1000) });
 
     // 主动发回结果(任务循环的交付点 —— bot 被自己的任务唤醒后交付)
     const header = `📋 查好了「${goal}」\n`;
