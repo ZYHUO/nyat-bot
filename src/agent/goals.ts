@@ -45,7 +45,9 @@ export function createGoal(input: CreateGoalInput, maxActive = 5): number | null
   try {
     const db = getDb();
     const topic = input.topic.trim().slice(0, 100);
-    if (topic.length < 4) return null;
+    // 中文 2-3 字就够(比特币/显卡/比赛),但去掉纯标点/单字。
+    if (topic.length < 2) return null;
+    if (!/[^\s\p{P}\p{S}]/u.test(topic)) return null;
     const { c } = db.prepare(`SELECT COUNT(*) AS c FROM goals WHERE status = 'active'`).get() as { c: number };
     if (c >= maxActive) {
       logger.info({ topic }, 'goal rejected: max active reached');

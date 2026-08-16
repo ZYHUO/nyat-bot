@@ -43,8 +43,12 @@ describe('createGoal', () => {
   });
 
   it('rejects too-short topics and respects maxActive cap', () => {
-    expect(createGoal({ topic: 'ab', origin: 'self' })).toBeNull();
-    for (let i = 0; i < 5; i++) {
+    // 中文 2 字起步可接受;单字/纯标点拒绝。
+    expect(createGoal({ topic: '比特币', origin: 'self' })).not.toBeNull();
+    expect(createGoal({ topic: 'a', origin: 'self' })).toBeNull();
+    expect(createGoal({ topic: '。。。', origin: 'self' })).toBeNull();
+    // 已有 1 个 active(比特币),还剩 4 个空位 → 4 个成功,第 5 个拒绝。
+    for (let i = 0; i < 4; i++) {
       expect(createGoal({ topic: `goal topic number ${i}`, origin: 'self' })).not.toBeNull();
     }
     expect(createGoal({ topic: 'sixth goal should be rejected', origin: 'self' }, 5)).toBeNull();
