@@ -73,6 +73,15 @@ describe('parseResearchRequest', () => {
   it('still accepts 帮我查一下 Rust 异步最佳实践 with 一下', () => {
     expect(parseResearchRequest('@bot 帮我查一下 Rust 异步最佳实践')).toBe('Rust 异步最佳实践');
   });
+
+  it('accepts temporal targets (今天/昨天 are not pronouns)', () => {
+    expect(parseResearchRequest('@bot 帮我查一下今天东京的天气')).toBe('今天东京的天气');
+    expect(parseResearchRequest('@bot 帮我查一下昨天的大盘走势')).toBe('昨天的大盘走势');
+  });
+
+  it('rejects 为什么-style targets', () => {
+    expect(parseResearchRequest('@bot 帮我查一下为什么搜不到')).toBeNull();
+  });
 });
 
 describe('tryCreateResearchTask', () => {
