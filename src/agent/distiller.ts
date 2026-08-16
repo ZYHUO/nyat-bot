@@ -107,17 +107,6 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
       return null;
     }
 
-    // AGI L5 L1: 过滤实例级经验 —— 含具体人名/单次事件痕迹的降级为抽象版。
-    // (prompt 已要求原则级,这里是兜底:实例级经验宁可 drop 也不污染库)
-    const PRINCIPLE_VIOLATION = /(小明|小红|老王|上次|刚才|这次任务|群友\w*|【[^】]+】|#\d+)/;
-    parsed.experience = parsed.experience.filter((e) => {
-      const dirty = PRINCIPLE_VIOLATION.test(e.content) && e.content.length <= 120;
-      if (dirty) {
-        logger.debug({ taskId: task.id, content: e.content }, 'dropped instance-level experience (L1)');
-      }
-      return !dirty;
-    });
-
     const episodeId = saveEpisode({
       taskId: task.id,
       chatId: task.chatId,
@@ -137,7 +126,6 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
           content: e.content,
           tags: e.tags,
           sourceEpisodeId: episodeId,
-          originBot: env().BOT_USERNAME ?? 'self',
         })),
       );
       pruneExperience(200);

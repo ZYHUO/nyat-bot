@@ -20,8 +20,6 @@ beforeEach(() => {
   db = new Database(':memory:');
   const sql = readFileSync(join(__dirname, '../../../migrations/0054_episodes_experience.sql'), 'utf8');
   db.exec(sql);
-  db.exec(readFileSync(join(__dirname, '../../../migrations/0057_experience_verify.sql'), 'utf8'));
-  db.exec(readFileSync(join(__dirname, '../../../migrations/0061_experience_share.sql'), 'utf8'));
 });
 
 describe('episodes store', () => {

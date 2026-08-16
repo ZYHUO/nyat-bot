@@ -455,10 +455,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
   let systemPrompt = EXECUTOR_SYSTEM;
-  // AGI Level 5 Phase 1: 本次任务注入的经验 id(终态时验证打分)。
-  let injectedExperienceIds: number[] = [];
-  // AGI Level 5 Phase 4: 本次任务注入的 loop 策略 id(终态时计数进化)。
-  let injectedPolicyIds: number[] = [];
   if (isSelfPlay) {
     try {
       const { loadCachedPrompt } = await import('../shared/config.js');
@@ -470,56 +466,15 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   }
 
   // AGI Level 4 P4-A: 开工前注入过往经验 —— 犯过的错不再犯第二遍（常驻）。
-  // AGI Level 5 Phase 1: 记录注入的经验 id,终态时验证打分(①)。
-  // AGI Level 5 Phase 5: 跨 bot 共享门控(EXPERIENCE_SHARE_ENABLED 时)。
   try {
     const { findRelevantExperience } = await import('../agent/episodes.js');
-    const hints = findRelevantExperience(task.contentDirection, 3, {
-      botId: env().BOT_USERNAME ?? 'self',
-      allowShared: env().EXPERIENCE_SHARE_ENABLED,
-    });
+    const hints = findRelevantExperience(task.contentDirection, 3);
     if (hints.length) {
-      // AGI L5 L2: 预算截断 + 信号重排(已验证优先,可疑垫底)。
-      let picked: typeof hints = hints;
-      if (env().RECALL_BUDGET_ENABLED) {
-        const { applyRecallBudget } = await import('../agent/recall-budget.js');
-        picked = applyRecallBudget(hints, env().RECALL_MAX_EXPERIENCE) as typeof hints;
-      }
-      systemPrompt += `\n\n[过往经验]\n${picked.map((h) => `- (${h.kind}) ${h.content}`).join('\n')}\n以上是之前做类似事总结的教训，能用就用，不适用就忽略。`;
-      injectedExperienceIds = picked.map((h) => h.id);
-      logger.info({ taskId: task.id, hintCount: picked.length, ids: injectedExperienceIds }, 'experience recall injected');
+      systemPrompt += `\n\n[过往经验]\n${hints.map((h) => `- (${h.kind}) ${h.content}`).join('\n')}\n以上是之前做类似事总结的教训，能用就用，不适用就忽略。`;
+      logger.info({ taskId: task.id, hintCount: hints.length }, 'experience recall injected');
     }
   } catch {
     /* recall is best-effort */
-  }
-
-  // AGI Level 5 Phase 6: 注入世界状态(对象中心实体,goal check 上下文基础)。
-  if (env().WORLD_STATE_ENABLED) {
-    try {
-      const { buildWorldStateBlock } = await import('../agent/world-state.js');
-      const block = buildWorldStateBlock(task.contentDirection);
-      if (block) systemPrompt += block;
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  // AGI Level 5 Phase 4: 注入可进化的循环策略(OpenLoopEvolve 轻量版)。
-  if (env().LOOP_POLICY_ENABLED) {
-    try {
-      const { listActivePolicies } = await import('../agent/loop-policy.js');
-      const policies = listActivePolicies(env().LOOP_POLICY_MAX);
-      if (policies.length) {
-        systemPrompt +=
-          '\n\n[循环策略]\n' +
-          policies.map((p) => `- ${p.rule}`).join('\n') +
-          '\n以上是过往任务沉淀的循环策略,适用就用。';
-        injectedPolicyIds = policies.map((p) => p.id);
-        logger.info({ taskId: task.id, policyCount: policies.length }, 'loop policies injected');
-      }
-    } catch {
-      /* best-effort */
-    }
   }
 
   const { prompt, manifest } = await engine.assemble([
@@ -840,44 +795,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       // 任务终态：解除 chat → task 索引，恢复该 chat 的正常 dispatch。
       await unregisterAgentChat(task.chatId, task.id);
 
-      // AGI Level 5 Phase 1: 路径质量统计 + 经验验证打分(①+D)。
-      // 结果好但路径脏(done + path_quality < 0.7)不算经验被证实。
-      // executor 无结构化调用历史,totalCalls=0 → 中性 0.8 分(不做证伪)。
-      if (injectedExperienceIds.length > 0 && env().EXPERIENCE_VERIFY_ENABLED) {
-        void import('../agent/path-quality.js')
-          .then(async ({ computePathQuality }) => {
-            const quality = computePathQuality({ totalCalls: 0, invalidCalls: 0, retryCount: 0, turns: task.totalTurns ?? 0 });
-            const { recordInjectOutcome } = await import('../agent/experience-verify.js');
-            recordInjectOutcome({
-              experienceIds: injectedExperienceIds,
-              taskOutcome: task.status === 'done' ? 'done' : 'failed',
-              pathQualityScore: quality.score,
-            });
-          })
-          .catch((err) => logger.warn({ err, taskId: task.id }, 'experience verify failed'));
-      }
-
-      // AGI Level 5 Phase 4: loop 策略计数进化。
-      if (injectedPolicyIds.length > 0 && env().LOOP_POLICY_ENABLED) {
-        void import('../agent/loop-policy.js')
-          .then(({ recordPolicyOutcome }) => {
-            recordPolicyOutcome(injectedPolicyIds, task.status === 'done');
-          })
-          .catch((err) => logger.warn({ err, taskId: task.id }, 'loop policy outcome failed'));
-      }
-
-      // AGI Level 5 Phase 6: 任务终态把 topic 实体写入世界状态。
-      if (env().WORLD_STATE_ENABLED) {
-        void import('../agent/world-state.js')
-          .then(({ upsertEntity }) => {
-            const topic = task.contentDirection.replace(/\[goal:\d+\]/g, '').trim().slice(0, 100);
-            if (topic.length >= 2) {
-              upsertEntity(topic, 'topic', { last_outcome: task.status === 'done' ? 'success' : 'failed' }, task.chatId);
-            }
-          })
-          .catch((err) => logger.warn({ err, taskId: task.id }, 'world state upsert failed'));
-      }
-
       // AGI Level 4 P4-A: 终态复盘蒸馏 —— 只留下过痕迹的任务才复盘（常驻）
       // （纯闲聊 sendText 一句就结束的也蒸，成本极低；失败任务重点挖 pitfall）。
       // fire-and-forget：复盘失败静默 warn，不阻塞 callback、不烧重试。
@@ -914,11 +831,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           const goalId = Number(goalMatch[1]);
           const found = endSummary.match(/^found:\s*(.+)$/im)?.[1]?.trim();
           void import('../agent/goals.js')
-            .then(async ({ recordCheck, markSilentChange }) => {
-              recordCheck(goalId, found ? found.slice(0, 500) : null);
-              // AGI Level 5 Phase 3: 有发现 = 世界悄悄变了,标记 silent change。
-              if (found) markSilentChange(goalId);
-            })
+            .then(({ recordCheck }) => recordCheck(goalId, found ? found.slice(0, 500) : null))
             .catch((err) => logger.warn({ err, goalId }, 'goal recordCheck failed'));
         }
       }

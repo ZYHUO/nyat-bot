@@ -31,14 +31,10 @@ export interface CreateGoalInput {
   origin: string; // 'self' | 'master' | `episode:${id}`
   chatId?: number | null;
   checkIntervalSec?: number;
-  /** AGI Level 5 Phase 3: 长期目标(跨周持续关注,stale 放宽到 30 天)。 */
-  longTerm?: boolean;
 }
 
-/** 连续多少天无新发现 → stale(cron 里用)。 */
+/** 连续多少天无新发现 → stale（cron 里用）。 */
 export const GOAL_STALE_AFTER_SEC = 7 * 86400;
-/** 长期目标的 stale 窗口(30 天,跨周持续关注不轻易放弃)。 */
-export const GOAL_LONG_TERM_STALE_AFTER_SEC = 30 * 86400;
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -64,18 +60,10 @@ export function createGoal(input: CreateGoalInput, maxActive = 5): number | null
     const ts = nowSec();
     const r = db
       .prepare(
-        `INSERT INTO goals (topic, origin, chat_id, check_interval_sec, long_term, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO goals (topic, origin, chat_id, check_interval_sec, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(
-        topic,
-        input.origin.slice(0, 64),
-        input.chatId ?? null,
-        input.checkIntervalSec ?? 86400,
-        input.longTerm ? 1 : 0,
-        ts,
-        ts,
-      );
+      .run(topic, input.origin.slice(0, 64), input.chatId ?? null, input.checkIntervalSec ?? 86400, ts, ts);
     logger.info({ topic, origin: input.origin }, 'goal created');
     return Number(r.lastInsertRowid);
   } catch (err) {
@@ -112,32 +100,18 @@ export function recordCheck(id: number, finding: string | null): void {
     const db = getDb();
     if (finding?.trim()) {
       db.prepare(
-        `UPDATE goals SET last_check_at = ?, last_finding = ?, findings_count = findings_count + 1,
-           check_count = check_count + 1, updated_at = ? WHERE id = ?`,
+        `UPDATE goals SET last_check_at = ?, last_finding = ?, findings_count = findings_count + 1, updated_at = ? WHERE id = ?`,
       ).run(ts, finding.trim().slice(0, 500), ts, id);
     } else {
-      db.prepare(`UPDATE goals SET last_check_at = ?, check_count = check_count + 1, updated_at = ? WHERE id = ?`).run(ts, ts, id);
-      // 零发现且活够久了 → stale(保留可复活,不再轮询)。
-      // 长期目标(long_term=1)的 stale 窗口放宽到 30 天(跨周持续关注不轻易放弃)。
+      db.prepare(`UPDATE goals SET last_check_at = ?, updated_at = ? WHERE id = ?`).run(ts, ts, id);
+      // 零发现且活够久了 → stale（保留可复活，不再轮询）。
       db.prepare(
         `UPDATE goals SET status = 'stale', updated_at = ?
-         WHERE id = ? AND status = 'active' AND findings_count = 0
-           AND created_at + CASE long_term WHEN 1 THEN ? ELSE ? END <= ?`,
-      ).run(ts, id, GOAL_LONG_TERM_STALE_AFTER_SEC, GOAL_STALE_AFTER_SEC, ts);
+         WHERE id = ? AND status = 'active' AND findings_count = 0 AND created_at + ? <= ?`,
+      ).run(ts, id, GOAL_STALE_AFTER_SEC, ts);
     }
   } catch (err) {
     logger.warn({ err, id }, 'recordCheck failed');
-  }
-}
-
-/** 标记一次 silent change(世界悄悄变了,LLM 对比上次 finding 发现变化)。 */
-export function markSilentChange(id: number): void {
-  try {
-    getDb()
-      .prepare(`UPDATE goals SET silent_change_detected = 1, updated_at = ? WHERE id = ?`)
-      .run(nowSec(), id);
-  } catch (err) {
-    logger.warn({ err, id }, 'markSilentChange failed');
   }
 }
 

@@ -234,19 +234,6 @@ export function startCronJobs(deps?: CronDeps): void {
     if (any) logger.info({ crons: exprs }, 'Dream journal cron enabled');
   }
 
-  // AGI Level 5 Phase 2: Dreaming 整合 — 每周日 04:17 低峰。
-  if (env().DREAM_CONSOLIDATE_ENABLED) {
-    tasks.push(
-      schedule('17 4 * * 0', () => {
-        void safeRun('dream-consolidate', async () => {
-          const { runDreamConsolidate } = await import('./dream-consolidate.js');
-          await runDreamConsolidate();
-        });
-      }),
-    );
-    logger.info('Dream consolidate cron enabled (Sun 04:17)');
-  }
-
   // Silence alert — bot 沉默检测(端到端回复健康)。
   // 每 SILENCE_ALERT_INTERVAL_MIN 分钟扫一次「活跃但 bot 未回复」的 chat。
   // 默认关;开时配 SILENCE_ALERT_CHAT_ID 才真正发送,否则只打日志。

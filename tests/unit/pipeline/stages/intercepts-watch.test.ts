@@ -36,7 +36,6 @@ const formatted = {
 beforeEach(() => {
   db = new Database(':memory:');
   db.exec(readFileSync(join(__dirname, '../../../../migrations/0055_goals.sql'), 'utf8'));
-  db.exec(readFileSync(join(__dirname, '../../../../migrations/0059_goal_long_term.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../../migrations/0012_topic_watches.sql'), 'utf8'));
   sendDirectMock.mockReset();
 });
