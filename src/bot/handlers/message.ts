@@ -95,17 +95,32 @@ async function handleUpdate(ctx: Context): Promise<void> {
   // direct = DM/私聊、@bot、昵称、回复 bot、命令 —— 这类消息 bot 必须接,
   // 群聊普通消息不记 direct(决定不插话是正常行为,不触发沉默告警)。
   if (userId && msg.from && !msg.from.is_bot && userId !== 1087968824) {
-    const direct =
-      isDM(chatId) ||
-      detectDirectInteraction(ctx.update, {
-        botUid: getBotIdentity().uid,
-        botUsername: getBotIdentity().username,
-        botNicknames: getBotIdentity().nicknames,
-        editByContentOnly: true,
-      }) !== null;
-    void import('../../tracking/reply-activity.js')
-      .then(({ recordHumanMessage }) => recordHumanMessage(chatId, { direct }))
-      .catch(() => {});
+    const directKind = detectDirectInteraction(ctx.update, {
+      botUid: getBotIdentity().uid,
+      botUsername: getBotIdentity().username,
+      botNicknames: getBotIdentity().nicknames,
+      editByContentOnly: true,
+    });
+    // 沉默告警只关心「bot 必须接话」的消息:
+    // - slash 命令(如 /checkin)有自己的 handler 路径,不走 Meta 回复回路 → 不算 direct
+    // - bot 睡眠期 @bot 会进 sleep-queue,早晨 catch-up 补回 → 不记 direct(有兜底机制)
+    const isSlashCommand = directKind === 'command';
+    const direct = !isSlashCommand && (isDM(chatId) || directKind !== null);
+    if (direct) {
+      void import('../../tracking/reply-activity.js')
+        .then(async ({ recordHumanMessage }) => {
+          // 睡眠期不记 direct:消息已由 sleep-queue 接管,醒来 catch-up。
+          const { isAsleep } = await import('../../tracking/sleep.js');
+          if (await isAsleep()) return;
+          recordHumanMessage(chatId, { direct: true });
+        })
+        .catch(() => {});
+    } else {
+      // 非 direct 消息也保持 lastHuman 新鲜度(用于 humanStale 判定),但不触发告警。
+      void import('../../tracking/reply-activity.js')
+        .then(({ recordHumanMessage }) => recordHumanMessage(chatId))
+        .catch(() => {});
+    }
   }
 
   // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
