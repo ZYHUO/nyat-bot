@@ -410,6 +410,9 @@ const envSchema = z.object({
   CONNECTIVITY_TRACKING_ENABLED: booleanFromEnv.default(false),
   // 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。
   SYCOPHANCY_AUDIT_ENABLED: booleanFromEnv.default(false),
+  // ── AGI Level 6 Phase 15: 小模型增强 ────────────────────────────────
+  // best-of-N 采样基数(按难度翻倍)。verifier 用 judge usage 打分选最优。
+  BEST_OF_N_BASE: z.coerce.number().int().min(1).default(1),
   MEMORY_STALE_AFTER_DAYS: z.coerce.number().int().min(7).default(90),
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
