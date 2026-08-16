@@ -150,6 +150,17 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // AGI L6 Phase 14: 连接率计算 —— 回填已到 5 分钟窗口的连接率。
+  if (env().CONNECTIVITY_TRACKING_ENABLED) {
+    tasks.push(schedule('*/2 * * * *', () => {
+      void safeRun('connectivity-calc', async () => {
+        const { calculateConnectivityWindows } = await import('../agent/reverse-valve.js');
+        const n = await calculateConnectivityWindows();
+        if (n > 0) logger.info({ windows: n }, 'connectivity windows calculated');
+      });
+    }));
+  }
+
   // 功能 A3:每日「今日感想」生成(每小时跑,内部按 BJ 日去重,只生成一次)。
   if (env().SCHOOL_SCHEDULE_ENABLED) {
     tasks.push(schedule('40 * * * *', () => {

@@ -7,9 +7,19 @@ import { toMarkdownV2 } from './markdown.js';
 import { shardMarkdownV2, TG_TEXT_LIMIT } from './shard.js';
 import { recordSpeech } from '../../tracking/speech-meter.js';
 import { recordBotReply } from '../../tracking/reply-activity.js';
+import { recordBotMessageForConnectivity } from '../../agent/reverse-valve.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RETRIES = 3;
+
+// AGI L6 Phase 14: 连接率埋点 —— 只记群聊(chatId < 0),DM 不记。
+// fire-and-forget,失败不影响发送。
+function recordConnectivityWindow(chatId: number, mid: number, ts: number): void {
+  if (chatId >= 0 || !mid) return;
+  void recordBotMessageForConnectivity(chatId, mid, '', ts).catch((err) => {
+    logger.debug({ err, chatId }, 'connectivity record failed');
+  });
+}
 const BASE_BACKOFF_MS = 1000;
 
 /** React to a message with a single emoji (Telegram setMessageReaction). Best-effort. */
@@ -125,11 +135,13 @@ export async function sendMessage(
     }
     recordSpeech();
     recordBotReply(chatId);
+    recordConnectivityWindow(chatId, first, Date.now());
     return first;
   }
   const messageId = await sendMarkdownOnce(chatId, shards[0]!, text, replyToId, messageThreadId);
   recordSpeech();
   recordBotReply(chatId);
+  recordConnectivityWindow(chatId, messageId, Date.now());
   return messageId;
 }
 

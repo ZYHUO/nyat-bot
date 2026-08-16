@@ -405,6 +405,9 @@ const envSchema = z.object({
   // 补 harness 的「执行+状态」:BullMQ 独立队列跑任务,与消息处理隔离。
   TASK_EXECUTOR_ENABLED: booleanFromEnv.default(false),
   TASK_MAX_ROUNDS: z.coerce.number().int().min(1).default(6),
+  // ── AGI Level 6 Phase 14: 反向阀门 L7 ───────────────────────────────
+  // 连接率埋点(新核心指标)+ 私聊风险分档。初期只记录不改行为。
+  CONNECTIVITY_TRACKING_ENABLED: booleanFromEnv.default(false),
   MEMORY_STALE_AFTER_DAYS: z.coerce.number().int().min(7).default(90),
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
