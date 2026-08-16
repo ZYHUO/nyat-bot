@@ -14,6 +14,7 @@ import type { FormattedMessage } from '../../shared/types.js';
 import { loadCachedPrompt, _resetPromptCache, getConfig } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { getTopExpressions, reinforceExpressions } from '../../learners/expression-learner.js';
+import { buildNormsBlock } from '../../agent/group-norms.js';
 import { getRecentSelfReplies, selfHistoryPromptSection } from '../../tracking/self-history.js';
 import { getActiveSelfNotes } from '../../tracking/self-model.js';
 import { getRelationship, relationshipPromptHint } from '../../tracking/relationship.js';
@@ -248,6 +249,13 @@ export function buildMessages(
     try {
       const socialBlock = buildSocialInjection(chatId);
       if (socialBlock) stablePrefixParts.push(`[群友关系]\n${socialBlock}`);
+    } catch { /* non-critical */ }
+    // AGI L5 L3: 群氛围画像(LoSoNA)—— 该群隐性规范,贴合风格回复。
+    try {
+      if (env().GROUP_NORMS_ENABLED) {
+        const normsBlock = buildNormsBlock(chatId);
+        if (normsBlock) stablePrefixParts.push(normsBlock.trim());
+      }
     } catch { /* non-critical */ }
   }
 

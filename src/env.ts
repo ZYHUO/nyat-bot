@@ -360,6 +360,48 @@ const envSchema = z.object({
   // 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection
   // 检索相关经验注入 executor prompt。复盘走便宜链，失败静默不重试。
   DISTILL_USAGE: z.string().default('summarize'),
+  // ── AGI Level 5 Phase 1: 经验验证器（常驻）────────────────────────────
+  // 注入的经验在任务终态打分：done+干净路径 → success_count；failed →
+  // failure_count。成功≥2 次 → verified=1(已证实)，失败≥2 次 → verified=2
+  // (可疑，检索降权)。防「一次侥幸成功被固化」(Practice Makes Unsafe)。
+  EXPERIENCE_VERIFY_ENABLED: booleanFromEnv.default(false),
+  EXPERIENCE_VERIFY_MIN_SUCCESS: z.coerce.number().int().min(1).default(2),
+  // ── AGI Level 5 Phase 2: Dreaming 整合 ───────────────────────────────
+  // 每周一次语义合并冗余/冲突经验(MindMemOS dreaming)。走 judge 链。
+  DREAM_CONSOLIDATE_ENABLED: booleanFromEnv.default(false),
+  DREAM_CONSOLIDATE_USAGE: z.string().default('judge'),
+  // ── AGI Level 5 Phase 3: 长期任务语义 ────────────────────────────────
+  // goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。
+  // long_term goal 的 stale 窗口放宽到 30 天。
+  GOAL_LONG_TERM_ENABLED: booleanFromEnv.default(false),
+  // ── AGI Level 5 Phase 4: Loop 策略资产化 ─────────────────────────────
+  // executor 循环策略(验证/重试/停止)从静态升级为可进化资产:
+  // 注入 prompt + 任务终态计数,成功率 <30% 自动 disable。
+  LOOP_POLICY_ENABLED: booleanFromEnv.default(false),
+  LOOP_POLICY_MAX: z.coerce.number().int().min(1).default(5),
+  // ── AGI Level 5 Phase 5: 多智能体安全共享 ─────────────────────────────
+  // 只有 verified=1(已证实)的经验可跨 bot 共享;未验证/可疑仅本 bot 用。
+  EXPERIENCE_SHARE_ENABLED: booleanFromEnv.default(false),
+  // ── AGI Level 5 Phase 6: 轻量世界状态 ────────────────────────────────
+  // 对象中心实体(person/project/topic)持续维护,goal check 开工前注入上下文。
+  WORLD_STATE_ENABLED: booleanFromEnv.default(false),
+  // ── AGI Level 5 Phase 8: Context rot 防护 ─────────────────────────────
+  // 少召回+重排+最高信号放前(防「迷失在中间」/干扰项误导)。
+  RECALL_BUDGET_ENABLED: booleanFromEnv.default(false),
+  RECALL_MAX_EXPERIENCE: z.coerce.number().int().min(1).default(3),
+  // ── AGI Level 5 Phase 9: 群体风格画像 ────────────────────────────────
+  // LoSoNA: 每个群有自己的隐性规范,观察消息 → 推断 → 注入 reply。
+  GROUP_NORMS_ENABLED: booleanFromEnv.default(false),
+  GROUP_NORMS_INFER_USAGE: z.string().default('judge'),
+  GROUP_NORMS_TTL_HOURS: z.coerce.number().int().min(1).default(6),
+  // ── AGI Level 5 Phase 10: ToM 心智状态层 ─────────────────────────────
+  // 回复前先想「对方想要什么/什么情绪/期待什么反应」,白捡的策略性收益。
+  TOM_STATE_ENABLED: booleanFromEnv.default(false),
+  // ── AGI Level 5 Phase 12: 记忆陈旧检测 ───────────────────────────────
+  // 超期未确认 → stale 降权;变化词(换工作/分手) → 相关旧属性 stale。
+  // 只检测不自动删;检索到 stale 时注明可能过时。
+  MEMORY_FRESHNESS_ENABLED: booleanFromEnv.default(false),
+  MEMORY_STALE_AFTER_DAYS: z.coerce.number().int().min(7).default(90),
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
   GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(5),

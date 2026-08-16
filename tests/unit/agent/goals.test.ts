@@ -7,7 +7,7 @@ vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => db,
 }));
 
-const { createGoal, listDueGoals, recordCheck, setGoalStatus, listGoals, GOAL_STALE_AFTER_SEC } = await import(
+const { createGoal, listDueGoals, recordCheck, setGoalStatus, listGoals, GOAL_STALE_AFTER_SEC, GOAL_LONG_TERM_STALE_AFTER_SEC, markSilentChange } = await import(
   '../../../src/agent/goals.js'
 );
 
@@ -28,6 +28,9 @@ beforeEach(() => {
       last_check_at INTEGER,
       last_finding TEXT,
       findings_count INTEGER DEFAULT 0,
+      long_term INTEGER DEFAULT 0,
+      silent_change_detected INTEGER DEFAULT 0,
+      check_count INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -104,6 +107,30 @@ describe('recordCheck', () => {
     recordCheck(id, null);
     const g = listGoals()[0]!;
     expect(g.status).toBe('active');
+  });
+
+  it('AGI L5 P3: long_term goal survives past normal stale window (30d instead of 7d)', () => {
+    const id = createGoal({ topic: '长期关注的目标', origin: 'master', longTerm: true })!;
+    // 10 天无发现:普通目标已 stale,long_term 仍 active(窗口 30 天)
+    db.prepare(`UPDATE goals SET created_at = ? WHERE id = ?`).run(nowSec() - GOAL_STALE_AFTER_SEC - 10, id);
+    recordCheck(id, null);
+    const g = listGoals()[0]!;
+    expect(g.status).toBe('active');
+    // 31 天无发现:long_term 也 stale
+    db.prepare(`UPDATE goals SET created_at = ? WHERE id = ?`).run(nowSec() - GOAL_LONG_TERM_STALE_AFTER_SEC - 10, id);
+    recordCheck(id, null);
+    expect(listGoals()[0]!.status).toBe('stale');
+  });
+
+  it('AGI L5 P3: check_count increments and markSilentChange sets flag', () => {
+    const id = createGoal({ topic: '追踪话题', origin: 'master' })!;
+    recordCheck(id, '有发现');
+    recordCheck(id, null);
+    const g = listGoals()[0]!;
+    expect(g.check_count).toBe(2);
+    expect(g.silent_change_detected).toBe(0);
+    markSilentChange(id);
+    expect(listGoals()[0]!.silent_change_detected).toBe(1);
   });
 });
 

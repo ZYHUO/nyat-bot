@@ -27,11 +27,16 @@ export interface ExperienceEntryInput {
   content: string;
   tags: string[];
   sourceEpisodeId: number;
+  sourceKind?: string; // episode | loop_policy | shared
+  originBot?: string; // 产出该经验的 bot 身份(默认 self)
 }
 
 export interface ExperienceHit {
+  id: number;
   content: string;
   kind: string;
+  /** 信号强度: verified=1 → 1, 未知 → 0.5, verified=2 → 0(供 recall-budget 重排)。 */
+  signal?: number;
 }
 
 function nowSec(): number {
@@ -78,12 +83,21 @@ export function saveExperienceEntries(entries: ExperienceEntryInput[]): void {
   if (!entries.length) return;
   try {
     const stmt = getDb().prepare(
-      `INSERT INTO experience_entries (kind, content, tags, source_episode_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_kind, origin_bot, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const ts = nowSec();
     for (const en of entries.slice(0, 8)) {
       if (!en.content?.trim()) continue;
-      stmt.run(String(en.kind || 'trick').slice(0, 32), en.content.trim().slice(0, 500), safeJsonArray(en.tags), en.sourceEpisodeId, ts);
+      stmt.run(
+        String(en.kind || 'trick').slice(0, 32),
+        en.content.trim().slice(0, 500),
+        safeJsonArray(en.tags),
+        en.sourceEpisodeId,
+        en.sourceKind?.slice(0, 32) ?? 'episode',
+        en.originBot?.slice(0, 32) ?? 'self',
+        ts,
+      );
     }
   } catch (err) {
     logger.warn({ err }, 'saveExperienceEntries failed');
@@ -94,7 +108,12 @@ export function saveExperienceEntries(entries: ExperienceEntryInput[]): void {
  * 按查询文本检索相关经验（FTS）。命中即 use_count++ / last_used_at 更新。
  * 查询做安全转义：非法 FTS 语法（引号、特殊符）回退为 token OR 查询，再不行返回空。
  */
-export function findRelevantExperience(query: string, limit = 3): ExperienceHit[] {
+export function findRelevantExperience(
+  query: string,
+  limit = 3,
+  opts?: { botId?: string; allowShared?: boolean },
+): ExperienceHit[] {
+  const { botId = 'self', allowShared = true } = opts ?? {};
   try {
     const db = getDb();
     const tokens = query
@@ -105,22 +124,36 @@ export function findRelevantExperience(query: string, limit = 3): ExperienceHit[
       .slice(0, 6);
     if (!tokens.length) return [];
     const ftsQuery = tokens.map((t) => `"${t}"`).join(' OR ');
+    const whereShared = allowShared
+      ? ` AND (e.origin_bot = ? OR (e.origin_bot != ? AND e.verified = 1))`
+      : ` AND e.origin_bot = ?`;
+    const args = allowShared ? [ftsQuery, botId, botId, limit * 3] : [ftsQuery, botId, limit * 3];
+    const placeholders = allowShared ? 4 : 3;
     const rows = db
       .prepare(
-        `SELECT e.id, e.content, e.kind FROM experience_fts f
+        `SELECT e.id, e.content, e.kind, e.verified, e.origin_bot FROM experience_fts f
          JOIN experience_entries e ON e.id = f.rowid
-         WHERE experience_fts MATCH ?
+         WHERE experience_fts MATCH ?${whereShared}
          ORDER BY rank LIMIT ?`,
       )
-      .all(ftsQuery, limit * 3) as { id: number; content: string; kind: string }[];
+      .all(...(args.slice(0, placeholders) as [string, string, number])) as { id: number; content: string; kind: string; verified: number; origin_bot: string }[];
     if (!rows.length) return [];
-    // FTS rank（相关性）优先，相关性相当时新经验优先曝光。
-    // ORDER BY rank 已按相关性排好，这里只在截取前按 id DESC 稳定同分序，不再重排。
-    const picked = rows.slice(0, limit);
+    // FTS rank(相关性)优先,但 verified=2(可疑)降权排最后,verified=1(已证实)优先。
+    const sorted = [...rows].sort((a, b) => {
+      const va = a.verified === 2 ? 2 : a.verified === 1 ? 0 : 1;
+      const vb = b.verified === 2 ? 2 : b.verified === 1 ? 0 : 1;
+      return va - vb;
+    });
+    const picked = sorted.slice(0, limit);
     const bump = db.prepare(`UPDATE experience_entries SET use_count = use_count + 1, last_used_at = ? WHERE id = ?`);
     const ts = nowSec();
     for (const r of picked) bump.run(ts, r.id);
-    return picked.map((r) => ({ content: r.content, kind: r.kind }));
+    return picked.map((r) => ({
+      id: r.id,
+      content: r.content,
+      kind: r.kind,
+      signal: r.verified === 1 ? 1 : r.verified === 2 ? 0 : 0.5,
+    }));
   } catch (err) {
     logger.debug({ err }, 'findRelevantExperience failed (non-fatal)');
     return [];

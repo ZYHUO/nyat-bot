@@ -559,7 +559,8 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             `[goal:${goal.id}] 持续关注：「${goal.topic}」。` +
             `用 web.search 搜一下最新进展，或翻看最近聊天里有没有相关话题。` +
             (goal.last_finding ? `上次发现：${goal.last_finding}——看看有没有新进展。` : `这是第一次检查。`) +
-            `有新发现就 sendText 简短汇报一次，没有就什么都不说直接 runtime.endTask。` +
+            `世界可能悄悄变了——主动探查，注意发现没人告诉你的变化(版本更新/价格变动/新消息)。` +
+            `有新发现就 sendText 简短汇报一次(自然分享，不像新闻播报)，没有就什么都不说直接 runtime.endTask。` +
             `最后必须 runtime.endTask("found: …" 或 "no_update")。`,
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
@@ -591,6 +592,25 @@ export async function runUnifiedTick(): Promise<void> {
       return;
     }
     const state = await buildWorldState();
+    // AGI L5 L3: 群氛围推断 —— 活跃群且 norms 过期/缺失时补一次(便宜链,失败静默)。
+    if (e.GROUP_NORMS_ENABLED) {
+      try {
+        const { needsRefresh, inferGroupNorms } = await import('../agent/group-norms.js');
+        for (const g of state.groups ?? []) {
+          if (!needsRefresh(g.chatId, e.GROUP_NORMS_TTL_HOURS * 3600)) continue;
+          const recent = g.lastTexts
+            .split('\n')
+            .map((t) => t.trim())
+            .filter((t) => t.length >= 2)
+            .slice(-15);
+          if (recent.length >= 5) {
+            void inferGroupNorms({ chatId: g.chatId, recentMessages: recent }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'group norms refresh failed');
+      }
+    }
     const verdict = await decideTick(state);
     await executeVerdict(verdict, state);
   } catch (err) {
