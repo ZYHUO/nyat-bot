@@ -139,6 +139,17 @@ export function startCronJobs(deps?: CronDeps): void {
     }));
   }
 
+  // AGI L6 Phase 13.4: 任务唤醒 —— 到点(next_wake)的任务派发执行。
+  // 连续性的物理实现: bot 不是被消息唤醒,是被自己的任务唤醒。
+  if (env().TASK_EXECUTOR_ENABLED) {
+    tasks.push(schedule('* * * * *', () => {
+      void safeRun('task-wake', async () => {
+        const { wakeDueTasks } = await import('./task-wake.js');
+        await wakeDueTasks();
+      });
+    }));
+  }
+
   // 功能 A3:每日「今日感想」生成(每小时跑,内部按 BJ 日去重,只生成一次)。
   if (env().SCHOOL_SCHEDULE_ENABLED) {
     tasks.push(schedule('40 * * * *', () => {
