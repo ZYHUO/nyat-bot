@@ -24,22 +24,6 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
     })();
   }
 
-  // Topic watch notifications
-  if (chatId < 0 && !formatted.isBot && formatted.textContent) {
-    void (async () => {
-      try {
-        const { checkWatches } = await import('../tracking/topic-watch.js');
-        const { sendMessage } = await import('../bot/sender/telegram.js');
-        const watchers = checkWatches(chatId, formatted.textContent, formatted.uid);
-        for (const uid of watchers) {
-          sendMessage(uid, '📢 有人聊到了你追踪的话题喵~').catch(() => {});
-        }
-      } catch (err) {
-        logger.debug({ err, chatId }, 'Meta: topic watch failed');
-      }
-    })();
-  }
-
   // DM wake poke
   if (chatId > 0 && env().SLEEP_WAKE_ON_DM_ENABLED) {
     void import('../tracking/sleep.js')

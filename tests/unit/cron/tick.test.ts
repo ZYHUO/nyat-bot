@@ -189,7 +189,9 @@ describe('runUnifiedTick execution mapping', () => {
     const task = enqueueMock.mock.calls[0]![0] as { contentDirection: string };
     expect(task.contentDirection).toContain('[selfplay]');
     expect(task.contentDirection).toContain('写个贪吃蛇');
-    expect(task.contentDirection).toContain('禁止 telegram.sendText');
+    // 2026-08-19 自主性修复：自玩可见化——做完有意思可以分享一句，不再禁言。
+    expect(task.contentDirection).toContain('sendText 分享一句');
+    expect(task.contentDirection).not.toContain('禁止 telegram.sendText');
     expect(redisStore.get('xxb:selfplay:last')).toBeTruthy();
   });
 

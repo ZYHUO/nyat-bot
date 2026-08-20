@@ -178,6 +178,23 @@ async function handleUpdate(ctx: Context): Promise<void> {
 
         runMetaBookkeepingHooks(chatId, fm);
 
+        // Post-task 发酵窗口:人类群消息额外缓冲进窗口(附加式,不影响下方任何闸门)。
+        // 放在 mute/sleep/heart 之前——被这些闸门丢掉的非 direct 消息恰恰是窗口要捞的。
+        if (fm.role === 'user' && !fm.isBot) {
+          try {
+            const { ingestIncomingPostTask } = await import('../../subagent/post-task-window.js');
+            ingestIncomingPostTask(chatId, {
+              messageId: fm.messageId,
+              userId: fm.uid,
+              username: fm.username || fm.fullName,
+              textPreview: (fm.textContent || rawText).slice(0, 200),
+              messageThreadId: fm.messageThreadId,
+            });
+          } catch (err) {
+            logger.debug({ err, chatId, messageId }, 'post-task window ingest failed');
+          }
+        }
+
         if (metaMuteBlocksReply(chatId, fm, isDirect)) {
           logger.debug({ chatId, uid: fm.uid }, 'Meta path: muted, skip Attention');
           return 'done';

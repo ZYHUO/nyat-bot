@@ -19,11 +19,9 @@ import { maybeReact } from "../reactions.js";
 import { recordInteraction } from "../../tracking/social-graph.js";
 import { getRedis } from "../../db/redis.js";
 import { callWithFallback } from "../../ai/fallback.js";
-import { sendMessage } from "../../bot/sender/telegram.js";
 import { getBotUid } from "../../bot/bot.js";
 import { env } from "../../env.js";
 import { logger } from "../../shared/logger.js";
-import { checkWatches } from "../../tracking/topic-watch.js";
 import { recordMessage as recordStatMessage } from "../../tracking/stats.js";
 import { bumpGatePendingCount } from "../timing/state-store.js";
 import { playGame, hasActiveGame } from "../games/manager.js";
@@ -163,16 +161,6 @@ export async function runBookkeeping(ctx: {
   // 3.51 Stats (fire-and-forget)
   if (!formatted.isBot) {
     try { recordStatMessage(job.chatId, formatted.uid); } catch (err) { logger.debug({ err, chatId: job.chatId }, 'recordStatMessage failed'); }
-  }
-
-  // 3.52 Topic watch notifications (fire-and-forget)
-  if (job.chatId < 0 && !formatted.isBot && formatted.textContent) {
-    try {
-      const watchers = checkWatches(job.chatId, formatted.textContent, formatted.uid);
-      for (const uid of watchers) {
-        sendMessage(uid, `📢 有人聊到了你追踪的话题喵~`).catch((err) => logger.debug({ err, uid }, 'topic-watch notify failed (non-critical)'));
-      }
-    } catch (err) { logger.debug({ err, chatId: job.chatId }, 'Topic watch check failed'); }
   }
 
   // 3.6 Bot interaction tracking(D 降噪:ad/verify/echo 不进 digest/学习)

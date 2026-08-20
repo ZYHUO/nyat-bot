@@ -20,6 +20,12 @@ export interface DispatchArgs {
   interrupt?: boolean;
   /** Telegram forum topic (supergroup thread) id; routes reply into the correct topic. */
   messageThreadId?: number;
+  /**
+   * 跳过 dispatch 期 timing gate。autoDispatchL0 已自带 gate（非 L0 时）所以
+   * 必须传 true 防双重裁决；工作型 dispatch（日记 ack 等 direct 回应）也可传。
+   * Meta LLM 主动 gap-fill 的闲聊 dispatch 不传 —— 那正是 gate 要管的。
+   */
+  skipDispatchGate?: boolean;
 }
 
 export function buildMetaApiContext(opts?: {
@@ -120,6 +126,36 @@ export function buildMetaApiContext(opts?: {
         }
       } catch {
         /* fail-open */
+      }
+
+      // Dispatch 期 timing gate：Heart/Meta 决定「说不说」，gate 决定「什么时候说」。
+      // L0 direct / L1_CALLBACK 在 helper 内 bypass；autoDispatch 传 skipDispatchGate
+      // 因为上面已经带过完整上下文跑过一次。gate 决策 wait/defer/no_action →
+      // suppress（wait-resume / defer ZSET 负责到点重评，不丢消息）。
+      if (layer !== 'L0' && !args.skipDispatchGate) {
+        try {
+          const { evaluateDispatchGate } = await import('./dispatch-gate.js');
+          const gate = await evaluateDispatchGate({
+            chatId: cid,
+            layer,
+            reason: 'meta_llm_dispatch',
+            messageId: quotes[0],
+            userId: args.targetUserId,
+            textPreview: args.contentDirection.slice(0, 200),
+            messageThreadId: args.messageThreadId,
+            deferCount: 0,
+          });
+          if (gate.verdict === 'suppress') {
+            unclaim();
+            logger.info(
+              { chatId: cid, layer, reason: gate.reason },
+              'Meta dispatch suppressed by timing gate',
+            );
+            return { taskId: 'gate_suppressed' };
+          }
+        } catch (err) {
+          logger.warn({ err, chatId: cid }, 'Meta dispatch gate failed — fail-open dispatch');
+        }
       }
 
       const quoteId = quotes[0];

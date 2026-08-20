@@ -256,6 +256,25 @@ export function startCronJobs(deps?: CronDeps): void {
     if (any) logger.info({ crons: exprs }, 'Dream journal cron enabled');
   }
 
+  // Dreaming 做梦(CGM background-agent 简化版):凌晨把「上次做梦以来」的
+  // 素材打包,派发一个特权长 CodeAct 任务到主人 DM 自主夜战。默认关。
+  if (env().DREAMING_ENABLED) {
+    const dreamingCron = env().DREAMING_CRON;
+    if (validate(dreamingCron)) {
+      tasks.push(
+        schedule(dreamingCron, () => {
+          void safeRun('dreaming', async () => {
+            const { runDreaming } = await import('./dreaming.js');
+            await runDreaming();
+          });
+        }),
+      );
+      logger.info({ cron: dreamingCron }, 'Dreaming cron enabled');
+    } else {
+      logger.warn({ expr: dreamingCron }, 'Invalid DREAMING_CRON, dreaming cron disabled');
+    }
+  }
+
   // AGI Level 5 Phase 2: Dreaming 整合 — 每周日 04:17 低峰。
   if (env().DREAM_CONSOLIDATE_ENABLED) {
     tasks.push(

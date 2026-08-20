@@ -117,43 +117,14 @@ async function handleBootstrap(
   };
 }
 
-async function handleSubmit(
-  deps: ApiDeps,
-  user: TelegramUser,
-  body: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const chatId = Number(body.chat_id);
-  const note = String(body.note ?? '');
-  const chatTitle = String(body.chat_title ?? '');
-
-  if (!chatId || isNaN(chatId)) {
-    return { ok: false, error: 'invalid_chat_id' };
-  }
-
-  const result = await allowlist.submit(deps.redis, deps.config, {
-    chatId,
-    userId: user.id,
-    username: user.username,
-    firstName: user.first_name,
-    lastName: user.last_name,
-    note,
-    chatTitle,
-  });
-
-  // Dispatch auto AI review if enabled
-  if (result.ok && deps.config.autoAiReviewOnSubmit && result.request_id) {
-    void aiReview
-      .runAiReview(deps.redis, deps.config, result.request_id, {
-        aiCall: deps.aiCall,
-        getRecentContext: deps.getRecentContext,
-        getChat: async (cid: number) => {
-          return tryGetChat(deps.bot, cid);
-        },
-      })
-      .catch((err: unknown) => logger.warn({ err, chatId }, 'Auto AI review failed'));
-  }
-
-  return { ...result };
+// 2026-08-20 起申请入口搬到 bot 对话（私聊 bot 报群 ID/@username，AI 自动审核）。
+// miniapp submit 路由保留但只回迁移提示——旧前端用户能看到引导而不是莫名 404。
+function handleSubmitMovedToBot(): Record<string, unknown> {
+  return {
+    ok: false,
+    error: 'moved_to_bot',
+    message: '白名单申请已搬家：直接私聊 bot，把群 ID 或 @群username 发给 ta 就能申请，bot 会自动审核。',
+  };
 }
 
 async function handleMySubmissions(
@@ -556,7 +527,7 @@ export function createAdminApi(deps: ApiDeps): Hono {
           return c.json(await handleBootstrap(deps, user, master));
         // User-accessible actions (any authenticated user):
         case 'submit':
-          return c.json(await handleSubmit(deps, user, body));
+          return c.json(handleSubmitMovedToBot());
         case 'my_submissions':
           return c.json(await handleMySubmissions(deps, user));
         case 'check_bot_permissions':

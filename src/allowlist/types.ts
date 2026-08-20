@@ -33,6 +33,10 @@ export interface PendingRequest {
   ai_reason: string;
   ai_reviewed_at?: number;
   review_state: 'needs_manual' | 'auto_approved';
+  /** 申请来源：miniapp（旧入口）/ dm（私聊 bot 申请）/ join（bot 入群自动审核）。 */
+  source?: 'miniapp' | 'dm' | 'join';
+  /** 申请人在目标群的成员身份（bot 在群里能查到时回填）。 */
+  applicant_member_status?: string;
 }
 
 export interface AllowlistConfig {

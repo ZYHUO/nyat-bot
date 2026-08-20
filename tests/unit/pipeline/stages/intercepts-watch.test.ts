@@ -37,7 +37,6 @@ beforeEach(() => {
   db = new Database(':memory:');
   db.exec(readFileSync(join(__dirname, '../../../../migrations/0055_goals.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../../migrations/0059_goal_long_term.sql'), 'utf8'));
-  db.exec(readFileSync(join(__dirname, '../../../../migrations/0012_topic_watches.sql'), 'utf8'));
   sendDirectMock.mockReset();
 });
 
@@ -56,12 +55,11 @@ describe('dispatchCommand /watch 分流', () => {
     expect(String(sendDirectMock.mock.calls[0]![1])).toContain('比特币');
   });
 
-  it('群聊(chatId<0)→ 不落 goals 表(老 addWatch 路径)', async () => {
-    // 群聊 watch 不 import goals 的 createGoal —— 用 spy 确认 goals 表没行。
+  it('群聊(chatId<0)→ 关键词追踪已删,返回 false 落回正常回复流(2026-08-19)', async () => {
     const handled = await dispatchCommand(-100123, formatted, '/watch', '显卡');
-    expect(handled).toBe(true);
+    expect(handled).toBe(false);
     expect(listGoals('active')).toHaveLength(0);
-    expect(sendDirectMock).toHaveBeenCalledOnce();
+    expect(sendDirectMock).not.toHaveBeenCalled();
   });
 
   it('重复 topic 不重复建 goal(createGoal 去重)', async () => {

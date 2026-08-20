@@ -11,6 +11,7 @@ import { getDb } from '../db/sqlite.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { logger } from '../shared/logger.js';
+import { env } from '../env.js';
 
 const MAX_PAIRS_PER_TICK = 6;
 const MIN_INTERACTIONS = 10;
@@ -76,6 +77,19 @@ export async function runRelationshipSummarize(): Promise<void> {
       logger.info({ chatId: pair.chat_id, uid: pair.uid, summary }, 'relationship-summarize: updated');
     } catch (err) {
       logger.debug({ err, chatId: pair.chat_id, uid: pair.uid }, 'relationship-summarize: pair failed');
+    }
+  }
+
+  // #2 关系评分量化: 每日全量重算分位评分 + Dunbar 分层落 quant_* 侧车列,
+  // (RELATIONSHIP_PROFILE_TRIM_ENABLED 开时) 再按 tier 裁剪画像。独立 flag 门控,
+  // 与上面的叙事概括互不干扰 —— 这里挂了不影响 summarize 已写入的结果。
+  if (env().RELATIONSHIP_QUANT_ENABLED) {
+    try {
+      const { recomputeAllChats } = await import('../tracking/relationship-quant.js');
+      const result = recomputeAllChats();
+      logger.info(result, 'relationship-quant: daily recompute done');
+    } catch (err) {
+      logger.warn({ err }, 'relationship-quant: daily recompute failed');
     }
   }
 }

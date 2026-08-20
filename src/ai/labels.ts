@@ -31,6 +31,7 @@ export function getLabels(): Map<string, AILabel> {
       forceRaw: p.forceRaw,
       timeout: p.timeout,
       maxTokens: p.maxTokens,
+      temperature: p.temperature,
       capabilities: p.vision !== undefined ? { vision: p.vision } : undefined,
     });
   }

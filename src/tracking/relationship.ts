@@ -21,6 +21,7 @@ import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { decayValence } from './mood.js';
+import { accumulateQualityEvent } from './relationship-quant.js';
 
 // Per-hour exponential decay applied to stored affinity on read (read-side only,
 // never written back). magnitude *= (1 - rate)^hoursSinceLastInteraction.
@@ -144,6 +145,10 @@ export function applyRelationshipEvent(
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(chatId, uid, nextAffinity, nextCount, now, nextSummary ?? '', now);
     }
+
+    // #2 量化评分: 事件映射为 quality delta 累积侧车, cron 重算时消费清零。
+    // 必须在 upsert 之后 (accumulate 是 UPDATE, 需要行已存在)。flag 关时 no-op。
+    accumulateQualityEvent(chatId, uid, summary ?? '');
 
     logger.debug(
       { chatId, uid, delta, affinity: nextAffinity, count: nextCount },

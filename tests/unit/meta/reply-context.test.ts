@@ -74,7 +74,9 @@ describe('reply-context', () => {
       messageId: 1,
       textPreview: '吃了吗',
     });
-    expect(d).toMatch(/短回 @u 的消息 #1/);
+    // 中性方向（2026-08-19）：不再写死「短回」，闲聊/干活交给 executor 判断。
+    expect(d).toMatch(/回应 @u 的消息 #1/);
+    expect(d).not.toMatch(/短回 @u/);
     expect(d).not.toMatch(/禁止空问候/);
     expect(d).not.toMatch(/短接话/);
   });

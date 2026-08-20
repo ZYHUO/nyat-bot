@@ -8,6 +8,7 @@ import { getDb } from '../db/sqlite.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
+import { recordRelationshipActivity } from './relationship-quant.js';
 const MAX_PENDING = 50;      // 积累多少条消息再总结
 const MIN_PENDING_TO_SUMMARIZE = 8;
 const MAX_PROMPT_CHARS = 600;
@@ -94,6 +95,8 @@ export function recordUserMessage(
   text: string,
 ): void {
   if (!text.trim()) return;
+  // #2 关系评分量化: 记 30 天窗口日活 (侧车表; flag 关时 no-op, 自身 fail-soft)。
+  recordRelationshipActivity(chatId, uid);
   const key = `${chatId}:${uid}`;
   let entry = _writeBuffer.get(key);
   if (!entry) {

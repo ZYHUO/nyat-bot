@@ -6,7 +6,6 @@ import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
 import { pruneReviewed } from '../allowlist/allowlist.js';
-import { cleanExpired } from '../tracking/topic-watch.js';
 import { pruneOldSelfReplies } from '../tracking/self-history.js';
 import { getDb } from '../db/sqlite.js';
 
@@ -65,13 +64,6 @@ export async function runCleanup(deps?: CleanupDeps): Promise<void> {
 
   // 5. Clean up stale submit dedup locks
   // (Handled by Redis TTL on the lock keys)
-
-  // 6. Clean expired topic watches
-  try {
-    cleanExpired();
-  } catch (err) {
-    logger.warn({ err }, 'Failed to clean expired topic watches');
-  }
 
   // 6.5 G10: prune stale single-occurrence learnings (expressions/jargons)
   try {

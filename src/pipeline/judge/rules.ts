@@ -31,9 +31,8 @@ const WHITELISTED_COMMANDS = new Set([
   "/stats",
   "/muteme",
   "/unmuteme",
+  // /watch 仅保留 DM→goals 路径；群聊关键词追踪已删（2026-08-19）。
   "/watch",
-  "/unwatch",
-  "/watches",
   "/game",
   "/feature",
   "/setdefault",

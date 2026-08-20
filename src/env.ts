@@ -204,6 +204,12 @@ const envSchema = z.object({
   // 自助把 bot 激活进任意群,而 submit 动作不校验提交者是否该群群管。
   ALLOWLIST_AI_AUTO_ENABLE: booleanFromEnv.default(false),
   ALLOWLIST_AI_CONFIDENCE_THRESHOLD: z.coerce.number().default(0.85),
+  // Bot 对话流申请（2026-08-20 起替代 miniapp 提交）：申请人私聊 bot 报群 ID/@username，
+  // bot 调 allowlist.apply 自动审核——申请人须为目标群 creator/administrator 才允许
+  // AI 通过即启用（身份经 getChatMember 核实），否则 AI 结论只作建议转主人评判。
+  ALLOWLIST_BOT_FLOW_ENABLED: booleanFromEnv.default(false),
+  // bot 被拉进群 → 立即自动跑一遍 AI 审核（不等申请）。拉群人是群管理才可自动启用。
+  ALLOWLIST_REVIEW_ON_JOIN: booleanFromEnv.default(false),
 
   // ── Proactive Engagement (Stage B) ──
   JUDGE_PROACTIVE_ENABLED: booleanFromEnv.default(false),
@@ -606,6 +612,69 @@ const envSchema = z.object({
    * 而非永久丢弃。需 TIMING_GATE_ENABLED + META_SUBAGENT_ENABLED 同开。默认关。
    */
   META_DEFER_ENABLED: booleanFromEnv.default(false),
+  /**
+   * Dispatch 期 timing gate：把 runTimingGate 挂到 CodeAct dispatch 前——
+   * Heart/Meta 决定「说不说」，gate 决定「什么时候说」（老 pipeline 里
+   * judge=REPLY 之后、reply 之前那道节奏闸的 meta 等价物）。
+   * L0 direct / L1_CALLBACK bypass；其余（heart 插话、Meta LLM gap-fill
+   * 闲聊）过完整短路层（continuation 免检 / 冷却 defer / talk-value）+ LLM。
+   * 需 TIMING_GATE_ENABLED 同开；建议配合 META_DEFER_ENABLED。默认关。
+   */
+  META_DISPATCH_GATE_ENABLED: booleanFromEnv.default(false),
+  /**
+   * 承诺闭环（promise loop）：说出口的承诺必须落地——
+   * ① telegram.sendToChat 跨群送达（仅主人 DM 任务，限 2 次/任务）；
+   * ② goals.add 把「等下/回头要做的事」立成关注目标（unified-tick 到点执行）；
+   * ③ endTask 兜底：bot 自己发的文本含承诺措辞但既没 goals.add 也没 sendToChat
+   *    → 自动补立 goal（origin promise-backstop）。默认关。
+   */
+  PROMISE_LOOP_ENABLED: booleanFromEnv.default(false),
+  // 承诺兜底判定用的 AI usage 名（便宜快模型；LLM 判定非规则引擎）。
+  PROMISE_CHECK_USAGE: z.string().default('reflection'),
+  /**
+   * Post-Task Window（CGM 借鉴）：CodeAct 发完消息后开一个短暂发酵窗口，
+   * 窗口内新消息由极轻量 LLM 判定「有没有人接住我刚才的话」，命中则不过
+   * Meta 直接补一轮 CodeAct 回复。默认关。
+   */
+  POST_TASK_WINDOW_ENABLED: booleanFromEnv.default(false),
+  // 发酵窗口时长(ms)。默认 2 分钟。
+  POST_TASK_WINDOW_MS: z.coerce.number().int().positive().default(120_000),
+  // follow-up 判定用的 AI usage 名（便宜快模型）。
+  POST_TASK_FOLLOWUP_USAGE: z.string().default('judge'),
+  /**
+   * Session Digest 持久化（CGM 借鉴）：Meta/Subagent 每 session 的
+   * [SESSION_DIGEST] 落 SQLite session_digests 表（FTS5 可检索），
+   * 后续 session 按 delta 注入；Subagent 侧没输出 digest 不让 endTask。默认关。
+   */
+  DIGEST_PERSIST_ENABLED: booleanFromEnv.default(false),
+  /**
+   * Dreaming（CGM background-agent 简化版）：凌晨 cron 触发一个特权长任务，
+   * 带着「上次做梦以来的任务/人/digest」素材自主行动（查资料/关心人/小工具）。
+   * 默认关。
+   */
+  DREAMING_ENABLED: booleanFromEnv.default(false),
+  // dreaming cron（UTC）。默认 19:17 UTC = 北京 03:17。
+  DREAMING_CRON: z.string().default('17 19 * * *'),
+  // dreaming 长任务用的 AI usage 名。
+  DREAMING_USAGE: z.string().default('reply'),
+  /**
+   * Grounding 并行事实核查（CGM 借鉴）：heart/meta 决策的同时并行跑脱敏搜索，
+   * 结果注入 CodeAct executor 作 grounding 参考；无搜索证据则丢弃。默认关。
+   */
+  GROUNDING_ENABLED: booleanFromEnv.default(false),
+  // grounding 搜索综合用的 AI usage 名（便宜快模型）。
+  GROUNDING_USAGE: z.string().default('judge'),
+  /**
+   * 关系评分量化（CGM 借鉴）：affinity 改由量化数据驱动——30 天窗口三维度
+   * 百分位（互动次数/活跃天数/画像深度）+ LLM quality delta + 14 天衰减 +
+   * Dunbar 容量上限（15/50/150 强制降级）。默认关（保持 LLM 直调旧行为）。
+   */
+  RELATIONSHIP_QUANT_ENABLED: booleanFromEnv.default(false),
+  /**
+   * tier 驱动画像精度：按关系 tier 裁剪 user_profiles（Tier1 traits≤10 留 14 天
+   * episodes，Tier4 traits≤1 留 1 天）——不熟的人主动遗忘。默认关。
+   */
+  RELATIONSHIP_PROFILE_TRIM_ENABLED: booleanFromEnv.default(false),
   // 单次 Meta flush 最多处理几个 attention 条目。
   META_ATTENTION_TOP_N: z.coerce.number().int().positive().default(8),
   // Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。
@@ -931,6 +1000,9 @@ export interface EnvProvider {
   timeout?: number;
   /** per-provider maxTokens 覆盖;给推理模型(如 mundo)单独放宽,防被小 maxTokens 截断成空。 */
   maxTokens?: number;
+  /** per-provider temperature 强制覆盖(调用方显式值也让位):给只接受固定温度的模型
+   *  (如 kimi-k3 只允许 temperature=1,否则 400 invalid temperature)。 */
+  temperature?: number;
   /** 声明是否支持图片输入(P2 多模态回复)。undefined=未知(照发,provider 自己拒);
    *  false=明确不支持(带图调用直接跳过该 label,不白烧一跳)。 */
   vision?: boolean;
@@ -1123,7 +1195,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'RAW', 'VISION'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE', 'RAW', 'VISION'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -1155,6 +1227,7 @@ export function getProviders(): Map<string, EnvProvider> {
       forceRaw: readBool(fields['RAW']),
       timeout: (() => { const n = fields['TIMEOUT'] ? parseInt(fields['TIMEOUT'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
       maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
+      temperature: (() => { const n = fields['TEMPERATURE'] ? parseFloat(fields['TEMPERATURE']) : NaN; return Number.isFinite(n) ? n : undefined; })(),
       vision: readBool(fields['VISION']),
     });
   }

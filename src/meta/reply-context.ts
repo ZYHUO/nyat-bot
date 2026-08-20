@@ -105,7 +105,10 @@ export function buildL0ContentDirection(opts: {
 }): string {
   const burst = opts.burstHint ?? '';
   const master = opts.masterHint ?? '';
-  const tail = `${burst}${master}禁止复读用户原话；用本喵口吻接一句。`;
+  // 中性方向：只给事实（谁/哪条/上下文），「闲聊还是干活」完全交给 executor 判断。
+  // 历史教训（2026-08-19 七夕券事故）：写死「短回…接一句」会把「快去发」这类
+  // 行动指令压成闲聊——弱模型听方向不听规则，撒娇完事不办事。
+  const tail = `${burst}${master}禁止复读用户原话。闲聊就自然接一句；是做事的指令（送/发/查/写/提醒）就去做完再回。`;
   const mid = opts.messageId ? `#${opts.messageId}` : '';
   const preview = String(opts.textPreview ?? '')
     .replace(/\s+/g, ' ')
@@ -152,7 +155,7 @@ export function buildL0ContentDirection(opts: {
     );
   }
   if (opts.messageId) {
-    return `短回 ${opts.who} 的消息 #${opts.messageId}（内容见最近聊天）。${tail}`;
+    return `回应 ${opts.who} 的消息 #${opts.messageId}（内容见最近聊天）。${tail}`;
   }
-  return `短回 ${opts.who}（内容见最近聊天）。${tail}`;
+  return `回应 ${opts.who}（内容见最近聊天）。${tail}`;
 }

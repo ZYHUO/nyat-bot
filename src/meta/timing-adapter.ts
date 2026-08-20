@@ -30,7 +30,7 @@ import { scheduleMetaDeferReeval } from './defer.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
-interface MetaWaitAnchor {
+export interface MetaWaitAnchor {
   chatId: number;
   layer: AttentionLayer;
   reason: string;
@@ -46,7 +46,7 @@ function waitAnchorKey(chatId: number): string {
   return `xxb:meta:wait-anchor:${chatId}`;
 }
 
-async function setMetaWaitAnchor(anchor: MetaWaitAnchor, ttlSec: number): Promise<void> {
+export async function setMetaWaitAnchor(anchor: MetaWaitAnchor, ttlSec: number): Promise<void> {
   const redis = getRedis();
   await redis.set(waitAnchorKey(anchor.chatId), JSON.stringify(anchor), 'EX', Math.max(60, ttlSec));
 }
