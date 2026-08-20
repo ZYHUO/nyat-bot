@@ -32,18 +32,15 @@ describe('detectCommandIntent', () => {
     expect(detectCommandIntent('谁想要我的卡')).toEqual({ cmd: '/wish', arg: 'wanted', kind: 'intercept' });
   });
 
-  it('watch / unwatch / watches', () => {
-    expect(detectCommandIntent('追踪比特币')).toEqual({ cmd: '/watch', arg: '比特币', kind: 'intercept' });
-    expect(detectCommandIntent('帮我留意一下显卡')).toEqual({ cmd: '/watch', arg: '显卡', kind: 'intercept' });
-    expect(detectCommandIntent('取消追踪比特币')).toEqual({ cmd: '/unwatch', arg: '比特币', kind: 'intercept' });
-    expect(detectCommandIntent('我追踪了什么')).toEqual({ cmd: '/watches', arg: '', kind: 'intercept' });
-    // 关注比特币 仍应触发(关注 作动词)
-    expect(detectCommandIntent('关注比特币')).toEqual({ cmd: '/watch', arg: '比特币', kind: 'intercept' });
-    // 回归:「关注点」「关注度」是名词,疑问句片段不应误触发 /watch
-    expect(detectCommandIntent('怎么关注点都一样')).toBeNull();
-    expect(detectCommandIntent('大家关注点都一样啊')).toBeNull();
-    expect(detectCommandIntent('这个关注度好高')).toBeNull();
-    expect(detectCommandIntent('我的关注点是性能')).toBeNull();
+  it('watch 关键词追踪已删除：相关表述一律不落命令（2026-08-19）', () => {
+    // 群聊关键词追踪功能下线后，NL 路由不再产出 /watch /unwatch /watches。
+    // 「留意/关注/追踪」类日常对话必须原样落到正常回复流。
+    expect(detectCommandIntent('追踪比特币')).toBeNull();
+    expect(detectCommandIntent('帮我留意一下显卡')).toBeNull();
+    expect(detectCommandIntent('取消追踪比特币')).toBeNull();
+    expect(detectCommandIntent('我追踪了什么')).toBeNull();
+    expect(detectCommandIntent('关注比特币')).toBeNull();
+    expect(detectCommandIntent('诺亚帮你留意着，不让这份心意落空')).toBeNull();
   });
 
   it('party games', () => {

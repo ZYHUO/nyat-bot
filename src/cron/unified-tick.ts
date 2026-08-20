@@ -46,6 +46,10 @@ export interface WorldState {
   rssNewCount: number;
   selfPlayCooldownLeftSec: number;
   lastCareAgoSec: number;
+  /** 各活跃群当前在聊的话题（topic-registry）——给 tick 可跟进的「料」（2026-08-19 自主性修复）。 */
+  topics?: { chatId: number; label: string }[];
+  /** 最近几条 session digest（bot 自己的连续叙事：刚做过什么/还在等什么）。 */
+  recentDigests?: string[];
 }
 
 const LAST_CARE_KEY = 'xxb:proactive:last_care:';
@@ -57,8 +61,8 @@ const REMEMBER_USER_KEY = 'xxb:proactive:remember:'; // + chatId:uid
 const CARE_MASTER_MIN_SILENT_SEC = 4 * 3600;
 /** 两次主动关心最少间隔，防「刚关心完又关心」刷屏。 */
 const CARE_MASTER_MIN_INTERVAL_SEC = 4 * 3600;
-/** group_speak 硬门槛：与 prompt「沉默 <60min 不该选」对齐。 */
-const GROUP_SPEAK_MIN_SILENT_SEC = 60 * 60;
+/** group_speak 硬门槛：与 prompt「冷场 >20min 可冒泡」对齐；有料分享也走这道底线，防压着活人聊天。 */
+const GROUP_SPEAK_MIN_SILENT_SEC = 20 * 60;
 /** 同一群两次主动冒泡最少间隔（读 LAST_POKE，此前只写不读）。 */
 const GROUP_POKE_MIN_INTERVAL_SEC = 2 * 3600;
 /** remember_user 同一人冷却。 */
@@ -204,6 +208,38 @@ export async function buildWorldState(): Promise<WorldState> {
     }
   }
 
+  // 群话题 + 自己的最近叙事（2026-08-19 自主性修复：世界状态没「料」→ 决策只有 quiet）。
+  // topics: 各活跃群当前话题（topic-registry，每群取前 2）；recentDigests: 最近 3 条
+  // session digest（bot 自己刚做过/还在等的事，延续性比沉默分钟数更能驱动有意义的动作）。
+  const topics: NonNullable<WorldState['topics']> = [];
+  try {
+    const { getActiveTopics } = await import('../tracking/topic-registry.js');
+    for (const g of groups) {
+      try {
+        for (const t of getActiveTopics(g.chatId, 2)) {
+          topics.push({ chatId: g.chatId, label: t.label });
+        }
+      } catch { /* skip chat */ }
+    }
+  } catch { /* keep empty */ }
+
+  let recentDigests: string[] = [];
+  try {
+    if (e.DIGEST_PERSIST_ENABLED) {
+      const { recentDigests: rd } = await import('../meta/session-digest.js');
+      recentDigests = rd(3).map((d) => d.text.slice(0, 120));
+    }
+    if (recentDigests.length === 0) {
+      const raw = await redis.lrange('xxb:meta:digests', 0, 2);
+      for (const r of raw) {
+        try {
+          const parsed = JSON.parse(r) as { text?: string };
+          if (parsed.text) recentDigests.push(parsed.text.slice(0, 120));
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* keep empty */ }
+
   return {
     hourBeijing: hourBeijing(),
     masterSilentSec,
@@ -214,6 +250,8 @@ export async function buildWorldState(): Promise<WorldState> {
     rssNewCount,
     selfPlayCooldownLeftSec,
     lastCareAgoSec,
+    topics,
+    recentDigests,
   };
 }
 
@@ -263,14 +301,14 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 
 可选动作（只能选一个）：
 - care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
-- group_speak: 某个群冷场了，去冒个泡。chatId=目标群。沉默 <60min 的群不该选；选沉默最久且最近聊得不错的。
+- group_speak: 有真实想分享的就开口——跟进群里在聊的话题、分享你最近做的有意思的事（见 session digest）、或群里冷场超过 20 分钟去自然冒个泡。chatId=目标群。**没料的硬冒泡不如安静**；别复读你 digest 里刚分享过的同一件事。
 - remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
 - self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索）。idea+plan。自玩是私下练习，不是给主人表演；不要把自玩主题写进 care_master。
 - check_goal: 有到期关注目标，去查查进展。goalId。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
 
 判断原则（像真人，不像机器）：
-- 真人不会每 5 分钟都想说话。quiet 是默认，其他动作要有真实理由。
+- 真人不会每 5 分钟都想说话。quiet 仍是常见答案，但**有料就该动**——群里的话题可以跟进、自己刚做成的事可以分享、冷场可以自然冒泡。
 - 深夜（23-8 点）除非主人刚发过消息，否则 quiet。
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
 - 上下文里刚出现过你自己的自玩汇报时，下一周期优先 quiet，不要用 care_master 继续推销。
@@ -292,6 +330,12 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         .map((u) => `  ${u.name}(群 ${u.chatId})已 ${u.absentDays} 天没出现`)
         .join('\n')
     : '  (没有长时间缺席的熟面孔)';
+  const topicLines = (state.topics ?? []).length
+    ? state.topics!.map((t) => `  群 ${t.chatId}: 「${t.label}」`).join('\n')
+    : '  (没有明显话题)';
+  const digestLines = (state.recentDigests ?? []).length
+    ? state.recentDigests!.map((d) => `  - ${d}`).join('\n')
+    : '  (没有)';
   const user = [
     `现在北京时间 ${state.hourBeijing} 点。`,
     ``,
@@ -300,6 +344,12 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `群:`,
     groupLines,
+    ``,
+    `群里在聊的话题:`,
+    topicLines,
+    ``,
+    `你最近做的事（session digest）:`,
+    digestLines,
     ``,
     `缺席的熟面孔:`,
     absentLines,
@@ -424,10 +474,12 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
       const { getBotUid } = await import('../bot/bot.js');
       const silentMin = Math.floor(group.silentSec / 60);
+      // 把 tick 的开口理由带进去（跟进话题/分享近事/冷场冒泡），别只会「沉默 N 分钟」。
+      const why = verdict.reason.trim() ? `开口理由：${verdict.reason.slice(0, 100)}。` : '';
       const text = await generatePersonaProactiveText(
         a.chatId,
         getBotUid(),
-        `[主动开口·冷场] 群里已经沉默 ${silentMin} 分钟了。你可以自然地发起一个话题、接着之前聊的随口说一句、或分享点有意思的。禁止自我介绍、禁止「大家好」式开场。`,
+        `[主动开口] ${why}群里已经沉默 ${silentMin} 分钟。你可以接着群里的话题随口说一句、分享你最近做的有意思的事、或自然发起新话题。禁止自我介绍、禁止「大家好」式开场。`,
       );
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined group speak');
@@ -521,13 +573,15 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const planText = a.plan.length ? `\n计划:\n${a.plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}` : '';
       await enqueueCodeActJob({
         id: `selfplay_${now}_${Math.floor(Math.random() * 1e6)}`,
-        // chatId 仍用主人：沙盒/记忆挂靠身份；host 层 maxText/File=0，禁止任何投递。
+        // chatId 仍用主人：沙盒/记忆挂靠身份；host 层 maxText/File=1，
+        // 做完有意思可以给主人分享一句(+一个产物文件)，没意思就安静结束（2026-08-19 自主性修复）。
         chatId: e.MASTER_UID,
         contentDirection:
           `[selfplay] 自主行动：${a.idea}${planText}\n` +
-          `没有人在等你。这是私下练习：禁止 telegram.sendText / sendFile / sendVoice / sendSticker（会失败）。` +
-          `产物只写沙盒，用 computer.listFiles 确认后 runtime.endTask("做了什么/学到什么")。`,
-        toneGuidance: '自主、专注、零打扰',
+          `没有人在等你。专心做完，做完了自己评判：` +
+          `有意思/值得给主人看 → sendText 分享一句（最多一条；有产物文件可 sendFile 一个），然后 runtime.endTask("做了什么/学到什么")。` +
+          `没意思/没做成 → 不发任何消息，直接 runtime.endTask 老实说明。`,
+        toneGuidance: '自主、专注、做完再说',
         createdAt: Date.now(),
         status: 'queued',
       });
@@ -561,7 +615,8 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             (goal.last_finding ? `上次发现：${goal.last_finding}——看看有没有新进展。` : `这是第一次检查。`) +
             `世界可能悄悄变了——主动探查，注意发现没人告诉你的变化(版本更新/价格变动/新消息)。` +
             `有新发现就 sendText 简短汇报一次(自然分享，不像新闻播报)，没有就什么都不说直接 runtime.endTask。` +
-            `最后必须 runtime.endTask("found: …" 或 "no_update")。`,
+            `这件事如果办不到(目标不存在/没这个能力/试了但失败) → 不许装完成，老实给这个 chat 说一句办不到的原因，endTask("无法完成: 原因")。` +
+            `最后必须 runtime.endTask("found: …"、"no_update" 或 "无法完成: …")。`,
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
           status: 'queued',

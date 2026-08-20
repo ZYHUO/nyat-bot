@@ -10,6 +10,7 @@ import { getGlobalState } from './global-state.js';
 import { buildMetaApiContext } from './meta-api.js';
 import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
+import { persistDigest, recentDigests as recentPersistedDigests } from './session-digest.js';
 import {
   buildL0ContentDirection,
   filterAttentionForMetaLlm,
@@ -426,6 +427,7 @@ async function autoDispatchL0(
         relatedQuotes?: number[];
         targetUserId?: number;
         messageThreadId?: number;
+        skipDispatchGate?: boolean;
       },
     ) => Promise<{ taskId: string }>;
   };
@@ -553,6 +555,53 @@ async function autoDispatchL0(
         masterHint,
       });
 
+    // Dispatch 期 timing gate：整组都是非 L0（heart 插话等被动回复）时，
+    // 派发前过一道节奏闸（wait → 挂起等 resume；no_action/defer → 本次不说）。
+    // 混入任何 L0 direct（@/DM/回复 bot）整组 bypass，对齐老 gate 语义。
+    if (siblings.every((s) => s.layer !== 'L0')) {
+      try {
+        const { evaluateDispatchGate } = await import('./dispatch-gate.js');
+        const gate = await evaluateDispatchGate({
+          chatId,
+          layer: latest.layer,
+          reason: latest.reason,
+          messageId: latest.messageId,
+          userId: latest.userId,
+          textPreview: latest.textPreview,
+          messageThreadId: latest.messageThreadId,
+          payload: latest.payload,
+          deferCount:
+            typeof latest.payload?.['deferCount'] === 'number'
+              ? (latest.payload['deferCount'] as number)
+              : 0,
+        });
+        if (gate.verdict === 'suppress') {
+          logger.info({ chatId, reason: gate.reason }, 'Meta autoDispatch: dispatch gate suppressed');
+          // 本 tick 不再让 Meta LLM 对同 chat 补派（wait/defer 有自己的重评链路）。
+          skipChatIds?.add(chatId);
+          continue;
+        }
+      } catch (err) {
+        logger.warn({ err, chatId }, 'Meta autoDispatch gate failed — fail-open dispatch');
+      }
+    }
+
+    // Grounding 并行核查（GROUNDING_ENABLED 门控）：事实/问题类消息在派发的同时
+    // 后台起联网搜索，digest 存 Redis 由 executor 任务开头自取。fire-and-forget，
+    // 绝不阻塞/失败影响 dispatch。
+    if (env().GROUNDING_ENABLED && latest.messageId) {
+      try {
+        const { maybeStartGrounding } = await import('./grounding.js');
+        void maybeStartGrounding({
+          chatId,
+          messageId: latest.messageId,
+          text: latest.textPreview ?? '',
+        }).catch(() => {});
+      } catch {
+        /* grounding is best-effort */
+      }
+    }
+
     const r = await d.taskToGroup(chatId, {
       contentDirection,
       toneGuidance: '自然接话或干活，根据用户消息自行决定。',
@@ -560,6 +609,8 @@ async function autoDispatchL0(
       relatedQuotes: relatedQuotes.length ? relatedQuotes : undefined,
       targetUserId: latest.userId && latest.userId > 0 ? latest.userId : undefined,
       messageThreadId: latest.messageThreadId,
+      // autoDispatch 已在上方自带 gate（非 L0 时），taskToGroup 里别再过一次。
+      skipDispatchGate: true,
     });
     if (r.taskId === 'skipped_busy') busyChatIds.add(chatId);
     else if (skipChatIds) skipChatIds.add(chatId);
@@ -688,7 +739,10 @@ export async function runMetaSession(
       .map((c) => c.summary)
       .join('; ')
       .slice(0, 240);
-    if (digest) state.addDigest(digest);
+    if (digest) {
+      state.addDigest(digest);
+      persistDigest({ kind: 'meta', text: digest });
+    }
     logger.info(
       { callbacks: callbacks.length, alreadyDispatched: codeRan },
       'Meta callbacks-only session skipped (no re-dispatch)',
@@ -718,8 +772,13 @@ export async function runMetaSession(
           .map((c) => `- task=${c.taskId} chat=${c.chatId} ok=${c.ok} summary=${c.summary.slice(0, 200)}`)
           .join('\n');
 
-  const digestBlock = state
-    .recentDigests(6)
+  // flag 开 → digest 注入改读 SQLite session_digests(全局叙事流,重启不丢);
+  // flag 关 → 维持内存 40 条旧路径。SQLite 读取失败时 recentPersistedDigests 返回 []。
+  const digestBlock = (
+    env().DIGEST_PERSIST_ENABLED
+      ? recentPersistedDigests(6).map((d) => ({ at: d.createdAt * 1000, text: d.text }))
+      : state.recentDigests(6)
+  )
     .map((d) => `- ${formatBeijingNowLine(new Date(d.at))} ${d.text.slice(0, 160)}`)
     .join('\n');
 
@@ -811,6 +870,9 @@ export async function runMetaSession(
   const digest = extractDigest(text) ?? text.slice(0, 240);
   if (digest) {
     state.addDigest(digest);
+    // CGM: digest 永久落 SQLite(FTS 可检索);内存/Redis 写法保持不动做兼容。
+    // flag 关时 persistDigest 内部 no-op,且永不抛出。
+    persistDigest({ kind: 'meta', text: digest });
     // Persist for dream-journal cron (may run same process; Redis survives restart)
     try {
       const { getRedis } = await import('../db/redis.js');

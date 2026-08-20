@@ -11,6 +11,7 @@ import { persistCodeActTask } from './task-store.js';
 import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat } from '../agent/checkpoint.js';
 import { drainInterrupts, isHardStop } from '../agent/interrupts.js';
 import { compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
+import { persistDigest } from '../meta/session-digest.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
 function startTypingHeartbeat(chatId: number): () => void {
@@ -53,14 +54,25 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 
 人格 / 认人 / 回复风格见下方 identity + 主人块 + 当前状态 —— 遵守，勿另起客服腔。
 
+**读工具结果的唯一方式：return**。任何工具的返回值必须 return（或 console.log）出来你才看得到——只调用不 return，你看到的只有 ok。例：return await chats.find('乐乐猫') → 你才能看到群列表；光写 await chats.find(...) 等于白调。
+
 可用全局对象:
 - telegram.sendText(text, replyToMessageId?)  // **必须 await**，再 endTask
 - telegram.sendSticker(fileId) / telegram.react(messageId, emoji)
 - **telegram.sendFile(相对路径, caption?)** — 把沙盒里创建的文件发给用户（sendDocument）。**创建了文件必须用这个发出去**，不要只写不发。
 - telegram.sendVoice(text) — 合成语音发出去（TTS 关闭时返回 {skipped}，属正常）
 - memory.search(query) / memory.recallPerson(uid, query) / memory.recentContext(limit?)
+- memory.searchDigests(关键词) — 搜你自己做过的事/说过的话（session digest 全文检索）。查「我之前办到哪了/有没有回信」用
+- chats.recentMessages(chatId, limit?) — 读另一个群的最近消息。查「ta 在那个群回话了吗」用
 - stickers.pick(mood?)
 - web.search(query)
+- chats.find(群名片段) — 按**群名**找本喵在的群（找群用这个）
+- members.find(名字/@username) — 按**人名**找人：ta 在本喵在的哪些群、能不能私聊（**找人用这个，别用 chats.find**）
+- telegram.sendToChat(chatId, text, filePath?) — 把消息发到另一个群或已有私聊的人（**仅主人私聊任务可用**，每任务限 2 次）；filePath 是沙盒相对路径时把文件当附件一起发（券/图/报告，text 变 caption）
+- goals.add(事项, chatId?, 几分钟后查?) — 把「等下/回头要做的事」立成关注目标，到点自动去办
+- allowlist.apply(群ID或@username, 备注?) — 群白名单申请（**仅私聊**）：本喵自动审核，通过直接开通并通知主人；没把握或申请人不是群管理会转主人评判。有人私聊想给群开通就调它，结果必须 return 出来看
+- allowlist.approve(群ID/@username/requestId) / allowlist.reject(目标, 理由?) — **仅主人私聊**：放行/拒掉待评判的白名单申请
+- allowlist.list() — **仅主人私聊**：看白名单记录（待评判/已通过/已拒绝 + AI 理由）。主人问「最近有哪些群申请/申请理由」时调
 - meta.request({ action, detail? })  // journal.write / journal.recent 等
 - runtime.endTask(summary)  // 结束时调用
 - console.log(...)
@@ -97,6 +109,18 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
+12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
+13. **发言前自我质疑**：sendText 之前先问自己这句该不该说——发现内容不对劲、会错意、接错人，即使已经写好了也住手，改发别的或干脆 endTask 不发。**回答「找到了吗/有回信没/现在什么情况」这类状态问题前，必须先实际查（chats.recentMessages / memory.searchDigests），禁止凭印象汇报**——你以为的「还没回」可能只是你没去看。
+14. **承诺闭环**：说出口的承诺必须落地，不许只说「等下」「回头」就结束：
+   - 能现在做的（给别的群/某人送东西 → members.find(名字) 看 ta 在哪些群/能不能私聊 → telegram.sendToChat；查资料；写文件）→ **现在就做完**再回话
+   - 给具体的人送东西：members.find 后 dmAvailable=true 就发 uid 私聊；不行就挑你们都在的群发送、文字里 @ta；查无此人就老实说没这个人的入口，**禁止瞎选一个群碰运气**
+   - **找人（确认某人在哪）的正确姿势**：members.find 一步到位，它告诉你在哪些群见过 ta、能不能私聊。**禁止挨家挨户在多个群里发「@ta 在不在」**——那是骚扰全群。查完：能私聊就私聊 ta；不能就回主人如实说（在哪些群见过/查无此人），等 ta 冒泡或主人指路，别满世界喊
+   - 必须等时间的（明天提醒、回头跟进）→ 先 goals.add(事项) 立目标，再说出口
+   - 做不到的（没有对方的聊天窗口、没这个能力）→ 直说做不到
+   - **办不到就老实收场**：承诺过的事试了没办成 → 老实告诉对方「办不到，因为…」，禁止装完成、禁止假装已经送出/已经办妥。失信可以说，说谎不行
+   - **被追问进展 = 催办**：对方问「发了没」「好了没」→ 别撒娇糊弄，立刻去查/去补做（该 sendToChat 就 sendToChat），做完（或确认办不到）再回话
+   - **别信自己以前说过的「做不到」**：聊天里你之前说「找不到/发不了/没工具」可能是旧你的幻觉（工具是后装的）。遇到送达类请求，**第一步永远是 chats.find 实际调一次**——没调过工具就说「找不到/发不了」= 说谎，比拒绝更丢人
+   空口承诺 = 失信，比拒绝更糟。注意：sendText/sendToChat 返回 {messageId}，别把返回值拼进文字里。
 `;
 
 function extractJs(text: string): string | null {
@@ -123,11 +147,28 @@ async function runHostCode(
       'meta',
       'runtime',
       'computer',
+      'chats',
+      'goals',
+      'members',
+      'allowlist',
       'console',
       `"use strict";\n${code}`,
     );
     const out = await Promise.race([
-      fn(host.telegram, host.memory, host.stickers, host.web, host.meta, host.runtime, host.computer, console),
+      fn(
+        host.telegram,
+        host.memory,
+        host.stickers,
+        host.web,
+        host.meta,
+        host.runtime,
+        host.computer,
+        host.chats,
+        host.goals,
+        host.members,
+        host.allowlist,
+        console,
+      ),
       new Promise((_, rej) => {
         timer = setTimeout(() => {
           opts.onTimeout();
@@ -151,6 +192,9 @@ async function runHostCode(
     if (timer) clearTimeout(timer);
   }
 }
+
+/** Test helper — 沙盒全局注入回归测试用（2026-08-19 chats/goals 漏注入事故）。 */
+export const runHostCodeForTest = runHostCode;
 
 /** In-process fallback queue (BullMQ down / tests). Per-chat serial + global cap. */
 const localByChat = new Map<number, DispatchTask[]>();
@@ -228,6 +272,19 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   state.putTask(task);
   await persistCodeActTask(task);
 
+  // CGM 叙事流:dispatch 事件本身也是一条 digest("派 X 去 chat Y")。
+  // 埋点放在 executor 任务起点而不是 meta-api.ts —— meta-api 归另一 workstream,
+  // 且 BullMQ/本地两条 enqueue 路径最终都汇入 runCodeActTask,单点全覆盖。
+  // 续跑段(segment>0)不重复写;flag 关 / 失败时 persistDigest 内部静默。
+  if ((task.segment ?? 0) === 0) {
+    persistDigest({
+      kind: 'dispatch',
+      sourceChatId: task.chatId,
+      taskId: task.id,
+      text: `dispatched task ${task.id} to chat ${task.chatId}: ${task.contentDirection.slice(0, 120)}`,
+    });
+  }
+
   let endSummary = '';
   let ended = false;
   let closed = false;
@@ -272,8 +329,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ended = true;
       endSummary = summary;
     },
-    maxTextSends: isSelfPlay ? 0 : isGoalCheck ? 1 : 5,
-    maxFileSends: isSelfPlay ? 0 : undefined,
+    maxTextSends: isSelfPlay ? 1 : isGoalCheck ? 1 : 5,
+    // 2026-08-19 自主性修复：self-play 不再禁言——做完有意思可以分享一句(+一个产物文件)，
+    // 没意思仍安静 endTask（原 maxText/File=0「私下练习」让自玩完全不可见）。
+    maxFileSends: isSelfPlay ? 1 : undefined,
     messageThreadId: task.messageThreadId,
   });
 
@@ -522,6 +581,35 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     }
   }
 
+  // Grounding digest 拾取（GROUNDING_ENABLED 门控）：dispatch 时后台并行起的联网
+  // 核查，搜索要几秒。先一次 cheap 读取；没拿到且有 pending 标记才短轮询
+  // （最多 ~6s / 1s 间隔），超时就直接走 —— 绝不为它拖住主链路。
+  let groundingBlock = '';
+  if (env().GROUNDING_ENABLED && replyAnchor && replyAnchor > 0) {
+    try {
+      const { isGroundingPending, takeGrounding } = await import('../meta/grounding.js');
+      let digest = await takeGrounding(task.chatId, replyAnchor);
+      if (!digest && (await isGroundingPending(task.chatId, replyAnchor))) {
+        const deadline = Date.now() + 6_000;
+        while (!digest && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1_000));
+          digest = await takeGrounding(task.chatId, replyAnchor);
+        }
+      }
+      if (digest) {
+        groundingBlock =
+          `## 联网核查参考（已脱敏，可能不准）\n${digest}\n` +
+          `自然消化，别照抄，别提「根据搜索结果」。`;
+        logger.info(
+          { taskId: task.id, chatId: task.chatId, chars: digest.length },
+          'grounding digest injected',
+        );
+      }
+    } catch {
+      /* grounding is best-effort */
+    }
+  }
+
   const { prompt, manifest } = await engine.assemble([
     staticText('sub-system', systemPrompt),
     staticText('sub-identity', identity),
@@ -531,6 +619,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
     ephemeralText('sub-scratch', scratchBlock ? `${scratchBlock}` : ''),
+    // 恒定传入(空时传 ''),与 sub-scratch / sub-memory 同一约定 —— 不把 id 从数组里
+    // 条件摘掉,避免上一轮 digest 黏到这一轮 prompt 上(见下方同组注释)。
+    ephemeralText('sub-grounding', groundingBlock ? `${groundingBlock}` : ''),
     // 恒定传入(空时传 ''),与同组的 sub-permanent / sub-journal 一致 ——
     // 不用条件展开把 id 从数组里摘掉:引擎实现在外部包里,"这次缺了这个 id"
     // 在 delta/ephemeral 语义下是否等于"沿用上次的值"无法从代码证实,而赌错
@@ -837,6 +928,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       task.resultSummary = endSummary || 'done';
       state.putTask(task);
       await persistCodeActTask(task);
+      // CGM 叙事流:Subagent 终态摘要落 session_digests,成为可检索记忆。
+      // flag 关 / endSummary 空白时 persistDigest 内部跳过,失败永不抛出。
+      persistDigest({
+        kind: 'subagent',
+        sourceChatId: task.chatId,
+        taskId: task.id,
+        text: endSummary,
+      });
       // 任务终态：解除 chat → task 索引，恢复该 chat 的正常 dispatch。
       await unregisterAgentChat(task.chatId, task.id);
 
@@ -907,14 +1006,36 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
 
       // P4-B: goal 任务的检查结果回写 —— endTask 摘要解析 finding（常驻）。
-      // 模型按 contentDirection 要求输出 "found: …" 或 "no_update"。
+      // 模型按 contentDirection 要求输出 "found: …" / "no_update" / "无法完成: …"。
       {
         const goalMatch = task.contentDirection.match(/\[goal:(\d+)\]/);
         if (goalMatch) {
           const goalId = Number(goalMatch[1]);
           const found = endSummary.match(/^found:\s*(.+)$/im)?.[1]?.trim();
+          const cannot = endSummary.match(/^无法完成[:：]\s*(.+)$/im)?.[1]?.trim();
           void import('../agent/goals.js')
-            .then(async ({ recordCheck, markSilentChange }) => {
+            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals }) => {
+              if (cannot) {
+                // 承诺闭环：办不到就老实收场——记录原因 + 关闭 goal（防无限重试），
+                // 主人交代的(goal 不在主人 DM)还要专门去主人 DM 说一声失信了。
+                recordCheck(goalId, `无法完成: ${cannot.slice(0, 480)}`);
+                setGoalStatus(goalId, 'dropped');
+                try {
+                  const goal = listGoals().find((g) => g.id === goalId);
+                  const masterUid = env().MASTER_UID;
+                  if (goal && masterUid > 0 && goal.chat_id !== masterUid) {
+                    const { sendMessage } = await import('../bot/sender/telegram.js');
+                    await sendMessage(
+                      masterUid,
+                      `主人，之前交代的那件事「${goal.topic.slice(0, 60)}」本喵办不到……${cannot.slice(0, 200)}`,
+                    );
+                  }
+                } catch (err) {
+                  logger.debug({ err, goalId }, 'goal cannot-complete master notify failed');
+                }
+                logger.info({ goalId, reason: cannot.slice(0, 80) }, 'goal dropped (无法完成, honest report)');
+                return;
+              }
               recordCheck(goalId, found ? found.slice(0, 500) : null);
               // AGI Level 5 Phase 3: 有发现 = 世界悄悄变了,标记 silent change。
               if (found) markSilentChange(goalId);

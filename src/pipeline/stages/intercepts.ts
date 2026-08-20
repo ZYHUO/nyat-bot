@@ -16,7 +16,6 @@ import {
 } from "../../knowledge/sticker/store.js";
 import { env } from "../../env.js";
 import { logger } from "../../shared/logger.js";
-import { addWatch, removeWatch, listWatches } from "../../tracking/topic-watch.js";
 import { applyMoodEvent } from "../../tracking/mood.js";
 import { startGame, stopGame } from "../games/manager.js";
 import { createGuessNumberGame } from "../games/guess-number.js";
@@ -78,36 +77,22 @@ export async function dispatchCommand(
   arg: string,
 ): Promise<boolean> {
   if (cmd === "/watch" && arg) {
-    // DM(主人)指派 → P4-B goals 表:周期性 CodeAct 去查进展并汇报。
-    // 群聊 → 老的关键词追踪(addWatch,群里聊到就提醒)。
-    if (chatId > 0) {
-      const { createGoal } = await import("../../agent/goals.js");
-      const id = createGoal(
-        { topic: arg, origin: "master", chatId },
-        env().GOAL_MAX_ACTIVE,
-      );
-      await sender.sendDirect(
-        chatId,
-        id
-          ? `好喵～本喵会定期盯「${arg}」的最新进展，有发现就告诉你～`
-          : `喵…这个目标没立上（本喵最多同时盯 ${env().GOAL_MAX_ACTIVE} 个，或主题太短/重复了），换个说法试试喵～`,
-        formatted.messageId,
-      );
-      return true;
-    }
-    addWatch(chatId, formatted.uid, arg);
-    await sender.sendDirect(chatId, `好的，有人聊到「${arg}」本喵会叫你喵~`, formatted.messageId);
-    return true;
-  }
-  if (cmd === "/unwatch" && arg) {
-    const ok = removeWatch(chatId, formatted.uid, arg);
-    await sender.sendDirect(chatId, ok ? `已取消追踪「${arg}」喵~` : `没有找到这个追踪喵~`, formatted.messageId);
-    return true;
-  }
-  if (cmd === "/watches") {
-    const watches = listWatches(chatId, formatted.uid);
-    const reply = watches.length > 0 ? `你的追踪列表：\n${watches.map(w => `- ${w}`).join('\n')}` : '你还没有追踪任何话题喵~';
-    await sender.sendDirect(chatId, reply, formatted.messageId);
+    // 仅 DM(主人)指派 → P4-B goals 表:周期性 CodeAct 去查进展并汇报。
+    // 群聊关键词追踪(addWatch)已于 2026-08-19 删除——NL 路由把普通对话
+    // 误判成追踪命令（「诺亚帮你留意着」→ 抓到句子碎片当关键词）。
+    if (chatId <= 0) return false;
+    const { createGoal } = await import("../../agent/goals.js");
+    const id = createGoal(
+      { topic: arg, origin: "master", chatId },
+      env().GOAL_MAX_ACTIVE,
+    );
+    await sender.sendDirect(
+      chatId,
+      id
+        ? `好喵～本喵会定期盯「${arg}」的最新进展，有发现就告诉你～`
+        : `喵…这个目标没立上（本喵最多同时盯 ${env().GOAL_MAX_ACTIVE} 个，或主题太短/重复了），换个说法试试喵～`,
+      formatted.messageId,
+    );
     return true;
   }
   if (cmd === "/game" && chatId < 0) {

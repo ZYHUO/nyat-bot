@@ -59,8 +59,8 @@
 - 😺 **情绪 + 关系** — 每群情绪 valence（migration 0017）、对每位群友的好感度随时间衰减（migration 0018）
 - 🕸️ **群友社交图** — 追踪群友之间（非 bot↔人）的互动关系，注入回复 prompt「A 和 B 常互动」让猫娘读懂群气氛（migration 0034）
 - 😻 **emoji 反应** — `setMessageReaction` 轻量"已读卖萌"，对好笑/可爱/秀的消息偶尔反应，每群每天硬上限 2 次、不调 LLM
-- 🔭 **话题追踪** — `/watch 关键词`，有人聊到就提醒你
-- 🛡️ **入群验证 + 白名单** — 审批制入群，AI 辅助审核 + 验证问答，Master 通知
+- 🔭 **关注目标** — DM 里 `/watch 事项` 或自然语言「回头提醒我」，立成关注目标，到点主动跟进
+- 🛡️ **入群验证 + 白名单** — 申请入口即 bot 对话：私聊报群 ID/@username，AI 自动审核（申请人经核验为群管理才自动启用，其余转 Master DM 评判）；bot 被拉进群也会自动先审一遍；验证问答兜底
 
 **私聊功能（DM 助手）**
 - 📨 **传话/带话** — 私聊让本喵把话带到群里，可指定对象
@@ -177,7 +177,7 @@ src/
 │   ├── fallback.ts       #   回退链 + hedged request
 │   ├── labels.ts         #   模型路由配置
 │   └── token-counter.ts  #   tiktoken 计算
-├── allowlist/            # 群聊白名单 — 审批 + AI 审核
+├── allowlist/            # 群聊白名单 — bot 对话流申请 + AI 审核 + Master 评判
 ├── bot/                  # grammy bot
 │   ├── handlers/         #   消息处理 + 成员事件
 │   ├── middleware/        #   白名单 + 速率限制
@@ -387,6 +387,8 @@ PM2 仅建议作为备用手动方案保留；正式常驻运行优先使用 sys
 | `BOT_NICKNAMES` | Bot 昵称（逗号分隔） | `xxb,啾咪囝` |
 | `MASTER_UID` | 主人 Telegram UID | `0` |
 | `ALLOWLIST_ENABLED` | 启用群聊白名单 | `false` |
+| `ALLOWLIST_BOT_FLOW_ENABLED` | 白名单 bot 对话流（DM 申请 + AI 自动审核 + Master DM 评判） | `false` |
+| `ALLOWLIST_REVIEW_ON_JOIN` | bot 被拉进群即自动跑一遍 AI 审核（拉群人是群管理才可自动启用） | `false` |
 | `GEMINI_API_KEY` | Gemini 联网搜索 key（AI Studio）；空=回退 xAI/DDG | (可选) |
 | `GEMINI_SEARCH_MODEL` / `GEMINI_SEARCH_PROXY` | 搜索模型 / 出口受限时的代理 | `gemini-2.5-flash-lite` / — |
 | `FIRECRAWL_API_KEY` / `FIRECRAWL_API_URL` | 抓取兜底（自托管可填 localhost） | (可选) |
@@ -444,7 +446,7 @@ Prompt 文件进程内热缓存，改完重启即生效，无需重新构建。
 | `/cards` | 我的猫娘图鉴 | 「看看我的图鉴」 |
 | `/wish` | 心愿单 `add 卡名` · `holders` 找持有人 · `wanted` | 「我想要九尾喵」「谁有我想要的卡」 |
 | `/game` | 小游戏 `tod`/`dare`/`wyr`/`nhie`/`guess` | 「玩真心话」「来个二选一」 |
-| `/watch` `/unwatch` `/watches` | 话题追踪 | 「追踪比特币」「取消追踪比特币」 |
+| `/watch` `/unwatch` `/watches` | 关注目标（DM） | 「追踪比特币」→ 立目标到点跟进 |
 | `/muteme` `/unmuteme` | 让本喵不回复我 / 恢复 | 「别理我」「可以理我了」 |
 | `/feature` | 群功能开关（群管） | — |
 | `/remember` | 记住我的偏好 | 「记住我喜欢猫」 |
@@ -512,7 +514,7 @@ xxb-ts (NyatBot) is a Telegram group chat AI bot written in TypeScript. It acts 
 - **Decide with one heart** — a single persona-aware "heart" call (with a first-person self-state narration) decides reply / wait / pass for passive group messages; optional post-decision "念头" reflection; the 3-level judge pipeline remains as the fallback (Meta graylist chats skip this path to avoid double replies)
 - **Think in turns** — MaiBot-style per-chat cognition turns: message bursts judged as one thought, mid-generation interrupts trigger a replan, "wait for them to finish" genuinely comes back, bounded self-continuation
 - **Carry a conversation naturally** — stays engaged after it speaks (MaiBot-style talk-frequency): picks up questions/statements from either side within the last few messages, no @ or reply needed, while staying restrained in hot chats
-- **Understand natural-language commands** — "帮我签到" → checkin, "看看我的图鉴" → card album, "追踪比特币" → watch topic (DM is lenient; groups require addressing the bot)
+- **Understand natural-language commands** — "帮我签到" → checkin, "看看我的图鉴" → card album, "追踪比特币" → follow-up goal (DM is lenient; groups require addressing the bot)
 - **Reply to multiple people** in a single trigger, each quoting its own target
 - **Call tools** — web search (Gemini Google-Search grounding → xAI / SearxNG / DDG fallback), web fetch (with self-hosted Firecrawl fallback for JS/Cloudflare pages), IP lookup, timers
 - **Live a real life** — 16-year-old high-schooler persona: deterministic weekly timetable + holiday/make-up overrides; sneaks the phone in class (short replies), chattier after school, a daily "today's mood" line

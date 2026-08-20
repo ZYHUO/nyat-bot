@@ -85,7 +85,8 @@ async function callClaude(
     ];
   }
 
-  if (opts.temperature !== undefined) body['temperature'] = opts.temperature;
+  const claudeTemp = label.temperature ?? opts.temperature;
+  if (claudeTemp !== undefined) body['temperature'] = claudeTemp;
 
   const res = await fetch(`${label.endpoint}/messages`, {
     method: 'POST',
@@ -190,7 +191,8 @@ async function callOpenAIRaw(
     messages: messages.map(m => ({ role: m.role, content: serializeContent(m.content) })),
   };
   if (opts.maxTokens != null) body['max_tokens'] = opts.maxTokens;
-  if (opts.temperature != null) body['temperature'] = opts.temperature;
+  const rawTemp = label.temperature ?? opts.temperature;
+  if (rawTemp != null) body['temperature'] = rawTemp;
   if (opts.stream) body['stream'] = true;
   if (label.reasoningEffort) body['reasoning_effort'] = label.reasoningEffort;
   if (label.disableThinking) body['thinking'] = { type: 'disabled' };
@@ -460,7 +462,7 @@ export async function callModel(
       model: provider(label.model),
       messages: messages as Parameters<typeof generateText>[0]['messages'],
       maxTokens: opts.maxTokens,
-      temperature: opts.temperature,
+      temperature: label.temperature ?? opts.temperature,
       abortSignal: mergeAbortSignals(opts.timeout, opts.signal),
     });
 

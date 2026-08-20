@@ -19,6 +19,9 @@ export interface AILabel {
   timeout?: number;
   /** per-label maxTokens 覆盖(给推理模型放宽,防截断成空);调用方显式 maxTokens 优先。 */
   maxTokens?: number;
+  /** per-label temperature 强制覆盖(调用方显式值也让位):只接受固定温度的模型用
+   *  (如 kimi-k3 只允许 temperature=1)。 */
+  temperature?: number;
   capabilities?: { vision?: boolean; functionCalling?: boolean };
 }
 

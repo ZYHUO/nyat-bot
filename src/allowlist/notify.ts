@@ -25,12 +25,12 @@ export async function onBotJoinedGroup(
   const hasPending = pending.some((p) => p.chat_id === chatId);
 
   if (hasPending) {
-    await safeSend(bot, chatId, '⏳ 本群的白名单申请正在审核中，请耐心等待。');
+    await safeSend(bot, chatId, '⏳ 本群的开通申请正在审核中，请耐心等待喵。');
   } else {
     await safeSend(
       bot,
       chatId,
-      '📋 本群尚未申请白名单。请通过 Mini App 提交申请，审核通过后即可使用。',
+      '📋 本群还没开通白名单。请群主或管理员私聊我，把本群 ID 或 @群username 发给我就能申请，我会自动审核喵～',
     );
   }
 }

@@ -21,6 +21,7 @@ import { startCronJobs, stopCronJobs } from './cron/scheduler.js';
 import { initBotTracker } from './tracking/interaction.js';
 import { isMemoryAvailable, warmEmbedder } from './memory/chroma.js';
 import { callAllowlistReviewModel } from './allowlist/ai-call.js';
+import { configFromEnv, defaultGetRecentContext } from './allowlist/bot-flow.js';
 import type { AllowlistConfig } from './allowlist/types.js';
 import { getStartupOwnership } from './startup/ownership.js';
 import { getIngressMode, installPollHeartbeat, startIngressWatchdog } from './ingress/failover.js';
@@ -65,17 +66,7 @@ async function main(): Promise<void> {
   const bot = await createBot();
 
   // 5. Build allowlist config from env
-  const allowlistConfig: AllowlistConfig = {
-    enabled: config.ALLOWLIST_ENABLED,
-    redisPrefix: config.ALLOWLIST_REDIS_PREFIX,
-    defaultEnabledAfterApproval: config.ALLOWLIST_DEFAULT_ENABLE_AFTER_APPROVE,
-    maxSubmissionsPerUserPerDay: config.ALLOWLIST_MAX_SUBMISSIONS_PER_DAY,
-    autoAiReviewOnSubmit: config.ALLOWLIST_AUTO_AI_REVIEW,
-    autoAiReviewMessageLimit: config.ALLOWLIST_AI_MESSAGE_LIMIT,
-    aiReviewContextMaxChars: config.ALLOWLIST_AI_CONTEXT_MAX_CHARS,
-    aiApproveAutoEnable: config.ALLOWLIST_AI_AUTO_ENABLE,
-    aiApproveConfidenceThreshold: config.ALLOWLIST_AI_CONFIDENCE_THRESHOLD,
-  };
+  const allowlistConfig: AllowlistConfig = configFromEnv(config);
 
   // 6. Register allowlist middleware
   if (allowlistConfig.enabled) {
@@ -165,9 +156,7 @@ async function main(): Promise<void> {
     bot.api.setMyCommands([
       { command: 'checkin', description: '每日签到' },
       { command: 'stats', description: '群聊统计' },
-      { command: 'watch', description: '追踪话题 /watch 关键词' },
-      { command: 'unwatch', description: '取消追踪 /unwatch 关键词' },
-      { command: 'watches', description: '查看追踪列表' },
+      { command: 'watch', description: '盯一个话题的进展（仅私聊）' },
       { command: 'game', description: '小游戏 /game guess' },
       { command: 'muteme', description: '让bot不回复我' },
       { command: 'unmuteme', description: '恢复bot回复' },
@@ -208,6 +197,9 @@ async function main(): Promise<void> {
     config: allowlistConfig,
     env: config,
     aiCall: callAllowlistReviewModel,
+    // 2026-08-20 补上：之前没传 → miniapp 时代 AI 审核拉不到最近群消息，
+    // 大量「无法获取群组数据，建议人工审核」就是这么来的。
+    getRecentContext: defaultGetRecentContext,
   });
   app.route('/miniapp_api', adminApi);
 

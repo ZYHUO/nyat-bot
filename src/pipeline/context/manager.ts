@@ -412,11 +412,25 @@ export async function addAssistant(
   reply: { textContent: string; messageId: number },
   threadId?: number,
 ): Promise<void> {
+  // 2026-08-19：写 bot 真实身份——之前 uid:0/name:'' 在上下文里格式化成
+  // 「Unknown(bot)」，bot 自己读回来认不出是自己说的（persona 约定是「名字+(bot)」）。
+  let uid = 0;
+  let username = '';
+  let fullName = '';
+  try {
+    const { getBotIdentity } = await import('../../bot/bot.js');
+    const id = getBotIdentity();
+    uid = id.uid || 0;
+    username = id.username || '';
+    fullName = id.displayName || '';
+  } catch {
+    /* bot 未初始化（测试/关机路径）——保持匿名兜底 */
+  }
   const assistantMsg: FormattedMessage = {
     role: 'assistant',
-    uid: 0,
-    username: '',
-    fullName: '',
+    uid,
+    username,
+    fullName,
     timestamp: Math.floor(Date.now() / 1000),
     messageId: reply.messageId,
     textContent: reply.textContent,

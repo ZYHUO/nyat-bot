@@ -7,6 +7,7 @@ import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-
 import { isDM } from '../shared/chat.js';
 import { isEchoOf } from '../shared/echo-text.js';
 import { markMessageAnswered } from '../meta/answered.js';
+import type { ApplyOutcome, MasterActionOutcome } from '../allowlist/bot-flow.js';
 
 /** Cross-task memory of recent bot lines in this process (beats Redis/NyatDB lag). */
 const recentBotTextsByChat = new Map<number, string[]>();
@@ -62,12 +63,63 @@ export interface HostApi {
     sendFile: (path: string, caption?: string) => Promise<{ messageId: number }>;
     /** Synthesize + send a voice message (TTS). Falls back to {skipped} when TTS disabled. */
     sendVoice: (text: string) => Promise<{ messageId: number } | { skipped: true; reason: string }>;
+    /**
+     * 跨群送达（承诺闭环①）：把一条文字发到另一个群；可带沙盒相对路径文件
+     * （券/图/报告当附件，text 变 caption）。仅主人 DM 任务可用，
+     * 每任务限 2 次；目标必须是 bot 在的群。PROMISE_LOOP_ENABLED 门控。
+     */
+    sendToChat: (targetChatId: number, text: string, filePath?: string) => Promise<{ messageId: number }>;
     react: (messageId: number, emoji: string) => Promise<boolean>;
+  };
+  /** 群目录（承诺闭环配套）：按**群名片段**找群。空命中返回指路字符串（找错对象的自救提示）。 */
+  chats: {
+    find: (query: string) => Promise<Array<{ chatId: number; title: string }> | string>;
+    /** 读另一个群的最近消息（本 bot 自己的上下文库，只读）。查「ta 回话了吗」用。 */
+    recentMessages: (chatId: number, limit?: number) => Promise<string>;
+  };
+  /** 成员目录（2026-08-19）：按**人名/@username** 查这个人在 bot 在的哪些群、能不能私聊。 */
+  members: {
+    find: (
+      name: string,
+    ) => Promise<
+      | Array<{
+          uid: number;
+          username: string;
+          name: string;
+          groups: Array<{ chatId: number; title: string }>;
+          dmAvailable: boolean;
+        }>
+      | string
+    >;
+  };
+  /** 关注目标（承诺闭环②）：把「等下/回头要做的事」立成 goal，unified-tick 到点执行。 */
+  goals: {
+    add: (
+      topic: string,
+      targetChatId?: number,
+      checkInMinutes?: number,
+    ) => Promise<{ goalId: number | null; reason: string }>;
+  };
+  /**
+   * 群白名单（2026-08-20 bot 对话流，替代 miniapp 申请入口）。
+   * apply 任何人私聊可用；approve/reject/list 仅主人 DM。ALLOWLIST_BOT_FLOW_ENABLED 门控。
+   */
+  allowlist: {
+    /** 给群申请开通：target = 群ID(全形或去 -100 短形)/@username/t.me 链接。AI 自动审核。 */
+    apply: (target: string, note?: string) => Promise<ApplyOutcome>;
+    /** 主人放行待评判申请（requestId/chatId/@username/群名片段都行）。 */
+    approve: (target: string) => Promise<MasterActionOutcome>;
+    /** 主人拒掉待评判申请。 */
+    reject: (target: string, reason?: string) => Promise<MasterActionOutcome>;
+    /** 主人翻白名单记录：待评判/已通过/已拒绝 + AI 理由。 */
+    list: () => Promise<string>;
   };
   memory: {
     search: (query: string) => Promise<string>;
     recallPerson: (uid: number, query: string) => Promise<string>;
     recentContext: (limit?: number) => Promise<string>;
+    /** 搜 bot 自己做过的事/说过的话（session digest FTS）。查「我之前办到哪了」用。 */
+    searchDigests: (query: string) => Promise<string>;
   };
   stickers: {
     pick: (mood?: string) => Promise<string | null>;
@@ -191,11 +243,68 @@ export function createHostApi(
   let fileSent = 0;
   let lastSentNorm = '';
   let metaRequested = false;
+  // 承诺闭环：本任务发出过的文字（backstop 扫承诺措辞用）、跨群送达次数、是否已立 goal。
+  const sentTexts: string[] = [];
+  let crossSends = 0;
+  let goalAdded = false;
   const maxTextSends = opts.maxTextSends ?? 2;
   const maxFileSends = opts.maxFileSends ?? Number.POSITIVE_INFINITY;
   const pendingBookkeeping: Promise<unknown>[] = [];
   /** In-flight telegram/web ops — models often forget `await` before endTask. */
   const inflightOps = new Set<Promise<unknown>>();
+
+  /**
+   * 承诺闭环③ 兜底（LLM 判定，非规则引擎）：endTask 时把本任务发出的文字交给
+   * 便宜 LLM 判「bot 是不是承诺了没兑现/没登记的事」——是且模型既没 goals.add
+   * 也没 sendToChat → 自动补立 goal（origin promise-backstop）。fail-soft，
+   * LLM 失败就当没承诺（宁可漏，不误立）。
+   */
+  const promiseBackstop = async (): Promise<void> => {
+    try {
+      if (!env().PROMISE_LOOP_ENABLED) return;
+      if (goalAdded || crossSends > 0) return;
+      if (sentTexts.length === 0) return;
+      const said = sentTexts.map((t) => t.slice(0, 200)).join('\n');
+      const { callWithFallback } = await import('../ai/fallback.js');
+      const res = await callWithFallback({
+        usage: env().PROMISE_CHECK_USAGE,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'bot 刚刚对用户说了下面这些话。判断：bot 是否承诺了将来的动作（送去/转发/提醒/等下做/回头给…），而且这次对话里并没有完成它？普通闲聊、已经完成了的事、没承诺 → false。只输出 JSON：{"promise": true|false, "topic": "一句话事项(≤30字, promise=false 时空串)"}',
+          },
+          { role: 'user', content: said },
+        ],
+        maxTokens: 120,
+        temperature: 0,
+        maxTimeoutMs: 8_000,
+        allowHedge: false,
+      });
+      const m = (res.content || '').match(/\{[\s\S]*\}/);
+      if (!m) return;
+      let verdict: { promise?: boolean; topic?: string };
+      try {
+        verdict = JSON.parse(m[0]) as { promise?: boolean; topic?: string };
+      } catch {
+        return;
+      }
+      const topic = String(verdict.topic ?? '').trim().slice(0, 60);
+      if (!verdict.promise || !topic) return;
+      const { createGoal } = await import('../agent/goals.js');
+      const id = createGoal({
+        topic: `兑现承诺: ${topic}`,
+        origin: `promise-backstop:${opts.taskId ?? ''}`.slice(0, 64),
+        chatId,
+        checkIntervalSec: 900,
+      });
+      if (id) {
+        logger.info({ chatId, goalId: id, topic }, 'promise backstop(llm): goal created from bot own text');
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'promise backstop failed (non-critical)');
+    }
+  };
 
   const assertOpen = () => {
     if (opts.isClosed?.()) throw new Error('host_closed');
@@ -258,6 +367,26 @@ export function createHostApi(
   const track = (p: Promise<unknown>) => {
     pendingBookkeeping.push(p);
     return p;
+  };
+
+  /** allowlist 命名空间的公共 deps 组装（apply/approve/reject/list 共用）。 */
+  const buildAllowlistDeps = async () => {
+    const { getBot, getBotUid } = await import('../bot/bot.js');
+    const { getRedis } = await import('../db/redis.js');
+    const botFlow = await import('../allowlist/bot-flow.js');
+    const { callAllowlistReviewModel } = await import('../allowlist/ai-call.js');
+    return {
+      botFlow,
+      deps: {
+        redis: getRedis(),
+        bot: getBot(),
+        config: botFlow.configFromEnv(env()),
+        aiCall: callAllowlistReviewModel,
+        getRecentContext: botFlow.defaultGetRecentContext,
+        masterUid: env().MASTER_UID,
+        botUid: getBotUid(),
+      },
+    };
   };
 
   return {
@@ -438,6 +567,7 @@ export function createHostApi(
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               lastMessageId = messageId;
               lastSentNorm = part;
+              sentTexts.push(part);
               rememberBotText(chatId, part);
               // G8 A/B 基线:Meta/CodeAct 是生产的主回复路径,它不经过
               // stages/deliver.ts,所以那边的埋点在这条路上完全记不到(实测
@@ -489,6 +619,19 @@ export function createHostApi(
                 .catch((err) => logger.debug({ err, chatId }, 'host noteMetaBotReply failed')),
             );
 
+            // Post-task 发酵窗口:bot 发言成功 → 开窗/顺延(内部 fail-soft,绝不影响发送)。
+            try {
+              const { noteBotSpoke } = await import('./post-task-window.js');
+              noteBotSpoke(chatId, {
+                messageId: lastMessageId,
+                textPreview: clean.slice(0, 200),
+                taskId: opts.taskId,
+                messageThreadId: opts.messageThreadId,
+              });
+            } catch (err) {
+              logger.debug({ err, chatId }, 'host post-task noteBotSpoke failed');
+            }
+
             return makeSendAck(`text_sent#${lastMessageId}`, lastMessageId);
           })(),
         );
@@ -522,6 +665,18 @@ export function createHostApi(
                 await Promise.all(
                   [...answeredIds].map((mid) => markMessageAnswered(chatId, mid).catch(() => undefined)),
                 );
+                // Post-task 发酵窗口:贴纸也算 bot 发了言(弱锚点, judge 会偏保守)。
+                try {
+                  const { noteBotSpoke } = await import('./post-task-window.js');
+                  noteBotSpoke(chatId, {
+                    messageId,
+                    textPreview: '[sticker]',
+                    taskId: opts.taskId,
+                    messageThreadId: opts.messageThreadId,
+                  });
+                } catch (err) {
+                  logger.debug({ err, chatId }, 'host post-task noteBotSpoke(sticker) failed');
+                }
               }
               return { messageId };
             } catch (err) {
@@ -623,6 +778,302 @@ export function createHostApi(
         assertOpen();
         return trackInflight(reactToMessage(chatId, messageId, emoji));
       },
+      sendToChat(targetChatId: number, text: string, filePath?: string) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            if (!env().PROMISE_LOOP_ENABLED) throw new Error('promise_loop_disabled');
+            // v1 安全闸：只有主人 DM 里的任务可以跨群送达（主人指派的递送场景）。
+            if (chatId !== env().MASTER_UID) throw new Error('sendToChat_master_dm_only');
+            const tid = Number(targetChatId);
+            if (!Number.isFinite(tid) || tid === 0) {
+              throw new Error('sendToChat_invalid_target: group chatId (negative) or user uid (positive) required');
+            }
+            if (crossSends >= 2) throw new Error('sendToChat_limit:2');
+            const clean = String(text ?? '').trim();
+            if (!clean) throw new Error('empty text');
+            assertNotBanned(clean);
+            // 确认目标可达：群→bot 必须在；个人→必须已有私聊（getChat 成功）。
+            try {
+              const { getBot } = await import('../bot/bot.js');
+              await getBot().api.getChat(tid);
+            } catch {
+              throw new Error(
+                tid > 0
+                  ? 'sendToChat_dm_unavailable: no existing DM with that user'
+                  : 'sendToChat_not_member: bot is not in that group',
+              );
+            }
+            // 可带沙盒文件：券/图/报告当附件发（text 变 caption），否则纯文字。
+            let messageId = 0;
+            let deliveredDesc = clean;
+            const rawPath = String(filePath ?? '').trim();
+            if (rawPath) {
+              const { resolveInsideSandbox } = await import('../sandbox/paths.js');
+              const { basename } = await import('node:path');
+              const target = resolveInsideSandbox(rawPath); // throws on path escape
+              const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
+              await sendChatAction(tid, 'upload_document');
+              const r = await tgSendFile(tid, target, { caption: clean.slice(0, 1000) });
+              messageId = r.messageId;
+              deliveredDesc = `[file] ${basename(target)}: ${clean}`;
+            } else {
+              messageId = await sendMessage(tid, clean.slice(0, 500));
+            }
+            crossSends++;
+            // 目标群上下文/记忆/时间线全跟上——说过的话自己得记得。
+            try {
+              const { addAssistant } = await import('../pipeline/context/manager.js');
+              await addAssistant(tid, { textContent: deliveredDesc, messageId });
+            } catch (err) {
+              logger.debug({ err, chatId: tid }, 'host sendToChat addAssistant failed');
+            }
+            try {
+              const { noteMetaBotReply } = await import('../meta/timing-adapter.js');
+              await noteMetaBotReply(tid);
+            } catch (err) {
+              logger.debug({ err, chatId: tid }, 'host sendToChat noteMetaBotReply failed');
+            }
+            try {
+              const { persistDigest } = await import('../meta/session-digest.js');
+              persistDigest({
+                kind: 'subagent',
+                sourceChatId: tid,
+                taskId: opts.taskId,
+                text: `跨群送达(${chatId}→${tid}): ${deliveredDesc.slice(0, 80)}`,
+              });
+            } catch (err) {
+              logger.debug({ err, chatId: tid }, 'host sendToChat digest failed');
+            }
+            logger.info(
+              { from: chatId, to: tid, messageId, withFile: !!rawPath, preview: clean.slice(0, 60) },
+              'host sendToChat delivered',
+            );
+            return makeSendAck(`cross_sent#${messageId}`, messageId);
+          })(),
+        );
+      },
+    },
+    chats: {
+      async find(query: string) {
+        const q = String(query ?? '').trim().slice(0, 50);
+        if (!q) return [];
+        const norm = (s: string) => s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+        const nq = norm(q);
+        if (!nq) return [];
+        const { getRedis } = await import('../db/redis.js');
+        const redis = getRedis();
+        let ids: number[] = [];
+        try {
+          const raw = await redis.zrange('xxb:active_groups', 0, 39);
+          ids = [...new Set(raw.map(Number).filter((n) => Number.isFinite(n) && n < 0))];
+        } catch {
+          return [];
+        }
+        const out: Array<{ chatId: number; title: string }> = [];
+        for (const id of ids) {
+          let title = '';
+          try {
+            const cached = await redis.get(`xxb:chat_title:${id}`);
+            if (cached) {
+              title = cached;
+            } else {
+              const { getBot } = await import('../bot/bot.js');
+              const chat = (await getBot().api.getChat(id)) as { title?: string };
+              title = typeof chat.title === 'string' ? chat.title : '';
+              if (title) await redis.set(`xxb:chat_title:${id}`, title, 'EX', 21600);
+            }
+          } catch {
+            continue; // 已退群/不可达——跳过
+          }
+          const nt = norm(title);
+          if (nt && (nt.includes(nq) || nq.includes(nt))) {
+            out.push({ chatId: id, title });
+            if (out.length >= 3) break;
+          }
+        }
+        logger.info({ chatId, query: q, candidates: ids.length, hits: out.length }, 'host chats.find');
+        // 空命中时给指路而不是裸 []——模型拿「群名查不到」当「这个人不存在」用是
+        // 2026-08-19 的实测事故（找 ccb 却调了群名搜索）。
+        if (out.length === 0) {
+          return `群名里没查到「${q}」。注意：chats.find 是按**群名**找群；如果你要找的是**某个人**（ta 在哪些群/能不能私聊），用 members.find(名字)。`;
+        }
+        return out;
+      },
+      async recentMessages(targetChatId: number, limit = 12) {
+        const tid = Number(targetChatId);
+        if (!Number.isFinite(tid) || tid === 0) return '(invalid chatId)';
+        const n = Math.min(Math.max(Number(limit) || 12, 1), 30);
+        try {
+          const { getRecent } = await import('../pipeline/context/manager.js');
+          const { slimSingleMessage } = await import('../pipeline/context/slim.js');
+          const { getBotUid } = await import('../bot/bot.js');
+          const msgs = await getRecent(tid, n);
+          if (!msgs.length) return '(那个群最近没有记录)';
+          const botUid = getBotUid() || 0;
+          return msgs.map((m) => slimSingleMessage(m, botUid)).join('\n');
+        } catch (err) {
+          logger.debug({ err, chatId: tid }, 'host chats.recentMessages failed');
+          return '(读取失败)';
+        }
+      },
+    },
+    members: {
+      async find(name: string) {
+        const q = String(name ?? '').trim().replace(/^@/, '').slice(0, 40);
+        if (!q) return [];
+        // 1) SQLite 画像：bot 在哪些群见过这个人（免费本地查询）
+        const { getDb } = await import('../db/sqlite.js');
+        const like = `%${q}%`;
+        const rows = getDb()
+          .prepare(
+            `SELECT chat_id, uid, username, full_name, sender_tag FROM user_profiles
+             WHERE username LIKE ? OR full_name LIKE ? OR sender_tag LIKE ? LIMIT 30`,
+          )
+          .all(like, like, like) as Array<{
+          chat_id: number; uid: number; username: string | null; full_name: string | null; sender_tag: string | null;
+        }>;
+        const byUid = new Map<number, { username: string; name: string; chatIds: number[] }>();
+        for (const r of rows) {
+          if (!(r.uid > 0)) continue;
+          const cur = byUid.get(r.uid) ?? { username: r.username ?? '', name: r.full_name ?? '', chatIds: [] };
+          if (!cur.username && r.username) cur.username = r.username;
+          if (!cur.name && r.full_name) cur.name = r.full_name;
+          if (!cur.chatIds.includes(r.chat_id)) cur.chatIds.push(r.chat_id);
+          byUid.set(r.uid, cur);
+        }
+        const { getRedis } = await import('../db/redis.js');
+        const redis = getRedis();
+        const resolveTitle = async (cid: number): Promise<string> => {
+          try {
+            const cached = await redis.get(`xxb:chat_title:${cid}`);
+            if (cached) return cached;
+            const { getBot } = await import('../bot/bot.js');
+            const chat = (await getBot().api.getChat(cid)) as { title?: string };
+            const t = typeof chat.title === 'string' ? chat.title : '';
+            if (t) await redis.set(`xxb:chat_title:${cid}`, t, 'EX', 21600);
+            return t;
+          } catch {
+            return '';
+          }
+        };
+        const out: Array<{
+          uid: number; username: string; name: string;
+          groups: Array<{ chatId: number; title: string }>; dmAvailable: boolean;
+        }> = [];
+        for (const [uid, info] of [...byUid.entries()].slice(0, 3)) {
+          // 2) 逐群确认当前成员身份（cap 6），顺带解析标题
+          const { getBot } = await import('../bot/bot.js');
+          const groups: Array<{ chatId: number; title: string }> = [];
+          for (const cid of info.chatIds.slice(0, 6)) {
+            try {
+              const m = (await getBot().api.getChatMember(cid, uid)) as { status?: string };
+              if (m.status === 'left' || m.status === 'kicked') continue;
+              groups.push({ chatId: cid, title: await resolveTitle(cid) });
+            } catch {
+              continue; // 退群/不可达
+            }
+          }
+          // 3) DM 可达性（对方和 bot 有过私聊才发得起 DM）
+          let dmAvailable = false;
+          try {
+            await getBot().api.getChat(uid);
+            dmAvailable = true;
+          } catch {
+            /* no DM history */
+          }
+          out.push({ uid, username: info.username, name: info.name, groups, dmAvailable });
+        }
+        logger.info({ chatId, query: q, candidates: byUid.size, hits: out.length }, 'host members.find');
+        if (out.length === 0) {
+          return `本地画像里没找到「${q}」——ta 可能没在本喵见过的群里说过话，或名字写法不一样（试试 ta 的 @username 或群友常用叫法）。实在没有就请主人给 ta 的 uid，或把 ta 拉来跟本喵说句话。`;
+        }
+        return out;
+      },
+    },
+    goals: {
+      async add(topic: string, targetChatId?: number, checkInMinutes?: number) {
+        if (!env().PROMISE_LOOP_ENABLED) return { goalId: null, reason: 'promise_loop_disabled' };
+        const t = String(topic ?? '').trim().slice(0, 100);
+        if (!t) return { goalId: null, reason: 'empty_topic' };
+        const cid = Number(targetChatId);
+        const goalChatId = Number.isFinite(cid) && cid !== 0 ? cid : chatId;
+        const minutes = Number(checkInMinutes);
+        const intervalSec = Math.min(Math.max(Number.isFinite(minutes) && minutes > 0 ? minutes : 15, 5), 1440) * 60;
+        const { createGoal } = await import('../agent/goals.js');
+        const id = createGoal({
+          topic: t,
+          origin: `promise:${opts.taskId ?? 'chat'}`.slice(0, 64),
+          chatId: goalChatId,
+          checkIntervalSec: intervalSec,
+        });
+        if (id) {
+          goalAdded = true;
+          logger.info({ chatId, goalChatId, goalId: id, topic: t }, 'host goals.add (promise)');
+        }
+        return { goalId: id, reason: id ? 'created' : 'dup_or_full' };
+      },
+    },
+    allowlist: {
+      async apply(target: string, note?: string) {
+        assertOpen();
+        if (!env().ALLOWLIST_BOT_FLOW_ENABLED) throw new Error('allowlist_bot_flow_disabled');
+        // 申请只能私聊发起：DM 的 chatId 就是申请人 uid，天然实名可追溯。
+        if (!(chatId > 0)) {
+          throw new Error('allowlist_apply_dm_only: 请对方私聊我，把群 ID 或 @username 发过来申请');
+        }
+        const { botFlow, deps } = await buildAllowlistDeps();
+        let applicantUsername: string | undefined;
+        let applicantFirstName: string | undefined;
+        try {
+          const u = (await deps.bot.api.getChat(chatId)) as {
+            username?: string;
+            first_name?: string;
+          };
+          applicantUsername = u.username;
+          applicantFirstName = u.first_name;
+        } catch {
+          /* best-effort */
+        }
+        const outcome = await botFlow.applyViaBot(deps, {
+          applicantUid: chatId,
+          applicantUsername,
+          applicantFirstName,
+          target: String(target ?? ''),
+          note: note === undefined || note === null ? undefined : String(note),
+        });
+        logger.info({ chatId, target: String(target ?? ''), outcome: outcome.kind }, 'host allowlist.apply');
+        return outcome;
+      },
+      async approve(target: string) {
+        assertOpen();
+        if (!env().ALLOWLIST_BOT_FLOW_ENABLED) throw new Error('allowlist_bot_flow_disabled');
+        if (chatId !== env().MASTER_UID) throw new Error('allowlist_master_only');
+        const { botFlow, deps } = await buildAllowlistDeps();
+        const outcome = await botFlow.masterApprove(deps, String(target ?? ''));
+        logger.info({ chatId, target: String(target ?? ''), outcome: outcome.kind }, 'host allowlist.approve');
+        return outcome;
+      },
+      async reject(target: string, reason?: string) {
+        assertOpen();
+        if (!env().ALLOWLIST_BOT_FLOW_ENABLED) throw new Error('allowlist_bot_flow_disabled');
+        if (chatId !== env().MASTER_UID) throw new Error('allowlist_master_only');
+        const { botFlow, deps } = await buildAllowlistDeps();
+        const outcome = await botFlow.masterReject(
+          deps,
+          String(target ?? ''),
+          reason === undefined || reason === null ? undefined : String(reason),
+        );
+        logger.info({ chatId, target: String(target ?? ''), outcome: outcome.kind }, 'host allowlist.reject');
+        return outcome;
+      },
+      async list() {
+        assertOpen();
+        if (!env().ALLOWLIST_BOT_FLOW_ENABLED) throw new Error('allowlist_bot_flow_disabled');
+        if (chatId !== env().MASTER_UID) throw new Error('allowlist_master_only');
+        const { botFlow, deps } = await buildAllowlistDeps();
+        return trackInflight(botFlow.listForMaster(deps));
+      },
     },
     memory: {
       async search(query: string) {
@@ -689,6 +1140,20 @@ export function createHostApi(
           return '(context unavailable)';
         }
       },
+      async searchDigests(query: string) {
+        const q = String(query ?? '').trim().slice(0, 80);
+        if (!q) return '(empty query)';
+        try {
+          if (!env().DIGEST_PERSIST_ENABLED) return '(digest persist disabled)';
+          const { searchDigests } = await import('../meta/session-digest.js');
+          const hits = searchDigests(q, 5);
+          if (!hits.length) return '(没有找到相关记录)';
+          return hits.map((h) => `- ${h.text.slice(0, 160)}`).join('\n');
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host memory.searchDigests failed');
+          return '(检索失败)';
+        }
+      },
     },
     stickers: {
       async pick(mood = 'happy') {
@@ -731,6 +1196,16 @@ export function createHostApi(
           .replace(/[^a-z0-9._:-]/g, '')
           .slice(0, 64);
         if (!action) throw new Error('meta.request action required');
+        // 2026-08-19 事故：模型编造 list_chats action 拿到 {queued:true} 正反馈，
+        // 以为"系统会处理"→ 告诉用户"都试了"。未知 action 必须硬报错并指路正确工具，
+        // 否则幻觉被正向强化。有效 action 只有 journal.*（系统硬处理）。
+        const VALID = new Set(['journal.write', 'journal.trywrite', 'journal.recent']);
+        if (!VALID.has(action)) {
+          throw new Error(
+            `unknown_action:${action} — meta.request 只支持 ${[...VALID].join('/')}。` +
+              `找群用 chats.find(群名片段)，跨群发送用 telegram.sendToChat(chatId, text)，别编 action。`,
+          );
+        }
         const detail = String(args?.detail ?? '').trim().slice(0, 500);
         const { getAttentionAccumulator } = await import('../meta/attention.js');
         await getAttentionAccumulator().ingestAsync({
@@ -756,6 +1231,8 @@ export function createHostApi(
       endTask(summary: string) {
         if (ended) return;
         ended = true;
+        // 承诺闭环③ 兜底：说了「等下/我去…」但没立 goal 也没跨群送达 → 自动补 goal。
+        void promiseBackstop();
         opts.onEnd(String(summary ?? '').slice(0, 1000));
       },
       didSendText() {
