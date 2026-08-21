@@ -31,7 +31,7 @@ export interface SelfState {
 export async function composeSelfState(chatId: number): Promise<SelfState> {
   // 四个独立异步源并行取;组装仍按固定顺序(life → mood → focus →
   // social → thought → stance → obsession),叙述与旧版逐字一致。
-  const [moodPart, focusVal, socialPart, mindData, obsessionPart, schoolNarrative, weatherPart] = await Promise.all([
+  const [moodPart, focusVal, socialPart, mindData, obsessionPart, schoolNarrative, weatherPart, yesterdayPart] = await Promise.all([
     (async (): Promise<string | null> => {
       try {
         const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
@@ -106,6 +106,38 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
         return null;
       }
     })(),
+    // 昨日回忆（跨天连续：真人记得自己昨天在干嘛/做过什么）
+    (async (): Promise<string | null> => {
+      try {
+        // 北京时间今日 0 点的 unix 秒
+        const todayStartSec = Math.floor((Date.now() + 8 * 3600_000) / 86400_000) * 86400 - 8 * 3600;
+        const yesterdayStartSec = todayStartSec - 86400;
+        const parts: string[] = [];
+        // 昨日作息碎碎念（与今日感想同一条 cron 管道，按日期 key 取昨天）
+        try {
+          const { env } = await import('../../env.js');
+          if (env().SCHOOL_SCHEDULE_ENABLED) {
+            const { getRedis } = await import('../../db/redis.js');
+            const { schoolNarrativeKey } = await import('../../cron/school-day-plan.js');
+            const yDate = new Date(yesterdayStartSec * 1000 + 8 * 3600_000).toISOString().slice(0, 10);
+            const narr = await getRedis().get(schoolNarrativeKey(yDate));
+            if (narr) parts.push(`昨天你的日子：「${narr.slice(0, 80)}」`);
+          }
+        } catch { /* optional */ }
+        // 昨日最后一条 digest（bot 昨天实际做成的事）
+        try {
+          const { digestsSince } = await import('../../meta/session-digest.js');
+          const yesterday = digestsSince(yesterdayStartSec, 60).filter((d) => d.createdAt < todayStartSec);
+          const last = yesterday[yesterday.length - 1];
+          if (last) parts.push(`昨天你做过：「${last.text.slice(0, 80)}」`);
+        } catch { /* optional */ }
+        if (!parts.length) return null;
+        return parts.join('；') + '（都是昨天的事，心里有数就好，别当今天的话题硬提）';
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: yesterday recall source failed');
+        return null;
+      }
+    })(),
   ]);
 
   const before: string[] = [];
@@ -170,6 +202,9 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
 
   // A3:今日感想(睡着时不提,免得跟"困得不行"打架)
   if (schoolNarrative && !lifeSleeping) after.push(`今天你心里念叨着:「${schoolNarrative}」`);
+
+  // 昨日回忆(跨天连续;同样睡着时不提)
+  if (yesterdayPart && !lifeSleeping) after.push(yesterdayPart);
 
   const make = (withThought: boolean): string => {
     const all = [...before, ...(withThought && thoughtPart ? [thoughtPart] : []), ...after];

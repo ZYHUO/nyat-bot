@@ -77,6 +77,12 @@ async function main(): Promise<void> {
   // 7. Register member handler
   registerMemberHandler(bot, allowlistConfig);
 
+  // 7.05 新人进群感知（真人环境：记入 missed 队列，bot 自己挑时机欢迎，不秒发机器人式欢迎语）
+  {
+    const { registerNewcomerHandler } = await import('./bot/handlers/newcomer.js');
+    registerNewcomerHandler(bot);
+  }
+
   // 7.1 Register join verification handler
   if (config.VERIFY_ENABLED) {
     const { registerJoinVerifyHandler } = await import('./bot/handlers/join-verify.js');

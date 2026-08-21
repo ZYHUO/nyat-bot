@@ -144,3 +144,27 @@ describe('listGoals / setGoalStatus', () => {
     expect(listGoals().length).toBe(2);
   });
 });
+
+describe('same-task dedup（2026-08-22 goal 8/9 重复事故）', () => {
+  it('同一 taskId 的 backstop 和 episode 蒸馏只立一个 goal', () => {
+    const first = createGoal({ topic: '明天把毛毛团成球丢掉', origin: 'promise-backstop:task-abc123' });
+    expect(first).not.toBeNull();
+    // 同 taskId、措辞不同 —— 以前会绕过 topic 去重再立一个
+    const second = createGoal({ topic: '明天按承诺清理猫毛并告知主人', origin: 'episode:task-abc123' });
+    expect(second).toBeNull();
+  });
+
+  it('不同 taskId 不互相挡', () => {
+    const a = createGoal({ topic: 'task A 的承诺', origin: 'promise-backstop:task-111aaa' });
+    const b = createGoal({ topic: 'task B 的承诺', origin: 'promise-backstop:task-222bbb' });
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+  });
+
+  it('无 taskId 的 origin（master/self）不受影响', () => {
+    const a = createGoal({ topic: 'master 指派的事', origin: 'master' });
+    const b = createGoal({ topic: '另一个 self 立的', origin: 'self' });
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+  });
+});

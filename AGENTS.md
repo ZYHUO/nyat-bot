@@ -68,6 +68,8 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 - **SQLite**: `new Database(':memory:')`, load the **real** migration file(s) into it, and `vi.mock` `../../../src/db/sqlite.js`'s `getDb` (see `tests/unit/memory/importance.test.ts`, `tests/unit/tracking/*.test.ts`).
 - **`env()`**: mock as a plain object to toggle flags per test.
 - **`callWithFallback`**: mock to return `{ content: '…json…' }` for LLM-dependent code.
+- **Test-vs-production isolation is enforced, not optional**: under `VITEST`, `getRedis()` rewrites the URL to **db 0** and `getDb()` forces **`:memory:`** — `env.ts` loads the real `.env` via dotenv, so without this an unmocked dynamic import writes production (2026-08-21: a test fixture landed in the master's DM context and the bot repeated it as fact). **Mock the direct behavior module** (e.g. `weather.js`), not just its deps — `vi.mock(env.js)` does not reliably propagate through deep dynamic-import chains (observed: real env leaked through, a live fetch fired). If a test fails on `:memory:` "no such table", that test was secretly touching prod — mock it properly.
+- A flaky pattern exists: the **first full `vitest run` right after editing src** occasionally reports one spurious failure that never reproduces on immediate rerun (suspected transform-cache timing). Rerun before believing it; three green runs = clean.
 
 ## Before you commit
 

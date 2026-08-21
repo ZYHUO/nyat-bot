@@ -214,6 +214,25 @@ export async function evaluateMetaHeart(opts: {
     } catch {
       /* non-critical */
     }
+    // 「想起再回」埋点：这条 pass 的消息若其实冲着 bot 来（回复 bot/叫名字），
+    // 记一笔——当时没接的话头，tick 冷场时可以自然捡回来（真人感）。
+    try {
+      const text = String(formatted.textContent ?? '');
+      const { getBotUid, getBotIdentity } = await import('../bot/bot.js');
+      const toBot = formatted.replyTo?.uid === getBotUid();
+      const called = getBotIdentity().nicknames.some((n) => n && text.includes(n));
+      if ((toBot || called) && text.trim()) {
+        const { noteMissed } = await import('./missed.js');
+        await noteMissed(chatId, {
+          messageId: formatted.messageId,
+          uid: formatted.uid,
+          name: formatted.fullName || formatted.username || `uid:${formatted.uid}`,
+          text: text.slice(0, 80),
+        });
+      }
+    } catch {
+      /* non-critical */
+    }
     logger.info(
       { chatId, why: heart.why, messageId: formatted.messageId, latencyMs: heart.latencyMs },
       'Meta heart: pass',
