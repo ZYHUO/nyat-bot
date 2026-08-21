@@ -10,7 +10,7 @@ vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => ({ prepare: () => ({ get: () => undefined }) }),
 }));
 
-import { getSchoolState, getSchoolAttentionFactor, getDaySummary } from '../../../src/tracking/school-state.js';
+import { getSchoolState, getSchoolAttentionFactor, getDaySummary, getLifeTransition } from '../../../src/tracking/school-state.js';
 
 // helper: build a Date that is the given Beijing weekday + HH:MM.
 // 2026-06-15 is a Monday (UTC). We pick UTC times and add nothing — getSchoolState
@@ -157,5 +157,36 @@ describe('getSchoolState with overrides', () => {
     expect(s.phase).toBe('holiday');
     expect(s.selfLine).toContain('放假');
     expect(s.selfLine).toContain('端午节');
+  });
+});
+
+describe('getLifeTransition（生活状态切换的新鲜感）', () => {
+  beforeEach(() => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'school' });
+  });
+
+  it('刚睡醒窗口（wakeMin 后 45 分钟内）返回「刚睡醒没多久」', async () => {
+    const { daySchedule } = await import('../../../src/tracking/life-state.js'); // 无状态纯函数，动态无碍
+    const wake = daySchedule('2026-06-16').wakeMin; // date-seeded 确定性
+    const hh = String(Math.floor(wake / 60)).padStart(2, '0');
+    const mm = String((wake % 60) + 10).padStart(2, '0');
+    expect(getLifeTransition(bjDate(`2026-06-16T${hh}:${mm}`))).toBe('刚睡醒没多久');
+  });
+
+  it('上课日放学窗口（16:35-17:15）返回「刚放学」', async () => {
+    expect(getLifeTransition(bjDate('2026-06-16T16:40'))).toBe('刚放学');
+  });
+
+  it('晚自习结束窗口（21:30-22:10）返回「刚下晚自习」', async () => {
+    expect(getLifeTransition(bjDate('2026-06-16T21:35'))).toBe('刚下晚自习');
+  });
+
+  it('上课日普通时段（非切换点）返回 null', async () => {
+    expect(getLifeTransition(bjDate('2026-06-16T15:00'))).toBeNull();
+  });
+
+  it('暑假 profile 没有放学切换', async () => {
+    mockEnv.mockReturnValue({ SCHOOL_SCHEDULE_ENABLED: true, DAILY_LIFE_PROFILE: 'summer' });
+    expect(getLifeTransition(bjDate('2026-06-16T16:40'))).toBeNull();
   });
 });

@@ -12,6 +12,7 @@
 import { env } from '../env.js';
 import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
+import { daySchedule } from './life-state.js';
 
 export type SchoolPhase =
   | 'before_school'
@@ -232,6 +233,35 @@ const IDLE: SchoolState = {
   selfLine: null,
   profile: 'summer',
 };
+
+/**
+ * 生活状态切换的新鲜感（真人感：「刚放学」「刚睡醒」是真人冒泡的天然由头）。
+ * 只在切换点后一小个窗口内返回值，其余时间 null——注入 tick 世界状态，
+ * 让自主发言能有「刚放学喵」这种时机，而不是干巴巴的冷场冒泡。
+ */
+export function getLifeTransition(now: Date = new Date()): string | null {
+  try {
+    const { date, minutes } = beijing(now);
+    // 刚睡醒（所有日子通用；wakeMin 与 life-state 同源，每天 07:00-08:30 随机）
+    try {
+      const sched = daySchedule(date);
+      if (minutes >= sched.wakeMin && minutes < sched.wakeMin + 45) {
+        return '刚睡醒没多久';
+      }
+    } catch {
+      /* life-state 源失败不阻塞 */
+    }
+    // 上课日的放学/晚自习结束切换
+    if (!env().SCHOOL_SCHEDULE_ENABLED) return null;
+    const state = getSchoolState(now);
+    if (state.profile !== 'school') return null;
+    if (minutes >= AFTERNOON_END && minutes < AFTERNOON_END + 40) return '刚放学';
+    if (minutes >= EVENING_END && minutes < EVENING_END + 40) return '刚下晚自习';
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function summerState(minutes: number): SchoolState {
   const slot =

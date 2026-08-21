@@ -24,6 +24,9 @@ vi.mock('../../../../src/pipeline/heart/mind.js', () => ({ getMind: mocks.getMin
 vi.mock('../../../../src/tracking/obsessions.js', () => ({ getObsession: mocks.getObsession }));
 // 上学日程源(A0/A3)与本组「源顺序」用例无关 —— 关掉,保持叙述确定性
 vi.mock('../../../../src/tracking/school-state.js', () => ({ getSchoolSelfStateLine: () => null }));
+// 天气源（2026-08-22）：mock 行为源本身——vi.mock(env) 对深层动态 import 链
+// 不可靠（实测穿透拿到真 env，WEATHER_ENABLED=true 时真发 fetch 并写 db0）。
+vi.mock('../../../../src/shared/weather.js', () => ({ getWeatherHint: async () => null }));
 vi.mock('../../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: false }) }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },

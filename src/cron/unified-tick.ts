@@ -44,6 +44,12 @@ export interface WorldState {
   absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
   dueGoals: { id: number; topic: string; lastFinding: string | null }[];
   rssNewCount: number;
+  /** RSS 最新条目标题（谈资内容本身，不只是计数——bot 得知道「有什么」才能拿来当话题）。 */
+  rssTopTitles?: string[];
+  /** 当前天气一句话（环境感知，WEATHER_ENABLED 时注入）。 */
+  weather?: string | null;
+  /** 生活状态切换的新鲜感（「刚放学」「刚睡醒」——真人冒泡的天然由头）。 */
+  lifeTransition?: string | null;
   selfPlayCooldownLeftSec: number;
   lastCareAgoSec: number;
   /** 各活跃群当前在聊的话题（topic-registry）——给 tick 可跟进的「料」（2026-08-19 自主性修复）。 */
@@ -141,16 +147,43 @@ export async function buildWorldState(): Promise<WorldState> {
     dueGoals = listDueGoals(now).map((g) => ({ id: g.id, topic: g.topic, lastFinding: g.last_finding }));
   } catch { /* keep empty */ }
 
-  // RSS fuel（所有群的 fuel 总量，粗粒度即可）
+  // RSS fuel（所有群的 fuel 总量，粗粒度即可；另取最新几条标题当真实话题料）
   let rssNewCount = 0;
+  const rssTopTitles: string[] = [];
   if (e.RSS_MONITOR_ENABLED) {
     try {
       const keys = await redis.keys('xxb:rss:fuel:*');
       for (const k of keys.slice(0, 5)) {
         rssNewCount += await redis.llen(k);
       }
-    } catch { /* keep 0 */ }
+      for (const k of keys.slice(0, 3)) {
+        const items = await redis.lrange(k, 0, 1);
+        for (const raw of items) {
+          try {
+            const it = JSON.parse(raw) as { title?: string; source?: string };
+            if (it.title) {
+              rssTopTitles.push(`${it.source ? `[${it.source}] ` : ''}${it.title}`.slice(0, 80));
+            }
+          } catch { /* skip malformed */ }
+        }
+        if (rssTopTitles.length >= 3) break;
+      }
+    } catch { /* keep empty */ }
   }
+
+  // 天气（环境感知，fail-soft）
+  let weather: string | null = null;
+  try {
+    const { getWeatherHint } = await import('../shared/weather.js');
+    weather = await getWeatherHint();
+  } catch { /* keep null */ }
+
+  // 生活状态切换（刚放学/刚睡醒——自主冒泡的天然由头，同步确定性）
+  let lifeTransition: string | null = null;
+  try {
+    const { getLifeTransition } = await import('../tracking/school-state.js');
+    lifeTransition = getLifeTransition();
+  } catch { /* keep null */ }
 
   // self-play 冷却
   let selfPlayCooldownLeftSec = 0;
@@ -248,6 +281,9 @@ export async function buildWorldState(): Promise<WorldState> {
     absentUsers,
     dueGoals,
     rssNewCount,
+    rssTopTitles,
+    weather,
+    lifeTransition,
     selfPlayCooldownLeftSec,
     lastCareAgoSec,
     topics,
@@ -303,7 +339,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
 - group_speak: 有真实想分享的就开口——跟进群里在聊的话题、分享你最近做的有意思的事（见 session digest）、或群里冷场超过 20 分钟去自然冒个泡。chatId=目标群。**没料的硬冒泡不如安静**；别复读你 digest 里刚分享过的同一件事。
 - remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
-- self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索）。idea+plan。自玩是私下练习，不是给主人表演；不要把自玩主题写进 care_master。
+- self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索/搜点有意思的东西）。idea+plan。自玩是私下练习，别为了表演而自玩；但玩出了真有意思的东西（画了好玩的/挖到冷知识/写成个小工具）可以自然地分享给群里或主人一次。
 - check_goal: 有到期关注目标，去查查进展。goalId。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
 
@@ -337,7 +373,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ? state.recentDigests!.map((d) => `  - ${d}`).join('\n')
     : '  (没有)';
   const user = [
-    `现在北京时间 ${state.hourBeijing} 点。`,
+    `现在北京时间 ${state.hourBeijing} 点。${state.weather ? state.weather + '。' : ''}${state.lifeTransition ? `你${state.lifeTransition}（刚切换状态——想随口提一句的话这是个自然的由头）。` : ''}`,
     ``,
     `主人 DM: ${state.masterSilentSec === null ? '(未配置)' : `沉默 ${Math.floor(state.masterSilentSec / 3600)} 小时`}。最近: ${state.masterLastText}`,
     `上次主动关心主人: ${state.lastCareAgoSec === Number.MAX_SAFE_INTEGER ? '从来没有' : `${Math.floor(state.lastCareAgoSec / 3600)} 小时前`}`,
@@ -357,7 +393,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     `到期关注目标:`,
     goalLines,
     ``,
-    `RSS 新资讯: ${state.rssNewCount} 条待消化`,
+    `RSS 新资讯: ${state.rssNewCount} 条待消化${(state.rssTopTitles ?? []).length ? `：\n${(state.rssTopTitles ?? []).map((t) => `  - ${t}`).join('\n')}` : ''}`,
     `self-play 冷却: ${state.selfPlayCooldownLeftSec > 0 ? `还有 ${Math.floor(state.selfPlayCooldownLeftSec / 60)} 分钟` : '已就绪'}`,
     ``,
     `这个周期做什么？`,
@@ -615,8 +651,9 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             (goal.last_finding ? `上次发现：${goal.last_finding}——看看有没有新进展。` : `这是第一次检查。`) +
             `世界可能悄悄变了——主动探查，注意发现没人告诉你的变化(版本更新/价格变动/新消息)。` +
             `有新发现就 sendText 简短汇报一次(自然分享，不像新闻播报)，没有就什么都不说直接 runtime.endTask。` +
+            `这件事如果已经办完/兑现了(承诺的事做完了、目标达到了) → endTask("已完成: 怎么完的")，goal 会关闭不再跟进。` +
             `这件事如果办不到(目标不存在/没这个能力/试了但失败) → 不许装完成，老实给这个 chat 说一句办不到的原因，endTask("无法完成: 原因")。` +
-            `最后必须 runtime.endTask("found: …"、"no_update" 或 "无法完成: …")。`,
+            `最后必须 runtime.endTask("found: …"、"no_update"、"已完成: …" 或 "无法完成: …")。`,
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
           status: 'queued',
