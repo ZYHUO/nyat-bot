@@ -87,7 +87,7 @@ function extractItems(xml: string): RssItem[] {
         const pubDate = r['pubDate'] as string | undefined;
         const guid = r['guid'] as string | undefined;
         return {
-          title: title ?? '(无标题)',
+          title: cleanTitle(title ?? '(无标题)'),
           link: typeof link === 'string' ? link : undefined,
           description: typeof description === 'string' ? description : undefined,
           pubDate: typeof pubDate === 'string' ? pubDate : undefined,
@@ -111,7 +111,7 @@ function extractItems(xml: string): RssItem[] {
         const updated = r['updated'] as string | undefined;
         const id = r['id'] as string | undefined;
         return {
-          title: title ?? '(无标题)',
+          title: cleanTitle(title ?? '(无标题)'),
           link: typeof link === 'string' ? link : undefined,
           description: typeof summary === 'string' ? summary : undefined,
           pubDate: typeof updated === 'string' ? updated : undefined,
@@ -140,6 +140,20 @@ function cleanDescription(desc?: string): string {
     .replace(/&[a-z]+;/g, ' ')
     .trim()
     .slice(0, 200);
+}
+
+/** 标题的 HTML 实体解码（&#124; → | 等；爱范儿/极客公园标题里常见，2026-08-22 实测乱码入料）。 */
+function cleanTitle(title: string): string {
+  return title
+    .replace(/&#(\d+);/g, (_m, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&apos;/g, "'")
+    .trim();
 }
 
 /** 用 bot 风格评论一条资讯 */

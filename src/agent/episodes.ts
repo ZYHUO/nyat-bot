@@ -160,18 +160,25 @@ export function findRelevantExperience(
   }
 }
 
-/** 经验库上限淘汰：超出 maxEntries 时按 use_count 升序（少用的先删），同分按创建时间。 */
+/**
+ * 经验库上限淘汰：超出 maxEntries 时按 use_count 升序（少用的先删），同分按创建时间。
+ * 2026-08-22 修复：新条目（<36h）豁免——use_count=0 的新经验还没等到被检索命中的
+ * 机会就被挤掉（实测 77% 条目 use_count=0，库满时新蒸馏的经验活不过一晚）。
+ */
 export function pruneExperience(maxEntries = 200): void {
   try {
     const db = getDb();
     const { c } = db.prepare(`SELECT COUNT(*) AS c FROM experience_entries`).get() as { c: number };
     if (c <= maxEntries) return;
     const excess = c - maxEntries;
+    const graceSec = 36 * 3600;
+    const now = Math.floor(Date.now() / 1000);
     db.prepare(
       `DELETE FROM experience_entries WHERE id IN (
-         SELECT id FROM experience_entries ORDER BY use_count ASC, created_at ASC LIMIT ?
+         SELECT id FROM experience_entries WHERE created_at + ? < ?
+         ORDER BY use_count ASC, created_at ASC LIMIT ?
        )`,
-    ).run(excess);
+    ).run(graceSec, now, excess);
   } catch (err) {
     logger.warn({ err }, 'pruneExperience failed');
   }
