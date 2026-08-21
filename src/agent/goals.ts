@@ -61,6 +61,20 @@ export function createGoal(input: CreateGoalInput, maxActive = 5): number | null
       .prepare(`SELECT id FROM goals WHERE status = 'active' AND topic = ?`)
       .get(topic) as { id: number } | undefined;
     if (dup) return null;
+    // 同一任务只立一个 goal：promise-backstop 和 episode 蒸馏会从同一个 taskId
+    // 各立一次（措辞不同绕过 topic 去重）——2026-08-22 实测 goal 8/9 重复
+    // （「团毛球」vs「清理猫毛」同一承诺）。origin 形如 promise-backstop:<taskId> /
+    // episode:<taskId> / promise:<taskId>，按 taskId 段查重。
+    const originTask = input.origin.split(':')[1]?.trim();
+    if (originTask && originTask.length >= 6) {
+      const dupTask = db
+        .prepare(`SELECT id FROM goals WHERE status = 'active' AND origin LIKE ?`)
+        .get(`%:${originTask}`) as { id: number } | undefined;
+      if (dupTask) {
+        logger.info({ topic, origin: input.origin, existingId: dupTask.id }, 'goal rejected: same task already has active goal');
+        return null;
+      }
+    }
     const ts = nowSec();
     const r = db
       .prepare(

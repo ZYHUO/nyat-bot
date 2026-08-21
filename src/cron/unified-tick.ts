@@ -50,6 +50,8 @@ export interface WorldState {
   weather?: string | null;
   /** 生活状态切换的新鲜感（「刚放学」「刚睡醒」——真人冒泡的天然由头）。 */
   lifeTransition?: string | null;
+  /** 当时没接的话头 / 新人进群（冲 bot 来但 heart pass 的，或刚进群的）——想起来可以自然捡回/欢迎。 */
+  missed?: { chatId: number; name: string; text: string; ageMin: number; kind?: 'message' | 'join' }[];
   selfPlayCooldownLeftSec: number;
   lastCareAgoSec: number;
   /** 各活跃群当前在聊的话题（topic-registry）——给 tick 可跟进的「料」（2026-08-19 自主性修复）。 */
@@ -185,6 +187,24 @@ export async function buildWorldState(): Promise<WorldState> {
     lifeTransition = getLifeTransition();
   } catch { /* keep null */ }
 
+  // 当时没接的话头（heart pass 但冲 bot 来的）——「想起再回」数据源
+  const missed: NonNullable<WorldState['missed']> = [];
+  try {
+    const { peekMissed } = await import('../meta/missed.js');
+    for (const g of groups) {
+      const items = await peekMissed(g.chatId);
+      for (const it of items.slice(0, 2)) {
+        missed.push({
+          chatId: g.chatId,
+          name: it.name,
+          text: it.text,
+          ageMin: Math.max(0, Math.floor((now - it.ts) / 60)),
+          ...(it.kind ? { kind: it.kind } : {}),
+        });
+      }
+    }
+  } catch { /* keep empty */ }
+
   // self-play 冷却
   let selfPlayCooldownLeftSec = 0;
   try {
@@ -284,6 +304,7 @@ export async function buildWorldState(): Promise<WorldState> {
     rssTopTitles,
     weather,
     lifeTransition,
+    missed,
     selfPlayCooldownLeftSec,
     lastCareAgoSec,
     topics,
@@ -372,6 +393,15 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
   const digestLines = (state.recentDigests ?? []).length
     ? state.recentDigests!.map((d) => `  - ${d}`).join('\n')
     : '  (没有)';
+  const missedLines = (state.missed ?? []).length
+    ? state.missed!
+        .map((m) =>
+          m.kind === 'join'
+            ? `  群 ${m.chatId}: ${m.name} 刚进群（${m.ageMin}分钟前）——可以自然欢迎一句`
+            : `  群 ${m.chatId}: ${m.name}（${m.ageMin}分钟前）: 「${m.text}」`,
+        )
+        .join('\n')
+    : '  (没有)';
   const user = [
     `现在北京时间 ${state.hourBeijing} 点。${state.weather ? state.weather + '。' : ''}${state.lifeTransition ? `你${state.lifeTransition}（刚切换状态——想随口提一句的话这是个自然的由头）。` : ''}`,
     ``,
@@ -383,6 +413,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `群里在聊的话题:`,
     topicLines,
+    ``,
+    `当时冲你来但你没接的话头 / 群里新发生的事（想起来了可以自然捡回一句/欢迎新人，别刻意补账）:`,
+    missedLines,
     ``,
     `你最近做的事（session digest）:`,
     digestLines,
@@ -512,10 +545,22 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const silentMin = Math.floor(group.silentSec / 60);
       // 把 tick 的开口理由带进去（跟进话题/分享近事/冷场冒泡），别只会「沉默 N 分钟」。
       const why = verdict.reason.trim() ? `开口理由：${verdict.reason.slice(0, 100)}。` : '';
+      // 「想起再回」：该群有当时没接的话头/刚进群的新人 → 递给写手，发言成功后清掉（想起是一次性的）
+      const missedHere = (state.missed ?? []).filter((m) => m.chatId === a.chatId);
+      const missedHint = missedHere.length
+        ? missedHere
+            .map((m) =>
+              m.kind === 'join'
+                ? `新人 ${m.name} 刚进群，自然欢迎一句`
+                : `${m.name}说「${m.text.slice(0, 60)}」当时没接——想起来了可以自然捡回`,
+            )
+            .map((s) => `可以捡的话头：${s}。`)
+            .join('')
+        : '';
       const text = await generatePersonaProactiveText(
         a.chatId,
         getBotUid(),
-        `[主动开口] ${why}群里已经沉默 ${silentMin} 分钟。你可以接着群里的话题随口说一句、分享你最近做的有意思的事、或自然发起新话题。禁止自我介绍、禁止「大家好」式开场。`,
+        `[主动开口] ${why}${missedHint}群里已经沉默 ${silentMin} 分钟。你可以接着群里的话题随口说一句、分享你最近做的有意思的事、或自然发起新话题。禁止自我介绍、禁止「大家好」式开场。`,
       );
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined group speak');
@@ -526,6 +571,12 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const messageId = await sendMessage(a.chatId, text);
       if (messageId) {
         await addAssistant(a.chatId, { textContent: text, messageId });
+      }
+      if (missedHere.length) {
+        try {
+          const { clearMissed } = await import('../meta/missed.js');
+          await clearMissed(a.chatId);
+        } catch { /* non-critical */ }
       }
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');

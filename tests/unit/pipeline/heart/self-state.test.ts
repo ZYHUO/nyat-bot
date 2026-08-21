@@ -27,6 +27,9 @@ vi.mock('../../../../src/tracking/school-state.js', () => ({ getSchoolSelfStateL
 // 天气源（2026-08-22）：mock 行为源本身——vi.mock(env) 对深层动态 import 链
 // 不可靠（实测穿透拿到真 env，WEATHER_ENABLED=true 时真发 fetch 并写 db0）。
 vi.mock('../../../../src/shared/weather.js', () => ({ getWeatherHint: async () => null }));
+// 昨日回忆源（2026-08-22）：同理 mock 掉数据访问，别依赖「:memory: 报表不存在」的巧合。
+vi.mock('../../../../src/meta/session-digest.js', () => ({ digestsSince: () => [] }));
+vi.mock('../../../../src/db/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
 vi.mock('../../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: false }) }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
