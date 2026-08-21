@@ -125,6 +125,24 @@ describe('pruneExperience', () => {
     expect(rows.some((r) => r.use_count === 100)).toBe(true);
   });
 
+  it('spares fresh entries (<36h) even when never used', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stmt = db.prepare(
+      `INSERT INTO experience_entries (kind, content, tags, source_episode_id, use_count, created_at) VALUES (?, ?, ?, 1, ?, ?)`,
+    );
+    // 5 条 3 天前的老条目（有点使用）+ 2 条刚创建零使用的新条目
+    for (let i = 0; i < 5; i++) stmt.run('trick', `old experience ${i}`, '["t"]', i + 1, now - 86400 * 3);
+    stmt.run('trick', 'fresh unused A', '["t"]', 0, now - 3600);
+    stmt.run('trick', 'fresh unused B', '["t"]', 0, now - 1800);
+    pruneExperience(5);
+    const rows = db.prepare('SELECT content FROM experience_entries').all() as { content: string }[];
+    expect(rows.length).toBe(5);
+    // 新条目豁免：没被用过也活下来；删的是老条目里最少用的两条
+    expect(rows.some((r) => r.content === 'fresh unused A')).toBe(true);
+    expect(rows.some((r) => r.content === 'fresh unused B')).toBe(true);
+    expect(rows.some((r) => r.content === 'old experience 0')).toBe(false);
+  });
+
   it('no-op when under cap', () => {
     saveExperienceEntries([
       { kind: 'trick', content: 'only one', tags: ['x'], sourceEpisodeId: 1 },
