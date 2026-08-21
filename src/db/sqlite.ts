@@ -8,9 +8,13 @@ let _db: Database.Database | undefined;
 
 export function getDb(): Database.Database {
   if (!_db) {
-    const dbPath = resolve(env().SQLITE_PATH);
+    // vitest 下强制内存库：dotenv 会把生产 SQLITE_PATH 喂给测试进程，漏 mock
+    // 的测试会读写生产 data/xxb.db（Redis 污染事故的孪生通道）。没 mock 的测试
+    // 会在 :memory: 上显式报表不存在——正好暴露该补 mock 的测试。
+    const isVitest = !!process.env['VITEST'];
+    const dbPath = isVitest ? ':memory:' : resolve(env().SQLITE_PATH);
     const dir = dirname(dbPath);
-    if (!existsSync(dir)) {
+    if (!isVitest && !existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
 

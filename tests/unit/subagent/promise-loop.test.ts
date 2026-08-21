@@ -29,6 +29,7 @@ const envBase: Record<string, unknown> = {
   MEMORY_CROSS_CONTEXT_ENABLED: false,
   MEMORY_VISIBILITY_ENABLED: false,
   DIGEST_PERSIST_ENABLED: true,
+  GOAL_MAX_ACTIVE: 20,
 };
 
 vi.mock('../../../src/env.js', () => ({ env: () => envBase }));
@@ -191,6 +192,7 @@ describe('promise loop (承诺闭环)', () => {
     expect(r).toEqual({ goalId: 42, reason: 'created' });
     expect(createGoal).toHaveBeenCalledWith(
       expect.objectContaining({ topic: '把七夕券送给缪缪', chatId: MASTER, checkIntervalSec: 900 }),
+      20,
     );
     envBase.PROMISE_LOOP_ENABLED = false;
     const r2 = await api.goals.add('另一件事');
@@ -212,6 +214,7 @@ describe('promise loop (承诺闭环)', () => {
         checkIntervalSec: 900,
         topic: expect.stringContaining('去乐乐猫群喊缪缪送券'),
       }),
+      20,
     );
   });
 

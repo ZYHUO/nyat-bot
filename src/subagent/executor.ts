@@ -83,7 +83,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - computer.writeFile(path, content) — 写文件到沙盒目录
 - computer.readFile(path) — 读沙盒文件
 - computer.listFiles(dir) — 列出沙盒目录文件
-- computer.browse(url) — 打开浏览器访问网页
+- computer.browse(url) — 打开浏览器访问网页（**只返回页面标题**；看正文必须再调 computer.getText() 并 return）
 - computer.screenshot() — 截屏当前页面
 - computer.click(selector) / computer.type(selector, text) — 操作网页元素
 - computer.getText(selector?) — 提取网页文本
@@ -106,7 +106,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
 8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
    - **写 HTML 必须带头 \`<meta charset="UTF-8">\`**（放在 <head> 内开头）。不写的话 Telegram 发出去用户本地打开中文会乱码（实测：标题/按钮变 å–µï½ž）。检查办法：写完 grep charset，没有就补。CSS/JS 不需要。
-9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。
+9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。**正文非必要不用 emoji**——情绪用贴纸表达，sendText 的文字里别夹表情符号；「喵」「～」是口癖照用。给别人的消息贴表情回应（telegram.react）不受此限。
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
 12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
@@ -181,10 +181,20 @@ async function runHostCode(
     if (opts.isClosed()) {
       return { ok: false, output: 'codeact_timeout' };
     }
-    return {
-      ok: true,
-      output: out === undefined ? 'ok' : typeof out === 'string' ? out : JSON.stringify(out),
-    };
+    let output = out === undefined ? 'ok' : typeof out === 'string' ? out : JSON.stringify(out);
+    // 「只回 ok」机制修复：查询类工具结果被调了但没 return → host 留了摘要，捡回来
+    // 给它看（2026-08-21 goal_2：搜到 1247 字却报「工具只回 ok，办不到」）。
+    if (out === undefined) {
+      const unviewed = host.runtime.drainUnviewedResults?.() ?? [];
+      if (unviewed.length) {
+        output =
+          'ok\n\n（注意：你刚才调用了查询工具但没 return 结果——不 return 等于白调。' +
+          '这次帮你捡回来了，下次一律 return：\n- ' +
+          unviewed.join('\n- ') +
+          '）';
+      }
+    }
+    return { ok: true, output };
   } catch (err) {
     await host.runtime.flushBookkeeping().catch(() => undefined);
     return { ok: false, output: err instanceof Error ? err.message : String(err) };
@@ -289,6 +299,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   let ended = false;
   let closed = false;
 
+  // Self-play: sandbox-only (0 delivery). Goal-check: at most one report bubble.
+  const isSelfPlay = task.contentDirection.includes('[selfplay]');
+  const isGoalCheck = /\[goal:\d+\]/.test(task.contentDirection);
+
   // Ensure we always have a reply anchor in groups: quotes → parse from direction → none.
   let replyAnchor = task.quoteMessageIds?.[0];
   if (!replyAnchor || replyAnchor <= 0) {
@@ -298,12 +312,13 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   if (replyAnchor && replyAnchor > 0) {
     task.quoteMessageIds = [replyAnchor];
   } else if (task.chatId < 0) {
-    logger.warn({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
+    // goal/self-play 等自主任务没有消息触发源，天然没锚点——不是异常，别刷 warn。
+    if (isSelfPlay || isGoalCheck) {
+      logger.debug({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
+    } else {
+      logger.warn({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
+    }
   }
-
-  // Self-play: sandbox-only (0 delivery). Goal-check: at most one report bubble.
-  const isSelfPlay = task.contentDirection.includes('[selfplay]');
-  const isGoalCheck = /\[goal:\d+\]/.test(task.contentDirection);
 
   // 长任务实时干预(P1):任务**一开始**就注册 chat→task 索引 —— 原来只在续跑时
   // 注册,首段 30 轮/120s 内用户消息会重复 dispatch 新任务,喊停/问进度永远到不了。
@@ -1012,9 +1027,19 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         if (goalMatch) {
           const goalId = Number(goalMatch[1]);
           const found = endSummary.match(/^found:\s*(.+)$/im)?.[1]?.trim();
+          const achieved = endSummary.match(/^已完成[:：]\s*(.+)$/im)?.[1]?.trim();
           const cannot = endSummary.match(/^无法完成[:：]\s*(.+)$/im)?.[1]?.trim();
           void import('../agent/goals.js')
             .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals }) => {
+              if (achieved) {
+                // 事办完了——记录成果 + 关闭 goal。此前没这个出口：办完的 goal
+                // 永远 active 且 findings>0 永不 stale，maxActive 坑满后新 goal 全拒
+                // （2026-08-21 实测：券券补发完成两天还占坑，承诺闭环新 goal 被拒 7 次）。
+                recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
+                setGoalStatus(goalId, 'achieved');
+                logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved');
+                return;
+              }
               if (cannot) {
                 // 承诺闭环：办不到就老实收场——记录原因 + 关闭 goal（防无限重试），
                 // 主人交代的(goal 不在主人 DM)还要专门去主人 DM 说一声失信了。

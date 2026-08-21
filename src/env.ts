@@ -422,7 +422,7 @@ const envSchema = z.object({
   MEMORY_STALE_AFTER_DAYS: z.coerce.number().int().min(7).default(90),
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
-  GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(5),
+  GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(20),
   // ── AGI Level 4 P4-C: 自我模型（常驻）────────────────────────────────
   // 每天凌晨复盘自己 24h 的回复表现 → ≤5 条自我认知注入回复 prompt。
   SELF_REFLECT_USAGE: z.string().default('judge'),
@@ -779,6 +779,11 @@ const envSchema = z.object({
   RSS_FEEDS_JSON: z.string().default('[]'),
   // 自动发送时使用的 LLM 路由
   RSS_USAGE: z.string().default('summarize'),
+
+  // ── 天气环境感知（真人感）──
+  // wttr.in 免费源，30min 缓存；注入 self-state / tick WorldState，全 fail-soft。
+  WEATHER_ENABLED: booleanFromEnv.default(false),
+  WEATHER_CITY: z.string().default('Beijing'),
 
   // ── 借力其他 bot(学其他 bot 的命令,需要时代发)──
   // P1:观察学习每个 bot 的命令档案(怎么用/场景/needs_reply/needs_admin/output_type)

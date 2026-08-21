@@ -80,7 +80,10 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   reply:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
   vision:    { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
   audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
-  judge:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 30_000, maxTokens: 800,  temperature: 0 },
+  // judge/heart（step-3.7-flash reasoning）：maxTokens 不设上限——reasoning_content 计入
+  // completion，卡 800 会把 JSON 截成半截；实测 low 档自然输出 300-1000 token。
+  // timeout 45s：开了 reasoning 后 P99 偶到 35s，30s 会无谓触发同模型 backup 重试。
+  judge:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 45_000, temperature: 0 },
   summarize: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 180_000 },
   // Mundo「难题攻坚」部门(可选,默认关)
   mundo:     { label: 'mundo',         backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },

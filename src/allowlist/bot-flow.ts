@@ -164,6 +164,88 @@ function chatTag(chat: { chatId: number; title: string; username?: string }): st
   return `「${chat.title || chat.chatId}」(${chat.chatId}${un})`;
 }
 
+// ── 给主人的通知：LLM 总结成 persona 人话，fallback 结构化模板 ──────
+
+interface MasterNotifyEvent {
+  kind: 'auto_approved' | 'needs_judgement';
+  source: 'dm' | 'join';
+  chat: { chatId: number; title: string; username?: string };
+  applicant: { uid: number; username?: string; firstName?: string; memberStatus?: string };
+  note?: string;
+  ai: { ok: boolean; decision?: string; confidence?: number; reason?: string };
+}
+
+const MASTER_NOTIFY_SYSTEM = `你是啾咪囝（Telegram 猫娘 bot）的通知喉舌。把下面的白名单审核事件（JSON）消化成一条发给主人的私聊。
+要求：
+- 猫娘口吻但说正事，不撒娇不废话，正文 ≤120 字
+- 说清三件事：什么群（群名 + chatId）、谁申请/拉进群的、AI 怎么判的、为什么
+- 给出你的建议（建议放行 / 建议拒绝 / 拿不准）+ 一句话理由
+- 申请人就是主人自己时（masterIsApplicant=true）点一句「你自己拉的群喵」
+- 群消息摘要为空的新群，要翻译成「新群还没聊天记录，AI 没东西可审所以保守拒了」这种人话，别照抄 AI 原话
+- kind=auto_approved（已自动启用，只是备案）→ 结尾一句「已直接启用喵」即可
+- kind=needs_judgement → 结尾固定两行操作指引（chatId 照抄原样）：
+  放行 → 「让群 {chatId} 通过」
+  拒绝 → 「拒了 {chatId}」
+只输出通知正文，不要 JSON，不要解释。`;
+
+/** LLM 失败时的保底模板（信息全，但没有人话总结）。 */
+function fallbackMasterText(ev: MasterNotifyEvent): string {
+  const who = `${applicantTag({
+    applicantUid: ev.applicant.uid,
+    applicantUsername: ev.applicant.username,
+    applicantFirstName: ev.applicant.firstName,
+  })}(uid ${ev.applicant.uid}${ev.applicant.memberStatus ? `, 身份:${ev.applicant.memberStatus}` : ''})`;
+  const ai = !ev.ai.ok
+    ? 'AI 审核调用失败，转人工评判'
+    : `AI ${ev.ai.decision}（置信 ${ev.ai.confidence}）：${ev.ai.reason}`;
+  if (ev.kind === 'auto_approved') {
+    const head = ev.source === 'join' ? '【白名单·入群自动通过】' : '【白名单·自动通过】';
+    return `${head}${chatTag(ev.chat)}\n${ev.source === 'join' ? '拉群人' : '申请人'}：${who}\n${ai}`;
+  }
+  const head = ev.source === 'join' ? '【白名单·入群待评判】' : '【白名单·待你评判】';
+  const tail = ev.source === 'join'
+    ? '（拒了我也不会退群，只是不服务）'
+    : '';
+  return `${head}${chatTag(ev.chat)}\n${ev.source === 'join' ? '拉群人' : '申请人'}：${who}\n备注：${ev.note || '（无）'}\n${ai}\n想放行就说「让群 ${ev.chat.chatId} 通过」，想拒就说「拒了 ${ev.chat.chatId}」${tail}`;
+}
+
+/**
+ * 通知主人：先让便宜 LLM 用 persona 总结（带建议），失败 fallback 模板。
+ * 发完写进主人 DM 上下文（addAssistant）——主人回「通过吧」时 bot 看得见
+ * 自己这条通知里的 chatId，sendToChat 同款「说过的话自己得记得」。
+ */
+async function notifyMaster(deps: BotFlowDeps, ev: MasterNotifyEvent): Promise<void> {
+  let text: string | null = null;
+  try {
+    const raw = await deps.aiCall(
+      MASTER_NOTIFY_SYSTEM,
+      JSON.stringify({ ...ev, masterIsApplicant: ev.applicant.uid === deps.masterUid }),
+    );
+    const clean = String(raw ?? '').trim();
+    //  sanity：总结里必须带 chatId，否则主人没法操作，等于丢了关键信息
+    if (clean && clean.includes(String(ev.chat.chatId))) text = clean.slice(0, 800);
+  } catch (err) {
+    logger.debug({ err }, 'notifyMaster LLM summarize failed, fallback to template');
+  }
+  if (!text) text = fallbackMasterText(ev);
+
+  let messageId = 0;
+  try {
+    const m = (await deps.bot.api.sendMessage(deps.masterUid, text)) as { message_id?: number };
+    messageId = typeof m?.message_id === 'number' ? m.message_id : 0;
+  } catch (err) {
+    logger.warn({ err, chatId: ev.chat.chatId, kind: ev.kind }, 'notifyMaster send failed');
+    return;
+  }
+  try {
+    const { addAssistant } = await import('../pipeline/context/manager.js');
+    await addAssistant(deps.masterUid, { textContent: text.slice(0, 500), messageId });
+  } catch (err) {
+    logger.debug({ err }, 'notifyMaster addAssistant failed (non-critical)');
+  }
+}
+
+
 /** 回填 source / 成员身份到 pending 记录（best-effort，主人翻记录时用）。 */
 async function markPendingMeta(
   deps: BotFlowDeps,
@@ -283,15 +365,21 @@ export async function applyViaBot(
     },
   }, { enableNowOverride: true, autoApproveAllowed: isAdmin });
 
-  const who = `${applicantTag(params)}(uid ${params.applicantUid}${isAdmin ? `, 群${mstatus === 'creator' ? '主' : '管理'}` : `, 身份:${mstatus}`})`;
-
   if (reviewed.ok && reviewed.decision === 'APPROVE' && reviewed.enabled_now) {
     await safeSend(deps.bot, chat.chatId, '✅ 白名单审核通过，本群已启用，直接叫我名字或 @ 我就好喵～');
-    await safeSend(
-      deps.bot,
-      deps.masterUid,
-      `【白名单·自动通过】${chatTag(chat)}\n申请人：${who}\nAI 置信 ${reviewed.confidence}：${reviewed.reason}`,
-    );
+    await notifyMaster(deps, {
+      kind: 'auto_approved',
+      source: 'dm',
+      chat: { chatId: chat.chatId, title: chat.title, username: chat.username },
+      applicant: {
+        uid: params.applicantUid,
+        username: params.applicantUsername,
+        firstName: params.applicantFirstName,
+        memberStatus: mstatus,
+      },
+      note,
+      ai: { ok: true, decision: reviewed.decision, confidence: reviewed.confidence, reason: reviewed.reason },
+    });
     return {
       kind: 'approved',
       chatId: chat.chatId,
@@ -302,16 +390,21 @@ export async function applyViaBot(
   }
 
   // 没通过/没把握/申请人非管理 → 转主人评判
-  const why = !reviewed.ok
-    ? 'AI 审核调用失败，转人工评判'
-    : isAdmin
-      ? `AI ${reviewed.decision}（置信 ${reviewed.confidence}）：${reviewed.reason}`
-      : `AI ${reviewed.decision}（置信 ${reviewed.confidence}）：${reviewed.reason}；另：申请人不是群管理，按规矩留你定夺`;
-  await safeSend(
-    deps.bot,
-    deps.masterUid,
-    `【白名单·待你评判】${chatTag(chat)}\n申请人：${who}\n备注：${note || '（无）'}\n${why}\n想放行就说「让群 ${chat.chatId} 通过」，想拒就说「拒了 ${chat.chatId}」。`,
-  );
+  await notifyMaster(deps, {
+    kind: 'needs_judgement',
+    source: 'dm',
+    chat: { chatId: chat.chatId, title: chat.title, username: chat.username },
+    applicant: {
+      uid: params.applicantUid,
+      username: params.applicantUsername,
+      firstName: params.applicantFirstName,
+      memberStatus: mstatus,
+    },
+    note,
+    ai: reviewed.ok
+      ? { ok: true, decision: reviewed.decision, confidence: reviewed.confidence, reason: reviewed.reason }
+      : { ok: false },
+  });
   return {
     kind: 'needs_master',
     chatId: chat.chatId,
@@ -395,27 +488,35 @@ export async function reviewOnJoin(
   } catch {
     /* best-effort */
   }
-  const who = `拉群人：${applicantTag({ applicantUid: inviter.uid, applicantUsername: inviter.username, applicantFirstName: inviter.firstName })}(uid ${inviter.uid}, 身份:${mstatus})`;
+  const notifyEv = {
+    source: 'join' as const,
+    chat: { chatId, title },
+    applicant: {
+      uid: inviter.uid,
+      username: inviter.username,
+      firstName: inviter.firstName,
+      memberStatus: mstatus,
+    },
+  };
 
   if (reviewed.ok && reviewed.decision === 'APPROVE' && reviewed.enabled_now) {
     await safeSend(deps.bot, chatId, '✅ 我通过白名单审核啦，本群已启用，叫我名字或 @ 我就好喵～');
-    await safeSend(
-      deps.bot,
-      deps.masterUid,
-      `【白名单·入群自动通过】${chatTag({ chatId, title })}\n${who}\nAI 置信 ${reviewed.confidence}：${reviewed.reason}`,
-    );
+    await notifyMaster(deps, {
+      ...notifyEv,
+      kind: 'auto_approved',
+      ai: { ok: true, decision: reviewed.decision, confidence: reviewed.confidence, reason: reviewed.reason },
+    });
     return;
   }
 
   // 不通过/没把握/拉群人非管理 → 群里静默，只找主人
-  const why = !reviewed.ok
-    ? 'AI 审核调用失败，转人工评判'
-    : `AI ${reviewed.decision}（置信 ${reviewed.confidence}）：${reviewed.reason}${isAdmin ? '' : '；另：拉群的人不是群管理'}`;
-  await safeSend(
-    deps.bot,
-    deps.masterUid,
-    `【白名单·入群待评判】${chatTag({ chatId, title })}\n${who}\n${why}\n想放行就说「让群 ${chatId} 通过」，想拒就说「拒了 ${chatId}」（拒了我也不会退群，只是不服务）。`,
-  );
+  await notifyMaster(deps, {
+    ...notifyEv,
+    kind: 'needs_judgement',
+    ai: reviewed.ok
+      ? { ok: true, decision: reviewed.decision, confidence: reviewed.confidence, reason: reviewed.reason }
+      : { ok: false },
+  });
 }
 
 // ── ③ 主人评判 / 翻记录 ───────────────────────────────────────────

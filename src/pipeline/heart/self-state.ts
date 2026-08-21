@@ -31,7 +31,7 @@ export interface SelfState {
 export async function composeSelfState(chatId: number): Promise<SelfState> {
   // 四个独立异步源并行取;组装仍按固定顺序(life → mood → focus →
   // social → thought → stance → obsession),叙述与旧版逐字一致。
-  const [moodPart, focusVal, socialPart, mindData, obsessionPart, schoolNarrative] = await Promise.all([
+  const [moodPart, focusVal, socialPart, mindData, obsessionPart, schoolNarrative, weatherPart] = await Promise.all([
     (async (): Promise<string | null> => {
       try {
         const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
@@ -96,6 +96,16 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
         return null;
       }
     })(),
+    // 天气环境感知（真人感：一句话事实，fail-soft）
+    (async (): Promise<string | null> => {
+      try {
+        const { getWeatherHint } = await import('../../shared/weather.js');
+        return await getWeatherHint();
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: weather source failed');
+        return null;
+      }
+    })(),
   ]);
 
   const before: string[] = [];
@@ -129,6 +139,9 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
       logger.debug({ err, chatId }, 'self-state: school source failed');
     }
   }
+
+  // 天气(环境感知):睡着/吃饭时别违和地关心天气
+  if (weatherPart && !lifeSleeping && !lifeEating) before.push(weatherPart);
 
   // 群心情(mood)
   if (moodPart) before.push(moodPart);

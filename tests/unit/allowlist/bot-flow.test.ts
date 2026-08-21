@@ -13,6 +13,13 @@ vi.mock('../../../src/shared/logger.js', () => ({
   },
 }));
 
+// notifyMaster 里动态 import 的 addAssistant——不 mock 会穿透到真实 getRedis()
+// （2026-08-21 污染事故：fixture 经此写进主人 DM 上下文，bot 把「好群」当真事讲）。
+vi.mock('../../../src/pipeline/context/manager.js', () => ({
+  addAssistant: vi.fn(async () => undefined),
+  getRecent: vi.fn(async () => []),
+}));
+
 const MASTER = 6251541967;
 const BOT_UID = 999;
 const GROUP = -1001234567890;
@@ -130,8 +137,16 @@ function makeDeps(
   };
 }
 
-const APPROVE_AI = async () => '{"decision":"APPROVE","confidence":0.95,"reason":"群内容正常"}';
-const REJECT_AI = async () => '{"decision":"REJECT","confidence":0.9,"reason":"疑似广告群"}';
+// aiCall 分流：审核返回判定 JSON；给主人的通知总结（system 含「通知喉舌」）
+// 返回 persona 人话（必须带 chatId，bot-flow 的 sanity 检查才会采用）。
+const approveAi = async (sys: string) =>
+  sys.includes('通知喉舌')
+    ? `喵～「好群」(${GROUP}) 的群主来申请开通啦，群里聊的都很正常，AI 也挺放心（置信 0.95），建议放行。已直接启用喵`
+    : '{"decision":"APPROVE","confidence":0.95,"reason":"群内容正常"}';
+const rejectAi = async (sys: string) =>
+  sys.includes('通知喉舌')
+    ? `喵～「好群」(${GROUP}) 这个新群还没聊天记录，AI 没东西可审只能保守拒了。建议你自己瞄一眼再定。\n放行 → 「让群 ${GROUP} 通过」\n拒绝 → 「拒了 ${GROUP}」`
+    : '{"decision":"REJECT","confidence":0.9,"reason":"疑似广告群"}';
 
 async function importFlow() {
   return await import('../../../src/allowlist/bot-flow.js');
@@ -166,7 +181,7 @@ describe('allowlist bot-flow', () => {
   describe('applyViaBot', () => {
     it('群管理申请 + AI 高置信通过 → 直接启用，通知群里和主人', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, {
         applicantUid: APPLICANT,
         applicantUsername: 'applicant',
@@ -185,6 +200,39 @@ describe('allowlist bot-flow', () => {
       const sentTo = api.sendMessage.mock.calls.map((c) => c[0]);
       expect(sentTo).toContain(GROUP);
       expect(sentTo).toContain(MASTER);
+      // 给主人的是 LLM persona 总结（通知喉舌），不是结构化模板
+      const masterMsg = api.sendMessage.mock.calls.find((c) => c[0] === MASTER);
+      expect(String(masterMsg![1])).toContain('已直接启用喵');
+    });
+
+    it('给主人的通知：LLM 总结挂掉 → fallback 模板也带操作指引和 chatId', async () => {
+      const aiCall = async (sys: string) =>
+        sys.includes('通知喉舌')
+          ? null // 通知总结失败
+          : '{"decision":"REJECT","confidence":0.25,"reason":"群消息摘要为空"}';
+      const { api } = makeBot();
+      const deps = makeDeps(api, redis, aiCall);
+      const outcome = await flow.applyViaBot(deps, {
+        applicantUid: APPLICANT,
+        target: '@goodgroup',
+      });
+      expect(outcome.kind).toBe('needs_master');
+      const masterMsg = api.sendMessage.mock.calls.find((c) => c[0] === MASTER);
+      expect(masterMsg).toBeTruthy();
+      expect(String(masterMsg![1])).toContain(`让群 ${GROUP} 通过`);
+      expect(String(masterMsg![1])).toContain('群消息摘要为空');
+    });
+
+    it('给主人的通知：LLM 总结丢了 chatId → 视为不可用，fallback 模板', async () => {
+      const aiCall = async (sys: string) =>
+        sys.includes('通知喉舌')
+          ? '喵～有个群想开通，看着还行，你说了算' // 没有 chatId
+          : '{"decision":"REJECT","confidence":0.9,"reason":"疑似广告群"}';
+      const { api } = makeBot();
+      const deps = makeDeps(api, redis, aiCall);
+      await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
+      const masterMsg = api.sendMessage.mock.calls.find((c) => c[0] === MASTER);
+      expect(String(masterMsg![1])).toContain(`让群 ${GROUP} 通过`);
     });
 
     it('普通成员申请：AI 即使高置信通过也转主人评判（防注入自助开通）', async () => {
@@ -194,7 +242,7 @@ describe('allowlist bot-flow', () => {
           return { status: 'member' };
         }),
       });
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, {
         applicantUid: APPLICANT,
         target: '@goodgroup',
@@ -218,7 +266,7 @@ describe('allowlist bot-flow', () => {
 
     it('AI 拒绝 → 转主人评判，pending 保留', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, REJECT_AI);
+      const deps = makeDeps(api, redis, rejectAi);
       const outcome = await flow.applyViaBot(deps, {
         applicantUid: APPLICANT,
         target: '@goodgroup',
@@ -237,7 +285,7 @@ describe('allowlist bot-flow', () => {
           return { status: 'creator' };
         }),
       });
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
       expect(outcome.kind).toBe('not_in_group');
       expect(Object.keys(await redis.hgetall('xxb:mal:pending'))).toHaveLength(0);
@@ -250,7 +298,7 @@ describe('allowlist bot-flow', () => {
           return { status: 'left' };
         }),
       });
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
       expect(outcome.kind).toBe('not_a_member');
     });
@@ -261,7 +309,7 @@ describe('allowlist bot-flow', () => {
         String(GROUP),
         JSON.stringify({ chat_id: GROUP, approved: true, enabled: true }),
       );
-      const aiCall = vi.fn(APPROVE_AI);
+      const aiCall = vi.fn(approveAi);
       const { api } = makeBot();
       const deps = makeDeps(api, redis, aiCall);
       const outcome = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
@@ -276,7 +324,7 @@ describe('allowlist bot-flow', () => {
         JSON.stringify({ chat_id: GROUP, approved: true, enabled: false }),
       );
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
       expect(outcome.kind).toBe('already_enabled');
       const rec = JSON.parse((await redis.hget('xxb:mal:groups', String(GROUP)))!) as GroupRecord;
@@ -286,14 +334,14 @@ describe('allowlist bot-flow', () => {
     it('已有 pending → already_pending', async () => {
       await seedPending(redis);
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
       expect(outcome.kind).toBe('already_pending');
     });
 
     it('超每日限流 → rate_limited', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI, { maxSubmissionsPerUserPerDay: 1 });
+      const deps = makeDeps(api, redis, approveAi, { maxSubmissionsPerUserPerDay: 1 });
       const first = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
       expect(first.kind).toBe('approved');
       const second = await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@other' });
@@ -302,7 +350,7 @@ describe('allowlist bot-flow', () => {
 
     it('去掉 -100 前缀的短群 id 也能解析', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, {
         applicantUid: APPLICANT,
         target: '1234567890',
@@ -313,7 +361,7 @@ describe('allowlist bot-flow', () => {
 
     it('解析不到的目标 → not_found', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       const outcome = await flow.applyViaBot(deps, {
         applicantUid: APPLICANT,
         target: '@nosuchgroup',
@@ -325,7 +373,7 @@ describe('allowlist bot-flow', () => {
   describe('reviewOnJoin', () => {
     it('入群自动审核：管理拉群 + AI 通过 → 启用并宣布', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       await flow.reviewOnJoin(deps, GROUP, { uid: APPLICANT, username: 'applicant' });
 
       const rec = await redis.hget('xxb:mal:groups', String(GROUP));
@@ -345,7 +393,7 @@ describe('allowlist bot-flow', () => {
           return { status: 'member' };
         }),
       });
-      const deps = makeDeps(api, redis, APPROVE_AI);
+      const deps = makeDeps(api, redis, approveAi);
       await flow.reviewOnJoin(deps, GROUP, { uid: APPLICANT });
       expect(await redis.hget('xxb:mal:groups', String(GROUP))).toBeNull();
       // 群里静默，只通知主人
@@ -358,7 +406,7 @@ describe('allowlist bot-flow', () => {
         String(GROUP),
         JSON.stringify({ chat_id: GROUP, approved: true, enabled: true }),
       );
-      const aiCall = vi.fn(APPROVE_AI);
+      const aiCall = vi.fn(approveAi);
       const { api } = makeBot();
       const deps = makeDeps(api, redis, aiCall);
       await flow.reviewOnJoin(deps, GROUP, { uid: APPLICANT });
@@ -371,7 +419,7 @@ describe('allowlist bot-flow', () => {
     it('masterApprove：pending → 启用，通知群和申请人', async () => {
       await seedPending(redis);
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, REJECT_AI);
+      const deps = makeDeps(api, redis, rejectAi);
       const outcome = await flow.masterApprove(deps, String(GROUP));
       expect(outcome.kind).toBe('approved');
 
@@ -392,14 +440,14 @@ describe('allowlist bot-flow', () => {
         JSON.stringify({ chat_id: GROUP, approved: true, enabled: true }),
       );
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, REJECT_AI);
+      const deps = makeDeps(api, redis, rejectAi);
       const outcome = await flow.masterApprove(deps, '@goodgroup');
       expect(outcome.kind).toBe('approved');
     });
 
     it('masterApprove 找不到目标 → not_pending', async () => {
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, REJECT_AI);
+      const deps = makeDeps(api, redis, rejectAi);
       const outcome = await flow.masterApprove(deps, '@nosuchgroup');
       expect(outcome.kind).toBe('not_pending');
     });
@@ -407,7 +455,7 @@ describe('allowlist bot-flow', () => {
     it('masterReject：pending 移 reviewed，DM 通知申请人', async () => {
       await seedPending(redis);
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, REJECT_AI);
+      const deps = makeDeps(api, redis, rejectAi);
       const outcome = await flow.masterReject(deps, String(GROUP), '广告群不收');
       expect(outcome.kind).toBe('rejected');
       expect(await redis.hget('xxb:mal:pending', 'req-1')).toBeNull();
@@ -453,7 +501,7 @@ describe('allowlist bot-flow', () => {
         }),
       );
       const { api } = makeBot();
-      const deps = makeDeps(api, redis, REJECT_AI);
+      const deps = makeDeps(api, redis, rejectAi);
       const out = await flow.listForMaster(deps);
       expect(out).toContain('待评判 (1)');
       expect(out).toContain('已通过 (1)');

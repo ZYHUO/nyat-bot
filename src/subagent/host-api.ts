@@ -142,6 +142,8 @@ export interface HostApi {
     didProduce: () => boolean;
     /** Await ctx/timing writes so Meta callback sees the reply. */
     flushBookkeeping: () => Promise<void>;
+    /** 模型没 return 时兜底：取走本任务被忽略的查询类工具结果摘要（executor 用）。 */
+    drainUnviewedResults?: () => string[];
     /** 工作记忆：记下「在等什么/答应了什么」，30 分钟自动过期。 */
     setScratch: (text: string) => Promise<void>;
     /** 事办完了清掉（prefix 匹配，省略 = 全清）。 */
@@ -152,7 +154,9 @@ export interface HostApi {
 }
 
 /** Computer-use namespace — terminal, browser, files. Disabled proxy when SANDBOX_ENABLED=false. */
-function buildComputerApi(): Record<string, (...args: never[]) => Promise<unknown>> {
+function buildComputerApi(
+  noteUnviewed?: (label: string, v: unknown) => void,
+): Record<string, (...args: never[]) => Promise<unknown>> {
   if (!env().SANDBOX_ENABLED) {
     // Return a proxy that throws on any property access — model gets a clear error.
     // Guard against `then` to avoid thenable trap if model writes `await computer`.
@@ -170,7 +174,9 @@ function buildComputerApi(): Record<string, (...args: never[]) => Promise<unknow
     },
     async run(command: never) {
       const { executeCommand } = await import('../sandbox/terminal.js');
-      return executeCommand(String(command));
+      const v = await executeCommand(String(command));
+      noteUnviewed?.(`computer.run(${String(command).slice(0, 40)})`, v);
+      return v;
     },
     async writeFile(path: never, content: never) {
       const { sandboxWriteFile } = await import('../sandbox/files.js');
@@ -202,7 +208,9 @@ function buildComputerApi(): Record<string, (...args: never[]) => Promise<unknow
     },
     async getText(selector?: never) {
       const { browserGetText } = await import('../sandbox/browser.js');
-      return browserGetText(selector ? String(selector) : undefined);
+      const v = await browserGetText(selector ? String(selector) : undefined);
+      noteUnviewed?.('computer.getText', v);
+      return v;
     },
     async eval(js: never) {
       const { browserEval } = await import('../sandbox/browser.js');
@@ -272,7 +280,7 @@ export function createHostApi(
           {
             role: 'system',
             content:
-              'bot 刚刚对用户说了下面这些话。判断：bot 是否承诺了将来的动作（送去/转发/提醒/等下做/回头给…），而且这次对话里并没有完成它？普通闲聊、已经完成了的事、没承诺 → false。只输出 JSON：{"promise": true|false, "topic": "一句话事项(≤30字, promise=false 时空串)"}',
+              'bot 刚刚对用户说了下面这些话。判断：bot 是否承诺了将来的动作（送去/转发/提醒/等下做/回头给…），而且这次对话里并没有完成它？普通闲聊、已经完成了的事、没承诺 → false。只输出 JSON：{"promise": true|false, "topic": "一句话事项(≤30字, promise=false 时空串)"}。topic 必须具体——谁+做什么（给某人送什么/查什么/提醒什么），「帮忙做某事」「处理事情」这类空泛写法等于没提取出来，直接判 false',
           },
           { role: 'user', content: said },
         ],
@@ -297,7 +305,7 @@ export function createHostApi(
         origin: `promise-backstop:${opts.taskId ?? ''}`.slice(0, 64),
         chatId,
         checkIntervalSec: 900,
-      });
+      }, env().GOAL_MAX_ACTIVE);
       if (id) {
         logger.info({ chatId, goalId: id, topic }, 'promise backstop(llm): goal created from bot own text');
       }
@@ -367,6 +375,23 @@ export function createHostApi(
   const track = (p: Promise<unknown>) => {
     pendingBookkeeping.push(p);
     return p;
+  };
+
+  /**
+   * 「只回 ok」事故的机制修复（2026-08-21 goal_2：web.search 明明返回 1247 字，
+   * 模型没 return → 以为工具坏了 → 向主人报「办不到」）。查询类工具的结果在这里
+   * 留一份摘要；模型本步没 return 时由 executor 捡回附进 output。
+   */
+  const unviewedResults: string[] = [];
+  const noteUnviewed = (label: string, v: unknown): void => {
+    try {
+      if (unviewedResults.length >= 5) return;
+      const s = (typeof v === 'string' ? v : JSON.stringify(v)) || '';
+      if (!s) return;
+      unviewedResults.push(`${label} → ${s.slice(0, 300)}${s.length > 300 ? '…' : ''}`);
+    } catch {
+      /* best-effort */
+    }
   };
 
   /** allowlist 命名空间的公共 deps 组装（apply/approve/reject/list 共用）。 */
@@ -898,6 +923,7 @@ export function createHostApi(
         if (out.length === 0) {
           return `群名里没查到「${q}」。注意：chats.find 是按**群名**找群；如果你要找的是**某个人**（ta 在哪些群/能不能私聊），用 members.find(名字)。`;
         }
+        noteUnviewed(`chats.find(${q.slice(0, 30)})`, out);
         return out;
       },
       async recentMessages(targetChatId: number, limit = 12) {
@@ -911,7 +937,9 @@ export function createHostApi(
           const msgs = await getRecent(tid, n);
           if (!msgs.length) return '(那个群最近没有记录)';
           const botUid = getBotUid() || 0;
-          return msgs.map((m) => slimSingleMessage(m, botUid)).join('\n');
+          const text = msgs.map((m) => slimSingleMessage(m, botUid)).join('\n');
+          noteUnviewed(`chats.recentMessages(${tid})`, text);
+          return text;
         } catch (err) {
           logger.debug({ err, chatId: tid }, 'host chats.recentMessages failed');
           return '(读取失败)';
@@ -988,6 +1016,7 @@ export function createHostApi(
         if (out.length === 0) {
           return `本地画像里没找到「${q}」——ta 可能没在本喵见过的群里说过话，或名字写法不一样（试试 ta 的 @username 或群友常用叫法）。实在没有就请主人给 ta 的 uid，或把 ta 拉来跟本喵说句话。`;
         }
+        noteUnviewed(`members.find(${q.slice(0, 30)})`, out);
         return out;
       },
     },
@@ -1006,7 +1035,7 @@ export function createHostApi(
           origin: `promise:${opts.taskId ?? 'chat'}`.slice(0, 64),
           chatId: goalChatId,
           checkIntervalSec: intervalSec,
-        });
+        }, env().GOAL_MAX_ACTIVE);
         if (id) {
           goalAdded = true;
           logger.info({ chatId, goalChatId, goalId: id, topic: t }, 'host goals.add (promise)');
@@ -1072,7 +1101,9 @@ export function createHostApi(
         if (!env().ALLOWLIST_BOT_FLOW_ENABLED) throw new Error('allowlist_bot_flow_disabled');
         if (chatId !== env().MASTER_UID) throw new Error('allowlist_master_only');
         const { botFlow, deps } = await buildAllowlistDeps();
-        return trackInflight(botFlow.listForMaster(deps));
+        const out = await botFlow.listForMaster(deps);
+        noteUnviewed('allowlist.list', out);
+        return out;
       },
     },
     memory: {
@@ -1080,9 +1111,11 @@ export function createHostApi(
         try {
           const hits = await searchMemory(chatId, String(query).slice(0, 200), 5, 1500);
           if (!hits.length) return '(no hits)';
-          return hits
+          const text = hits
             .map((h, i) => `${i + 1}. ${String(h.textContent ?? '').slice(0, 200)}`)
             .join('\n');
+          noteUnviewed(`memory.search(${String(query).slice(0, 30)})`, text);
+          return text;
         } catch (err) {
           logger.debug({ err }, 'host memory.search failed');
           return '(memory unavailable)';
@@ -1115,7 +1148,9 @@ export function createHostApi(
         } catch (err) {
           logger.debug({ err }, 'host memory.recallPerson failed');
         }
-        return bits.join('\n') || '(no person recall)';
+        const joined = bits.join('\n') || '(no person recall)';
+        noteUnviewed(`memory.recallPerson(${id})`, joined);
+        return joined;
       },
       async recentContext(limit = 20) {
         try {
@@ -1135,7 +1170,9 @@ export function createHostApi(
             }
             return base;
           });
-          return lines.join('\n');
+          const joined = lines.join('\n');
+          noteUnviewed('memory.recentContext', joined);
+          return joined;
         } catch {
           return '(context unavailable)';
         }
@@ -1148,7 +1185,9 @@ export function createHostApi(
           const { searchDigests } = await import('../meta/session-digest.js');
           const hits = searchDigests(q, 5);
           if (!hits.length) return '(没有找到相关记录)';
-          return hits.map((h) => `- ${h.text.slice(0, 160)}`).join('\n');
+          const text = hits.map((h) => `- ${h.text.slice(0, 160)}`).join('\n');
+          noteUnviewed(`memory.searchDigests(${q.slice(0, 30)})`, text);
+          return text;
         } catch (err) {
           logger.debug({ err, chatId }, 'host memory.searchDigests failed');
           return '(检索失败)';
@@ -1177,6 +1216,7 @@ export function createHostApi(
           const raw = await executeSearch(q);
           const out = String(raw ?? '').trim().slice(0, 3500);
           logger.info({ chatId, q: q.slice(0, 80), chars: out.length }, 'host web.search');
+          noteUnviewed(`web.search(${q.slice(0, 40)})`, out || '(no results)');
           return out || '(no results)';
         } catch (err) {
           logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host web.search failed');
@@ -1267,7 +1307,10 @@ export function createHostApi(
           logger.debug({ err, chatId }, 'host clearScratch failed');
         }
       },
+      drainUnviewedResults() {
+        return unviewedResults.splice(0, unviewedResults.length);
+      },
     },
-    computer: buildComputerApi(),
+    computer: buildComputerApi(noteUnviewed),
   };
 }
