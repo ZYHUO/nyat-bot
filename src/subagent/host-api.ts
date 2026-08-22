@@ -232,6 +232,8 @@ export function createHostApi(
   opts: {
     onEnd: (summary: string) => void;
     defaultReplyTo?: number;
+    /** 本任务全部可引用的 messageId（burst 分人回复要 quote 不同的 id）；显式 replyTo 必须落在此集合。 */
+    quoteIds?: number[];
     /** Burst siblings - mark answered only after successful sendText. */
     relatedQuoteIds?: number[];
     isClosed?: () => boolean;
@@ -246,7 +248,6 @@ export function createHostApi(
 ): HostApi {
   const banned = env().CODEACT_BANNED_WORDS;
   let ended = false;
-  let defaultQuoteUsed = false;
   let textSent = 0;
   let fileSent = 0;
   let lastSentNorm = '';
@@ -340,34 +341,23 @@ export function createHostApi(
   const resolveReplyTo = (replyToMessageId?: number): number | undefined => {
     const explicit = parseMsgId(replyToMessageId);
     const fallback = parseMsgId(opts.defaultReplyTo);
+    // 本任务可引用的消息集合（burst 分人回复要 quote quotes 里不同的 id）
+    const allowed = new Set(
+      (opts.quoteIds ?? []).map((n) => Math.floor(Number(n))).filter((n) => n > 0),
+    );
+    if (fallback) allowed.add(fallback);
 
-    // Task quote exists: never accept a different #id on the *first* quote fill
-    // (DM used to trust model and pasted a *group* messageId → 串台).
-    if (fallback) {
-      if (explicit && explicit !== fallback && !defaultQuoteUsed) {
-        logger.warn(
-          { chatId, fromModel: explicit, forced: fallback, dm: isDM(chatId) },
-          'host sendText: reject model replyTo ≠ task quote',
-        );
-        throw new Error(
-          `reply_to_mismatch: model used #${explicit} but task quote is #${fallback}. ` +
-            `Omit replyTo or pass only ${fallback}, then retry sendText (do not reuse wrong bubble text).`,
-        );
-      }
-      // DM: never force quote (omit → plain bubble).
-      if (isDM(chatId)) return explicit;
-      // Group first bubble: fill task quote once.
-      if (!defaultQuoteUsed) {
-        defaultQuoteUsed = true;
-        return fallback;
-      }
-      // Later sendText: default plain; only honor explicit 特别许愿 replyTo.
-      return explicit;
-    }
-
-    // No task quote — DM/group: explicit only as last resort
-    if (explicit && !isDM(chatId)) {
-      logger.warn({ chatId, fromModel: explicit }, 'host sendText: group send with no task quote');
+    // 显式传了不在本任务 quotes 里的 id → 串台风险（DM 曾把群 messageId 贴进来），拦。
+    // 省略 = 不引用（2026-08-22 起群聊也不再自动补——真人不是每条回复都顶引用）。
+    if (explicit !== undefined && allowed.size > 0 && !allowed.has(explicit)) {
+      logger.warn(
+        { chatId, fromModel: explicit, allowed: [...allowed], dm: isDM(chatId) },
+        'host sendText: reject model replyTo ∉ task quotes',
+      );
+      throw new Error(
+        `reply_to_mismatch: model used #${explicit}, not in this task's quotes (${[...allowed].join('/')}). ` +
+          `Omit replyTo (no quote) or pass one of the task quotes, then retry sendText.`,
+      );
     }
     return explicit;
   };
@@ -809,7 +799,7 @@ export function createHostApi(
           (async () => {
             if (!env().PROMISE_LOOP_ENABLED) throw new Error('promise_loop_disabled');
             // v1 安全闸：只有主人 DM 里的任务可以跨群送达（主人指派的递送场景）。
-            if (chatId !== env().MASTER_UID) throw new Error('sendToChat_master_dm_only');
+            if (!env().MASTER_UID || chatId !== env().MASTER_UID) throw new Error('sendToChat_master_dm_only');
             const tid = Number(targetChatId);
             if (!Number.isFinite(tid) || tid === 0) {
               throw new Error('sendToChat_invalid_target: group chatId (negative) or user uid (positive) required');
@@ -1022,10 +1012,16 @@ export function createHostApi(
     },
     goals: {
       async add(topic: string, targetChatId?: number, checkInMinutes?: number) {
+        assertOpen();
         if (!env().PROMISE_LOOP_ENABLED) return { goalId: null, reason: 'promise_loop_disabled' };
         const t = String(topic ?? '').trim().slice(0, 100);
         if (!t) return { goalId: null, reason: 'empty_topic' };
         const cid = Number(targetChatId);
+        // 2026-08-22 审查修复: 目标群必须与任务同源(防跨群挂 goal), 主人 DM 任务可指定任意已开群。
+        const isMasterTask = env().MASTER_UID > 0 && chatId === env().MASTER_UID;
+        if (Number.isFinite(cid) && cid !== 0 && cid !== chatId && !isMasterTask) {
+          return { goalId: null, reason: 'goal_target_chat_mismatch' };
+        }
         const goalChatId = Number.isFinite(cid) && cid !== 0 ? cid : chatId;
         const minutes = Number(checkInMinutes);
         const intervalSec = Math.min(Math.max(Number.isFinite(minutes) && minutes > 0 ? minutes : 15, 5), 1440) * 60;

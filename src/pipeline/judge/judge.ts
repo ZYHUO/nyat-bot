@@ -12,6 +12,14 @@ import { env } from "../../env.js";
 import { getKnowledge } from "../../knowledge/manager.js";
 import { getChatState } from "../timing/chat-runtime.js";
 
+/** heart 心流路径刻意降级的 L0 规则集合(与 heart.ts 的 demote 逻辑保持同步)。 */
+const HEART_DEMOTED_L0_RULES = new Set([
+  "followup_to_bot",
+  "active_conv_engage",
+  "hot_chat",
+  "recent_reply",
+]);
+
 export interface JudgeInput {
   message: FormattedMessage;
   recentMessages: FormattedMessage[];
@@ -25,6 +33,13 @@ export interface JudgeInput {
   burstHint?: string;
   /** G9: per-chat focus level (0..1) — modulates the L1 REPLY acceptance bar */
   focus?: number;
+  /**
+   * heart 回退专用(P1 fix 2026-08-22 审查): 把"对话热度"类 L0 规则
+   * (followup_to_bot/active_conv_engage/hot_chat/recent_reply)降级为不生效——
+   * 这些规则在 heart 心流路径被刻意 demote(bot 刚说话≠自动回), 回退路径若
+   * 不带同一降级, 同一条消息会因 heart 是否健康而得到不同判决。
+   */
+  demoteConversationalL0?: boolean;
 }
 
 function findLastBotReplyIndex(
@@ -113,7 +128,10 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
 
   const l0Start = performance.now();
   const l0Result = evaluateRules(ruleCtx);
-  if (l0Result) {
+  if (l0Result && input.demoteConversationalL0 && HEART_DEMOTED_L0_RULES.has(l0Result.rule ?? "")) {
+    logger.debug({ rule: l0Result.rule }, "L0 conversational rule demoted (heart fallback parity)");
+    // 不直接 return —— 让消息继续走 L1/L2, 与 heart 路径的裁决语义对齐
+  } else if (l0Result) {
     l0Result.latencyMs = Math.round(performance.now() - l0Start);
     logger.debug(
       {

@@ -735,6 +735,10 @@ const envSchema = z.object({
     .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean)),
 
   // ── Computer-use sandbox (Playwright + terminal) ──
+  // ⚠️ 安全边界说明(2026-08-22 审查): computer.run 走宿主 /bin/sh -c 执行, 危险命令
+  // 模式集(sandbox/terminal.ts)只是纵深防御——**不是**隔离。SANDBOX_ENABLED=true +
+  // SANDBOX_TERMINAL_ENABLED=true 时模型可在宿主机执行任意未被模式命中的命令
+  // (读 .env/网络外带)。真隔离需容器/独立 uid 运行 bot。
   SANDBOX_ENABLED: booleanFromEnv.default(false),
   SANDBOX_TERMINAL_ENABLED: booleanFromEnv.default(true),
   SANDBOX_BROWSER_ENABLED: booleanFromEnv.default(true),

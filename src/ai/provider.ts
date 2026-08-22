@@ -102,7 +102,7 @@ async function callClaude(
   const latencyMs = Math.round(performance.now() - start);
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
+    const errText = sanitizeErrText(await res.text().catch(() => ''));
     if (res.status === 429) {
       throw new AIError(`Rate limited: ${errText}`, label.name, label.model, 'AI_RATE_LIMIT');
     }
@@ -175,13 +175,23 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
 
 // ── Raw OpenAI-compatible fetch (used for vision & stream) ────────
 
+
+/** 上游错误体进日志前截断+脱敏(防自建中转 401 回显 key) — P1 fix 2026-08-22 */
+function sanitizeErrText(raw: string): string {
+  return raw
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***')
+    .slice(0, 300);
+}
+
 async function callOpenAIRaw(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean; signal?: AbortSignal; jsonMode?: boolean },
 ): Promise<AICallResult> {
   const start = performance.now();
-  const apiKey = label.apiKeys[0]!;
+  const apiKey = label.apiKeys[0];
+  if (!apiKey) throw new AIError('No API key configured', label.name, label.model, 'AI_NO_KEY');
   const baseUrl = label.endpoint.replace(/\/+$/, '');
   // Append /chat/completions; add /v1 only if endpoint doesn't already end with a version path
   const chatUrl = /\/v\d+$/.test(baseUrl) ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
@@ -219,7 +229,7 @@ async function callOpenAIRaw(
   } as RequestInit & { dispatcher?: Agent });
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
+    const errText = sanitizeErrText(await res.text().catch(() => ''));
     if (res.status === 429) throw new AIError(`Rate limited: ${errText}`, label.name, label.model, 'AI_RATE_LIMIT');
     // Detect content safety rejection in OpenAI-compatible endpoints
     if (res.status === 451 || isContentSafetyRejection(errText)) {

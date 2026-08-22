@@ -74,16 +74,26 @@ describe('host sendText replyTo + self-echo', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('fills task quote when model omits replyTo', async () => {
+  it('omitting replyTo sends plain bubble (no forced quote since 2026-08-22)', async () => {
     const host = createHostApi(-1001, {
       defaultReplyTo: 392277,
       onEnd: () => {},
     });
     await host.telegram.sendText('喵？');
-    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', 392277, undefined);
+    // 引用有指向才用——模型省略 = 不引用（真人不是每条回复都顶引用标）
+    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', undefined, undefined);
   });
 
-  it('segments long reply: first bubble quotes, later bubbles plain', async () => {
+  it('explicit task-quote replyTo still quotes (有指向的引用)', async () => {
+    const host = createHostApi(-1001, {
+      defaultReplyTo: 392277,
+      onEnd: () => {},
+    });
+    await host.telegram.sendText('回你这句喵', 392277);
+    expect(sendMessage).toHaveBeenCalledWith(-1001, '回你这句喵', 392277, undefined);
+  });
+
+  it('segments long reply: no bubble quotes unless model explicitly asks', async () => {
     const host = createHostApi(-1001, {
       defaultReplyTo: 392277,
       onEnd: () => {},
@@ -94,8 +104,7 @@ describe('host sendText replyTo + self-echo', () => {
     expect(long.length).toBeGreaterThan(60);
     await host.telegram.sendText(long);
     expect(sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(sendMessage.mock.calls[0]![2]).toBe(392277);
-    for (let i = 1; i < sendMessage.mock.calls.length; i++) {
+    for (let i = 0; i < sendMessage.mock.calls.length; i++) {
       expect(sendMessage.mock.calls[i]![2]).toBeUndefined();
     }
   });

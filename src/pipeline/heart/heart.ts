@@ -240,6 +240,9 @@ export async function runHeartBranch(ctx: {
         chatId: job.chatId, groupActivity: { messagesLast5Min, messagesLast1Hour },
         burstHint,
         focus: focusLevel,
+        // heart 回退时保持与心流路径同一套 L0 降级(P1 fix 2026-08-22 审查):
+        // 否则"对话热度"规则在回退路径复活 → 同一条消息因 heart 健康与否判决不一致。
+        demoteConversationalL0: true,
       });
     } else {
     // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
