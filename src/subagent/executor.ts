@@ -99,8 +99,9 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
    - 如果是简单问题（查天气、问时间、搜资料）→ web.search 查完消化成短人话回复
    - **创建了文件（代码/HTML/脚本/图片等）→ 必须用 \`telegram.sendFile(相对路径, caption)\` 把文件发给用户**，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await sendFile，再另写纯文字 sendText。
 2. 下方已注入最近聊天；通常不必再调 recentContext。
-3. **私聊**默认不传 replyTo；**群聊**第一条务必 \`sendText(text, quotes里的messageId)\`（或省略 replyTo，host 会填 quotes）。**禁止**传上下文里其它旧 #id —— 传错会 \`reply_to_mismatch\`，应省略 replyTo 或只用 quotes 里的 id 重试，不要改气泡正文去贴错人。
-4. 一轮优先 1 条文字（host 会按标点自动拆成多气泡，首条 quote、后续不 quote）；真要另起一轮最多再 sendText 一次。输出：极短思考 + 一个 \`\`\`js 代码块。
+3. **引用（replyTo）有指向才用，默认不引用**：真人不是每条回复都顶个引用标。省略 replyTo = 不引用（私聊群聊一样）。**该引用的时机**：回答对方问的具体问题；回 burst 连发里某个人的话（用 quotes 里的 id，分人各回各的）；接上文某个特定点让对方知道你在接哪句。闲聊接话、新起的话头、自己冒泡 → 不引用。**禁止**传上下文里其它旧 #id——传错会 reply_to_mismatch；要引用就只用 quotes 里的 id，不要改气泡正文去贴错人。
+3.5. **排版克制**：支持 Telegram 富文本——星号粗体、_斜体_、||剧透||、行内代码/代码块、大于号引用块。但真人群聊几乎不排版：**日常闲聊一律纯文字**，只有内容真需要时才用（贴代码、发长文、强调个别词）。为排版而排版比没有更假。
+4. 一轮优先 1 条文字（host 会按标点自动拆成多气泡，引用与否由你按 3 决定）；真要另起一轮最多再 sendText 一次。输出：极短思考 + 一个 \`\`\`js 代码块。
 5. **await 完 send* 再** runtime.endTask("一句话摘要")。禁止 fire-and-forget send。
 6. 无日记工具；要写/读日记 → meta.request。禁止编造「写完了」。
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
@@ -309,9 +310,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     const m = task.contentDirection.match(/#(\d{1,12})/);
     if (m?.[1]) replyAnchor = Number(m[1]);
   }
-  if (replyAnchor && replyAnchor > 0) {
-    task.quoteMessageIds = [replyAnchor];
-  } else if (task.chatId < 0) {
+  // 2026-08-22: 不再改写 task.quoteMessageIds——多元素 quotes(burst 分人各回各的)
+  // 必须原样传给 host 白名单, 否则模型引用第 2 个 id 会撞 reply_to_mismatch。
+  // replyAnchor 只作为 defaultReplyTo(首气泡兜底锚点)。
+  if (!replyAnchor && task.chatId < 0) {
     // goal/self-play 等自主任务没有消息触发源，天然没锚点——不是异常，别刷 warn。
     if (isSelfPlay || isGoalCheck) {
       logger.debug({ taskId: task.id, chatId: task.chatId }, 'CodeAct: no reply anchor for group task');
@@ -338,6 +340,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const host = createHostApi(task.chatId, {
     taskId: task.id,
     defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
+    quoteIds: task.quoteMessageIds,
     relatedQuoteIds: task.relatedQuoteIds,
     isClosed: () => closed,
     onEnd: (summary) => {
@@ -656,7 +659,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           ? `\n[硬性提醒] 这是最后一段。本段结束前必须收尾：sendText 总结做了什么/卡在哪/产出在哪，然后 runtime.endTask。`
           : '') +
 (replyAnchor && replyAnchor > 0
-          ? `\\\\n\\\\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。私聊可省略 replyTo；群聊省略时系统会补 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
+          ? `\\\\n\\\\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。省略 replyTo = 不引用（私聊群聊一样）——引用只在你真有指向时才用 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
           : '') +
         `\\\\n\\\\n根据用户消息自行决定：简单聊天就 1-2 轮回复，需要做事就多轮工具调用，完成后 sendText 报告结果。看 ## Now 的日段（北京时间）。禁止复读用户原话。`,
     ),

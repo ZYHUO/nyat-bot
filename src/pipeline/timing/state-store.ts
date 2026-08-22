@@ -178,9 +178,26 @@ async function persist(
     if (remove.length > 0) pipeline.hdel(k, ...remove);
     if (ttl > 0) pipeline.expire(k, ttl);
     await pipeline.exec();
+    if (persistFailStreak > 0) {
+      persistFailStreak = 0;
+      logger.info('timing state persist recovered');
+    }
   } catch (err) {
-    logger.warn({ err, chatId }, 'persist timing state failed');
+    // P1 fix(2026-08-22 审查): persist 连续失败说明 Redis 偏态故障——状态机在"失忆运行"
+    // (退避/攒批/WAIT 抑制全部失效)。升 error 让报警能抓到, 并暴露 degraded 标志。
+    persistFailStreak += 1;
+    const level = persistFailStreak >= PERSIST_FAIL_ERROR_THRESHOLD ? 'error' : 'warn';
+    logger[level]({ err, chatId, streak: persistFailStreak }, 'persist timing state failed');
   }
+}
+
+/** 连续 persist 失败计数与降级阈值。>0 即表示当前 timing 状态不可信(写不进 Redis)。 */
+let persistFailStreak = 0;
+const PERSIST_FAIL_ERROR_THRESHOLD = 3;
+
+/** timing 状态是否处于写入退化(Redis 写失败中)。消费方可据此跳过依赖陈旧状态的短路层。 */
+export function isTimingDegraded(): boolean {
+  return persistFailStreak >= PERSIST_FAIL_ERROR_THRESHOLD;
 }
 
 export async function enterRunning(chatId: number): Promise<void> {
@@ -213,10 +230,11 @@ export async function enterWait(
   anchorMessageId?: number,
   waitJobId?: string,
   triggerUid?: number,
+  waitUntilOverrideMs?: number,
 ): Promise<void> {
   const patch: Record<string, string | number> = {
     state: 'WAIT',
-    waitUntil: Date.now() + waitSec * 1000,
+    waitUntil: waitUntilOverrideMs ?? Date.now() + waitSec * 1000,
     lastGateAt: Date.now(),
     lastGateAction: 'wait',
     ...GATE_PENDING_RESET,

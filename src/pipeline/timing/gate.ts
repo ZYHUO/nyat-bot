@@ -28,6 +28,7 @@ import {
   type ChatTimingState,
 } from './chat-runtime.js';
 import { checkTalkValueThreshold } from './talk-value.js';
+import { isTimingDegraded } from './state-store.js';
 import { hasDeferBudget } from './defer.js';
 import { appendGateHistory, formatGateHistoryBlock, getGateHistory } from './gate-history.js';
 
@@ -296,7 +297,10 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
   // —— 否则未达阈值等于丢消息。连续免检(P0-A)优先于本层;defer 预算耗尽
   // 的条目跳过本层直接给 LLM(review #3:低 talk_value 的慢群否则会变成
   // 确定性永不回复区)。
-  if (input.canDefer && hasDeferBudget(input.deferCount) && !input.proactiveMode && !input.skipShortCircuits && state) {
+  // timing degraded(Redis 写失败中)时 gatePendingCount 是陈旧值, 攒批判定不可信 → 跳过本层
+  // 保守穿透给 LLM gate(多烧一次好过沉默群被无限 defer)。P1 fix 2026-08-22 审查。
+  const timingUsable = !isTimingDegraded();
+  if (input.canDefer && timingUsable && hasDeferBudget(input.deferCount) && !input.proactiveMode && !input.skipShortCircuits && state) {
     try {
       const verdict = await checkTalkValueThreshold({ chatId: input.chatId, state });
       if (!verdict.pass) {

@@ -188,6 +188,10 @@ async function hedgedCall(
   // 这不是边缘情况,是几乎每次都命中,等于整条链的 token 账单翻倍。
   const controllers = new Map<string, AbortController>();
   let settledWinner: string | null = null;
+  // hedge 双跳计费去重(P0 fix 2026-08-22): 输家"已完成但被掐"是否已 emit 过 usage,
+  // 用单调 Set 判定而不是读 settledWinner——两跳几乎同时完成时 .then 与 Promise.any.then
+  // 的 microtask 顺序不保证, 靠 winner 指针会随机多记/漏记一份。
+  const emittedUsageLabels = new Set<string>();
   const abortLosers = (winner: string | null) => {
     for (const [name, ac] of controllers) {
       if (name !== winner) ac.abort(new Error('hedge lost the race'));
@@ -210,11 +214,14 @@ async function hedgedCall(
       // —— 于是 llm_token_daily 与 llm_tokens_total 系统性少算了 hedge 那一份,
       // 这也正是"hedge 不取消输家"能长期没被发现的原因。这里把它记成 discarded。
       if (settledWinner !== null && settledWinner !== label.name && !suppressMetrics) {
-        emitLlmResult(usage, r, chatId);
-        logger.info(
-          { usage, label: label.name, tokens: r.tokenUsage.total },
-          'Hedge loser completed anyway — tokens billed, counted as discarded',
-        );
+        if (!emittedUsageLabels.has(label.name)) {
+          emittedUsageLabels.add(label.name);
+          emitLlmResult(usage, r, chatId);
+          logger.info(
+            { usage, label: label.name, tokens: r.tokenUsage.total },
+            'Hedge loser completed anyway — tokens billed, counted as discarded',
+          );
+        }
       }
       if (rejectEmpty && !r.content.trim()) {
         throw new AIError('Empty response', label.name, label.model, 'AI_EMPTY');
@@ -240,6 +247,11 @@ async function hedgedCall(
   let hedgeStarted = false;
   const hedgePromise = new Promise<AICallResult>((resolve, reject) => {
     const timer = setTimeout(async () => {
+      // caller 已 abort(turn 打断/关机)时不再发射 hedge——否则白烧一跳还会给 hedge label 刷熔断(P1 fix 2026-08-22)
+      if (isCallerAbort(callOpts.signal)) {
+        reject(new AIError('Hedge skipped (caller aborted)', 'unknown', 'unknown', 'AI_ABORTED'));
+        return;
+      }
       if (await cooldown.isCoolingDown(hedgeLabel.model)) {
         reject(new AIError('Hedge skipped (cooldown)', 'unknown', 'unknown', 'AI_HEDGE_FAILED'));
         return;

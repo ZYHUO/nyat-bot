@@ -87,32 +87,34 @@ describe('host sendText reply_to policy', () => {
     expect(sendMessage.mock.calls[1]![2]).toBe(99);
   });
 
-  it('group: default reply_to only on first bubble', async () => {
+  it('group: omitting replyTo no longer auto-fills task quote (2026-08-22 起引用有指向才用)', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
-    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77 });
+    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77, quoteIds: [77] });
     await host.telegram.sendText('第一条');
     await host.telegram.sendText('第二条');
-    expect(sendMessage.mock.calls[0]![2]).toBe(77);
+    expect(sendMessage.mock.calls[0]![2]).toBeUndefined();
     expect(sendMessage.mock.calls[1]![2]).toBeUndefined();
   });
 
-  it('group: later sendText honors explicit replyTo wish', async () => {
+  it('group: explicit replyTo honored within task quotes, rejected outside', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
-    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77 });
-    await host.telegram.sendText('先回主锚点');
-    await host.telegram.sendText('再点另一条', 88);
+    // burst：任务 quotes 有两条（77/88），分人各回各的
+    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77, quoteIds: [77, 88], maxTextSends: 5 });
+    await host.telegram.sendText('回 77 这句', 77);
+    await host.telegram.sendText('回 88 那句', 88);
     expect(sendMessage.mock.calls[0]![2]).toBe(77);
     expect(sendMessage.mock.calls[1]![2]).toBe(88);
+    // quotes 之外的旧 id → 拦（串台防护）
+    await expect(host.telegram.sendText('贴错人', 999)).rejects.toThrow(/reply_to_mismatch/);
   });
 
-  it('group: segmenter splits — only first part has reply_to', async () => {
+  it('group: segmenter splits — no part quotes unless model explicitly asks', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
-    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77 });
+    const host = createHostApi(-100123, { onEnd: () => {}, defaultReplyTo: 77, quoteIds: [77] });
     // >20 chars + 句号 → host runs segmentReply
     await host.telegram.sendText('先看看温度是不是瓶颈吧。别真把小机子给烤熟了喵。别瞎超频！');
     expect(sendMessage.mock.calls.length).toBeGreaterThan(1);
-    expect(sendMessage.mock.calls[0]![2]).toBe(77);
-    for (let i = 1; i < sendMessage.mock.calls.length; i++) {
+    for (let i = 0; i < sendMessage.mock.calls.length; i++) {
       expect(sendMessage.mock.calls[i]![2]).toBeUndefined();
     }
   });

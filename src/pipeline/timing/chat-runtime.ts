@@ -130,6 +130,9 @@ export async function transitionToStop(chatId: number, triggerUid?: number, ttlS
  * Transition to WAIT. Schedules a BullMQ delayed wait-resume job that will
  * fire after `waitSec` seconds. Bounds waitSec into [WAIT_MIN_SEC, WAIT_MAX_SEC].
  */
+/** enqueueWaitResume 双失败时 WAIT 的硬上限(lazy-expire 兜底窗口)。 */
+const WAIT_RESUME_FALLBACK_MS = 60_000;
+
 export async function transitionToWait(
   chatId: number,
   waitSec: number,
@@ -149,6 +152,7 @@ export async function transitionToWait(
   // still mark the state but the chat will sit in WAIT until the next manual
   // wakeup (direct interaction).
   let waitJobId: string | undefined;
+  let waitUntilOverrideMs: number | undefined;
   try {
     waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
   } catch (err) {
@@ -159,11 +163,15 @@ export async function transitionToWait(
     try {
       waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
     } catch (err2) {
-      logger.error({ err: err2, chatId, bounded }, 'enqueueWaitResume failed twice; entering WAIT without scheduled resume (recovers on direct wakeup)');
+      // 双失败后把 waitUntil 钳到 1 分钟硬上限(P1 fix 2026-08-22 审查): 否则 chat 裸进
+      // WAIT 且非 direct 消息被 waitTriggerUids 整人抑制——触发者若不再发 direct,
+      // 要等 TIMING_STATE_TTL(24h)才自愈。钳短后 state-store 的 lazy-expire 分钟级兜底。
+      logger.error({ err: err2, chatId, bounded }, 'enqueueWaitResume failed twice; entering WAIT clamped to 60s (lazy-expire fallback)');
+      waitUntilOverrideMs = Date.now() + WAIT_RESUME_FALLBACK_MS;
     }
   }
 
-  await enterWait(chatId, bounded, anchorMessageId, waitJobId, triggerUid);
+  await enterWait(chatId, bounded, anchorMessageId, waitJobId, triggerUid, waitUntilOverrideMs);
   logger.info(
     { chatId, waitSec: bounded, anchorMessageId, waitJobId, triggerUid },
     'Chat transitioned to WAIT (gate=wait)',
