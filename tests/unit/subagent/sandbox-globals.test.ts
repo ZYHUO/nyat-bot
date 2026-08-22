@@ -35,6 +35,7 @@ function makeHostStub() {
     goals: { __ns: 'goals' },
     members: { __ns: 'members' },
     allowlist: { __ns: 'allowlist' },
+    admin: { __ns: 'admin' },
   } as never;
 }
 
@@ -46,14 +47,14 @@ describe('runHostCode sandbox globals', () => {
       `return [
         typeof telegram, typeof memory, typeof stickers, typeof web,
         typeof meta, typeof runtime, typeof computer,
-        typeof chats, typeof goals, typeof members, typeof allowlist, typeof console,
+        typeof chats, typeof goals, typeof members, typeof allowlist, typeof admin, typeof console,
       ].join(',');`,
       host,
       { isClosed: () => false, onTimeout: () => undefined, timeoutMs: 30_000 },
     );
     expect(r.ok).toBe(true);
     expect(r.output).toBe(
-      'object,object,object,object,object,object,object,object,object,object,object,object',
+      'object,object,object,object,object,object,object,object,object,object,object,object,object',
     );
   }, 20_000);
 
@@ -61,11 +62,11 @@ describe('runHostCode sandbox globals', () => {
     const { runHostCodeForTest } = await import('../../../src/subagent/executor.js');
     const host = makeHostStub();
     const r = await runHostCodeForTest(
-      `return chats.__ns + '/' + goals.__ns + '/' + members.__ns + '/' + allowlist.__ns;`,
+      `return chats.__ns + '/' + goals.__ns + '/' + members.__ns + '/' + allowlist.__ns + '/' + admin.__ns;`,
       host,
       { isClosed: () => false, onTimeout: () => undefined, timeoutMs: 30_000 },
     );
     expect(r.ok).toBe(true);
-    expect(r.output).toBe('chats/goals/members/allowlist');
+    expect(r.output).toBe('chats/goals/members/allowlist/admin');
   }, 20_000);
 });

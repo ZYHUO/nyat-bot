@@ -36,6 +36,114 @@ export async function reactToMessage(chatId: number, messageId: number, emoji: s
   }
 }
 
+/** 发起群投票（sendPoll，匿名单选）。返回 messageId；失败返回 0。非幂等不重试。 */
+export async function sendPoll(
+  chatId: number,
+  question: string,
+  options: string[],
+  messageThreadId?: number,
+): Promise<number> {
+  try {
+    const bot = getBot();
+    const threadParam = messageThreadId ? { message_thread_id: messageThreadId } : {};
+    const r = await bot.api.sendPoll(
+      chatId,
+      question.slice(0, 300),
+      options.slice(0, 10).map((o) => ({ text: o.slice(0, 100) })),
+      { is_anonymous: true, allows_multiple_answers: false, ...threadParam },
+    );
+    return r.message_id;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'sendPoll failed (non-critical)');
+    return 0;
+  }
+}
+
+/** 转发消息（forwardMessage）。返回目标群的 messageId；失败返回 0。非幂等不重试。 */
+export async function forwardMessage(
+  targetChatId: number,
+  fromChatId: number,
+  messageId: number,
+): Promise<number> {
+  try {
+    const bot = getBot();
+    const r = await bot.api.forwardMessage(targetChatId, fromChatId, Math.floor(messageId));
+    return r.message_id;
+  } catch (err) {
+    logger.debug({ err, targetChatId, fromChatId, messageId }, 'forwardMessage failed (non-critical)');
+    return 0;
+  }
+}
+
+/** 临时禁言（restrictChatMember 全权限关闭 + until_date）。失败 false。 */
+export async function muteMember(chatId: number, uid: number, minutes: number): Promise<boolean> {
+  try {
+    const bot = getBot();
+    const until = Math.floor(Date.now() / 1000) + Math.floor(minutes) * 60;
+    await bot.api.restrictChatMember(
+      chatId,
+      Math.floor(uid),
+      {
+        can_send_messages: false,
+        can_send_photos: false,
+        can_send_videos: false,
+        can_send_documents: false,
+        can_send_audios: false,
+        can_send_voice_notes: false,
+        can_send_video_notes: false,
+        can_send_polls: false,
+        can_send_other_messages: false,
+        can_add_web_page_previews: false,
+        can_invite_users: false,
+        can_pin_messages: false,
+        can_manage_topics: false,
+      },
+      { until_date: until },
+    );
+    return true;
+  } catch (err) {
+    logger.debug({ err, chatId, uid, minutes }, 'muteMember failed');
+    return false;
+  }
+}
+
+/** 解除禁言（恢复全权限）。失败 false。 */
+export async function unmuteMember(chatId: number, uid: number): Promise<boolean> {
+  try {
+    const bot = getBot();
+    await bot.api.restrictChatMember(chatId, Math.floor(uid), {
+      can_send_messages: true,
+      can_send_photos: true,
+      can_send_videos: true,
+      can_send_documents: true,
+      can_send_audios: true,
+      can_send_voice_notes: true,
+      can_send_video_notes: true,
+      can_send_polls: true,
+      can_send_other_messages: true,
+      can_add_web_page_previews: true,
+      can_invite_users: true,
+    });
+    return true;
+  } catch (err) {
+    logger.debug({ err, chatId, uid }, 'unmuteMember failed');
+    return false;
+  }
+}
+
+/** 置顶/取消置顶。失败 false。 */
+export async function pinMessage(chatId: number, messageId: number, unpin = false): Promise<boolean> {
+  try {
+    const bot = getBot();
+    if (unpin) await bot.api.unpinChatMessage(chatId, Math.floor(messageId));
+    else await bot.api.pinChatMessage(chatId, Math.floor(messageId), { disable_notification: true });
+    return true;
+  } catch (err) {
+    logger.debug({ err, chatId, messageId, unpin }, 'pinMessage failed');
+    return false;
+  }
+}
+
 /**
  * @param idempotent 该操作重放一次是否安全。
  *

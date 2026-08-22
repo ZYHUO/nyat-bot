@@ -70,6 +70,35 @@ export interface HostApi {
      */
     sendToChat: (targetChatId: number, text: string, filePath?: string) => Promise<{ messageId: number }>;
     react: (messageId: number, emoji: string) => Promise<boolean>;
+    /**
+     * 发起群投票（匿名单选，Telegram 原生 poll）。仅群聊；每任务限 1 次、
+     * 每群每天限 2 次（真人也不会一天到晚发起投票）。question ≤200 字，
+     * options 2-10 个各 ≤60 字。返回 {messageId}（0=被闸/失败）。
+     */
+    sendPoll: (question: string, options: string[]) => Promise<{ messageId: number }>;
+    /**
+     * 转发消息（forwardMessage）。底线硬闸只有 DM 禁转（私聊内容不外流）；
+     * 群对群转不转、转什么由模型自己按隐私准则判断（别转私人信息/别把人吐槽的话
+     * 转到当事人群里/别转敏感内容）。targetChatId 省略=当前群。
+     * 每任务限 2 次、目标群每天限 3 次。返回 {messageId}（0=被闸/失败）。
+     */
+    forward: (fromChatId: number, messageId: number, targetChatId?: number) => Promise<{ messageId: number }>;
+  };
+  /**
+   * 群管理动作（真人感：bot 是群管理就该能干活）。调用前自动权限自检——
+   * bot 在该群没有对应管理权限时报错并指路（让群主开权限）。仅群聊；
+   * 每群每小时合计限 10 次。mute 不许对主人/bot 自己下手。
+   */
+  admin: {
+    /** 删消息（默认当前群；不许跨群删）。 */
+    deleteMessage: (messageId: number) => Promise<{ ok: boolean }>;
+    /** 临时禁言（minutes 1-1440）。 */
+    mute: (uid: number, minutes: number) => Promise<{ ok: boolean }>;
+    /** 解除禁言。 */
+    unmute: (uid: number) => Promise<{ ok: boolean }>;
+    /** 置顶/取消置顶。 */
+    pin: (messageId: number) => Promise<{ ok: boolean }>;
+    unpin: (messageId: number) => Promise<{ ok: boolean }>;
   };
   /** 群目录（承诺闭环配套）：按**群名片段**找群。空命中返回指路字符串（找错对象的自救提示）。 */
   chats: {
@@ -250,6 +279,8 @@ export function createHostApi(
   let ended = false;
   let textSent = 0;
   let fileSent = 0;
+  let pollSent = false;
+  let forwardsSent = 0;
   let lastSentNorm = '';
   let metaRequested = false;
   // 承诺闭环：本任务发出过的文字（backstop 扫承诺措辞用）、跨群送达次数、是否已立 goal。
@@ -793,6 +824,92 @@ export function createHostApi(
         assertOpen();
         return trackInflight(reactToMessage(chatId, messageId, emoji));
       },
+      sendPoll(question: string, options: string[]) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            // 真人感：投票是「事件型」动作——仅群聊、每任务 1 次、每群每天 2 次。
+            if (chatId > 0) throw new Error('sendPoll_groups_only: 投票只在群里发起');
+            if (pollSent) throw new Error('sendPoll_limit:1_per_task');
+            const q = String(question ?? '').trim().slice(0, 200);
+            const pollOpts = (Array.isArray(options) ? options : [])
+              .map((o) => String(o ?? '').trim().slice(0, 60))
+              .filter(Boolean)
+              .slice(0, 10);
+            if (!q) throw new Error('sendPoll_empty_question');
+            if (pollOpts.length < 2) throw new Error('sendPoll_need_2_options');
+            assertNotBanned(q + ' ' + pollOpts.join(' '));
+            // 每群每天 cap 2（react 的 dayKey 同款；原子 incr 防并发双发）
+            const { getRedis } = await import('../db/redis.js');
+            const day = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            const key = `xxb:poll:${chatId}:${day}`;
+            const n = await getRedis().incr(key);
+            if (n === 1) await getRedis().expire(key, 30 * 3600);
+            if (n > 2) {
+              logger.info({ chatId }, 'host sendPoll rejected daily cap');
+              return { messageId: 0 };
+            }
+            const { sendPoll } = await import('../bot/sender/telegram.js');
+            const messageId = await sendPoll(chatId, q, pollOpts, opts.messageThreadId);
+            if (messageId > 0) {
+              pollSent = true;
+              try {
+                const { addAssistant } = await import('../pipeline/context/manager.js');
+                await addAssistant(chatId, {
+                  textContent: `[投票] ${q}（${pollOpts.join(' / ')}）`,
+                  messageId,
+                }, opts.messageThreadId);
+              } catch { /* non-critical */ }
+              logger.info({ chatId, q: q.slice(0, 40), options: pollOpts.length }, 'host sendPoll sent');
+            }
+            return { messageId };
+          })(),
+        );
+      },
+      forward(fromChatId: number, messageId: number, targetChatId?: number) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            const tid = Number(targetChatId ?? chatId);
+            const fid = Number(fromChatId);
+            const mid = Math.floor(Number(messageId));
+            if (!Number.isFinite(fid) || !Number.isFinite(tid) || !Number.isFinite(mid) || mid <= 0) {
+              throw new Error('forward_invalid_args');
+            }
+            // 隐私闸只钉死一条底线：DM 一律禁（私聊内容不外流）。群对群转不转、
+            // 转什么由模型自己按隐私准则判断（2026-08-22 用户拍板：本质是 AI 决策）。
+            if (fid > 0 || tid > 0) {
+              throw new Error('forward_groups_only: 只允许群对群转发，私聊内容不外流');
+            }
+            if (forwardsSent >= 2) throw new Error('forward_limit:2_per_task');
+            // 目标群每天 cap 3（防刷，不是语义判断）
+            const { getRedis } = await import('../db/redis.js');
+            const redis = getRedis();
+            const day = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            const key = `xxb:forward:${tid}:${day}`;
+            const n = await redis.incr(key);
+            if (n === 1) await redis.expire(key, 30 * 3600);
+            if (n > 3) {
+              logger.info({ chatId: tid }, 'host forward rejected daily cap');
+              return { messageId: 0 };
+            }
+            const { forwardMessage } = await import('../bot/sender/telegram.js');
+            const outMessageId = await forwardMessage(tid, fid, mid);
+            if (outMessageId > 0) {
+              forwardsSent++;
+              try {
+                const { addAssistant } = await import('../pipeline/context/manager.js');
+                await addAssistant(tid, {
+                  textContent: `[转发] 从另一个群转来的消息`,
+                  messageId: outMessageId,
+                });
+              } catch { /* non-critical */ }
+              logger.info({ from: fid, to: tid, messageId: mid, outMessageId }, 'host forward delivered');
+            }
+            return { messageId: outMessageId };
+          })(),
+        );
+      },
       sendToChat(targetChatId: number, text: string, filePath?: string) {
         assertOpen();
         return trackInflight(
@@ -869,6 +986,99 @@ export function createHostApi(
         );
       },
     },
+    admin: (() => {
+      /** 权限自检：bot 在该群没有对应管理权限时 throw 指路（admin 权限不一定给到）。 */
+      const assertAdminPerm = async (
+        perm: 'can_delete_messages' | 'can_restrict_members' | 'can_pin_messages',
+      ): Promise<void> => {
+        const { getBot, getBotUid } = await import('../bot/bot.js');
+        const member = (await getBot().api.getChatMember(chatId, getBotUid())) as unknown as Record<string, unknown>;
+        const status = String(member['status'] ?? '');
+        if (status !== 'administrator' || member[perm] !== true) {
+          const permName = perm.replace(/^can_/i, '').replace(/_/g, ' ');
+          throw new Error(
+            `admin_no_permission: 我在这个群没有管理权限（需要 ${permName}）——让群主/管理在群设置里给我开一下再喊我`,
+          );
+        }
+      };
+      const rateGate = async (): Promise<void> => {
+        const { getRedis } = await import('../db/redis.js');
+        const hourKey = Math.floor(Date.now() / 3600_000);
+        const key = `xxb:admin_act:${chatId}:${hourKey}`;
+        const n = await getRedis().incr(key);
+        if (n === 1) await getRedis().expire(key, 7200);
+        if (n > 10) throw new Error('admin_rate_limit: 本群每小时管理动作上限 10 次');
+      };
+      const assertGroup = (): void => {
+        if (chatId > 0) throw new Error('admin_groups_only: 管理动作只在群里');
+      };
+      return {
+        async deleteMessage(messageId: number) {
+          assertOpen();
+          assertGroup();
+          const mid = Math.floor(Number(messageId));
+          if (!Number.isFinite(mid) || mid <= 0) throw new Error('invalid messageId');
+          await assertAdminPerm('can_delete_messages');
+          await rateGate();
+          const { deleteMessage } = await import('../bot/sender/telegram.js');
+          await deleteMessage(chatId, mid); // 现有 sender 静默失败版；权限自检已在前面真验证
+          logger.info({ chatId, messageId: mid }, 'host admin.deleteMessage');
+          return { ok: true };
+        },
+        async mute(uid: number, minutes: number) {
+          assertOpen();
+          assertGroup();
+          const target = Math.floor(Number(uid));
+          const mins = Math.min(Math.max(Math.floor(Number(minutes)) || 10, 1), 1440);
+          if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
+          if (target === env().MASTER_UID) throw new Error('admin_no_master: 不许对主人下手');
+          const { getBotUid } = await import('../bot/bot.js');
+          if (target === getBotUid()) throw new Error('admin_no_self: 不能禁言我自己');
+          await assertAdminPerm('can_restrict_members');
+          await rateGate();
+          const { muteMember } = await import('../bot/sender/telegram.js');
+          const ok = await muteMember(chatId, target, mins);
+          logger.info({ chatId, uid: target, minutes: mins, ok }, 'host admin.mute');
+          return { ok };
+        },
+        async unmute(uid: number) {
+          assertOpen();
+          assertGroup();
+          const target = Math.floor(Number(uid));
+          if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
+          await assertAdminPerm('can_restrict_members');
+          await rateGate();
+          const { unmuteMember } = await import('../bot/sender/telegram.js');
+          const ok = await unmuteMember(chatId, target);
+          logger.info({ chatId, uid: target, ok }, 'host admin.unmute');
+          return { ok };
+        },
+        async pin(messageId: number) {
+          assertOpen();
+          assertGroup();
+          const mid = Math.floor(Number(messageId));
+          if (!Number.isFinite(mid) || mid <= 0) throw new Error('invalid messageId');
+          await assertAdminPerm('can_pin_messages');
+          await rateGate();
+          const { pinMessage } = await import('../bot/sender/telegram.js');
+          const ok = await pinMessage(chatId, mid, false);
+          logger.info({ chatId, messageId: mid, ok }, 'host admin.pin');
+          return { ok };
+        },
+        async unpin(messageId: number) {
+          assertOpen();
+          assertGroup();
+          const mid = Math.floor(Number(messageId));
+          if (!Number.isFinite(mid) || mid <= 0) throw new Error('invalid messageId');
+          await assertAdminPerm('can_pin_messages');
+          await rateGate();
+          const { pinMessage } = await import('../bot/sender/telegram.js');
+          const ok = await pinMessage(chatId, mid, true);
+          logger.info({ chatId, messageId: mid, ok }, 'host admin.unpin');
+          return { ok };
+        },
+      };
+    })(),
     chats: {
       async find(query: string) {
         const q = String(query ?? '').trim().slice(0, 50);
