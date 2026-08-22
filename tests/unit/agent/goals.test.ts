@@ -52,9 +52,9 @@ describe('createGoal', () => {
     expect(createGoal({ topic: '。。。', origin: 'self' })).toBeNull();
     // 已有 1 个 active(比特币),还剩 4 个空位 → 4 个成功,第 5 个拒绝。
     for (let i = 0; i < 4; i++) {
-      expect(createGoal({ topic: `goal topic number ${i}`, origin: 'self' })).not.toBeNull();
+      expect(createGoal({ topic: ['显卡行情', '足球赛果', '明天天气', '新番更新'][i]!, origin: 'self' })).not.toBeNull();
     }
-    expect(createGoal({ topic: 'sixth goal should be rejected', origin: 'self' }, 5)).toBeNull();
+    expect(createGoal({ topic: '白菜价格走势', origin: 'self' }, 5)).toBeNull();
   });
 });
 
@@ -136,8 +136,8 @@ describe('recordCheck', () => {
 
 describe('listGoals / setGoalStatus', () => {
   it('filters by status and updates status', () => {
-    const a = createGoal({ topic: 'goal alpha topic', origin: 'self' })!;
-    createGoal({ topic: 'goal beta topic', origin: 'self' });
+    const a = createGoal({ topic: '比特币行情追踪', origin: 'self' })!;
+    createGoal({ topic: '显卡降价消息', origin: 'self' });
     setGoalStatus(a, 'dropped');
     expect(listGoals('active').length).toBe(1);
     expect(listGoals('dropped').length).toBe(1);
@@ -155,8 +155,8 @@ describe('same-task dedup（2026-08-22 goal 8/9 重复事故）', () => {
   });
 
   it('不同 taskId 不互相挡', () => {
-    const a = createGoal({ topic: 'task A 的承诺', origin: 'promise-backstop:task-111aaa' });
-    const b = createGoal({ topic: 'task B 的承诺', origin: 'promise-backstop:task-222bbb' });
+    const a = createGoal({ topic: '明天带伞提醒', origin: 'promise-backstop:task-111aaa' });
+    const b = createGoal({ topic: '新番更新追更', origin: 'promise-backstop:task-222bbb' });
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
   });
@@ -166,5 +166,22 @@ describe('same-task dedup（2026-08-22 goal 8/9 重复事故）', () => {
     const b = createGoal({ topic: '另一个 self 立的', origin: 'self' });
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
+  });
+});
+
+describe('topic 同主题去重（2026-08-22 自我增殖事故）', () => {
+  it('措辞略异的同主题 goal 被拒（子串）', () => {
+    createGoal({ topic: 'DeepSeek API 定价后续变化', origin: 'self' });
+    expect(createGoal({ topic: 'DeepSeek API 定价后续变化（峰谷计费规则、新模型发布）', origin: 'self' })).toBeNull();
+  });
+
+  it('套话前缀不同但主题相同的被拒（bigram 重叠）', () => {
+    createGoal({ topic: '持续关注 AI 模型新版本定价变动 xAI OpenAI Anthropic', origin: 'self' });
+    expect(createGoal({ topic: '兑现承诺: AI 模型新版本定价变动 xAI OpenAI Anthropic 阶跃星辰', origin: 'self' })).toBeNull();
+  });
+
+  it('真正不同的主题不受影响', () => {
+    createGoal({ topic: 'DeepSeek API 定价后续变化', origin: 'self' });
+    expect(createGoal({ topic: '明天提醒主人带伞', origin: 'self' })).not.toBeNull();
   });
 });

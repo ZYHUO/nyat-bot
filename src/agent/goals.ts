@@ -44,6 +44,29 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/** goal topic 归一化：去前缀套话/标点/空白/大小写，只留内容字符（中英日韩）。 */
+function normalizeGoalTopic(topic: string): string {
+  return topic
+    .toLowerCase()
+    .replace(/兑现承诺[:：]?|持续关注|后续|有新消息就推送到群里。?|看看有没有新进展。?/g, '')
+    .replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+
+/** 字符 bigram 重叠率（Dice 系数）：|A∩B|*2/(|A|+|B|)。 */
+function bigramOverlap(a: string, b: string): number {
+  if (a.length < 2 || b.length < 2) return 0;
+  const grams = (s: string) => {
+    const set = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+    return set;
+  };
+  const ga = grams(a);
+  const gb = grams(b);
+  let inter = 0;
+  for (const g of ga) if (gb.has(g)) inter++;
+  return (2 * inter) / (ga.size + gb.size);
+}
+
 /** 立 goal。返回 rowid；超上限或重复 topic（active 中已有同 topic）返回 null。 */
 export function createGoal(input: CreateGoalInput, maxActive = 5): number | null {
   try {
@@ -61,6 +84,27 @@ export function createGoal(input: CreateGoalInput, maxActive = 5): number | null
       .prepare(`SELECT id FROM goals WHERE status = 'active' AND topic = ?`)
       .get(topic) as { id: number } | undefined;
     if (dup) return null;
+    // 同主题查重（2026-08-22 自我增殖事故：goal check 完成后 episode 蒸馏又立同主题
+    // goal，措辞略异绕过精确匹配——「DeepSeek 定价」繁殖出两条、「AI 模型定价」两条）。
+    // 归一化后互为子串或字符 bigram 重叠 ≥0.55 即同一主题——数据质量查重，非语义引擎。
+    const normTopic = normalizeGoalTopic(topic);
+    if (normTopic.length >= 6) {
+      const actives = db
+        .prepare(`SELECT id, topic FROM goals WHERE status = 'active'`)
+        .all() as { id: number; topic: string }[];
+      for (const g of actives) {
+        const normExisting = normalizeGoalTopic(g.topic);
+        if (normExisting.length < 6) continue;
+        if (normTopic.includes(normExisting) || normExisting.includes(normTopic)) {
+          logger.info({ topic, existingId: g.id }, 'goal rejected: substring dup');
+          return null;
+        }
+        if (bigramOverlap(normTopic, normExisting) >= 0.55) {
+          logger.info({ topic, existingId: g.id }, 'goal rejected: topic overlap dup');
+          return null;
+        }
+      }
+    }
     // 同一任务只立一个 goal：promise-backstop 和 episode 蒸馏会从同一个 taskId
     // 各立一次（措辞不同绕过 topic 去重）——2026-08-22 实测 goal 8/9 重复
     // （「团毛球」vs「清理猫毛」同一承诺）。origin 形如 promise-backstop:<taskId> /
