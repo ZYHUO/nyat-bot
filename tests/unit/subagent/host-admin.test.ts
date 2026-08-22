@@ -125,6 +125,24 @@ describe('host admin（群管理动作）', () => {
     expect(muteMemberMock).toHaveBeenCalledWith(GROUP, 12345, 1440);
   });
 
+  it('pin 返回被 pin 消息的内容预览（pin 错能自己发现）', async () => {
+    const { getRecent } = await import('../../../src/pipeline/context/manager.js');
+    vi.mocked(getRecent).mockResolvedValueOnce([
+      { role: 'user', uid: 1, username: 'u', fullName: '老白', textContent: '周日烧烤报名帖', messageId: 777, timestamp: 1, isForwarded: false },
+    ] as never);
+    const api = await makeApi(GROUP);
+    const r = await api.admin.pin(777);
+    expect(r.ok).toBe(true);
+    expect(r.pinnedPreview).toBe('周日烧烤报名帖');
+  });
+
+  it('pin 的消息不在最近上下文 → preview 提示自查', async () => {
+    const api = await makeApi(GROUP); // getRecent 默认 mock 返回 []
+    const r = await api.admin.pin(999999);
+    expect(r.ok).toBe(true);
+    expect(r.pinnedPreview).toContain('内容未取到');
+  });
+
   it('频率闸：每小时超 10 次拒绝', async () => {
     redisIncr.mockResolvedValue(11);
     const api = await makeApi(GROUP);

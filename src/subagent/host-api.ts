@@ -96,8 +96,8 @@ export interface HostApi {
     mute: (uid: number, minutes: number) => Promise<{ ok: boolean }>;
     /** 解除禁言。 */
     unmute: (uid: number) => Promise<{ ok: boolean }>;
-    /** 置顶/取消置顶。 */
-    pin: (messageId: number) => Promise<{ ok: boolean }>;
+    /** 置顶/取消置顶。pin 返回 pinnedPreview（实际被 pin 消息的前 80 字）——立刻核对，错了 unpin 重 pin。 */
+    pin: (messageId: number) => Promise<{ ok: boolean; pinnedPreview: string }>;
     unpin: (messageId: number) => Promise<{ ok: boolean }>;
   };
   /** 群目录（承诺闭环配套）：按**群名片段**找群。空命中返回指路字符串（找错对象的自救提示）。 */
@@ -156,6 +156,8 @@ export interface HostApi {
   web: {
     /** Live web search (Gemini / xAI / Searx / DDG). */
     search: (query: string) => Promise<string>;
+    /** 本地 RSS 谈资库的最新条目（源/标题/链接）——找「我之前分享过的新闻出处」先翻这里。 */
+    feed: () => Promise<string>;
   };
   meta: {
     /**
@@ -1062,8 +1064,17 @@ export function createHostApi(
           await rateGate();
           const { pinMessage } = await import('../bot/sender/telegram.js');
           const ok = await pinMessage(chatId, mid, false);
-          logger.info({ chatId, messageId: mid, ok }, 'host admin.pin');
-          return { ok };
+          // pin 完把「实际 pin 的消息内容」带回去——模型立刻看到 pin 的是什么，
+          // 错了能自己 unpin 重 pin（2026-08-22：pin 错消息的事故预防）。
+          let preview = '';
+          try {
+            const { getRecent } = await import('../pipeline/context/manager.js');
+            const msgs = await getRecent(chatId, 60);
+            const hit = msgs.find((m) => m.messageId === mid);
+            preview = (hit?.textContent ?? '').slice(0, 80);
+          } catch { /* best-effort */ }
+          logger.info({ chatId, messageId: mid, ok, preview: preview.slice(0, 40) }, 'host admin.pin');
+          return { ok, pinnedPreview: preview || '(内容未取到——用 chats.recentMessages 自己核对)' };
         },
         async unpin(messageId: number) {
           assertOpen();
@@ -1427,6 +1438,34 @@ export function createHostApi(
         } catch (err) {
           logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host web.search failed');
           return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+      async feed() {
+        assertOpen();
+        // 本地 RSS 谈资库（xxb:rss:fuel:* 全群聚合）：bot 分享过的新闻的出处就在这。
+        try {
+          const { getRedis } = await import('../db/redis.js');
+          const redis = getRedis();
+          const keys = await redis.keys('xxb:rss:fuel:*');
+          const items: string[] = [];
+          for (const k of keys.slice(0, 5)) {
+            const raws = await redis.lrange(k, 0, 9);
+            for (const raw of raws) {
+              try {
+                const it = JSON.parse(raw) as { title?: string; link?: string; source?: string };
+                if (it.title) {
+                  items.push(`[${it.source ?? '?'}] ${it.title}${it.link ? ` ${it.link}` : ''}`.slice(0, 200));
+                }
+              } catch { /* skip malformed */ }
+            }
+          }
+          const out = items.slice(0, 12).join('\n');
+          const text = out || '(谈资库是空的)';
+          noteUnviewed('web.feed', text);
+          return text;
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host web.feed failed');
+          return '(谈资库读取失败)';
         }
       },
     },
