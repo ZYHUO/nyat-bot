@@ -231,8 +231,11 @@ async function notifyMaster(deps: BotFlowDeps, ev: MasterNotifyEvent): Promise<v
 
   let messageId = 0;
   try {
-    const m = (await deps.bot.api.sendMessage(deps.masterUid, text)) as { message_id?: number };
-    messageId = typeof m?.message_id === 'number' ? m.message_id : 0;
+    // 走 sender 包装器：LLM 总结自带 **粗体**/`代码` 等 Markdown，裸 api.sendMessage
+    // 没有 parse_mode 会把语法原样糊主人脸上（2026-08-23 事故）。包装器负责
+    // MarkdownV2 转换 + 解析失败掉纯文本兜底。
+    const { sendMessage } = await import('../bot/sender/telegram.js');
+    messageId = await sendMessage(deps.masterUid, text);
   } catch (err) {
     logger.warn({ err, chatId: ev.chat.chatId, kind: ev.kind }, 'notifyMaster send failed');
     return;

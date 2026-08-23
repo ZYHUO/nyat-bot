@@ -61,6 +61,8 @@ export interface HostApi {
     sendSticker: (fileId: string) => Promise<{ messageId: number }>;
     /** Deliver a sandbox file to the user (sendDocument). Path is sandbox-relative. */
     sendFile: (path: string, caption?: string) => Promise<{ messageId: number }>;
+    /** 把沙盒里的图片当**照片**发（内联显示，发图首选；文档/代码文件才用 sendFile）。 */
+    sendPhoto: (path: string, caption?: string) => Promise<{ messageId: number }>;
     /** Synthesize + send a voice message (TTS). Falls back to {skipped} when TTS disabled. */
     sendVoice: (text: string) => Promise<{ messageId: number } | { skipped: true; reason: string }>;
     /**
@@ -121,6 +123,18 @@ export interface HostApi {
       | string
     >;
   };
+  /**
+   * 画摊子（2026-08-23）：画图交给专职画摊子子代理——教学 prompt 喂 SVG 手艺，
+   * 产出 SVG 光栅化成 PNG。告诉它要画什么（内容/风格/图里要写的字），返回沙盒
+   * 相对路径 pngPath/svgPath；拿到后必须 telegram.sendPhoto(pngPath, caption) 发出去。
+   * 每任务限 2 次；失败返回 {error}。
+   */
+  art: {
+    draw: (
+      description: string,
+      opts?: { width?: number; height?: number },
+    ) => Promise<{ pngPath: string; svgPath: string; width: number; height: number } | { error: string }>;
+  };
   /** 关注目标（承诺闭环②）：把「等下/回头要做的事」立成 goal，unified-tick 到点执行。 */
   goals: {
     add: (
@@ -179,6 +193,14 @@ export interface HostApi {
     setScratch: (text: string) => Promise<void>;
     /** 事办完了清掉（prefix 匹配，省略 = 全清）。 */
     clearScratch: (prefix?: string) => Promise<void>;
+    /**
+     * auto+plan 模式（借鉴 code harness 的 plan mode）：多步任务开头列计划，
+     * 之后每轮 prompt 里能看到自己的计划照它推进。任务内状态，不落库。
+     */
+    setPlan: (steps: string[]) => void;
+    /** executor 每轮读；dirty=自上轮注入后有更新。 */
+    getPlan: () => { steps: string[]; dirty: boolean } | null;
+    markPlanRead: () => void;
   };
   /** Computer-use sandbox (terminal/browser/files). Throws sandbox_disabled when off. */
   computer: Record<string, (...args: never[]) => Promise<unknown>>;
@@ -283,6 +305,10 @@ export function createHostApi(
   let fileSent = 0;
   let pollSent = false;
   let forwardsSent = 0;
+  let artDraws = 0;
+  // auto+plan：任务内计划（setPlan 写入，executor 每轮读 dirty 注入 prompt）
+  let currentPlan: string[] | null = null;
+  let planDirty = false;
   let lastSentNorm = '';
   let metaRequested = false;
   // 承诺闭环：本任务发出过的文字（backstop 扫承诺措辞用）、跨群送达次数、是否已立 goal。
@@ -587,7 +613,7 @@ export function createHostApi(
                   await new Promise((r) => setTimeout(r, 300));
                 }
               }
-              await sendChatAction(chatId, 'typing');
+              await sendChatAction(chatId, 'typing', opts.messageThreadId);
               // 分句：仅首条带 reply_to；后续默认不带。另一次 sendText 若显式传 messageId 才 quote（特别许愿）。
               const replyTo = i === 0 ? resolveReplyTo(replyToMessageId) : undefined;
               if (i === 0) firstReplyTo = replyTo;
@@ -693,7 +719,7 @@ export function createHostApi(
               logger.warn({ chatId, fileId: id.slice(0, 40) }, 'host sendSticker rejected bad fileId');
               return { messageId: 0 };
             }
-            await sendChatAction(chatId, 'typing');
+            await sendChatAction(chatId, 'typing', opts.messageThreadId);
             try {
               const messageId = await sendSticker(chatId, id);
               if (messageId > 0) {
@@ -751,7 +777,7 @@ export function createHostApi(
               const { basename } = await import('node:path');
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
-              await sendChatAction(chatId, 'upload_photo');
+              await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
               const { messageId } = await tgSendFile(chatId, target, {
                 caption: caption ? String(caption).slice(0, 1000) : undefined,
                 replyToId: opts.defaultReplyTo,
@@ -789,6 +815,61 @@ export function createHostApi(
           })(),
         );
       },
+      sendPhoto(path: string, caption?: string) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            // 与 sendFile 共用 maxFileSends 闸（都是「发一个沙盒文件出去」）。
+            if (fileSent >= maxFileSends) {
+              throw new Error(`sendFile_limit:${maxFileSends}`);
+            }
+            const raw = String(path ?? '').trim();
+            if (!raw) {
+              logger.warn({ chatId }, 'host sendPhoto rejected empty path');
+              return makeSendAck('photo_send_failed:empty_path', 0);
+            }
+            try {
+              const { resolveInsideSandbox } = await import('../sandbox/paths.js');
+              const { basename } = await import('node:path');
+              const target = resolveInsideSandbox(raw); // throws on path escape
+              const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
+              await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
+              const { messageId } = await tgSendPhoto(chatId, target, {
+                caption: caption ? String(caption).slice(0, 1000) : undefined,
+                replyToId: opts.defaultReplyTo,
+                messageThreadId: opts.messageThreadId,
+              });
+              if (messageId > 0) {
+                fileSent++;
+                await track(
+                  import('../pipeline/context/manager.js')
+                    .then(({ addAssistant }) =>
+                      addAssistant(
+                        chatId,
+                        { textContent: `[photo] ${basename(target)}${caption ? `: ${String(caption).slice(0, 80)}` : ''}`, messageId },
+                        opts.messageThreadId,
+                      ),
+                    )
+                    .catch((err) => logger.debug({ err, chatId }, 'host addAssistant photo failed')),
+                );
+                const answeredIds = new Set<number>();
+                if (opts.defaultReplyTo && opts.defaultReplyTo > 0) answeredIds.add(opts.defaultReplyTo);
+                for (const mid of opts.relatedQuoteIds ?? []) {
+                  if (mid > 0) answeredIds.add(mid);
+                }
+                await Promise.all(
+                  [...answeredIds].map((mid) => markMessageAnswered(chatId, mid).catch(() => undefined)),
+                );
+              }
+              return makeSendAck(messageId > 0 ? `photo_sent:${basename(target)}#${messageId}` : 'photo_send_failed', messageId);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn({ err, chatId, path: raw }, 'host sendPhoto failed (non-fatal)');
+              return makeSendAck(`photo_send_failed:${msg}`, 0);
+            }
+          })(),
+        );
+      },
       sendVoice(text: string) {
         assertOpen();
         return trackInflight(
@@ -800,7 +881,7 @@ export function createHostApi(
               const { sendVoice: tgSendVoice } = await import('../bot/sender/telegram.js');
               const ogg = await synthesizeVoice(clean.slice(0, 500));
               if (!ogg) return { skipped: true as const, reason: 'tts_disabled' };
-              await sendChatAction(chatId, 'record_voice');
+              await sendChatAction(chatId, 'record_voice', opts.messageThreadId);
               const { messageId } = await tgSendVoice(chatId, ogg, {
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
@@ -947,7 +1028,7 @@ export function createHostApi(
               const { basename } = await import('node:path');
               const target = resolveInsideSandbox(rawPath); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
-              await sendChatAction(tid, 'upload_document');
+              await sendChatAction(tid, 'upload_document', opts.messageThreadId);
               const r = await tgSendFile(tid, target, { caption: clean.slice(0, 1000) });
               messageId = r.messageId;
               deliveredDesc = `[file] ${basename(target)}: ${clean}`;
@@ -1229,6 +1310,32 @@ export function createHostApi(
         }
         noteUnviewed(`members.find(${q.slice(0, 30)})`, out);
         return out;
+      },
+    },
+    art: {
+      draw(description: string, drawOpts?: { width?: number; height?: number }) {
+        assertOpen();
+        return trackInflight(
+          (async () => {
+            if (artDraws >= 2) return { error: 'art_limit:2_per_task' };
+            artDraws++;
+            try {
+              const { drawArtwork } = await import('../agent/artist.js');
+              const r = await drawArtwork(String(description ?? ''), drawOpts ?? {});
+              if ('error' in r) {
+                logger.warn({ chatId, err: r.error }, 'host art.draw failed');
+                return r;
+              }
+              logger.info(
+                { chatId, png: r.pngPath, w: r.width, h: r.height },
+                'host art.draw done — remember to telegram.sendPhoto it',
+              );
+              return r;
+            } catch (err) {
+              return { error: `art_failed:${err instanceof Error ? err.message : String(err)}` };
+            }
+          })(),
+        );
       },
     },
     goals: {
@@ -1554,6 +1661,22 @@ export function createHostApi(
       },
       drainUnviewedResults() {
         return unviewedResults.splice(0, unviewedResults.length);
+      },
+      setPlan(steps: string[]) {
+        const clean = (Array.isArray(steps) ? steps : [])
+          .map((s) => String(s ?? '').trim().slice(0, 80))
+          .filter(Boolean)
+          .slice(0, 8);
+        if (!clean.length) return;
+        currentPlan = clean;
+        planDirty = true;
+        logger.info({ chatId, steps: clean.length }, 'host runtime.setPlan');
+      },
+      getPlan() {
+        return currentPlan ? { steps: currentPlan, dirty: planDirty } : null;
+      },
+      markPlanRead() {
+        planDirty = false;
       },
     },
     computer: buildComputerApi(noteUnviewed),

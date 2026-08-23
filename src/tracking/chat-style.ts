@@ -90,3 +90,27 @@ export function styleHumanizerOverlay(style: ChatStyle): {
 export function _resetChatStyleCache(): void {
   cache.clear();
 }
+
+/**
+ * 群风格 → 一句话 prompt 提示（CodeAct 主链注入用，2026-08-22）。
+ * 真人会「融入房间」：短句群短打、长聊群别句句压成十几个字、没人引用别条条顶引用。
+ */
+export function chatStylePromptLine(style: ChatStyle | null): string {
+  if (!style) return '';
+  const sizeDesc = style.microStyle
+    ? '这是个短打群（消息中位 ≤12 字），你也短点'
+    : style.medianChars <= 25
+      ? `这群说话正常偏短（中位 ~${style.medianChars} 字）`
+      : style.medianChars <= 50
+        ? `这群聊得开（消息中位 ~${style.medianChars} 字）——别句句压成十几个字，内容需要时长一点自然`
+        : `这群爱长聊（消息中位 ~${style.medianChars} 字）——内容需要就写足，别刻意拆碎`;
+  const quoteDesc =
+    style.quoteRatio < 0.1
+      ? '这里几乎没人用引用，你也别条条顶引用标'
+      : style.quoteRatio > 0.35
+        ? '这里大家常用引用，有明确指向就带上'
+        : '';
+  const punctDesc =
+    style.punctEndRate < 0.25 ? '句尾不怎么落标点（你也别句句句号收尾）' : '';
+  return `本群风格：${sizeDesc}${quoteDesc ? '；' + quoteDesc : ''}${punctDesc ? '；' + punctDesc : ''}。向群里中位数回归，不是 1:1 模仿。`;
+}
