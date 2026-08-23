@@ -680,6 +680,8 @@ const envSchema = z.object({
   // Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。
   META_USAGE: z.string().default('judge'),
   CODEACT_USAGE: z.string().default('reply'),
+  // 画摊子（agent/artist.ts）的 AI usage 名：SVG 是代码活，默认跟 reply 主链。
+  ARTIST_USAGE: z.string().default('reply'),
   CODEACT_MAX_TURNS: z.coerce.number().int().positive().default(8),
   CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   // CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。

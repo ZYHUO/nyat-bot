@@ -398,6 +398,44 @@ export async function sendFile(
 }
 
 /**
+ * Send a local image file as a photo (inline display). 发图首选——照片直接展开在
+ * 聊天里，sendDocument 要点下载，真人发图都是照片。Non-idempotent.
+ */
+export async function sendPhoto(
+  chatId: number,
+  filePath: string,
+  opts: { caption?: string; replyToId?: number; messageThreadId?: number } = {},
+): Promise<{ messageId: number }> {
+  const { InputFile } = await import('grammy');
+  const { readFile, stat } = await import('node:fs/promises');
+  const { basename } = await import('node:path');
+
+  const fstat = await stat(filePath);
+  if (!fstat.isFile()) throw new Error(`sendPhoto: not a file: ${filePath}`);
+  if (fstat.size > 10 * 1024 * 1024) throw new Error(`sendPhoto: too large (${fstat.size} bytes)`);
+
+  const buffer = await readFile(filePath);
+  const bot = getBot();
+  const anchor =
+    typeof opts.replyToId === 'number' && Number.isFinite(opts.replyToId) && opts.replyToId > 0
+      ? Math.floor(opts.replyToId)
+      : undefined;
+  const threadId =
+    typeof opts.messageThreadId === 'number' && Number.isFinite(opts.messageThreadId) && opts.messageThreadId > 1
+      ? Math.floor(opts.messageThreadId)
+      : undefined;
+
+  const result = await bot.api.sendPhoto(chatId, new InputFile(buffer, basename(filePath)), {
+    caption: opts.caption ? opts.caption.slice(0, 1000) : undefined,
+    reply_parameters: anchor ? { message_id: anchor, allow_sending_without_reply: true as const } : undefined,
+    message_thread_id: threadId,
+  });
+  recordSpeech();
+  recordBotReply(chatId);
+  return { messageId: result.message_id };
+}
+
+/**
  * Send an OGG/Opus voice message (from TTS). Non-idempotent.
  */
 export async function sendVoice(
@@ -439,10 +477,12 @@ export async function deleteMessage(chatId: number, messageId: number): Promise<
 export async function sendChatAction(
   chatId: number,
   action: 'typing' | 'upload_photo' | 'upload_document' | 'record_voice',
+  messageThreadId?: number,
 ): Promise<void> {
   try {
     const bot = getBot();
-    await bot.api.sendChatAction(chatId, action);
+    // forum（topic）群必须带 message_thread_id，否则 typing 显示在 General 而不是对应话题里
+    await bot.api.sendChatAction(chatId, action, messageThreadId ? { message_thread_id: messageThreadId } : {});
   } catch (err) {
     // Chat actions are best-effort, don't throw on failure
     logger.debug({ chatId, action, err }, 'sendChatAction failed (non-critical)');

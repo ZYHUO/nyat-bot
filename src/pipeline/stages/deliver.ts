@@ -440,9 +440,9 @@ export async function generateAndSendReplies(args: {
         if (set !== null) {
           const ghostSec = 4 + Math.random() * 8;
           logger.info({ chatId: job.chatId, ghostSec: Math.round(ghostSec) }, 'Typing ghost — typed then abandoned');
-          await sendChatAction(job.chatId, 'typing');
+          await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
           if (ghostSec > 5) {
-            setTimeout(() => sendChatAction(job.chatId, 'typing').catch(() => {}), 4500);
+            setTimeout(() => sendChatAction(job.chatId, 'typing', formatted.messageThreadId).catch(() => {}), 4500);
           }
           // 关机可中止:ghost 本来就什么都不发,提前醒直接走 return
           await sleepWithAbort(ghostSec * 1000, getShutdownSignal());
@@ -543,7 +543,7 @@ export async function generateAndSendReplies(args: {
           throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
         }
       }
-      await sendChatAction(job.chatId, 'typing');
+      await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
       await sleepWithAbort(typingLead * 1000, readAbort);
       if (job.turnContext?.signal?.aborted || getShutdownSignal().aborted) {
         throw new AIError("Turn interrupted during read delay", "send", "send", "AI_ABORTED");
@@ -611,14 +611,14 @@ export async function generateAndSendReplies(args: {
       // 前缀**不带引用**:真人"嗯"一声只是占位,quote 由正文自己决定 ——
       // 否则同一条消息被"嗯"和正文各 reply 一次,非常机器人。
       if (replyIdx === 0 && !isDmChat && ackPrefix.shouldSend && ackPrefix.prefix) {
-        await sendChatAction(job.chatId, 'typing');
+        await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
         const ackDelay = humanizerConfig?.jitterEnabled !== false
           ? applyJitter(1.0, humanizerConfig?.jitterFactor ?? 0.2)
           : 1.0;
         await new Promise((resolve) => setTimeout(resolve, ackDelay * 1000));
         await sender.sendDirect(job.chatId, ackPrefix.prefix).catch(() => {});
         // Pause between prefix and main content
-        await sendChatAction(job.chatId, 'typing');
+        await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
         await new Promise((resolve) => setTimeout(resolve, (ackPrefix.delay ?? 1.5) * 1000));
       }
 
@@ -650,7 +650,7 @@ export async function generateAndSendReplies(args: {
           capSec: 8,
           floorSec: 0.2,
         });
-        await sendChatAction(job.chatId, 'typing');
+        await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
         // 关机可中止(多段 ×8s 会叠加):提前醒后本段照发,下一轮循环顶部
         // 的 shutdown guard 负责收尾 —— 不在这里 break,保持"这句话发完"。
         await sleepWithAbort(delay * 1000, getShutdownSignal());
@@ -659,7 +659,7 @@ export async function generateAndSendReplies(args: {
       // ── G10: model-owned hesitation — the model marked THIS line as one it
       // wants to brew on for a beat before sending (emphasis/turning point)
       if (reply.hesitateBefore && !isDmChat) {
-        await sendChatAction(job.chatId, 'typing');
+        await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
         await new Promise((resolve) => setTimeout(resolve, 1200 + Math.random() * 1100));
       }
 
@@ -786,7 +786,7 @@ export async function generateAndSendReplies(args: {
               // ── Humanizer: typo correction (placeholder path) ──
               if (typoResult && typoResult.correction === 'edit') {
                 const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-                await sendChatAction(job.chatId, 'typing');
+                await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
                 await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
@@ -795,7 +795,7 @@ export async function generateAndSendReplies(args: {
               // ── Humanizer: typo append (placeholder path — send correct char as follow-up) ──
               if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
                 const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-                await sendChatAction(job.chatId, 'typing');
+                await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
                 const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
                 if (appendSent.messageId) {
@@ -831,10 +831,10 @@ export async function generateAndSendReplies(args: {
             let currentMessageId: number | undefined = sent.messageId;
             let currentBaseText = recordedText;
             if (deleteResend.shouldDeleteResend && sent.messageId) {
-              await sendChatAction(job.chatId, 'typing');
+              await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               await new Promise((resolve) => setTimeout(resolve, deleteResend.deleteDelay * 1000));
               await deleteMessage(job.chatId, sent.messageId).catch(() => {});
-              await sendChatAction(job.chatId, 'typing');
+              await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               const resendDelay = Math.min(calculateTypingDelay(deleteResend.modifiedText, segmenterConfig), 1.5);
               await new Promise((resolve) => setTimeout(resolve, resendDelay * 1000));
               const resent = await sender.sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
@@ -853,7 +853,7 @@ export async function generateAndSendReplies(args: {
                 scheduleDeferredTypoFix(job.chatId, currentMessageId, typoResult.originalText, Math.floor(Date.now() / 1000));
               } else {
                 const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-                await sendChatAction(job.chatId, 'typing');
+                await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
                 await editMessage(job.chatId, currentMessageId, typoResult.originalText).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
@@ -863,7 +863,7 @@ export async function generateAndSendReplies(args: {
             // ── Humanizer: typo append (send correct char as follow-up) ──
             if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
               const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
-              await sendChatAction(job.chatId, 'typing');
+              await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
               const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
               if (appendSent.messageId) {
@@ -881,7 +881,7 @@ export async function generateAndSendReplies(args: {
                 const afterthoughtDelayJittered = humanizerConfig?.jitterEnabled !== false
                   ? applyJitter(afterthoughtDelay, humanizerConfig?.jitterFactor ?? 0.2)
                   : afterthoughtDelay;
-                await sendChatAction(job.chatId, 'typing');
+                await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, afterthoughtDelayJittered * 1000));
                 await editMessage(job.chatId, currentMessageId, afterthought.editedText).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, edited: afterthought.editedText }, 'Humanizer: afterthought edit');

@@ -57,6 +57,22 @@ async function handleUpdate(ctx: Context): Promise<void> {
     .then(({ recordMessageSeen }) => recordMessageSeen(chatId))
     .catch(() => { /* telemetry never breaks ingest */ });
 
+  // 消息入口可观测（2026-08-22「bot 没回复我」排查的教训：入口没有 info 日志，
+  // 「消息到底进没进系统」无法一秒定位）。dedup 之后记，重复投递不算。
+  {
+    const text = (msg.text ?? msg.caption ?? '') as string | undefined;
+    logger.info(
+      {
+        chatId,
+        messageId,
+        uid: userId,
+        isEdit,
+        preview: (text || '[sticker/图/附件]').slice(0, 40),
+      },
+      'message in',
+    );
+  }
+
   try {
     if (userId && (await isRateLimited(userId))) return;
   } catch (err) {

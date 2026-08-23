@@ -46,6 +46,7 @@
     "ioredis": "^5.6.1",
     "lru-cache": "^11.1.0",
     "nanoid": "^5.1.5",
+    "sharp": "^0.32.6",
     "node-cron": "^3.0.3",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",

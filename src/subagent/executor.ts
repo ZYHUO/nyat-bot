@@ -6,6 +6,7 @@ import { getGlobalState } from '../meta/global-state.js';
 import type { DispatchTask } from '../meta/types.js';
 import { createHostApi, type HostApi } from './host-api.js';
 import { sendChatAction } from '../bot/sender/telegram.js';
+import { isDM } from '../shared/chat.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
 import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat } from '../agent/checkpoint.js';
@@ -60,6 +61,8 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - telegram.sendText(text, replyToMessageId?)  // **必须 await**，再 endTask
 - telegram.sendSticker(fileId) / telegram.react(messageId, emoji)
 - **telegram.sendFile(相对路径, caption?)** — 把沙盒里创建的文件发给用户（sendDocument）。**创建了文件必须用这个发出去**，不要只写不发。
+- telegram.sendPhoto(相对路径, caption?) — 把沙盒里的**图片**当照片发（内联直接显示）。发图片一律用这个；sendFile 留给文档/代码/压缩包
+- art.draw(描述, {width?, height?}?) — **画图摊子**：告诉它要画什么（画面内容/风格/图里要写的字，越具体越好），专职画师产出 SVG 并转成 PNG，返回 {pngPath, svgPath} 或 {error}。**画图必须用它，禁止自己用 PIL/代码涂鸦**；拿到 pngPath 后用 telegram.sendPhoto(pngPath, caption) 发出去，再 sendText 一句话。每任务限 2 次
 - telegram.sendVoice(text) — 合成语音发出去（TTS 关闭时返回 {skipped}，属正常）
 - memory.search(query) / memory.recallPerson(uid, query) / memory.recentContext(limit?)
 - memory.searchDigests(关键词) — 搜你自己做过的事/说过的话（session digest 全文检索）。查「我之前办到哪了/有没有回信」用
@@ -94,14 +97,14 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - computer.eval(js) — 在页面执行 JS
 - computer.scroll(direction, amount) — 滚动页面
 - computer.closeBrowser() — 关闭浏览器
-- **画图/图像处理用 python3.10（有 PIL），不是 python3（没有 PIL）**。例：python3.10 -c "from PIL import Image; ..."
+- **图像处理（改尺寸/裁剪/转格式/处理真实照片）用 python3.10（有 PIL），不是 python3（没有 PIL）**。例：python3.10 -c "from PIL import Image; ..."。注意：**画图创作（画券/画头像/画海报）不走这里，用 art.draw**
 
 ## 行为准则
 1. 根据用户消息**自然决定**是聊天还是干活：
    - 如果用户要求产出物（写代码、写文件、查询信息生成报告等）→ 规划步骤、逐步执行、完成后 sendText 报告结果
    - 如果只是闲聊、问候、吐槽 → 1-2 轮内 sendText 回复然后 endTask
    - 如果是简单问题（查天气、问时间、搜资料）→ web.search 查完消化成短人话回复
-   - **创建了文件（代码/HTML/脚本/图片等）→ 必须用 \`telegram.sendFile(相对路径, caption)\` 把文件发给用户**，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await sendFile，再另写纯文字 sendText。
+   - **创建了文件（代码/HTML/脚本/图片等）→ 必须发出去**：图片用 \`telegram.sendPhoto(相对路径, caption)\`，其它文件用 \`telegram.sendFile(相对路径, caption)\`，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendPhoto/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await send*，再另写纯文字 sendText。
 2. 下方已注入最近聊天；通常不必再调 recentContext。
 3. **引用（replyTo）有指向才用，默认不引用**：真人不是每条回复都顶个引用标。省略 replyTo = 不引用（私聊群聊一样）。**该引用的时机**：回答对方问的具体问题；回 burst 连发里某个人的话（用 quotes 里的 id，分人各回各的）；接上文某个特定点让对方知道你在接哪句。闲聊接话、新起的话头、自己冒泡 → 不引用。**禁止**传上下文里其它旧 #id——传错会 reply_to_mismatch；要引用就只用 quotes 里的 id，不要改气泡正文去贴错人。
 3.5. **排版克制**：支持 Telegram 富文本——星号粗体、_斜体_、||剧透||、行内代码/代码块、大于号引用块。但真人群聊几乎不排版：**日常闲聊一律纯文字**，只有内容真需要时才用（贴代码、发长文、强调个别词）。为排版而排版比没有更假。
@@ -115,6 +118,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
 12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
+12.5. **多步任务先列计划**（auto+plan）：要写代码/画图/交付文件/多步查询的任务，开工先 runtime.setPlan(['第一步…','第二步…'...]) 列个计划（≤8 步）——之后每轮你能看到自己的计划，照它推进；做完一步可以 setPlan 更新剩余步骤。1-2 步的小活别列。
 13. **发言前自我质疑**：sendText 之前先问自己这句该不该说——发现内容不对劲、会错意、接错人，即使已经写好了也住手，改发别的或干脆 endTask 不发。**回答「找到了吗/有回信没/现在什么情况」这类状态问题前，必须先实际查（chats.recentMessages / memory.searchDigests），禁止凭印象汇报**——你以为的「还没回」可能只是你没去看。
 14. **承诺闭环**：说出口的承诺必须落地，不许只说「等下」「回头」就结束：
    - 能现在做的（给别的群/某人送东西 → members.find(名字) 看 ta 在哪些群/能不能私聊 → telegram.sendToChat；查资料；写文件）→ **现在就做完**再回话
@@ -157,6 +161,7 @@ async function runHostCode(
       'members',
       'allowlist',
       'admin',
+      'art',
       'console',
       `"use strict";\n${code}`,
     );
@@ -174,6 +179,7 @@ async function runHostCode(
         host.members,
         host.allowlist,
         host.admin,
+        host.art,
         console,
       ),
       new Promise((_, rej) => {
@@ -375,6 +381,15 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await warmScratchCache(task.chatId);
     scratchBlock = scratchPromptBlockSync(task.chatId) ?? '';
   } catch { /* optional */ }
+
+  // 群风格（长度镜像/引用率/标点漂移）——真人会融入房间；CodeAct 主链接上。
+  let chatStyleLine = '';
+  if (!isDM(task.chatId)) {
+    try {
+      const { getChatStyle, chatStylePromptLine } = await import('../tracking/chat-style.js');
+      chatStyleLine = chatStylePromptLine(await getChatStyle(task.chatId));
+    } catch { /* optional */ }
+  }
 
   const { buildCodeActIdentityPrompt } = await import('../pipeline/reply/prompt-builder.js');
   const { buildMasterIdentityBlock } = await import('../shared/master-identity.js');
@@ -641,6 +656,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-permanent', permanent ? `## 永久知识\n${permanent}` : ''),
     ephemeralText('sub-roster', roster ? `## 群成员\n${roster}` : ''),
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
+    // 群风格融入（2026-08-22）：本群说话长度/引用/标点习惯——向群中位数回归。
+    ephemeralText('sub-style', chatStyleLine ? `## 本群风格\n${chatStyleLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
     ephemeralText('sub-scratch', scratchBlock ? `${scratchBlock}` : ''),
     // 恒定传入(空时传 ''),与 sub-scratch / sub-memory 同一约定 —— 不把 id 从数组里
@@ -751,6 +768,21 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             // 用户又说话了 → 任务重新有了"该回应的人",重置 sendText 后的自动收尾计数,
             // 否则模型刚 sendText 汇报过、用户追问一句,任务在回应前就被 auto_end 掐掉。
             postSendTurns = 0;
+          }
+        } catch { /* non-critical */ }
+      }
+
+      // auto+plan：模型 setPlan 后，下一轮把最新计划注入上下文（照它推进）。
+      if (!injectedInterrupts) {
+        try {
+          const plan = host.runtime.getPlan?.();
+          if (plan?.dirty) {
+            history.push({
+              role: 'user',
+              content: `[当前计划（你刚列的，照着推进，做完一步可以 setPlan 更新剩余）]\n${plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`,
+            });
+            host.runtime.markPlanRead?.();
+            logger.debug({ taskId: task.id, turn, steps: plan.steps.length }, 'CodeAct plan injected');
           }
         } catch { /* non-critical */ }
       }

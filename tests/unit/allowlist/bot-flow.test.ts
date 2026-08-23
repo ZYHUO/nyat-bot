@@ -20,6 +20,15 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getRecent: vi.fn(async () => []),
 }));
 
+// notifyMaster 改走 sender 包装器（MarkdownV2 转换）后，给主人的通知不再经过
+// deps.bot.api.sendMessage——mock 掉包装器，主人通知断言都查它。
+vi.mock('../../../src/bot/sender/telegram.js', () => ({
+  sendMessage: vi.fn(async () => 1),
+}));
+
+import { sendMessage as senderSendMessage } from '../../../src/bot/sender/telegram.js';
+const senderMock = vi.mocked(senderSendMessage);
+
 const MASTER = 6251541967;
 const BOT_UID = 999;
 const GROUP = -1001234567890;
@@ -174,6 +183,7 @@ describe('allowlist bot-flow', () => {
   let flow: Awaited<ReturnType<typeof importFlow>>;
 
   beforeEach(async () => {
+    senderMock.mockClear();
     redis = createRedisMock();
     flow = await importFlow();
   });
@@ -196,13 +206,14 @@ describe('allowlist bot-flow', () => {
       expect(group.approved).toBe(true);
       expect(group.enabled).toBe(true);
 
-      // 群里通知 + 主人备案
+      // 群里通知（safeSend 裸发）+ 主人备案（sender 包装器）
       const sentTo = api.sendMessage.mock.calls.map((c) => c[0]);
       expect(sentTo).toContain(GROUP);
-      expect(sentTo).toContain(MASTER);
+      expect(sentTo).not.toContain(MASTER);
       // 给主人的是 LLM persona 总结（通知喉舌），不是结构化模板
-      const masterMsg = api.sendMessage.mock.calls.find((c) => c[0] === MASTER);
-      expect(String(masterMsg![1])).toContain('已直接启用喵');
+      const masterCalls = senderMock.mock.calls.filter((c) => c[0] === MASTER);
+      expect(masterCalls).toHaveLength(1);
+      expect(String(masterCalls[0]![1])).toContain('已直接启用喵');
     });
 
     it('给主人的通知：LLM 总结挂掉 → fallback 模板也带操作指引和 chatId', async () => {
@@ -217,7 +228,7 @@ describe('allowlist bot-flow', () => {
         target: '@goodgroup',
       });
       expect(outcome.kind).toBe('needs_master');
-      const masterMsg = api.sendMessage.mock.calls.find((c) => c[0] === MASTER);
+      const masterMsg = senderMock.mock.calls.find((c) => c[0] === MASTER);
       expect(masterMsg).toBeTruthy();
       expect(String(masterMsg![1])).toContain(`让群 ${GROUP} 通过`);
       expect(String(masterMsg![1])).toContain('群消息摘要为空');
@@ -231,7 +242,7 @@ describe('allowlist bot-flow', () => {
       const { api } = makeBot();
       const deps = makeDeps(api, redis, aiCall);
       await flow.applyViaBot(deps, { applicantUid: APPLICANT, target: '@goodgroup' });
-      const masterMsg = api.sendMessage.mock.calls.find((c) => c[0] === MASTER);
+      const masterMsg = senderMock.mock.calls.find((c) => c[0] === MASTER);
       expect(String(masterMsg![1])).toContain(`让群 ${GROUP} 通过`);
     });
 
@@ -259,9 +270,9 @@ describe('allowlist bot-flow', () => {
       expect(reqs[0]!.applicant_member_status).toBe('member');
       expect(reqs[0]!.source).toBe('dm');
 
-      // 只通知了主人，群里没声张
-      const sentTo = api.sendMessage.mock.calls.map((c) => c[0]);
-      expect(sentTo).toEqual([MASTER]);
+      // 只通知了主人（sender 包装器），群里没声张
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      expect(senderMock.mock.calls.map((c) => c[0])).toEqual([MASTER]);
     });
 
     it('AI 拒绝 → 转主人评判，pending 保留', async () => {
@@ -275,7 +286,8 @@ describe('allowlist bot-flow', () => {
       expect(await redis.hget('xxb:mal:groups', String(GROUP))).toBeNull();
       const pendings = await redis.hgetall('xxb:mal:pending');
       expect(Object.keys(pendings)).toHaveLength(1);
-      expect(api.sendMessage.mock.calls.map((c) => c[0])).toEqual([MASTER]);
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      expect(senderMock.mock.calls.map((c) => c[0])).toEqual([MASTER]);
     });
 
     it('bot 不在目标群 → not_in_group，不建申请', async () => {
@@ -381,7 +393,8 @@ describe('allowlist bot-flow', () => {
       expect(JSON.parse(rec!).enabled).toBe(true);
       const sentTo = api.sendMessage.mock.calls.map((c) => c[0]);
       expect(sentTo).toContain(GROUP);
-      expect(sentTo).toContain(MASTER);
+      expect(sentTo).not.toContain(MASTER);
+      expect(senderMock.mock.calls.map((c) => c[0])).toEqual([MASTER]);
       // pending 来源标注为 join
       // （approved 后 pending 已删，从 groups 记录侧面验证链路走通即可）
     });
@@ -397,7 +410,8 @@ describe('allowlist bot-flow', () => {
       await flow.reviewOnJoin(deps, GROUP, { uid: APPLICANT });
       expect(await redis.hget('xxb:mal:groups', String(GROUP))).toBeNull();
       // 群里静默，只通知主人
-      expect(api.sendMessage.mock.calls.map((c) => c[0])).toEqual([MASTER]);
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      expect(senderMock.mock.calls.map((c) => c[0])).toEqual([MASTER]);
     });
 
     it('已在白名单 → 只发已就绪，不跑 AI', async () => {
