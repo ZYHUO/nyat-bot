@@ -78,6 +78,26 @@ describe('host sendText reply_to policy', () => {
     ).rejects.toThrow(/sendText_non_string/);
   });
 
+  it('unescapes literal \\n from double-escaped model output (2026-08-24 做梦字条事故)', async () => {
+    const { createHostApi } = await import('../../../src/subagent/host-api.js');
+    const host = createHostApi(7624515600, { onEnd: () => {} });
+    await host.telegram.sendText('第一件事：喂猫\\n\\n第二件事：睡觉');
+    const sent = String(sendMessage.mock.calls[0]![1]);
+    expect(sent).toContain('第一件事：喂猫\n\n第二件事：睡觉');
+    expect(sent).not.toContain('\\n');
+  });
+
+  it('含代码围栏的文本不动（围栏里的 \\n 可能是真代码）', async () => {
+    const { createHostApi } = await import('../../../src/subagent/host-api.js');
+    const host = createHostApi(7624515600, { onEnd: () => {} });
+    const code = '看这段：```js\nconsole.log("a\\nb");```';
+    await host.telegram.sendText(code);
+    // 分句器会按行/标点拆成多气泡（既有行为）。归一化若误伤围栏内容，字面 \n
+    // 会变成真换行被进一步拆散——只要还有完整 `console.log("a\nb")` 片段即未动。
+    const joined = sendMessage.mock.calls.map((c) => String(c[1])).join('');
+    expect(joined).toContain('console.log("a\\nb")');
+  });
+
   it('DM: no default reply_to; explicit still works', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
     const host = createHostApi(7624515600, { onEnd: () => {}, defaultReplyTo: 99 });
