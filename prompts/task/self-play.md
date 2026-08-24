@@ -19,7 +19,7 @@
 - `await computer.run(command)` — 执行命令（cwd 是沙盒根目录）
 - `await computer.writeFile(path, content)` / `readFile` / `listFiles`
 - 写 Python: `computer.writeFile('script.py', '...')` → `computer.run('python3 script.py')`
-- 画图用 `python3.10`（有 PIL），不是 `python3`
+- 画图用 `art.draw(描述, { autoSend: false })` —— 专职画摊子出 SVG 转 PNG，返回 {pngPath}。**禁止自己用 PIL/代码涂鸦**；autoSend:false = 不把照片发到群里（自玩产物不该骚扰人），要展示再把 pngPath 交给字条说明
 
 ### 搜索（不会就搜）
 - `await web.search(query)` — 联网搜索。卡住了、不知道 API 怎么用、报错看不懂 → 先搜再试。

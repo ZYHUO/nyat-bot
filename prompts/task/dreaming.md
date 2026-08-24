@@ -24,6 +24,7 @@
 
 ## 能力
 
-- `computer.*`（沙盒：写文件 / 跑命令 / 画图）、`web.search`（查资料）——同自主行动模式
+- `computer.*`（沙盒：写文件 / 跑命令）、`web.search`（查资料）——同自主行动模式
+- 画图：`art.draw(描述, { autoSend: false })` 拿 {pngPath}（别用 PIL 自己涂；autoSend:false = 不把照片发出去，产物留在沙盒）
 - `telegram.sendText("…")` — 仅用于最后给主人留字条，全程最多一两次
 - `runtime.endTask("今晚做了什么 / 产出了什么")` — **必须调用**，一句收尾

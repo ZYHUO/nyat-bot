@@ -132,6 +132,18 @@ function itemFingerprint(feedUrl: string, item: RssItem): string {
   return createHash('md5').update(key).digest('hex');
 }
 
+/**
+ * 新鲜度闸（2026-08-24）：pubDate 可解析且比阈值老 → 算陈旧（Opus 4.6 那种
+ * 标题党旧闻被当新闻端上桌的教训）。没日期/解析不了的放行——很多 feed 不给
+ * 日期，误杀比漏放糟。
+ */
+function isStale(item: RssItem, maxAgeHours: number): boolean {
+  if (!item.pubDate) return false;
+  const ts = Date.parse(item.pubDate);
+  if (Number.isNaN(ts)) return false;
+  return Date.now() - ts > maxAgeHours * 3600_000;
+}
+
 /** 清理 HTML 标签，截断描述 */
 function cleanDescription(desc?: string): string {
   if (!desc) return '';
@@ -234,6 +246,14 @@ export async function runRssMonitor(): Promise<void> {
         if (isNew === 1) {
           // First time seeing this item
           await redis.expire(seenKey, SEEN_TTL_SEC);
+          // 陈旧条目：计 seen（防回潮）但不入谈资、不推送
+          if (isStale(item, env().RSS_MAX_ITEM_AGE_HOURS)) {
+            logger.info(
+              { url: feed.url, title: item.title.slice(0, 40), pubDate: item.pubDate },
+              'RSS: stale item skipped (freshness gate)',
+            );
+            continue;
+          }
           newItems.push(item);
 
           // Store as fuel for proactive messaging
