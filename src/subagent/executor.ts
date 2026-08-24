@@ -62,7 +62,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - telegram.sendSticker(fileId) / telegram.react(messageId, emoji)
 - **telegram.sendFile(相对路径, caption?)** — 把沙盒里创建的文件发给用户（sendDocument）。**创建了文件必须用这个发出去**，不要只写不发。
 - telegram.sendPhoto(相对路径, caption?) — 把沙盒里的**图片**当照片发（内联直接显示）。发图片一律用这个；sendFile 留给文档/代码/压缩包
-- art.draw(描述, {width?, height?}?) — **画图摊子**：告诉它要画什么（画面内容/风格/图里要写的字，越具体越好），专职画师产出 SVG 并转成 PNG，返回 {pngPath, svgPath} 或 {error}。**画图必须用它，禁止自己用 PIL/代码涂鸦**；拿到 pngPath 后用 telegram.sendPhoto(pngPath, caption) 发出去，再 sendText 一句话。每任务限 2 次
+- art.draw(描述, {width?, height?, caption?, autoSend?}?) — **画图摊子（画图必须用它，禁止自己用 PIL/代码涂鸦）**：告诉它要画什么（画面内容/风格/图里要写的字，越具体越好），caption 是照片配文。**异步的**：调用立刻返回 {started}，画好照片会自动发到当前会话（带 caption）——你**不要等结果**，调完先 sendText 一句「在画了喵」之类的话，再 endTask。画砸了系统会自动发翻车说明。想自己拿文件去跨群投递才传 autoSend:false（同步等结果，慢，会占满本轮预算）。每任务限 2 次
 - telegram.sendVoice(text) — 合成语音发出去（TTS 关闭时返回 {skipped}，属正常）
 - memory.search(query) / memory.recallPerson(uid, query) / memory.recentContext(limit?)
 - memory.searchDigests(关键词) — 搜你自己做过的事/说过的话（session digest 全文检索）。查「我之前办到哪了/有没有回信」用
