@@ -1,6 +1,6 @@
 {
   "name": "nyat-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "NyatBot — Telegram AI 群聊喵娘机器人，拟人回复引擎",
   "type": "module",
   "private": true,
