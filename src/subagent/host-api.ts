@@ -485,8 +485,16 @@ export function createHostApi(
             if (text !== null && text !== undefined && typeof text !== 'string' && typeof text !== 'number') {
               throw new Error('sendText_non_string: pass plain text only; do not interpolate API return objects');
             }
-            const clean = String(text ?? '').trim();
-            if (!clean) throw new Error('empty text');
+            const rawText = String(text ?? '').trim();
+            if (!rawText) throw new Error('empty text');
+            // 模型双转义事故（2026-08-24 做梦字条：整段话带着字面 \n 原样发给了主人）。
+            // 模型在 JS 字符串里写了 \\n，eval 出来就是字面 backslash-n。签名：
+            // 有字面 \n 序列且不含代码围栏（含围栏的可能是真代码片段，别动）。
+            let clean = rawText;
+            if (rawText.includes('\\n') && !rawText.includes('```')) {
+              clean = rawText.replace(/\\n/g, '\n');
+              logger.info({ chatId, chars: rawText.length }, 'host sendText: unescaped literal \\n from model');
+            }
             if (clean.includes('[object Object]')) {
               throw new Error(
                 'sendText_object_coercion: text contains "[object Object]" — sendFile/sendText return {messageId}; send the file, then describe it in a separate plain-text sendText without interpolating the return value',
