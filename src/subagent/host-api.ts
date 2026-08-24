@@ -125,15 +125,23 @@ export interface HostApi {
   };
   /**
    * 画摊子（2026-08-23）：画图交给专职画摊子子代理——教学 prompt 喂 SVG 手艺，
-   * 产出 SVG 光栅化成 PNG。告诉它要画什么（内容/风格/图里要写的字），返回沙盒
-   * 相对路径 pngPath/svgPath；拿到后必须 telegram.sendPhoto(pngPath, caption) 发出去。
-   * 每任务限 2 次；失败返回 {error}。
+   * 产出 SVG 光栅化成 PNG。
+   * 默认**异步自动送达**（autoSend 省略=true）：立即返回 {started}，画好由系统直接把
+   * 照片发到当前会话（带 caption）——LLM 出 SVG 实测 20-70s，任何固定单轮预算都可能
+   * 输（2026-08-24 画树事故：轮超时杀死了已生成的图的送达），所以不让模型等结果；
+   * 模型 sendText 一句「在画了」再 endTask 即可。autoSend=false = 同步拿
+   * {pngPath,svgPath} 自己投递（跨群 sendToChat 附件等场景），会占满本轮预算。
+   * 每任务限 2 次；失败自动发一条翻车说明。
    */
   art: {
     draw: (
       description: string,
-      opts?: { width?: number; height?: number },
-    ) => Promise<{ pngPath: string; svgPath: string; width: number; height: number } | { error: string }>;
+      opts?: { width?: number; height?: number; caption?: string; autoSend?: boolean },
+    ) => Promise<
+      | { started: true; note: string }
+      | { pngPath: string; svgPath: string; width: number; height: number }
+      | { error: string }
+    >;
   };
   /** 关注目标（承诺闭环②）：把「等下/回头要做的事」立成 goal，unified-tick 到点执行。 */
   goals: {
@@ -1313,29 +1321,99 @@ export function createHostApi(
       },
     },
     art: {
-      draw(description: string, drawOpts?: { width?: number; height?: number }) {
+      draw(description: string, drawOpts?: { width?: number; height?: number; caption?: string; autoSend?: boolean }) {
         assertOpen();
-        return trackInflight(
-          (async () => {
-            if (artDraws >= 2) return { error: 'art_limit:2_per_task' };
-            artDraws++;
-            try {
-              const { drawArtwork } = await import('../agent/artist.js');
-              const r = await drawArtwork(String(description ?? ''), drawOpts ?? {});
-              if ('error' in r) {
-                logger.warn({ chatId, err: r.error }, 'host art.draw failed');
+        const autoSend = drawOpts?.autoSend !== false;
+        if (!autoSend) {
+          // 同步路径：调用方自己拿路径去投递（跨群 sendToChat 附件等）。慢，会占满本轮预算。
+          return trackInflight(
+            (async () => {
+              if (artDraws >= 2) return { error: 'art_limit:2_per_task' };
+              artDraws++;
+              try {
+                const { drawArtwork } = await import('../agent/artist.js');
+                const r = await drawArtwork(String(description ?? ''), drawOpts ?? {});
+                if ('error' in r) {
+                  logger.warn({ chatId, err: r.error }, 'host art.draw failed');
+                  return r;
+                }
+                logger.info({ chatId, png: r.pngPath, w: r.width, h: r.height }, 'host art.draw done (sync)');
                 return r;
+              } catch (err) {
+                return { error: `art_failed:${err instanceof Error ? err.message : String(err)}` };
               }
-              logger.info(
-                { chatId, png: r.pngPath, w: r.width, h: r.height },
-                'host art.draw done — remember to telegram.sendPhoto it',
-              );
-              return r;
-            } catch (err) {
-              return { error: `art_failed:${err instanceof Error ? err.message : String(err)}` };
+            })(),
+          );
+        }
+        // 异步自动送达（默认）：画+发不绑单轮超时预算——轮死了画照样能送达
+        // （inflight 任务会被 close 前的 flushBookkeeping 等到，typing 心跳覆盖全程）。
+        if (artDraws >= 2) return Promise.resolve({ error: 'art_limit:2_per_task' });
+        artDraws++;
+        const caption = String(drawOpts?.caption ?? '').slice(0, 200);
+        const job = (async () => {
+          // 「正在发送照片」标识续命到送达（任务级 typing 心跳在 close 后就停了，
+          // 而本 job 可能比任务活得久）。
+          const keepalive = setInterval(() => {
+            void sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
+          }, 4000);
+          try {
+            void sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
+            const { drawArtwork } = await import('../agent/artist.js');
+            const r = await drawArtwork(String(description ?? ''), {
+              width: drawOpts?.width,
+              height: drawOpts?.height,
+            });
+            if ('error' in r) {
+              logger.warn({ chatId, err: r.error }, 'host art.draw(async) failed');
+              // 办不到要老实收场（翻车说明也走完整发送链，让上下文知道 bot 说过）。
+              const { sendMessage: tgSendMessage } = await import('../bot/sender/telegram.js');
+              await tgSendMessage(
+                chatId,
+                '呜……画摊子翻车了，这张图没画成。换个说法再让我试一次？',
+                opts.defaultReplyTo,
+                opts.messageThreadId,
+              ).catch(() => 0);
+              return;
             }
-          })(),
-        );
+            const { resolveInsideSandbox } = await import('../sandbox/paths.js');
+            const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
+            const target = resolveInsideSandbox(r.pngPath);
+            const { messageId } = await tgSendPhoto(chatId, target, {
+              caption: caption || undefined,
+              replyToId: opts.defaultReplyTo,
+              messageThreadId: opts.messageThreadId,
+            });
+            if (messageId > 0) {
+              fileSent++;
+              try {
+                const { addAssistant } = await import('../pipeline/context/manager.js');
+                await addAssistant(
+                  chatId,
+                  { textContent: `[photo] ${r.pngPath}${caption ? `: ${caption.slice(0, 80)}` : ''}`, messageId },
+                  opts.messageThreadId,
+                );
+              } catch { /* non-critical */ }
+              const answeredIds = new Set<number>();
+              if (opts.defaultReplyTo && opts.defaultReplyTo > 0) answeredIds.add(opts.defaultReplyTo);
+              for (const mid of opts.relatedQuoteIds ?? []) {
+                if (mid > 0) answeredIds.add(mid);
+              }
+              await Promise.all(
+                [...answeredIds].map((mid) => markMessageAnswered(chatId, mid).catch(() => undefined)),
+              );
+            }
+            logger.info({ chatId, png: r.pngPath, messageId }, 'host art.draw(async) delivered');
+          } catch (err) {
+            logger.warn({ err, chatId }, 'host art.draw(async) job failed');
+          } finally {
+            clearInterval(keepalive);
+          }
+        })();
+        trackInflight(job);
+        return Promise.resolve({
+          started: true as const,
+          note: '画摊子开工了——画好会自动把照片发到这个会话（带你的 caption）。你先 sendText 一句「在画了」之类的话，别干等结果，也别重复调用。',
+        });
       },
     },
     goals: {
