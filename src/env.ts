@@ -785,6 +785,9 @@ const envSchema = z.object({
   RSS_FEEDS_JSON: z.string().default('[]'),
   // 自动发送时使用的 LLM 路由
   RSS_USAGE: z.string().default('summarize'),
+  // 新条目新鲜度闸（小时）：pubDate 比阈值老的直接丢（仍计 seen 防回潮）；
+  // 没日期/解析不了的放行（误杀比漏放糟）。2026-08-24：Opus 4.6 旧闻标题党被端上桌的教训。
+  RSS_MAX_ITEM_AGE_HOURS: z.coerce.number().int().positive().default(72),
 
   // ── 天气环境感知（真人感）──
   // wttr.in 免费源，30min 缓存；注入 self-state / tick WorldState，全 fail-soft。
