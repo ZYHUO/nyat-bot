@@ -110,7 +110,7 @@ describe('reply-context', () => {
         textSnippet: '哼 本喵刚醒 才没跟他玩',
       },
       replyToIsSelf: true,
-      masterHint: '对方是主人(@Zh_Taiwan)：软一点、听话一点。',
+      masterHint: '对方是主人(@Zh_Taiwan)：亲近但不跪，指令真执行，蠢了照样嫌弃。',
     });
     expect(d).toMatch(/回复你的 #393494/);
     expect(d).toMatch(/千雪怎么了/);

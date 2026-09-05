@@ -30,12 +30,18 @@ function jaccard(a: string, b: string): number {
 
 function isCandidate(raw: string): boolean {
   const s = raw.trim();
-  if (s.length < 2 || s.length > 60) return false;
+  if (s.length < 4 || s.length > 60) return false; // 太短的全是噪音("冲!""嗯")
   if (s.startsWith("SELF")) return false; // bot 自己的话
   if (s.startsWith("/")) return false; // 命令
   if (/^\[?(?:表情|图片|贴纸|sticker|media|语音|视频)/i.test(s)) return false;
   if (/^@\w+\s*$/.test(s)) return false; // 光 @ 人
   if (/https?:\/\//.test(s)) return false; // 链接
+  if (/\[source_id:\d+\]/.test(s)) return false; // learner 格式化残留
+  if (/\[media\]/i.test(s)) return false; // 媒体占位(无论冒号切分前后)
+  if (/^\[[= ]+\]$/.test(s)) return false; // 进度条
+  if (/^\d+\.\d+%\s*\[\d+\/\d+\]$/.test(s)) return false; // 下载进度行
+  if (/^[\[\]=|—\-_.\d%\s\/\\]+$/.test(s)) return false; // 纯符号/数字行
+  if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\s]+$/u.test(s)) return false; // 纯 emoji 行
   return true;
 }
 
