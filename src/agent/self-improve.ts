@@ -72,7 +72,28 @@ export interface SelfEditResult {
  * 修改自己的 prompt 文件。relativePath 相对 prompts/ 目录(如 'identity/persona.md')。
  * 返回 {ok, backup}。失败返回 {ok:false, reason}。
  */
-export function selfEditPrompt(relativePath: string, newContent: string, motive: string): SelfEditResult {
+let lastEditAt = 0;
+/** Test-only reset for the 24h self-edit cooldown. */
+export function __resetSelfEditCooldownForTest(): void {
+  lastEditAt = 0;
+}
+
+export function selfEditPrompt(
+  relativePath: string,
+  newContent: string,
+  motive: string,
+  opts?: { skipCooldownForTest?: boolean; skipFsForTest?: string },
+): SelfEditResult {
+  if (!opts?.skipCooldownForTest && Date.now() - lastEditAt < 24 * 3600 * 1000) {
+    return { ok: false, reason: 'self-edit cooldown: one edit per 24h' };
+  }
+  if (String(newContent ?? '').length > 8000) {
+    return { ok: false, reason: 'content too large (max 8000 chars)' };
+  }
+  if (opts?.skipFsForTest !== undefined) {
+    lastEditAt = Date.now();
+    return { ok: true, backup: null };
+  }
   const pathCheck = safePromptPath(relativePath);
   if (!pathCheck.ok) {
     logger.warn({ relativePath, reason: pathCheck.reason }, 'self-edit: rejected');
@@ -86,6 +107,7 @@ export function selfEditPrompt(relativePath: string, newContent: string, motive:
   try {
     const bak = backup(full);
     writeFileSync(full, content, 'utf-8');
+    lastEditAt = Date.now();
     recordMotive(relativePath, motive);
     logger.info({ relativePath, backup: bak, motive: motive.slice(0, 80) }, 'self-edit: prompt modified');
     return { ok: true, backup: bak };

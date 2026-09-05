@@ -1950,7 +1950,17 @@ export function createHostApi(
     self: {
       async editPrompt(relativePath: string, newContent: string, motive: string) {
         const { selfEditPrompt } = await import('../agent/self-improve.js');
-        return selfEditPrompt(String(relativePath), String(newContent), String(motive ?? ''));
+        const r = selfEditPrompt(String(relativePath), String(newContent), String(motive ?? ''));
+        // Self-edits never self-certify: annotate the stored motive with the task
+        // assessment (unverified unless host evidence proves otherwise).
+        if (r.ok) {
+          try {
+            const { getDb } = await import('../db/sqlite.js');
+            getDb().prepare(`UPDATE self_model_notes SET note = note || ? WHERE rowid = last_insert_rowid()`)
+              .run(` [task assessment at edit: ${audit.snapshot().totalCalls} calls observed]`);
+          } catch { /* motive annotation is best-effort */ }
+        }
+        return r;
       },
       async readPrompt(relativePath: string) {
         const { selfReadPrompt } = await import('../agent/self-improve.js');
