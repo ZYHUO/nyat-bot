@@ -23,8 +23,9 @@ import { getTopicLine } from '../../tracking/topic-registry.js';
 import { scratchPromptBlockSync } from '../../tracking/scratchpad.js';
 import { buildProfileInjection, getBotTagForAddressing } from '../../tracking/user-profile.js';
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
-import { buildSocialInjection } from '../../tracking/social-graph.js';
+import { buildSocialInjection, buildBridgeHint } from '../../tracking/social-graph.js';
 import { buildRoleHint } from '../../tracking/behavioral-roles.js';
+import { recallEpisodes } from '../../tracking/group-episodes.js';
 import { currentRiskLevel, buildValveHint } from '../../agent/reverse-valve.js';
 import { getBotUid } from '../../bot/bot.js';
 import { isMaster } from '../../admin/auth.js';
@@ -250,6 +251,19 @@ export function buildMessages(
     try {
       const socialBlock = buildSocialInjection(chatId);
       if (socialBlock) stablePrefixParts.push(`[群友关系]\n${socialBlock}`);
+    } catch { /* non-critical */ }
+    // Phase 14.2 群牵线: 有共同往事/共同熟人才加一句可选素材,没素材返回 '' 跳过。
+    // stable(边权按天衰减,非每条变) → 放 stable 前缀,不污染缓存语义。
+    // 复用 reply.ts §G7 同口径(关键词命中),但只取 1 条且更克制(提一句就行)。
+    try {
+      if (env().REVERSE_VALVE_ENABLED && !latestMessage.isAnonymous && !latestMessage.isBot) {
+        const bridge = buildBridgeHint(
+          chatId, latestMessage.uid, (latestMessage.fullName ?? '').slice(0, 16),
+          (latestMessage.textContent || latestMessage.captionContent || '').trim(),
+          recallEpisodes,
+        );
+        if (bridge) stablePrefixParts.push(bridge);
+      }
     } catch { /* non-critical */ }
     // AGI L5 L3: 群氛围画像(LoSoNA)—— 该群隐性规范,贴合风格回复。
     try {
