@@ -31,8 +31,15 @@ function jaccard(a: string, b: string): number {
 function isCandidate(raw: string): boolean {
   const s = raw.trim();
   if (s.length < 4 || s.length > 60) return false; // 太短的全是噪音("冲!""嗯")
+  // 注意:调用方已剥 [source_id:N] 前缀并取正文,这里只判干净正文。
+  // 残留检查保留当保险(防未来调用方又传格式化行)。
   if (s.startsWith("SELF")) return false; // bot 自己的话
   if (s.startsWith("/")) return false; // 命令
+  if (/^@\w+(\s+\d+[hm])?$/.test(s)) return false; // 光 @ 人 / 定时器残留(@every 1h)
+  if (/^[⏳▸⚙🔍⌛✅❌⚠＃#@]/.test(s)) return false; // bot 状态行(进度/报告/后端/连通性)
+  if (/^(连通性|速度)测试|检测报告|后端[:：]|当前进度|请选择|CRON-/i.test(s)) return false; // bot 状态正文
+  if (/^\[文件[「\[]/.test(s)) return false; // 系统文件占位([文件「xxx」:…无法解析内容])
+  if (/[ℭ℃]/.test(s)) return false; // 天气 bot 广播残留
   if (/^\[?(?:表情|图片|贴纸|sticker|media|语音|视频)/i.test(s)) return false;
   if (/^@\w+\s*$/.test(s)) return false; // 光 @ 人
   if (/https?:\/\//.test(s)) return false; // 链接
@@ -48,20 +55,32 @@ function isCandidate(raw: string): boolean {
 /**
  * 从一批群聊文本里挑 ≤10 条 exemplar(确定性,无 LLM)。
  * 输入是已格式化的 "name: text" 行或纯文本;含 SELF 标记的行自动排除。
+ * H2 修复:输入可能是 learner-scan 格式 "[source_id:123] name: text" ——
+ * 先剥 [source_id:N] 前缀,再走 speaker/正文切分。存库只存干净正文,
+ * 不带 source_id/speaker 前缀(线上 10 条全是格式化残留的教训)。
  */
 export function pickExemplars(lines: string[]): string[] {
   const out: string[] = [];
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    // 先剥 learner 格式化前缀 "[source_id:123] "(精确匹配,不误伤正文里的方括号)
+    const line = rawLine.replace(/^\[source_id:\d+\]\s*/, "");
+    // H2 修2:行内换行只取首行 —— 多行 bot 报告(检测报告/后端列表)的后续行
+    // ("> 疑似掉线"/"- xxx.com")不能当独立 exemplar。注意 learner 行本身
+    // text.slice(0,200) 保留换行,所以这里必须按 \n 切。
+    const firstLine = line.split("\n")[0]!.trim();
+    if (line.trim() !== firstLine) continue; // 含换行 = 报告体/长文,整行不要
     // 取冒号后的正文(learner-scan 格式 "name: text");无冒号整行当正文
     const m = line.match(/^(?:\[[^\]]+\]\s*)?([^:：]{1,24}[:：])\s*(.+)$/);
     const speaker = (m?.[1] ?? "").replace(/[:：]\s*$/, "").trim();
     // bot 自己的发言(SELF 标记)整行跳过 —— 不能只看正文
     if (/^self$/i.test(speaker)) continue;
+    // bot 状态行的 speaker 本身就是状态词(⚙️后端/⏳连通性/🔍检测)——整行扔,不看正文
+    if (/^[⏳▸⚙🔍⌛✅❌⚠＃#@]/.test(speaker)) continue;
+    if (/^(连通性|速度)测试|检测报告|后端|当前进度|请选择|CRON-/i.test(speaker)) continue;
     const text = (m?.[2] ?? line).trim();
-    if (!isCandidate(line.trim()) && !isCandidate(text)) continue;
-    const cand = isCandidate(text) ? text : line.trim();
-    if (out.some((e) => jaccard(e, cand) > 0.7)) continue; // 近似重复
-    out.push(cand);
+    if (!isCandidate(text)) continue;
+    if (out.some((e) => jaccard(e, text) > 0.7)) continue; // 近似重复
+    out.push(text);
     if (out.length >= EXEMPLAR_MAX) break;
   }
   return out;

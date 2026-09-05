@@ -52,7 +52,52 @@ describe('dialect exemplar', () => {
     expect(picked.some((s) => s.includes('我是bot'))).toBe(false);
   });
 
-  it('pickExemplars: filters noise (progress bars, source_id residue, pure symbols)', () => {
+  it('pickExemplars: strips learner format prefix before filtering', () => {
+    const picked = pickExemplars([
+      '[source_id:225332] 小明: 楼下奶茶第二杯半价啦',
+      '[source_id:225336] 快乐小鳄鱼: [media]',
+      '[source_id:225337] SELF: 我是bot刚说的话',
+      '[source_id:225338] 喵锵: /invite@KairoClaw_bot',
+    ]);
+    // 只剩干净正文,无 source_id 残留、无 speaker 前缀、无命令/媒体/SELF
+    expect(picked).toEqual(['楼下奶茶第二杯半价啦']);
+    expect(picked.some((s) => s.includes('source_id'))).toBe(false);
+  });
+
+  it('pickExemplars: per-message feed keeps report body whole', () => {
+    // 调用方按消息喂(一人一条,含 \n)—— 多行报告整块拒,不拆行
+    const picked = pickExemplars([
+      'FFQ.LA Test Center: 🔍 检测报告：\n\n计划: @every 1h\n> 疑似中转掉线\n - aws-my-ipv6.com',
+      '喵锵: 等我生活费要到了整一个尝尝味',
+    ]);
+    expect(picked).toEqual(['等我生活费要到了整一个尝尝味']);
+  });
+
+  it('pickExemplars: filters bot status lines (progress/backend/report)', () => {
+    const picked = pickExemplars([
+      '#nybs',
+      '@every 1h',
+      '⏳连通性测试进行中...',
+      '⚙️后端:深圳电信-1000M',
+      '▸CRON-广东电信',
+      '🔍 检测报告：',
+      '请选择排序方式:',
+      '当前进度:',
+      '等我生活费要到了整一个尝尝味',
+    ]);
+    expect(picked).toEqual(['等我生活费要到了整一个尝尝味']);
+  });
+
+  it('pickExemplars: filters system file placeholders + weather bot residue', () => {
+    const picked = pickExemplars([
+      '[文件「2026-09-05T22-27-54.695-wiki.png」：类型 image/png，无法解析内容]',
+      '𝟛𝟘:𝟘𝟘 ✨𝟐𝟖(𝟑𝟐)°ℭ❤️: @Minasei 叫主人',
+      '等我生活费要到了整一个尝尝味',
+    ]);
+    expect(picked).toEqual(['等我生活费要到了整一个尝尝味']);
+  });
+
+  it('pickExemplars: filters classic noise (progress bars, media, short)', () => {
     const picked = pickExemplars([
       '5.00%     [1/20]',
       '[=                   ]',

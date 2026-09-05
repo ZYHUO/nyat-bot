@@ -104,7 +104,7 @@ async function runJargonInference(chatId: number, e: ReturnType<typeof env>): Pr
   }
 }
 
-export async function runLearnerScan(): Promise<void> {
+export async function runLearnerScan(opts: { exemplarOnlyChatId?: number } = {}): Promise<void> {
   const e = env();
   if (!e.LEARNER_ENABLED) return;
 
@@ -117,6 +117,34 @@ export async function runLearnerScan(): Promise<void> {
   }
 
   if (allChats.length === 0) return;
+
+  // H2 修复验证:手动回填指定群 exemplar(绕过 MIN_NEW 门槛,历史不回填是线上数据,
+  // 不是补测假数据 —— 资格是 getRecent 真实现场 + needsExemplars 真空库)。
+  if (opts.exemplarOnlyChatId !== undefined) {
+    const chatId = opts.exemplarOnlyChatId;
+    try {
+      const { needsExemplars, pickExemplars, saveExemplars } = await import('../learners/dialect-exemplar.js');
+      if (!needsExemplars(chatId)) {
+        logger.info({ chatId }, 'learner-scan: exemplar backfill skipped — already filled');
+        return;
+      }
+      const recent = await getRecent(chatId, e.LEARNER_BATCH_SIZE);
+      // H2 修2:按消息喂 pickExemplars(一人一条),不走 formatMessagesForLearner
+      // —— 格式化行 join('\n') 后再 split 会把多行报告体的后续行拆成独立行
+      // ("- xxx.com"/"> 疑似掉线"),绕过整行报告体检查(线上 7 条垃圾的根因)。
+      const lines = recent.map((m) => {
+        const name = m.fullName || m.username || (m.role === 'assistant' ? 'SELF' : '?');
+        const text = (m.textContent || m.captionContent || '[media]').slice(0, 200);
+        return `${name}: ${text}`;
+      });
+      const picked = pickExemplars(lines);
+      if (picked.length > 0) saveExemplars(chatId, picked);
+      logger.info({ chatId, scanned: lines.length, count: picked.length }, 'learner-scan: exemplar backfilled');
+    } catch (err) {
+      logger.warn({ err, chatId }, 'learner-scan: exemplar backfill failed');
+    }
+    return;
+  }
 
   // Pick up to MAX_CHATS_PER_TICK
   const candidates = allChats.length <= e.LEARNER_MAX_CHATS_PER_TICK
@@ -151,10 +179,16 @@ export async function runLearnerScan(): Promise<void> {
 
       // H2.1 exemplar 冷启动:缺方言库时用确定性挑选补 10 条(0ms,无 LLM)。
       // 与 LLM 抽取并行不互斥 —— exemplar 管"原汁语感",expressions 管"句式抽象"。
+      // H2 修2:按消息喂(一人一条),不走 format+split —— 多行报告体后续行
+      // ("- xxx.com"/"> 疑似")会被 split 拆成独立行绕过检查。
       try {
         const { needsExemplars, pickExemplars, saveExemplars } = await import('../learners/dialect-exemplar.js');
         if (needsExemplars(chatId)) {
-          const lines = formatMessagesForLearner(newMsgs).split('\n').filter(Boolean);
+          const lines = newMsgs.map((m) => {
+            const name = m.fullName || m.username || (m.role === 'assistant' ? 'SELF' : '?');
+            const text = (m.textContent || m.captionContent || '[media]').slice(0, 200);
+            return `${name}: ${text}`;
+          });
           const picked = pickExemplars(lines);
           if (picked.length > 0) {
             saveExemplars(chatId, picked);
