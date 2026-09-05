@@ -52,15 +52,26 @@ function recentMaterial(windowSec: number): string {
   const parts: string[] = [];
   try {
     const db = getDb();
-    const eps = db
-      .prepare(`SELECT goal, outcome, summary FROM episodes WHERE created_at > ? ORDER BY created_at DESC LIMIT 20`)
-      .all(since) as { goal: string; outcome: string; summary: string }[];
+    // Evidence gate: only episodes with host-verified task_evidence may seed skills.
+    // Rows without evidence (old data) are treated as unverified and excluded.
+    let eps: { goal: string; outcome: string; summary: string }[] = [];
+    try {
+      eps = db
+        .prepare(`SELECT e.goal, e.outcome, e.summary FROM episodes e
+           JOIN task_evidence t ON t.task_id = e.task_id AND t.assessment = 'verified'
+           WHERE e.created_at > ? ORDER BY e.created_at DESC LIMIT 20`)
+        .all(since) as { goal: string; outcome: string; summary: string }[];
+    } catch {
+      eps = [];
+    }
     if (eps.length) {
       parts.push(
         '=== 最近任务 ===\n' +
           eps.map((e) => `- [${e.outcome}] ${e.goal.slice(0, 80)}\n  ${e.summary.slice(0, 200)}`).join('\n'),
       );
     }
+    // NOTE (Phase 2 Task 6 follow-up): experience_entries still unfiltered here;
+    // verified-only experience material is tracked separately, not silently assumed.
     const exps = db
       .prepare(`SELECT kind, content FROM experience_entries WHERE created_at > ? ORDER BY created_at DESC LIMIT 30`)
       .all(since) as { kind: string; content: string }[];
