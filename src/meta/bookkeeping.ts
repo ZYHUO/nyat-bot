@@ -10,9 +10,8 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
   if (chatId > 0 && formatted.uid > 0 && !formatted.isBot) {
     void (async () => {
       try {
-        const { markDmEver, markPmDmOpen } = await import('../tracking/dm-state.js');
+        const { markDmEver } = await import('../tracking/dm-state.js');
         markDmEver(formatted.uid);
-        markPmDmOpen(formatted.uid);
         const { countDmPending } = await import('../tracking/dm-pending.js');
         if (countDmPending(formatted.uid) > 0) {
           const { flushDmPendingOnInbound } = await import('../pipeline/dm-proactive.js');

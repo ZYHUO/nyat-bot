@@ -96,4 +96,20 @@ describe('parseEnv', () => {
     expect(env.ASI_SAMPLE_RATE).toBe(0.5);
     expect(env.MULTI_AGENT_CHAT_SPECIALISTS).toBe(false);
   });
+
+  it('phase-2 evidence gates default OFF and accept override', () => {
+    const env = parseEnv({ ...validEnv });
+    expect(env.GOAL_EVIDENCE_GATE_ENABLED).toBe(false);
+    expect(env.SKILL_VERIFIED_USE_ENABLED).toBe(false);
+    expect(env.SELF_EDIT_GUARDRAILS_ENABLED).toBe(false);
+    const on = parseEnv({
+      ...validEnv,
+      GOAL_EVIDENCE_GATE_ENABLED: '1',
+      SKILL_VERIFIED_USE_ENABLED: 'true',
+      SELF_EDIT_GUARDRAILS_ENABLED: '1',
+    });
+    expect(on.GOAL_EVIDENCE_GATE_ENABLED).toBe(true);
+    expect(on.SKILL_VERIFIED_USE_ENABLED).toBe(true);
+    expect(on.SELF_EDIT_GUARDRAILS_ENABLED).toBe(true);
+  });
 });

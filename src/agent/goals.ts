@@ -14,6 +14,9 @@ export type GoalStatus = 'active' | 'achieved' | 'stale' | 'dropped';
 
 export interface GoalRow {
   id: number;
+  verified_achievements: number;
+  unverified_completions: number;
+  last_evidence: string;
   topic: string;
   origin: string;
   chat_id: number | null;
@@ -22,6 +25,19 @@ export interface GoalRow {
   last_check_at: number | null;
   last_finding: string | null;
   findings_count: number;
+  check_count: number;
+  long_term: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GoalSubtaskRow {
+  id: number;
+  goal_id: number;
+  parent_id: number | null;
+  description: string;
+  status: string;
+  result: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -199,6 +215,31 @@ export function markSilentChange(id: number): void {
   }
 }
 
+/** Host-side evidence gate: only independently verified work may close a goal as achieved. */
+export function markGoalAchieved(id: number, evidence: 'verified' | 'failed' | 'unverified', label?: string): void {
+  if (evidence !== 'verified') throw new Error('goal achieved needs verified evidence');
+  try {
+    getDb().prepare(
+      `UPDATE goals SET status = 'achieved', verified_achievements = verified_achievements + 1,
+        last_evidence = 'verified', last_finding = COALESCE(?, last_finding), updated_at = ? WHERE id = ?`,
+    ).run(label?.slice(0, 500) ?? null, nowSec(), id);
+  } catch (err) {
+    logger.warn({ err, id }, 'markGoalAchieved failed');
+  }
+}
+
+/** Model-claimed completion without verification stays open and counted, never achieved. */
+export function recordUnverifiedCompletion(id: number, note?: string): void {
+  try {
+    getDb().prepare(
+      `UPDATE goals SET unverified_completions = unverified_completions + 1,
+        last_evidence = 'unverified', last_finding = COALESCE(?, last_finding), updated_at = ? WHERE id = ?`,
+    ).run(note?.slice(0, 500) ?? null, nowSec(), id);
+  } catch (err) {
+    logger.warn({ err, id }, 'recordUnverifiedCompletion failed');
+  }
+}
+
 export function setGoalStatus(id: number, status: GoalStatus): void {
   try {
     getDb().prepare(`UPDATE goals SET status = ?, updated_at = ? WHERE id = ?`).run(status, nowSec(), id);
@@ -217,5 +258,81 @@ export function listGoals(status?: GoalStatus): GoalRow[] {
   } catch (err) {
     logger.warn({ err }, 'listGoals failed');
     return [];
+  }
+}
+
+// ────────────────────────────────────────
+// Goal Subtasks — AGI Level 6 P4 subtree
+// ────────────────────────────────────────
+
+/** 给一个 goal 创建子树根节点。 */
+export function createSubtask(input: {
+  goalId: number;
+  description: string;
+  parentId?: number | null;
+}): number | null {
+  try {
+    const ts = nowSec();
+    const r = getDb()
+      .prepare(
+        `INSERT INTO goal_subtasks (goal_id, parent_id, description, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'pending', ?, ?)`,
+      )
+      .run(input.goalId, input.parentId ?? null, input.description.slice(0, 200), ts, ts);
+    return Number(r.lastInsertRowid);
+  } catch (err) {
+    logger.warn({ err }, 'createSubtask failed');
+    return null;
+  }
+}
+
+/** 某个 goal 的全部 subtask。 */
+export function listSubtasks(goalId: number): GoalSubtaskRow[] {
+  try {
+    return getDb()
+      .prepare(`SELECT * FROM goal_subtasks WHERE goal_id = ? ORDER BY id ASC`)
+      .all(goalId) as GoalSubtaskRow[];
+  } catch {
+    return [];
+  }
+}
+
+/** pending → running | done | blocked。 */
+export function setSubtaskStatus(id: number, status: string, result?: string): void {
+  try {
+    const ts = nowSec();
+    if (result !== undefined) {
+      getDb()
+        .prepare(`UPDATE goal_subtasks SET status = ?, result = ?, updated_at = ? WHERE id = ?`)
+        .run(status, result.slice(0, 500), ts, id);
+    } else {
+      getDb().prepare(`UPDATE goal_subtasks SET status = ?, updated_at = ? WHERE id = ?`).run(status, ts, id);
+    }
+  } catch (err) {
+    logger.warn({ err }, 'setSubtaskStatus failed');
+  }
+}
+
+/** 某个 goal 下一个 pending subtask（给 worker 调度）。 */
+export function nextPendingSubtask(goalId: number): GoalSubtaskRow | null {
+  try {
+    const row = getDb()
+      .prepare(`SELECT * FROM goal_subtasks WHERE goal_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1`)
+      .get(goalId) as GoalSubtaskRow | undefined;
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 某个 goal 是否全部完成。 */
+export function isGoalComplete(goalId: number): boolean {
+  try {
+    const r = getDb()
+      .prepare(`SELECT COUNT(*) AS c FROM goal_subtasks WHERE goal_id = ? AND status != 'done'`)
+      .get(goalId) as { c: number };
+    return r.c === 0;
+  } catch {
+    return false;
   }
 }

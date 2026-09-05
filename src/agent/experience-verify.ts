@@ -18,6 +18,8 @@ export interface InjectOutcomeArgs {
   taskOutcome: 'done' | 'failed';
   pathQualityScore: number;
   minSuccess?: number;
+  /** Host-side acceptance, never inferred from endTask summary. */
+  evidenceStatus?: 'verified' | 'failed' | 'unverified';
 }
 
 /** 记录一次注入后任务结果。返回更新到的 verified 状态(按 id)。 */
@@ -36,8 +38,8 @@ export function recordInjectOutcome(args: InjectOutcomeArgs): Map<number, Verifi
     );
     const read = db.prepare(`SELECT verified, success_count, failure_count FROM experience_entries WHERE id = ?`);
     for (const id of experienceIds) {
-      const good = taskOutcome === 'done' && isPathQualityGood(pathQualityScore);
-      const fail = taskOutcome === 'failed';
+      const good = args.evidenceStatus === 'verified' && taskOutcome === 'done' && isPathQualityGood(pathQualityScore);
+      const fail = args.evidenceStatus === 'failed' && taskOutcome === 'failed';
       const incS = good ? 1 : 0;
       const incF = fail ? 1 : 0;
       if (incS === 0 && incF === 0) continue; // done 但路径脏: 不计数

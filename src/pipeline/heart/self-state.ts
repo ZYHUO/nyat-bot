@@ -31,7 +31,7 @@ export interface SelfState {
 export async function composeSelfState(chatId: number): Promise<SelfState> {
   // 四个独立异步源并行取;组装仍按固定顺序(life → mood → focus →
   // social → thought → stance → obsession),叙述与旧版逐字一致。
-  const [moodPart, focusVal, socialPart, mindData, obsessionPart, schoolNarrative, weatherPart, yesterdayPart] = await Promise.all([
+  const [moodPart, focusVal, socialPart, mindData, obsessionPart, hobbyPart, schoolNarrative, weatherPart, yesterdayPart] = await Promise.all([
     (async (): Promise<string | null> => {
       try {
         const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
@@ -79,6 +79,16 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
         return flavor || null;
       } catch (err) {
         logger.debug({ err, chatId }, 'self-state: obsession source failed');
+        return null;
+      }
+    })(),
+    // 长期爱好(从群友爱好蒸馏,慢变量;区别于 obsession 的 3h 短周期轮换)
+    (async (): Promise<string | null> => {
+      try {
+        const { getHobbyFlavor } = await import('../../tracking/hobbies.js');
+        return await getHobbyFlavor();
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: hobby source failed');
         return null;
       }
     })(),
@@ -200,11 +210,16 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
   // 本周执念
   if (obsessionPart) after.push(obsessionPart);
 
+  // 长期爱好(慢变量,别当话题硬提,只有别人正好聊到才淡淡带一句)
+  if (hobbyPart) after.push(`你最近挺喜欢:${hobbyPart}(只是你自己的小爱好,别主动开话题,别人正好聊到才淡淡带一句)`);
+
   // A3:今日感想(睡着时不提,免得跟"困得不行"打架)
   if (schoolNarrative && !lifeSleeping) after.push(`今天你心里念叨着:「${schoolNarrative}」`);
 
-  // 昨日回忆(跨天连续;同样睡着时不提)
-  if (yesterdayPart && !lifeSleeping) after.push(yesterdayPart);
+  // 昨日回忆(跨天连续)。2026-08-31 修复:睡着时也保留——凌晨被吵醒时
+  // 砍掉它是"失忆感"的来源(只剩"迷迷糊糊"一句,没有任何记忆锚点)。
+  // 真人半夜被叫醒也记得昨天干了什么,只是反应慢。
+  if (yesterdayPart) after.push(yesterdayPart);
 
   const make = (withThought: boolean): string => {
     const all = [...before, ...(withThought && thoughtPart ? [thoughtPart] : []), ...after];

@@ -7,6 +7,7 @@ import { logger } from '../shared/logger.js';
 import { formatBeijingNowLine } from '../shared/beijing-time.js';
 import { buildMasterIdentityBlock, masterShortHint } from '../shared/master-identity.js';
 import { getGlobalState } from './global-state.js';
+import { resolveJournalChatLink, getJournalChannelInfo } from '../cron/dream-journal.js';
 import { buildMetaApiContext } from './meta-api.js';
 import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
@@ -141,8 +142,13 @@ async function interceptDiaryAttention(
     result: { wrote: boolean; reason?: string; snippet?: string | null },
   ): Promise<void> {
     const snip = (result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    let journalLink: string | null = null;
+    if (result.wrote) {
+      journalLink = await resolveJournalChatLink();
+    }
+    const linkNote = journalLink ? `\n\n日记发布在频道 ${journalLink}（只在频道里能看到完整版）。` : '';
     const direction = result.wrote
-      ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
+      ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」${linkNote ? `频道链接：${journalLink}` : ''}。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
       : diarySkipAckDirection(result.reason);
 
     // Non-Meta chats: dispatch.taskToGroup would throw, so send a short ack
@@ -152,7 +158,7 @@ async function interceptDiaryAttention(
       try {
         const { sendMessage } = await import('../bot/sender/telegram.js');
         const ackText = result.wrote
-          ? `日记已写好啦～${snip ? `「${snip}」` : ''}`
+          ? `日记已写好啦～${snip ? `「${snip}」` : ''}${journalLink ? `\n发布在频道：${journalLink}` : ''}`
           : diarySkipAckDirection(result.reason).slice(0, 200);
         await sendMessage(a.chatId, ackText, a.messageId, a.messageThreadId);
       } catch (err) {
@@ -726,6 +732,19 @@ export async function runMetaSession(
   const engine = getContextEngine('meta');
   const dreaming = await loadBackgroundDreaming();
 
+  // Resolve the dream journal channel link + numeric chatId for this session.
+  let journalChannelLink: string | null = null;
+  let journalChatId: number = 0;
+  try {
+    const info = await getJournalChannelInfo();
+    if (info) {
+      journalChannelLink = info.link;
+      journalChatId = info.chatId;
+    }
+  } catch {
+    /* non-critical */
+  }
+
   // Pure ok-callbacks: CodeAct already spoke. Do not Meta-LLM another group reply
   // (was causing near-duplicate second bubbles after diary ack).
   const userFacing = metaAttention.filter((a) => a.layer === 'L0' || a.layer === 'L1');
@@ -793,6 +812,14 @@ export async function runMetaSession(
       'meta-now',
       `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
     ),
+    ...(journalChannelLink
+      ? [
+          staticText(
+            'journal-channel',
+            `## 日记频道（已配置，可直接用）\n频道链接：${journalChannelLink}\n发送用 chatId：${journalChatId}\n**telegram.sendToChat(${journalChatId}, "内容", "图片路径") 可以直接发，bot 有权限。**`,
+          ),
+        ]
+      : []),
   ]);
 
   logger.info(

@@ -18,7 +18,13 @@ export interface AttentionItem {
   messageThreadId?: number;
 }
 
+import type { AcceptanceContract, AcceptanceResult } from '../agent/task-evidence.js';
+import type { AuditSnapshot } from '../agent/execution-audit.js';
+
 export interface DispatchTask {
+  acceptance?: AcceptanceContract;
+  assessment?: AcceptanceResult;
+  audit?: AuditSnapshot;
   id: string;
   chatId: number;
   contentDirection: string;

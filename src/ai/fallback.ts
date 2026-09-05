@@ -13,10 +13,24 @@ import { logger } from '../shared/logger.js';
 import { getRedis } from '../db/redis.js';
 import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
+import { smartGroupReorder, recordSmartGroupResult, smartGroupAutoAssign, isAutoAssignEnabled } from './smart-group.js';
 
 export async function callWithFallback(options: AICallOptions): Promise<AICallResult> {
   const usage = getUsage(options.usage);
-  const labelNames = [usage.label, ...usage.backups];
+  const manualNames = [usage.label, ...usage.backups];
+
+  // Smart Group auto-assign: 开了就忽略 .env 手动链,从全量 provider 池按
+  // usage profile(tier/vision)自动选 top-N。选不出来(池空/全不符)回退手动链。
+  let candidateNames = manualNames;
+  if (isAutoAssignEnabled()) {
+    const auto = await smartGroupAutoAssign(options.usage);
+    if (auto.length > 0) candidateNames = auto;
+  }
+
+  // Smart Group: reorder candidates by health/latency/cost if enabled.
+  // getLabels 由 smart-group 内部惰性 import —— 默认关闭时零开销,也不碰测试 mock。
+  const smartOrderedNames = await smartGroupReorder(candidateNames);
+
   const cooldown = new CooldownTracker(getRedis());
   // 后台批任务(allowHedge:false)不 hedge —— 2s 后双发对延迟无感,纯翻倍账单。
   const hedgeDelayMs = options.allowHedge === false ? 0 : env().HEDGE_DELAY_MS;
@@ -44,8 +58,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     (m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image'),
   );
 
-  for (let i = 0; i < labelNames.length; i++) {
-    const labelName = labelNames[i]!;
+  for (let i = 0; i < smartOrderedNames.length; i++) {
+    const labelName = smartOrderedNames[i]!;
 
     // Skip label already tried as a hedge
     if (labelName === hedgeTriedLabel) continue;
@@ -76,8 +90,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       // Note: hedgeTriedLabel is set before the call. If hedgedCall throws,
       // both primary and hedge have been attempted, so skipping the hedge
       // label in the fallback loop is correct.
-      if (i === 0 && labelNames.length > 1 && hedgeDelayMs > 0) {
-        hedgeTriedLabel = labelNames[1]!;
+      if (i === 0 && smartOrderedNames.length > 1 && hedgeDelayMs > 0) {
+        hedgeTriedLabel = smartOrderedNames[1]!;
         const hedgeLabel = getLabel(hedgeTriedLabel);
         const result = await hedgedCall(
           label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown,
@@ -107,6 +121,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         );
       }
       if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
+      // Smart Group: always record (decoupled from suppressMetrics — routing data ≠ metrics)
+      void recordSmartGroupResult(labelName, result.latencyMs, true);
       return result;
     } catch (err) {
       errors.push(err instanceof Error ? err : new Error(String(err)));
@@ -137,8 +153,10 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         logger.warn({ label: labelName, model: label.model, errCode, breakerSec: remaining }, 'Circuit breaker tripped');
       }
 
-      // Metrics: this attempt failed (visible per-label so retries/429 storms show up).
+      // Metrics: this attempt failed
       if (!options.suppressMetrics) emitLlmError(options.usage, labelName, label.model, options.chatId);
+      // Smart Group: always record failure (decoupled from suppressMetrics)
+      void recordSmartGroupResult(labelName, 0, false);
       logger.warn({ label: labelName, err: errors.at(-1)?.message }, 'Label failed, trying next');
     }
   }

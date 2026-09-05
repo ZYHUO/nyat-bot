@@ -433,21 +433,27 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
   ].join('\n');
 
   try {
-    const res = await Promise.race([
-      callWithFallback({
-        usage: env().UNIFIED_TICK_USAGE,
-        messages: [
-          { role: 'system', content: TICK_SYSTEM },
-          { role: 'user', content: user },
-        ],
-        maxTokens: 400,
-        temperature: 0.7,
-      }),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('tick_timeout')), 25_000)),
-    ]);
-    const verdict = parseTickVerdict(res.content ?? '');
-    if (!verdict) return { action: { type: 'quiet', reason: 'parse_failed' }, reason: 'parse_failed' };
-    return verdict;
+    // parse 失败重试一次(2026-08-31):stepfun 偶发吐脏 JSON/围栏,一次 parse_failed
+    // 直接 quiet 会把整个决策周期浪费掉(实测多周期连续 parse_failed)。重试带
+    // 「只输出 JSON」的强化提示,再失败才认栽。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await Promise.race([
+        callWithFallback({
+          usage: env().UNIFIED_TICK_USAGE,
+          messages: [
+            { role: 'system', content: TICK_SYSTEM },
+            { role: 'user', content: attempt === 0 ? user : `${user}\n\n(上次输出无法解析。这次只输出一个 JSON 对象,不要任何其他文字/围栏/解释。)` },
+          ],
+          maxTokens: 400,
+          temperature: attempt === 0 ? 0.7 : 0.3,
+        }),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('tick_timeout')), 25_000)),
+      ]);
+      const verdict = parseTickVerdict(res.content ?? '');
+      if (verdict) return verdict;
+      logger.warn({ attempt, raw: (res.content ?? '').slice(0, 120) }, 'tick verdict unparseable, retrying');
+    }
+    return { action: { type: 'quiet', reason: 'parse_failed' }, reason: 'parse_failed' };
   } catch (err) {
     logger.debug({ err }, 'decideTick failed (fail-quiet)');
     return { action: { type: 'quiet', reason: 'llm_failed' }, reason: 'llm_failed' };
@@ -683,9 +689,14 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         return;
       }
       try {
-        const { listGoals, recordCheck } = await import('../agent/goals.js');
+        const { listGoals, recordCheck, listSubtasks } = await import('../agent/goals.js');
         const goal = listGoals('active').find((g) => g.id === a.goalId);
         if (!goal) return;
+        const subtasks = listSubtasks(goal.id);
+        const hasSubtasks = subtasks.length > 0;
+        const subtaskContext = hasSubtasks
+          ? `\n子任务进度：${subtasks.map((s) => `[${s.status}] ${s.description}`).join('；')}。优先推进 status=pending 的子任务。`
+          : '';
         const targetChat = goal.chat_id ?? (e.MASTER_UID > 0 ? e.MASTER_UID : 0);
         if (!targetChat) return;
         const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
@@ -701,13 +712,12 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             `用 web.search 搜一下最新进展，或翻看最近聊天里有没有相关话题。` +
             (goal.last_finding ? `上次发现：${goal.last_finding}。` : `这是第一次检查。`) +
             `世界可能悄悄变了——主动探查，注意发现没人告诉你的变化(版本更新/价格变动/新消息)。` +
-            // 2026-08-22：「有新发现就汇报」太松导致同一主题每天反复汇报差不多的话。
-            // 要求与上次发现做实质对比——没有真正的新事实就安静。
             `**只有和上次发现实质不同的新事实**才 sendText 简短汇报一次(自然分享,不像新闻播报,一两句就收);` +
             `和上次差不多/没有新进展 → 什么都不说直接 endTask("no_update")。` +
             `这件事如果已经办完/兑现了(承诺的事做完了、目标达到了) → endTask("已完成: 怎么完的")，goal 会关闭不再跟进。` +
             `这件事如果办不到(目标不存在/没这个能力/试了但失败) → 不许装完成，老实给这个 chat 说一句办不到的原因，endTask("无法完成: 原因")。` +
-            `最后必须 runtime.endTask("found: …"、"no_update"、"已完成: …" 或 "无法完成: …")。`,
+            `最后必须 runtime.endTask("found: …"、"no_update"、"已完成: …" 或 "无法完成: …")。` +
+            subtaskContext,
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
           status: 'queued',

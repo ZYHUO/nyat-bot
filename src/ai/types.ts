@@ -23,6 +23,8 @@ export interface AILabel {
    *  (如 kimi-k3 只允许 temperature=1)。 */
   temperature?: number;
   capabilities?: { vision?: boolean; functionCalling?: boolean };
+  /** Smart Group auto-assign 质量分层: high=主力回复, medium=中等, low=廉价快。 */
+  tier?: 'high' | 'medium' | 'low';
 }
 
 export interface AIUsage {

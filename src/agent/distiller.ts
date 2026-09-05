@@ -78,11 +78,14 @@ export interface DistillEpisodeArgs {
  */
 export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillResult | null> {
   const { task, outcome, progressSummary, tailText } = args;
+  // Evidence gate: lifecycle done without host verification must not be distilled as success.
+  const assessed: 'done' | 'failed' =
+    outcome === 'done' && task.assessment?.status === 'verified' ? 'done' : 'failed';
   try {
     const system = loadCachedPrompt('task/distill.md');
     const user = [
       `goal: ${task.contentDirection.slice(0, 500)}`,
-      `outcome: ${outcome}`,
+      `outcome: ${assessed}`,
       `summary: ${progressSummary.slice(0, 2000)}`,
       `turns: ${task.totalTurns ?? 0}, segments: ${(task.segment ?? 0) + 1}`,
       ``,
@@ -122,7 +125,7 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
       taskId: task.id,
       chatId: task.chatId,
       goal: task.contentDirection,
-      outcome,
+      outcome: assessed,
       summary: parsed.summary,
       lessons: parsed.lessons,
       tags: parsed.tags,
