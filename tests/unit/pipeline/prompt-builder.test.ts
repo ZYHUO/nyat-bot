@@ -168,5 +168,28 @@ describe('Prompt Builder', () => {
       expect(messages[1]!.content).toContain('[REPLY_COUNT_REQUIREMENT]');
       expect(messages[1]!.content).toContain('必须输出恰好 2 条消息');
     });
+
+    it('H2.2: injects [群方言] block when exemplars exist (group msg)', async () => {
+      const dialect = await import('../../../src/learners/dialect-exemplar.js');
+      const spy = vi.spyOn(dialect, 'getExemplars').mockReturnValue(['哈哈哈笑死', '冲！']);
+      // EXPRESSION_INJECT_ENABLED 默认关也可能被 CI env 打开 —— mock 掉避免读 expressions 表
+      const expr = await import('../../../src/learners/expression-learner.js');
+      const exprSpy = vi.spyOn(expr, 'getTopExpressions').mockReturnValue([]);
+      try {
+        const groupMsg: FormattedMessage = { ...latestMessage, textContent: '在吗' };
+        const messages = buildMessages('sys', 'ctx', groupMsg, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, -1001);
+        expect(messages[1]!.content).toContain('[群方言]');
+        expect(messages[1]!.content).toContain('哈哈哈笑死');
+        expect(messages[1]!.content).toContain('铁律');
+      } finally {
+        spy.mockRestore();
+        exprSpy.mockRestore();
+      }
+    });
+
+    it('H2.2: no [群方言] block without exemplars or chatId', () => {
+      const messages = buildMessages('sys', 'ctx', latestMessage);
+      expect(messages[1]!.content).not.toContain('[群方言]');
+    });
   });
 });
