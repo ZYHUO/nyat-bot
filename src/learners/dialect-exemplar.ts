@@ -36,7 +36,7 @@ function isCandidate(raw: string): boolean {
   if (s.startsWith("SELF")) return false; // bot 自己的话
   if (s.startsWith("/")) return false; // 命令
   if (/^@\w+(\s+\d+[hm])?$/.test(s)) return false; // 光 @ 人 / 定时器残留(@every 1h)
-  if (/^[⏳▸⚙🔍⌛✅❌⚠＃#@]/.test(s)) return false; // bot 状态行(进度/报告/后端/连通性)
+  if (/^[⏳▸⚙🔍⌛✅❌⚠＃#@]/u.test(s)) return false; // bot 状态行(进度/报告/后端/连通性)
   if (/^(连通性|速度)测试|检测报告|后端[:：]|当前进度|请选择|CRON-/i.test(s)) return false; // bot 状态正文
   if (/^\[文件[「\[]/.test(s)) return false; // 系统文件占位([文件「xxx」:…无法解析内容])
   if (/[ℭ℃]/.test(s)) return false; // 天气 bot 广播残留
@@ -75,7 +75,7 @@ export function pickExemplars(lines: string[]): string[] {
     // bot 自己的发言(SELF 标记)整行跳过 —— 不能只看正文
     if (/^self$/i.test(speaker)) continue;
     // bot 状态行的 speaker 本身就是状态词(⚙️后端/⏳连通性/🔍检测)——整行扔,不看正文
-    if (/^[⏳▸⚙🔍⌛✅❌⚠＃#@]/.test(speaker)) continue;
+    if (/^[⏳▸⚙🔍⌛✅❌⚠＃#@]/u.test(speaker)) continue;
     if (/^(连通性|速度)测试|检测报告|后端|当前进度|请选择|CRON-/i.test(speaker)) continue;
     const text = (m?.[2] ?? line).trim();
     if (!isCandidate(text)) continue;
