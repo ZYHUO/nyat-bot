@@ -7,6 +7,8 @@
 
 import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
+import { getActiveTopics } from './topic-registry.js';
+import { recordReward } from './topic-bandit.js';
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
@@ -84,6 +86,16 @@ export function recordReplySentiment(params: {
       )
       .run(params.userId, params.botMessageId, params.chatId, s, params.userText.slice(0, 300));
     logger.debug({ userId: params.userId, s, text: params.userText.slice(0, 50) }, 'feedback: reply');
+    // H4 bandit 回流：这次回复是对 bot 跟进某话题的反馈 → 折成 reward。
+    // 话题归因：本群当前 live 话题（topic-registry getActiveTopics），命中多个
+    // 时均分 reward（保守，避免错归因放大）。同步调用（registry 是纯 SQLite）。
+    try {
+      const live = getActiveTopics(params.chatId, 4);
+      if (live.length > 0) {
+        const share = s / live.length;
+        for (const t of live) recordReward(params.chatId, t.label, share);
+      }
+    } catch { /* non-critical */ }
   } catch (err) {
     logger.debug({ err }, 'recordReplySentiment failed (non-critical)');
   }
