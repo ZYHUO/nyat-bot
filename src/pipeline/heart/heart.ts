@@ -212,26 +212,29 @@ export async function runHeartBranch(ctx: {
     // resume 再撞坏链路,恶性循环。改为 MaiBot 不变量:任何"先不回"必须
     // 物化为会再触发的状态 —— defer 重评(预算内),预算耗尽回退 legacy
     // judge(judge 用 stepfun 主标签,与 heart 不同链)出真裁决。
-    if (heart.act === 'pass' && heart.why === 'llm_failed') {
+    if (heart.act === 'pass' && (heart.why === 'llm_failed' || heart.why === 'parse_failed')) {
+      const isParse = heart.why === 'parse_failed';
       if (hasDeferBudget(job.turnContext.deferCount)) {
         const rescheduled = await scheduleGateDeferReeval({
           chatId: job.chatId,
           entry: buildDeferEntry(job, formatted),
           deferCount: job.turnContext.deferCount ?? 0,
-          retryAfterMs: 30_000,
-          reason: 'heart_llm_failed_defer',
+          retryAfterMs: isParse ? 10_000 : 30_000,
+          reason: isParse ? 'heart_parse_failed_defer' : 'heart_llm_failed_defer',
         }).catch(() => false);
         if (rescheduled) {
           logger.warn(
             { chatId: job.chatId, uid: formatted.uid },
-            "Heart infra failure → timed re-eval scheduled",
+            isParse ? "Heart parse failure → timed re-eval scheduled" : "Heart infra failure → timed re-eval scheduled",
           );
           return { shouldReturn: true };
         }
       }
       logger.warn(
         { chatId: job.chatId, deferCount: job.turnContext.deferCount },
-        "Heart infra failure, defer budget exhausted → legacy judge fallback",
+        isParse
+          ? "Heart parse failure, defer budget exhausted → legacy judge fallback"
+          : "Heart infra failure, defer budget exhausted → legacy judge fallback",
       );
       judgeResult = await judge({
         message: formatted, recentMessages,

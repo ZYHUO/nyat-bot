@@ -232,7 +232,11 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   }
   const latencyMs = Math.round(performance.now() - start);
   if (!parsed) {
-    logger.warn({ chatId: input.chatId, rawSummary: summarizeHeartRaw(raw) }, 'heart parse failed, fail-closed pass');
+    // H0 hybrid fail-soft:parse 失败 ≠ 没听懂。旧行为 fail-closed pass 直接吞回复,
+    // 与 llm_failed 的 defer/judge 兜底不对称 —— 同一条消息因"吐脏 JSON"还是
+    // "链路挂了"走不同命运。parse_failed 进同一条 hybrid 路径:defer 预算内重评,
+    // 预算耗尽回退 legacy judge(与 llm_failed 同链,同日志前缀)。
+    logger.warn({ chatId: input.chatId, rawSummary: summarizeHeartRaw(raw) }, 'heart parse failed, hybrid fallback');
     return { act: 'pass', path: 'chat', why: 'parse_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 

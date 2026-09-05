@@ -137,6 +137,14 @@ describe('heart fallback signal hygiene (#34)', () => {
     expect(d.why).toBe('llm_failed');
   });
 
+  it('H0 hybrid: parse_failed also surfaces as pass+parse_failed (heart.ts routes to defer/judge)', async () => {
+    // 脏 JSON → parse 走重试也救不回 → why=parse_failed,调用方(heart.ts)接管 hybrid 路径
+    callModelMock.mockResolvedValue(ok('不是 JSON 也不是 那么是一坨中文'));
+    const d = await heartDecision(baseInput());
+    expect(d.act).toBe('pass');
+    expect(d.why).toBe('parse_failed');
+  });
+
   it('TurnInterrupt abort short-circuits the chain (no backup burn) and re-throws for replan', async () => {
     const controller = new AbortController();
     callModelMock.mockImplementationOnce(async () => {

@@ -63,4 +63,18 @@ describe('reply prompt files', () => {
     expect(readPrompt('task/reply.md')).toContain('直接指令要掂量');
     expect(readPrompt('task/judge.md')).toContain('不跪');
   });
+
+  it('H0+H3: servant @ ban lifted, heard-but-pass licensed with guardrails', () => {
+    // H3: 主动@解禁 —— 旧禁令必须消失,新写法必须在(防回潮)
+    expect(readPrompt('safety/guardrails.md')).not.toContain('不主动 @ 任何人');
+    expect(readPrompt('safety/guardrails.md')).toContain('不许编 username');
+    // H0: 听见了但不想理 —— judge + heart 双入口都有,且三铁律齐全
+    for (const f of ['task/judge.md', 'task/heart.md']) {
+      const prompt = readPrompt(f);
+      expect(prompt, `${f} missing heard-but-pass`).toContain('听见了但不想理');
+      expect(prompt, `${f} missing heard_but_pass marker`).toContain('heard_but_pass');
+    }
+    expect(readPrompt('task/judge.md')).toContain('第 3 次必须 REPLY');
+    expect(readPrompt('task/heart.md')).toContain('第 3 次必须接');
+  });
 });
