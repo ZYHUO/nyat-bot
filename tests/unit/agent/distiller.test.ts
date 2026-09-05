@@ -32,6 +32,7 @@ const baseTask = {
   status: 'done' as const,
   totalTurns: 8,
   segment: 0,
+  assessment: { status: 'verified', reasons: ['caller_checks_passed'], checks: [] },
 };
 
 beforeEach(() => {
@@ -95,6 +96,25 @@ describe('parseDistillOutput', () => {
     expect(withGoal.followUpGoal).toBe('主人的 Sub2API 项目进展');
     const tooShort = parseDistillOutput(JSON.stringify({ summary: 's', follow_up_goal: 'ab' }))!;
     expect(tooShort.followUpGoal).toBeNull();
+  });
+});
+
+describe('distillEpisode evidence gate', () => {
+  it('maps unverified lifecycle-done to failed episode outcome', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+    const unverified = { ...baseTask, assessment: { status: 'unverified', reasons: ['no_contract'], checks: [] } };
+    await distillEpisode({ task: unverified, outcome: 'done', progressSummary: 's', tailText: 't' });
+    const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
+    expect(ep['outcome']).toBe('failed');
+    const prompt = String(callWithFallbackMock.mock.calls[0]![0]['messages'][1]['content']);
+    expect(prompt).toContain('outcome: failed');
+  });
+
+  it('keeps verified done as done', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+    await distillEpisode({ task: baseTask, outcome: 'done', progressSummary: 's', tailText: 't' });
+    const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
+    expect(ep['outcome']).toBe('done');
   });
 });
 
