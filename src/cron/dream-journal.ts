@@ -12,6 +12,7 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getGlobalState } from '../meta/global-state.js';
 import { sendMessage } from '../bot/sender/telegram.js';
+import { getBot } from '../bot/bot.js';
 import type { FormattedMessage } from '../shared/types.js';
 
 export type DreamSlot = 'morning' | 'bedtime' | 'free';
@@ -45,6 +46,32 @@ export function normalizeJournalChatId(raw: number): number {
   if (!raw || !Number.isFinite(raw)) return 0;
   if (raw < 0) return raw;
   return Number(`-100${raw}`);
+}
+
+/** Look up channel/supergroup username via Telegram getChat — no invite needed. */
+export async function resolveJournalChatLink(): Promise<string | null> {
+  try {
+    const chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
+    if (chatId === 0) return null;
+    const bot = getBot();
+    const info = await bot.api.getChat(chatId);
+    if ('username' in info && info.username) return `https://t.me/${info.username}`;
+    if ('invite_link' in info && info.invite_link) return String(info.invite_link);
+    logger.warn({ chatId, fields: Object.keys(info) }, 'resolveJournalChatLink: no username or invite_link');
+    return null;
+  } catch (err) {
+    logger.warn({ err }, 'resolveJournalChatLink: getChat failed');
+    return null;
+  }
+}
+
+/** Resolve both the display link and the numeric chatId for telegram.sendToChat. */
+export async function getJournalChannelInfo(): Promise<{ link: string; chatId: number } | null> {
+  const chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
+  if (chatId === 0) return null;
+  const link = await resolveJournalChatLink();
+  if (!link) return null;
+  return { link, chatId };
 }
 
 export function dreamJournalPath(day?: string): string {

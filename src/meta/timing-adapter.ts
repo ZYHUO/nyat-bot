@@ -161,7 +161,7 @@ export async function evaluateMetaTiming(opts: {
   let recentMessages: FormattedMessage[] = [];
   try {
     const { getRecent } = await import('../pipeline/context/manager.js');
-    recentMessages = await getRecent(chatId, 20);
+    recentMessages = await getRecent(chatId, 20, formatted.messageThreadId);
   } catch {
     recentMessages = [formatted];
   }

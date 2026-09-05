@@ -5,7 +5,6 @@ import { logger } from '../../../src/shared/logger.js';
 const mockBuildSystemPrompt = vi.fn();
 const mockBuildMessages = vi.fn();
 const mockSlimContextForAI = vi.fn();
-const mockCompressContext = vi.fn();
 const mockSearchKnowledge = vi.fn();
 const mockCallWithFallback = vi.fn();
 const mockParseReplyResponse = vi.fn();
@@ -42,10 +41,6 @@ vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({
 
 vi.mock('../../../src/pipeline/context/slim.js', () => ({
   slimContextForAI: (...args: unknown[]) => mockSlimContextForAI(...args),
-}));
-
-vi.mock('../../../src/pipeline/context/compressor.js', () => ({
-  compressContext: (...args: unknown[]) => mockCompressContext(...args),
 }));
 
 vi.mock('../../../src/knowledge/manager.js', () => ({
@@ -151,7 +146,6 @@ describe('generateReply', () => {
       { role: 'user', content: 'user prompt' },
     ]);
     mockSlimContextForAI.mockReturnValue('context');
-    mockCompressContext.mockReturnValue([]);
     mockSearchKnowledge.mockReturnValue('');
     mockGetRecent.mockResolvedValue([]);
     mockGetGroupMembers.mockResolvedValue([]);

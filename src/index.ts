@@ -12,9 +12,11 @@ import { startWorker, closeWorker } from './queue/worker.js';
 import { startTaskWorker } from './queue/task-worker.js';
 import { closeQueue } from './queue/producer.js';
 import { freeEncoder } from './ai/token-counter.js';
+import { initSmartGroup } from './ai/smart-group.js';
 import { createAllowlistMiddleware } from './bot/middleware/allowlist.js';
 import { registerMemberHandler } from './bot/handlers/member.js';
 import { registerMessageHandlers } from './bot/handlers/message.js';
+import { registerFeedbackHandler } from './bot/handlers/feedback.js';
 import { createAdminApi } from './admin/api.js';
 import { createMonitorApi } from './admin/monitor.js';
 import { startCronJobs, stopCronJobs } from './cron/scheduler.js';
@@ -96,6 +98,8 @@ async function main(): Promise<void> {
   // 7.5 Register message handler (AFTER allowlist middleware so it takes effect)
   registerMessageHandlers(bot);
 
+  registerFeedbackHandler();
+
   const ownership = getStartupOwnership();
 
   // 8. Start BullMQ worker
@@ -135,6 +139,8 @@ async function main(): Promise<void> {
       }
       logger.info({ url: config.WEBHOOK_URL }, 'Webhook set (failover mode)');
       startIngressWatchdog(redis, 'webhook');
+      // Smart Group: 同 polling 分支,webhook 模式也恢复历史健康数据
+      await initSmartGroup();
     } else {
       // ── Polling mode (preferred / default) ──
       if (ingressMode === 'webhook' && !canWebhook) {
@@ -148,6 +154,9 @@ async function main(): Promise<void> {
         logger.warn({ err }, 'deleteWebhook before polling failed (continuing)');
       }
       installPollHeartbeat(bot, redis);
+      // Smart Group: 从 Redis 恢复历史健康数据(重启不丢,auto-assign 首日就有据可依)。
+      // 内部 SMART_GROUP_ENABLED=false 时 no-op。
+      await initSmartGroup();
       void bot.start({
         onStart: () => logger.info('Bot started (polling)'),
       });

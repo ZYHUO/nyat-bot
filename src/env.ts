@@ -366,6 +366,21 @@ const envSchema = z.object({
   // 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection
   // 检索相关经验注入 executor prompt。复盘走便宜链，失败静默不重试。
   DISTILL_USAGE: z.string().default('summarize'),
+  // ── 自我技能沉淀（AGI 自我 skill 系统）────────────────────────────────
+  // 每 6h 从 episodes + experience_entries 蒸馏「小 skill」,每周合并去重
+  // 成「大 skill」并归档小 skill 防爆。skill 是结构化能力单元(触发条件/
+  // 步骤/坑),区别于碎片化经验。开工前按 contentDirection 检索注入。
+  SKILL_DISTILL_ENABLED: booleanFromEnv.default(false),
+  SKILL_DISTILL_USAGE: z.string().default('summarize'),
+  SKILL_DISTILL_INTERVAL_MIN: z.coerce.number().int().positive().default(360),
+  SKILL_CONSOLIDATE_ENABLED: booleanFromEnv.default(false),
+  SKILL_CONSOLIDATE_USAGE: z.string().default('judge'),
+  SKILL_MAX_BIG: z.coerce.number().int().min(1).default(50),
+  // ── 爱好系统（从群友爱好蒸馏 bot 自己的爱好）────────────────────────
+  // 聚合群友常聊话题 → LLM 蒸馏成 bot 自己的爱好 → 注入 self-state。
+  // 慢变量(几天重蒸馏一次),区别于 obsessions 的 3h 短周期轮换。
+  HOBBY_DISTILL_ENABLED: booleanFromEnv.default(false),
+  HOBBY_DISTILL_USAGE: z.string().default('summarize'),
   // ── AGI Level 5 Phase 1: 经验验证器（常驻）────────────────────────────
   // 注入的经验在任务终态打分：done+干净路径 → success_count；failed →
   // failure_count。成功≥2 次 → verified=1(已证实)，失败≥2 次 → verified=2
@@ -699,6 +714,9 @@ const envSchema = z.object({
   AGENT_COMPACT_USAGE: z.string().default('judge'),
   // Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。
   CODEACT_WEB_SEARCH_ENABLED: booleanFromEnv.default(true),
+  // Subagent host pixiv/linux.sb 只读工具。默认关，按灰度开。
+  CODEACT_PIXIV_ENABLED: booleanFromEnv.default(false),
+  CODEACT_LINUXSB_ENABLED: booleanFromEnv.default(false),
   // Context Engine:组装 Meta/Subagent prompt 时打 Manifest(可观测+稳定前缀)。
   CONTEXT_ENGINE_ENABLED: booleanFromEnv.default(true),
   // 日记 dream-journal(独立 flag,可不启 Meta 单独开)。
@@ -1020,6 +1038,9 @@ export interface EnvProvider {
   /** 声明是否支持图片输入(P2 多模态回复)。undefined=未知(照发,provider 自己拒);
    *  false=明确不支持(带图调用直接跳过该 label,不白烧一跳)。 */
   vision?: boolean;
+  /** Smart Group auto-assign 质量分层: high=主力回复模型, medium=中等(judge/summarize),
+   *  low=廉价快模型(gate/cheap batch)。未声明默认 medium。 */
+  tier?: 'high' | 'medium' | 'low';
 }
 
 export interface EnvUsage {
@@ -1209,7 +1230,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE', 'RAW', 'VISION'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE', 'RAW', 'VISION', 'TIER'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -1243,6 +1264,7 @@ export function getProviders(): Map<string, EnvProvider> {
       maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
       temperature: (() => { const n = fields['TEMPERATURE'] ? parseFloat(fields['TEMPERATURE']) : NaN; return Number.isFinite(n) ? n : undefined; })(),
       vision: readBool(fields['VISION']),
+      tier: (fields['TIER'] === 'high' || fields['TIER'] === 'low') ? fields['TIER'] : (fields['TIER'] === 'medium' ? 'medium' : undefined),
     });
   }
 

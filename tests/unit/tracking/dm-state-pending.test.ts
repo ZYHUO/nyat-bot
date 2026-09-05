@@ -5,7 +5,7 @@ let testDb: Database.Database;
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
-const { markDmEver, hasDmEver, listDmEverUids, getPmNudge, upsertPmNudge, markPmDmOpen } =
+const { markDmEver, hasDmEver, listDmEverUids } =
   await import('../../../src/tracking/dm-state.js');
 const { enqueueDmPending, countDmPending, peekDmPending, markDmPendingFlushed } = await import('../../../src/tracking/dm-pending.js');
 
@@ -15,11 +15,6 @@ function initSchema(db: Database.Database): void {
     CREATE TABLE dm_pending_lines (
       id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, intent TEXT NOT NULL,
       context TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, flushed_at INTEGER);
-    CREATE TABLE pm_nudge_state (
-      uid INTEGER PRIMARY KEY, state TEXT NOT NULL DEFAULT 'none', attempts INTEGER NOT NULL DEFAULT 0,
-      last_nudge_at INTEGER, next_nudge_at INTEGER, primary_chat_id INTEGER,
-      resentment REAL NOT NULL DEFAULT 0, exhausted_until INTEGER,
-      updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')));
   `);
 }
 
@@ -44,36 +39,6 @@ describe('dm-state: dm_ever', () => {
     testDb.prepare('UPDATE dm_users SET last_dm_at = ? WHERE uid = 7').run(Math.floor(Date.now() / 1000) - 100 * 86400);
     expect(listDmEverUids(90 * 86400)).toEqual([]);
     expect(listDmEverUids(0)).toEqual([7]);
-  });
-});
-
-describe('dm-state: pm_nudge machine', () => {
-  it('default is none/0', () => {
-    const s = getPmNudge(99);
-    expect(s.state).toBe('none');
-    expect(s.attempts).toBe(0);
-    expect(s.resentment).toBe(0);
-  });
-
-  it('upsert persists patch and merges', () => {
-    upsertPmNudge(99, { state: 'nudging', attempts: 2, primaryChatId: -100 });
-    const s = getPmNudge(99);
-    expect(s.state).toBe('nudging');
-    expect(s.attempts).toBe(2);
-    expect(s.primaryChatId).toBe(-100);
-    upsertPmNudge(99, { attempts: 3 }); // merge, keep state
-    expect(getPmNudge(99).state).toBe('nudging');
-    expect(getPmNudge(99).attempts).toBe(3);
-  });
-
-  it('markPmDmOpen resets attempts/resentment to dm_open', () => {
-    upsertPmNudge(99, { state: 'nudging', attempts: 3, resentment: 0.6, exhaustedUntil: 123 });
-    markPmDmOpen(99);
-    const s = getPmNudge(99);
-    expect(s.state).toBe('dm_open');
-    expect(s.attempts).toBe(0);
-    expect(s.resentment).toBe(0);
-    expect(s.exhaustedUntil).toBeNull();
   });
 });
 
