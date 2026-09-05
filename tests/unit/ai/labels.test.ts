@@ -45,3 +45,15 @@ describe('labels', () => {
     expect(resolveUsageName('reply')).toBe('reply');
   });
 });
+
+describe('usage-level jsonMode (H4.2)', () => {
+  it('judge/summarize 硬默认含 jsonMode:true（fallback 透传，调用方可关）', async () => {
+    // ensureUsageLabelsExist 要求 label 存在，mock 里 getProviders 为空调不动
+    // getUsage —— 退化断言源码硬默认（getUsage 只是透传，fallback 侧 ?? 逻辑由类型保证）。
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/ai/labels.ts', 'utf-8');
+    expect(src).toContain('jsonMode: true');
+    const fb = readFileSync('src/ai/fallback.ts', 'utf-8');
+    expect(fb).toContain('options.jsonMode ?? usage.jsonMode');
+  });
+});

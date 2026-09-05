@@ -64,6 +64,8 @@ export async function verifyReplyQuality(input: VerifyInput): Promise<number> {
       messages: [{ role: 'user', content: prompt }],
       temperature: 0,
       maxTokens: 8,
+      // 纯数字输出 —— 关 usage 级 jsonMode
+      jsonMode: false,
     });
     const n = Number.parseFloat((res.content ?? '').trim());
     if (Number.isFinite(n)) content = Math.max(0, Math.min(1, n));

@@ -84,8 +84,8 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // judge/heart（step-3.7-flash reasoning）：maxTokens 不设上限——reasoning_content 计入
   // completion，卡 800 会把 JSON 截成半截；实测 low 档自然输出 300-1000 token。
   // timeout 45s：开了 reasoning 后 P99 偶到 35s，30s 会无谓触发同模型 backup 重试。
-  judge:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 45_000, temperature: 0 },
-  summarize: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 180_000 },
+  judge:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 45_000, temperature: 0, jsonMode: true },
+  summarize: { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 180_000, jsonMode: true },
   // Mundo「难题攻坚」部门(可选,默认关)
   mundo:     { label: 'mundo',         backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
   // 「深想」异步深答(可选)
@@ -104,6 +104,8 @@ export function getUsage(name: string): AIUsage {
       timeout: envUsage.timeout ?? 60_000,
       maxTokens: envUsage.maxTokens,
       temperature: envUsage.temperature,
+      // .env 未配 JSON_MODE 时跟硬默认走（judge/summarize 默认 true）
+      jsonMode: envUsage.jsonMode ?? USAGE_DEFAULTS[resolved]?.jsonMode,
     });
   }
 

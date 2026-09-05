@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { SHARE_THRESHOLD } from '../../../src/pipeline/rhythm/taste.js';
 
 let testDb: Database.Database;
 
@@ -37,8 +38,16 @@ describe('taste scoring', () => {
 
   it('funny meme text with reactions → high', () => {
     const s = scoreTaste(msg('哈哈哈笑死我了，典中典', { messageId: 42 }), { reactions: ['😂', '👍', '❤'] });
-    expect(s.score).toBeGreaterThanOrEqual(0.6);
+    expect(s.score).toBeGreaterThanOrEqual(SHARE_THRESHOLD);
     expect(s.reasons.length).toBeGreaterThan(0);
+  });
+
+  it('H4.2: single-hit + meaty (0.45) below threshold; double-hit passes', () => {
+    // 回放实证："我 turn 没改🤣" funny 单命中 0.35 —— 不够线（防单 emoji 误转）
+    expect(scoreTaste(msg('我 turn 没改🤣')).score).toBeLessThan(SHARE_THRESHOLD);
+    // funny+useful 双命中 0.7 —— 稳过
+    const s = scoreTaste(msg('哈哈哈这个教程太有用了，避坑指南收藏'));
+    expect(s.score).toBeGreaterThanOrEqual(SHARE_THRESHOLD);
   });
 
   it('bot own / command / ad → 0', () => {

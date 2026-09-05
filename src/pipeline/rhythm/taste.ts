@@ -10,8 +10,13 @@ import type { FormattedMessage } from "../../shared/types.js";
 
 /** 转发冷却:同一条 7 天内不重转 */
 export const FORWARD_DEDUP_SEC = 7 * 86400;
-/** 分享阈值:分 ≥0.6 才值得转 */
-export const SHARE_THRESHOLD = 0.6;
+/**
+ * 分享阈值:分 ≥0.5 才值得转（H4.2 回放实证：9群×194条 human 消息，
+ * 0.6 档 0 条、0.5 档 0 条、0.3-0.49 档 6 条全是真料——"官方群人怎么这么少"/
+ * "我 turn 没改🤣"/"这个频道怎么这么多人..."。0.6 偏高饿死 share 动作，
+ * 降到 0.5 让 funny/useful 单命中+meaty（0.45）够线、双命中（0.7）稳过）。
+ */
+export const SHARE_THRESHOLD = 0.5;
 
 export interface TasteScore {
   score: number; // 0..1

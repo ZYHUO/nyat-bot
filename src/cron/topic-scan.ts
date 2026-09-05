@@ -38,6 +38,8 @@ async function extractTopic(chatId: number): Promise<string | null> {
       messages: [{ role: 'system', content: sys }, { role: 'user', content: ctx }],
       maxTokens: 24,
       temperature: 0,
+      // 纯文本标签输出 —— 关掉 usage 级 jsonMode（response_format 会强制 JSON，坏事）
+      jsonMode: false,
     });
     const label = (res.content || '').trim().replace(/^[\s["'「『]+|[\s\]"'」』。.!?！？]+$/g, '').slice(0, 40);
     if (!label || label.toUpperCase() === 'NONE' || label.length < 2) return null;

@@ -1064,6 +1064,7 @@ export interface EnvUsage {
   timeout?: number;
   maxTokens?: number;
   temperature?: number;
+  jsonMode?: boolean;
 }
 
 let _providers: Map<string, EnvProvider> | undefined;
@@ -1288,7 +1289,7 @@ export function getProviders(): Map<string, EnvProvider> {
 }
 
 /**
- * Parse AI_USAGE_<NAME>_LABEL/BACKUPS/TIMEOUT/MAX_TOKENS/TEMPERATURE from process.env.
+ * Parse AI_USAGE_<NAME>_LABEL/BACKUPS/TIMEOUT/MAX_TOKENS/TEMPERATURE/JSON_MODE from process.env.
  * Usage names are lowercased (with underscores preserved for multi-word names like REPLY_PRO).
  * Also synthesizes compatibility routing for legacy AI_MODEL_* envs when explicit AI_USAGE_* entries are absent.
  */
@@ -1301,7 +1302,7 @@ export function getUsageRouting(): Map<string, EnvUsage> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_USAGE_') || !value) continue;
     const rest = key.slice('AI_USAGE_'.length);
-    const fields = ['LABEL', 'BACKUPS', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE'] as const;
+    const fields = ['LABEL', 'BACKUPS', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE', 'JSON_MODE'] as const;
     let matchedField: string | undefined;
     let usageName: string | undefined;
     for (const f of fields) {
@@ -1328,6 +1329,9 @@ export function getUsageRouting(): Map<string, EnvUsage> {
       timeout: readNumber(fields['TIMEOUT']),
       maxTokens: readNumber(fields['MAX_TOKENS']),
       temperature: readNumber(fields['TEMPERATURE']),
+      jsonMode: fields['JSON_MODE'] !== undefined
+        ? /^(1|true|yes|on)$/i.test(fields['JSON_MODE'])
+        : undefined,
     });
   }
 

@@ -42,7 +42,7 @@ export interface WorldState {
   masterLastText: string;
   groups: { chatId: number; silentSec: number; lastTexts: string }[];
   /**
-   * H3.1 转发候选(taste 确定性打分 ≥0.6 的真人消息,每群 ≤2 条)。
+   * H3.1 转发候选(taste 确定性打分 ≥阈值 的真人消息,每群 ≤2 条)。
    * LLM 只能从这里选 share 目标,不许编造 messageId。
    */
   shareCandidates?: { fromChatId: number; messageId: number; text: string; score: number }[];
@@ -292,7 +292,7 @@ export async function buildWorldState(): Promise<WorldState> {
 
   let recentDigests: string[] = [];
 
-  // H3.1 转发候选:各活跃群近 30 条里 taste ≥0.6 且 7 天内没转过的,每群 ≤2。
+  // H3.1 转发候选:各活跃群近 30 条里 taste ≥阈值 且 7 天内没转过的,每群 ≤2。
   // 确定性打分先行 —— LLM 只做"转哪条到哪群"的选择,不做品味判断。
   const shareCandidates: NonNullable<WorldState['shareCandidates']> = [];
   try {
