@@ -60,6 +60,12 @@ export async function reflectChat(chatId: number): Promise<number> {
       allowHedge: false, // 后台批任务:hedge 双发纯翻倍账单
     });
     digest = result.content.trim().slice(0, 600);
+    // Phase 14.3: 连接率进复盘 —— digest 尾部拼一行 best/worst(确定性,不烧 token)。
+    // 无数据/flag 关时原样返回;写手在 [本群近况] 里看到,知道哪类话把群聊活/聊死。
+    try {
+      const { appendConnectivityLine } = await import('../agent/reverse-valve.js');
+      digest = appendConnectivityLine(digest, chatId);
+    } catch { /* non-critical */ }
     await redis.del(FAIL_PREFIX + chatId).catch(() => {});
     incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'clear' });
   } catch (err) {

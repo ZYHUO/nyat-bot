@@ -86,6 +86,53 @@ export function groupConnectivity(chatId: number, sinceSec: number): number {
   return rows.reduce((a, b) => a + b.human_rounds, 0) / rows.length;
 }
 
+/**
+ * Phase 14.3 连接率进复盘: bot 最近 N 条已计算窗口里,连接率最高/最低
+ * 各取 1 条(bot_mid + human_rounds)。复盘提示用,不进主回复路径。
+ * 返回 null = 没数据(新群/刚开机),调用方跳过。
+ */
+export function bestWorstWindows(chatId: number, limit = 20): {
+  best: { mid: number; rounds: number };
+  worst: { mid: number; rounds: number };
+  avg: number;
+} | null {
+  try {
+    const rows = getDb()
+      .prepare(
+        `SELECT bot_mid, human_rounds FROM connectivity_windows
+         WHERE chat_id = ? AND calculated = 1 ORDER BY bot_ts DESC LIMIT ?`,
+      )
+      .all(chatId, limit) as { bot_mid: number; human_rounds: number }[];
+    if (rows.length < 3) return null; // 样本太少不下结论
+    let best = rows[0]!, worst = rows[0]!;
+    let sum = 0;
+    for (const r of rows) {
+      sum += r.human_rounds;
+      if (r.human_rounds > best.human_rounds) best = r;
+      if (r.human_rounds < worst.human_rounds) worst = r;
+    }
+    return {
+      best: { mid: best.bot_mid, rounds: best.human_rounds },
+      worst: { mid: worst.bot_mid, rounds: worst.human_rounds },
+      avg: Math.round((sum / rows.length) * 10) / 10,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 把连接率摘要拼进近况 digest 尾部(≤60 字)。无数据返回原 digest。 */
+export function appendConnectivityLine(digest: string, chatId: number): string {
+  try {
+    if (!env().CONNECTIVITY_TRACKING_ENABLED) return digest;
+    const bw = bestWorstWindows(chatId);
+    if (!bw) return digest;
+    return `${digest}\n[连接率] 均值 ${bw.avg} 轮/条;最高 #${bw.best.mid}(${bw.best.rounds}轮) / 最低 #${bw.worst.mid}(${bw.worst.rounds}轮)。`;
+  } catch {
+    return digest;
+  }
+}
+
 // ── 阶段 1: 私聊风险分档 ──────────────────
 
 export interface RiskScore {

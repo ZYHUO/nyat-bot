@@ -15,6 +15,7 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent: (chatId:
 
 const {
   recordBotMessageForConnectivity, calculateConnectivityWindows, groupConnectivity,
+  bestWorstWindows, appendConnectivityLine,
   scoreDmRisk, hasEmotionWord, isNightHour,
   recordDmMessage, computeRiskInput, currentRiskLevel,
   buildValveHint, valveHumanizerTune,
@@ -191,5 +192,48 @@ describe('valve wiring (Phase 14.1)', () => {
     expect(inp.nightRatio).toBeLessThanOrEqual(1);
     expect(inp.groupTalkRatio).toBeGreaterThanOrEqual(0);
     expect(inp.groupTalkRatio).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('connectivity into reflection (Phase 14.3)', () => {
+  beforeEach(() => {
+    envMock.mockReturnValue({ CONNECTIVITY_TRACKING_ENABLED: true, REVERSE_VALVE_ENABLED: true });
+  });
+
+  function seedWindows(chatId: number): void {
+    // 5 条已计算窗口: rounds 0/1/2/5/8, mid 递增
+    const now = nowSecTest();
+    const rows: Array<[number, number, number]> = [[101, 0, 0], [102, 1, 100], [103, 2, 200], [104, 5, 300], [105, 8, 400]];
+    for (const [mid, rounds, off] of rows) {
+      db.prepare(`INSERT INTO connectivity_windows (chat_id, bot_mid, bot_username, bot_ts, window_end, human_rounds, calculated)
+        VALUES (?, ?, 'bot', ?, ?, ?, 1)`).run(chatId, mid, now - 1000 + off, now - 700 + off, rounds);
+    }
+  }
+
+  it('bestWorstWindows returns best/worst/avg', () => {
+    seedWindows(-100);
+    const bw = bestWorstWindows(-100)!;
+    expect(bw.best).toEqual({ mid: 105, rounds: 8 });
+    expect(bw.worst).toEqual({ mid: 101, rounds: 0 });
+    expect(bw.avg).toBeCloseTo(3.2, 1);
+  });
+
+  it('bestWorstWindows returns null with too few samples', () => {
+    db.prepare(`INSERT INTO connectivity_windows (chat_id, bot_mid, bot_username, bot_ts, window_end, human_rounds, calculated)
+      VALUES (-100, 1, 'bot', 1000, 1300, 5, 1)`).run();
+    expect(bestWorstWindows(-100)).toBeNull();
+  });
+
+  it('appendConnectivityLine appends summary, passthrough when no data or flag off', () => {
+    seedWindows(-100);
+    const out = appendConnectivityLine('近况摘要', -100);
+    expect(out).toContain('[连接率]');
+    expect(out).toContain('#105(8轮)');
+    expect(out).toContain('#101(0轮)');
+    // 无数据 → 原样
+    expect(appendConnectivityLine('近况摘要', -200)).toBe('近况摘要');
+    // flag 关 → 原样
+    envMock.mockReturnValue({ CONNECTIVITY_TRACKING_ENABLED: false });
+    expect(appendConnectivityLine('近况摘要', -100)).toBe('近况摘要');
   });
 });
