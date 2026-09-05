@@ -886,16 +886,22 @@ export async function runUnifiedTick(): Promise<void> {
     }
     const state = await buildWorldState();
     // AGI L5 L3: 群氛围推断 —— 活跃群且 norms 过期/缺失时补一次(便宜链,失败静默)。
+    // H4.2: buildWorldState 只取 6 条(3 条拼 lastTexts, recent.slice(-3))，
+    // 拼完 split('\n') 只剩 1 行 → recent.length>=5 恒假 → norms 表线上 0 行。
+    // 改直查 getRecent 30 条(与 H3.1 shareCandidates 同窗)，够 5 条才 infer。
     if (e.GROUP_NORMS_ENABLED) {
       try {
         const { needsRefresh, inferGroupNorms } = await import('../agent/group-norms.js');
         for (const g of state.groups ?? []) {
           if (!needsRefresh(g.chatId, e.GROUP_NORMS_TTL_HOURS * 3600)) continue;
-          const recent = g.lastTexts
-            .split('\n')
-            .map((t) => t.trim())
-            .filter((t) => t.length >= 2)
-            .slice(-15);
+          let recent: string[] = [];
+          try {
+            const msgs = await getRecent(g.chatId, 30);
+            recent = msgs
+              .map((m) => (m.textContent || m.captionContent || '').trim())
+              .filter((t) => t.length >= 2)
+              .slice(-15);
+          } catch { /* keep empty */ }
           if (recent.length >= 5) {
             void inferGroupNorms({ chatId: g.chatId, recentMessages: recent }).catch(() => {});
           }
