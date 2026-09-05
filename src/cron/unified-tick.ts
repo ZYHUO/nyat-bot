@@ -26,6 +26,7 @@ export type TickAction =
   | { type: 'remember_user'; chatId: number; name: string; absentDays: number }
   | { type: 'self_play'; idea: string; plan: string[] }
   | { type: 'check_goal'; goalId: number }
+  | { type: 'share'; fromChatId: number; messageId: number; toChatId: number }
   | { type: 'quiet'; reason: string };
 
 export interface TickVerdict {
@@ -40,6 +41,11 @@ export interface WorldState {
   masterSilentSec: number | null; // null = MASTER_UID 未配
   masterLastText: string;
   groups: { chatId: number; silentSec: number; lastTexts: string }[];
+  /**
+   * H3.1 转发候选(taste 确定性打分 ≥0.6 的真人消息,每群 ≤2 条)。
+   * LLM 只能从这里选 share 目标,不许编造 messageId。
+   */
+  shareCandidates?: { fromChatId: number; messageId: number; text: string; score: number }[];
   /** 3+ 天没出现的熟面孔(交互≥5 次)——"想起某人"的数据源。 */
   absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
   dueGoals: { id: number; topic: string; lastFinding: string | null }[];
@@ -277,6 +283,33 @@ export async function buildWorldState(): Promise<WorldState> {
   } catch { /* keep empty */ }
 
   let recentDigests: string[] = [];
+
+  // H3.1 转发候选:各活跃群近 30 条里 taste ≥0.6 且 7 天内没转过的,每群 ≤2。
+  // 确定性打分先行 —— LLM 只做"转哪条到哪群"的选择,不做品味判断。
+  const shareCandidates: NonNullable<WorldState['shareCandidates']> = [];
+  try {
+    const { scoreTaste, wasForwardedRecently, SHARE_THRESHOLD } = await import('../pipeline/rhythm/taste.js');
+    for (const g of groups.slice(0, 5)) {
+      try {
+        const recent = await getRecent(g.chatId, 30);
+        let picked = 0;
+        for (let i = recent.length - 1; i >= 0 && picked < 2; i--) {
+          const m = recent[i]!;
+          if (m.role === 'assistant' || m.isBot) continue;
+          const s = scoreTaste(m);
+          if (s.score < SHARE_THRESHOLD) continue;
+          if (wasForwardedRecently(g.chatId, m.messageId)) continue;
+          shareCandidates.push({
+            fromChatId: g.chatId,
+            messageId: m.messageId,
+            text: (m.textContent || m.captionContent || '').slice(0, 80),
+            score: s.score,
+          });
+          picked++;
+        }
+      } catch { /* skip chat */ }
+    }
+  } catch { /* keep empty */ }
   try {
     if (e.DIGEST_PERSIST_ENABLED) {
       const { recentDigests: rd } = await import('../meta/session-digest.js');
@@ -298,6 +331,7 @@ export async function buildWorldState(): Promise<WorldState> {
     masterSilentSec,
     masterLastText: masterLastText.slice(0, 400),
     groups,
+    shareCandidates,
     absentUsers,
     dueGoals,
     rssNewCount,
@@ -348,6 +382,20 @@ function parseTickVerdict(raw: string): TickVerdict | null {
     if (type === 'check_goal' && typeof obj['goalId'] === 'number') {
       return { action: { type, goalId: obj['goalId'] as number }, reason };
     }
+    if (type === 'share'
+      && typeof obj['fromChatId'] === 'number'
+      && typeof obj['messageId'] === 'number'
+      && typeof obj['toChatId'] === 'number') {
+      return {
+        action: {
+          type,
+          fromChatId: obj['fromChatId'] as number,
+          messageId: obj['messageId'] as number,
+          toChatId: obj['toChatId'] as number,
+        },
+        reason,
+      };
+    }
     return { action: { type: 'quiet', reason: reason || 'default' }, reason };
   } catch {
     return null;
@@ -362,6 +410,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
 - self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索/搜点有意思的东西）。idea+plan。自玩是私下练习，别为了表演而自玩；但玩出了真有意思的东西（画了好玩的/挖到冷知识/写成个小工具）可以自然地分享给群里或主人一次。
 - check_goal: 有到期关注目标，去查查进展。goalId。
+- share: A 群有条真有意思的消息（见「值得转发的」），转到 B 群给那边的人看。fromChatId=来源群，messageId=那条消息，toChatId=目标群。**只能选候选列表里的，不许编 id；目标群选当前话题能接住它的（别往正经群倒梗、别往梗群倒正经）；A 转 A（同群）禁止**。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
 
 判断原则（像真人，不像机器）：
@@ -370,7 +419,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
 - 上下文里刚出现过你自己的自玩汇报时，下一周期优先 quiet，不要用 care_master 继续推销。
 
-只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "reason": "一句话为什么"}`;
+只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|share", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "fromChatId": 数字(share 时), "messageId": 数字(share 时), "toChatId": 数字(share 时), "reason": "一句话为什么"}`;
 
 /** 单次 LLM 决策。失败 → quiet（fail-closed）。 */
 export async function decideTick(state: WorldState): Promise<TickVerdict> {
@@ -402,6 +451,11 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         )
         .join('\n')
     : '  (没有)';
+  const shareLines = (state.shareCandidates ?? []).length
+    ? state.shareCandidates!
+        .map((c) => `  群 ${c.fromChatId} #${c.messageId} (分${c.score}): 「${c.text}」`)
+        .join('\n')
+    : '  (没有值得转的)';
   const user = [
     `现在北京时间 ${state.hourBeijing} 点。${state.weather ? state.weather + '。' : ''}${state.lifeTransition ? `你${state.lifeTransition}（刚切换状态——想随口提一句的话这是个自然的由头）。` : ''}`,
     ``,
@@ -425,6 +479,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `到期关注目标:`,
     goalLines,
+    ``,
+    `值得转发的（A 群看到的好东西，可以转到 B 群——只能选下面列的，不许编 id）:`,
+    shareLines,
     ``,
     `RSS 新资讯: ${state.rssNewCount} 条待消化${(state.rssTopTitles ?? []).length ? `：\n${(state.rssTopTitles ?? []).map((t) => `  - ${t}`).join('\n')}` : ''}`,
     `self-play 冷却: ${state.selfPlayCooldownLeftSec > 0 ? `还有 ${Math.floor(state.selfPlayCooldownLeftSec / 60)} 分钟` : '已就绪'}`,
@@ -726,6 +783,61 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         logger.info({ goalId: goal.id, topic: goal.topic.slice(0, 60) }, 'unified tick: goal check dispatched');
       } catch (err) {
         logger.warn({ err, goalId: a.goalId }, 'unified tick: check_goal failed');
+      }
+      return;
+    }
+
+    case 'share': {
+      // H3.1 跨群转发：四道硬门（LLM 只做选择，安全由代码兜底）。
+      const cand = (state.shareCandidates ?? []).find(
+        (c) => c.fromChatId === a.fromChatId && c.messageId === a.messageId,
+      );
+      if (!cand) {
+        logger.info({ from: a.fromChatId, msg: a.messageId }, 'unified tick: share rejected — not in candidates');
+        return;
+      }
+      if (a.toChatId === a.fromChatId) {
+        logger.info('unified tick: share rejected — same chat');
+        return;
+      }
+      if (!state.groups.some((g) => g.chatId === a.toChatId)) {
+        logger.info({ to: a.toChatId }, 'unified tick: share rejected — unknown target');
+        return;
+      }
+      try {
+        const { wasForwardedRecently, recordForward } = await import('../pipeline/rhythm/taste.js');
+        if (wasForwardedRecently(a.fromChatId, a.messageId)) {
+          logger.info('unified tick: share rejected — forwarded recently');
+          return;
+        }
+        const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
+        if (!(await tryAcquireProactiveSlot(a.toChatId, 'unified-tick-share'))) return;
+        const { forwardMessage, sendMessage } = await import('../bot/sender/telegram.js');
+        const { addAssistant } = await import('../pipeline/context/manager.js');
+        const fwdId = await forwardMessage(a.toChatId, a.fromChatId, a.messageId);
+        if (!fwdId) {
+          logger.info('unified tick: share forward failed');
+          return;
+        }
+        recordForward(a.fromChatId, a.messageId, cand.score);
+        // 转发后跟一句人话（像真人"诶这个好笑转给你们看"），失败也认——转发本身已落地。
+        try {
+          const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
+          const { getBotUid } = await import('../bot/bot.js');
+          const line = await generatePersonaProactiveText(
+            a.toChatId,
+            getBotUid(),
+            `[转发跟话] 你刚把一条有意思的消息转到这个群。自然地跟一句为什么转（比如"这个太好笑了转给你们看看"），一句话，别复述转发内容，别自我介绍。`,
+          );
+          if (line) {
+            const mid = await sendMessage(a.toChatId, line);
+            if (mid) await addAssistant(a.toChatId, { textContent: line, messageId: mid });
+          }
+        } catch { /* follow-up optional */ }
+        await markProactiveSent(a.toChatId, 'unified-tick-share');
+        logger.info({ from: a.fromChatId, msg: a.messageId, to: a.toChatId }, 'unified tick: shared');
+      } catch (err) {
+        logger.warn({ err }, 'unified tick: share failed');
       }
       return;
     }
