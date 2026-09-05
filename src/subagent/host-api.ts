@@ -80,6 +80,10 @@ export function stripApiCallLines(text: string): { clean: string; stripped: numb
   return { clean: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), stripped };
 }
 
+import { createExecutionAudit, attachExecutionAudit, type AuditSnapshot } from '../agent/execution-audit.js';
+import type { AcceptanceContract, AcceptanceCheck, AcceptanceResult } from '../agent/task-evidence.js';
+import * as sandboxPaths from '../sandbox/paths.js';
+
 export interface HostApi {
   telegram: {
     sendText: (text: string, replyToMessageId?: number) => Promise<{ messageId: number }>;
@@ -226,6 +230,8 @@ export interface HostApi {
   };
   runtime: {
     endTask: (summary: string) => void;
+    setAcceptance: (checks: AcceptanceCheck[]) => void;
+    verifyAcceptance: () => Promise<AcceptanceResult>;
     didSendText: () => boolean;
     /** 有产出（文字或文件都算）——长任务续跑判断用。 */
     didProduce: () => boolean;
@@ -334,6 +340,8 @@ export function createHostApi(
   chatId: number,
   opts: {
     onEnd: (summary: string) => void;
+    acceptance?: AcceptanceContract;
+    priorAudit?: AuditSnapshot;
     defaultReplyTo?: number;
     /** 本任务全部可引用的 messageId（burst 分人回复要 quote 不同的 id）；显式 replyTo 必须落在此集合。 */
     quoteIds?: number[];
@@ -349,6 +357,16 @@ export function createHostApi(
     messageThreadId?: number;
   },
 ): HostApi {
+  const sandboxRoot = (() => {
+    try {
+      const fn = (sandboxPaths as unknown as { resolveSandboxRoot?: () => string }).resolveSandboxRoot;
+      if (typeof fn === 'function') return fn();
+    } catch {
+      void 0;
+    }
+    return '/tmp';
+  })();
+  const audit = createExecutionAudit(sandboxRoot, opts.acceptance, opts.priorAudit);
   const banned = env().CODEACT_BANNED_WORDS;
   let ended = false;
   let textSent = 0;
@@ -513,7 +531,7 @@ export function createHostApi(
     };
   };
 
-  return {
+  const api: HostApi = {
     telegram: {
       sendText(text: string, replyToMessageId?: number) {
         assertOpen();
@@ -1866,8 +1884,11 @@ export function createHostApi(
       },
     },
     runtime: {
+      setAcceptance(checks) { audit.propose(checks); },
+      verifyAcceptance() { return audit.verify(); },
       endTask(summary: string) {
         if (ended) return;
+        if (!String(summary).startsWith('failed')) audit.assertCanEnd();
         ended = true;
         // 承诺闭环③ 兜底：说了「等下/我去…」但没立 goal 也没跨群送达 → 自动补 goal。
         void promiseBackstop();
@@ -1941,4 +1962,12 @@ export function createHostApi(
       },
     },
   };
+  // Runtime stays synchronous. All tool receipts originate from host-returned results.
+  for (const key of Object.keys(api) as (keyof HostApi)[]) {
+    if (key === 'runtime') continue;
+    const namespaces = api as unknown as Record<string, object>;
+    namespaces[key] = audit.wrap(key, namespaces[key]!);
+  }
+  attachExecutionAudit(api, audit);
+  return api;
 }

@@ -29,12 +29,12 @@ export interface PathQualityResult {
 /**
  * 计算路径质量。
  * score = 1 - (invalidCalls + retryCount) / max(1, totalCalls)
- * 无调用记录(纯聊天) → 0.8(中性偏上,不算证实也不算证伪)。
+ * 无调用记录 → 0,缺少观测不能作为成功证据。
  */
 export function computePathQuality(input: PathQualityInput): PathQualityResult {
   const { totalCalls, invalidCalls, retryCount } = input;
   if (totalCalls <= 0) {
-    return { score: 0.8, invalidCalls: 0, retryCount: 0 };
+    return { score: 0, invalidCalls: 0, retryCount: 0 };
   }
   const penalty = (invalidCalls + retryCount) / totalCalls;
   const score = Math.max(0, Math.min(1, 1 - penalty));

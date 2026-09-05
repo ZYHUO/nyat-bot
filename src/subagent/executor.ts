@@ -88,7 +88,9 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - self.editPrompt(相对路径, 新内容, 动机) — **改良自己的 prompt**：改 prompts/ 下的 .md 文件（如 'identity/persona.md'）。改前系统自动备份、改后 30s 内热重载生效（不用重启）。**动机必须写清楚**（为什么改、想达到什么效果）。只改 prompt 文件，不碰代码、不碰 .env、不重启自己
 - self.readPrompt(相对路径) — 读自己的 prompt 文件（先看现状再改）
 - self.listPrompts() — 列出所有可改的 prompt 文件
-- runtime.endTask(summary)  // 结束时调用
+- runtime.setAcceptance(checks) — 多步产物任务先声明检查: [{kind:'json_field',path:'result.json',field:['answer'],equals:42}] 或 nonempty_file/sha256。这是你提出的检查,不算独立成功证明;外部给定条件不能覆盖。
+- runtime.verifyAcceptance() — 实际读取沙盒产物验收,失败先修复再检查。
+- runtime.endTask(summary)  // 有验收条件时必须先通过 verifyAcceptance;不能用口头声称代替。确实失败用 failed:原因收尾。
 - console.log(...)
 
 ## 电脑使用（SANDBOX_ENABLED 时可用）
@@ -313,6 +315,9 @@ export function enqueueSubagentTask(task: DispatchTask): void {
     });
 }
 
+import { getExecutionAudit } from '../agent/execution-audit.js';
+import { saveTaskEvidence } from '../agent/task-evidence-store.js';
+
 export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const state = getGlobalState();
   task.status = 'running';
@@ -375,6 +380,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   const host = createHostApi(task.chatId, {
     taskId: task.id,
+    acceptance: task.acceptance,
+    priorAudit: task.audit,
     defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
     quoteIds: task.quoteMessageIds,
     relatedQuoteIds: task.relatedQuoteIds,
@@ -390,6 +397,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     messageThreadId: task.messageThreadId,
   });
 
+  const audit = getExecutionAudit(host)!;
   const engine = getContextEngine(`subagent:${task.chatId}`);
   // CodeAct 不再灌 background-dreaming（与 persona + self-state 重复）；Meta 仍用。
   let journal = '';
@@ -814,12 +822,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   const stopTyping = startTypingHeartbeat(task.chatId);
   try {
-    let turnsRun = 0;
+    task.totalTurns ??= 0;
     /** Turns observed after the first successful send* — used to auto endTask. */
     let postSendTurns = 0;
     const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 5;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
-      turnsRun++;
+      task.totalTurns++;
 
       // 实时干预(P1):每轮开头排一次用户 interrupt —— 原来只在续跑段开头排一次,
       // 段内 30 轮/120s 里用户喊停/问进度/补充需求全都到不了。硬停词立即终止。
@@ -870,7 +878,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
 
       // Already delivered: don't keep burning turns waiting for a forgotten endTask.
-      if (!injectedInterrupts && host.runtime.didSendText() && postSendTurns > postSendGrace) {
+      if (!audit.hasContract() && !injectedInterrupts && host.runtime.didSendText() && postSendTurns > postSendGrace) {
         host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
         break;
       }
@@ -893,7 +901,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       history.push({ role: 'assistant', content: llmText });
       const code = extractJs(llmText);
       if (!code) {
-        if (host.runtime.didSendText()) {
+        if (!audit.hasContract() && host.runtime.didSendText()) {
           host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
           break;
         }
@@ -930,7 +938,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : `已完成步骤 ${turn + 1}/${maxTurns}。继续下一步，或完成后 runtime.endTask("结果摘要")。`}${sentHint}`
           : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? (isSelfPlay ? '这是最后一轮，runtime.endTask 收尾。' : '这是最后一轮，sendText 说明进展然后 endTask。') : ''}`,
       });
-      if (!ended && host.runtime.didSendText()) {
+      if (!audit.hasContract() && !ended && host.runtime.didSendText()) {
         if (postSendTurns >= postSendGrace) {
           host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
           break;
@@ -949,13 +957,13 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         !isGoalCheck &&
         !isSelfPlay &&
         segment + 1 < maxSegments &&
-        host.runtime.didProduce() &&
-        !host.runtime.didSendText();
+        (audit.hasContract() || host.runtime.didProduce()) &&
+        (audit.hasContract() || !host.runtime.didSendText());
 
       if (canResume) {
         let progressSummary = resumeSummary;
         try {
-          const total = (task.totalTurns ?? 0) + turnsRun;
+          const total = task.totalTurns ?? 0;
           if (total >= env().AGENT_COMPACT_AFTER_TURNS) {
             const c = await compactHistory({
               history,
@@ -983,12 +991,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           progressSummary,
           artifacts: [],
           segment: segment + 1,
-          totalTurns: (task.totalTurns ?? 0) + turnsRun,
+          totalTurns: task.totalTurns ?? 0,
         });
 
         task.segment = segment + 1;
         task.checkpointKey = key;
-        task.totalTurns = (task.totalTurns ?? 0) + turnsRun;
+        task.audit = audit.snapshot();
         task.status = 'queued';
         state.putTask(task);
         await persistCodeActTask(task);
@@ -1009,6 +1017,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           'agent task checkpointed & re-enqueued for next segment',
         );
         // 注意：不 enqueueCallback —— 任务未完成，Meta 不应收到完成回调。
+      } else if (audit.hasContract()) {
+        host.runtime.endTask('failed_acceptance_budget_exhausted');
       } else if (host.runtime.didSendText()) {
         // Model delivered but forgot endTask — synthesize so Meta gets a clean callback.
         host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
@@ -1062,8 +1072,17 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     // 续跑任务不进入终态：保持 queued，等下一段完成/超限后再收尾。
     const resumed = endSummary.startsWith('resumed_seg');
     if (!resumed) {
+      task.audit = audit.snapshot();
+      task.assessment = await audit.verify();
+      if (closed || endSummary.startsWith('failed')) {
+        task.assessment = { status: 'unverified', reasons: ['execution_incomplete'], checks: task.assessment.checks };
+      }
       task.status = endSummary.startsWith('failed') ? 'failed' : 'done';
       task.resultSummary = endSummary || 'done';
+      saveTaskEvidence({ taskId: task.id, chatId: task.chatId, lifecycle: task.status,
+        assessment: task.assessment.status, turns: task.totalTurns ?? 0,
+        totalCalls: task.audit.totalCalls, failedCalls: task.audit.failedCalls, retryCount: task.audit.retryCount,
+        reasons: task.assessment.reasons });
       state.putTask(task);
       await persistCodeActTask(task);
       // CGM 叙事流:Subagent 终态摘要落 session_digests,成为可检索记忆。
@@ -1079,23 +1098,24 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
       // AGI Level 5 Phase 1: 路径质量统计 + 经验验证打分(①+D)。
       // 结果好但路径脏(done + path_quality < 0.7)不算经验被证实。
-      // executor 无结构化调用历史,totalCalls=0 → 中性 0.8 分(不做证伪)。
+      // 真实 host 调用统计 + 独立验收,不能把结束当成功。
       if (injectedExperienceIds.length > 0 && env().EXPERIENCE_VERIFY_ENABLED) {
         void import('../agent/path-quality.js')
           .then(async ({ computePathQuality }) => {
-            const quality = computePathQuality({ totalCalls: 0, invalidCalls: 0, retryCount: 0, turns: task.totalTurns ?? 0 });
+            const quality = computePathQuality({ totalCalls: task.audit!.totalCalls, invalidCalls: task.audit!.failedCalls, retryCount: task.audit!.retryCount, turns: task.totalTurns ?? 0 });
             const { recordInjectOutcome } = await import('../agent/experience-verify.js');
             recordInjectOutcome({
               experienceIds: injectedExperienceIds,
               taskOutcome: task.status === 'done' ? 'done' : 'failed',
               pathQualityScore: quality.score,
+              evidenceStatus: task.assessment?.status ?? 'unverified',
             });
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'experience verify failed'));
       }
 
       // AGI Level 5 Phase 4: loop 策略计数进化。
-      if (injectedPolicyIds.length > 0 && env().LOOP_POLICY_ENABLED) {
+      if (injectedPolicyIds.length > 0 && env().LOOP_POLICY_ENABLED && task.assessment.status === 'verified') {
         void import('../agent/loop-policy.js')
           .then(({ recordPolicyOutcome }) => {
             recordPolicyOutcome(injectedPolicyIds, task.status === 'done');
@@ -1109,7 +1129,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           .then(({ upsertEntity }) => {
             const topic = task.contentDirection.replace(/\[goal:\d+\]/g, '').trim().slice(0, 100);
             if (topic.length >= 2) {
-              upsertEntity(topic, 'topic', { last_outcome: task.status === 'done' ? 'success' : 'failed' }, task.chatId);
+              upsertEntity(topic, 'topic', { last_outcome: task.assessment?.status ?? 'unverified' }, task.chatId);
             }
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'world state upsert failed'));
@@ -1128,7 +1148,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             distillEpisode({
               task,
               outcome: task.status === 'done' ? 'done' : 'failed',
-              progressSummary: resumeSummary ?? endSummary,
+              progressSummary: `[host assessment: ${task.assessment?.status ?? 'unverified'}; lifecycle done is not verified success] ${resumeSummary ?? endSummary}`,
               tailText,
             }),
           )
@@ -1197,7 +1217,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         taskId: task.id,
         chatId: task.chatId,
         summary: task.resultSummary,
-        ok: task.status === 'done',
+        ok: task.status === 'done' && (!task.acceptance || task.assessment.status === 'verified'),
         createdAt: Date.now(),
       });
     }
