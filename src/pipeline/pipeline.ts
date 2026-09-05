@@ -7,7 +7,7 @@ import { formatMessage } from "./formatter.js";
 import { getRecent } from "./context/manager.js";
 import { judge, l0Rule } from "./judge/judge.js";
 import { isMentioningSelf } from "./judge/rules.js";
-import { tryCreateResearchTask } from "./judge/task-trigger.js";
+import { tryCreateResearchTask, handleTaskFollowUp } from "./judge/task-trigger.js";
 import { processMedia } from "./stages/media.js";
 import { runBookkeeping } from "./stages/bookkeeping.js";
 import { runPostJudge } from "./stages/post-judge.js";
@@ -323,6 +323,17 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         botIdentity.nicknames,
       );
       if (mentioned) {
+        // Phase 13.5: 关联闭环优先于新建 —— 对进行中任务的追问/催促/取消
+        // 先处理(同样要求 @,同样 L0 零成本)。新建任务意图在其内部让路。
+        const followed = await handleTaskFollowUp(
+          job.chatId, formatted.uid,
+          formatted.textContent || formatted.captionContent || '',
+          true,
+        );
+        if (followed) {
+          logger.info({ chatId: job.chatId, uid: formatted.uid }, 'Pipeline complete (task follow-up, judge skipped)');
+          return;
+        }
         const taken = await tryCreateResearchTask(
           job.chatId, formatted.uid,
           formatted.textContent || formatted.captionContent || '',
