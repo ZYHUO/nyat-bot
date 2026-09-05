@@ -160,6 +160,15 @@ export async function runBookkeeping(ctx: {
   // 3.51 Stats (fire-and-forget)
   if (!formatted.isBot) {
     try { recordStatMessage(job.chatId, formatted.uid); } catch (err) { logger.debug({ err, chatId: job.chatId }, 'recordStatMessage failed'); }
+    // Phase 14.1: DM 按天聚合(风险输入)。只在 DM + flag 开时记,群聊零开销。
+    // 同步 SQLite UPSERT(<1ms),fail-soft。
+    if (job.chatId > 0 && e.REVERSE_VALVE_ENABLED) {
+      try {
+        const { recordDmMessage } = await import('../../agent/reverse-valve.js');
+        // formatted.timestamp 是 Telegram 秒级时间戳;recordDmMessage 按秒计深夜时段。
+        recordDmMessage(formatted.uid, formatted.textContent || formatted.captionContent || '', formatted.timestamp);
+      } catch (err) { logger.debug({ err, chatId: job.chatId }, 'dm stats record failed (non-critical)'); }
+    }
   }
 
   // 3.6 Bot interaction tracking(D 降噪:ad/verify/echo 不进 digest/学习)

@@ -16,6 +16,8 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent: (chatId:
 const {
   recordBotMessageForConnectivity, calculateConnectivityWindows, groupConnectivity,
   scoreDmRisk, hasEmotionWord, isNightHour,
+  recordDmMessage, computeRiskInput, currentRiskLevel,
+  buildValveHint, valveHumanizerTune,
 } = await import('../../../src/agent/reverse-valve.js');
 
 beforeEach(() => {
@@ -119,5 +121,75 @@ describe('dm risk scoring', () => {
     expect(isNightHour(1)).toBe(true);
     expect(isNightHour(23)).toBe(true);
     expect(isNightHour(12)).toBe(false);
+  });
+});
+
+describe('valve wiring (Phase 14.1)', () => {
+  beforeEach(() => {
+    db.exec(readFileSync(join(__dirname, '../../../migrations/0076_dm_stats.sql'), 'utf8'));
+    envMock.mockReturnValue({ CONNECTIVITY_TRACKING_ENABLED: true, REVERSE_VALVE_ENABLED: true });
+  });
+
+  it('recordDmMessage aggregates per-day counters', () => {
+    const noon = Math.floor(Date.now() / 1000);
+    const noonDate = new Date(noon * 1000).toISOString().slice(0, 10);
+    // 同一天两条: 深夜判定按传入 ts,第二条用同一天中午 ts 保证同 date 行
+    recordDmMessage(42, '最近好孤独睡不着', noon - 3600);
+    recordDmMessage(42, '今天吃了个苹果', noon);
+    const row = db.prepare('SELECT * FROM dm_daily_stats').get() as { date: string; msgs: number; night_msgs: number; emotion_msgs: number };
+    expect(row.date).toBe(noonDate);
+    expect(row.msgs).toBe(2);
+    expect(row.emotion_msgs).toBe(1);
+  });
+
+  it('currentRiskLevel is low with no history', () => {
+    const r = currentRiskLevel(99);
+    expect(r.level).toBe('low');
+  });
+
+  it('currentRiskLevel escalates with streak + night + emotion', () => {
+    // 连续 10 天深夜情绪倾诉
+    const now = Math.floor(Date.now() / 1000);
+    for (let d = 0; d < 10; d++) {
+      const day = new Date((now - d * 86400) * 1000).toISOString().slice(0, 10);
+      db.prepare(`INSERT OR REPLACE INTO dm_daily_stats (date, uid, msgs, night_msgs, emotion_msgs, session_min)
+        VALUES (?, ?, 8, 7, 5, 90)`).run(day, 42);
+    }
+    const r = currentRiskLevel(42);
+    expect(r.level).not.toBe('low');
+    expect(r.factors.length).toBeGreaterThan(0);
+  });
+
+  it('buildValveHint returns undefined for low risk', () => {
+    expect(buildValveHint({ level: 'low', score: 10, factors: [] })).toBeUndefined();
+  });
+
+  it('buildValveHint medium asks to shorten + guide to group', () => {
+    const h = buildValveHint({ level: 'medium', score: 50, factors: ['深夜占比 60%'] });
+    expect(h).toContain('短');
+  });
+
+  it('buildValveHint high adds non-judgmental care without preaching', () => {
+    const h = buildValveHint({ level: 'high', score: 80, factors: ['连续 12 天'] });
+    expect(h).toContain('连续 12 天');
+    expect(h).not.toMatch(/建议|应该|你需要/);
+  });
+
+  it('valveHumanizerTune only dampens on medium/high', () => {
+    expect(valveHumanizerTune('low')).toBeUndefined();
+    const m = valveHumanizerTune('medium')!;
+    expect(m.thinkingInterjectionRate).toBe(0);
+    expect(m.afterthoughtEditRate).toBe(0);
+    const h = valveHumanizerTune('high')!;
+    expect(h.emojiReplyRate).toBe(0);
+  });
+
+  it('computeRiskInput clamps to 0..1 ranges', () => {
+    recordDmMessage(43, 'x'.repeat(5000));
+    const inp = computeRiskInput(43);
+    expect(inp.nightRatio).toBeGreaterThanOrEqual(0);
+    expect(inp.nightRatio).toBeLessThanOrEqual(1);
+    expect(inp.groupTalkRatio).toBeGreaterThanOrEqual(0);
+    expect(inp.groupTalkRatio).toBeLessThanOrEqual(1);
   });
 });

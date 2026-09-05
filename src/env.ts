@@ -435,6 +435,10 @@ const envSchema = z.object({
   // ── AGI Level 6 Phase 14: 反向阀门 L7 ───────────────────────────────
   // 连接率埋点(新核心指标)+ 私聊风险分档。初期只记录不改行为。
   CONNECTIVITY_TRACKING_ENABLED: booleanFromEnv.default(false),
+  // Phase 14.1 接线: DM 风险 → 写手提示 + humanizer 衰减。默认 OFF,OFF 时
+  // currentRiskLevel 恒 low(提示/衰减全是 undefined,行为与改造前逐字节一致)。
+  // 只在 DM(chatId > 0)生效,群聊零变化。
+  REVERSE_VALVE_ENABLED: booleanFromEnv.default(false),
   // 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。
   SYCOPHANCY_AUDIT_ENABLED: booleanFromEnv.default(false),
   // ── AGI Level 6 Phase 15: 小模型增强 ────────────────────────────────
