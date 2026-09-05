@@ -33,6 +33,13 @@ export interface AIUsage {
   timeout: number;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * 该 usage 默认 JSON 输出（H4.2：stepfun 系吐脏 JSON 是系统性的——gate 529 次
+   * parse_failed_closed、norms 6/9 首轮失败、tick 多周期连续 parse_failed 全同因）。
+   * 开后 fallback 层自动带 jsonMode:true（provider 层转 response_format）。
+   * 调用方可显式传 jsonMode:false 关掉（如 topic-scan 纯文本标签）。
+   */
+  jsonMode?: boolean;
 }
 
 export enum ModelTier {

@@ -148,6 +148,8 @@ export async function microJudge(
       ],
       maxTokens: 100,
       temperature: 0,
+      // judge.md 要求只输出 JSON 对象 —— usage 级 jsonMode 已默认开（H4.2），
+      // 这里不再逐个传，provider 层 response_format 兜底。
       signal,
     });
   } catch (err) {
