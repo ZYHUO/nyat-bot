@@ -29,6 +29,10 @@ export interface ExperienceEntryInput {
   sourceEpisodeId: number;
   sourceKind?: string; // episode | loop_policy | shared
   originBot?: string; // 产出该经验的 bot 身份(默认 self)
+  /** 产出 episode 的 outcome(assessed 后);缺省 unknown,按 unverified 对待。 */
+  sourceOutcome?: string;
+  /** 产出 episode 的 host assessment;只有 verified 才是可信血缘。 */
+  sourceAssessment?: 'verified' | 'failed' | 'unverified';
 }
 
 export interface ExperienceHit {
@@ -78,26 +82,54 @@ export function saveEpisode(e: EpisodeInput): number | null {
   }
 }
 
-/** 保存蒸馏出的经验条目。 */
+/** 保存蒸馏出的经验条目。血缘列记录产出 episode 的 outcome/assessment(默认 unverified)。 */
 export function saveExperienceEntries(entries: ExperienceEntryInput[]): void {
   if (!entries.length) return;
   try {
-    const stmt = getDb().prepare(
-      `INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_kind, origin_bot, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
+    const db = getDb();
+    const hasSource = (() => {
+      try {
+        return db.prepare(`SELECT source_assessment FROM experience_entries LIMIT 0`).get() !== undefined || true;
+      } catch {
+        return false;
+      }
+    })();
+    const stmt = hasSource
+      ? db.prepare(
+          `INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_kind, origin_bot, source_outcome, source_assessment, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+      : db.prepare(
+          `INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_kind, origin_bot, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
     const ts = nowSec();
     for (const en of entries.slice(0, 8)) {
       if (!en.content?.trim()) continue;
-      stmt.run(
-        String(en.kind || 'trick').slice(0, 32),
-        en.content.trim().slice(0, 500),
-        safeJsonArray(en.tags),
-        en.sourceEpisodeId,
-        en.sourceKind?.slice(0, 32) ?? 'episode',
-        en.originBot?.slice(0, 32) ?? 'self',
-        ts,
-      );
+      const assessment = en.sourceAssessment ?? 'unverified';
+      if (hasSource) {
+        stmt.run(
+          String(en.kind || 'trick').slice(0, 32),
+          en.content.trim().slice(0, 500),
+          safeJsonArray(en.tags),
+          en.sourceEpisodeId,
+          en.sourceKind?.slice(0, 32) ?? 'episode',
+          en.originBot?.slice(0, 32) ?? 'self',
+          en.sourceOutcome?.slice(0, 16) ?? null,
+          assessment,
+          ts,
+        );
+      } else {
+        stmt.run(
+          String(en.kind || 'trick').slice(0, 32),
+          en.content.trim().slice(0, 500),
+          safeJsonArray(en.tags),
+          en.sourceEpisodeId,
+          en.sourceKind?.slice(0, 32) ?? 'episode',
+          en.originBot?.slice(0, 32) ?? 'self',
+          ts,
+        );
+      }
     }
   } catch (err) {
     logger.warn({ err }, 'saveExperienceEntries failed');

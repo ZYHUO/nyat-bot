@@ -23,7 +23,11 @@ import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
 
 const PROMPTS_DIR = resolve(process.cwd(), 'prompts');
-const BACKUP_DIR = resolve(process.cwd(), 'prompts', '.self-edit-backups');
+
+/** P3-3: allow tests to redirect the prompts root. Production never sets this. */
+export function promptsDirForTest(): string {
+  return process.env['NYAT_PROMPTS_DIR'] ?? PROMPTS_DIR;
+}
 
 /** 校验目标路径安全:必须在 prompts/ 下、必须是 .md 文件、不能是备份目录。 */
 function safePromptPath(relativePath: string): { ok: true; full: string } | { ok: false; reason: string } {
@@ -31,8 +35,9 @@ function safePromptPath(relativePath: string): { ok: true; full: string } | { ok
   if (!clean || clean.includes('..')) return { ok: false, reason: 'path traversal rejected' };
   if (!clean.endsWith('.md')) return { ok: false, reason: 'only .md prompt files allowed' };
   if (clean.startsWith('.self-edit-backups')) return { ok: false, reason: 'backup dir is read-only' };
-  const full = resolve(PROMPTS_DIR, clean);
-  if (!full.startsWith(PROMPTS_DIR)) return { ok: false, reason: 'path escapes prompts dir' };
+  const root = promptsDirForTest();
+  const full = resolve(root, clean);
+  if (!full.startsWith(root)) return { ok: false, reason: 'path escapes prompts dir' };
   return { ok: true, full };
 }
 
@@ -40,9 +45,10 @@ function safePromptPath(relativePath: string): { ok: true; full: string } | { ok
 function backup(full: string): string | null {
   try {
     if (!existsSync(full)) return null;
-    mkdirSync(BACKUP_DIR, { recursive: true });
+    const dir = join(promptsDirForTest(), '.self-edit-backups');
+    mkdirSync(dir, { recursive: true });
     const ts = Date.now();
-    const bak = join(BACKUP_DIR, `${basename(full)}.bak-${ts}`);
+    const bak = join(dir, `${basename(full)}.bak-${ts}`);
     copyFileSync(full, bak);
     return bak;
   } catch (err) {
@@ -51,15 +57,17 @@ function backup(full: string): string | null {
   }
 }
 
-/** 记录动机说明到 self_model_notes(复用 P4-C 表)。 */
-function recordMotive(relativePath: string, motive: string): void {
+/** 记录动机说明到 self_model_notes(复用 P4-C 表)。返回 rowid,失败返回 null。 */
+export function recordMotive(relativePath: string, motive: string): number | null {
   try {
     const note = `[self-edit] 改了 ${relativePath}：${motive.trim().slice(0, 200)}`;
-    getDb()
+    const r = getDb()
       .prepare(`INSERT INTO self_model_notes (note, evidence, created_at) VALUES (?, ?, ?)`)
       .run(note, null, Math.floor(Date.now() / 1000));
+    return Number(r.lastInsertRowid);
   } catch (err) {
     logger.warn({ err }, 'self-edit: record motive failed');
+    return null;
   }
 }
 
@@ -67,6 +75,8 @@ export interface SelfEditResult {
   ok: boolean;
   reason?: string;
   backup?: string | null;
+  /** self_model_notes rowid of the stored motive (null if the insert failed). */
+  motiveRowid?: number | null;
 }
 
 /**
@@ -119,9 +129,9 @@ export function selfEditPrompt(
     const bak = backup(full);
     writeFileSync(full, content, 'utf-8');
     lastEditAt = Date.now();
-    recordMotive(relativePath, motive);
+    const motiveRowid = recordMotive(relativePath, motive);
     logger.info({ relativePath, backup: bak, motive: motive.slice(0, 80) }, 'self-edit: prompt modified');
-    return { ok: true, backup: bak };
+    return { ok: true, backup: bak, motiveRowid };
   } catch (err) {
     logger.warn({ err, relativePath }, 'self-edit: write failed');
     return { ok: false, reason: 'write failed' };
