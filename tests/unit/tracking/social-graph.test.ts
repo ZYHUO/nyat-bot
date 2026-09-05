@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 let testDb: Database.Database;
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
 
-const { recordInteraction, getTopEdges, buildSocialInjection } =
+const { recordInteraction, getTopEdges, buildSocialInjection, buildBridgeHint, getClosestPeer } =
   await import('../../../src/tracking/social-graph.js');
 
 function init(db: Database.Database): void {
@@ -54,5 +54,26 @@ describe('social-graph', () => {
   it('returns empty when nothing is strong enough', () => {
     recordInteraction(-100, 1, 'A', 2, 'B'); // single interaction, below floor
     expect(buildSocialInjection(-100)).toBe('');
+  });
+
+  it('getClosestPeer returns the strongest peer', () => {
+    for (let i = 0; i < 4; i++) recordInteraction(-100, 1, 'A', 2, 'B');
+    for (let i = 0; i < 2; i++) recordInteraction(-100, 1, 'A', 3, 'C');
+    expect(getClosestPeer(-100, 1)).toBe('B');
+    expect(getClosestPeer(-100, 9)).toBeUndefined(); // 无边
+  });
+
+  it('buildBridgeHint prefers shared episode, falls back to peer, else empty', () => {
+    // 有往事 → 提往事
+    expect(buildBridgeHint(-100, 1, 'A', '上次团建真好玩', () => [{ summary: '上次团建去了海边' }]))
+      .toContain('上次团建去了海边');
+    // 无往事但有熟人 → cue 熟人
+    for (let i = 0; i < 3; i++) recordInteraction(-100, 1, 'A', 2, 'B');
+    expect(buildBridgeHint(-100, 1, 'A', '今天天气不错', () => []))
+      .toContain('B');
+    // 都没有 → 空,调用方跳过
+    expect(buildBridgeHint(-100, 9, 'Z', '今天天气不错', () => [])).toBe('');
+    // 太短的消息不查往事
+    expect(buildBridgeHint(-100, 9, 'Z', '好', () => [{ summary: '不该命中' }])).toBe('');
   });
 });
