@@ -273,9 +273,17 @@ export async function buildWorldState(): Promise<WorldState> {
   const topics: NonNullable<WorldState['topics']> = [];
   try {
     const { getActiveTopics } = await import('../tracking/topic-registry.js');
+    // H4 bandit 排序：同群话题按平均 reward 排，好话题排前（LLM 先看到好选项）。
+    // 无分数时原序（行为零变化）；失败回退原序。
     for (const g of groups) {
       try {
-        for (const t of getActiveTopics(g.chatId, 2)) {
+        const live = getActiveTopics(g.chatId, 2);
+        try {
+          const { getTopicScores } = await import('../tracking/topic-bandit.js');
+          const sm = new Map(getTopicScores(g.chatId).map((r) => [r.label, r.pulls > 0 ? r.reward / r.pulls : 0]));
+          live.sort((a, b) => (sm.get(b.label) ?? 0) - (sm.get(a.label) ?? 0));
+        } catch { /* keep registry order */ }
+        for (const t of live) {
           topics.push({ chatId: g.chatId, label: t.label });
         }
       } catch { /* skip chat */ }
@@ -606,6 +614,16 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
       const { getBotUid } = await import('../bot/bot.js');
       const silentMin = Math.floor(group.silentSec / 60);
+      // H4 bandit:该群话题按平均 reward 排序后给写手"先跟哪个好"（pickTopic eps=0 纯 exploit）。
+      // 失败/无分 → 不注记（行为零变化）。
+      let topicHint = '';
+      try {
+        const { getActiveTopics } = await import('../tracking/topic-registry.js');
+        const { pickTopic } = await import('../tracking/topic-bandit.js');
+        const labels = getActiveTopics(a.chatId, 4).map((t) => t.label);
+        const best = labels.length > 1 ? pickTopic(a.chatId, labels, 0) : labels[0];
+        if (best) topicHint = `群里在聊:${labels.join('、')}。优先跟「${best}」(大家之前反响好)。`;
+      } catch { /* no hint */ }
       // 把 tick 的开口理由带进去（跟进话题/分享近事/冷场冒泡），别只会「沉默 N 分钟」。
       const why = verdict.reason.trim() ? `开口理由：${verdict.reason.slice(0, 100)}。` : '';
       // 「想起再回」：该群有当时没接的话头/刚进群的新人 → 递给写手，发言成功后清掉（想起是一次性的）
@@ -623,7 +641,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const text = await generatePersonaProactiveText(
         a.chatId,
         getBotUid(),
-        `[主动开口] ${why}${missedHint}群里已经沉默 ${silentMin} 分钟。你可以接着群里的话题随口说一句、分享你最近做的有意思的事、或自然发起新话题。禁止自我介绍、禁止「大家好」式开场。`,
+        `[主动开口] ${why}${topicHint}${missedHint}群里已经沉默 ${silentMin} 分钟。你可以接着群里的话题随口说一句、分享你最近做的有意思的事、或自然发起新话题。禁止自我介绍、禁止「大家好」式开场。`,
       );
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined group speak');
@@ -634,6 +652,13 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       const messageId = await sendMessage(a.chatId, text);
       if (messageId) {
         await addAssistant(a.chatId, { textContent: text, messageId });
+        // H4 pull 记录：这次主动开口跟的话题（topicHint 里的 best）算一次 pull，
+        // 后续 reaction/reply 反馈会折成 reward 回来。
+        try {
+          const { recordPull } = await import('../tracking/topic-bandit.js');
+          const m = topicHint.match(/优先跟「(.+?)」/);
+          if (m?.[1]) recordPull(a.chatId, m[1]);
+        } catch { /* non-critical */ }
       }
       if (missedHere.length) {
         try {
