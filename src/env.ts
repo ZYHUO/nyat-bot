@@ -772,6 +772,8 @@ const envSchema = z.object({
   SANDBOX_ENABLED: booleanFromEnv.default(false),
   SANDBOX_TERMINAL_ENABLED: booleanFromEnv.default(true),
   SANDBOX_BROWSER_ENABLED: booleanFromEnv.default(true),
+  // Phase 15 真隔离: bwrap userns 沙盒默认开。设 0 回退宿主 exec(应急, 无隔离)。
+  SANDBOX_BWRAP_ENABLED: booleanFromEnv.default(true),
   SANDBOX_ALLOWED_COMMANDS: z.string().default(''),
   SANDBOX_BLOCKED_COMMANDS: z.string().default('rm -rf,shutdown,reboot,mkfs,halt,dd if=,chmod 777'),
 

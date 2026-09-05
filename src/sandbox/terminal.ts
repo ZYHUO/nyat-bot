@@ -1,9 +1,73 @@
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { env } from '../env.js';
 import { resolveSandboxRoot } from './paths.js';
 import { logger } from '../shared/logger.js';
 
 const MAX_OUTPUT = 4000;
+
+// ── 真隔离: bwrap userns 沙盒(Phase 15) ──
+// executeCommand 默认走 bwrap: 与宿主隔离 mount/user/pid/net(无 lo 外网,
+// 保留回环做本地 DNS 兜底),cwd=data/sandbox 以读写绑定,PATH/SSL 只读绑定。
+// 降级: bwrap 二进制缺失或启动失败 → 走旧宿主 exec(纵深防御模式集仍先生效),
+// 并打 warn 日志(上线后应为 0, 可按此报警)。
+const BWRAP_BIN = '/usr/bin/bwrap';
+let bwrapMissingLogged = false;
+
+function bwrapAvailable(): boolean {
+  // SANDBOX_BWRAP_ENABLED 默认 true; 运维可显式设 0 回退宿主执行(应急)。
+  try {
+    if (!env().SANDBOX_BWRAP_ENABLED) return false;
+  } catch { return true; }
+  if (existsSync(BWRAP_BIN)) return true;
+  if (!bwrapMissingLogged) {
+    bwrapMissingLogged = true;
+    logger.warn('sandbox: bwrap binary missing, falling back to host exec (no isolation)');
+  }
+  return false;
+}
+
+interface BwrapSpec {
+  bin: string;
+  args: string[];
+  cwd: string;
+  timeoutMs: number;
+}
+
+/** 构造 bwrap 启动参数: 命令走 /bin/sh -c(沙盒内), 环境只给最小集。
+ * 关键: 不绑定宿主 / 等敏感目录 —— 沙盒内 / 只有绑进去的系统目录,
+ * /root/.env 等一律不可见。cwd 是唯一可写绑定; 沙盒内 chdir 到 /sandbox。
+ */
+export function buildBwrapSpec(command: string, cwd: string, timeoutMs: number): BwrapSpec {
+  const pathEnv = process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin';
+  return {
+    bin: BWRAP_BIN,
+    args: [
+      '--unshare-all',       // user/mount/pid/net/ipc/uts 全隔离
+      '--die-with-parent',   // bot 崩了不留孤儿进程
+      '--ro-bind', '/usr', '/usr',
+      '--ro-bind-try', '/usr/local', '/usr/local',
+      '--ro-bind', '/bin', '/bin',
+      '--ro-bind', '/lib', '/lib',
+      '--ro-bind', '/lib64', '/lib64',
+      '--ro-bind-try', '/etc/ssl', '/etc/ssl',
+      '--ro-bind-try', '/etc/ca-certificates', '/etc/ca-certificates',
+      '--ro-bind-try', '/etc/resolv.conf', '/etc/resolv.conf',
+      '--bind', cwd, '/sandbox', // 唯一可写绑定, 沙盒内固定 /sandbox
+      '--dir', '/tmp',
+      '--tmpfs', '/run',
+      '--proc', '/proc',
+      '--dev', '/dev',
+      '--chdir', '/sandbox',
+      '--setenv', 'PATH', pathEnv,
+      '--setenv', 'HOME', '/sandbox',
+      '--setenv', 'LANG', 'en_US.UTF-8',
+      '--', '/bin/sh', '-c', command,
+    ],
+    cwd,
+    timeoutMs,
+  };
+}
 
 /**
  * P1 fix(2026-08-22 审查): 原实现是子串匹配——`rm -rf` 拦不住 `rm -r -f`/`rm -fr`/
@@ -79,6 +143,35 @@ export function executeCommand(command: string, opts?: { timeoutMs?: number }): 
   }
   const cwd = resolveSandboxRoot();
   const start = Date.now();
+  // 真隔离优先: bwrap 沙盒内执行; 不可用/启动失败 → 降级宿主 exec(模式集已先生效)。
+  if (bwrapAvailable()) {
+    const spec = buildBwrapSpec(command, cwd, timeoutMs);
+    return new Promise((resolve) => {
+      const proc = execFile(spec.bin, spec.args, {
+        cwd: spec.cwd,
+        timeout: spec.timeoutMs,
+        maxBuffer: 1024 * 1024,
+      }, (err, stdout, stderr) => {
+        const durationMs = Date.now() - start;
+        if (err && (err as NodeJS.ErrnoException & { killed?: boolean }).killed) {
+          resolve({ stdout: truncate(stdout), stderr: truncate(stderr) + '\n(timeout)', exitCode: -1, durationMs });
+        } else if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+          logger.warn('sandbox: bwrap spawn ENOENT, falling back to host exec');
+          resolve(hostExec(command, cwd, timeoutMs, start));
+        } else {
+          resolve({ stdout: truncate(stdout), stderr: truncate(stderr), exitCode: (err as { code?: number } | null)?.code ?? 0, durationMs });
+        }
+      });
+      proc.on('error', () => {
+        resolve({ stdout: '', stderr: 'spawn error', exitCode: -1, durationMs: Date.now() - start });
+      });
+    });
+  }
+  return hostExec(command, cwd, timeoutMs, start);
+}
+
+/** 降级路径: 宿主 exec(无隔离, 仅纵深防御模式集)。bwrap 缺失/禁用/启动失败时用。 */
+function hostExec(command: string, cwd: string, timeoutMs: number, start: number): Promise<CommandResult> {
   return new Promise((resolve) => {
     const proc = exec(command, {
       cwd,
