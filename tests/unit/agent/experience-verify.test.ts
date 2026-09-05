@@ -37,10 +37,10 @@ describe('computePathQuality', () => {
     expect(isPathQualityGood(r.score)).toBe(false);
   });
 
-  it('无调用 → 中性 0.8', () => {
+  it('无调用 → 不构成证据', () => {
     const r = computePathQuality({ totalCalls: 0, invalidCalls: 0, retryCount: 0, turns: 1 });
-    expect(r.score).toBe(0.8);
-    expect(isPathQualityGood(r.score)).toBe(true);
+    expect(r.score).toBe(0);
+    expect(isPathQualityGood(r.score)).toBe(false);
   });
 
   it('score clamp 到 [0,1]', () => {
@@ -68,11 +68,21 @@ describe('summarizeToolCalls', () => {
 });
 
 describe('recordInjectOutcome', () => {
+  it('legacy done without independent evidence never rewards an experience', () => {
+    const id = saveOne('unknown');
+    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'done', pathQualityScore: 1 });
+    expect(db.prepare('SELECT success_count FROM experience_entries WHERE id=?').get(id)).toEqual({success_count: 0});
+  });
+  it('unverified failure never punishes an experience', () => {
+    const id = saveOne('unknown failure');
+    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'failed', evidenceStatus: 'unverified', pathQualityScore: 0 });
+    expect(db.prepare('SELECT failure_count FROM experience_entries WHERE id=?').get(id)).toEqual({failure_count: 0});
+  });
   it('done + 干净路径 2 次 → verified=1', () => {
     const id1 = saveOne('写代码前先跑一遍验证');
     const id2 = saveOne('写完必须 sendFile');
     for (let i = 0; i < 2; i++) {
-      recordInjectOutcome({ experienceIds: [id1!, id2!], taskOutcome: 'done', pathQualityScore: 0.9 });
+      recordInjectOutcome({ experienceIds: [id1!, id2!], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9 });
     }
     const rows = db.prepare('SELECT id, verified, success_count FROM experience_entries ORDER BY id').all() as {
       id: number; verified: number; success_count: number;
@@ -83,15 +93,15 @@ describe('recordInjectOutcome', () => {
 
   it('failed 2 次 → verified=2(可疑)', () => {
     const id = saveOne('先发贴纸再说话');
-    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'failed', pathQualityScore: 0.5 });
-    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'failed', pathQualityScore: 0.5 });
+    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'failed', evidenceStatus: 'failed', pathQualityScore: 0.5 });
+    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'failed', evidenceStatus: 'failed', pathQualityScore: 0.5 });
     const row = db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(id) as { verified: number };
     expect(row.verified).toBe(2);
   });
 
   it('done 但路径脏 → 不计数(不证实)', () => {
     const id = saveOne('脏路径经验');
-    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'done', pathQualityScore: 0.3 });
+    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.3 });
     const row = db.prepare('SELECT success_count, failure_count, verified FROM experience_entries WHERE id = ?').get(id) as {
       success_count: number; failure_count: number; verified: number;
     };
@@ -102,7 +112,7 @@ describe('recordInjectOutcome', () => {
 
   it('success 但不足阈值 → 仍未证实', () => {
     const id = saveOne('只成功一次');
-    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'done', pathQualityScore: 0.9, minSuccess: 3 });
+    recordInjectOutcome({ experienceIds: [id!], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9, minSuccess: 3 });
     const row = db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(id) as { verified: number };
     expect(row.verified).toBe(0);
   });

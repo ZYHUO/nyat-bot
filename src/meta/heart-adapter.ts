@@ -83,7 +83,7 @@ export async function evaluateMetaHeart(opts: {
   let recentMessages: FormattedMessage[] = [];
   try {
     const { getRecent } = await import('../pipeline/context/manager.js');
-    recentMessages = await getRecent(chatId, 40);
+    recentMessages = await getRecent(chatId, 40, formatted.messageThreadId);
   } catch {
     recentMessages = [formatted];
   }

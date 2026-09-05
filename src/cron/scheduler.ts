@@ -1,9 +1,13 @@
 // ────────────────────────────────────────
-// Cron scheduler — node-cron based, with setInterval fallback
-// Replaces PHP crontab-based cron_handler.php
+// Scheduler — 全部任务注册到 tick 心跳系统(无 node-cron)
+//
+// 原 node-cron 调度已整体迁移到 heartbeat.ts 的任务注册表:
+//   everySec(n)      ← '*/n * * * *'
+//   dailyAt(h,m)     ← 'm h * * *'(北京时间)
+//   weeklyAt(d,h,m)  ← 'm h * * d'(北京时间)
+// unified-tick 不再有独立调度层,它只是注册表里的一个普通任务。
 // ────────────────────────────────────────
 
-import { schedule, validate } from 'node-cron';
 import { env } from '../env.js';
 import { runDailyReport } from './report.js';
 import { runModelCheck } from './model-check.js';
@@ -11,17 +15,17 @@ import { runCleanup, type CleanupDeps } from './cleanup.js';
 import { runKnowledgeSync } from './knowledge-sync.js';
 import { runUserProfileSync } from '../tracking/user-profile.js';
 // idle.ts / proactive-thinker.ts / self-play.ts / goal-check.ts / proactive-scan.ts
-// 已被 unified-tick 取代并删除；活跃时段判断在 active-hours.ts。
+// 已被 unified-tick 取代并删除;活跃时段判断在 active-hours.ts。
 import { runLearnerScan } from './learner-scan.js';
 import { runChannelSync } from './channel-sync.js';
 import { flushDailyStats } from '../tracking/stats.js';
 import { logger } from '../shared/logger.js';
+import { registerTickTask, startHeartbeat, stopHeartbeat, isStarted } from './heartbeat.js';
 
 export interface CronDeps {
   cleanupDeps?: CleanupDeps;
 }
 
-const tasks: ReturnType<typeof schedule>[] = [];
 let _started = false;
 let _deps: CronDeps = {};
 
@@ -30,69 +34,89 @@ export function startCronJobs(deps?: CronDeps): void {
   _started = true;
   if (deps) _deps = deps;
 
-  const enabled = env().CRON_ENABLED;
-  if (!enabled) {
+  if (!env().CRON_ENABLED) {
     logger.info('Cron jobs disabled via CRON_ENABLED');
     return;
   }
 
-  // Model status check — every 5 minutes
-  tasks.push(schedule('*/5 * * * *', () => {
-    void safeRun('model-check', runModelCheck);
-  }));
+  const reg = registerTickTask;
 
-  // Daily report — every day at 23:55 Beijing time (15:55 UTC)
-  tasks.push(schedule('55 15 * * *', () => {
-    void safeRun('daily-report', runDailyReport);
-  }));
+  // Model status check — every 5 minutes
+  reg({ name: 'model-check', everySec: 5 * 60, run: runModelCheck });
+
+  // Daily report — every day at 23:55 Beijing time
+  reg({ name: 'daily-report', dailyAt: { hour: 23, minute: 55 }, run: runDailyReport });
 
   // Cleanup — every 6 hours
-  tasks.push(schedule('0 */6 * * *', () => {
-    void safeRun('cleanup', () => runCleanup(_deps.cleanupDeps));
-  }));
+  reg({
+    name: 'cleanup',
+    everySec: 6 * 3600,
+    run: async () => { await runCleanup(_deps.cleanupDeps); },
+  });
 
   // Verification timeout cleanup — every minute
   if (env().VERIFY_ENABLED) {
-    tasks.push(schedule('* * * * *', () => {
-      void safeRun('verify-cleanup', async () => {
+    reg({
+      name: 'verify-cleanup',
+      everySec: 60,
+      run: async () => {
         const { cleanupTimedOutVerifications } = await import('../verification/cleanup.js');
         const { getBot } = await import('../bot/bot.js');
         const bot = getBot();
         if (bot) await cleanupTimedOutVerifications(bot);
-      });
-    }));
+      },
+    });
   }
 
   // Behavioral role tagging — every 2h during active hours (8:00–22:00 CST-ish)
-  tasks.push(schedule('23 8-22/2 * * *', () => {
-    void safeRun('behavioral-roles', async () => {
+  // 原 cron '23 8-22/2 * * *' = 8/10/12/.../22 点的 23 分。间隔语义下取 2h,
+  // 活跃时段过滤由任务内部逻辑承担(behavioral-roles 本身只在活跃群跑)。
+  reg({
+    name: 'behavioral-roles',
+    everySec: 2 * 3600,
+    run: async () => {
       const { runRoleAnalysis } = await import('../tracking/behavioral-roles.js');
       const n = await runRoleAnalysis();
       if (n > 0) logger.info({ chats: n }, 'Behavioral roles tick');
-    });
-  }));
+    },
+  });
+
+  // Feedback aggregate — hourly sentiment → self_model_notes
+  reg({
+    name: 'feedback-aggregate',
+    everySec: 3600,
+    run: async () => {
+      const { runFeedbackAggregate } = await import('./feedback-aggregate.js');
+      await runFeedbackAggregate();
+    },
+  });
 
   // Memory "dream" — nightly forgetting of old, never-recalled memories
-  tasks.push(schedule('41 4 * * *', () => {
-    void safeRun('memory-dream', async () => {
+  reg({
+    name: 'memory-dream',
+    dailyAt: { hour: 4, minute: 41 },
+    run: async () => {
       const { runMemoryDream } = await import('./memory-dream.js');
       const forgotten = await runMemoryDream();
       if (forgotten > 0) logger.info({ forgotten }, 'Memory dream tick');
-    });
-  }));
+    },
+  });
 
   // #8 关系叙事 — 每天给互动多的群友写/更新一句 "你和TA" 的共同经历概括
-  tasks.push(schedule('19 5 * * *', () => {
-    void safeRun('relationship-summarize', async () => {
+  reg({
+    name: 'relationship-summarize',
+    dailyAt: { hour: 5, minute: 19 },
+    run: async () => {
       const { runRelationshipSummarize } = await import('./relationship-summarize.js');
       await runRelationshipSummarize();
-    });
-  }));
+    },
+  });
 
   // token 记账日报 — 每天把昨天/今天各 provider 的 token 消耗打进 info 日志
-  // (StepFun 用了多少一目了然)。持久化在 llm_token_daily,重启不丢。
-  tasks.push(schedule('3 0 * * *', () => {
-    void safeRun('token-report', async () => {
+  reg({
+    name: 'token-report',
+    dailyAt: { hour: 0, minute: 3 },
+    run: async () => {
       const { getTokenReport } = await import('../metrics/token-ledger.js');
       const now = new Date();
       const yday = new Date(now.getTime() - 86400_000).toISOString().slice(0, 10);
@@ -103,88 +127,99 @@ export function startCronJobs(deps?: CronDeps): void {
           'token ledger daily report',
         );
       }
-    });
-  }));
+    },
+  });
 
-  // 机制5:LLM 全局画像合并。C:从每天一次改为**每 2 小时**(配 PROFILE_MERGE_STALE_HOURS
-  // 水位线 + PROFILE_MERGE_MAX_UIDS 批量),全局画像更新更勤 + 更充分消耗配额。默认关灰度。
+  // 机制5:LLM 全局画像合并(每 2 小时,配 PROFILE_MERGE_STALE_HOURS 水位线)
   if (env().PROFILE_MERGE_ENABLED) {
-    tasks.push(schedule('31 */2 * * *', () => {
-      void safeRun('profile-merge', async () => {
+    reg({
+      name: 'profile-merge',
+      everySec: 2 * 3600,
+      run: async () => {
         const { runProfileMerge } = await import('./profile-merge.js');
         await runProfileMerge();
-      });
-    }));
+      },
+    });
   }
 
-  // 深度反思(A)—— 对活跃群提炼"本群近况"注入回复;吞吐可调(REFLECTION_*),
-  // 把 StepFun 配额花在"让 bot 记住群里发生过什么"。默认关。
+  // 深度反思(A)—— 对活跃群提炼"本群近况"注入回复;吞吐可调(REFLECTION_*)
   if (env().REFLECTION_ENABLED) {
-    tasks.push(schedule(`*/${env().REFLECTION_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('deep-reflection', async () => {
+    reg({
+      name: 'deep-reflection',
+      everySec: env().REFLECTION_INTERVAL_MIN * 60,
+      run: async () => {
         const { runDeepReflection } = await import('./deep-reflection.js');
         await runDeepReflection();
-      });
-    }));
+      },
+    });
   }
 
-  // StepFun 配额消费引擎(滚动深反思)—— 每分钟拉一批全池工作项(群反思+跨上下文合并)
-  // 并发跑,把订阅配额用起来(冲 ~100M/天)。速率/并发/权重全可调,默认关。
+  // StepFun 配额消费引擎(滚动深反思)—— 每分钟拉一批全池工作项并发跑
   if (env().STEPFUN_CONSUMER_ENABLED) {
-    tasks.push(schedule('* * * * *', () => {
-      void safeRun('stepfun-consumer', async () => {
+    reg({
+      name: 'stepfun-consumer',
+      everySec: 60,
+      run: async () => {
         const { runStepfunConsumer } = await import('./stepfun-consumer.js');
         await runStepfunConsumer();
-      });
-    }));
+      },
+    });
   }
 
   // AGI L6 Phase 13.4: 任务唤醒 —— 到点(next_wake)的任务派发执行。
-  // 连续性的物理实现: bot 不是被消息唤醒,是被自己的任务唤醒。
   if (env().TASK_EXECUTOR_ENABLED) {
-    tasks.push(schedule('* * * * *', () => {
-      void safeRun('task-wake', async () => {
+    reg({
+      name: 'task-wake',
+      everySec: 60,
+      run: async () => {
         const { wakeDueTasks } = await import('./task-wake.js');
         await wakeDueTasks();
-      });
-    }));
+      },
+    });
   }
 
   // AGI L6 Phase 14: 连接率计算 —— 回填已到 5 分钟窗口的连接率。
   if (env().CONNECTIVITY_TRACKING_ENABLED) {
-    tasks.push(schedule('*/2 * * * *', () => {
-      void safeRun('connectivity-calc', async () => {
+    reg({
+      name: 'connectivity-calc',
+      everySec: 2 * 60,
+      run: async () => {
         const { calculateConnectivityWindows } = await import('../agent/reverse-valve.js');
         const n = await calculateConnectivityWindows();
         if (n > 0) logger.info({ windows: n }, 'connectivity windows calculated');
-      });
-    }));
+      },
+    });
   }
 
   // 功能 A3:每日「今日感想」生成(每小时跑,内部按 BJ 日去重,只生成一次)。
   if (env().SCHOOL_SCHEDULE_ENABLED) {
-    tasks.push(schedule('40 * * * *', () => {
-      void safeRun('school-day-plan', async () => {
+    reg({
+      name: 'school-day-plan',
+      everySec: 3600,
+      run: async () => {
         const { runSchoolDayPlan } = await import('./school-day-plan.js');
         await runSchoolDayPlan();
-      });
-    }));
+      },
+    });
   }
 
-  // 常驻贴纸识图:每 3 分钟分析一小批 pending 常驻贴纸(分批避免打爆视觉额度;
-  // 全部分析完后自动 no-op)。
+  // 常驻贴纸识图:每 3 分钟分析一小批 pending 常驻贴纸
   if (env().RESIDENT_STICKER_PACKS) {
-    tasks.push(schedule('*/3 * * * *', () => {
-      void safeRun('resident-sticker-analyze', async () => {
+    reg({
+      name: 'resident-sticker-analyze',
+      everySec: 3 * 60,
+      run: async () => {
         const { analyzeResidentStickers } = await import('../knowledge/sticker/resident.js');
         await analyzeResidentStickers(6);
-      });
-    }));
+      },
+    });
   }
 
   // G7(语言生命)群共同经历 — 每 2 小时为活跃群提炼 0-2 条"群里发生的事"
-  tasks.push(schedule('37 */2 * * *', () => {
-    void safeRun('group-episodes', async () => {
+  reg({
+    name: 'group-episodes',
+    everySec: 2 * 3600,
+    run: async () => {
       const { getRedis } = await import('../db/redis.js');
       const { summarizeEpisodes } = await import('../tracking/group-episodes.js');
       const raw = await getRedis().zrange('xxb:active_groups', -6, -1);
@@ -192,268 +227,297 @@ export function startCronJobs(deps?: CronDeps): void {
         const chatId = Number(idStr);
         if (chatId < 0) await summarizeEpisodes(chatId).catch(() => {});
       }
-    });
-  }));
+    },
+  });
 
   // Expression learning gate — hourly auto-review of pending learned patterns
-  tasks.push(schedule('51 * * * *', () => {
-    void safeRun('expression-gate', async () => {
+  reg({
+    name: 'expression-gate',
+    everySec: 3600,
+    run: async () => {
       const { runExpressionGate } = await import('../learners/expression-gate.js');
       const n = await runExpressionGate();
       if (n > 0) logger.info({ reviewed: n }, 'Expression gate tick');
-    });
-  }));
+    },
+  });
 
-  // Knowledge base sync — configurable (PHP cron_long_term.php); only runs when chat IDs set
-  const ks = env().KNOWLEDGE_CRON_SCHEDULE;
-  if (validate(ks)) {
-    tasks.push(
-      schedule(ks, () => {
-        void safeRun('knowledge-sync', runKnowledgeSync);
-      }),
-    );
+  // Knowledge base sync — configurable; only runs when chat IDs set
+  // 原 KNOWLEDGE_CRON_SCHEDULE 是 cron 表达式,迁移后按其分钟数取间隔。
+  const ksMin = parseCronToMinutes(env().KNOWLEDGE_CRON_SCHEDULE);
+  if (ksMin !== null) {
+    reg({
+      name: 'knowledge-sync',
+      everySec: ksMin * 60,
+      run: runKnowledgeSync,
+    });
   } else {
-    logger.warn({ expr: ks }, 'Invalid KNOWLEDGE_CRON_SCHEDULE, knowledge-sync cron disabled');
+    logger.warn({ expr: env().KNOWLEDGE_CRON_SCHEDULE }, 'Invalid KNOWLEDGE_CRON_SCHEDULE, knowledge-sync disabled');
   }
 
   // User profile sync — every hour, Qwen3.6+ summarizes pending messages per user
-  tasks.push(schedule('7 * * * *', () => {
-    void safeRun('user-profile-sync', runUserProfileSync);
-  }));
+  reg({ name: 'user-profile-sync', everySec: 3600, run: runUserProfileSync });
 
-  // P5-A: Unified tick —— 决策合并的统一唤醒循环（常驻）。
+  // P5-A: Unified tick —— 决策合并的统一唤醒循环(常驻)。
   // 已取代 idle / proactive-scan / proactive-thinker / self-play / goal-check
-  // 五个决策型 cron（它们的执行器保留在 tick 内部复用）。
-  tasks.push(schedule(`*/${env().UNIFIED_TICK_INTERVAL_MIN} * * * *`, () => {
-    void safeRun('unified-tick', async () => {
+  // 五个决策型 cron(它们的执行器保留在 tick 内部复用)。
+  // 迁移到心跳后:它只是注册表里的一个普通间隔任务,不再有独立调度层。
+  reg({
+    name: 'unified-tick',
+    everySec: env().UNIFIED_TICK_INTERVAL_MIN * 60,
+    run: async () => {
       const { runUnifiedTick } = await import('./unified-tick.js');
       await runUnifiedTick();
-    });
-  }));
+    },
+  });
 
-  // Dream journal — multi cron (UTC, comma-separated); model WRITE/SKIP; append entries
+  // Dream journal — multi slot (北京时间,逗号分隔); model WRITE/SKIP; append entries
   if (env().DREAM_JOURNAL_ENABLED) {
-    const exprs = env()
+    const slots = env()
       .DREAM_JOURNAL_CRON.split(',')
       .map((s) => s.trim())
       .filter(Boolean);
     let any = false;
-    for (const djCron of exprs) {
-      if (!validate(djCron)) {
+    for (const djCron of slots) {
+      const at = parseCronToDaily(djCron);
+      if (!at) {
         logger.warn({ expr: djCron }, 'Invalid DREAM_JOURNAL_CRON entry, skipped');
         continue;
       }
       any = true;
-      tasks.push(
-        schedule(djCron, () => {
-          void safeRun('dream-journal', async () => {
-            const { runDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
-            await runDreamJournal({ slot: inferDreamSlot() });
-          });
-        }),
-      );
+      reg({
+        name: `dream-journal:${at.hour}:${at.minute}`,
+        dailyAt: at,
+        run: async () => {
+          const { runDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
+          await runDreamJournal({ slot: inferDreamSlot() });
+        },
+      });
     }
-    if (any) logger.info({ crons: exprs }, 'Dream journal cron enabled');
+    if (any) logger.info({ slots }, 'Dream journal slots enabled');
   }
 
-  // Dreaming 做梦(CGM background-agent 简化版):凌晨把「上次做梦以来」的
-  // 素材打包,派发一个特权长 CodeAct 任务到主人 DM 自主夜战。默认关。
+  // Dreaming 自由时段(CGM background-agent 简化版):凌晨派发特权长 CodeAct 任务。
   if (env().DREAMING_ENABLED) {
-    const dreamingCron = env().DREAMING_CRON;
-    if (validate(dreamingCron)) {
-      tasks.push(
-        schedule(dreamingCron, () => {
-          void safeRun('dreaming', async () => {
-            const { runDreaming } = await import('./dreaming.js');
-            await runDreaming();
-          });
-        }),
-      );
-      logger.info({ cron: dreamingCron }, 'Dreaming cron enabled');
+    const at = parseCronToDaily(env().DREAMING_CRON);
+    if (at) {
+      reg({
+        name: 'dreaming',
+        dailyAt: at,
+        run: async () => {
+          const { runDreaming } = await import('./dreaming.js');
+          await runDreaming();
+        },
+      });
+      logger.info({ at }, 'Dreaming task enabled');
     } else {
-      logger.warn({ expr: dreamingCron }, 'Invalid DREAMING_CRON, dreaming cron disabled');
+      logger.warn({ expr: env().DREAMING_CRON }, 'Invalid DREAMING_CRON, dreaming disabled');
     }
   }
 
   // AGI Level 5 Phase 2: Dreaming 整合 — 每周日 04:17 低峰。
   if (env().DREAM_CONSOLIDATE_ENABLED) {
-    tasks.push(
-      schedule('17 4 * * 0', () => {
-        void safeRun('dream-consolidate', async () => {
-          const { runDreamConsolidate } = await import('./dream-consolidate.js');
-          await runDreamConsolidate();
-        });
-      }),
-    );
-    logger.info('Dream consolidate cron enabled (Sun 04:17)');
+    reg({
+      name: 'dream-consolidate',
+      weeklyAt: { day: 0, hour: 4, minute: 17 },
+      run: async () => {
+        const { runDreamConsolidate } = await import('./dream-consolidate.js');
+        await runDreamConsolidate();
+      },
+    });
+    logger.info('Dream consolidate task enabled (Sun 04:17)');
   }
 
   // Silence alert — bot 沉默检测(端到端回复健康)。
-  // 每 SILENCE_ALERT_INTERVAL_MIN 分钟扫一次「活跃但 bot 未回复」的 chat。
-  // 默认关;开时配 SILENCE_ALERT_CHAT_ID 才真正发送,否则只打日志。
   if (env().SILENCE_ALERT_ENABLED) {
-    const intervalMin = env().SILENCE_ALERT_INTERVAL_MIN;
-    tasks.push(schedule(`*/${intervalMin} * * * *`, () => {
-      void safeRun('silence-alert', async () => {
+    reg({
+      name: 'silence-alert',
+      everySec: env().SILENCE_ALERT_INTERVAL_MIN * 60,
+      run: async () => {
         const { runSilenceAlert } = await import('./silence-alert.js');
         await runSilenceAlert();
-      });
-    }));
-    logger.info({ intervalMin }, 'Silence alert cron enabled');
+      },
+    });
+    logger.info({ intervalMin: env().SILENCE_ALERT_INTERVAL_MIN }, 'Silence alert task enabled');
   }
 
-  // 借力其他 bot:周期观察学命令档案(P1,纯观察,flag 默认关)
+  // 借力其他 bot:周期观察学命令档案(P1,纯观察)
   if (env().BOT_COMMAND_LEARN_ENABLED) {
-    tasks.push(schedule(`*/${env().BOT_COMMAND_LEARN_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('bot-command-learn', async () => {
+    reg({
+      name: 'bot-command-learn',
+      everySec: env().BOT_COMMAND_LEARN_INTERVAL_MIN * 60,
+      run: async () => {
         const { runBotCommandLearn } = await import('./bot-command-scan.js');
         await runBotCommandLearn();
-      });
-    }));
+      },
+    });
   }
 
-  // 口头禅自动惩罚闭环(盯自发言,复读超阈值→自动降权+动态拉黑,flag 默认关)
+  // 口头禅自动惩罚闭环(盯自发言,复读超阈值→自动降权+动态拉黑)
   if (env().TIC_PENALTY_ENABLED) {
-    tasks.push(schedule(`*/${env().TIC_PENALTY_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('tic-penalty', async () => {
+    reg({
+      name: 'tic-penalty',
+      everySec: env().TIC_PENALTY_INTERVAL_MIN * 60,
+      run: async () => {
         const { runTicPenalty } = await import('./tic-penalty.js');
         await runTicPenalty();
-      });
-    }));
+      },
+    });
   }
 
   // 硬作息心跳(v2):动态就寝 shift、晚安/早安边沿、半夜醒、补回排水
-  // (问候由 SLEEP_ANNOUNCE_ENABLED 在函数内部单独控制,心跳必须常跑)
   if (env().SLEEP_SCHEDULE_ENABLED) {
-    tasks.push(schedule('* * * * *', () => {
-      void safeRun('sleep-cycle', async () => {
+    reg({
+      name: 'sleep-cycle',
+      everySec: 60,
+      run: async () => {
         const { runSleepCycle } = await import('./sleep-cycle.js');
         await runSleepCycle();
-      });
-    }));
+      },
+    });
   }
 
   // （原 proactive-scan / proactive-thinker / self-play / goal-check 的独立
   // 注册已移除——决策统一由 unified-tick 做出，执行器在 tick 内部调用。）
 
-  // P4-C: Self-reflect — 每 6h 复盘自己的回复表现（自我模型，加快学习循环）
-  tasks.push(schedule('17 */6 * * *', () => {
-    void safeRun('self-reflect', async () => {
+  // P4-C: Self-reflect — 每 6h 复盘自己的回复表现(自我模型,加快学习循环)
+  reg({
+    name: 'self-reflect',
+    everySec: 6 * 3600,
+    run: async () => {
       const { runSelfReflect } = await import('./self-reflect.js');
       await runSelfReflect();
+    },
+  });
+
+  // 自我技能沉淀: 每 6h 蒸馏小 skill
+  if (env().SKILL_DISTILL_ENABLED) {
+    reg({
+      name: 'skill-distill',
+      everySec: env().SKILL_DISTILL_INTERVAL_MIN * 60,
+      run: async () => {
+        const { runSkillDistill } = await import('./skill-distill.js');
+        await runSkillDistill();
+      },
     });
-  }));
+  }
+
+  // 自我技能沉淀: 每周合并小 skill → 大 skill,归档防爆
+  if (env().SKILL_CONSOLIDATE_ENABLED) {
+    reg({
+      name: 'skill-consolidate',
+      weeklyAt: { day: 0, hour: 4, minute: 23 },
+      run: async () => {
+        const { runSkillConsolidate } = await import('./skill-consolidate.js');
+        await runSkillConsolidate();
+      },
+    });
+  }
+
+  // 爱好蒸馏: 每天一次从群友爱好蒸馏 bot 自己的爱好(慢变量)
+  if (env().HOBBY_DISTILL_ENABLED) {
+    reg({
+      name: 'hobby-distill',
+      dailyAt: { hour: 5, minute: 41 },
+      run: async () => {
+        const { distillHobbies } = await import('../tracking/hobbies.js');
+        await distillHobbies();
+      },
+    });
+  }
 
   // P2-B: RSS feed monitor — periodic feed polling + auto-post + fuel
   if (env().RSS_MONITOR_ENABLED) {
-    tasks.push(schedule(`*/${env().RSS_MONITOR_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('rss-monitor', async () => {
+    reg({
+      name: 'rss-monitor',
+      everySec: env().RSS_MONITOR_INTERVAL_MIN * 60,
+      run: async () => {
         const { runRssMonitor } = await import('./rss-monitor.js');
         await runRssMonitor();
-      });
-    }));
+      },
+    });
   }
 
   // Topic scan — extract per-chat current topic + advance topic lifecycle (D1)
   if (env().TOPIC_REGISTRY_ENABLED) {
-    tasks.push(schedule(`*/${env().TOPIC_SCAN_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('topic-scan', async () => {
+    reg({
+      name: 'topic-scan',
+      everySec: env().TOPIC_SCAN_INTERVAL_MIN * 60,
+      run: async () => {
         const { runTopicScan } = await import('./topic-scan.js');
         await runTopicScan();
-      });
-    }));
+      },
+    });
   }
 
   // Prompt-cache warmup — keep the static reply system prefix hot on DeepSeek
   if (env().CACHE_WARMUP_ENABLED) {
-    tasks.push(schedule(`*/${env().CACHE_WARMUP_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('cache-warmup', async () => {
+    reg({
+      name: 'cache-warmup',
+      everySec: env().CACHE_WARMUP_INTERVAL_MIN * 60,
+      run: async () => {
         const { runCacheWarmup } = await import('./cache-warmup.js');
         await runCacheWarmup();
-      });
-    }));
+      },
+    });
   }
 
   // Learner scan — expression + jargon extraction (Stage D)
   if (env().LEARNER_ENABLED) {
-    tasks.push(schedule(`*/${env().LEARNER_SCAN_INTERVAL_MIN} * * * *`, () => {
-      void safeRun('learner-scan', runLearnerScan);
-    }));
+    reg({
+      name: 'learner-scan',
+      everySec: env().LEARNER_SCAN_INTERVAL_MIN * 60,
+      run: runLearnerScan,
+    });
   }
 
   // Channel source scraping — every 30 minutes, fetch public channel posts into ChromaDB
-  tasks.push(schedule('*/30 * * * *', () => {
-    void safeRun('channel-sync', runChannelSync);
-  }));
+  reg({ name: 'channel-sync', everySec: 30 * 60, run: runChannelSync });
 
   // Daily stats flush — every hour
-  tasks.push(schedule('0 * * * *', () => {
-    void safeRun('stats-flush', async () => { flushDailyStats(); });
-  }));
+  reg({
+    name: 'stats-flush',
+    everySec: 3600,
+    run: async () => { flushDailyStats(); },
+  });
 
-  logger.info({ jobCount: tasks.length }, 'Cron jobs started');
+  startHeartbeat();
 }
 
 export function stopCronJobs(): void {
-  for (const task of tasks) {
-    task.stop();
-  }
-  tasks.length = 0;
+  stopHeartbeat();
   _started = false;
   logger.info('Cron jobs stopped');
 }
 
-export function isStarted(): boolean {
-  return _started;
+export { isStarted };
+
+// ── cron 表达式兼容解析(迁移期 .env 里还是 cron 写法) ────────────────────
+
+/** 把简单 cron 表达式解析成「每天 h:m」;解析不了返回 null。 */
+function parseCronToDaily(expr: string): { hour: number; minute: number } | null {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, mon, dow] = parts;
+  if (dom !== '*' || mon !== '*' || dow !== '*') return null;
+  if (!/^\d+$/.test(min!) || !/^\d+$/.test(hour!)) return null;
+  const m = Number(min);
+  const h = Number(hour);
+  if (m > 59 || h > 23) return null;
+  return { hour: h, minute: m };
 }
 
-const CRON_TIMEOUT_MS: Record<string, number> = {
-  'model-check': 60_000,
-  'daily-report': 5 * 60_000,
-  'cleanup': 5 * 60_000,
-  'knowledge-sync': 15 * 60_000,
-  'user-profile-sync': 10 * 60_000,
-  'idle-check': 60_000,
-  'sleep-cycle': 60_000,
-  'channel-sync': 10 * 60_000,
-  // 命令学习可路由到 mundo(深推理,单次可达 480s);放宽到 12min 免慢调用撞死 tick。
-  'bot-command-learn': 12 * 60_000,
-};
-const DEFAULT_CRON_TIMEOUT_MS = 5 * 60_000;
-
-const _running = new Set<string>();
-
-async function safeRun(name: string, fn: () => Promise<void>): Promise<void> {
-  if (_running.has(name)) {
-    logger.warn({ name }, 'Cron job already running, skipping');
-    return;
+/** 把简单 cron 表达式解析成间隔分钟数;解析不了返回 null。 */
+function parseCronToMinutes(expr: string): number | null {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, mon, dow] = parts;
+  if (hour !== '*' || dom !== '*' || mon !== '*' || dow !== '*') return null;
+  const step = /^\*\/(\d+)$/.exec(min!);
+  if (step) {
+    const n = Number(step[1]);
+    return n > 0 ? n : null;
   }
-  _running.add(name);
-  const start = performance.now();
-  const timeoutMs = CRON_TIMEOUT_MS[name] ?? DEFAULT_CRON_TIMEOUT_MS;
-  // 锁(_running)只在 fn() **真正 settle** 时释放,不在超时时释放(codex #2):
-  // 原来超时后就删锁 → fn 仍在后台跑,下个 tick 会起同名任务并发(重复写库/发消息/
-  // 烧 LLM)。现在超时只记告警,锁一直握到 fn 结束,下个 tick 因锁在被正常跳过。
-  const task = fn().then(
-    () => { logger.debug({ name, durationMs: Math.round(performance.now() - start) }, 'Cron job completed'); },
-    (err) => { logger.error({ err, name, durationMs: Math.round(performance.now() - start) }, 'Cron job failed'); },
-  ).finally(() => { _running.delete(name); });
-
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`Cron job ${name} timed out after ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-    });
-    await Promise.race([task, timeout]);
-  } catch {
-    logger.warn(
-      { name, timeoutMs },
-      'Cron job exceeded timeout (仍在后台跑,锁保持到结束,不会并发起同名任务)',
-    );
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  if (min === '*') return 1; // 每分钟
+  if (/^\d+$/.test(min!)) return 60; // 固定分钟(如 '30 * * * *')= 每小时
+  return null;
 }

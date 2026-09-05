@@ -122,7 +122,13 @@ async function callClaude(
     throw new AIError(data.error.message, label.name, label.model);
   }
 
-  const rawText = data.content.filter(c => c.type === 'text').map(c => c.text).join('');
+  // StepFun reasoning 模型可能只返回 thinking block 不带 text block，
+  // 此时 rawText 为空 → "Empty response"。不把 thinking 当正文发出去，
+  // 宁可报空让 fallback 链处理。
+  const rawText = data.content
+    .filter(c => c.type === 'text')
+    .map(c => c.text)
+    .join('');
   const text = rawText
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')

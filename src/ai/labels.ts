@@ -33,6 +33,7 @@ export function getLabels(): Map<string, AILabel> {
       maxTokens: p.maxTokens,
       temperature: p.temperature,
       capabilities: p.vision !== undefined ? { vision: p.vision } : undefined,
+      tier: p.tier,
     });
   }
 

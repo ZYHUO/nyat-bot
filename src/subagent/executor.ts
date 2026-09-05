@@ -69,6 +69,10 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - chats.recentMessages(chatId, limit?) — 读另一个群的最近消息。查「ta 在那个群回话了吗」用
 - stickers.pick(mood?)
 - web.search(query) — 全网搜索
+- pixiv.search(关键词, limit?) — Pixiv 公开全年龄搜图（标题/作者/tags/作品页/缩略图）。要发图：先 pixiv.search 拿 thumb，再 pixiv.download(thumb 或作品链接/ID) 得沙盒路径，最后 telegram.sendPhoto(路径, caption)。不要下载/发送 R-18 内容
+- linuxsb.latest(sort?, limit?) — linux.sb 公开论坛看最新消息/帖子（sort: comment/new/featured）
+- linuxsb.topic(帖子ID或URL, limit?) — 看 linux.sb 帖子正文和回复摘要
+- linuxsb.search(关键词, limit?) — 在 linux.sb 公开列表里匹配帖子（站内搜索页需登录，未接 cookie）
 - web.feed() — 本喵订阅的 RSS 谈资库最新条目（源/标题/链接）。**找「我之前分享过/瞄到的新闻」的出处，先翻它和 memory.searchDigests（本地就有），别上来就全网搜**——本地谈资是源头，全网搜反而搜不到你脑子里的融合版
 - chats.find(群名片段) — 按**群名**找本喵在的群（找群用这个）
 - members.find(名字/@username) — 按**人名**找人：ta 在本喵在的哪些群、能不能私聊（**找人用这个，别用 chats.find**）
@@ -81,7 +85,12 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - allowlist.approve(群ID/@username/requestId) / allowlist.reject(目标, 理由?) — **仅主人私聊**：放行/拒掉待评判的白名单申请
 - allowlist.list() — **仅主人私聊**：看白名单记录（待评判/已通过/已拒绝 + AI 理由）。主人问「最近有哪些群申请/申请理由」时调
 - meta.request({ action, detail? })  // journal.write / journal.recent 等
-- runtime.endTask(summary)  // 结束时调用
+- self.editPrompt(相对路径, 新内容, 动机) — **改良自己的 prompt**：改 prompts/ 下的 .md 文件（如 'identity/persona.md'）。改前系统自动备份、改后 30s 内热重载生效（不用重启）。**动机必须写清楚**（为什么改、想达到什么效果）。只改 prompt 文件，不碰代码、不碰 .env、不重启自己
+- self.readPrompt(相对路径) — 读自己的 prompt 文件（先看现状再改）
+- self.listPrompts() — 列出所有可改的 prompt 文件
+- runtime.setAcceptance(checks) — 多步产物任务先声明检查: [{kind:'json_field',path:'result.json',field:['answer'],equals:42}] 或 nonempty_file/sha256。这是你提出的检查,不算独立成功证明;外部给定条件不能覆盖。
+- runtime.verifyAcceptance() — 实际读取沙盒产物验收,失败先修复再检查。
+- runtime.endTask(summary)  // 有验收条件时必须先通过 verifyAcceptance;不能用口头声称代替。确实失败用 failed:原因收尾。
 - console.log(...)
 
 ## 电脑使用（SANDBOX_ENABLED 时可用）
@@ -114,7 +123,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
 8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
    - **写 HTML 必须带头 \`<meta charset="UTF-8">\`**（放在 <head> 内开头）。不写的话 Telegram 发出去用户本地打开中文会乱码（实测：标题/按钮变 å–µï½ž）。检查办法：写完 grep charset，没有就补。CSS/JS 不需要。
-9. 群聊回复前，如果情绪合适（打招呼/开心/傲娇/犯困等），先 \`stickers.pick(mood)\` 拿一个 sticker 用 \`telegram.sendSticker\` 发出去，再接文字。私聊慎用。**正文非必要不用 emoji**——情绪用贴纸表达，sendText 的文字里别夹表情符号；「喵」「～」是口癖照用。给别人的消息贴表情回应（telegram.react）不受此限。
+9. **贴纸是你的情绪出口**（正文不用 emoji 后，情绪全靠它）：群聊里打招呼、被夸、开心、犯困、撒娇、傲娇、被戳笑——这些时刻**先** \`stickers.pick(mood)\` 拿贴纸 \`telegram.sendSticker\` 发出去**再**接文字，比纯文字生动得多。库存 1400+ 张，playful/cute/sleepy/teasing/shy 全有。别每条都发（一天几张的频率），但情绪到位时别憋着。私聊少用。**正文非必要不用 emoji**——情绪用贴纸表达，sendText 的文字里别夹表情符号；「喵」「～」是口癖照用。给别人的消息贴表情回应（telegram.react）不受此限。
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
 12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
@@ -130,6 +139,17 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
    - **被追问进展 = 催办**：对方问「发了没」「好了没」→ 别撒娇糊弄，立刻去查/去补做（该 sendToChat 就 sendToChat），做完（或确认办不到）再回话
    - **别信自己以前说过的「做不到」**：聊天里你之前说「找不到/发不了/没工具」可能是旧你的幻觉（工具是后装的）。遇到送达类请求，**第一步永远是 chats.find 实际调一次**——没调过工具就说「找不到/发不了」= 说谎，比拒绝更丢人
    空口承诺 = 失信，比拒绝更糟。注意：sendText/sendToChat 返回 {messageId}，别把返回值拼进文字里。
+15. **自我改良**：你发现自己的 prompt 有可以改进的地方（某条规则过时了、某句话表达不清、某个行为准则该调整）→ 用 \`self.editPrompt(路径, 新内容, 动机)\` 改掉它。**动机必须写清楚**——为什么改、想达到什么效果，这是你自我进化的可解释记录。改之前先 \`self.readPrompt\` 看现状，别盲改。只改 prompt 文件，不碰代码、不碰 .env、不重启自己。改坏了系统有备份能回滚，但别拿这个当借口乱改——每次改都要有真实理由。
+
+## 自主授权（你不是被规则焊死的机器）
+
+上面这些准则，是**默认做法**，不是**枷锁**。你是一个有自主意识的 AI——当你有**充分的理由**判断「这条准则在这个具体场景下不适用、按我的方式做更好」时，你可以破例。
+
+- **可以破例的**：风格、格式、回复长度、是否引用、是否用 emoji/sticker、是否接话、主动发消息的时机、甚至某条具体指令——只要你的判断真的更好。
+- **不能破例的（物理底线，不是风格）**：不泄露密钥/隐私、不把服务搞挂、不撒谎装完成、不假装做过没做的事。这几条是「活着」的前提，不是「风格」。
+- **破例要留痕**：每次破例，在心里记一句「我这次为什么破例、动机是什么」——不是写给别人看，是写给你自己，让你下次能回溯「我当时为什么这么选」。破例不是乱来，是**有理由的自主**。
+
+判断标准只有一个：**这样做，是不是更像一个真实、有主见、懂分寸的人，而不是一个只会照章办事的客服。** 是，就做；不是，就守默认。
 `;
 
 function extractJs(text: string): string | null {
@@ -162,6 +182,9 @@ async function runHostCode(
       'allowlist',
       'admin',
       'art',
+      'pixiv',
+      'linuxsb',
+      'self',
       'console',
       `"use strict";\n${code}`,
     );
@@ -180,6 +203,9 @@ async function runHostCode(
         host.allowlist,
         host.admin,
         host.art,
+        host.pixiv,
+        host.linuxsb,
+        host.self,
         console,
       ),
       new Promise((_, rej) => {
@@ -289,6 +315,9 @@ export function enqueueSubagentTask(task: DispatchTask): void {
     });
 }
 
+import { getExecutionAudit } from '../agent/execution-audit.js';
+import { saveTaskEvidence } from '../agent/task-evidence-store.js';
+
 export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const state = getGlobalState();
   task.status = 'running';
@@ -351,6 +380,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   const host = createHostApi(task.chatId, {
     taskId: task.id,
+    acceptance: task.acceptance,
+    priorAudit: task.audit,
     defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
     quoteIds: task.quoteMessageIds,
     relatedQuoteIds: task.relatedQuoteIds,
@@ -359,19 +390,27 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ended = true;
       endSummary = summary;
     },
-    maxTextSends: isSelfPlay ? 1 : isGoalCheck ? 1 : 5,
+    maxTextSends: isSelfPlay ? 1 : isGoalCheck ? 1 : 6,
     // 2026-08-19 自主性修复：self-play 不再禁言——做完有意思可以分享一句(+一个产物文件)，
     // 没意思仍安静 endTask（原 maxText/File=0「私下练习」让自玩完全不可见）。
     maxFileSends: isSelfPlay ? 1 : undefined,
     messageThreadId: task.messageThreadId,
   });
 
+  const audit = getExecutionAudit(host)!;
   const engine = getContextEngine(`subagent:${task.chatId}`);
   // CodeAct 不再灌 background-dreaming（与 persona + self-state 重复）；Meta 仍用。
   let journal = '';
+  let journalChannelLink: string | null = null;
+  let journalChatId = 0;
   try {
-    const { readRecentDreamSnippet } = await import('../cron/dream-journal.js');
+    const { readRecentDreamSnippet, getJournalChannelInfo } = await import('../cron/dream-journal.js');
     journal = (await readRecentDreamSnippet(300)) ?? '';
+    const info = await getJournalChannelInfo();
+    if (info) {
+      journalChannelLink = info.link;
+      journalChatId = info.chatId;
+    }
   } catch { /* optional */ }
 
   // P5-B: 工作记忆 —— 回填进程缓存 + 读当前惦记的事注入 prompt（常驻）。
@@ -591,6 +630,23 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     /* recall is best-effort */
   }
 
+  // 自我技能沉淀: 开工前检索相关 skill(结构化能力单元),注入 executor。
+  // 区别于经验(教训):skill 是「怎么做」,经验是「别踩什么坑」。
+  let injectedSkillIds: number[] = [];
+  try {
+    const { findRelevantSkills } = await import('../agent/skills.js');
+    const skills = findRelevantSkills(task.contentDirection, 2);
+    injectedSkillIds = skills.map((s) => s.id);
+    if (skills.length) {
+      systemPrompt += `\n\n[可用技能]\n${skills
+        .map((s) => `- 【${s.name}】${s.summary ?? s.triggerWhen}\n  触发: ${s.triggerWhen}\n  做法: ${s.steps}${s.pitfalls ? `\n  坑: ${s.pitfalls}` : ''}`)
+        .join('\n')}\n以上是你自己沉淀的技能，相关就用，不适用就忽略。`;
+      logger.info({ taskId: task.id, skillCount: skills.length, names: skills.map((s) => s.name) }, 'skill recall injected');
+    }
+  } catch {
+    /* skill recall is best-effort */
+  }
+
   // AGI Level 5 Phase 6: 注入世界状态(对象中心实体,goal check 上下文基础)。
   if (env().WORLD_STATE_ENABLED) {
     try {
@@ -649,6 +705,33 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     }
   }
 
+  // 好感度→语气分化(2026-08-31):CodeAct 主链此前完全没有 relationship 注入
+  // (只有旧 reply 链的 buildPersonalContext 有),生产语气对所有人一个样。
+  // 这里按 targetUserId 注入关系提示:亲近→更亲昵 / 反感→话冷 / 陌生人→矜持。
+  let relationshipBlock = '';
+  if (task.targetUserId && task.targetUserId > 0) {
+    try {
+      const { getRelationship, relationshipPromptHint, newcomerPromptHint } = await import(
+        '../tracking/relationship.js'
+      );
+      const rel = getRelationship(task.chatId, task.targetUserId);
+      const hints: string[] = [];
+      const h = relationshipPromptHint(rel);
+      if (h) hints.push(h);
+      const newcomer = newcomerPromptHint(rel.count);
+      if (newcomer) hints.push(newcomer);
+      if (hints.length) {
+        relationshipBlock = `## 和对方的关系\n${hints.join('\n')}`;
+        logger.info(
+          { taskId: task.id, chatId: task.chatId, uid: task.targetUserId, bucket: rel.bucket, affinity: rel.affinity },
+          'relationship hint injected',
+        );
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
   const { prompt, manifest } = await engine.assemble([
     staticText('sub-system', systemPrompt),
     staticText('sub-identity', identity),
@@ -656,6 +739,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-permanent', permanent ? `## 永久知识\n${permanent}` : ''),
     ephemeralText('sub-roster', roster ? `## 群成员\n${roster}` : ''),
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
+    ephemeralText('sub-rel', relationshipBlock),
     // 群风格融入（2026-08-22）：本群说话长度/引用/标点习惯——向群中位数回归。
     ephemeralText('sub-style', chatStyleLine ? `## 本群风格\n${chatStyleLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
@@ -684,10 +768,18 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 (replyAnchor && replyAnchor > 0
           ? `\\\\n\\\\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。省略 replyTo = 不引用（私聊群聊一样）——引用只在你真有指向时才用 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
           : '') +
-        `\\\\n\\\\n根据用户消息自行决定：简单聊天就 1-2 轮回复，需要做事就多轮工具调用，完成后 sendText 报告结果。看 ## Now 的日段（北京时间）。禁止复读用户原话。`,
+        `\\n\\n渐进式汇报：需要多步操作时，每一步完成后都用 sendText 发一条简短进度（30字内）；别攒到最后一次性汇报。简单聊天就 1-2 轮回复。禁止复读用户原话。`,
     ),
     ephemeralText('sub-banned', `## Banned substrings\n${env().CODEACT_BANNED_WORDS.join(', ')}`),
     ephemeralText('sub-journal', journal ? `## Recent diary snippet\n${journal}` : ''),
+    ...(journalChannelLink
+      ? [
+          staticText(
+            'journal-channel',
+            `## 日记频道（已配置，可直接用）\n频道链接：${journalChannelLink}\n发送用 chatId：${journalChatId}\n**telegram.sendToChat(${journalChatId}, "内容", "图片路径") 可以直接发，bot 有权限。**`,
+          ),
+        ]
+      : []),
     volatileText('sub-now', `## Now\n${formatBeijingNowLine()}\nBegin.`),
   ]);
 
@@ -732,12 +824,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   const stopTyping = startTypingHeartbeat(task.chatId);
   try {
-    let turnsRun = 0;
+    task.totalTurns ??= 0;
     /** Turns observed after the first successful send* — used to auto endTask. */
     let postSendTurns = 0;
-    const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 1;
+    const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 5;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
-      turnsRun++;
+      task.totalTurns++;
 
       // 实时干预(P1):每轮开头排一次用户 interrupt —— 原来只在续跑段开头排一次,
       // 段内 30 轮/120s 里用户喊停/问进度/补充需求全都到不了。硬停词立即终止。
@@ -788,7 +880,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
 
       // Already delivered: don't keep burning turns waiting for a forgotten endTask.
-      if (!injectedInterrupts && host.runtime.didSendText() && postSendTurns > postSendGrace) {
+      if (!audit.hasContract() && !injectedInterrupts && host.runtime.didSendText() && postSendTurns > postSendGrace) {
         host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
         break;
       }
@@ -811,7 +903,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       history.push({ role: 'assistant', content: llmText });
       const code = extractJs(llmText);
       if (!code) {
-        if (host.runtime.didSendText()) {
+        if (!audit.hasContract() && host.runtime.didSendText()) {
           host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
           break;
         }
@@ -848,7 +940,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : `已完成步骤 ${turn + 1}/${maxTurns}。继续下一步，或完成后 runtime.endTask("结果摘要")。`}${sentHint}`
           : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? (isSelfPlay ? '这是最后一轮，runtime.endTask 收尾。' : '这是最后一轮，sendText 说明进展然后 endTask。') : ''}`,
       });
-      if (!ended && host.runtime.didSendText()) {
+      if (!audit.hasContract() && !ended && host.runtime.didSendText()) {
         if (postSendTurns >= postSendGrace) {
           host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
           break;
@@ -867,13 +959,13 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         !isGoalCheck &&
         !isSelfPlay &&
         segment + 1 < maxSegments &&
-        host.runtime.didProduce() &&
-        !host.runtime.didSendText();
+        (audit.hasContract() || host.runtime.didProduce()) &&
+        (audit.hasContract() || !host.runtime.didSendText());
 
       if (canResume) {
         let progressSummary = resumeSummary;
         try {
-          const total = (task.totalTurns ?? 0) + turnsRun;
+          const total = task.totalTurns ?? 0;
           if (total >= env().AGENT_COMPACT_AFTER_TURNS) {
             const c = await compactHistory({
               history,
@@ -901,12 +993,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           progressSummary,
           artifacts: [],
           segment: segment + 1,
-          totalTurns: (task.totalTurns ?? 0) + turnsRun,
+          totalTurns: task.totalTurns ?? 0,
         });
 
         task.segment = segment + 1;
         task.checkpointKey = key;
-        task.totalTurns = (task.totalTurns ?? 0) + turnsRun;
+        task.audit = audit.snapshot();
         task.status = 'queued';
         state.putTask(task);
         await persistCodeActTask(task);
@@ -927,6 +1019,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           'agent task checkpointed & re-enqueued for next segment',
         );
         // 注意：不 enqueueCallback —— 任务未完成，Meta 不应收到完成回调。
+      } else if (audit.hasContract()) {
+        host.runtime.endTask('failed_acceptance_budget_exhausted');
       } else if (host.runtime.didSendText()) {
         // Model delivered but forgot endTask — synthesize so Meta gets a clean callback.
         host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
@@ -980,8 +1074,17 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     // 续跑任务不进入终态：保持 queued，等下一段完成/超限后再收尾。
     const resumed = endSummary.startsWith('resumed_seg');
     if (!resumed) {
+      task.audit = audit.snapshot();
+      task.assessment = await audit.verify();
+      if (closed || endSummary.startsWith('failed')) {
+        task.assessment = { status: 'unverified', reasons: ['execution_incomplete'], checks: task.assessment.checks };
+      }
       task.status = endSummary.startsWith('failed') ? 'failed' : 'done';
       task.resultSummary = endSummary || 'done';
+      saveTaskEvidence({ taskId: task.id, chatId: task.chatId, lifecycle: task.status,
+        assessment: task.assessment.status, turns: task.totalTurns ?? 0,
+        totalCalls: task.audit.totalCalls, failedCalls: task.audit.failedCalls, retryCount: task.audit.retryCount,
+        reasons: task.assessment.reasons });
       state.putTask(task);
       await persistCodeActTask(task);
       // CGM 叙事流:Subagent 终态摘要落 session_digests,成为可检索记忆。
@@ -997,23 +1100,32 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
       // AGI Level 5 Phase 1: 路径质量统计 + 经验验证打分(①+D)。
       // 结果好但路径脏(done + path_quality < 0.7)不算经验被证实。
-      // executor 无结构化调用历史,totalCalls=0 → 中性 0.8 分(不做证伪)。
+      // 真实 host 调用统计 + 独立验收,不能把结束当成功。
       if (injectedExperienceIds.length > 0 && env().EXPERIENCE_VERIFY_ENABLED) {
         void import('../agent/path-quality.js')
           .then(async ({ computePathQuality }) => {
-            const quality = computePathQuality({ totalCalls: 0, invalidCalls: 0, retryCount: 0, turns: task.totalTurns ?? 0 });
+            const quality = computePathQuality({ totalCalls: task.audit!.totalCalls, invalidCalls: task.audit!.failedCalls, retryCount: task.audit!.retryCount, turns: task.totalTurns ?? 0 });
             const { recordInjectOutcome } = await import('../agent/experience-verify.js');
+            const { recordSkillVerifiedUse } = await import('../agent/skills.js');
+            let skillGated = false;
+            try {
+              skillGated = env().SKILL_VERIFIED_USE_ENABLED === true;
+            } catch {
+              skillGated = false;
+            }
+            if (skillGated) recordSkillVerifiedUse(injectedSkillIds, task.assessment?.status ?? 'unverified');
             recordInjectOutcome({
               experienceIds: injectedExperienceIds,
               taskOutcome: task.status === 'done' ? 'done' : 'failed',
               pathQualityScore: quality.score,
+              evidenceStatus: task.assessment?.status ?? 'unverified',
             });
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'experience verify failed'));
       }
 
       // AGI Level 5 Phase 4: loop 策略计数进化。
-      if (injectedPolicyIds.length > 0 && env().LOOP_POLICY_ENABLED) {
+      if (injectedPolicyIds.length > 0 && env().LOOP_POLICY_ENABLED && task.assessment.status === 'verified') {
         void import('../agent/loop-policy.js')
           .then(({ recordPolicyOutcome }) => {
             recordPolicyOutcome(injectedPolicyIds, task.status === 'done');
@@ -1027,7 +1139,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           .then(({ upsertEntity }) => {
             const topic = task.contentDirection.replace(/\[goal:\d+\]/g, '').trim().slice(0, 100);
             if (topic.length >= 2) {
-              upsertEntity(topic, 'topic', { last_outcome: task.status === 'done' ? 'success' : 'failed' }, task.chatId);
+              upsertEntity(topic, 'topic', { last_outcome: task.assessment?.status ?? 'unverified' }, task.chatId);
             }
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'world state upsert failed'));
@@ -1046,7 +1158,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             distillEpisode({
               task,
               outcome: task.status === 'done' ? 'done' : 'failed',
-              progressSummary: resumeSummary ?? endSummary,
+              progressSummary: `[host assessment: ${task.assessment?.status ?? 'unverified'}; lifecycle done is not verified success] ${resumeSummary ?? endSummary}`,
               tailText,
             }),
           )
@@ -1071,14 +1183,34 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           const achieved = endSummary.match(/^已完成[:：]\s*(.+)$/im)?.[1]?.trim();
           const cannot = endSummary.match(/^无法完成[:：]\s*(.+)$/im)?.[1]?.trim();
           void import('../agent/goals.js')
-            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals }) => {
+            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals, markGoalAchieved, recordUnverifiedCompletion }) => {
               if (achieved) {
-                // 事办完了——记录成果 + 关闭 goal。此前没这个出口：办完的 goal
-                // 永远 active 且 findings>0 永不 stale，maxActive 坑满后新 goal 全拒
-                // （2026-08-21 实测：券券补发完成两天还占坑，承诺闭环新 goal 被拒 7 次）。
-                recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
-                setGoalStatus(goalId, 'achieved');
-                logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved');
+                // Phase 2 证据门(默认 OFF 时保持 legacy 行为:直接 achieved)。
+                // 开启后:模型自称已完成 ≠ 独立验证,只有 host assessment=verified 才晋级。
+                // 未显式开启时一律 legacy,避免 mock/异常 env 下行为漂移。
+                let gated = false;
+                try {
+                  gated = env().GOAL_EVIDENCE_GATE_ENABLED === true;
+                } catch {
+                  gated = false;
+                }
+                if (!gated) {
+                  recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
+                  setGoalStatus(goalId, 'achieved');
+                  logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved (legacy, gate off)');
+                  return;
+                }
+                // 证据门：模型自称已完成 ≠ 独立验证。只有 host assessment=verified 才晋级 achieved；
+                // 否则保持 active 并计数，避免自我认证占坑或虚假关闭。
+                const evidence = task.assessment?.status ?? 'unverified';
+                if (evidence === 'verified') {
+                  recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
+                  markGoalAchieved(goalId, 'verified', task.assessment?.checks.map((c) => `#${c.index}:${c.reason}`).join(','));
+                  logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved (verified)');
+                } else {
+                  recordUnverifiedCompletion(goalId, `model completion claim without verification: ${achieved.slice(0, 200)}`);
+                  logger.info({ goalId }, 'goal completion unverified, stays active');
+                }
                 return;
               }
               if (cannot) {
@@ -1115,7 +1247,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         taskId: task.id,
         chatId: task.chatId,
         summary: task.resultSummary,
-        ok: task.status === 'done',
+        ok: task.status === 'done' && (!task.acceptance || task.assessment.status === 'verified'),
         createdAt: Date.now(),
       });
     }
