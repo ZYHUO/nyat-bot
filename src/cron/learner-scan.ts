@@ -155,7 +155,7 @@ export async function runLearnerScan(): Promise<void> {
         const { needsExemplars, pickExemplars, saveExemplars } = await import('../learners/dialect-exemplar.js');
         if (needsExemplars(chatId)) {
           const lines = formatMessagesForLearner(newMsgs).split('\n').filter(Boolean);
-          const picked = pickExemplars(lines, 0);
+          const picked = pickExemplars(lines);
           if (picked.length > 0) {
             saveExemplars(chatId, picked);
             logger.info({ chatId, count: picked.length }, 'learner-scan: exemplar cold-start filled');

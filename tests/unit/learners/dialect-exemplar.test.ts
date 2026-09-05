@@ -41,14 +41,14 @@ describe('dialect exemplar', () => {
       '今晚加班到十点',
       '周报写完了吗',
     ];
-    const picked = pickExemplars(msgs, 9999);
+    const picked = pickExemplars(msgs);
     expect(picked.length).toBeLessThanOrEqual(10);
     // 近似重复被去重
     expect(picked.filter((s) => s.includes('笑死我了')).length).toBe(1);
   });
 
   it('pickExemplars: skips bot own messages via marker', () => {
-    const picked = pickExemplars(['SELF: 我是bot', '真人说话味儿'], 9999);
+    const picked = pickExemplars(['SELF: 我是bot', '真人说话味儿']);
     expect(picked.some((s) => s.includes('我是bot'))).toBe(false);
   });
 

@@ -43,7 +43,7 @@ function isCandidate(raw: string): boolean {
  * 从一批群聊文本里挑 ≤10 条 exemplar(确定性,无 LLM)。
  * 输入是已格式化的 "name: text" 行或纯文本;含 SELF 标记的行自动排除。
  */
-export function pickExemplars(lines: string[], _botUid: number): string[] {
+export function pickExemplars(lines: string[]): string[] {
   const out: string[] = [];
   for (const line of lines) {
     // 取冒号后的正文(learner-scan 格式 "name: text");无冒号整行当正文
