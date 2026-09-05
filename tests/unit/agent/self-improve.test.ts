@@ -3,6 +3,9 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => ({ prepare: () => ({ run: () => ({}) }) }),
 }));
+vi.mock('../../../src/env.js', () => ({
+  env: () => ({ SELF_EDIT_GUARDRAILS_ENABLED: true }),
+}));
 vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));

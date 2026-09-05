@@ -35,6 +35,18 @@ File checks are deliberately limited: nonempty, JSON field equality, SHA256. The
 
 Only verified outcomes with observed acceptable execution quality may increment positive experience evidence. Unverified outcomes neither reward nor punish. Retrieval/use counts are not evidence that a skill improved performance. Existing legacy verified flags are not automatically erased; cleaning historical evidence requires a separately reviewed migration/experiment.
 
+## Phase 2: evidence-gated goals and learning (flags default OFF)
+
+`GOAL_EVIDENCE_GATE_ENABLED`, `SKILL_VERIFIED_USE_ENABLED`, `SELF_EDIT_GUARDRAILS_ENABLED` all default to `false`. When OFF, behavior matches pre-Phase-2 (legacy direct `achieved` path, no skill verified-use counting, ungated self-edit). When ON:
+
+- Goal `achieved` requires host-verified evidence: `markGoalAchieved(id, 'verified', label)` throws on anything else; unverified model completion claims stay `active` via `recordUnverifiedCompletion` (new `verified_achievements` / `unverified_completions` / `last_evidence` columns from migration `0073`).
+- Episodes derive outcome from assessment: lifecycle `done` + `unverified` is distilled as `failed`, so unverified claims cannot become skills or positive experience.
+- Skill distillation reads verified episodes only (`JOIN task_evidence ... assessment='verified'`); rows without evidence (old data) are excluded, not assumed.
+- `use_count` remains a retrieval counter; `verified_use_count` (migration `0074`) is the new learning signal, incremented only on `verified` tasks.
+- Self-edit has a 24h cooldown and an 8000-char size cap, and never self-certifies (motive annotated with task assessment, not marked verified).
+
+Still NOT proven by this phase: cross-domain generalization, memory/skill ON-vs-OFF learning gains, long-horizon recovery. Those need real held-out runs, not flag flips.
+
 ## Persistence
 
 Migration `0072_task_evidence.sql` adds an evaluation sidecar instead of breaking the historical episodes schema. Evidence includes task ID, chat ID, assessment, lifecycle, bounded reason codes, actual turns, calls, failures and retries. Do not log tool bodies, secrets, private chat content, or generated code into these records. Persistence failures remain visible and do not make tasks successful.

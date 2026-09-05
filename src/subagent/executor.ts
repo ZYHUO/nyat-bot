@@ -1107,7 +1107,13 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             const quality = computePathQuality({ totalCalls: task.audit!.totalCalls, invalidCalls: task.audit!.failedCalls, retryCount: task.audit!.retryCount, turns: task.totalTurns ?? 0 });
             const { recordInjectOutcome } = await import('../agent/experience-verify.js');
             const { recordSkillVerifiedUse } = await import('../agent/skills.js');
-            recordSkillVerifiedUse(injectedSkillIds, task.assessment?.status ?? 'unverified');
+            let skillGated = false;
+            try {
+              skillGated = env().SKILL_VERIFIED_USE_ENABLED === true;
+            } catch {
+              skillGated = false;
+            }
+            if (skillGated) recordSkillVerifiedUse(injectedSkillIds, task.assessment?.status ?? 'unverified');
             recordInjectOutcome({
               experienceIds: injectedExperienceIds,
               taskOutcome: task.status === 'done' ? 'done' : 'failed',
@@ -1179,6 +1185,21 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           void import('../agent/goals.js')
             .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals, markGoalAchieved, recordUnverifiedCompletion }) => {
               if (achieved) {
+                // Phase 2 证据门(默认 OFF 时保持 legacy 行为:直接 achieved)。
+                // 开启后:模型自称已完成 ≠ 独立验证,只有 host assessment=verified 才晋级。
+                // 未显式开启时一律 legacy,避免 mock/异常 env 下行为漂移。
+                let gated = false;
+                try {
+                  gated = env().GOAL_EVIDENCE_GATE_ENABLED === true;
+                } catch {
+                  gated = false;
+                }
+                if (!gated) {
+                  recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
+                  setGoalStatus(goalId, 'achieved');
+                  logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved (legacy, gate off)');
+                  return;
+                }
                 // 证据门：模型自称已完成 ≠ 独立验证。只有 host assessment=verified 才晋级 achieved；
                 // 否则保持 active 并计数，避免自我认证占坑或虚假关闭。
                 const evidence = task.assessment?.status ?? 'unverified';

@@ -15,3 +15,14 @@
 - Persisted `lifecycle=done, assessment=unverified` remains explicitly unverified.
 - Same-ID updates are idempotent; cross-chat collisions are rejected; invalid counts and missing schemas return failure.
 - Final code review and regression results are appended after integration, not inferred from this baseline.
+
+## Phase 2 gate (all flags default OFF)
+
+- `GOAL_EVIDENCE_GATE_ENABLED=1`: goal `achieved` requires host-verified evidence; unverified claims stay active.
+- `SKILL_VERIFIED_USE_ENABLED=1`: `verified_use_count` increments only on verified tasks.
+- `SELF_EDIT_GUARDRAILS_ENABLED=1`: 24h cooldown + 8000-char cap on self-edit.
+
+Verify: `tests/unit/env.test.ts` (defaults OFF + override), `tests/unit/agent/goals.test.ts` (gate),
+`tests/unit/cron/skill-distill.test.ts` (verified-only material),
+`tests/unit/agent/skill-verified-use.test.ts` (no `use_count` rewrite),
+`tests/unit/agent/self-improve.test.ts` (cooldown + size, env-mocked ON).

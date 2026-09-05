@@ -395,6 +395,12 @@ const envSchema = z.object({
   // goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。
   // long_term goal 的 stale 窗口放宽到 30 天。
   GOAL_LONG_TERM_ENABLED: booleanFromEnv.default(false),
+  // ── Phase 2: 证据门学习 ──────────────────────────────────────────
+  // 默认 OFF:OFF 时行为与 Phase-2 之前一致(legacy 直写路径)。
+  // 开启后:goal achieved 必须 host verified;skill verified_use 独立计数;自改 prompt 受冷却/长度限制。
+  GOAL_EVIDENCE_GATE_ENABLED: booleanFromEnv.default(false),
+  SKILL_VERIFIED_USE_ENABLED: booleanFromEnv.default(false),
+  SELF_EDIT_GUARDRAILS_ENABLED: booleanFromEnv.default(false),
   // ── AGI Level 5 Phase 4: Loop 策略资产化 ─────────────────────────────
   // executor 循环策略(验证/重试/停止)从静态升级为可进化资产:
   // 注入 prompt + 任务终态计数,成功率 <30% 自动 disable。
