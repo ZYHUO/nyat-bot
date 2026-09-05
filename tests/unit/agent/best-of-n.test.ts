@@ -37,6 +37,16 @@ describe('best-of-n', () => {
     expect(score).toBe(0.9);
   });
 
+  it('feedbackBias shifts scores without changing LLM content judgment', async () => {
+    // 同一内容分 0.5: 群友买账(+1) → 0.65; 被怼(-1) → 0.35; 无 bias → 原样 0.5
+    expect(await verifyReplyQuality({ reply: '中间', feedbackBias: 1 })).toBeCloseTo(0.65, 2);
+    expect(await verifyReplyQuality({ reply: '中间', feedbackBias: -1 })).toBeCloseTo(0.35, 2);
+    expect(await verifyReplyQuality({ reply: '中间' })).toBe(0.5);
+    // 内容分仍主导: 0.9 内容 + 差态度(-1) = 0.63, 仍高于 0.1 内容 + 好态度(+1) = 0.37
+    expect(await verifyReplyQuality({ reply: '我是正确答案', feedbackBias: -1 })).toBeCloseTo(0.63, 2);
+    expect(await verifyReplyQuality({ reply: '乱编的', feedbackBias: 1 })).toBeCloseTo(0.37, 2);
+  });
+
   it('single candidate passes through', async () => {
     const { best } = await pickBestOfN(['only']);
     expect(best).toBe('only');

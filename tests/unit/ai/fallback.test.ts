@@ -98,6 +98,30 @@ describe('parseJudgeAction', () => {
     expect(result!.action).toBe('REPLY');
     expect(result!.replyPath).toBe('planned');
   });
+
+  it('strips paired thinking blocks wrapping JSON (reasoning-model residue)', () => {
+    const result = parseJudgeAction('<think>让我想想……这条消息在问问题</think>\n{"action": "REPLY", "confidence": 0.8}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+  });
+
+  it('strips unclosed thinking prefix (StepFun only-thinking response)', () => {
+    const result = parseJudgeAction('一些推理过程……</think>\n{"action": "IGNORE", "confidence": 0.9}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+  });
+
+  it('thinking residue keywords do not cause false-positive keyword fallback', () => {
+    // thinking 里提到 REPLY 但真正的决策是 IGNORE —— 剥干净后必须走 JSON, 不能被关键词带偏
+    const result = parseJudgeAction('<think>要不要 REPLY 呢? 不, 没必要</think>\n{"action": "IGNORE"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+  });
+
+  it('returns null for empty/thinking-only responses', () => {
+    expect(parseJudgeAction('')).toBeNull();
+    expect(parseJudgeAction('<think>还在想……</think>')).toBeNull();
+  });
 });
 
 // Fallback chain tests - mock the AI provider

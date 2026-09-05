@@ -22,6 +22,8 @@ export interface VerifyInput {
   reply: string;
   /** 群调性/上下文摘要(可选,帮助 verifier 判断"符不符合这个群") */
   contextHint?: string;
+  /** 同群 bot 消息近期 sentiment 均值(-1..1,来自 feedback_events)。可选;无则纯 LLM 分。 */
+  feedbackBias?: number;
 }
 
 /** 回复复杂度估计(近似难度分类器,纯规则)。返回 1(简单)到 3(难)。 */
@@ -46,9 +48,16 @@ export function sampleCountFor(difficulty: 1 | 2 | 3, base: number): number {
 /**
  * verifier: 单条回复质量打分。返回 0..1(0=最差,1=最好)。
  * 判断维度: 相关性 / 调性符合 / 无胡编 / 回答完整。
+ *
+ * Phase B: 真实质量信号先行 —— 调用方传入的 feedbackBias(-1..1,来自
+ * feedback_events 里同群 bot 消息的近期 sentiment 均值)直接加权:
+ * 群友最近越买账, 分数上浮; 最近被怼/被无视, 分数下压。
+ * LLM 只评内容分, 最终分 = clamp(内容分*0.7 + (0.5+bias/2)*0.3)。
+ * 无 bias 时退化为纯 LLM 分(行为零变化)。
  */
 export async function verifyReplyQuality(input: VerifyInput): Promise<number> {
   const prompt = `你是回复质量评审。给这条 bot 回复打分(0-1)。考虑: 1)是否答非所问 2)是否胡编事实(没有依据的断言) 3)语气是否符合群聊调性(自然、不过度谄媚) 4)是否完整回答。只输出一个 0-1 数字,不要其他内容。\n\n${input.contextHint ? `群上下文: ${input.contextHint.slice(0, 300)}\n\n` : ''}回复: ${input.reply.slice(0, 800)}`;
+  let content = 0.5;
   try {
     const res = await callWithFallback({
       usage: 'judge',
@@ -57,25 +66,30 @@ export async function verifyReplyQuality(input: VerifyInput): Promise<number> {
       maxTokens: 8,
     });
     const n = Number.parseFloat((res.content ?? '').trim());
-    if (Number.isFinite(n)) return Math.max(0, Math.min(1, n));
-    return 0.5;
+    if (Number.isFinite(n)) content = Math.max(0, Math.min(1, n));
   } catch (err) {
     logger.debug({ err }, 'verifier failed, neutral score');
-    return 0.5;
   }
+  // 真实信号加权: 无 bias 原样返回(行为零变化); 有则内容分*0.7 + 群友态度*0.3。
+  const b = input.feedbackBias;
+  if (typeof b !== 'number' || !Number.isFinite(b)) return content;
+  const crowd = Math.max(0, Math.min(1, 0.5 + b / 2));
+  return Math.round((content * 0.7 + crowd * 0.3) * 100) / 100;
 }
 
 /**
  * best-of-N 挑选: 给定 N 条候选,verifier 打分选最优。
  * 返回最优回复 + 其分数。N=1 时直接返回(零开销)。
+ * feedbackBias 可选(Phase B 真实信号): 透传给 verifier, 无则纯 LLM 分。
  */
 export async function pickBestOfN(
   candidates: string[],
   contextHint?: string,
+  feedbackBias?: number,
 ): Promise<{ best: string; score: number }> {
   if (candidates.length <= 1) return { best: candidates[0] ?? '', score: 0.5 };
   const scored = await Promise.all(
-    candidates.map(async (c) => ({ c, s: await verifyReplyQuality({ reply: c, contextHint }) })),
+    candidates.map(async (c) => ({ c, s: await verifyReplyQuality({ reply: c, contextHint, feedbackBias }) })),
   );
   scored.sort((a, b) => b.s - a.s);
   return { best: scored[0]!.c, score: scored[0]!.s };

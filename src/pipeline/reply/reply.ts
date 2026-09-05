@@ -1107,9 +1107,16 @@ export async function generateReply(
         const v = variantDraft.find((p) => !p.action && !isBlankReply(p.replyContent));
         if (v) {
           const ctxHint = `群聊回复,主题: ${(message.textContent || '').slice(0, 100)}`;
-          const { best, score } = await pickBestOfN([primary.replyContent, v.replyContent], ctxHint);
+          // Phase B: 同群近期群友态度进 verifier(同步 SQLite, <1ms)。无数据 bias=0,
+          // 加权后 ≈ 纯 LLM 分, 行为零变化; 有数据才上浮/下压。
+          let bias = 0;
+          try {
+            const { getChatFeedbackBias } = await import('../../tracking/feedback.js');
+            bias = getChatFeedbackBias(chatId);
+          } catch { /* non-critical: bias=0 */ }
+          const { best, score } = await pickBestOfN([primary.replyContent, v.replyContent], ctxHint, bias);
           if (best !== primary.replyContent && best === v.replyContent) {
-            logger.info({ chatId, score, primaryLen: primary.replyContent.length, variantLen: v.replyContent.length }, 'best-of-N picked variant over primary');
+            logger.info({ chatId, score, bias, primaryLen: primary.replyContent.length, variantLen: v.replyContent.length }, 'best-of-N picked variant over primary');
             primary.replyContent = v.replyContent;
           } else {
             logger.debug({ chatId, score }, 'best-of-N kept primary');
