@@ -52,9 +52,13 @@ export interface ParsedReply {
    * G2 统一动作空间(TURN_ACTION_PLANNER_ENABLED):
    *   reply(默认/缺省)| react(只点 emoji)| sticker(只发贴纸)| silent(主动沉默)
    */
-  action?: 'reply' | 'react' | 'sticker' | 'silent';
+  action?: 'reply' | 'react' | 'sticker' | 'silent' | 'poll';
   /** action='react' 时的 emoji(已规范化到 Telegram 白名单) */
   emoji?: string;
+  /** action='poll' 时的投票问题(≤200字) */
+  pollQuestion?: string;
+  /** action='poll' 时的选项(2-10个,各≤60字) */
+  pollOptions?: string[];
   /** action='sticker':模型把贴纸当一等动作 → 投递层跳过贴纸冷却 */
   modelStickerAct?: boolean;
   /** G10: 模型表达的投递意图 — 这句想停顿酝酿一拍再发(重点/转折处) */
@@ -446,10 +450,27 @@ function validateAndReturn(
   data: Record<string, unknown>,
   fallbackMessageId: number,
 ): ParsedReply | null {
-  // ── G2 action items (react / sticker / silent) ──
+  // ── G2 action items (react / sticker / silent / poll) ──
   const actionRaw = typeof data['action'] === 'string' ? data['action'].toLowerCase() : undefined;
   if (actionRaw === 'silent') {
     return { action: 'silent', replyContent: '', targetMessageId: fallbackMessageId };
+  }
+  // H3 poll 进主流程：问题+选项双约束，任一不满足整项丢弃（防半吊子投票）。
+  // 长度上限与 host-api sendPoll 同值（q≤200/选项各≤60/2-10个），解析层先拦一道。
+  if (actionRaw === 'poll') {
+    const q = String(data['question'] ?? '').trim().slice(0, 200);
+    const opts = (Array.isArray(data['options']) ? data['options'] : [])
+      .map((o) => String(o ?? '').trim().slice(0, 60))
+      .filter(Boolean)
+      .slice(0, 10);
+    if (!q || opts.length < 2) {
+      logger.debug({ q: q.slice(0, 30), optN: opts.length }, 'Poll action missing question/options, dropping');
+      return null;
+    }
+    let target = data['targetMessageId'] ?? data['target_message_id'] ?? fallbackMessageId;
+    if (typeof target === 'string') target = parseInt(target, 10);
+    if (typeof target !== 'number' || !Number.isFinite(target)) target = fallbackMessageId;
+    return { action: 'poll', replyContent: '', targetMessageId: target as number, pollQuestion: q, pollOptions: opts };
   }
   if (actionRaw === 'react') {
     const emoji = normalizeReactionEmoji(data['emoji'] ?? data['reaction']);

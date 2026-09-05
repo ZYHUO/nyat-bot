@@ -240,6 +240,8 @@ export async function generateReply(
   toolExecutionFailed: boolean;
   /** G2: model-chosen emoji reactions to execute as first-class acts */
   reactions?: Array<{ targetMessageId: number; emoji: string }>;
+  /** H3: model-chosen poll to execute as first-class act (max 1 per turn) */
+  polls?: Array<{ question: string; options: string[]; targetMessageId: number }>;
   /** G2: the model deliberately chose silence — send nothing, not an error */
   modelSilent?: boolean;
 }> {
@@ -957,6 +959,8 @@ export async function generateReply(
   const delegationMarkers = /(回复|回应|怼|评价|告诉|转告|提醒|帮我回|替我回|替我说|帮我和|代我)/;
   const userDelegated = delegationMarkers.test(message.textContent || '');
   let reactions: Array<{ targetMessageId: number; emoji: string }> | undefined;
+  // H3 poll:每回合最多 1 个 poll(与 react 同约束);最终草稿为准,regen 后旧 poll 不残留
+  let polls: Array<{ question: string; options: string[]; targetMessageId: number }> | undefined;
 
   const normalizeDraft = (raw: ReturnType<typeof parseReplyResponse>): ReturnType<typeof parseReplyResponse> => {
     let texts = raw;
@@ -965,6 +969,11 @@ export async function generateReply(
       // 每回合最多 1 个 react;以**最终**草稿为准(regen 后旧 react 不残留)
       reactions = reactItems.length > 0
         ? reactItems.slice(0, 1).map((r) => ({ targetMessageId: r.targetMessageId, emoji: r.emoji! }))
+        : undefined;
+      // H3 poll 同约束:每回合最多 1 个;问题+选项 parser 已验,这里只收
+      const pollItems = raw.filter((r) => r.action === 'poll' && r.pollQuestion && (r.pollOptions?.length ?? 0) >= 2);
+      polls = pollItems.length > 0
+        ? pollItems.slice(0, 1).map((r) => ({ question: r.pollQuestion!, options: r.pollOptions!, targetMessageId: r.targetMessageId }))
         : undefined;
       texts = raw.filter((r) => r.action === undefined || r.action === 'reply' || r.action === 'sticker');
       for (const r of texts) {
@@ -1159,6 +1168,7 @@ export async function generateReply(
     toolsUsed: result.toolsUsed,
     toolExecutionFailed,
     reactions,
+    polls,
     modelSilent,
   };
 }
