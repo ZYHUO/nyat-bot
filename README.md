@@ -63,7 +63,7 @@ Most chat bots are **responding** systems: cue in, text out. Real group members 
 - ✅ **Checkin, reputation, allowlist** — streaks/rankings/milestones, AI-reviewed join verification
 
 **Infrastructure**
-- 📦 **BullMQ queue** (Redis) · 🗃️ **Redis + SQLite + Qdrant + optional NyatDB** page-store ChatLog · 🔁 **polling ⇄ webhook auto-failover** · 📊 **Admin Mini App** (WebApp HMAC) · ⏰ **Cron fleet** (health, profiles, proactive, ingest, dreaming, learning, cleanup) · 🔐 **SSRF guards, rate limits, atomic Lua ops, dedup locks** · 📡 **public channel ingest** · 🔥 **Firecrawl fallback for JS/Cloudflare pages** · 🔌 **Skill plugin system** (`data/skills/*.json`) · 🚀 **one-shot deploy** (`scripts/deploy.sh`) · 🧪 **vitest, fully green baseline** · 🪦 **graceful shutdown contract**
+- 📦 **BullMQ queue** (Redis) · 🗃️ **Redis + SQLite + Qdrant + optional NyatDB** page-store ChatLog · 🔁 **polling ⇄ webhook auto-failover** · 🔭 **read-only chat monitor** (`/monitor`, token-gated) · ⏰ **Cron fleet** (health, profiles, proactive, ingest, dreaming, learning, cleanup) · 🔐 **SSRF guards, rate limits, atomic Lua ops, dedup locks** · 📡 **public channel ingest** · 🔥 **Firecrawl fallback for JS/Cloudflare pages** · 🔌 **Skill plugin system** (`data/skills/*.json`) · 🚀 **one-shot deploy** (`scripts/deploy.sh`) · 🧪 **vitest, fully green baseline** · 🪦 **graceful shutdown contract**
 
 ### 🏗️ Architecture
 
@@ -116,7 +116,7 @@ grammY Bot
   └─ Allowlist + Join Verify
 
 Hono HTTP Server
-  ├─ /health   ├─ /miniapp_api (Admin)   └─ /webhook (failover)
+  ├─ /health   ├─ /monitor (read-only chat viewer)   └─ /webhook (failover)
 
 Cron: model health · profile sync · idle proactive · channel ingest
       · memory dream · dream-journal · learner scan · cleanup
@@ -319,7 +319,6 @@ Prefer the one-shot script above (it sets up Qdrant + both systemd units). Manua
 
 ```bash
 npm run build
-npm run build:miniapp
 sudo ./scripts/install-systemd.sh   # installs xxb-ts.service (logs to logs/app.log)
 # Qdrant (semantic memory) — handled by deploy.sh; standalone:
 #   download the musl static build to /usr/local/bin/qdrant, apply deploy/systemd/qdrant.service.template

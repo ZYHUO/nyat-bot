@@ -202,18 +202,16 @@ async function main(): Promise<void> {
     app.get('/metrics', (c) => c.text(renderMetrics()));
     logger.info('Prometheus /metrics enabled');
   }
-  app.get('/miniapp', (c) => c.redirect('/miniapp/'));
-  app.use('/miniapp/*', serveStatic({ root: './' }));
-
-  // Mount admin API at /miniapp_api
+  // Mount admin API at /miniapp_api (kept: allowlist review console posts here;
+  // the miniapp *frontend* is gone, allowlist ops moved to the bot DM flow)
   const adminApi = createAdminApi({
     redis,
     bot,
     config: allowlistConfig,
     env: config,
     aiCall: callAllowlistReviewModel,
-    // 2026-08-20 补上：之前没传 → miniapp 时代 AI 审核拉不到最近群消息，
-    // 大量「无法获取群组数据，建议人工审核」就是这么来的。
+    // 2026-08-20: without this the AI review can't fetch recent group messages,
+    // producing waves of "no group data, suggest manual review".
     getRecentContext: defaultGetRecentContext,
   });
   app.route('/miniapp_api', adminApi);

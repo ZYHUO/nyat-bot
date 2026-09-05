@@ -12,7 +12,6 @@ nyat-bot/                         # 宿主：Telegram bot + 编排
 │   ├── nyatdb/                   # @nyat/nyatdb
 │   └── context-engine/           # @nyat/context-engine
 ├── native/nyatdb/                # @nyat/nyatdb-native（napi；workspace）
-├── miniapp-web/                  # Admin UI（已独立 package）
 └── src/                          # 宿主部门（见下表）
 ```
 
@@ -56,7 +55,7 @@ flowchart TB
 | **Knowledge** | `knowledge/`, `learners/` | 知识库、贴纸、黑话学习 | 晚 |
 | **Features** | `pipeline/dm-relay`, `gacha`, `games`, `allowlist`, `verification` | 产品功能岛 | 按岛可选拆 |
 | **Cron** | `cron/` | 定时任务 | 留宿主 |
-| **Admin** | `admin/`, `miniapp-web/` | HTTP / WebApp | UI 已分包 |
+| **Admin** | `admin/` (monitor API + runtime-config) | HTTP, token-gated read-only |
 | **Data** | `db/` | SQLite / Redis 客户端 | 留宿主 |
 | **Shared** | `shared/` | logger、types、chat 工具 | 极薄；日后 `@nyat/shared` 可选 |
 
