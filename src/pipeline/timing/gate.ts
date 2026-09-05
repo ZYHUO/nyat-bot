@@ -379,6 +379,10 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
       ],
       maxTokens: 200,
       temperature: 0,
+      // H4.1: jsonMode（与 heart/decision.ts 同因——stepfun 类小模型吐脏 JSON
+      // 是 parse_failed_closed 529 次的主因）。provider 层已支持，gate 两次
+      // 调用（首判+纠正重试）都没传。开了后 parse 仍失败 → 原 fail-closed 路径。
+      jsonMode: true,
       // 与 heart/decision.ts 同因:超时预算必须是 per-attempt cap,不能
       // 烧进共享 signal(首跳超时会毒化整条 fallback 链)。gate 是
       // fail-open,所以旧 bug 在这里表现为"看似裁决过,实为全链 DOA 后
@@ -421,6 +425,7 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
         ],
         maxTokens: 200,
         temperature: 0,
+        jsonMode: true,
         signal: input.signal,
         maxTimeoutMs: timeoutMs,
       });
