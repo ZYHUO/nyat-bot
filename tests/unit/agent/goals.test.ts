@@ -7,7 +7,7 @@ vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => db,
 }));
 
-const { createGoal, listDueGoals, recordCheck, setGoalStatus, listGoals, GOAL_STALE_AFTER_SEC, GOAL_LONG_TERM_STALE_AFTER_SEC, markSilentChange } = await import(
+const { createGoal, listDueGoals, recordCheck, setGoalStatus, listGoals, GOAL_STALE_AFTER_SEC, GOAL_LONG_TERM_STALE_AFTER_SEC, markSilentChange, markGoalAchieved, recordUnverifiedCompletion } = await import(
   '../../../src/agent/goals.js'
 );
 
@@ -31,11 +31,38 @@ beforeEach(() => {
       long_term INTEGER DEFAULT 0,
       silent_change_detected INTEGER DEFAULT 0,
       check_count INTEGER DEFAULT 0,
+      verified_achievements INTEGER NOT NULL DEFAULT 0,
+      unverified_completions INTEGER NOT NULL DEFAULT 0,
+      last_evidence TEXT NOT NULL DEFAULT 'unverified',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX idx_goals_status_due ON goals(status, last_check_at);
   `);
+});
+
+describe('goal evidence gate', () => {
+  it('rejects achieved without verified evidence', () => {
+    const id = createGoal({ topic: 'evidence gate probe', origin: 'test' }, 50)!;
+    expect(() => markGoalAchieved(id, 'unverified')).toThrow('needs verified evidence');
+    expect(listGoals().find((g) => g.id === id)!.status).toBe('active');
+  });
+
+  it('records verified achievement with evidence label', () => {
+    const id = createGoal({ topic: 'evidence gate pass', origin: 'test' }, 50)!;
+    markGoalAchieved(id, 'verified', 'result.json:sum=55');
+    const row = listGoals().find((g) => g.id === id)!;
+    expect(row.status).toBe('achieved');
+    expect(row.verified_achievements).toBe(1);
+  });
+
+  it('keeps unverified completion open and counted', () => {
+    const id = createGoal({ topic: 'evidence gate open', origin: 'test' }, 50)!;
+    recordUnverifiedCompletion(id, 'model said done');
+    const row = listGoals().find((g) => g.id === id)!;
+    expect(row.status).toBe('active');
+    expect(row.unverified_completions).toBe(1);
+  });
 });
 
 describe('createGoal', () => {

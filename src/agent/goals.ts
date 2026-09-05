@@ -14,6 +14,9 @@ export type GoalStatus = 'active' | 'achieved' | 'stale' | 'dropped';
 
 export interface GoalRow {
   id: number;
+  verified_achievements: number;
+  unverified_completions: number;
+  last_evidence: string;
   topic: string;
   origin: string;
   chat_id: number | null;
@@ -209,6 +212,31 @@ export function markSilentChange(id: number): void {
       .run(nowSec(), id);
   } catch (err) {
     logger.warn({ err, id }, 'markSilentChange failed');
+  }
+}
+
+/** Host-side evidence gate: only independently verified work may close a goal as achieved. */
+export function markGoalAchieved(id: number, evidence: 'verified' | 'failed' | 'unverified', label?: string): void {
+  if (evidence !== 'verified') throw new Error('goal achieved needs verified evidence');
+  try {
+    getDb().prepare(
+      `UPDATE goals SET status = 'achieved', verified_achievements = verified_achievements + 1,
+        last_evidence = 'verified', last_finding = COALESCE(?, last_finding), updated_at = ? WHERE id = ?`,
+    ).run(label?.slice(0, 500) ?? null, nowSec(), id);
+  } catch (err) {
+    logger.warn({ err, id }, 'markGoalAchieved failed');
+  }
+}
+
+/** Model-claimed completion without verification stays open and counted, never achieved. */
+export function recordUnverifiedCompletion(id: number, note?: string): void {
+  try {
+    getDb().prepare(
+      `UPDATE goals SET unverified_completions = unverified_completions + 1,
+        last_evidence = 'unverified', last_finding = COALESCE(?, last_finding), updated_at = ? WHERE id = ?`,
+    ).run(note?.slice(0, 500) ?? null, nowSec(), id);
+  } catch (err) {
+    logger.warn({ err, id }, 'recordUnverifiedCompletion failed');
   }
 }
 
