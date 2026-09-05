@@ -34,7 +34,15 @@ const AUDIT_SYSTEM =
 /** 解析审计输出; 垃圾返回 null。 */
 export function parseSycoOutput(raw: string): SycoScores | null {
   try {
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    // judge 链主模型是 reasoning 系(StepFun): 可能只回 thinking 块、或 thinking
+    // 包着 JSON。线上实测 4/5 群死在这里 —— 先剥思维链再找 JSON(与 provider.ts 同口径)。
+    const cleaned = raw
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/^[\s\S]*?<\/think(?:ing)?>/gi, '')
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
     const m = cleaned.match(/\{[\s\S]*\}/);
     if (!m) return null;
     const obj = JSON.parse(m[0]) as Record<string, unknown>;

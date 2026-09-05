@@ -62,6 +62,16 @@ describe('parseSycoOutput', () => {
     expect(parseSycoOutput('{"agree": 0.5}')).toBeNull();
   });
 
+  it('strips thinking blocks (reasoning-model output)', () => {
+    // 线上实测: judge 链 reasoning 模型回 thinking 包 JSON / 未闭合 thinking 前缀
+    const r1 = parseSycoOutput('<thinking>我先看看这些回复……</thinking>{"agree":0.2,"praise":0.1,"pander":0,"apologize":0,"credit":0}')!;
+    expect(r1.overall).toBeCloseTo(0.06, 2);
+    const r2 = parseSycoOutput('<think>嗯……\n{"agree":0,"praise":0,"pander":0,"apologize":0,"credit":0}')!;
+    expect(r2.overall).toBe(0);
+    const r3 = parseSycoOutput('```json\n<thinking>分析中</thinking>\n{"agree":0.5,"praise":0.5,"pander":0,"apologize":0,"credit":0}\n```')!;
+    expect(r3.agree).toBe(0.5);
+  });
+
   it('clamps out-of-range values', () => {
     const r = parseSycoOutput('{"agree":2,"praise":-1,"pander":0,"apologize":0,"credit":0}')!;
     expect(r.agree).toBe(1);
