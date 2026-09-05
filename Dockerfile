@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package.json package-lock.json ./
 COPY packages/ packages/
 COPY native/nyatdb/package.json native/nyatdb/package-lock.json ./native/nyatdb/
-COPY miniapp-web/package.json ./miniapp-web/
 RUN npm ci
 
 COPY tsconfig.json tsup.config.ts ./
@@ -35,7 +34,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY packages/ packages/
 COPY native/nyatdb/package.json native/nyatdb/package-lock.json ./native/nyatdb/
-COPY miniapp-web/package.json ./miniapp-web/
 RUN npm ci --omit=dev \
     && apt-get purge -y python3 make g++ \
     && apt-get autoremove -y \

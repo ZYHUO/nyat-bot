@@ -208,7 +208,7 @@ if [ "$MEM_MB" != 0 ] && [ "$MEM_MB" -lt 1800 ]; then
   if ! swapon --show 2>/dev/null | grep -q .; then
     warn "无 swap。建议加 2G：sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
   fi
-  if [ "$MINIMAL" = 0 ] && confirm "内存偏小，切到 --minimal 最小部署（跳过 miniapp + Qdrant，构建限内存）？"; then MINIMAL=1; fi
+  if [ "$MINIMAL" = 0 ] && confirm "内存偏小，切到 --minimal 最小部署（跳过 Qdrant，构建限内存）？"; then MINIMAL=1; fi
 elif [ "$MEM_MB" != 0 ]; then ok "内存 ${MEM_MB}MB 可用"; fi
 
 # 磁盘
@@ -281,7 +281,6 @@ if [ "$SKIP_DEPS" = 0 ]; then
   step "安装依赖" "首次较慢，原生模块要编译"
   if [ -f package-lock.json ]; then run npm ci --no-audit --no-fund || run npm install --no-audit --no-fund
   else run npm install --no-audit --no-fund; fi
-  if [ "$MINIMAL" = 0 ] && [ -d miniapp-web ]; then run npm --prefix miniapp-web install --no-audit --no-fund || warn "miniapp 依赖装失败（不影响 bot 本体）"; fi
   # NyatDB native 的 @napi-rs/cli（devDep）；失败不挡主路径
   if [ -f native/nyatdb/package.json ]; then
     run bash -c 'cd native/nyatdb && NODE_ENV=development npm install --no-audit --no-fund' \
@@ -289,7 +288,7 @@ if [ "$SKIP_DEPS" = 0 ]; then
   fi
   # 用户 clone、sudo 跑时，把 node_modules 还给该用户，免得之后 git pull/npm 报 EACCES
   if [ "$DRY" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-    chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules miniapp-web/node_modules native/nyatdb/node_modules 2>/dev/null || true
+    chown -R "${SUDO_USER}:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" node_modules native/nyatdb/node_modules 2>/dev/null || true
   fi
   ok "依赖就绪"
 else step "安装依赖" "已跳过 (--skip-deps)"; fi
@@ -335,7 +334,6 @@ if [ "$SKIP_BUILD" = 0 ]; then
     info "无 cargo，跳过 NyatDB native（需要时：装 Rust 后 npm run build:nyatdb）"
   fi
   run npm run build || die_fix "构建失败" "看上面的报错；内存小可加 swap 后重跑"
-  if [ "$MINIMAL" = 0 ] && [ -d miniapp-web ]; then run npm run build:miniapp || warn "miniapp 构建失败（管理后台 UI 受影响，bot 本体不受影响）"; fi
   ok "构建完成 dist/"
 else step "构建" "已跳过 (--skip-build)"; fi
 

@@ -1,13 +1,12 @@
 {
   "name": "nyat-bot",
   "version": "0.3.0",
-  "description": "NyatBot — Telegram AI 群聊喵娘机器人，拟人回复引擎",
+  "description": "NyatBot — a Telegram group-chat agent on the path from chatLLM to AGI",
   "type": "module",
   "private": true,
   "workspaces": [
     "packages/*",
-    "native/nyatdb",
-    "miniapp-web"
+    "native/nyatdb"
   ],
   "main": "dist/index.js",
   "scripts": {
@@ -16,10 +15,8 @@
     "build:nyatdb": "npm --prefix native/nyatdb run build",
     "migrate:nyatdb": "tsx scripts/migrate-to-nyatdb.ts",
     "build:nyatdb:debug": "npm --prefix native/nyatdb run build:debug",
-    "build:miniapp": "npm --prefix miniapp-web run build",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:miniapp": "npm --prefix miniapp-web run test",
     "test:watch": "vitest",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
