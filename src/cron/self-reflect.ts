@@ -101,13 +101,21 @@ export async function runSelfReflect(): Promise<void> {
     }
 
     const system = loadCachedPrompt('task/self-reflect.md');
+    // Phase 14.4: 谄媚审计趋势当证据(有则拼,无则跳过;确定性,不烧 token)。
+    let sycoLine = '';
+    try {
+      if (env().SYCOPHANCY_AUDIT_ENABLED) {
+        const { recentSycoTrend } = await import('./sycophancy-audit.js');
+        sycoLine = recentSycoTrend() ?? '';
+      }
+    } catch { /* non-critical */ }
     const res = await callWithFallback({
       usage: env().SELF_REFLECT_USAGE,
       messages: [
         { role: 'system', content: system },
         {
           role: 'user',
-          content: `最近 7 天任务统计：${recentEpisodeStats()}\n\n${samples.join('\n\n')}\n\n复盘这些表现，给出 0-5 条可操作的自我调整。`,
+          content: `最近 7 天任务统计：${recentEpisodeStats()}\n\n${samples.join('\n\n')}${sycoLine ? `\n\n${sycoLine}` : ''}\n\n复盘这些表现，给出 0-5 条可操作的自我调整。`,
         },
       ],
       maxTokens: 1000,
