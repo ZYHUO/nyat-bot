@@ -9,12 +9,93 @@
 // ────────────────────────────────────────
 import { Queue } from 'bullmq';
 import { getRedis } from '../../db/redis.js';
-import { createTask } from '../../agent/task-store.js';
+import { createTask, listActiveTasks, cancelTask, appendLedger, type TaskRow } from '../../agent/task-store.js';
 import { TASK_QUEUE_NAME } from '../../queue/task-worker.js';
 import type { TaskJobData } from '../../queue/task-worker.js';
 import { sendMessage } from '../../bot/sender/telegram.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+
+// ────────────────────────────────────────
+// Task 关联闭环(Phase 13.5): 任务建完后用户再说话,bot 不再无视。
+// L0 纯规则分类(0ms,无 LLM,不过度打扰):
+//   cancel     — 「算了/别查了/不用了」→ cancelTask + 确认一句
+//   progress   — 「怎么样了/查到没/催一下」→ 读 ledger 报进度
+//   supplement — 同一目标的补充信息 → appendLedger,worker 下轮可见
+// 必须同时满足: @ bot + 有活跃任务 + 文本命中。命中任一才接管,
+// 否则返回 null/false 让 judge 走常规路径(不能太过)。
+// ────────────────────────────────────────
+
+export type FollowUpAction = 'cancel' | 'progress' | 'supplement';
+
+const CANCEL_RE = /(算了|别查了|别找了|别搜了|不用查了|不用了|取消|别管了|不查了)/;
+const PROGRESS_RE = /(怎么样了|查到没|查到了吗|找到没|好了吗|还要多久|催一下|有结果了吗|进度)/;
+// 补充信息: 排除问句(疑问句走即时回答,不污染 ledger);且必须与任务
+// 目标有字面重叠(共享至少一个内容字),否则就是无关闲聊 —— 不能太过。
+const QUESTION_TAIL = /[吗?？]$/;
+const GOAL_STOP = new Set(['查', '搜', '找', '帮', '我', '你', '的', '了', '一', '下', '个', '请', '给']);
+
+function goalOverlap(clean: string, goal: string): boolean {
+  const goalChars = new Set([...goal].filter((c) => /\p{L}|\p{N}/u.test(c) && !GOAL_STOP.has(c)));
+  if (!goalChars.size) return true; // 目标无内容字时不拦(宁可记下)
+  return [...clean].some((c) => goalChars.has(c));
+}
+
+export interface FollowUpHit { action: FollowUpAction; task: TaskRow; }
+
+/**
+ * 纯函数分类: 给定文本 + 该用户的活跃任务, 返回命中或 null。
+ * 只看最新一条活跃任务(多任务取 updated_at 最近)。
+ */
+export function classifyTaskFollowUp(text: string, active: TaskRow[]): FollowUpHit | null {
+  const task = active[0];
+  if (!task) return null;
+  const clean = String(text ?? '').trim();
+  if (!clean || clean.length > 200) return null;
+  if (CANCEL_RE.test(clean)) return { action: 'cancel', task };
+  if (PROGRESS_RE.test(clean)) return { action: 'progress', task };
+  if (!QUESTION_TAIL.test(clean) && clean.length >= 4 && clean.length <= 60 && goalOverlap(clean, task.goal)) {
+    return { action: 'supplement', task };
+  }
+  return null;
+}
+
+/**
+ * pipeline hook: @ + 有活跃任务 + 命中分类 → 接管并返回 true。
+ * 新建任务分支(tryCreateResearchTask)优先: 能建成新任务就不当 follow-up。
+ */
+export async function handleTaskFollowUp(chatId: number, uid: number, text: string, isMentioned: boolean): Promise<boolean> {
+  if (!env().TASK_EXECUTOR_ENABLED) return false;
+  if (!isMentioned) return false;
+  // 新任务意图优先(避免「帮我查 Y」被当成旧任务的补充)
+  if (parseResearchRequest(text)) return false;
+  const active = listActiveTasks(uid, chatId);
+  const hit = classifyTaskFollowUp(text, active);
+  if (!hit) return false;
+  try {
+    if (hit.action === 'cancel') {
+      cancelTask(hit.task.id);
+      await sendMessage(chatId, `好,不查「${hit.task.goal}」了。`);
+    } else if (hit.action === 'progress') {
+      let ledger: { step: string; result: string }[] = [];
+      try { ledger = JSON.parse(hit.task.ledger) as typeof ledger; } catch { ledger = []; }
+      const last = ledger.at(-1);
+      const round = hit.task.search_round;
+      const text2 = last
+        ? `查「${hit.task.goal}」查到第 ${round} 轮了,刚看了${last.step}。`
+        : `还在查「${hit.task.goal}」(第 ${round} 轮),有结果就告诉你。`;
+      await sendMessage(chatId, text2);
+    } else {
+      appendLedger(hit.task.id, { step: '用户补充', result: String(text).slice(0, 300), ts: Math.floor(Date.now() / 1000) });
+      await sendMessage(chatId, `记下了,查的时候一起看。`);
+    }
+    logger.info({ taskId: hit.task.id, action: hit.action }, 'task follow-up handled');
+    return true;
+  } catch (err) {
+    logger.error({ err, chatId, uid }, 'task follow-up failed');
+    return false;
+  }
+}
 
 let _queue: Queue<TaskJobData> | undefined;
 function getTaskQueue(): Queue<TaskJobData> {
