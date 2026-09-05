@@ -1173,14 +1173,19 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           const achieved = endSummary.match(/^已完成[:：]\s*(.+)$/im)?.[1]?.trim();
           const cannot = endSummary.match(/^无法完成[:：]\s*(.+)$/im)?.[1]?.trim();
           void import('../agent/goals.js')
-            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals }) => {
+            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals, markGoalAchieved, recordUnverifiedCompletion }) => {
               if (achieved) {
-                // 事办完了——记录成果 + 关闭 goal。此前没这个出口：办完的 goal
-                // 永远 active 且 findings>0 永不 stale，maxActive 坑满后新 goal 全拒
-                // （2026-08-21 实测：券券补发完成两天还占坑，承诺闭环新 goal 被拒 7 次）。
-                recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
-                setGoalStatus(goalId, 'achieved');
-                logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved');
+                // 证据门：模型自称已完成 ≠ 独立验证。只有 host assessment=verified 才晋级 achieved；
+                // 否则保持 active 并计数，避免自我认证占坑或虚假关闭。
+                const evidence = task.assessment?.status ?? 'unverified';
+                if (evidence === 'verified') {
+                  recordCheck(goalId, `已完成: ${achieved.slice(0, 480)}`);
+                  markGoalAchieved(goalId, 'verified', task.assessment?.checks.map((c) => `#${c.index}:${c.reason}`).join(','));
+                  logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved (verified)');
+                } else {
+                  recordUnverifiedCompletion(goalId, `model completion claim without verification: ${achieved.slice(0, 200)}`);
+                  logger.info({ goalId }, 'goal completion unverified, stays active');
+                }
                 return;
               }
               if (cannot) {
