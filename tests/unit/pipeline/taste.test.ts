@@ -26,6 +26,7 @@ describe('taste scoring', () => {
   beforeEach(() => {
     testDb = new Database(':memory:');
     testDb.exec(readFileSync(resolve(process.cwd(), 'migrations/0080_taste_forwards.sql'), 'utf-8'));
+    testDb.exec(readFileSync(resolve(process.cwd(), 'migrations/0082_taste_forward_landing.sql'), 'utf-8'));
   });
   afterEach(() => testDb.close());
 

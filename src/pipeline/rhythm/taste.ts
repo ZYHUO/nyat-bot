@@ -65,13 +65,65 @@ export function scoreTaste(
   return { score: Math.min(1, Math.round(score * 100) / 100), reasons };
 }
 
-export function recordForward(chatId: number, messageId: number, score: number): void {
+export function recordForward(
+  chatId: number,
+  messageId: number,
+  score: number,
+  opts: { toChatId?: number; toMessageId?: number } = {},
+): void {
   try {
     getDb().prepare(
-      `INSERT OR REPLACE INTO taste_forwards (from_chat_id, message_id, score) VALUES (?, ?, ?)`,
-    ).run(chatId, messageId, score);
+      `INSERT OR REPLACE INTO taste_forwards
+         (from_chat_id, message_id, score, to_chat_id, to_message_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(chatId, messageId, score, opts.toChatId ?? null, opts.toMessageId ?? null);
   } catch (err) {
     logger.warn({ err, chatId, messageId }, "recordForward failed");
+  }
+}
+
+/**
+ * 转发落地那条在目标群的新 messageId（taste 闭环归因用：目标群有人给
+ * 转发点 reaction → reward 回给原话题。无记录返回 null）。
+ */
+export function getForwardLanding(fromChatId: number, messageId: number): {
+  toChatId: number;
+  toMessageId: number;
+} | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT to_chat_id, to_message_id FROM taste_forwards
+       WHERE from_chat_id = ? AND message_id = ?
+       AND created_at > unixepoch() - ${FORWARD_DEDUP_SEC}`,
+    ).get(fromChatId, messageId) as
+      | { to_chat_id: number | null; to_message_id: number | null }
+      | undefined;
+    if (row && row.to_chat_id && row.to_message_id) {
+      return { toChatId: row.to_chat_id, toMessageId: row.to_message_id };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 反查：目标群这条是转发的落点吗（是→返回源群+源 messageId）。 */
+export function getForwardSource(toChatId: number, toMessageId: number): {
+  fromChatId: number;
+  messageId: number;
+} | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT from_chat_id, message_id FROM taste_forwards
+       WHERE to_chat_id = ? AND to_message_id = ?
+       AND created_at > unixepoch() - ${FORWARD_DEDUP_SEC}`,
+    ).get(toChatId, toMessageId) as
+      | { from_chat_id: number; message_id: number }
+      | undefined;
+    if (row) return { fromChatId: row.from_chat_id, messageId: row.message_id };
+    return null;
+  } catch {
+    return null;
   }
 }
 

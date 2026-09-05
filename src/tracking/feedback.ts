@@ -9,6 +9,7 @@ import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 import { getActiveTopics } from './topic-registry.js';
 import { recordReward } from './topic-bandit.js';
+import { getForwardSource } from '../pipeline/rhythm/taste.js';
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
@@ -21,8 +22,9 @@ const EMOJI_SENTIMENT: Record<string, number> = {
 };
 
 // 用户回复消息里的情绪词 → 粗略 [-1, +1]
-const POSITIVE_RE = /\b(哈哈|好笑|不错|good|nice|棒|赞|喜欢|爱了|666|goh|厉害|赞|棒|强|牛|笑死|笑死我了|可爱|乖|还行|ok|可以)[\s\S]{0,5}?\b/;
-const NEGATIVE_RE = /\b(垃圾|傻|滚|烦|恶心|烂|差|crap|stupid|no|不要|别|烦人|气|傻逼|弱智)[\s\S]{0,5}?\b/;
+// 注：\b 对 CJK 无效（中文两侧都是词字符），所以中文词不加 \b；英文词保留 \b 防子串误杀。
+const POSITIVE_RE = /(哈哈|好笑|不错|棒|赞|喜欢|爱了|666|厉害|笑死|可爱|乖|还行|可以|\bgood\b|\bgoh\b|\bnice\b|\bok\b)/i;
+const NEGATIVE_RE = /(垃圾|傻|滚|烦|恶心|烂|差|傻逼|弱智|不要|别烦|\bcrap\b|\bstupid\b|\bno\b)/i;
 
 function emojiSentiment(e: string): number {
   return EMOJI_SENTIMENT[e] ?? 0;
@@ -64,12 +66,28 @@ export function recordReaction(params: {
       )
       .run(params.userId, params.botMessageId, params.chatId, params.emoji, s, nowSec());
     logger.debug({ userId: params.userId, emoji: params.emoji, s }, 'feedback: reaction');
+    // H4.2 reaction→bandit 回流：跟 recordReplySentiment 同口径——本群 live
+    // topics 均分 reward（保守，避免错归因放大）。
+    // taste 闭环：如果这条是转发的落点（目标群），reward 回给*源群*的 live topics。
+    try {
+      const src = getForwardSource(params.chatId, params.botMessageId);
+      const targetChat = src ? src.fromChatId : params.chatId;
+      const live = getActiveTopics(targetChat, 4);
+      if (live.length > 0) {
+        const share = s / live.length;
+        for (const t of live) recordReward(targetChat, t.label, share);
+      }
+    } catch { /* non-critical */ }
   } catch (err) {
     logger.debug({ err }, 'recordReaction failed (non-critical)');
   }
 }
 
 // replier: 用户直接回复 bot 消息（文字/情绪）
+// plan 口径：被 quote 追问本身就是强正信号（+1），跟文本情绪分开算——
+// 用户肯花力气打字追问，哪怕骂两句也是 engagement，不该被情绪负分吃掉。
+export const QUOTE_FOLLOWUP_BONUS = 1.0;
+
 export function recordReplySentiment(params: {
   userId: number;
   botMessageId: number;
@@ -77,22 +95,22 @@ export function recordReplySentiment(params: {
   userText: string;
 }): void {
   const s = textSentiment(params.userText);
-  if (s === 0) return; // 中性不记
+  const total = s + QUOTE_FOLLOWUP_BONUS;
   try {
     getDb()
       .prepare(
         `INSERT INTO feedback_events (kind, user_id, bot_message_id, chat_id, sentiment, raw_text, created_at)
          VALUES ('replier_sentiment', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(params.userId, params.botMessageId, params.chatId, s, params.userText.slice(0, 300));
-    logger.debug({ userId: params.userId, s, text: params.userText.slice(0, 50) }, 'feedback: reply');
+      .run(params.userId, params.botMessageId, params.chatId, total, params.userText.slice(0, 300), nowSec());
+    logger.debug({ userId: params.userId, s, total, text: params.userText.slice(0, 50) }, 'feedback: reply');
     // H4 bandit 回流：这次回复是对 bot 跟进某话题的反馈 → 折成 reward。
     // 话题归因：本群当前 live 话题（topic-registry getActiveTopics），命中多个
     // 时均分 reward（保守，避免错归因放大）。同步调用（registry 是纯 SQLite）。
     try {
       const live = getActiveTopics(params.chatId, 4);
       if (live.length > 0) {
-        const share = s / live.length;
+        const share = total / live.length;
         for (const t of live) recordReward(params.chatId, t.label, share);
       }
     } catch { /* non-critical */ }

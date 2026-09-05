@@ -159,6 +159,12 @@ async function main(): Promise<void> {
       await initSmartGroup();
       void bot.start({
         onStart: () => logger.info('Bot started (polling)'),
+        // message_reaction 默认不推送（grammY 文档），显式开——feedback 回流靠它收 reward。
+        allowed_updates: [
+          'message', 'edited_message', 'channel_post', 'edited_channel_post',
+          'message_reaction', 'message_reaction_count',
+          'callback_query', 'inline_query', 'my_chat_member', 'chat_member',
+        ],
       });
       startIngressWatchdog(redis, 'polling');
     }

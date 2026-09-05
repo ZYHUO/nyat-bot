@@ -844,7 +844,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           logger.info('unified tick: share forward failed');
           return;
         }
-        recordForward(a.fromChatId, a.messageId, cand.score);
+        recordForward(a.fromChatId, a.messageId, cand.score, { toChatId: a.toChatId, toMessageId: fwdId });
         // 转发后跟一句人话（像真人"诶这个好笑转给你们看"），失败也认——转发本身已落地。
         try {
           const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
