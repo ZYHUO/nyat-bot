@@ -25,6 +25,8 @@ import { hasDmEver } from "../tracking/dm-state.js";
 import { isMaster } from "../admin/auth.js";
 import { pushSleepPending } from "../tracking/sleep-queue.js";
 import { runHeartBranch } from "./heart/heart.js";
+import { classifyAddressee } from "./floor/addressee.js";
+import { recordFloorDecision } from "./floor/store.js";
 
 // ── Main pipeline orchestrator ──────────────────────────────────────
 
@@ -343,6 +345,38 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           logger.info({ chatId: job.chatId, uid: formatted.uid }, 'Pipeline complete (task created, judge skipped)');
           return;
         }
+      }
+    }
+
+    // H1.1 floor/addressee 三档(默认 OFF,OFF = 零行为变化)。
+    // 开后:每条群消息先 0ms 分类 + 落库 floor_decisions;
+    // ambient → bookkeeping 已做,直接落库返回(省 judge token);
+    // not_me → 同 ambient,但 reason 区分(duet/forwarded/bot_message);
+    // to_me / to_other → 走原 judge 链(Heart LLM 看全文自己决断)。
+    // 注意:to_other 不短路 —— 只是不找我,不代表不值得听(Heart 会判)。
+    if (e.FLOOR_ENABLED && job.chatId < 0 && !formatted.isBot) {
+      try {
+        const addr = classifyAddressee(
+          formatted, recentMessages, botUid,
+          botIdentity.username, botIdentity.nicknames, job.chatId,
+        );
+        recordFloorDecision({
+          chatId: job.chatId, messageId: formatted.messageId,
+          verdict: addr.verdict, reason: addr.reason,
+        });
+        logger.debug(
+          { chatId: job.chatId, messageId: formatted.messageId, verdict: addr.verdict, reason: addr.reason },
+          "Floor: addressee classified",
+        );
+        if (addr.verdict === "ambient" || addr.verdict === "not_me") {
+          logger.info(
+            { chatId: job.chatId, messageId: formatted.messageId, verdict: addr.verdict, reason: addr.reason },
+            "Pipeline complete (floor: not addressed, context saved)",
+          );
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "floor classify failed (non-critical, fall through)");
       }
     }
 

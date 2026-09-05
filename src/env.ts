@@ -213,6 +213,9 @@ const envSchema = z.object({
 
   // ── Proactive Engagement (Stage B) ──
   JUDGE_PROACTIVE_ENABLED: booleanFromEnv.default(false),
+  // H1.1 floor/addressee 三档（默认 OFF，OFF = 老路零变化）。
+  // 开后：ambient/not_me 先记 floor_decisions 再按规则短路，to_me 才进 judge。
+  FLOOR_ENABLED: booleanFromEnv.default(false),
   JUDGE_PROACTIVE_RATE: z.coerce.number().min(0).max(1).default(0.25),
   JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
   JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),

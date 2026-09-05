@@ -112,4 +112,11 @@ describe('parseEnv', () => {
     expect(on.SKILL_VERIFIED_USE_ENABLED).toBe(true);
     expect(on.SELF_EDIT_GUARDRAILS_ENABLED).toBe(true);
   });
+
+  it('H1.1 floor gate defaults OFF and accepts override', () => {
+    const env = parseEnv({ ...validEnv });
+    expect(env.FLOOR_ENABLED).toBe(false);
+    const on = parseEnv({ ...validEnv, FLOOR_ENABLED: '1' });
+    expect(on.FLOOR_ENABLED).toBe(true);
+  });
 });
