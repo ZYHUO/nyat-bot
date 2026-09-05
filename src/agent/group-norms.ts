@@ -112,6 +112,9 @@ export async function inferGroupNorms(input: NormsInput): Promise<string[] | nul
       maxTokens: 800,
       temperature: 0.3,
       allowHedge: false,
+      // 回放实测：step-3.7-flash 吐脏 JSON（围栏/前后缀）致 6/9 群 parse 失败。
+      // gate/heart 同因已开 jsonMode，这里补上。
+      jsonMode: true,
     });
     const norms = parseNormsOutput(res.content ?? '');
     if (norms.length) saveGroupNorms(input.chatId, norms, input.recentMessages.length);
