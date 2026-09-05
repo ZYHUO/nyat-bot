@@ -74,6 +74,21 @@ export function saveSkill(s: SkillInput): number | null {
   }
 }
 
+/** Verified-use signal: incremented only when a task using this skill reaches host-verified assessment.
+ * Retrieval counts (use_count) measure recall, not helpfulness — never conflate the two. */
+export function recordSkillVerifiedUse(ids: number[], evidence: 'verified' | 'failed' | 'unverified'): void {
+  if (evidence !== 'verified' || !ids.length) return;
+  try {
+    const stmt = getDb().prepare(
+      `UPDATE skills SET verified_use_count = verified_use_count + 1, last_verified_use_at = ? WHERE id = ?`,
+    );
+    const ts = Math.floor(Date.now() / 1000);
+    for (const id of ids) stmt.run(ts, id);
+  } catch (err) {
+    logger.warn({ err }, 'recordSkillVerifiedUse failed');
+  }
+}
+
 /** 归档一批小 skill(被大 skill 回收后,不再注入但保留历史)。 */
 export function archiveSkills(ids: number[]): void {
   if (!ids.length) return;

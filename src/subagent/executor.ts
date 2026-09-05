@@ -632,9 +632,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // 自我技能沉淀: 开工前检索相关 skill(结构化能力单元),注入 executor。
   // 区别于经验(教训):skill 是「怎么做」,经验是「别踩什么坑」。
+  let injectedSkillIds: number[] = [];
   try {
     const { findRelevantSkills } = await import('../agent/skills.js');
     const skills = findRelevantSkills(task.contentDirection, 2);
+    injectedSkillIds = skills.map((s) => s.id);
     if (skills.length) {
       systemPrompt += `\n\n[可用技能]\n${skills
         .map((s) => `- 【${s.name}】${s.summary ?? s.triggerWhen}\n  触发: ${s.triggerWhen}\n  做法: ${s.steps}${s.pitfalls ? `\n  坑: ${s.pitfalls}` : ''}`)
@@ -1104,6 +1106,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           .then(async ({ computePathQuality }) => {
             const quality = computePathQuality({ totalCalls: task.audit!.totalCalls, invalidCalls: task.audit!.failedCalls, retryCount: task.audit!.retryCount, turns: task.totalTurns ?? 0 });
             const { recordInjectOutcome } = await import('../agent/experience-verify.js');
+            const { recordSkillVerifiedUse } = await import('../agent/skills.js');
+            recordSkillVerifiedUse(injectedSkillIds, task.assessment?.status ?? 'unverified');
             recordInjectOutcome({
               experienceIds: injectedExperienceIds,
               taskOutcome: task.status === 'done' ? 'done' : 'failed',
