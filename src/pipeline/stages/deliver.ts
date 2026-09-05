@@ -287,6 +287,17 @@ export async function generateAndSendReplies(args: {
     } catch (err) {
       logger.debug({ err, chatId: job.chatId }, "Humanizer per-chat override fetch failed (non-critical)");
     }
+    // Phase 14.1 反向阀门: DM + flag 开 + 非 low → 特效衰减(最后合并,衰减胜出)。
+    // low/currentRisk 内部判空时返回 undefined → humanizerConfig 原样。群聊跳过。
+    if (e.REVERSE_VALVE_ENABLED && job.chatId > 0 && !formatted.isBot && !formatted.isAnonymous) {
+      try {
+        const { currentRiskLevel, valveHumanizerTune } = await import("../../agent/reverse-valve.js");
+        const tune = valveHumanizerTune(currentRiskLevel(formatted.uid).level);
+        if (tune) humanizerConfig = { ...(humanizerConfig ?? {}), ...tune };
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "Reverse-valve humanizer tune failed (non-critical)");
+      }
+    }
 
     // 7. 4-way context retrieval
     const t4 = performance.now();

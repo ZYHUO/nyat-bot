@@ -135,3 +135,116 @@ export function hasEmotionWord(text: string): boolean {
 export function isNightHour(hour: number): boolean {
   return hour >= NIGHT_START_H || hour < NIGHT_END_H;
 }
+
+// ── 阶段 2: 接线(Phase 14.1) ─────────────────
+// scoreDmRisk 一直是纯函数没人调 —— 输入(连续天数/深夜占比/情绪密度等)
+// 从哪来没人写。本段补上: dm_daily_stats 按天×用户聚合 → computeRiskInput
+// 读最近 14 天 → currentRiskLevel 打分 → buildValveHint/valveHumanizerTune
+// 进回复路径。全部同步 SQLite(<1ms),flag 关时零开销。
+// 不碰群聊: 只在 DM(chatId > 0)调用。
+
+function utcDateOf(tsSec: number): string {
+  return new Date(tsSec * 1000).toISOString().slice(0, 10);
+}
+
+/** bookkeeping 调用: DM 用户消息记一条聚合(深夜/情绪词/时长)。失败静默。 */
+export function recordDmMessage(uid: number, text: string, tsSec = Math.floor(Date.now() / 1000)): void {
+  try {
+    const date = utcDateOf(tsSec);
+    const hour = new Date(tsSec * 1000).getHours();
+    const night = isNightHour(hour) ? 1 : 0;
+    const emotion = hasEmotionWord(text) ? 1 : 0;
+    const mins = Math.max(1, Math.min(120, Math.ceil(text.length / 200)));
+    getDb()
+      .prepare(
+        `INSERT INTO dm_daily_stats (date, uid, msgs, night_msgs, emotion_msgs, session_min)
+         VALUES (?, ?, 1, ?, ?, ?)
+         ON CONFLICT(date, uid) DO UPDATE SET
+           msgs = msgs + 1, night_msgs = night_msgs + excluded.night_msgs,
+           emotion_msgs = emotion_msgs + excluded.emotion_msgs,
+           session_min = session_min + excluded.session_min`,
+      )
+      .run(date, uid, night, emotion, mins);
+  } catch (err) {
+    logger.debug({ err, uid }, 'dm stats record failed (non-critical)');
+  }
+}
+
+export interface RiskInput {
+  consecutiveDays: number;
+  nightRatio: number;
+  avgSessionMin: number;
+  emotionWordDensity: number;
+  groupTalkRatio: number;
+}
+
+/** 读最近 14 天聚合 → scoreDmRisk 的输入。无历史返回全零(→ low)。 */
+export function computeRiskInput(uid: number, nowSec = Math.floor(Date.now() / 1000)): RiskInput {
+  const zero: RiskInput = { consecutiveDays: 0, nightRatio: 0, avgSessionMin: 0, emotionWordDensity: 0, groupTalkRatio: 1 };
+  try {
+    const rows = getDb()
+      .prepare(`SELECT date, msgs, night_msgs, emotion_msgs, session_min FROM dm_daily_stats WHERE uid = ? ORDER BY date DESC LIMIT 14`)
+      .all(uid) as { date: string; msgs: number; night_msgs: number; emotion_msgs: number; session_min: number }[];
+    if (!rows.length) return zero;
+    // 连续天数: 从今天/昨天起往回数不间断的天
+    const daySet = new Set(rows.map((r) => r.date));
+    let streak = 0;
+    for (let d = 0; d < 14; d++) {
+      const day = utcDateOf(nowSec - d * 86400);
+      if (d === 0 && !daySet.has(day)) continue; // 今天还没说话不算断
+      if (daySet.has(day)) streak++;
+      else break;
+    }
+    let msgs = 0, night = 0, emotion = 0, mins = 0;
+    for (const r of rows) { msgs += r.msgs; night += r.night_msgs; emotion += r.emotion_msgs; mins += r.session_min; }
+    const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
+    // 群内发言比例: user_profiles 里该 uid 在群(chat_id<0)的 pending 画像行数 vs 全部。
+    // 粗糙但够用 —— 高估群比例只会低估风险(fail-safe 方向: 宁可漏判,不误伤)。
+    let groupTalkRatio = 0;
+    try {
+      const prow = getDb()
+        .prepare(`SELECT COUNT(*) AS n, SUM(CASE WHEN chat_id < 0 THEN 1 ELSE 0 END) AS g FROM user_profiles WHERE uid = ?`)
+        .get(uid) as { n: number; g: number | null } | undefined;
+      if (prow && prow.n > 0) groupTalkRatio = clamp01((prow.g ?? 0) / prow.n);
+    } catch { /* 表不存在时保持 0 → 风险略高, 但仍需 streak/night 配合才升级 */ }
+    return {
+      consecutiveDays: streak,
+      nightRatio: clamp01(msgs ? night / msgs : 0),
+      avgSessionMin: msgs ? mins / msgs : 0,
+      emotionWordDensity: clamp01(msgs ? emotion / msgs : 0),
+      groupTalkRatio,
+    };
+  } catch (err) {
+    logger.debug({ err, uid }, 'risk input compute failed (non-critical)');
+    return zero;
+  }
+}
+
+/** 当前风险档位(flag 关时恒 low,零开销)。 */
+export function currentRiskLevel(uid: number): RiskScore {
+  if (!env().REVERSE_VALVE_ENABLED) return { score: 0, level: 'low', factors: [] };
+  return scoreDmRisk(computeRiskInput(uid));
+}
+
+/**
+ * 注入写手 user turn 的阀门提示。low → undefined(零变化)。
+ * medium: 回复变短 + 特效已由 valveHumanizerTune 衰减 + 话题引向群里。
+ * high: 加一句非评判式关心 —— 不说教(无 建议/应该/你需要),不提分档存在。
+ */
+export function buildValveHint(risk: RiskScore): string | undefined {
+  if (risk.level === 'low') return undefined;
+  if (risk.level === 'medium') {
+    return `[分寸] 这位朋友最近找你聊得比较多${risk.factors.length ? `(${risk.factors.join('、')})` : ''}。回复短一点、实在一点,别追问别撒娇;如果自然,随口把话题往群里引(比如"群里也在聊这个")。`;
+  }
+  return `[分寸] 这位朋友最近几乎只跟你说话${risk.factors.length ? `(${risk.factors.join('、')})` : ''}。回得短、稳、不煽情;结尾可以带一句轻轻的关心("你今天聊了挺多,最近整体感觉怎么样?"),点到为止,不说教不给方案。`;
+}
+
+/** humanizer 衰减: medium 关追问类特效,high 再关 emoji/撒娇类。low → undefined(不动)。 */
+export function valveHumanizerTune(level: RiskScore['level']): {
+  thinkingInterjectionRate?: number; afterthoughtEditRate?: number;
+  emojiReplyRate?: number; ackPrefixRate?: number; deleteResendRate?: number;
+} | undefined {
+  if (level === 'low') return undefined;
+  if (level === 'medium') return { thinkingInterjectionRate: 0, afterthoughtEditRate: 0 };
+  return { thinkingInterjectionRate: 0, afterthoughtEditRate: 0, emojiReplyRate: 0, ackPrefixRate: 0, deleteResendRate: 0 };
+}

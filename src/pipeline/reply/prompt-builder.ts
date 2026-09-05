@@ -25,6 +25,7 @@ import { buildProfileInjection, getBotTagForAddressing } from '../../tracking/us
 import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection } from '../../tracking/social-graph.js';
 import { buildRoleHint } from '../../tracking/behavioral-roles.js';
+import { currentRiskLevel, buildValveHint } from '../../agent/reverse-valve.js';
 import { getBotUid } from '../../bot/bot.js';
 import { isMaster } from '../../admin/auth.js';
 import { formatBeijingNowLine } from '../../shared/beijing-time.js';
@@ -331,6 +332,18 @@ export function buildMessages(
     try {
       const line = getTopicLine(chatId);
       if (line) stablePrefixParts.push(`[当前话题] ${line}`);
+    } catch { /* non-critical */ }
+  }
+
+  // Phase 14.1 反向阀门: DM + flag 开 + 非 low 风险 → user turn 尾部加 [分寸]。
+  // volatile(每天变),放 user turn 不污染 system 前缀缓存。同步 SQLite(<1ms)。
+  // low → undefined 零变化;匿名/机器人跳过。
+  if (chatId !== undefined && chatId > 0 && !latestMessage.isAnonymous && !latestMessage.isBot) {
+    try {
+      if (env().REVERSE_VALVE_ENABLED) {
+        const hint = buildValveHint(currentRiskLevel(latestMessage.uid));
+        if (hint) volatileParts.push(hint);
+      }
     } catch { /* non-critical */ }
   }
 
