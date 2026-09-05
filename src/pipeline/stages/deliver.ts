@@ -371,6 +371,42 @@ export async function generateAndSendReplies(args: {
     const replies = replyResult.replies;
     timings["reply"] = Math.round(performance.now() - t5);
 
+    // H3 poll 执行器：与 host-api sendPoll 同约束（群聊/每群每天2次），失败静默不影响文本。
+    // 位置：文本路径推迟到打断/陈旧检查之后（防孤儿投票）；poll-only 路径由调用方在 modelSilent 分支调。
+    const executePolls = async (
+      result: typeof replyResult,
+      j: typeof job,
+      fmt: typeof formatted,
+    ): Promise<void> => {
+      if (!result.polls || result.polls.length === 0) return;
+      if (j.chatId > 0) return; // 仅群聊
+      try {
+        const { getRedis } = await import("../../db/redis.js");
+        const day = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+        const key = `xxb:poll:${j.chatId}:${day}`;
+        const n = await getRedis().incr(key);
+        if (n === 1) await getRedis().expire(key, 30 * 3600);
+        if (n > 2) {
+          logger.info({ chatId: j.chatId }, 'deliver poll rejected daily cap');
+          return;
+        }
+        const { sendPoll } = await import("../../bot/sender/telegram.js");
+        const { addAssistant } = await import("../context/manager.js");
+        for (const p of result.polls.slice(0, 1)) {
+          const messageId = await sendPoll(j.chatId, p.question, p.options, fmt.messageThreadId);
+          if (messageId > 0) {
+            await addAssistant(j.chatId, {
+              textContent: `[投票] ${p.question}（${p.options.join(' / ')}）`,
+              messageId,
+            }, fmt.messageThreadId).catch(() => {});
+            logger.info({ chatId: j.chatId, q: p.question.slice(0, 40) }, 'Model-chosen poll sent');
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: j.chatId }, 'deliver poll failed (non-critical)');
+      }
+    };
+
     // G2: model-chosen emoji reactions execute as first-class acts (with a
     // small human-ish delay so the react doesn't land robotically instantly)。
     // 调度时机:modelSilent 路径立即排(react-only 是合法回应);文本路径
@@ -395,8 +431,11 @@ export async function generateAndSendReplies(args: {
     };
 
     // G2: deliberate silence — the model looked and chose not to speak.
+    // H3: poll-only 回应同样合法（点了投票没说话 = 真人行为），与 react-only 同处理。
+    const hasPollOnly = !!(replyResult.polls && replyResult.polls.length > 0);
     if (replyResult.modelSilent && replies.length === 0) {
       scheduleReactions(); // react-only 回应照常落地
+      if (hasPollOnly) await executePolls(replyResult, job, formatted); // poll-only 照常落地
       if (maxPlaceholderMsgId) {
         await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
       }
@@ -473,6 +512,8 @@ export async function generateAndSendReplies(args: {
     // 文本回复确定要发了(ghost 没触发)→ 此刻才调度伴随的 reactions
     // (P2:ghost 之后才排,否则"打了一半算了"还留下一个孤儿 emoji)
     scheduleReactions();
+    // H3: 文本确定要发 → 伴随的 poll 此刻才发(同孤儿约束)
+    await executePolls(replyResult, job, formatted);
 
     // #3 小群降 quote:回复紧跟目标消息、中间没别人插话时,引用是冗余的
     // ——真人只在需要"消歧"时才 quote。概率随本群真人引用率回归;

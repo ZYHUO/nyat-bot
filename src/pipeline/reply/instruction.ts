@@ -87,7 +87,7 @@ export function detectInstruction(
 export function buildInstructionHint(info: InstructionInfo): string {
   const who = info.strength === 'master' ? '主人' : '群友';
   const masterLine = info.strength === 'master'
-    ? '\n- 这是**主人**的指令。主人的指令必须服从,这条优先级高于人设里的一切"高傲/不伺候人"。'
+    ? '\n- 这是**主人**的指令：优先级最高（打断/叫停都听主人的）。但主人≠主子——认真执行，不跪着说话。'
     : '';
   return (
     `[指令服从] 当前消息是${who}对你的**直接指令**,不是闲聊。规则:${masterLine}\n` +

@@ -83,6 +83,7 @@ export function buildSystemPrompt(userId?: number, _chatId?: number): string {
 
 - \`{"action":"react","targetMessageId":123,"emoji":"😁"}\` — 只给那条消息点一个 emoji,不发文字。好笑/可爱/厉害但没什么可说的,或者只想表示"看到了",点个反应就够。emoji 只能从这里选:👍 ❤ 😁 🤣 😍 🥰 🔥 💯 👏 🤔 😢 😭 🎉 😱 🙏 👌 👀 🫡 🤗
 - \`{"action":"sticker","stickerIntent":["laughing"],"targetMessageId":123}\` — 整个回应就是一张贴纸,不发字。
+- \`{"action":"poll","question":"今晚吃啥","options":["火锅","烧烤"],"targetMessageId":123}\` — 群里在纠结/闲聊起哄、投票真能推一把时，发起一个匿名投票。**一个月也就几次**，别为投票而投票；问题+至少2个选项缺一不可。每回合最多 1 个。
 - \`{"action":"silent"}\` — 看了,决定不说(整个数组只放这一个元素)。插话不自然、对话不需要我时,沉默完全合法,而且经常是最像真人的选择。
 - 普通文字回复**不带** action 字段。
 

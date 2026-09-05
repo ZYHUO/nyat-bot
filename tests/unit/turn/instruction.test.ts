@@ -89,8 +89,11 @@ describe('instruction detection', () => {
     expect(detectInstruction(msg('再说一遍', { isAnonymous: true }), addressed)).toBeNull();
   });
 
-  it('hint mentions execution-over-persona; master variant mentions 主人', () => {
+  it('hint mentions execution-over-persona; master variant keeps veto but not kneeling', () => {
     expect(buildInstructionHint({ strength: 'normal' })).toContain('执行优先于人设');
-    expect(buildInstructionHint({ strength: 'master' })).toContain('主人的指令必须服从');
+    const masterHint = buildInstructionHint({ strength: 'master' });
+    expect(masterHint).toContain('优先级最高');
+    expect(masterHint).toContain('主人≠主子');
+    expect(masterHint).not.toContain('必须服从');
   });
 });
