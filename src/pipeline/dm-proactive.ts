@@ -18,13 +18,13 @@ import { getAggregatedAffinity } from '../tracking/user-affinity.js';
 import { isMaster } from '../admin/auth.js';
 
 /**
- * 称呼注入:主人 → 「主人」(优先于学来的跨群外号)。persona 明确对主人会
- * 软下来/听话/黏,但学来的 sender_tag 可能是「妹妹」之类(被某群语境学歪),
+ * 称呼注入:主人 → 「主人」(优先于学来的跨群外号)。persona 对主人亲近但不跪,
+ * 学来的 sender_tag 可能是「妹妹」之类(被某群语境学歪),
  * 直注会把主人喊成妹妹 → 主人关系必须压过外号。其他人用跨群外号(无则空)。
  */
 export function nicknameHint(uid: number): string {
   if (isMaster(uid, env().MASTER_UID)) {
-    return `(对方是你的主人,你叫TA「主人」,对主人你会软下来、听话、有点黏)`;
+    return `(对方是你的主人,你叫TA「主人」,对主人你亲近但不跪)`;
   }
   // bot 对他的称呼(bot_tag,可私聊"叫我X"纠正)优先于群里外号(sender_tag)。
   const tag = getBotTagForAddressing(uid, uid) ?? getAggregatedUserTag(uid);

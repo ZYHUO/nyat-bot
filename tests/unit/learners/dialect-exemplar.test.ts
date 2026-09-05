@@ -48,8 +48,21 @@ describe('dialect exemplar', () => {
   });
 
   it('pickExemplars: skips bot own messages via marker', () => {
-    const picked = pickExemplars(['SELF: 我是bot', '真人说话味儿']);
+    const picked = pickExemplars(['SELF: 我是bot', '真人说话味儿呀']);
     expect(picked.some((s) => s.includes('我是bot'))).toBe(false);
+  });
+
+  it('pickExemplars: filters noise (progress bars, source_id residue, pure symbols)', () => {
+    const picked = pickExemplars([
+      '5.00%     [1/20]',
+      '[=                   ]',
+      '[source_id:225332] 喵锵: /invite@KairoClaw_bot',
+      '快乐小鳄鱼: [media]',
+      '冲！',
+      '嗯',
+      '楼下奶茶第二杯半价啦',
+    ]);
+    expect(picked).toEqual(['楼下奶茶第二杯半价啦']);
   });
 
   it('save + get roundtrip', () => {
