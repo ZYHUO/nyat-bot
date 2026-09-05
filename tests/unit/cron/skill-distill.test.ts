@@ -21,6 +21,7 @@ function seed(): void {
   db.exec(readFileSync('migrations/0054_episodes_experience.sql', 'utf8'));
   db.exec(readFileSync('migrations/0071_skills.sql', 'utf8'));
   db.exec(readFileSync('migrations/0072_task_evidence.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0075_experience_source.sql', 'utf8'));
 }
 
 beforeEach(seed);
@@ -53,5 +54,22 @@ describe('skill-distill evidence gate', () => {
     expect(seen).not.toContain('UNVERIFIED_SECRET_GOAL_TEXT');
     expect(getRecentSmallSkills(100)).toHaveLength(0);
     expect(saveSkill).toBeDefined();
+  });
+
+  it('P3-1: experience material only includes verified lineage', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_assessment, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run('trick', 'UNVERIFIED_EXP_SECRET_TEXT', '[]', 1, 'unverified', now - 60);
+    db.prepare(`INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_assessment, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run('trick', 'VERIFIED_EXP_REAL_TEXT', '[]', 2, 'verified', now - 60);
+    const { callWithFallback } = await import('../../../src/ai/fallback.js');
+    let seen = '';
+    (callWithFallback as ReturnType<typeof vi.fn>).mockImplementationOnce(async (args: { messages: { content: string }[] }) => {
+      seen = args.messages.map((m) => m.content).join('\n');
+      return { content: 'null' };
+    });
+    await runSkillDistill();
+    expect(seen).toContain('VERIFIED_EXP_REAL_TEXT');
+    expect(seen).not.toContain('UNVERIFIED_EXP_SECRET_TEXT');
   });
 });

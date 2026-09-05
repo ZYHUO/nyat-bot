@@ -70,11 +70,21 @@ function recentMaterial(windowSec: number): string {
           eps.map((e) => `- [${e.outcome}] ${e.goal.slice(0, 80)}\n  ${e.summary.slice(0, 200)}`).join('\n'),
       );
     }
-    // NOTE (Phase 2 Task 6 follow-up): experience_entries still unfiltered here;
-    // verified-only experience material is tracked separately, not silently assumed.
-    const exps = db
-      .prepare(`SELECT kind, content FROM experience_entries WHERE created_at > ? ORDER BY created_at DESC LIMIT 30`)
-      .all(since) as { kind: string; content: string }[];
+    // P3-1: experience_entries 只读 verified 血缘。历史数据(无血缘列或
+    // source_assessment != 'verified')一律排除 —— 未验证的经验不进技能素材。
+    let exps: { kind: string; content: string }[] = [];
+    try {
+      exps = db
+        .prepare(
+          `SELECT kind, content FROM experience_entries
+           WHERE created_at > ? AND source_assessment = 'verified'
+           ORDER BY created_at DESC LIMIT 30`,
+        )
+        .all(since) as { kind: string; content: string }[];
+    } catch {
+      // 0075 未应用的库(无血缘列):fail-closed,经验素材为空而非回退全量。
+      exps = [];
+    }
     if (exps.length) {
       parts.push('=== 最近经验 ===\n' + exps.map((e) => `- (${e.kind}) ${e.content}`).join('\n'));
     }

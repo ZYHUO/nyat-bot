@@ -134,6 +134,10 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
     });
 
     if (episodeId !== null && parsed.experience.length > 0) {
+      // P3-1 血缘:记录产出 episode 的 assessed outcome + host assessment。
+      // skill-distill 只读 source_assessment='verified' 的经验 —— unverified 经验
+      // 仍保留在库(可检索),但永不进入技能蒸馏素材。
+      const srcAssessment = task.assessment?.status ?? 'unverified';
       saveExperienceEntries(
         parsed.experience.map((e) => ({
           kind: e.kind,
@@ -141,6 +145,8 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
           tags: e.tags,
           sourceEpisodeId: episodeId,
           originBot: env().BOT_USERNAME ?? 'self',
+          sourceOutcome: assessed,
+          sourceAssessment: srcAssessment === 'verified' ? 'verified' : srcAssessment === 'failed' ? 'failed' : 'unverified',
         })),
       );
       pruneExperience(200);

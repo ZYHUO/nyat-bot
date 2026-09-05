@@ -1962,11 +1962,13 @@ export function createHostApi(
         });
         // Self-edits never self-certify: annotate the stored motive with the task
         // assessment (unverified unless host evidence proves otherwise).
-        if (r.ok) {
+        // P3-2: explicit rowid from selfEditPrompt — never last_insert_rowid(),
+        // which could hit an unrelated row if the motive INSERT failed.
+        if (r.ok && r.motiveRowid != null) {
           try {
             const { getDb } = await import('../db/sqlite.js');
-            getDb().prepare(`UPDATE self_model_notes SET note = note || ? WHERE rowid = last_insert_rowid()`)
-              .run(` [task assessment at edit: ${audit.snapshot().totalCalls} calls observed]`);
+            getDb().prepare(`UPDATE self_model_notes SET note = note || ? WHERE rowid = ?`)
+              .run(` [task assessment at edit: ${audit.snapshot().totalCalls} calls observed]`, r.motiveRowid);
           } catch { /* motive annotation is best-effort */ }
         }
         return r;
