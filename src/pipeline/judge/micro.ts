@@ -49,10 +49,18 @@ function normalizeJudgeDecision(
 }
 
 export function parseJudgeAction(raw: string): { action: JudgeAction; replyPath?: ReplyPath; confidence: number; reasoning: string } | null {
-  // Strip markdown code blocks
-  let cleaned = raw.trim();
-  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-  cleaned = cleaned.trim();
+  // Strip markdown code blocks + reasoning 模型的 thinking 块(StepFun 只回 thinking
+  // 不带 text 时 provider 层已剥成对块; 这里再防未闭合前缀/残留块, 与 syco 同口径)。
+  // 线上 judge parse 失败极少(1/全量), 但 thinking 残留会让"含 REPLY 关键词"的
+  // fallback 误判 —— 先剥干净再走原有三级解析(顺序不变)。
+  let cleaned = (raw ?? '').trim();
+  cleaned = cleaned
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/^[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
 
   // Try JSON parse first
   try {

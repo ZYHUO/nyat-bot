@@ -130,3 +130,23 @@ export function getUserFeedbackSentiment(userId: number, windowSec = 86400): num
     return 0;
   }
 }
+
+/**
+ * Phase B: 同群 bot 消息近期 sentiment 均值(-1..1, 7 天窗口)。
+ * 给 verifier 当 feedbackBias: 群友最近越买账 bot 的发言, 候选分上浮;
+ * 最近被怼/冷场, 下压。无数据返回 0(中性, 加权后行为接近纯 LLM 分)。
+ */
+export function getChatFeedbackBias(chatId: number, windowSec = 7 * 86400): number {
+  try {
+    const since = nowSec() - windowSec;
+    const r = getDb()
+      .prepare(
+        `SELECT AVG(sentiment) AS avg FROM feedback_events
+         WHERE chat_id = ? AND created_at >= ?`,
+      )
+      .get(chatId, since) as { avg: number | null };
+    return r.avg ?? 0;
+  } catch {
+    return 0;
+  }
+}

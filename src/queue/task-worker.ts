@@ -18,6 +18,7 @@ import {
   getTask, setTaskState, appendLedger, setProgress, bumpSearchRound,
   completeTask, retryTask, tasksEnabled,
 } from '../agent/task-store.js';
+import { saveTaskEvidence } from '../agent/task-evidence-store.js';
 
 export const TASK_QUEUE_NAME = 'task-executor';
 
@@ -123,6 +124,10 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
     if (!combined.trim()) {
       // 所有轮次都没拿到有效结果(重派时 search_round 可能已满)
       completeTask(taskId, combined);
+      saveTaskEvidence({ taskId: `research:${taskId}`, chatId,
+        lifecycle: 'done', assessment: 'failed',
+        turns: round, totalCalls: round, failedCalls: round, retryCount: task.retry_count,
+        reasons: ['empty_results'] });
       await sendMessage(chatId, `「${goal}」我没查到新东西,要换个关键词再试吗?`);
       return null;
     }
@@ -130,6 +135,12 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
     const summary = (synthesized ?? combined).slice(0, 6000);
     completeTask(taskId, summary);
     appendLedger(taskId, { step: '综合', result: synthesized ? `LLM 综合(${summary.length}字)` : '原始拼接(LLM 综合失败)', ts: Math.floor(Date.now() / 1000) });
+    // Phase A: research 任务也有证据了 —— 有交付物 = verified(发回群了),
+    // 综合失败回退原始拼接 = unverified(发了但质量无保证)。reason 只记 host 事实。
+    saveTaskEvidence({ taskId: `research:${taskId}`, chatId,
+      lifecycle: 'done', assessment: synthesized ? 'verified' : 'unverified',
+      turns: round, totalCalls: round, failedCalls: 0, retryCount: task.retry_count,
+      reasons: synthesized ? ['delivered_synthesized'] : ['delivered_raw_fallback'] });
 
     // 主动发回结果(任务循环的交付点 —— bot 被自己的任务唤醒后交付)
     const header = `📋 查好了「${goal}」\n`;
