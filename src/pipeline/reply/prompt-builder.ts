@@ -26,6 +26,7 @@ import { buildAliasInjection } from '../../knowledge/person-aliases.js';
 import { buildSocialInjection, buildBridgeHint } from '../../tracking/social-graph.js';
 import { buildRoleHint } from '../../tracking/behavioral-roles.js';
 import { recallEpisodes } from '../../tracking/group-episodes.js';
+import { getExemplars } from '../../learners/dialect-exemplar.js';
 import { currentRiskLevel, buildValveHint } from '../../agent/reverse-valve.js';
 import { getBotUid } from '../../bot/bot.js';
 import { isMaster } from '../../admin/auth.js';
@@ -277,6 +278,20 @@ export function buildMessages(
   // G4(语言生命):这块通常按群缓慢变化,前置后既保留风格指导,也更利于前缀缓存。
   if (expressionBlock) {
     stablePrefixParts.push(expressionBlock);
+  }
+
+  // H2.2 方言硬约束:exemplar 原话 + 三条铁律(禁复述/禁超长/短打群跟短)。
+  // 只读同步 <1ms;无 exemplar 返回 '' 跳过(行为零变化)。
+  if (chatId !== undefined && chatId < 0) {
+    try {
+      const exemplars = getExemplars(chatId);
+      if (exemplars.length > 0) {
+        const lines = exemplars.map((s) => `「${s}」`).join(" ");
+        stablePrefixParts.push(
+          `[群方言] 本群真人原话(只学语感节奏,不学内容,不许照搬原句):\n${lines}\n铁律:1) 不许把上面任何一句复述/改写当回复;2) 单条回复别超过群里中位长度 2 倍;3) 短打群(一两句)不许长篇大论。`,
+        );
+      }
+    } catch { /* non-critical */ }
   }
 
   // DM mode: inject private chat style and capabilities hint

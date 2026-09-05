@@ -149,6 +149,22 @@ export async function runLearnerScan(): Promise<void> {
         logger.debug({ err, chatId }, 'learner-scan: jargon recount failed (non-critical)');
       }
 
+      // H2.1 exemplar 冷启动:缺方言库时用确定性挑选补 10 条(0ms,无 LLM)。
+      // 与 LLM 抽取并行不互斥 —— exemplar 管"原汁语感",expressions 管"句式抽象"。
+      try {
+        const { needsExemplars, pickExemplars, saveExemplars } = await import('../learners/dialect-exemplar.js');
+        if (needsExemplars(chatId)) {
+          const lines = formatMessagesForLearner(newMsgs).split('\n').filter(Boolean);
+          const picked = pickExemplars(lines, 0);
+          if (picked.length > 0) {
+            saveExemplars(chatId, picked);
+            logger.info({ chatId, count: picked.length }, 'learner-scan: exemplar cold-start filled');
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, chatId }, 'learner-scan: exemplar cold-start failed (non-critical)');
+      }
+
       await extractFromChat(chatId, newMsgs, e);
       await runJargonInference(chatId, e);
 
