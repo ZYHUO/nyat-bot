@@ -389,6 +389,19 @@ export function startCronJobs(deps?: CronDeps): void {
     },
   });
 
+  // Phase 14.4: 谄媚审计 — 每周跑一次(周日凌晨错峰),离线抽样五维打分落库。
+  // flag 关时不注册,零开销。只记录不干预;趋势进 self-reflect 证据。
+  if (env().SYCOPHANCY_AUDIT_ENABLED) {
+    reg({
+      name: 'sycophancy-audit',
+      everySec: 7 * 24 * 3600,
+      run: async () => {
+        const { runSycophancyAudit } = await import('./sycophancy-audit.js');
+        await runSycophancyAudit();
+      },
+    });
+  }
+
   // 自我技能沉淀: 每 6h 蒸馏小 skill
   if (env().SKILL_DISTILL_ENABLED) {
     reg({
