@@ -533,9 +533,30 @@ export async function generateAndSendReplies(args: {
       readDelay = Math.max(2.5, latenessSec - (Date.now() - genStartMs) / 1000);
     } else {
       const readDelayBase = isDmChat ? 0 : calculateReadDelay(incomingLength, humanizerConfig);
-      readDelay = readDelayBase > 0
-        ? sampleHumanDelay(readDelayBase, { capSec: 8, tailProb: 0 })
-        : 0;
+      if (readDelayBase > 0) {
+        // H1.2: per 群节奏拟合 —— 用该群真人回复间隔中位数定 base,而不是
+        // 全局固定 readDelayBase。拿不到群节奏(冷群/异常)时回退老路。
+        let paceBase: number | null = null;
+        if (!isDmChat && e.FLOOR_ENABLED) {
+          try {
+            const { fitGroupPace } = await import("../rhythm/group-pace.js");
+            const recent20 = await getRecent(job.chatId, 20);
+            if (recent20.length >= 2) {
+              const paceFit = fitGroupPace(
+                recent20.map((m) => m.timestamp),
+                recent20.filter((m) => m.timestamp >= Math.floor(Date.now() / 1000) - 60).length,
+              );
+              // 融合:群节奏与内容长度各占一半 —— 长消息多看一会儿,快群整体更快
+              paceBase = (paceFit + readDelayBase) / 2;
+            }
+          } catch { /* fail-soft: 回退老路 */ }
+        }
+        readDelay = paceBase !== null
+          ? sampleHumanDelay(paceBase, { capSec: 8, tailProb: 0 })
+          : sampleHumanDelay(readDelayBase, { capSec: 8, tailProb: 0 });
+      } else {
+        readDelay = 0;
+      }
     }
     if (readDelay > 0) {
       // 只在最后 2-3 秒显示"正在输入"(刚拿起手机才开始打字);

@@ -354,6 +354,43 @@ export async function runPostJudge(ctx: {
       await recordGateContinue(job.chatId);
       await transitionToRunning(job.chatId);
     }
+  } else if (e.FLOOR_ENABLED && !job.turnContext?.gateBypass) {
+    // H1.2 silence 收敛(无 gate 时的确定性沉默层):gate LLM 关着的群,
+    // 用 0ms 本地三律代替 —— self_chase/hot_lurk/dead_chat 直接落库返回,
+    // 不烧 judge/reply。点名(@/回复bot/私聊)永不沉默;to_me 强义务豁免。
+    // replan/waitReplay 不走这里(上面 G3 分支已跳过 judge)。
+    const isDirect = !!(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule));
+    if (!isDirect && judgeResult.action === "REPLY" && job.chatId < 0) {
+      try {
+        const { shouldStaySilent } = await import("../rhythm/silence.js");
+        const { getChatState } = await import("../timing/chat-runtime.js");
+        const tstate = await getChatState(job.chatId).catch(() => undefined);
+        const nowMs = Date.now();
+        const nowSec = Math.floor(nowMs / 1000);
+        const addressed = judgeResult.rule === "reply_to_self" || judgeResult.rule === "mention_self";
+        const strongObligation = !!job.turnContext?.obligationStrong;
+        if (!addressed && !strongObligation) {
+          const s = shouldStaySilent({
+            recentMessages: recentMessages.map((m) => ({ uid: m.uid, timestamp: m.timestamp })),
+            botUid,
+            nowMs,
+            lastBotReplyAtMs: tstate?.lastBotReplyAt,
+            messagesLast1Min: recentMessages.filter((m) => m.timestamp >= nowSec - 60).length,
+            addressedToBot: false,
+          });
+          if (s.silent) {
+            const totalMs = Math.round(performance.now() - start);
+            logger.info(
+              { chatId: job.chatId, messageId: formatted.messageId, reason: s.reason, totalMs },
+              "Pipeline complete (silence: stayed quiet, context saved)",
+            );
+            return { completed: true };
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "silence check failed (non-critical, fall through)");
+      }
+    }
   }
 
   // 5.5-5.7 Post-mute-gate intercepts
