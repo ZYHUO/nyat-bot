@@ -132,8 +132,10 @@ describe('valve wiring (Phase 14.1)', () => {
   });
 
   it('recordDmMessage aggregates per-day counters', () => {
-    const noon = Math.floor(Date.now() / 1000);
-    const noonDate = new Date(noon * 1000).toISOString().slice(0, 10);
+    // 固定 UTC 正午时间戳：Date.now() 在 UTC 午夜前后 1h 内跑会跨天
+    // （noon-3600 落到前一天 → ON CONFLICT(date,uid) 写出两行 → flake）。
+    const noon = Math.floor(Date.UTC(2026, 0, 15, 12, 0, 0) / 1000);
+    const noonDate = '2026-01-15';
     // 同一天两条: 深夜判定按传入 ts,第二条用同一天中午 ts 保证同 date 行
     recordDmMessage(42, '最近好孤独睡不着', noon - 3600);
     recordDmMessage(42, '今天吃了个苹果', noon);
