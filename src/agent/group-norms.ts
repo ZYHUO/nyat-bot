@@ -66,7 +66,12 @@ export function saveGroupNorms(chatId: number, norms: string[], sampleCount: num
     }
   } catch (err) {
     logger.warn({ err, chatId }, 'saveGroupNorms failed');
+    return;
   }
+  // Phase 2 双写：同步 belief（fire-and-forget，失败不抛；void 防浮 promise）
+  void import('../core/migrate.js')
+    .then(({ syncGroupNorms }) => syncGroupNorms(chatId))
+    .catch(() => { /* non-critical */ });
 }
 
 /** 读某群 norms; 无 → null。 */

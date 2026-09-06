@@ -47,6 +47,11 @@ export function upsertEntity(
         ts,
         existing.id,
       );
+      // Phase 2 双写：同步 belief（fire-and-forget）
+      const eid = existing.id;
+      void import('../core/migrate.js')
+        .then(({ syncWorldEntity }) => syncWorldEntity(eid))
+        .catch(() => { /* non-critical */ });
       return existing.id;
     }
     const r = db
@@ -55,7 +60,12 @@ export function upsertEntity(
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(nm, kind, propsJson, sourceChatId ?? null, ts, ts);
-    return Number(r.lastInsertRowid);
+    const newId = Number(r.lastInsertRowid);
+    // Phase 2 双写：同步 belief（fire-and-forget）
+    void import('../core/migrate.js')
+      .then(({ syncWorldEntity }) => syncWorldEntity(newId))
+      .catch(() => { /* non-critical */ });
+    return newId;
   } catch (err) {
     logger.warn({ err, name: nm, kind }, 'upsertEntity failed');
     return null;
