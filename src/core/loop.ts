@@ -223,10 +223,15 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
 
 /** pipeline 侧调用：graylist 内才跑 core，否则直接 legacy（零开销）。 */
 export function isCoreChat(chatId: number): boolean {
+  // 全开：空名单 = 全量生效（与 SUBAGENT_MEMORY_CHAT_IDS 的空=关闭相反，
+  // 与 TURN_ACTOR/MULTI_AGENT 的空=全量一致 —— core 是行为兼容层不是隐私特性）。
+  // 要关：设 CORE_V2_ENABLED=false（一刀切）。
+  if (!env().CORE_V2_ENABLED) return false;
   const ids = env().CORE_V2_CHAT_IDS.split(',')
     .map((x) => Number(x.trim()))
     .filter((n) => !Number.isNaN(n) && n !== 0);
-  if (ids.length === 0) return false;
+  if (ids.length === 0) return true;
+  void chatId;
   return ids.includes(chatId);
 }
 

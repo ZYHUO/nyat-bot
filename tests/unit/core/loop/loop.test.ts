@@ -7,6 +7,7 @@ const envStore: Record<string, unknown> = {
   CORE_BELIEF_VIEW_ENABLED: false,
   CORE_BLACKBOARD_ENABLED: false,
   CORE_PERMISSION_GATE_ENABLED: false,
+  CORE_V2_ENABLED: true,
   CORE_V2_CHAT_IDS: '',
   BELIEF_VIEW_INJECT_MAX: 4,
   BELIEF_TTL_DEFAULT_SEC: 7776000,
@@ -157,11 +158,17 @@ describe('core assembleState + system prompt', () => {
     expect(p.system).not.toContain('[当前信念]');
   });
 
-  it('isCoreChat: 空名单 → false；命中 → true', async () => {
+  it('isCoreChat: 空名单 → 全量 true；总开关可一刀切', async () => {
     const { isCoreChat } = await import('../../../../src/core/loop.js');
-    expect(isCoreChat(-100)).toBe(false);
+    envStore['CORE_V2_ENABLED'] = true;
+    expect(isCoreChat(-100)).toBe(true);
+    expect(isCoreChat(-999)).toBe(true);
     envStore['CORE_V2_CHAT_IDS'] = '-100,-200';
     expect(isCoreChat(-100)).toBe(true);
     expect(isCoreChat(-300)).toBe(false);
+    envStore['CORE_V2_ENABLED'] = false;
+    expect(isCoreChat(-100)).toBe(false);
+    envStore['CORE_V2_ENABLED'] = true;
+    envStore['CORE_V2_CHAT_IDS'] = '';
   });
 });

@@ -448,7 +448,9 @@ const envSchema = z.object({
   CORE_BELIEF_VIEW_ENABLED: booleanFromEnv.default(false),
   CORE_BLACKBOARD_ENABLED: booleanFromEnv.default(false),
   CORE_PERMISSION_GATE_ENABLED: booleanFromEnv.default(false),
-  // 灰度群，逗号分隔（如 '-100123,-100456'）
+  // 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。
+  CORE_V2_ENABLED: booleanFromEnv.default(true),
+  // 灰度群，逗号分隔。空 = 全量生效（与 TURN_ACTOR/MULTI_AGENT 一致）。
   CORE_V2_CHAT_IDS: z.string().default(''),
   // Belief View 注入 prompt 的预算（Phase 2 才用，Phase 0 只定义）
   BELIEF_VIEW_INJECT_MAX: z.coerce.number().int().default(4),
