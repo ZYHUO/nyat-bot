@@ -18,6 +18,26 @@ import { logger } from '../shared/logger.js';
 import { isAsleep } from '../tracking/sleep.js';
 import { isWithinActiveHours } from './active-hours.js';
 
+// Phase 3：TickAction → CandidateAction（suppressor 打分形状）。quiet 无映射。
+function toCandidate(a: TickAction): import('../core/drives/score.js').CandidateAction | null {
+  switch (a.type) {
+    case 'care_master':
+      return { type: 'care_master' };
+    case 'group_speak':
+      return { type: 'group_speak', chatId: a.chatId };
+    case 'remember_user':
+      return { type: 'remember_user', chatId: a.chatId };
+    case 'self_play':
+      return { type: 'self_play' };
+    case 'check_goal':
+      return { type: 'check_goal', goalId: a.goalId };
+    case 'share':
+      return { type: 'share', fromChatId: a.fromChatId, toChatId: a.toChatId };
+    case 'quiet':
+      return null;
+  }
+}
+
 // ── 动作类型 ──────────────────────────────
 
 export type TickAction =
@@ -464,6 +484,60 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         .map((c) => `  群 ${c.fromChatId} #${c.messageId} (分${c.score}): 「${c.text}」`)
         .join('\n')
     : '  (没有值得转的)';
+  // Phase 3 drives（只做 scorer + suppressor 提示，不决策）：世界状态派生
+  // drive 值 → 候选动作按期望增益排序 → 拼进 prompt 给 LLM 看。fail-soft：
+  // 任一步抛错 → driveLines 空，prompt 与改造前逐字节一致。
+  let driveLines: string[] = [];
+  try {
+    const { deriveDriveValues, scoreAction } = await import('../core/drives/score.js');
+    const { proposeActions, formatProposals } = await import('../core/agenda/proposals.js');
+    const { setDriveValue, getDrives } = await import('../core/drives/store.js');
+    const values = deriveDriveValues({
+      masterSilentSec: state.masterSilentSec,
+      lastCareAgoSec: state.lastCareAgoSec,
+      groups: state.groups,
+      dueGoals: state.dueGoals,
+      rssNewCount: state.rssNewCount,
+      absentUsers: state.absentUsers ?? [],
+      selfPlayCooldownLeftSec: state.selfPlayCooldownLeftSec,
+      lifeTransition: state.lifeTransition ?? null,
+    });
+    for (const d of ['connection', 'curiosity', 'competence', 'autonomy'] as const) {
+      setDriveValue(d, values[d]);
+    }
+    const actions = proposeActions({
+      world: {
+        masterSilentSec: state.masterSilentSec,
+        lastCareAgoSec: state.lastCareAgoSec,
+        groups: state.groups,
+        dueGoals: state.dueGoals,
+        rssNewCount: state.rssNewCount,
+        absentUsers: state.absentUsers ?? [],
+        selfPlayCooldownLeftSec: state.selfPlayCooldownLeftSec,
+        lifeTransition: state.lifeTransition ?? null,
+        shareCandidates: (state.shareCandidates ?? []).map((c) => ({
+          fromChatId: c.fromChatId,
+          messageId: c.messageId,
+        })),
+      },
+      masterConfigured: env().MASTER_UID > 0,
+    });
+    const scores = new Map(actions.map((a) => [JSON.stringify(a), scoreAction(a, values)]));
+    const states = getDrives();
+    void states;
+    driveLines = [
+      `驱动力（0-1，越高越想做；仅供参考，quiet 仍是常见答案）: ` +
+        `connection=${values.connection.toFixed(2)} curiosity=${values.curiosity.toFixed(2)} ` +
+        `competence=${values.competence.toFixed(2)} autonomy=${values.autonomy.toFixed(2)}`,
+      `候选动作（按期望驱动增益排序）:`,
+      formatProposals(
+        [...actions].sort((a, b) => (scores.get(JSON.stringify(b)) ?? 0) - (scores.get(JSON.stringify(a)) ?? 0)),
+        scores,
+      ),
+    ];
+  } catch {
+    driveLines = [];
+  }
   const user = [
     `现在北京时间 ${state.hourBeijing} 点。${state.weather ? state.weather + '。' : ''}${state.lifeTransition ? `你${state.lifeTransition}（刚切换状态——想随口提一句的话这是个自然的由头）。` : ''}`,
     ``,
@@ -493,6 +567,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `RSS 新资讯: ${state.rssNewCount} 条待消化${(state.rssTopTitles ?? []).length ? `：\n${(state.rssTopTitles ?? []).map((t) => `  - ${t}`).join('\n')}` : ''}`,
     `self-play 冷却: ${state.selfPlayCooldownLeftSec > 0 ? `还有 ${Math.floor(state.selfPlayCooldownLeftSec / 60)} 分钟` : '已就绪'}`,
+    ...(driveLines.length ? ['', ...driveLines] : []),
     ``,
     `这个周期做什么？`,
   ].join('\n');
@@ -532,6 +607,30 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
   const redis = getRedis();
   const now = Math.floor(Date.now() / 1000);
   const a = verdict.action;
+
+  // Phase 3 suppressor（host 侧，LLM 绕不过）：动作所服务的 drive 处于
+  // satiation 高位（刚做过同类事）→ 否决，转 quiet。fail-soft：suppressor
+  // 任一步抛错 → 不拦，原有否决链继续。
+  try {
+    if (a.type !== 'quiet') {
+      const { suppress } = await import('../core/drives/score.js');
+      const { getDrives, satiate } = await import('../core/drives/store.js');
+      const candidate = toCandidate(a);
+      void satiate;
+      if (candidate) {
+        const reason = suppress(candidate, getDrives());
+        if (reason) {
+          logger.info(
+            { action: a.type, reason },
+            'unified tick: vetoed by drive satiation suppressor',
+          );
+          return;
+        }
+      }
+    }
+  } catch {
+    /* suppressor 失败不拦路 */
+  }
 
   switch (a.type) {
     case 'quiet':
@@ -575,6 +674,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         }
         await redis.set(LAST_CARE_KEY + e.MASTER_UID, String(now));
         await markProactiveSent(e.MASTER_UID, 'unified-tick');
+        // Phase 3 satiate：刚关心过主人 → connection 抑制
+        try {
+          const { satiate } = await import('../core/drives/store.js');
+          satiate('connection');
+        } catch { /* non-critical */ }
         logger.info({ text: a.text.slice(0, 60) }, 'unified tick: cared for master');
       } catch (err) {
         logger.warn({ err }, 'unified tick: care_master send failed');
@@ -668,6 +772,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');
+      // Phase 3 satiate：刚主动开过口 → connection 抑制（防连 tick 刷屏）
+      try {
+        const { satiate } = await import('../core/drives/store.js');
+        satiate('connection');
+      } catch { /* non-critical */ }
       logger.info({ chatId: a.chatId }, 'unified tick: spoke in group');
       return;
     }
@@ -761,6 +870,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         status: 'queued',
       });
       await redis.set(SELFPLAY_LAST_KEY, String(now));
+      // Phase 3 satiate：自玩已派出 → autonomy 抑制（防连着开新坑）
+      try {
+        const { satiate } = await import('../core/drives/store.js');
+        satiate('autonomy');
+      } catch { /* non-critical */ }
       logger.info({ idea: a.idea.slice(0, 80) }, 'unified tick: self-play dispatched');
       return;
     }
