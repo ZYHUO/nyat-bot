@@ -53,7 +53,13 @@ export async function handleSkillCommand(
     let body = '';
     try {
       const b = JSON.parse(r.verifyLog ?? '{}') as Record<string, unknown>;
-      body = [`触发：${String(b['triggerWhen'] ?? '-').slice(0, 200)}`, `步骤：${String(b['steps'] ?? '-').slice(0, 400)}`].join('\n');
+      const tier = String(b['tier'] ?? 'small');
+      const merged = Array.isArray(b['mergedFrom']) ? (b['mergedFrom'] as string[]).join('、') : '';
+      body = [
+        `触发：${String(b['triggerWhen'] ?? '-').slice(0, 200)}`,
+        `步骤：${String(b['steps'] ?? '-').slice(0, 400)}`,
+        `tier：${tier}${merged ? `（合自：${merged.slice(0, 200)}）` : ''}`,
+      ].join('\n');
     } catch {
       body = r.verifyLog ?? '-';
     }

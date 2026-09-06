@@ -2,8 +2,9 @@
 // Skill Distill — 每 6h 小技能蒸馏 (AGI 自我 skill 系统)
 //
 // 定期读最近几小时的 episodes + experience_entries,LLM 提炼成
-// 一个「小 skill」(触发条件/步骤/坑),落 skills 表。区别于 distiller
-// 的碎片经验:skill 是结构化能力单元,可被 executor 检索复用。
+// 一个「小 skill」(触发条件/步骤/坑)。
+// Phase 7 起不再直写 skills 表 —— 走 core lifecycle 门
+// （propose → verify → 主人 approve → publish），直写口子已封。
 // 蒸馏失败静默,下个周期再来——skill 是慢变量,不急这一轮。
 // ────────────────────────────────────────
 
@@ -12,7 +13,6 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { loadCachedPrompt } from '../shared/config.js';
 import { getDb } from '../db/sqlite.js';
-import { saveSkill } from '../agent/skills.js';
 
 export interface DistilledSkill {
   name: string;
@@ -121,16 +121,19 @@ export async function runSkillDistill(): Promise<void> {
       return;
     }
 
-    const id = saveSkill({
+    // Phase 7：走 lifecycle 门（propose → verify，再等主人 approve/publish）。
+    // verify 当场跑（确定性红线扫描），进了 verified 就在 /skill pending 里等主人。
+    const { proposeSkill, verifySkill } = await import('../core/skills/lifecycle.js');
+    const lid = proposeSkill({
       name: skill.name,
-      tier: 'small',
       triggerWhen: skill.trigger_when,
       steps: skill.steps,
       pitfalls: skill.pitfalls || undefined,
       summary: skill.summary || undefined,
       tags: skill.tags,
     });
-    logger.info({ id, name: skill.name }, 'skill-distill: skill saved');
+    const v = verifySkill(lid);
+    logger.info({ lid, name: skill.name, verified: v.ok, reason: v.reason }, 'skill-distill: proposed to lifecycle gate');
   } catch (err) {
     logger.warn({ err }, 'runSkillDistill failed');
   }
