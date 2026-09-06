@@ -4,13 +4,17 @@
 // 每周读所有未归档的小 skill,LLM 合并去重成「大 skill」,被合并的
 // 小 skill 归档(不再注入但保留历史)。大 skill 库超上限按 use_count
 // 淘汰。这是「回收那一周的所有 skill 防止爆掉」的落点。
+//
+// Phase 7 起：大 skill 不再直写 skills 表 —— 走 lifecycle 门
+// （propose → verify → 主人 approve → publish）；归档动作照旧
+// （只碰 skills 表的 archived 位，不经过门）。
 // ────────────────────────────────────────
 
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { loadCachedPrompt } from '../shared/config.js';
-import { saveSkill, archiveSkills, getRecentSmallSkills, pruneBigSkills } from '../agent/skills.js';
+import { archiveSkills, getRecentSmallSkills, pruneBigSkills } from '../agent/skills.js';
 
 export interface ConsolidatedSkill {
   name: string;
@@ -102,23 +106,28 @@ export async function runSkillConsolidate(): Promise<void> {
     }
     archiveSkills(archivedIds);
 
-    // 落大 skill。
-    let saved = 0;
+    // Phase 7：大 skill 走 lifecycle 门。归档照旧（archived 位），落库改 propose+verify。
+    // tier='big' + mergedFrom 进 proposal，主人 /skill show 可追溯，publish 时按 big 落库。
+    const { proposeSkill, verifySkill } = await import('../core/skills/lifecycle.js');
+    let proposed = 0;
     for (const c of consolidated) {
-      const id = saveSkill({
+      const lid = proposeSkill({
         name: c.name,
-        tier: 'big',
         triggerWhen: c.trigger_when,
         steps: c.steps,
         pitfalls: c.pitfalls || undefined,
         summary: c.summary || undefined,
         tags: c.tags,
+        tier: 'big',
+        mergedFrom: c.merged_from,
       });
-      if (id !== null) saved++;
+      const v = verifySkill(lid);
+      if (v.ok) proposed++;
+      else logger.info({ lid, name: c.name, reason: v.reason }, 'skill-consolidate: big proposal rejected by verify');
     }
 
     pruneBigSkills(env().SKILL_MAX_BIG);
-    logger.info({ saved, archived: archivedIds.length }, 'skill-consolidate: done');
+    logger.info({ proposed, archived: archivedIds.length }, 'skill-consolidate: done');
   } catch (err) {
     logger.warn({ err }, 'runSkillConsolidate failed');
   }

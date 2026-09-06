@@ -44,4 +44,8 @@ export interface ProposeInput {
   pitfalls?: string;
   summary?: string;
   tags?: string[];
+  /** consolidate 归档的小 skill 名（publish 时主人可追溯来源）。存在 verify_log JSON 里。 */
+  mergedFrom?: string[];
+  /** 期望 tier（distill=small，consolidate=big；publish 时用）。存在 verify_log JSON 里。 */
+  tier?: 'small' | 'big';
 }

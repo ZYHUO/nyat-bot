@@ -65,6 +65,8 @@ export function proposeSkill(input: ProposeInput): number {
       pitfalls: (input.pitfalls ?? '').slice(0, 1000),
       summary: (input.summary ?? '').slice(0, 300),
       tags: (input.tags ?? []).slice(0, 4),
+      tier: input.tier ?? 'small',
+      mergedFrom: (input.mergedFrom ?? []).slice(0, 20),
     }),
     now,
     id,
@@ -192,12 +194,13 @@ export function approveSkill(id: number, reviewerUid: number): VerifyResult {
 /**
  * 发布：调旧 saveSkill 写 skills 表 + 回填 skill_id → published。
  * 只能从 approved 进（人审是唯一前置）。
+ * tier：默认读 proposal 的 tier（distill=small，consolidate=big）；显式传参可覆盖。
  */
-export async function publishSkill(id: number): Promise<VerifyResult> {
+export async function publishSkill(id: number, tier?: 'small' | 'big'): Promise<VerifyResult> {
   const row = getLifecycle(id);
   if (!row) return { ok: false, reason: 'not found' };
   if (row.status !== 'approved') return { ok: false, reason: `bad state: ${row.status} (needs human approval)` };
-  let body: { triggerWhen: string; steps: string; pitfalls?: string; summary?: string; tags?: string[] };
+  let body: { triggerWhen: string; steps: string; pitfalls?: string; summary?: string; tags?: string[]; tier?: string };
   try {
     body = JSON.parse(row.verifyLog ?? '{}') as {
       triggerWhen: string;
@@ -205,15 +208,17 @@ export async function publishSkill(id: number): Promise<VerifyResult> {
       pitfalls?: string;
       summary?: string;
       tags?: string[];
+      tier?: string;
     };
   } catch {
     return reject(id, 'publish failed: corrupt proposal body');
   }
+  const finalTier = tier ?? (body.tier === 'big' ? 'big' : 'small');
   try {
     const { saveSkill } = await import('../../agent/skills.js');
     const skillId = saveSkill({
       name: row.name,
-      tier: 'small',
+      tier: finalTier,
       triggerWhen: body.triggerWhen,
       steps: body.steps,
       pitfalls: body.pitfalls,
