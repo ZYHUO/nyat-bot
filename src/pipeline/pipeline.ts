@@ -425,6 +425,22 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
     timings["judge"] = Math.round(performance.now() - t3);
 
+    // Core v2 Phase 1 shadow: graylist 群里，旧判之后跑 core 分层判，
+    // 只记日志对比（agree/分歧），不改行为。fire-and-forget，失败静默。
+    // CORE_V2_CHAT_IDS 为空 → isCoreChat 全 false → 零开销。
+    try {
+      const { isCoreChat, shadowCompare } = await import("../core/loop.js");
+      if (isCoreChat(job.chatId)) {
+        void shadowCompare({
+          chatId: job.chatId,
+          message: formatted,
+          legacy: judgeResult,
+          burstHint,
+          focusLevel,
+        });
+      }
+    } catch { /* shadow never breaks the pipeline */ }
+
     // Post-judge: path resolution, mute/sleep/timing gates, reply generation
     const postResult = await runPostJudge({
       judgeResult,
