@@ -211,8 +211,17 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
   if (intents.length === 0) {
     return { level, judgeResult, state, l2DryRun: [] };
   }
-  // 有 intent：对 intent 内容里声明的 tool 做 classify+approve，只记日志不执行
-  const dryRun: Array<{ tool: string; tier: string; approved: boolean }> = [];
+  // 有 intent：Phase 5 真执行 —— CORE_PERMISSION_GATE_ENABLED 开才调
+  // executeIntentReal；关则沿用 Phase 1 dry-run（classify+approve 只记日志）。
+  // 无论哪档，L2 永不直通 pipeline 回复（返回 judgeResult，执行结果只进 receipt）。
+  const dryRun: Array<{ tool: string; tier: string; approved: boolean; executed?: boolean }> = [];
+  let gateOn = false;
+  try {
+    const { env: envShim } = await import('./env-shim.js');
+    gateOn = envShim().CORE_PERMISSION_GATE_ENABLED === true;
+  } catch {
+    gateOn = false;
+  }
   for (const intent of intents.slice(0, 2)) {
     let tool = 'unknown';
     let args: unknown = {};
@@ -221,6 +230,12 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
       tool = parsed.tool ?? 'unknown';
       args = parsed.args ?? {};
     } catch {
+      continue;
+    }
+    if (gateOn) {
+      const { executeIntentReal } = await import('./l2/execute.js');
+      const r = await executeIntentReal(intent.id);
+      dryRun.push({ tool, tier: r.tier ?? classify(tool, args), approved: r.executed, executed: r.executed });
       continue;
     }
     const tier = classify(tool, args);

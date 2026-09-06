@@ -128,6 +128,20 @@ export async function dispatchCommand(
     return true;
   }
 
+  // Core v2 Phase 5：/skill —— 主人 DM 专属，skill 门审批。
+  // 非主人 / 非 DM 一律拒绝（不透露门存在，只说用不了）。
+  //   /skill pending                    待审列表（verified 待批准 + proposed 待验证）
+  //   /skill approve <lifecycleId>      人审批准（verified → approved）
+  //   /skill publish <lifecycleId>      发布（approved → skills 表）
+  //   /skill verify <lifecycleId>       手动触发 verify（proposed → verified/rejected）
+  //   /skill reject <lifecycleId>       驳回（verified/proposed → rejected）
+  //   /skill show <lifecycleId>         看候选内容
+  if (cmd === "/skill") {
+    const { handleSkillCommand } = await import("../../core/skills/commands.js");
+    const reply = await handleSkillCommand(chatId, formatted.uid, arg.trim());
+    if (reply) { await sender.sendDirect(chatId, reply, formatted.messageId); return true; }
+  }
+
   return false;
 }
 

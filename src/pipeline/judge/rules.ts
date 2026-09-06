@@ -38,6 +38,8 @@ const WHITELISTED_COMMANDS = new Set([
   "/setdefault",
   "/cards",
   "/wish",
+  // Core v2 Phase 5：skill 门审批（仅主人 DM 生效，dispatchCommand 里验 MASTER_UID）。
+  "/skill",
 ]);
 
 function makeResult(
