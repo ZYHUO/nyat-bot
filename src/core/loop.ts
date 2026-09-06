@@ -176,8 +176,14 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
   }
 
   // L1 proposal 上黑板（"我建议回/不回，因为…"，L2 可执行的 plan 永不直接写）
+  // Phase 6：proposal 里带结构化 tool 意图（L2 可消费的最小形状），promote
+  // 能读懂的才转 authorized_intent，读不懂的 proposal 照样留痕但不转。
+  // 意图派生规则（host 确定性，不烧 LLM）：
+  //   action=REPLY → tool=chats.recentMessages（只读：L2 回读上下文备查）
+  //   其他 action → 无 tool（纯判决留痕，不 promote）
+  let proposalId: string | undefined;
   try {
-    writeEntry({
+    const w = writeEntry({
       kind: 'proposal',
       author: 'l1',
       content: JSON.stringify({
@@ -185,11 +191,34 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
         rule: judgeResult.rule ?? null,
         confidence: judgeResult.confidence ?? null,
         messageId: input.message.messageId,
+        ...(judgeResult.action === 'REPLY'
+          ? { tool: 'chats.recentMessages', args: { chatId: input.chatId }, why: judgeResult.rule ?? 'l1-reply' }
+          : {}),
       }),
       chatId: input.chatId,
     });
+    if (w.ok) proposalId = w.id;
   } catch {
     /* non-critical */
+  }
+
+  // Phase 6：自动 promote（host 侧，fail-soft）。
+  // readonly proposal（REPLY→recentMessages）→ 自动转 authorized_intent（open），
+  // L2 在 gate 开时真执行（只读上下文备查），关时 dry-run。
+  // 非 REPLY 的 proposal 无 tool → promoteProposal 回 needs-user-confirm，不转。
+  if (proposalId) {
+    try {
+      const { promoteProposal } = await import('./promote.js');
+      const pr = promoteProposal(proposalId);
+      if (pr.promoted) {
+        logger.info(
+          { chatId: input.chatId, proposalId, intentId: pr.intentId },
+          'core L1 proposal auto-promoted (readonly)',
+        );
+      }
+    } catch {
+      /* promote 失败不拦路 */
+    }
   }
 
   if (level === 'l1-converse') {
@@ -288,6 +317,9 @@ export async function shadowCompare(opts: {
         legacy: `${opts.legacy.action}/${opts.legacy.level}/${opts.legacy.rule ?? '-'}`,
         core: `${r.level}/${r.judgeResult?.action ?? 'fallback'}/${r.judgeResult?.rule ?? '-'}`,
         agree: r.judgeResult ? r.judgeResult.action === opts.legacy.action : 'n/a',
+        // Phase 6 可观测：belief 段是否参与了这次 core 判（diverged 归因用）
+        beliefCount: r.state?.beliefs.length ?? 0,
+        promoted: (r.l2DryRun ?? []).length > 0,
       },
       'core shadow compare',
     );
