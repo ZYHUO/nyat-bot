@@ -442,6 +442,17 @@ const envSchema = z.object({
   // currentRiskLevel 恒 low(提示/衰减全是 undefined,行为与改造前逐字节一致)。
   // 只在 DM(chatId > 0)生效,群聊零变化。
   REVERSE_VALVE_ENABLED: booleanFromEnv.default(false),
+  // ── Core v2 Phase 0: Belief View + 黑板 ACL + L2 permission gate ──
+  // 全部默认 OFF。Phase 0 是纯地基（新表+纯函数），不接任何主路径，
+  // 开了也只影响 eval harness 和未来的 graylist 群。
+  CORE_BELIEF_VIEW_ENABLED: booleanFromEnv.default(false),
+  CORE_BLACKBOARD_ENABLED: booleanFromEnv.default(false),
+  CORE_PERMISSION_GATE_ENABLED: booleanFromEnv.default(false),
+  // 灰度群，逗号分隔（如 '-100123,-100456'）
+  CORE_V2_CHAT_IDS: z.string().default(''),
+  // Belief View 注入 prompt 的预算（Phase 2 才用，Phase 0 只定义）
+  BELIEF_VIEW_INJECT_MAX: z.coerce.number().int().default(4),
+  BELIEF_TTL_DEFAULT_SEC: z.coerce.number().int().default(7776000),
   // 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。
   SYCOPHANCY_AUDIT_ENABLED: booleanFromEnv.default(false),
   // ── AGI Level 6 Phase 15: 小模型增强 ────────────────────────────────
