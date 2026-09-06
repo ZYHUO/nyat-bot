@@ -127,7 +127,7 @@ describe('core runCoreTick', () => {
     expect(r.fallbackToLegacy).toBe(true);
   });
 
-  it('l2-upgrade 无 intent → 回 L1 判决，dry-run 空', async () => {
+  it('l2-upgrade：REPLY proposal 自动 promote → L2 dry-run 有一条 readonly（Phase 6）', async () => {
     vi.mocked(l0Rule).mockReturnValue(null);
     vi.mocked(microJudge).mockResolvedValue({
       action: 'REPLY',
@@ -143,6 +143,26 @@ describe('core runCoreTick', () => {
     });
     expect(r.level).toBe('l2-upgrade');
     expect(r.judgeResult?.action).toBe('REPLY');
+    // Phase 6：REPLY proposal 带 tool 意图 → 自动 promote → dry-run 一条 readonly
+    expect(r.l2DryRun).toEqual([{ tool: 'chats.recentMessages', tier: 'readonly', approved: true }]);
+  });
+
+  it('l2-upgrade：IGNORE proposal 无 tool → 不 promote，dry-run 空', async () => {
+    vi.mocked(l0Rule).mockReturnValue(null);
+    vi.mocked(microJudge).mockResolvedValue({
+      action: 'IGNORE',
+      level: 'L1_MICRO',
+      confidence: 0.9,
+      latencyMs: 100,
+    });
+    const { runCoreTick } = await import('../../../../src/core/loop.js');
+    // @bot 点名（mock bot username=nyatbot）→ l2-upgrade；判 IGNORE → proposal 无 tool → promote 不转
+    const r = await runCoreTick({
+      chatId: -100,
+      message: msg('@nyatbot 别理我', { replyTo: undefined }),
+      recentMessages: [],
+    });
+    expect(r.level).toBe('l2-upgrade');
     expect(r.l2DryRun).toEqual([]);
   });
 });

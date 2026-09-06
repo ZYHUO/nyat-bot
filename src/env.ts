@@ -458,6 +458,9 @@ const envSchema = z.object({
   // Belief View 注入 prompt 的预算（Phase 2 才用，Phase 0 只定义）
   BELIEF_VIEW_INJECT_MAX: z.coerce.number().int().default(4),
   BELIEF_TTL_DEFAULT_SEC: z.coerce.number().int().default(7776000),
+  // Phase 6：drive satiation 半衰期（秒，默认 6h，与 norms TTL 同量级）。
+  // halflifeSec() 经 env() 读这里（Phase 6 前直读 process.env，已收敛）。
+  CORE_DRIVE_SATIATION_HALFLIFE_SEC: z.coerce.number().int().positive().default(21600),
   // 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。
   SYCOPHANCY_AUDIT_ENABLED: booleanFromEnv.default(false),
   // ── AGI Level 6 Phase 15: 小模型增强 ────────────────────────────────

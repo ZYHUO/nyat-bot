@@ -10,17 +10,19 @@
 
 import { getDb } from '../../db/sqlite.js';
 import { logger } from '../../shared/logger.js';
+import { env } from '../../env.js';
 import { DRIVE_NAMES, type DriveName, type DriveState } from './types.js';
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-/** satiation 半衰期：默认 6h（与 norms TTL 同量级）。可配 CORE_DRIVE_SATIATION_HALFLIFE_SEC。 */
+/** satiation 半衰期：默认 6h（与 norms TTL 同量级）。经 env() 读（Phase 6 起，替代直读 process.env）。 */
 function halflifeSec(): number {
+  // env.js 无回指 core/drives，同步 import 无循环。单测 mock env() 为普通对象
+  // 时缺 key → NaN → 回默认 21600。
   try {
-    // 轻量读 env，不经过 env-shim 的重依赖（store 被多方 import，防循环）
-    const v = Number(process.env['CORE_DRIVE_SATIATION_HALFLIFE_SEC'] ?? 21600);
+    const v = Number(env().CORE_DRIVE_SATIATION_HALFLIFE_SEC ?? 21600);
     return Number.isFinite(v) && v > 0 ? v : 21600;
   } catch {
     return 21600;
