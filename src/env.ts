@@ -450,6 +450,9 @@ const envSchema = z.object({
   CORE_PERMISSION_GATE_ENABLED: booleanFromEnv.default(false),
   // 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。
   CORE_V2_ENABLED: booleanFromEnv.default(true),
+  // Phase 2 双写：旧表写入后同步 belief（读投影）。默认开（best-effort，
+  // 失败只打日志不拦路）。关掉则 core_beliefs 停更，读侧照常。
+  CORE_DUAL_WRITE: booleanFromEnv.default(true),
   // 灰度群，逗号分隔。空 = 全量生效（与 TURN_ACTOR/MULTI_AGENT 一致）。
   CORE_V2_CHAT_IDS: z.string().default(''),
   // Belief View 注入 prompt 的预算（Phase 2 才用，Phase 0 只定义）

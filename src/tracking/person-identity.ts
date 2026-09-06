@@ -142,6 +142,10 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
     // 由机制5 LLM 合并 cron 产出,这里保留已有值不覆盖。
     const impression = getUserProfilePrompt(primary, uid);
     upsertIdentity(uid, impression, primary, contexts.length, now);
+    // Phase 2 双写：同步 belief（fire-and-forget）
+    void import('../core/migrate.js')
+      .then(({ syncPersonIdentity }) => syncPersonIdentity(uid))
+      .catch(() => { /* non-critical */ });
     const existing = getPersonIdentity(uid);
     // impression 用**落库后**的值,不是本地变量 —— COALESCE 可能保留了旧值,返回本地的
     // null 会让调用方以为跨群印象没了。

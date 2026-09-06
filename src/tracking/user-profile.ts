@@ -628,6 +628,13 @@ ${tagLine}${existingBlock}最新发言(${pending.length}条):\n${messagesBlock}`
       })();
 
       logger.debug({ chatId: row.chat_id, uid: row.uid }, 'User profile updated');
+      // Phase 2 双写：同步 belief（fire-and-forget）
+      {
+        const c = row.chat_id, u = row.uid;
+        void import('../core/migrate.js')
+          .then(({ syncUserProfile }) => syncUserProfile(c, u))
+          .catch(() => { /* non-critical */ });
+      }
     } catch (err) {
       logger.warn({ err, chatId: row.chat_id, uid: row.uid }, 'User profile sync failed for user');
     }

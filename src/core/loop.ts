@@ -144,14 +144,28 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
   }
 
   // ── L1 会话（复用 microJudge，结果形状与旧链路一致） ──
+  // Phase 2：belief 预算注入 —— assembleSystemPrompt 从 state.beliefs
+  // 组出 [当前信念] 段（≤预算，空库时省略），拼进 knowledgeBase，与旧
+  // knowledge 同源。shadow 可比性不受影响（旧判无此段，agree 只比 action）。
   let judgeResult: JudgeResult;
   try {
+    const { assembleSystemPrompt } = await import('./prompt/system.js');
+    const assembled = assembleSystemPrompt(state);
+    const kb = [state.knowledge, assembled.beliefCount > 0
+      ? `[当前信念]\n${state.beliefs
+        .filter((b) => b.effectiveStatus === 'active')
+        .sort((a, b) => b.decayedConfidence - a.decayedConfidence)
+        .slice(0, assembled.beliefCount)
+        .map((b) => `- ${b.summary}`)
+        .join('\n')}`
+      : '']
+      .filter((s) => s && s.trim()).join('\n\n');
     judgeResult = await microJudge(
       input.message,
       input.recentMessages,
       botUid,
       'judge',
-      state.knowledge,
+      kb,
       input.chatId,
       undefined,
       input.burstHint,

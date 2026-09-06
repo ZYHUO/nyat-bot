@@ -151,7 +151,12 @@ export function createGoal(input: CreateGoalInput, maxActive = 5): number | null
         ts,
       );
     logger.info({ topic, origin: input.origin }, 'goal created');
-    return Number(r.lastInsertRowid);
+    const gid = Number(r.lastInsertRowid);
+    // Phase 2 双写：同步 belief（fire-and-forget）
+    void import('../core/migrate.js')
+      .then(({ syncGoal }) => syncGoal(gid))
+      .catch(() => { /* non-critical */ });
+    return gid;
   } catch (err) {
     logger.warn({ err }, 'createGoal failed');
     return null;
