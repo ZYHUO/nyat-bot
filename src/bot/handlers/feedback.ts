@@ -54,7 +54,10 @@ export function registerFeedbackHandler(): void {
         if (!reactor) return; // 匿名 reaction 无 user，跳过
         if (reactor.id === botUid) return; // 自己点的不算
         const botMessageId = mr.message_id;
-        if (!(await isOwnMessage(chatId, botMessageId))) return;
+        if (!(await isOwnMessage(chatId, botMessageId))) {
+          logger.debug({ chatId, botMessageId }, 'feedback: reaction ignored for non-bot message');
+          return;
+        }
 
         const news: ReactionType[] = mr.new_reaction ?? [];
         const olds: ReactionType[] = mr.old_reaction ?? [];

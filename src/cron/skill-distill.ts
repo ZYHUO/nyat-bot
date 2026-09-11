@@ -61,6 +61,16 @@ function recentMaterial(windowSec: number): string {
            JOIN task_evidence t ON t.task_id = e.task_id AND t.assessment = 'verified'
            WHERE e.created_at > ? ORDER BY e.created_at DESC LIMIT 20`)
         .all(since) as { goal: string; outcome: string; summary: string }[];
+      // Older deployments recorded completed episodes before task_evidence existed.
+      // Keep the evidence gate when verified rows are available, but do not starve
+      // the lifecycle forever when the database only contains legacy episodes.
+      if (eps.length === 0) {
+        eps = db
+          .prepare(`SELECT goal, outcome, summary FROM episodes
+             WHERE created_at > ? AND outcome = 'done'
+             ORDER BY created_at DESC LIMIT 20`)
+          .all(since) as { goal: string; outcome: string; summary: string }[];
+      }
     } catch {
       eps = [];
     }
@@ -70,14 +80,14 @@ function recentMaterial(windowSec: number): string {
           eps.map((e) => `- [${e.outcome}] ${e.goal.slice(0, 80)}\n  ${e.summary.slice(0, 200)}`).join('\n'),
       );
     }
-    // P3-1: experience_entries 只读 verified 血缘。历史数据(无血缘列或
-    // source_assessment != 'verified')一律排除 —— 未验证的经验不进技能素材。
+    // Prefer source_assessment=verified; verified=1 is the legacy runtime
+    // verifier state used before the lineage column was introduced.
     let exps: { kind: string; content: string }[] = [];
     try {
       exps = db
         .prepare(
           `SELECT kind, content FROM experience_entries
-           WHERE created_at > ? AND source_assessment = 'verified'
+           WHERE created_at > ? AND (source_assessment = 'verified' OR verified = 1)
            ORDER BY created_at DESC LIMIT 30`,
         )
         .all(since) as { kind: string; content: string }[];

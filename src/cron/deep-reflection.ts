@@ -36,7 +36,7 @@ export async function reflectChat(chatId: number): Promise<number> {
     incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'skip' });
     return 0; // 失败冷却中
   }
-  const recent = await getRecent(chatId, e.REFLECTION_WINDOW_MSGS);
+  const recent = await getRecent(chatId, Math.min(e.REFLECTION_WINDOW_MSGS, 80));
   const msgs = recent.filter((m) => !m.isBot && (m.textContent || m.captionContent || '').trim());
   if (msgs.length < MIN_MSGS) return 0;
 
@@ -52,12 +52,12 @@ export async function reflectChat(chatId: number): Promise<number> {
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `群最近 ${msgs.length} 条聊天:\n${lines}\n\n输出「本群近况」简报:` },
       ],
-      maxTokens: 16000, // high 推理留足天花板(实测high≤1559,永不截断)
+      maxTokens: 1200,
       temperature: 0.4,
       // 蒸馏是后台批任务,不该为单群烧满 provider 超时(22s)再串行降级 ×4 跳 ——
       // 一次 tick 12 群能把整条链的熔断计数全刷爆(2026-08-07 事故)。每跳 12s 封顶。
       maxTimeoutMs: 12000,
-      allowHedge: false, // 后台批任务:hedge 双发纯翻倍账单
+      allowHedge: false,
     });
     digest = result.content.trim().slice(0, 600);
     // Phase 14.3: 连接率进复盘 —— digest 尾部拼一行 best/worst(确定性,不烧 token)。

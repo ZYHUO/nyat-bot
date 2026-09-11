@@ -753,11 +753,16 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       const { sendMessage } = await import('../bot/sender/telegram.js');
       const { addAssistant } = await import('../pipeline/context/manager.js');
-      const messageId = await sendMessage(a.chatId, text);
+      let messageId = 0;
+      try {
+        messageId = await sendMessage(a.chatId, text);
+      } catch (err) {
+        logger.warn({ err, chatId: a.chatId }, 'unified tick: group unavailable, skipping group_speak');
+        return;
+      }
       if (messageId) {
         await addAssistant(a.chatId, { textContent: text, messageId });
-        // H4 pull 记录：这次主动开口跟的话题（topicHint 里的 best）算一次 pull，
-        // 后续 reaction/reply 反馈会折成 reward 回来。
+        // H4 pull: 这次主动开口跟的话题算一次 pull，后续 reaction/reply 反馈会折成 reward。
         try {
           const { recordPull } = await import('../tracking/topic-bandit.js');
           const m = topicHint.match(/优先跟「(.+?)」/);
@@ -830,7 +835,13 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       const { sendMessage } = await import('../bot/sender/telegram.js');
       const { addAssistant } = await import('../pipeline/context/manager.js');
-      const messageId = await sendMessage(a.chatId, text);
+      let messageId = 0;
+      try {
+        messageId = await sendMessage(a.chatId, text);
+      } catch (err) {
+        logger.warn({ err, chatId: a.chatId }, 'unified tick: group unavailable, skipping remember_user');
+        return;
+      }
       if (messageId) {
         await addAssistant(a.chatId, { textContent: text, messageId });
       }

@@ -27,9 +27,26 @@ export interface DistillResult {
 export function parseDistillOutput(raw: string): DistillResult | null {
   try {
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const m = cleaned.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    const obj = JSON.parse(m[0]) as Record<string, unknown>;
+    const candidates = [
+      cleaned,
+      cleaned.replace(/,\s*([}\]])/g, '$1'),
+      cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '',
+      (cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '').replace(/,\s*([}\]])/g, '$1'),
+    ];
+    let obj: Record<string, unknown> | null = null;
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          obj = parsed as Record<string, unknown>;
+          break;
+        }
+      } catch {
+        // Try the next common LLM formatting variant.
+      }
+    }
+    if (!obj) return null;
     const summary = typeof obj['summary'] === 'string' ? (obj['summary'] as string).trim().slice(0, 2000) : '';
     if (!summary) return null;
     const strArr = (v: unknown, max: number, len: number): string[] =>
