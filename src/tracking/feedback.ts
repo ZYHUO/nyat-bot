@@ -66,6 +66,10 @@ export function recordReaction(params: {
       )
       .run(params.userId, params.botMessageId, params.chatId, params.emoji, s, nowSec());
     logger.debug({ userId: params.userId, emoji: params.emoji, s }, 'feedback: reaction');
+    // Phase D：预测闭环——用户 reaction 到达即回填预测误差（fail-soft）。
+    void import('../agent/predictions.js')
+      .then(({ resolvePrediction }) => resolvePrediction({ chatId: params.chatId, messageId: params.botMessageId, actualSentiment: s, feedbackKind: 'reaction' }))
+      .catch(() => { /* non-critical */ });
     // H4.2 reaction→bandit 回流：跟 recordReplySentiment 同口径——本群 live
     // topics 均分 reward（保守，避免错归因放大）。
     // taste 闭环：如果这条是转发的落点（目标群），reward 回给*源群*的 live topics。
@@ -104,6 +108,10 @@ export function recordReplySentiment(params: {
       )
       .run(params.userId, params.botMessageId, params.chatId, total, params.userText.slice(0, 300), nowSec());
     logger.debug({ userId: params.userId, s, total, text: params.userText.slice(0, 50) }, 'feedback: reply');
+    // Phase D：预测闭环——reply 情绪回填（无情绪词的追问按轻度正反馈计，followup 本身是 engagement）。
+    void import('../agent/predictions.js')
+      .then(({ resolvePrediction }) => resolvePrediction({ chatId: params.chatId, messageId: params.botMessageId, actualSentiment: s !== 0 ? s : 0.4, feedbackKind: 'replier_sentiment' }))
+      .catch(() => { /* non-critical */ });
     // H4 bandit 回流：这次回复是对 bot 跟进某话题的反馈 → 折成 reward。
     // 话题归因：本群当前 live 话题（topic-registry getActiveTopics），命中多个
     // 时均分 reward（保守，避免错归因放大）。同步调用（registry 是纯 SQLite）。

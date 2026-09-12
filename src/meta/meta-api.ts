@@ -79,7 +79,7 @@ export function buildMetaApiContext(opts?: {
       if (!busy) {
         busy = state.listTasks(cid).some(
           (t) =>
-            (t.status === 'queued' || t.status === 'running') &&
+            (t.status === 'queued' || t.status === 'running' || t.status === 'waiting_user') &&
             Date.now() - t.createdAt < 180_000,
         );
       }

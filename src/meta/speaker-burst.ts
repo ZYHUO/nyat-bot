@@ -48,7 +48,7 @@ export function isInFlightCodeActForUser(chatId: number, uid: number): boolean {
       .listTasks(chatId)
       .some(
         (t) =>
-          (t.status === 'queued' || t.status === 'running') &&
+          (t.status === 'queued' || t.status === 'running' || t.status === 'waiting_user') &&
           t.targetUserId === uid &&
           now - t.createdAt < 180_000,
       );

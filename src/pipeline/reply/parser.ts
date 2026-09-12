@@ -304,7 +304,7 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
   const salvaged = salvageReplyContent(trimmed);
   if (salvaged) {
     logger.debug('Salvaged replyContent from malformed JSON');
-    return truncateReply({ replyContent: salvaged, targetMessageId: fallbackMessageId });
+    return { replyContent: salvaged, targetMessageId: fallbackMessageId };
   }
 
   // 3.8 A lone action item that failed validation (e.g. bad emoji) must not
@@ -332,10 +332,10 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
 
   // 4. Plain text fallback — treat entire response as reply content
   logger.debug('Using plain text fallback for AI response');
-  return truncateReply({
+  return {
     replyContent: normalizeWhitespace(trimmed),
     targetMessageId: fallbackMessageId,
-  });
+  };
 }
 
 /** 检测模型是否把 reply-schema 的定义本身当成了输出(而非一个实例)。 */
@@ -438,14 +438,6 @@ export function parseReplyResponse(raw: string, fallbackMessageId: number): Pars
   return [parseSingleReply(trimmed, fallbackMessageId)];
 }
 
-/** Truncate replyContent to Telegram's 4096-char limit */
-function truncateReply(reply: ParsedReply): ParsedReply {
-  if (reply.replyContent.length > 4096) {
-    reply.replyContent = reply.replyContent.slice(0, 4093) + '...';
-  }
-  return reply;
-}
-
 function validateAndReturn(
   data: Record<string, unknown>,
   fallbackMessageId: number,
@@ -521,12 +513,12 @@ function validateAndReturn(
   const parsed = replyOutputSchema.safeParse(normalized);
   if (parsed.success) {
     const { stickerIntent, ...rest } = parsed.data;
-    const result: ParsedReply = truncateReply({
+    const result: ParsedReply = {
       ...rest,
       stickerIntent: stickerIntent
         ? (Array.isArray(stickerIntent) ? stickerIntent : [stickerIntent])
         : undefined,
-    });
+    };
     if (data['handoffToSplitter'] === true) {
       result.handoffToSplitter = true;
     }

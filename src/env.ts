@@ -735,6 +735,27 @@ const envSchema = z.object({
   CODEACT_CONCURRENCY: z.coerce.number().int().positive().default(4),
   // 长时间 Agent 循环：分段续跑 + checkpoint + 上下文压缩。默认关，灰度开。
   AGENT_LOOP_ENABLED: booleanFromEnv.default(false),
+  // 长任务用户可见阶段通知：运行时负责短确认/保活，失败不影响任务执行。
+  TASK_PROGRESS_ENABLED: booleanFromEnv.default(true),
+  TASK_PROGRESS_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(30_000),
+  TASK_PROGRESS_MAX_VISIBLE_UPDATES: z.coerce.number().int().positive().default(6),
+  TASK_PROGRESS_START_DELAY_MS: z.coerce.number().int().nonnegative().default(1_000),
+  TASK_PROGRESS_KEEPALIVE_MS: z.coerce.number().int().positive().default(35_000),
+  TASK_PROGRESS_CODEACT_ENABLED: booleanFromEnv.default(true),
+  TASK_PROGRESS_RESEARCH_ENABLED: booleanFromEnv.default(true),
+  // 认知债务后台扫描（CSR）：过期清理 + 到期债务记录 + 预测误差摘要。默认关，灰度开。
+  DEBT_SWEEP_ENABLED: booleanFromEnv.default(false),
+  DEBT_SWEEP_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+
+  // 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。
+  REPLY_MODE_ENABLED: booleanFromEnv.default(true),
+  REPLY_ACK_THEN_EXPAND_ENABLED: booleanFromEnv.default(true),
+  REPLY_MICRO_REACTION_MAX_CHARS: z.coerce.number().int().positive().default(12),
+  REPLY_ACK_MAX_CHARS: z.coerce.number().int().positive().default(12),
+  REPLY_MAX_EXPANSION_SEGMENTS: z.coerce.number().int().positive().default(2),
+  REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED: booleanFromEnv.default(true),
+  REPLY_HUMANIZER_SAFE_MODE: booleanFromEnv.default(true),
+
   // 单个任务最多跑几段（每段 CODEACT_MAX_TURNS 轮）。超限强制诚实收尾。
   AGENT_MAX_SEGMENTS: z.coerce.number().int().positive().default(10),
   // history 超过多少轮触发 LLM 压缩早期轮次。

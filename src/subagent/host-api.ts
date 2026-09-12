@@ -81,12 +81,17 @@ export function stripApiCallLines(text: string): { clean: string; stripped: numb
 }
 
 import { createExecutionAudit, attachExecutionAudit, type AuditSnapshot } from '../agent/execution-audit.js';
+import { markTaskVisible } from '../agent/task-progress.js';
+import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
 import type { AcceptanceContract, AcceptanceCheck, AcceptanceResult } from '../agent/task-evidence.js';
 import * as sandboxPaths from '../sandbox/paths.js';
 
+export type DeliveryKind = 'conversation' | 'progress' | 'discovery' | 'clarification' | 'partial_result' | 'final';
+
 export interface HostApi {
   telegram: {
-    sendText: (text: string, replyToMessageId?: number) => Promise<{ messageId: number }>;
+    sendText: (text: string, replyToMessageId?: number, kind?: DeliveryKind) => Promise<{ messageId: number }>;
+    sendFinal: (text: string, replyToMessageId?: number) => Promise<{ messageId: number }>;
     sendSticker: (fileId: string) => Promise<{ messageId: number }>;
     /** Deliver a sandbox file to the user (sendDocument). Path is sandbox-relative. */
     sendFile: (path: string, caption?: string) => Promise<{ messageId: number }>;
@@ -232,7 +237,23 @@ export interface HostApi {
     endTask: (summary: string) => void;
     setAcceptance: (checks: AcceptanceCheck[]) => void;
     verifyAcceptance: () => Promise<AcceptanceResult>;
+    /** Any user-visible delivery happened, including intermediate messages. */
     didSendText: () => boolean;
+    /** A final delivery was explicitly sent or the task was ended. */
+    didProduceFinal: () => boolean;
+    /** An intermediate delivery happened without ending the task. */
+    didSendIntermediate: () => boolean;
+    /** The last delivery kind, if any. */
+    lastDeliveryKind: () => DeliveryKind | undefined;
+    /** Mark that the task is waiting for a user answer, not finished. */
+    waitForUser: (reason?: string) => void;
+    isWaitingForUser: () => boolean;
+    waitingReason: () => string | undefined;
+    /**
+     * CSR Phase D：发送前自报对用户反应的预测（可选）。
+     * 下一条成功 send* 会带上这条预测（source=model），用于后续 prediction error 学习。
+     */
+    predict: (text: string, predictedSentiment?: number) => void;
     /** 有产出（文字或文件都算）——长任务续跑判断用。 */
     didProduce: () => boolean;
     /** Await ctx/timing writes so Meta callback sees the reply. */
@@ -370,6 +391,12 @@ export function createHostApi(
   const banned = env().CODEACT_BANNED_WORDS;
   let ended = false;
   let textSent = 0;
+  let finalSent = false;
+  let intermediateSent = false;
+  let lastDeliveryKind: DeliveryKind | undefined;
+  let waitingForUser = false;
+  let waitingReason = '';
+  let pendingPrediction: { text: string; sentiment: number } | null = null;
   let fileSent = 0;
   let pollSent = false;
   let forwardsSent = 0;
@@ -437,6 +464,19 @@ export function createHostApi(
       if (id) {
         logger.info({ chatId, goalId: id, topic }, 'promise backstop(llm): goal created from bot own text');
       }
+      // Cognitive Debt：承诺同时是一笔未完成认知，goal 兑现/超时前始终可见。
+      const { createDebt } = await import('../agent/cognitive-debts.js');
+      createDebt({
+        chatId,
+        taskId: opts.taskId,
+        kind: 'promise',
+        statement: `对用户承诺了: ${topic}`,
+        sourceEventIds: opts.taskId ? [`task:${opts.taskId}`] : [],
+        priority: 8,
+        confidence: 0.9,
+        ttlSec: 3 * 24 * 3600,
+        nextCheckInSec: 900,
+      });
     } catch (err) {
       logger.debug({ err, chatId }, 'promise backstop failed (non-critical)');
     }
@@ -533,7 +573,7 @@ export function createHostApi(
 
   const api: HostApi = {
     telegram: {
-      sendText(text: string, replyToMessageId?: number) {
+      sendText(text: string, replyToMessageId?: number, kind: DeliveryKind = 'conversation') {
         assertOpen();
         return trackInflight(
           (async () => {
@@ -676,13 +716,11 @@ export function createHostApi(
               logger.debug({ err, chatId }, 'host segmentReply failed — single bubble');
             }
             if (parts.length === 1 && clean.length > maxLen) {
-              const { softTruncate } = await import('../shared/soft-truncate.js');
-              const next = softTruncate(clean, maxLen);
-              logger.info({ chatId, from: clean.length, to: next.length }, 'host sendText truncated');
-              parts = [next || clean.slice(0, maxLen)];
+              // Keep the full text and let the Telegram sender shard it. A silent
+              // hard truncate here loses the tail of long task results.
+              logger.info({ chatId, chars: clean.length, maxLen }, 'host sendText delegating long text to sender sharding');
             } else if (parts.length > 1) {
-              const { softTruncate } = await import('../shared/soft-truncate.js');
-              parts = parts.map((p) => (p.length > maxLen ? softTruncate(p, maxLen) || p.slice(0, maxLen) : p));
+              logger.debug({ chatId, parts: parts.length, chars: clean.length }, 'host sendText preserving segmented text for sender sharding');
             }
 
             // Past gate: finish even if task closes (model often skips await before endTask).
@@ -727,6 +765,32 @@ export function createHostApi(
                 );
               }
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
+              if (opts.taskId) markTaskVisible(opts.taskId);
+              logger.info({ chatId, taskId: opts.taskId, deliveryKind: kind, messageId }, 'task delivery recorded');
+              if (opts.taskId) {
+                emitTaskRuntimeEvent({
+                  kind: 'model_message_sent',
+                  taskId: opts.taskId,
+                  chatId,
+                  messageId,
+                  deliveryKind: kind,
+                });
+              }
+              // Phase D：登记交付预测。模型 predict() 过 → source=model；否则系统先验。
+              void import('../agent/predictions.js')
+                .then(({ recordPrediction }) => {
+                  const pending = pendingPrediction;
+                  pendingPrediction = null;
+                  if (pending) {
+                    recordPrediction({
+                      chatId, taskId: opts.taskId, messageId,
+                      source: 'model', prediction: pending.text, predictedSentiment: pending.sentiment,
+                    });
+                  } else {
+                    recordPrediction({ chatId, taskId: opts.taskId, messageId });
+                  }
+                })
+                .catch(() => { /* telemetry never breaks delivery */ });
               lastMessageId = messageId;
               lastSentNorm = part;
               sentTexts.push(part);
@@ -761,6 +825,9 @@ export function createHostApi(
             }
 
             textSent += 1;
+            lastDeliveryKind = kind;
+            if (kind === 'final') finalSent = true;
+            else intermediateSent = true;
 
             const answeredIds = new Set<number>();
             // Only mark after successful send — never a stale fromModel id.
@@ -797,6 +864,9 @@ export function createHostApi(
             return makeSendAck(`text_sent#${lastMessageId}`, lastMessageId);
           })(),
         );
+      },
+      sendFinal(text: string, replyToMessageId?: number) {
+        return this.sendText(text, replyToMessageId, 'final');
       },
       sendSticker(fileId: string) {
         assertOpen();
@@ -1887,6 +1957,7 @@ export function createHostApi(
       setAcceptance(checks) { audit.propose(checks); },
       verifyAcceptance() { return audit.verify(); },
       endTask(summary: string) {
+        logger.info({ chatId, taskId: opts.taskId, summary: String(summary ?? '').slice(0, 160), deliveryKind: lastDeliveryKind ?? null }, 'task finalization requested');
         if (ended) return;
         if (!String(summary).startsWith('failed')) audit.assertCanEnd();
         ended = true;
@@ -1896,6 +1967,35 @@ export function createHostApi(
       },
       didSendText() {
         return textSent > 0;
+      },
+      didProduceFinal() {
+        return finalSent || ended;
+      },
+      didSendIntermediate() {
+        return intermediateSent;
+      },
+      lastDeliveryKind() {
+        return lastDeliveryKind;
+      },
+      waitForUser(reason?: string) {
+        waitingForUser = true;
+        waitingReason = String(reason ?? '').slice(0, 240);
+        lastDeliveryKind = 'clarification';
+        if (opts.taskId) {
+          emitTaskRuntimeEvent({ kind: 'task_waiting_user', taskId: opts.taskId, chatId });
+        }
+      },
+      isWaitingForUser() {
+        return waitingForUser;
+      },
+      waitingReason() {
+        return waitingReason || undefined;
+      },
+      predict(text: string, predictedSentiment?: number) {
+        const t = String(text ?? '').trim().slice(0, 400);
+        if (!t) return;
+        const s = predictedSentiment ?? 0.5;
+        pendingPrediction = { text: t, sentiment: Math.min(1, Math.max(0, s)) };
       },
       /** 有产出（文字或文件都算）——长任务续跑判断用。 */
       didProduce() {

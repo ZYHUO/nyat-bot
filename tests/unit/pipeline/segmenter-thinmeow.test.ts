@@ -36,8 +36,19 @@ describe('thinMeowTic (喵口癖抑制)', () => {
     expect(thinMeowTic(['草 这也行', '确实离谱'])).toEqual(['草 这也行', '确实离谱']);
   });
 
-  it('端到端:segmentReply 默认开启抑制', () => {
-    const { segments } = segmentReply('对对对喵');
-    expect(segments).toEqual(['对对对']);
+  it('长中文不会静默变成默认嗯，且每段受长度上限约束', () => {
+    const text = '这是一个很长的中文回复，'.repeat(80);
+    const { segments } = segmentReply(text, { maxLength: 120, maxSentenceNum: 3, periodDropRate: 0 });
+    expect(segments.join('')).toContain('这是一个很长的中文回复');
+    expect(segments).not.toEqual(['嗯']);
+    expect(segments.every((s) => s.length <= 120)).toBe(true);
+  });
+
+  it('超过最大自然段数时保留内容而不是返回整段原文或嗯', () => {
+    const text = ['第一段内容。', '第二段内容。', '第三段内容。', '第四段内容。', '第五段内容。'].join('');
+    const { segments } = segmentReply(text, { maxLength: 20, maxSentenceNum: 3, periodDropRate: 0 });
+    expect(segments).not.toEqual(['嗯']);
+    expect(segments.join('')).toContain('第五段内容');
+    expect(segments.every((s) => s.length <= 20)).toBe(true);
   });
 });

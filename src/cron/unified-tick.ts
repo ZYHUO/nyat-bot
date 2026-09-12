@@ -69,6 +69,8 @@ export interface WorldState {
   /** 3+ 天没出现的熟面孔(交互≥5 次)——"想起某人"的数据源。 */
   absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
   dueGoals: { id: number; topic: string; lastFinding: string | null }[];
+  /** 到期待偿还的认知债务（CSR）——模型自己决定要不要借某个动作自然偿还。 */
+  dueDebts?: { id: number; kind: string; chatId: number; statement: string }[];
   rssNewCount: number;
   /** RSS 最新条目标题（谈资内容本身，不只是计数——bot 得知道「有什么」才能拿来当话题）。 */
   rssTopTitles?: string[];
@@ -173,6 +175,13 @@ export async function buildWorldState(): Promise<WorldState> {
   try {
     const { listDueGoals } = await import('../agent/goals.js');
     dueGoals = listDueGoals(now).map((g) => ({ id: g.id, topic: g.topic, lastFinding: g.last_finding }));
+  } catch { /* keep empty */ }
+
+  // 到期认知债务（CSR Phase B）——主动偿还的候选料，模型决定用不用
+  let dueDebts: WorldState['dueDebts'] = [];
+  try {
+    const { listDueDebts } = await import('../agent/cognitive-debts.js');
+    dueDebts = listDueDebts(5).map((d) => ({ id: d.id, kind: d.kind, chatId: d.chatId, statement: d.statement }));
   } catch { /* keep empty */ }
 
   // RSS fuel（所有群的 fuel 总量，粗粒度即可；另取最新几条标题当真实话题料）
@@ -362,6 +371,7 @@ export async function buildWorldState(): Promise<WorldState> {
     shareCandidates,
     absentUsers,
     dueGoals,
+    dueDebts,
     rssNewCount,
     rssTopTitles,
     weather,
@@ -459,6 +469,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
   const goalLines = state.dueGoals.length
     ? state.dueGoals.map((g) => `  goal#${g.id}: 「${g.topic}」${g.lastFinding ? `上次发现: ${g.lastFinding.slice(0, 60)}` : '(首次检查)'}`).join('\n')
     : '  (无到期目标)';
+  const debtLines = (state.dueDebts ?? []).length
+    ? state.dueDebts!.map((d) => `  debt#${d.id}(${d.kind}, 群 ${d.chatId}): ${d.statement.slice(0, 80)}`).join('\n')
+    : '  (没有到期债务)';
   const absentLines = (state.absentUsers ?? []).length
     ? state.absentUsers
         .map((u) => `  ${u.name}(群 ${u.chatId})已 ${u.absentDays} 天没出现`)
@@ -561,6 +574,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `到期关注目标:`,
     goalLines,
+    ``,
+    `欠着的认知债务（相关群出现合适时机时可自然偿还——兑现/核实/承认错了；别硬提）:`,
+    debtLines,
     ``,
     `值得转发的（A 群看到的好东西，可以转到 B 群——只能选下面列的，不许编 id）:`,
     shareLines,

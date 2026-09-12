@@ -91,6 +91,18 @@ export function startCronJobs(deps?: CronDeps): void {
     },
   });
 
+  // Debt sweep — 认知债务过期/到期扫描 + 预测误差摘要（CSR，默认关）
+  if (env().DEBT_SWEEP_ENABLED) {
+    reg({
+      name: 'debt-sweep',
+      everySec: env().DEBT_SWEEP_INTERVAL_MIN * 60,
+      run: async () => {
+        const { runDebtSweep } = await import('./debt-sweep.js');
+        await runDebtSweep();
+      },
+    });
+  }
+
   // Memory "dream" — nightly forgetting of old, never-recalled memories
   reg({
     name: 'memory-dream',

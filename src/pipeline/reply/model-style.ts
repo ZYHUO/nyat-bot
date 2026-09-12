@@ -9,32 +9,16 @@
 // 按 model 名子串匹配(reply usage 的主 label 的 model);命中就注入到 reply prompt
 // 靠近 CURRENT_MESSAGE 的位置(reply.ts)。grok 无补丁(它本来就对)。
 
+// 基座差异只补协议安全，不规定回复长度、段数或口头风格。
 const NUDGES: Array<{ match: RegExp; nudge: string }> = [
   {
-    // Gemini 系:天生话多,尤其爱给同一个人拆出第二条"解释/补充"。狠狠压成一句怼死。
-    // (实测:温和提醒无效,必须硬性"只出一条";A/B 后这版能把它拉到 grok 的利落感。)
-    match: /gemini/i,
+    match: /gemini|deepseek|v4-?(pro|flash)|dsv4/i,
     nudge:
-      '[你这个基座专属·硬性] 你的通病:回同一个人爱拆成好几条、爱加第二条"解释/补充/去测测看/其实/不过"。' +
-      '**回同一个人时只出一条、一句话怼完就停**——不解释原因、不列方案、不铺垫、不加"估计/其实/不过/要不要"。' +
-      '像 grok 那样一句损死(例:"300而已急啥 多半线路抽风 真被墙早超时了")。宁可少说,绝不啰嗦。' +
-      '(注意:多个**不同的人**问了不同的事,仍照常分人各回一条——这条只管"别给同一个人啰嗦第二句"。)',
+      '[基座协议提醒] 只输出回复正文本身，不要带“回复给#XXXX”“回复:”或“@某人”等格式壳，也不要把消息编号/工具协议写进正文。回复长度和语气根据上下文自行判断。',
   },
-  {
-    // DeepSeek V4(pro/flash)系:自带思考,正文偶发漏出格式壳(如"回复给#4405:"/"回复:"),
-    // 且比 grok 稍铺垫、稍长。禁一切前缀标注 + 拉齐利落感。
-    match: /deepseek|v4-?(pro|flash)|dsv4/i,
-    nudge:
-      '[你这个基座专属·硬性] 只输出回复正文本身,**绝不带任何前缀/标注/格式壳**——' +
-      '不要"回复给#XXXX:""回复:""@某人""(对XX说)"这类开头,也不要把消息编号/目标 id 写进正文。' +
-      '风格拉齐 grok:一句话怼完就停,不铺垫、不解释原因、不列方案、不加"其实/不过/估计/要不要"。' +
-      '宁可少说,绝不啰嗦。(多个**不同的人**仍照常分人各回一条。)',
-  },
-  // 以后接别的模型再加,例如:
-  // { match: /kimi|step/i, nudge: '...' },
 ];
 
-/** 按 reply 实际用的 model 名,返回该模型专属的风格补丁(没有就 undefined)。 */
+/** 按实际模型补协议安全提醒；不干预自然交流判断。 */
 export function modelStyleNudge(model: string | undefined): string | undefined {
   if (!model) return undefined;
   return NUDGES.find((n) => n.match.test(model))?.nudge;

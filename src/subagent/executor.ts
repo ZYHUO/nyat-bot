@@ -9,10 +9,12 @@ import { sendChatAction } from '../bot/sender/telegram.js';
 import { isDM } from '../shared/chat.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
-import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat } from '../agent/checkpoint.js';
+import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat, clearCheckpoint } from '../agent/checkpoint.js';
 import { drainInterrupts, isHardStop } from '../agent/interrupts.js';
 import { compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
 import { persistDigest } from '../meta/session-digest.js';
+import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
+import { createDebt, resolveOpenDebtsByTask } from '../agent/cognitive-debts.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
 function startTypingHeartbeat(chatId: number): () => void {
@@ -29,27 +31,6 @@ function startTypingHeartbeat(chatId: number): () => void {
   };
 }
 
-/** 长任务进度 ping:每任务 10min 最多一条(SET NX),失败静默。 */
-async function maybeSendProgressPing(task: DispatchTask): Promise<void> {
-  try {
-    const { getRedis } = await import('../db/redis.js');
-    const key = `xxb:agent:ping:${task.id}`;
-    const got = await getRedis().set(key, '1', 'EX', 600, 'NX');
-    if (!got) return;
-    const { incrCounter } = await import('../metrics/registry.js');
-    incrCounter('codeact_progress_ping_total', { chat: task.chatId });
-    const { sendMessage } = await import('../bot/sender/telegram.js');
-    const steps = task.totalTurns ?? 0;
-    await sendMessage(
-      task.chatId,
-      `（还在干活喵～已经跑了 ${steps > 0 ? `${steps} 步` : '好一会儿'}了，做完会说一声的）`,
-      task.quoteMessageIds?.[0],
-      task.messageThreadId,
-    );
-  } catch (err) {
-    logger.debug({ err, taskId: task.id }, 'agent progress ping failed (non-critical)');
-  }
-}
 
 const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct：写 JavaScript 调用 host API。
 
@@ -58,7 +39,8 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 **读工具结果的唯一方式：return**。任何工具的返回值必须 return（或 console.log）出来你才看得到——只调用不 return，你看到的只有 ok。例：return await chats.find('乐乐猫') → 你才能看到群列表；光写 await chats.find(...) 等于白调。
 
 可用全局对象:
-- telegram.sendText(text, replyToMessageId?)  // **必须 await**，再 endTask
+- telegram.sendText(text, replyToMessageId?, kind?)  // 中途交流/发现/澄清；**必须 await**，发送后可以继续工作
+- telegram.sendFinal(text, replyToMessageId?)  // 明确最终交付；**必须 await**，随后 runtime.endTask
 - telegram.sendSticker(fileId) / telegram.react(messageId, emoji)
 - **telegram.sendFile(相对路径, caption?)** — 把沙盒里创建的文件发给用户（sendDocument）。**创建了文件必须用这个发出去**，不要只写不发。
 - telegram.sendPhoto(相对路径, caption?) — 把沙盒里的**图片**当照片发（内联直接显示）。发图片一律用这个；sendFile 留给文档/代码/压缩包
@@ -90,6 +72,8 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - self.listPrompts() — 列出所有可改的 prompt 文件
 - runtime.setAcceptance(checks) — 多步产物任务先声明检查: [{kind:'json_field',path:'result.json',field:['answer'],equals:42}] 或 nonempty_file/sha256。这是你提出的检查,不算独立成功证明;外部给定条件不能覆盖。
 - runtime.verifyAcceptance() — 实际读取沙盒产物验收,失败先修复再检查。
+- runtime.waitForUser(reason?)  // 已向用户提出澄清/确认，任务保持等待，不要 endTask；用户下一条消息会继续注入。
+- runtime.predict(text, predictedSentiment?)  // 可选：发送前自报「用户大概会怎么反应」（0=负面 0.5=中性 1=正面）。发了 send* 就别再 predict，直接说话。
 - runtime.endTask(summary)  // 有验收条件时必须先通过 verifyAcceptance;不能用口头声称代替。确实失败用 failed:原因收尾。
 - console.log(...)
 
@@ -110,15 +94,15 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 
 ## 行为准则
 1. 根据用户消息**自然决定**是聊天还是干活：
-   - 如果用户要求产出物（写代码、写文件、查询信息生成报告等）→ 规划步骤、逐步执行、完成后 sendText 报告结果
-   - 如果只是闲聊、问候、吐槽 → 1-2 轮内 sendText 回复然后 endTask
+   - 如果用户要求产出物（写代码、写文件、查询信息生成报告等）→ 规划步骤、逐步执行；有真实发现、路线变化、阻塞或部分结果时可 sendText 自然告知，最终用 sendFinal + runtime.endTask 收尾
+   - 如果只是闲聊、问候、吐槽 → 自然回复即可；不需要为了显示状态而播报，完成后 runtime.endTask
    - 如果是简单问题（查天气、问时间、搜资料）→ web.search 查完消化成短人话回复
-   - **创建了文件（代码/HTML/脚本/图片等）→ 必须发出去**：图片用 \`telegram.sendPhoto(相对路径, caption)\`，其它文件用 \`telegram.sendFile(相对路径, caption)\`，再 sendText 说明。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendPhoto/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await send*，再另写纯文字 sendText。
+   - **创建了文件（代码/HTML/脚本/图片等）→ 必须发出去**：图片用 \`telegram.sendPhoto(相对路径, caption)\`，其它文件用 \`telegram.sendFile(相对路径, caption)\`。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendPhoto/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await send*，再另写纯文字 sendText。
 2. 下方已注入最近聊天；通常不必再调 recentContext。
 3. **引用（replyTo）有指向才用，默认不引用**：真人不是每条回复都顶个引用标。省略 replyTo = 不引用（私聊群聊一样）。**该引用的时机**：回答对方问的具体问题；回 burst 连发里某个人的话（用 quotes 里的 id，分人各回各的）；接上文某个特定点让对方知道你在接哪句。闲聊接话、新起的话头、自己冒泡 → 不引用。**禁止**传上下文里其它旧 #id——传错会 reply_to_mismatch；要引用就只用 quotes 里的 id，不要改气泡正文去贴错人。
 3.5. **排版克制**：支持 Telegram 富文本——星号粗体、_斜体_、||剧透||、行内代码/代码块、大于号引用块。但真人群聊几乎不排版：**日常闲聊一律纯文字**，只有内容真需要时才用（贴代码、发长文、强调个别词）。为排版而排版比没有更假。
-4. 一轮优先 1 条文字（host 会按标点自动拆成多气泡，引用与否由你按 3 决定）；真要另起一轮最多再 sendText 一次。输出：极短思考 + 一个 \`\`\`js 代码块。
-5. **await 完 send* 再** runtime.endTask("一句话摘要")。禁止 fire-and-forget send。
+4. 一轮可以发送一条或多条真正有价值的消息，是否分段由语境决定；中间交流不会自动结束任务。输出：极短思考 + 一个 \`\`\`js 代码块。
+5. **await 完 send* 再** runtime.endTask("一句话摘要")。中途 sendText 后可以继续观察和执行；最终交付用 sendFinal。
 6. 无日记工具；要写/读日记 → meta.request。禁止编造「写完了」。
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
 8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
@@ -127,8 +111,8 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
 12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
-12.5. **多步任务先列计划**（auto+plan）：要写代码/画图/交付文件/多步查询的任务，开工先 runtime.setPlan(['第一步…','第二步…'...]) 列个计划（≤8 步）——之后每轮你能看到自己的计划，照它推进；做完一步可以 setPlan 更新剩余步骤。1-2 步的小活别列。
-13. **发言前自我质疑**：sendText 之前先问自己这句该不该说——发现内容不对劲、会错意、接错人，即使已经写好了也住手，改发别的或干脆 endTask 不发。**回答「找到了吗/有回信没/现在什么情况」这类状态问题前，必须先实际查（chats.recentMessages / memory.searchDigests），禁止凭印象汇报**——你以为的「还没回」可能只是你没去看。
+12. **多步任务可以使用计划**（auto+plan）：只有确实有助于推进时才 runtime.setPlan；计划是可修改的工作假设，不是必须逐项播报的清单。用户纠正或新证据出现时，及时调整或放弃不再适用的步骤。
+13. **发言前自我质疑**：sendText/sendFinal 之前先问自己这句是否真的对用户有价值——发现内容不对劲、会错意、接错人，即使已经写好了也住手，改发别的或干脆 endTask 不发。中途消息不要泄漏内部思考、工具名或空洞的“处理中”。**回答「找到了吗/有回信没/现在什么情况」这类状态问题前，必须先实际查（chats.recentMessages / memory.searchDigests），禁止凭印象汇报**——你以为的「还没回」可能只是你没去看。
 14. **承诺闭环**：说出口的承诺必须落地，不许只说「等下」「回头」就结束：
    - 能现在做的（给别的群/某人送东西 → members.find(名字) 看 ta 在哪些群/能不能私聊 → telegram.sendToChat；查资料；写文件）→ **现在就做完**再回话
    - 给具体的人送东西：members.find 后 dmAvailable=true 就发 uid 私聊；不行就挑你们都在的群发送、文字里 @ta；查无此人就老实说没这个人的入口，**禁止瞎选一个群碰运气**
@@ -321,8 +305,10 @@ import { saveTaskEvidence } from '../agent/task-evidence-store.js';
 export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const state = getGlobalState();
   task.status = 'running';
+  task.waitingForUser = false;
   state.putTask(task);
   await persistCodeActTask(task);
+  emitTaskRuntimeEvent({ kind: 'task_started', taskId: task.id, chatId: task.chatId, segment: task.segment });
 
   // CGM 叙事流:dispatch 事件本身也是一条 digest("派 X 去 chat Y")。
   // 埋点放在 executor 任务起点而不是 meta-api.ts —— meta-api 归另一 workstream,
@@ -344,6 +330,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // Self-play: sandbox-only (0 delivery). Goal-check: at most one report bubble.
   const isSelfPlay = task.contentDirection.includes('[selfplay]');
   const isGoalCheck = /\[goal:\d+\]/.test(task.contentDirection);
+  const segment = task.segment ?? 0;
 
   // Ensure we always have a reply anchor in groups: quotes → parse from direction → none.
   let replyAnchor = task.quoteMessageIds?.[0];
@@ -371,12 +358,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await registerAgentChat(task.chatId, task.id);
   }
 
-  // 进度可见性(P1):续跑段开头,若任务从头到尾没发过言(canResume 的定义决定
-  // 了续跑任务从未 sendText),每 10min 一条确定性进度 ping —— 否则长任务在群里
-  // 闷头跑几十分钟,用户既不知道活着也不知道卡没卡。
-  if (interruptible && env().AGENT_PROGRESS_PING_ENABLED && env().AGENT_LOOP_ENABLED && (task.segment ?? 0) > 0) {
-    await maybeSendProgressPing(task);
-  }
+  // 普通 CodeAct 也承载闲聊回复。运行时不替模型播报任务阶段；模型
+  // 自己判断何时有值得告诉用户的发现、阻塞、澄清或部分结果。
 
   const host = createHostApi(task.chatId, {
     taskId: task.id,
@@ -588,7 +571,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // 长时间 Agent 循环：段号 + checkpoint 恢复 + 用户 interrupt 注入。
   const loopEnabled = env().AGENT_LOOP_ENABLED;
-  const segment = task.segment ?? 0;
 
   // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
   let systemPrompt = EXECUTOR_SYSTEM;
@@ -732,6 +714,20 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     }
   }
 
+  let workspaceBlock = '';
+  try {
+    const { buildCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
+    const workspace = await buildCognitiveWorkspace({ chatId: task.chatId, taskId: task.id, userId: task.targetUserId });
+    workspaceBlock = [
+      workspace.activeGoals.length ? `## 当前关注\n${workspace.activeGoals.map((x) => `- ${x}`).join('\n')}` : '',
+      workspace.currentTask ? `## 当前任务状态\n${workspace.currentTask.state}${workspace.currentTask.next ? `\n${workspace.currentTask.next}` : ''}` : '',
+      workspace.uncertainties.length ? `## 未确定事项\n${workspace.uncertainties.map((x) => `- ${x}`).join('\n')}` : '',
+      workspace.parts.map((x) => x.text).join('\n\n'),
+    ].filter(Boolean).join('\n\n');
+  } catch (err) {
+    logger.debug({ err, taskId: task.id }, 'cognitive workspace unavailable');
+  }
+
   const { prompt, manifest } = await engine.assemble([
     staticText('sub-system', systemPrompt),
     staticText('sub-identity', identity),
@@ -744,6 +740,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ephemeralText('sub-style', chatStyleLine ? `## 本群风格\n${chatStyleLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
     ephemeralText('sub-scratch', scratchBlock ? `${scratchBlock}` : ''),
+    ephemeralText('sub-workspace', workspaceBlock ? `## 工作区快照\n${workspaceBlock}` : ''),
     // 恒定传入(空时传 ''),与 sub-scratch / sub-memory 同一约定 —— 不把 id 从数组里
     // 条件摘掉,避免上一轮 digest 黏到这一轮 prompt 上(见下方同组注释)。
     ephemeralText('sub-grounding', groundingBlock ? `${groundingBlock}` : ''),
@@ -763,12 +760,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           ? `\n[长时间任务续跑] 这是第 ${segment + 1} 段（每段最多 ${maxTurns} 轮）。上面有此前执行摘要。继续完成任务；本段结束时若未完成，系统会自动保存进度并在下段继续，你无需在段末强行收尾，但每完成一个里程碑就 sendText 汇报一次进展。`
           : '') +
         (loopEnabled && segment + 1 >= env().AGENT_MAX_SEGMENTS
-          ? `\n[硬性提醒] 这是最后一段。本段结束前必须收尾：sendText 总结做了什么/卡在哪/产出在哪，然后 runtime.endTask。`
+          ? `\n[硬性提醒] 这是最后一段。本段结束前必须收尾：sendFinal 总结做了什么/卡在哪/产出在哪，然后 runtime.endTask。`
           : '') +
 (replyAnchor && replyAnchor > 0
           ? `\\\\n\\\\n硬约束：telegram.sendText 的 replyTo 若传只能是本任务 quote #${replyAnchor}（当前 chatId=${task.chatId}）；传别的 #id（尤其是别的群的）会失败。省略 replyTo = 不引用（私聊群聊一样）——引用只在你真有指向时才用 #${replyAnchor}。禁止把刚才在别的群说过的话原样贴过来。`
           : '') +
-        `\\n\\n渐进式汇报：需要多步操作时，每一步完成后都用 sendText 发一条简短进度（30字内）；别攒到最后一次性汇报。简单聊天就 1-2 轮回复。禁止复读用户原话。`,
+        `\\n\\n交流原则：不要把工具调用或内部思考直接发给用户。只有真实发现、矛盾、路线变化、阻塞、需要用户决定或有价值的部分结果，才自然发送中间消息；中间消息之后可以继续工作。最终完成后用 telegram.sendFinal，再 runtime.endTask。简单聊天就自然回复，不要播报系统状态。禁止复读用户原话。`,
     ),
     ephemeralText('sub-banned', `## Banned substrings\n${env().CODEACT_BANNED_WORDS.join(', ')}`),
     ephemeralText('sub-journal', journal ? `## Recent diary snippet\n${journal}` : ''),
@@ -795,7 +792,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // 长时间 Agent 循环：checkpoint 恢复 + 用户 interrupt 注入（loopEnabled/segment 见上方）。
   let resumeSummary = '';
   let restoredHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> | null = null;
-  if (loopEnabled && task.checkpointKey) {
+  if (task.checkpointKey) {
     try {
       const cp = await loadCheckpoint(task.checkpointKey);
       if (cp) {
@@ -817,9 +814,34 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       {
         role: 'user',
         content:
-          '执行任务。上下文已注入，根据 contentDirection 自行决定：是聊天就回一句，是干活就规划步骤逐步执行。每步写一个 ```js 代码块调用 API，观察结果后继续下一步。完成后 sendText 报告结果，然后 runtime.endTask。',
+          '执行任务。上下文已注入，根据 contentDirection 和工作区快照自行理解：是聊天就自然回复，是干活就逐步执行。只有实际发现、路线变化、阻塞、需要用户决定或部分结果值得告诉用户时才发送中间消息；最终完成后用 telegram.sendFinal，再 runtime.endTask。',
       },
     ];
+  }
+
+  if (task.pendingUserInput?.length) {
+    const pending = task.pendingUserInput;
+    task.pendingUserInput = undefined;
+    const block = pending
+      .map((input) => `- ${input.from ?? '用户'}: ${input.text}`)
+      .join('\n');
+    if (pending.some((input) => isHardStop(input.text))) {
+      host.runtime.endTask('failed_user_stopped');
+      endSummary = 'failed_user_stopped';
+      task.waitingForUser = false;
+      task.waitingReason = undefined;
+      if (task.checkpointKey) await clearCheckpoint(task.checkpointKey);
+      resolveOpenDebtsByTask(task.id, '用户已停止该任务，债务关闭');
+      task.status = 'failed';
+      await persistCodeActTask(task);
+    } else {
+      history.push({ role: 'user', content: `[用户对澄清问题的回答]\n${block}` });
+      task.waitingForUser = false;
+      task.waitingReason = undefined;
+      task.status = 'running';
+      resolveOpenDebtsByTask(task.id, '用户已回答澄清，任务恢复执行');
+      await persistCodeActTask(task);
+    }
   }
 
   const stopTyping = startTypingHeartbeat(task.chatId);
@@ -837,7 +859,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       if (interruptible) {
         try {
           const interrupts = await drainInterrupts(task.id);
-          if (interrupts.length > 0) {
+            if (interrupts.length > 0) {
+              emitTaskRuntimeEvent({ kind: 'user_interrupt_received', taskId: task.id, chatId: task.chatId, turn, segment });
+              logger.info({ taskId: task.id, chatId: task.chatId, count: interrupts.length }, 'task user interrupt received');
+
             if (interrupts.some((i) => isHardStop(i.text))) {
               logger.info({ taskId: task.id, chatId: task.chatId, turn }, 'agent task hard-stopped by user');
               const { incrCounter } = await import('../metrics/registry.js');
@@ -847,6 +872,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
                 await sendMessage(task.chatId, '好，停下了喵～（任务已取消）', task.quoteMessageIds?.[0], task.messageThreadId);
               } catch { /* ack best-effort */ }
               host.runtime.endTask('user_stopped');
+              if (task.checkpointKey) await clearCheckpoint(task.checkpointKey);
+              task.waitingForUser = false;
+              task.pendingUserInput = undefined;
+              resolveOpenDebtsByTask(task.id, '用户已停止该任务，债务关闭');
+              task.status = 'failed';
+              await persistCodeActTask(task);
               break;
             }
             const block = interrupts
@@ -854,12 +885,24 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
               .join('\n');
             history.push({
               role: 'user',
-              content: `[任务进行中，有人发来新消息]\n${block}\n先简短回应这些消息（问进度就汇报当前进度；让停就停下收尾；补充需求就纳入计划），然后继续当前任务。`,
+              content: `[任务进行中，有人发来新消息]\n${block}\n先理解这些消息是在补充事实、改变目标、询问状态、要求停止，还是普通聊天；据此调整计划或回复，然后决定是否继续当前任务。`,
             });
             injectedInterrupts = true;
             // 用户又说话了 → 任务重新有了"该回应的人",重置 sendText 后的自动收尾计数,
             // 否则模型刚 sendText 汇报过、用户追问一句,任务在回应前就被 auto_end 掐掉。
             postSendTurns = 0;
+            // Cognitive Debt：任务中途的用户补充/纠正值得记住（尤其跨段续跑时）。
+            createDebt({
+              chatId: task.chatId,
+              ownerUid: task.targetUserId,
+              taskId: task.id,
+              kind: 'correction',
+              statement: interrupts.map((i) => `${i.from}: ${i.text}`.slice(0, 200)).join('；').slice(0, 380),
+              sourceEventIds: interrupts.map((i) => `msg:${i.messageId ?? ''}`).filter((s) => s !== 'msg:'),
+              priority: 6,
+              confidence: 1,
+              ttlSec: 7 * 24 * 3600,
+            });
           }
         } catch { /* non-critical */ }
       }
@@ -879,8 +922,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         } catch { /* non-critical */ }
       }
 
-      // Already delivered: don't keep burning turns waiting for a forgotten endTask.
-      if (!audit.hasContract() && !injectedInterrupts && host.runtime.didSendText() && postSendTurns > postSendGrace) {
+      // Intermediate messages are not task completion. Only an explicit final
+      // delivery/endTask may trigger the auto-close safety net.
+      if (!audit.hasContract() && !injectedInterrupts && host.runtime.didProduceFinal() && postSendTurns > postSendGrace) {
         host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
         break;
       }
@@ -903,8 +947,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       history.push({ role: 'assistant', content: llmText });
       const code = extractJs(llmText);
       if (!code) {
-        if (!audit.hasContract() && host.runtime.didSendText()) {
-          host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
+        if (!audit.hasContract() && host.runtime.didProduceFinal()) {
+          host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_final');
           break;
         }
         history.push({
@@ -927,22 +971,28 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       if (exec.output === 'codeact_timeout') {
         closed = true;
       }
+      // Tool results remain internal observations. The model decides whether
+      // any discovery/progress is worth telling the user via sendText.
+      if (host.runtime.isWaitingForUser()) {
+        history.push({ role: 'user', content: '[系统] 任务已进入等待用户状态，停止继续调用工具，等待下一条用户消息。' });
+        break;
+      }
       const mismatchHint = !exec.ok && /reply_to_mismatch/.test(exec.output)
         ? `\n提示：群聊 replyTo 只能是 quotes 里的 #${replyAnchor ?? '?'}（或省略让 host 填）。不要换旧 #id，也不要复用错人的气泡正文。`
         : '';
       const sentHint =
-        !ended && host.runtime.didSendText()
-          ? '\n[系统] 你已经向用户发过消息。下一动作必须是 runtime.endTask("一句话摘要")，禁止再 sendText。'
+        !ended && host.runtime.didProduceFinal()
+          ? '\n[系统] 你已经发送最终交付。下一动作必须是 runtime.endTask("一句话摘要")。'
           : '';
       history.push({
         role: 'user',
         content: exec.ok
           ? `[observation]\n${exec.output}\n${ended ? '(task ended)' : `已完成步骤 ${turn + 1}/${maxTurns}。继续下一步，或完成后 runtime.endTask("结果摘要")。`}${sentHint}`
-          : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? (isSelfPlay ? '这是最后一轮，runtime.endTask 收尾。' : '这是最后一轮，sendText 说明进展然后 endTask。') : ''}`,
+          : `[observation:error]\n${exec.output}${mismatchHint}\n操作失败了，分析错误原因调整策略重试，或换一种方法。${turn + 1 >= maxTurns ? (isSelfPlay ? '这是最后一轮，runtime.endTask 收尾。' : '这是最后一轮，sendFinal 说明进展然后 endTask。') : ''}`,
       });
-      if (!audit.hasContract() && !ended && host.runtime.didSendText()) {
+      if (!audit.hasContract() && !ended && host.runtime.didProduceFinal()) {
         if (postSendTurns >= postSendGrace) {
-          host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
+          host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_final');
           break;
         }
         postSendTurns += 1;
@@ -959,8 +1009,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         !isGoalCheck &&
         !isSelfPlay &&
         segment + 1 < maxSegments &&
+        !host.runtime.isWaitingForUser() &&
         (audit.hasContract() || host.runtime.didProduce()) &&
-        (audit.hasContract() || !host.runtime.didSendText());
+        (audit.hasContract() || !host.runtime.didProduceFinal());
 
       if (canResume) {
         let progressSummary = resumeSummary;
@@ -988,6 +1039,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           logger.warn({ err, taskId: task.id }, 'agent segment summary failed');
         }
 
+        emitTaskRuntimeEvent({ kind: 'checkpoint_saved', taskId: task.id, chatId: task.chatId, segment: segment + 1, turn: task.totalTurns });
         const key = await saveCheckpoint(task, {
           history,
           progressSummary,
@@ -1021,9 +1073,37 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         // 注意：不 enqueueCallback —— 任务未完成，Meta 不应收到完成回调。
       } else if (audit.hasContract()) {
         host.runtime.endTask('failed_acceptance_budget_exhausted');
-      } else if (host.runtime.didSendText()) {
-        // Model delivered but forgot endTask — synthesize so Meta gets a clean callback.
-        host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_send');
+      } else if (host.runtime.didProduceFinal()) {
+        // Model delivered a final message but forgot endTask — synthesize a clean callback.
+        host.runtime.endTask(isGoalCheck ? 'no_update' : 'auto_end_after_final');
+      } else if (host.runtime.isWaitingForUser()) {
+        endSummary = 'waiting_user';
+        task.waitingForUser = true;
+        task.waitingReason = host.runtime.waitingReason() ?? 'user_clarification';
+        const waitingCheckpoint = await saveCheckpoint(task, {
+          history,
+          progressSummary: resumeSummary || 'waiting for user clarification',
+          artifacts: [],
+          segment,
+          totalTurns: task.totalTurns ?? 0,
+        });
+        task.checkpointKey = waitingCheckpoint;
+        task.status = 'waiting_user';
+        // Cognitive Debt：任务挂起等待用户 = 一笔未完成认知，回答/停止时偿还。
+        createDebt({
+          chatId: task.chatId,
+          ownerUid: task.targetUserId,
+          taskId: task.id,
+          kind: 'unfinished_task',
+          statement: `任务等待用户补充信息: ${task.waitingReason}`,
+          sourceEventIds: [`task:${task.id}`],
+          priority: 7,
+          confidence: 1,
+          ttlSec: 24 * 3600,
+        });
+        state.putTask(task);
+        await persistCodeActTask(task);
+        await registerAgentChat(task.chatId, task.id);
       } else if (isSelfPlay) {
         // Self-play is private practice — never bypass maxTextSends with a failsafe DM.
         host.runtime.endTask('selfplay_silent');
@@ -1065,22 +1145,40 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         }
       }
     } else if (closed && !endSummary) {
-      endSummary = host.runtime.didSendText() ? 'timeout_after_send' : 'failed_timeout';
+      endSummary = host.runtime.didProduceFinal() ? 'timeout_after_final' : 'failed_timeout';
     }
 
     // Ensure ctx write + any fire-and-forget sends finished before Meta sees callback.
     await host.runtime.flushBookkeeping();
 
     // 续跑任务不进入终态：保持 queued，等下一段完成/超限后再收尾。
-    const resumed = endSummary.startsWith('resumed_seg');
+    const resumed = endSummary.startsWith('resumed_seg') || endSummary === 'waiting_user';
     if (!resumed) {
       task.audit = audit.snapshot();
       task.assessment = await audit.verify();
-      if (closed || endSummary.startsWith('failed')) {
+      if (closed || endSummary.startsWith('failed') || endSummary === 'user_stopped') {
         task.assessment = { status: 'unverified', reasons: ['execution_incomplete'], checks: task.assessment.checks };
       }
-      task.status = endSummary.startsWith('failed') ? 'failed' : 'done';
+      task.status = endSummary.startsWith('failed') || endSummary === 'user_stopped' ? 'failed' : 'done';
       task.resultSummary = endSummary || 'done';
+      if (task.status === 'done') {
+        // 任务完成 → 偿还名下的未完成/等待债务（承诺债务由 goal 生命周期另行处理）。
+        resolveOpenDebtsByTask(task.id, `任务完成: ${String(endSummary).slice(0, 200)}`);
+      } else if (endSummary !== 'failed_user_stopped') {
+        // 任务失败 = 一笔未完成认知，后续可主动修复或向用户说明。
+        createDebt({
+          chatId: task.chatId,
+          ownerUid: task.targetUserId,
+          taskId: task.id,
+          kind: 'unfinished_task',
+          statement: `任务未完成: ${String(endSummary).slice(0, 300)}`,
+          sourceEventIds: [`task:${task.id}`],
+          priority: 6,
+          confidence: 1,
+          ttlSec: 7 * 24 * 3600,
+          nextCheckInSec: 6 * 3600,
+        });
+      }
       saveTaskEvidence({ taskId: task.id, chatId: task.chatId, lifecycle: task.status,
         assessment: task.assessment.status, turns: task.totalTurns ?? 0,
         totalCalls: task.audit.totalCalls, failedCalls: task.audit.failedCalls, retryCount: task.audit.retryCount,
@@ -1258,7 +1356,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     stopTyping();
     // P1:异常逃逸路径兜底解注册(正常终态已在上面解过;续跑段不能解 ——
     // 任务还在等下一段,索引没了用户消息就退回重复 dispatch)。
-    if (interruptible && !endSummary.startsWith('resumed_seg')) {
+    if (interruptible && !endSummary.startsWith('resumed_seg') && endSummary !== 'waiting_user') {
       await unregisterAgentChat(task.chatId, task.id).catch(() => {});
     }
     try {
