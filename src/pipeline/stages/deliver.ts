@@ -226,6 +226,7 @@ export async function generateAndSendReplies(args: {
     const baseHumanizerConfig: Partial<HumanizerConfig> | undefined = override?.humanizer
       ? Object.fromEntries(
           Object.entries({
+            safeMode: e.REPLY_HUMANIZER_SAFE_MODE,
             typoEnabled: override.humanizer.typo_enabled,
             typoRate: override.humanizer.typo_rate,
             typoCorrectionRate: override.humanizer.typo_correction_rate,
@@ -254,8 +255,11 @@ export async function generateAndSendReplies(args: {
     // rolling uncanny-risk EMA crosses thresholds). Shallow-merge over the
     // computed config so dialed-down rates win. Null-safe: no override → unchanged.
     // 合并顺序:群风格 underlay < mood-tune(情绪) < 运营 override < ASI 自调 per-chat override
-    let humanizerConfig: Partial<HumanizerConfig> | undefined =
-      styleHum || baseHumanizerConfig ? { ...(styleHum ?? {}), ...(baseHumanizerConfig ?? {}) } : undefined;
+    let humanizerConfig: Partial<HumanizerConfig> = {
+      safeMode: e.REPLY_HUMANIZER_SAFE_MODE,
+      ...(styleHum ?? {}),
+      ...(baseHumanizerConfig ?? {}),
+    };
     // Opus 评审 #1: 情绪自相关 —— 累/被怼时参数不同。mood-tune 是 underlay,
     // 其输出可被后续 override 覆盖;取不到 mood/energy 时 fail-soft 跳过。
     if (e.MOOD_TUNE_ENABLED) {

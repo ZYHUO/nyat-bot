@@ -80,19 +80,33 @@ function recentMaterial(windowSec: number): string {
           eps.map((e) => `- [${e.outcome}] ${e.goal.slice(0, 80)}\n  ${e.summary.slice(0, 200)}`).join('\n'),
       );
     }
-    // Prefer source_assessment=verified; verified=1 is the legacy runtime
-    // verifier state used before the lineage column was introduced.
+    // Evidence lineage exists across deployments at different migration levels.
+    // Build the predicate from columns that are actually present so a missing
+    // legacy column cannot hide valid source_assessment=verified rows.
     let exps: { kind: string; content: string }[] = [];
     try {
-      exps = db
-        .prepare(
-          `SELECT kind, content FROM experience_entries
-           WHERE created_at > ? AND (source_assessment = 'verified' OR verified = 1)
-           ORDER BY created_at DESC LIMIT 30`,
-        )
-        .all(since) as { kind: string; content: string }[];
+      const columns = new Set(
+        (db.prepare(`PRAGMA table_info(experience_entries)`).all() as Array<{ name?: string }>)
+          .map((row) => row.name)
+          .filter((name): name is string => Boolean(name)),
+      );
+      const predicates: string[] = [];
+      if (columns.has('source_assessment')) predicates.push(`source_assessment = 'verified'`);
+      if (columns.has('verified')) predicates.push(`verified = 1`);
+      if (predicates.length === 0) {
+        // No evidence column means historical data is not eligible for skills.
+        exps = [];
+      } else {
+        exps = db
+          .prepare(
+            `SELECT kind, content FROM experience_entries
+             WHERE created_at > ? AND (${predicates.join(' OR ')})
+             ORDER BY created_at DESC LIMIT 30`,
+          )
+          .all(since) as { kind: string; content: string }[];
+      }
     } catch {
-      // 0075 未应用的库(无血缘列):fail-closed,经验素材为空而非回退全量。
+      // Evidence query failures are fail-closed; never distill unverifiable data.
       exps = [];
     }
     if (exps.length) {

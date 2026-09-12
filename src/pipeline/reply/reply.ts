@@ -1069,21 +1069,23 @@ export async function generateReply(
 
   if (needsSegment) {
     const primaryTargetId = parsedReplies[0]!.targetMessageId;
-    const { segments } = segmentReply(parsedReplies[0]!.replyContent, segmenterConfig);
+    if (env().REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED) {
+      const { segments } = segmentReply(parsedReplies[0]!.replyContent, segmenterConfig);
 
-    if (segments.length > 1) {
-      const first = parsedReplies[0]!;
-      parsedReplies = segments.map((seg, idx) => ({
-        replyContent: seg,
-        targetMessageId: primaryTargetId,
-        // Only first segment gets quote-reply; the rest go without
-        replyQuote: idx === 0 ? first.replyQuote : false,
-        // P2:切段不丢字段 —— 犹豫挂第一段,贴纸意图挂最后一段(贴纸在文后发)
-        hesitateBefore: idx === 0 ? first.hesitateBefore : undefined,
-        stickerIntent: idx === segments.length - 1 ? first.stickerIntent : undefined,
-        modelStickerAct: idx === segments.length - 1 ? first.modelStickerAct : undefined,
-      }));
-      logger.debug({ count: segments.length }, 'Code segmenter split reply into multiple messages');
+      if (segments.length > 1) {
+        const first = parsedReplies[0]!;
+        parsedReplies = segments.map((seg, idx) => ({
+          replyContent: seg,
+          targetMessageId: primaryTargetId,
+          // Only first segment gets quote-reply; the rest go without
+          replyQuote: idx === 0 ? first.replyQuote : false,
+          // P2:切段不丢字段 —— 犹豫挂第一段,贴纸意图挂最后一段(贴纸在文后发)
+          hesitateBefore: idx === 0 ? first.hesitateBefore : undefined,
+          stickerIntent: idx === segments.length - 1 ? first.stickerIntent : undefined,
+          modelStickerAct: idx === segments.length - 1 ? first.modelStickerAct : undefined,
+        }));
+        logger.debug({ count: segments.length }, 'Code segmenter split reply into multiple messages');
+      }
     }
   }
 

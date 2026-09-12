@@ -8,8 +8,9 @@ export const TG_TEXT_LIMIT = 4096;
 /**
  * 按**转义后**长度把 MarkdownV2 文本切成 ≤4096 的片段。
  *
- * 为什么必须在这一层切:parser.truncateReply 截到**正好** 4096 个源字符,而
- * escapeMarkdownV2 给每个特殊字符加一个反斜杠 —— 实测 4093 个 'a' + '...' 转义后是 4099,
+ * Sender-level sharding is the final Telegram limit guard. Parser and task
+ * replies preserve full text until this layer, so the tail is not lost early.
+ * Telegram escapes special characters before enforcing the limit, therefore
  * 纯中文 + 句号同样是 4099,特殊字符密集的英文/代码膨胀更多。而 segmenter 的长度闸有
  * `getWesternRatio < 0.1` 前置条件,英文/代码直接跳过,于是长回复原样单段送到这里 →
  * Telegram 400 "message is too long" → 三层 catch 都不匹配(只认 reply-not-found 与

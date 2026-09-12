@@ -11,6 +11,8 @@ import { logger } from '../../shared/logger.js';
 export interface HumanizerConfig {
   /** Enable typo injection */
   typoEnabled: boolean;
+  /** Safe mode protects technical/factual/structured content from casual mutations. */
+  safeMode: boolean;
   /** Probability a character gets typoed (0-1) */
   typoRate: number;
   /** Probability of correcting a typo (0-1). 1.0 = always correct. Correction mode is 50/50: edit original vs append in next message */
@@ -80,6 +82,7 @@ export interface HumanizerConfig {
 
 const DEFAULT_HUMANIZER_CONFIG: HumanizerConfig = {
   typoEnabled: true,
+  safeMode: true,
   typoRate: 0.05,
   typoCorrectionRate: 1.0,
   typoCorrectionDelay: 1.5,
@@ -218,12 +221,23 @@ export interface TypoResult {
   typoIndex: number;
 }
 
-/**
- * Inject a single typo into text with a given probability.
- * Returns the typoed text and optionally a correction.
- */
+function isStructuredOrFactualText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  if (/```|https?:\/\/|(?:^|\s)\/(?:[a-z]|\w)|\b(?:v?\d+(?:\.\d+)+|\d{2,})\b/i.test(t)) return true;
+  if (/\b(?:api|json|yaml|http|sql|npm|git|docker|telegram|redis|qdrant|typescript|javascript)\b/i.test(t)) return true;
+  return t.length > 80 || /[：:]\s*\S+/.test(t);
+}
+
+/** Inject a single low-risk typo into casual text only. */
 export function injectTypo(text: string, config?: Partial<HumanizerConfig>): TypoResult {
   const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  // Never mutate structured or factual content. The caller can still opt into
+  // casual typos by setting safeMode=false for ordinary chat.
+  if (cfg.safeMode && isStructuredOrFactualText(text)) {
+    return { typoedText: text, originalText: text, correction: null, correctChar: null, typoIndex: -1 };
+  }
 
   if (!cfg.typoEnabled || Math.random() > cfg.typoRate) {
     // typoRate is per-character but we check per-message with amplified probability
@@ -512,14 +526,8 @@ function casualTweak(text: string): string {
   const r = Math.random();
   const last = text[text.length - 1];
 
-  // Add trailing emoji — 35%
+  // 人格要求正文尽量不用 emoji；事后编辑只做低风险标点/语气变化。
   if (r < 0.35) {
-    const emojis = ['😂', '👍', '🤣', '✨', '💕'];
-    return text + emojis[Math.floor(Math.random() * emojis.length)]!;
-  }
-
-  // Add trailing particle — 25%
-  if (r < 0.60) {
     const particles = ['啊', '呢', '呀', '哦'];
     return text + particles[Math.floor(Math.random() * particles.length)]!;
   }
@@ -560,6 +568,10 @@ function casualTweak(text: string): string {
  */
 export function decideAfterthoughtEdit(text: string, config?: Partial<HumanizerConfig>): AfterthoughtResult {
   const cfg = { ...DEFAULT_HUMANIZER_CONFIG, ...config };
+
+  if (cfg.safeMode && isStructuredOrFactualText(text)) {
+    return { shouldEdit: false, editedText: text };
+  }
 
   if (!cfg.afterthoughtEditEnabled) {
     return { shouldEdit: false, editedText: text };

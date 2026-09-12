@@ -40,7 +40,7 @@ const DEFAULT_CONFIG: SegmenterConfig = {
   enabled: true,
   maxLength: 220,        // 每条更长，减少强切（之前 100）
   maxSentenceNum: 3,     // 最多拆 3 条（之前 8，太碎）
-  enableOverflowReturnAll: true,
+  enableOverflowReturnAll: false,
   defaultReply: '嗯',
   enableKaomojiProtection: true,
   typingChineseTime: 0.06,  // 打字延迟大幅降低（之前 0.25），加快
@@ -373,6 +373,33 @@ function splitIntoSentences(text: string): string[] {
   return finalSentences;
 }
 
+function enforceSegmentLength(sentences: string[], maxLength: number): string[] {
+  const limit = Math.max(1, Math.floor(maxLength));
+  const result: string[] = [];
+  for (const sentence of sentences) {
+    let rest = sentence;
+    while (rest.length > limit) {
+      let cut = limit;
+      const window = rest.slice(0, limit);
+      const boundary = Math.max(
+        window.lastIndexOf('。'),
+        window.lastIndexOf('！'),
+        window.lastIndexOf('？'),
+        window.lastIndexOf('；'),
+        window.lastIndexOf(';'),
+        window.lastIndexOf('，'),
+        window.lastIndexOf(','),
+        window.lastIndexOf(' '),
+      );
+      if (boundary >= Math.floor(limit * 0.55)) cut = boundary + 1;
+      result.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trimStart();
+    }
+    if (rest.trim()) result.push(rest.trim());
+  }
+  return result.filter(Boolean);
+}
+
 // ─── Main entry ───
 
 export interface SegmentedReply {
@@ -422,15 +449,13 @@ export function segmentReply(text: string, config?: Partial<SegmenterConfig>): S
   const bracketPattern = /[(\[（【](?=[^)\]）】]*[一-龥])[^)\]）】]*[)\]）】]/g;
   processed = processed.replace(bracketPattern, '');
 
-  // 3. Length check
+  // 中文长文也必须保留内容，交给安全分段/Telegram 分片；不能静默变成“嗯”。
   const maxLengthDoubled = cfg.maxLength * 2;
   if (getWesternRatio(processed) < 0.1 && processed.length > maxLengthDoubled) {
-    logger.warn({ length: processed.length, max: maxLengthDoubled }, 'Reply too long, using fallback');
-    return { segments: [cfg.defaultReply], originalText: text };
+    logger.info({ length: processed.length, max: maxLengthDoubled }, 'Reply exceeds natural segment length, forcing safe split');
   }
-
-  // 4. Split
   let sentences = splitIntoSentences(processed);
+  sentences = enforceSegmentLength(sentences, cfg.maxLength);
 
   // 5. Random punctuation removal on each sentence
   sentences = sentences.map((s) => randomRemovePunctuation(s, cfg.periodDropRate));
@@ -440,17 +465,19 @@ export function segmentReply(text: string, config?: Partial<SegmenterConfig>): S
     sentences = recoverKaomoji(sentences, kaomojiMapping);
   }
 
-  // 7. Max sentence count check
+  // 8. Max sentence count: merge overflow into the final safe segment instead of
+  // returning the original long text or replacing it with a fallback reply.
   if (sentences.length > cfg.maxSentenceNum) {
-    if (cfg.enableOverflowReturnAll) {
-      logger.warn({ count: sentences.length }, 'Too many segments, returning full text');
-      sentences = [text.trim()];
-    } else {
-      return { segments: [cfg.defaultReply], originalText: text };
+    const kept = sentences.slice(0, Math.max(1, cfg.maxSentenceNum));
+    const overflow = sentences.slice(Math.max(1, cfg.maxSentenceNum)).join('，');
+    const last = kept.length - 1;
+    if (overflow && last >= 0) {
+      kept[last] = `${kept[last]}，${overflow}`;
     }
+    sentences = enforceSegmentLength(kept, cfg.maxLength);
+    logger.info({ count: sentences.length, originalCount: kept.length }, 'Merged overflow segments safely');
   }
 
-  // 8. Final filter (remove empty)
   let final = sentences.filter((s) => s.trim());
   if (final.length === 0) {
     return { segments: [cfg.defaultReply], originalText: text };

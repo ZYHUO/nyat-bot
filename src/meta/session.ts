@@ -466,19 +466,34 @@ async function autoDispatchL0(
           // 没人排,消息等于被吞。确认任务仍在 running/queued 才路由。
           const { loadCodeActTask } = await import('../subagent/task-store.js');
           const agentTask = await loadCodeActTask(agentTaskId);
-          if (agentTask && (agentTask.status === 'running' || agentTask.status === 'queued')) {
-            for (const s of withIds) {
-              const from = s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人';
-              await pushInterrupt(agentTaskId, {
+          if (agentTask && (agentTask.status === 'running' || agentTask.status === 'queued' || agentTask.status === 'waiting_user')) {
+            if (agentTask.waitingForUser || agentTask.status === 'waiting_user') {
+              agentTask.waitingForUser = false;
+              agentTask.waitingReason = undefined;
+              agentTask.pendingUserInput = withIds.map((s) => ({
                 text: (s.textPreview ?? '').slice(0, 500),
-                from,
+                from: s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人',
                 messageId: s.messageId,
-              });
+                at: Date.now(),
+              }));
+              agentTask.status = 'queued';
+              const { enqueueResumeCodeActJob } = await import('../subagent/queue.js');
+              await enqueueResumeCodeActJob(agentTask);
+              logger.info({ chatId, agentTaskId, intercepted: withIds.length }, 'agent: clarification answer resumed waiting task');
+            } else {
+              for (const s of withIds) {
+                const from = s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人';
+                await pushInterrupt(agentTaskId, {
+                  text: (s.textPreview ?? '').slice(0, 500),
+                  from,
+                  messageId: s.messageId,
+                });
+              }
+              logger.info(
+                { chatId, agentTaskId, intercepted: withIds.length },
+                'agent: message routed to running long task as interrupt',
+              );
             }
-            logger.info(
-              { chatId, agentTaskId, intercepted: withIds.length },
-              'agent: message routed to running long task as interrupt',
-            );
             continue;
           }
         }
@@ -651,7 +666,7 @@ async function requeueBusyL0(
       }
       const inflight = state
         .listTasks(a.chatId)
-        .filter((t) => t.status === 'queued' || t.status === 'running')
+        .filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'waiting_user')
         .some((t) => t.quoteMessageIds?.includes(a.messageId!));
       if (inflight) continue;
     }

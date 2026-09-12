@@ -95,7 +95,6 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
   if (task.state === 'cancelled') return null;
 
   setTaskState(taskId, 'running');
-
   const goal = task.goal;
   const maxRounds = task.max_rounds;
   const results: string[] = [];
