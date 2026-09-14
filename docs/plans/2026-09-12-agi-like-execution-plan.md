@@ -1,6 +1,6 @@
 # NyatBot AGI-like 执行计划
 
-> 状态：In progress（Phase 0–4 的基础纵向切片已实现；Phase 7 社会预测/修复评估基础已实现；Phase 8 复杂度路由 shadow 与受限 workspace 行为切片已实现；AGI-008 离线 paired replay 基础已实现；Agency authority/canary 仍关闭）
+> 状态：Engineering implementation complete on `feat/agi-like-full`; runtime authority、真实 Telegram canary、merge/restart 仍关闭并需要人类操作。真实 held-out 窗口已执行，但 §11 的长期/ON-OFF 证据门仍按实际样本保守标记。
 >
 > 日期：2026-09-12
 >
@@ -59,20 +59,20 @@
 
 ### 2.2 目前的关键断点
 
-1. [`src/agent/agency-runtime.ts`](../../src/agent/agency-runtime.ts) 已提供 durable run、policy、预算、attempt、receipt 和 adapter dispatch；[`src/agent/agency-delivery-adapter.ts`](../../src/agent/agency-delivery-adapter.ts) 提供显式 `speak/ask` transport factory 及 Telegram binding，[`src/agent/agency-wait-adapter.ts`](../../src/agent/agency-wait-adapter.ts) 提供带回执校验的 `wait` scheduler factory 及 timing FSM binding，[`src/agent/agency-control-adapters.ts`](../../src/agent/agency-control-adapters.ts) 提供 `observe/remember/correct/stop` callback factories；Reply 文本和五个 wait 入口已有默认关闭的 authority-only durable transport，但 Heart/其它 Meta 的完整动作注册仍未统一。
+1. [`src/agent/agency-runtime.ts`](../../src/agent/agency-runtime.ts) 已提供 durable run、policy、预算、attempt、receipt 和 adapter dispatch；[`src/agent/agency-action-semantics.ts`](../../src/agent/agency-action-semantics.ts) 将 Reply、Heart、Meta、timing、CodeAct、core、scheduler 入口统一到 host-derived `anchor/trigger/obligation` 语义；其它 Meta action 通过 [`src/agent/agency-meta-actions.ts`](../../src/agent/agency-meta-actions.ts) 记录 metadata-only observation。`src/eval/agency-canary.ts` 和 [`docs/runbooks/agi-canary.md`](../runbooks/agi-canary.md) 已提供 frozen baseline/experiment、rollback threshold 和报告模板；authority/canary 仍默认关闭。
 2. [`src/pipeline/pipeline.ts`](../../src/pipeline/pipeline.ts) 对 Core 使用 shadow compare，主行为仍由 legacy judge/reply 决定；Core L2 默认 dry-run。
 3. [`src/agent/task-runtime-events.ts`](../../src/agent/task-runtime-events.ts) 保留进程内 `EventEmitter` 作为低延迟通知，但所有当前生产者已统一经 `emitTaskRuntimeEvent` 写入 durable cognitive event；CodeAct 主循环也会记录不含模型正文的 model-turn started/finished 边界；`listTaskRuntimeEvents`/`replayTaskRuntimeEvents` 可在重启后按 task correlation 重建生命周期，`getTaskRecoverySummary` 再把 checkpoint、工具/模型边界、等待/失败和 task evidence 聚合成不含正文的 acceptance/recovery summary；旧生产者仍需继续收敛到更细的专用事件类型。
 4. Core belief/world/state 主要读取路径已传 scope；仍有少数 legacy caller 允许兼容 fallback，历史未 backfill 行不会进入 scoped workspace。
 5. [`src/core/migrate.ts`](../../src/core/migrate.ts) 已将新 user profile belief 按 chat+uid 双写，`person_identity` 仍是跨群 uid 级别；历史 profile 合并行需要自然刷新或专项 backfill 才能完全消除 legacy scope。
 6. [`src/agent/cognitive-workspace.ts`](../../src/agent/cognitive-workspace.ts) 已可被 Reply、Heart、Meta、CodeAct 和 unified tick 复用；Reply、Heart、Meta、CodeAct 与 unified tick 已能携带 durable message event anchor，仍有少数 legacy/background caller 未强制统一到同一个 event-anchored snapshot。
-7. prediction 已有 host-observable feedback resolver、signed calibration、按 chat/user/action 的校准维度和 evidence-only debt resolution；0101 追加了达到最小证据量后写入的有界 prediction model revision ledger，但它只记录 host 事实，不自动修改 prompt、skill、policy 或长期信念。0102 再增加 metadata-only `social_interaction` 事件和有界可回放社交图；0103 增加显式 `SOCIAL_PREDICTION_ENABLED` 下的 engagement 预测、host 事实/沉默结算和冲突→修复→后续互动评估，0104 为 `group_norms` 增加 append-only revision 和 as-of 读取，0105 为 `chat_relationships` 增加 append-only revision 和带锚点衰减的 `getRelationshipAt`；这些仍只作为评测/投影输入，不改变回复策略。语义债务匹配已提供 host-owned bounded semantic scorer 契约，更完整的关系/假设自动更新仍未完成。
+7. prediction 已有 host-observable feedback resolver、signed calibration、按 chat/user/action 的校准维度和 evidence-only debt resolution；0101 追加了达到最小证据量后写入的有界 prediction model revision ledger，但它只记录 host 事实，不自动修改 prompt、skill、policy 或长期信念。0102 再增加 metadata-only `social_interaction` 事件和有界可回放社交图；0103 增加显式 `SOCIAL_PREDICTION_ENABLED` 下的 engagement 预测、host 事实/沉默结算和冲突→修复→后续互动评估，0104 为 `group_norms` 增加 append-only revision 和 as-of 读取，0105 为 `chat_relationships` 增加 append-only revision 和带锚点衰减的 `getRelationshipAt`。0108 明确 legacy debt 只能从迁移后的首个快照开始回放，0109 将 Self/Person/Group/World active projection 收口到 host/tool/Telegram/scheduler/import 证据门；模型输出只进 candidate/audit，带 counterevidence 的长期更新仍需 host reconciliation。语义债务匹配已接入 workspace 的默认关闭、有界 host-owned scorer。
 8. [`src/sandbox/terminal.ts`](../../src/sandbox/terminal.ts) 默认在 bwrap 不可用时 fail-closed；只有显式关闭 `SANDBOX_REQUIRE_ISOLATION` 才允许应急宿主回退，该模式不能作为自主执行安全边界。
-9. holdout 和 spot-the-bot 是评测框架，不是通用能力、长期恢复或 AGI 结果；paired replay evaluator 只输出 engineering check，不能替代真实 held-out 运行。当前已增加真实 provider + CodeAct host 的首个 held-out/long-horizon execution window，但样本仍小，不能据此宣称 AGI-like 能力。
-10. Phase 8 已有纯函数的 fast/deep/background 复杂度分类和 post-judge shadow 指标；另有默认关闭、按 chat 灰度的行为切片，非 fast Reply 可显式复用 scoped workspace，deep 回合在同一灰度门内可启用有界 grounding 专家与 critic，统一唤醒循环对有信号的 background tick 可按同一门读取工作区。researcher、CodeAct、Agency、发送副作用和后台队列仍不因路由自动开启；必须先积累成本/质量数据。
+9. holdout 和 spot-the-bot 是评测框架，不是通用能力、长期恢复或 AGI 结果；paired replay evaluator 只输出 engineering check，不能替代真实 held-out 运行。当前已有同一 runner 的 frozen baseline 5 例和扩展 11 例真实 provider + CodeAct host 窗口，并生成 comparison/continuous-ops 报告；样本仍小，不能据此宣称稳定泛化或 AGI-like 能力。
+10. Phase 8 已有纯函数的 fast/deep/background 复杂度分类和 post-judge shadow 指标；另有默认关闭、按 chat 灰度的行为切片，非 fast Reply 可显式复用 scoped workspace，deep 回合在同一灰度门内可启用有界 grounding 专家与 critic，统一唤醒循环对有信号的 background tick 可按同一门读取工作区。multi-agent route convergence 已增加显式 allowlist，fast/direct 灰度可收敛 specialist fan-out，deep/lookup 仍按路由保留必要 grounding；researcher、CodeAct、Agency、发送副作用和后台队列仍不因路由自动开启。
 
 ### 2.3 基线检查
 
-当前 `main` 提交为 `b89ae5a`。本轮工作树的 typecheck、lint、build 通过；上一基线完整测试为 338 个文件、2725 个测试通过、4 个跳过；加入 social event graph、feedback bridge、complexity routing、Reply/wait authority bridge、social prediction ledger、受限 routing workspace 行为切片、Group/Person revision 回放、task runtime 重启回放、model-turn 生命周期事实、durable route observation window、route/Agency monitor 查询端点和 Meta dispatch decision observation 后最新完整测试为 350 个文件、2823 个测试通过、4 个跳过。跳过项是当前宿主无法创建 `NETLINK_ROUTE` socket 的 bwrap live 隔离探针，策略仍保持 fail-closed，不能据此扩大自主执行权限。
+当前 `main` 提交为 `b89ae5a`。本轮工作树的 typecheck、lint、build 通过；上一基线完整测试为 338 个文件、2725 个测试通过、4 个跳过；加入 social event graph、feedback bridge、complexity routing、Reply/wait authority bridge、social prediction ledger、受限 routing workspace 行为切片、Group/Person revision 回放、task runtime 重启回放、model-turn 生命周期事实、durable route observation window、route/Agency monitor 查询端点、Meta dispatch decision observation、action semantics 和 hypothesis evidence gate 后最新完整测试为 354 个文件、2831 个测试通过、4 个跳过。跳过项是当前宿主无法创建 `NETLINK_ROUTE` socket 的 bwrap live 隔离探针，策略仍保持 fail-closed，不能据此扩大自主执行权限。
 
 ### 2.4 首个纵向切片执行记录（2026-09-12）
 
@@ -85,7 +85,7 @@
 - 已完成 AGI-005 的下一步：新增 `src/agent/world-projection.ts`，把 Self/Person/Group/World 的 legacy tracking 行转换为带 scope、来源、置信度、状态和 expiry 的只读 hypothesis manifest；workspace 在 projection 可用时复用同一份实体快照，故障时保留旧读取回退。
 - 已完成 AGI-005 的事件锚点下一步：`asOfEventId` 先做 chat/task scope 校验并解析 `occurredAt`，再约束 beliefs、goals、predictions、task evidence、legacy tasks 和 Self/Person/Group 读取；World 在有 revision history 时回溯到锚点版本，缺少历史能力的状态显式进入 uncertainty。
 - 已完成 AGI-005 的 scope 收口：task-scoped world entity 只对同一 task、所属 chat 和 global facts 可见；workspace 的 legacy world/self fallback 也传递事件锚点，避免投影不可用时悄悄回到实时状态。
-- 已完成 AGI-006 的基础部分：新增 durable `agency_runs` 与 `AgencyActionEnvelope`，支持风险/预算校验、幂等、adapter dispatch、取消、超时和状态事件；随后补充 `agency_attempts`、`execution_receipts` 和 adapter 可消费的 LLM/tool usage meter；尚未接入 authority/canary。
+- 已完成 AGI-006：新增 durable `agency_runs` 与 `AgencyActionEnvelope`，支持风险/预算校验、幂等、adapter dispatch、取消、超时和状态事件；补充 `agency_attempts`、`execution_receipts`、usage meter、统一 anchor/trigger/obligation semantics、Meta action observation registry、frozen canary harness、rollback thresholds 和 runbook。authority/canary 的真实群启用仍是人类操作，默认关闭。
 - 已完成 AGI-006 的下一步：新增 host-owned Agency policy facade，统一 `shadow/advisory/canary/authority`、canary chat 白名单、LLM/tool 硬预算和 fail-closed dispatch；默认仍为 `shadow`，不会改变 legacy 行为。
 - 已完成 AGI-006 的终态收口：`createAgencyRun` 在落库前重新校验 action/scope/risk/budget/idempotency，过期状态转移只在数据库竞争成功时写 receipt，避免取消/抢占竞争产生伪终态记录。
 - 已完成 AGI-006 的主流程 shadow bridge：Core L1 judge proposal 以不含回复正文的 `observe` Agency action 写入 durable run，使用稳定幂等键，并优先以触发它的 Telegram/cognitive event 作为 causation；默认 `shadow` policy 将其置为 `waiting`，并把 `agencyRunId` 带回 Core 结果，仍不改变 legacy 行为。
@@ -104,19 +104,22 @@
 - 已完成 AGI-006 的 wait authority transport wiring：新增 `AGENCY_WAIT_TRANSPORT_ENABLED` 和 `dispatchWaitViaAgency`，Heart、Meta Heart、Meta timing/dispatch gate 与 pipeline gate 均先保留 replay anchor，再通过 durable `wait` run 让 timing FSM 返回真实 `waitUntil/waitJobId`；Reply、wait、CodeAct authority envelope 与 legacy delivery observation 优先把原始 Telegram/cognitive event 作为 `causationId`，task runtime 的 queue/start/tool/delivery/wait/terminal 生命周期也会保留任务锚点并支持重启 replay；无锚点时保留兼容 fallback。启用后 wait 失败不调用 legacy `transitionToWait`，默认仍关闭。
 - 已完成 AGI-006 的 Meta dispatch observation bridge：`dispatch.taskToGroup` 的 proposed、blocked、skipped、lock/gate/Agency rejection 分支均写入 metadata-only `observe` Agency run；quote 优先使用消息锚点，无 quote 的主动任务使用 task/事件锚点并落在 task scope。默认 shadow 下只保留 waiting proposal，legacy queue/发送仍是权威；`GET /monitor/api/agency-runs` 只返回脱敏生命周期 summary，不暴露 action 参数、模型方向或 adapter result。
 - 已完成 AGI-009 的基础部分：新增只读默认的 `replayCognitiveCorrelation`，可按 correlation/sequence 重放事件并显式选择是否应用同一 deterministic projector。
-- 已完成 AGI-008 的离线基础部分：新增 `src/eval/agi-like-evaluator.ts`，对同一事件切片运行 legacy/core × memory/skill/prediction ON/OFF 变体，输出 host outcome、false-success、人工介入、修复、延迟/调用成本、聚合 Wilson 95% 区间和 paired delta 区间；report evidence 同时固定代码版本、配置快照、样本数、事件时间范围、实验组、受限失败样本和 uncertainty。可选写入 `replay_experiments`，执行器异常按 `blocked` 记录且不保存原始异常。
-- 已完成 AGI-007 的基础部分：新增 0093 scope/provenance 列、0094 `resolution_event_id`、事件 dedupe 债务、evidence-only debt resolution、prediction feedback 回填和 `[-1,1]` signed calibration（旧 0088 行保持兼容语义）；0096 为 world entity 增加 append-only revision history，0097 为 skill lifecycle 增加候选/发布/回滚 revision ledger，0099 为债务增加 append-only 快照和锚点回放读取，0100 为 prediction 增加 user/action 维度，0101 为达到最小 host 证据量后追加有界 calibration revision ledger，0105 为关系快照增加 append-only revision 和 `getRelationshipAt` 锚点读取。另新增 `findRelatedDebtsScoped`，按 task/user/chat/source-event anchor 先于有界文本 overlap 做确定性匹配，并接入 workspace 当前消息排序；revision ledger 仍是只读审计输入，不自动改 prompt、skill、policy 或 belief；workspace 已提供 host-owned、有界、默认关闭的 semantic scorer 契约，但反证驱动的长期更新、迁移前 legacy 债务的早期历史和更深的 Self/Person/Group hypothesis 自动更新仍待后续阶段。
+- 已完成 AGI-008：除 `src/eval/agi-like-evaluator.ts` 的 paired replay 外，`scripts/eval-long-horizon-live.ts` 使用真实 provider 和真实 CodeAct host 跑 frozen baseline/expanded held-out windows；输出 host/external acceptance、false-success、人工介入、修复、恢复、延迟/调用成本、聚合 Wilson 95% 区间和 paired delta；report evidence 固定代码版本、配置快照、样本数、时间范围、实验组、失败样本和 uncertainty。
+- 已完成 AGI-007：在既有 0093/0094/0096/0099/0100/0101/0105 基础上，0108 建立 legacy debt history boundary，明确迁移前只能使用首个 captured snapshot；`findRelatedDebtsScopedWithSemantic` 接入 `src/agent/semantic-debt-scorer.ts` 的 host-owned bounded scorer，默认关闭、限制候选数/分数/超时且只做排序不改债务状态；0109 新增 Self/Person/Group/World hypothesis audit，host/tool/Telegram/scheduler/import 才能进入 active projection，模型自证只记 candidate，Self provenance 和 counterevidence 可回放。group norms 的模型推断默认只读审计，verified host evidence 才能写 active state。
 - 已补 Phase 6 的验证血缘切片：`verifySkill` 会把 host 静态检查（proposal JSON、必填字段、红线、已发布同名唯一性）写入 `skill_revisions.test_summary`，通过与失败都可回放；`listSkillRevisionVerificationSummaries`/`GET /monitor/api/skill-verifications` 仅投影 revision 状态、验证器、检查项名称和通过/失败计数，供 release/evaluation window 查询，不暴露 artifact、步骤、检查原因或回滚文本。这不是 held-out 行为测试，发布仍必须经过主人 `approve`，真正的跨任务负例/回归验证仍待后续阶段。
 - 已完成 Phase 7 的 replayable social foundation：0102 为 `social_interaction` 事件增加 chat/time 索引，`social-event-graph` 对 reply-chain 和 feedback host outcome 旁路记录 metadata-only 的有向互动事实（reply/support/conflict/repair），并提供 chat/user/as-of 过滤与时间衰减图读取；无正文、无跨群身份合并、无社交策略副作用。
 - 已完成 Phase 7 的 social prediction/repair evaluation 基础：0103 新增 bounded `social_predictions` ledger；显式 `SOCIAL_PREDICTION_ENABLED` 下群投递记录 engagement 先验，目标用户的 reply/reaction/conflict/repair 事件或观察窗沉默结算真实分数和 signed error，并以 `evaluateSocialRepairs`/`summarizeSocialRepairs` 做冲突→修复→后续互动的只读评估；不自动改关系、群规范、prompt 或回复策略。
 - 已完成 Phase 7 的 Group hypothesis 历史切片：0104 为 `group_norms` 保留 append-only revisions，`getGroupNorms(chatId, asOf)` 在有历史时按锚点读取旧规范；旧库只生成单条 legacy 快照，无法推断迁移前更早变化，仍不自动改回复策略。
 - 已完成 Phase 7 的 Person hypothesis 历史切片：0105 为 `chat_relationships` 保留 append-only revisions，`getRelationshipAt(chatId, uid, asOf)` 在有历史时按锚点读取旧关系并以锚点时间衰减；旧库只生成单条 legacy 快照，缺少历史时 Person 投影显式保留 uncertainty，仍不自动改回复策略。
 - 已完成 Phase 8 的复杂度路由基础：`src/agent/cognitive-routing.ts` 以纯函数识别目标、未偿还债务、待恢复任务、多步工具、外部查询、纠正/冲突、高风险副作用、异常预测误差和长上下文，输出可解释的 `fast/deep/background` 决策；post-judge 在 `COGNITIVE_ROUTING_ENABLED` 打开时记录 shadow counter/log，并在真正进入 reply generation 的回合写入 0106 durable route observation，delivery 结算发送/静默/失败/中断与延迟、工具数、回复数，outcome tracker 回填用户正负反馈；这些 telemetry 不增加 LLM 调用、不授予 Agency 权限。后续仍需用真实成本/质量窗口验收深 Reply 专家和有信号 background workspace 的收益。
-- 已完成 Phase 8 的首个行为切片：新增 `COGNITIVE_ROUTING_BEHAVIOR_ENABLED` 与 `COGNITIVE_ROUTING_CHAT_IDS`，命中灰度且 route 为 deep/background 的 Reply 才显式复用 scoped workspace；deep 回合再有界启用记忆/人设/导演/上下文 digest 与 critic grounding，researcher、CodeAct、Agency 权限和发送副作用均不受路由自动影响，默认关闭。
-- 最终验证：`npm run typecheck`、`npm run lint`、`npm run build`、`git diff --check` 和 `npm test` 均通过；本轮全量结果为 350 个测试文件、2823 个测试通过、4 个跳过（其中 4 个是当前宿主 bwrap 无法创建 `NETLINK_ROUTE` 的 live 隔离探针，策略仍保持 fail-closed）。
-- 首次真实 held-out/long-horizon execution window（2026-09-14）已完成：新增 [`scripts/eval-long-horizon-live.ts`](../../scripts/eval-long-horizon-live.ts)、[`src/eval/long-horizon.ts`](../../src/eval/long-horizon.ts) 和 5 例固定任务集，任务实例和多回合 CodeAct 协议不复用旧的 arithmetic/ledger smoke fixture。每例要求 3--5 个模型回合，使用真实 provider `step-3.7-flash`、真实 `createHostApi`/`runHostCodeForTest`、每例独立 sandbox 和临时 SQLite；Telegram 未启动，terminal/browser 关闭，Telegram/memory/web/meta 等外部命名空间由 harness 拒绝，caller-owned acceptance 在 host 外独立复核。完整原始汇总见 [`2026-09-14-long-horizon-live.json`](../eval-results/2026-09-14-long-horizon-live.json)。
-- 结果：`2/5` verified，pass rate `40%`；`4/5` 最终 artifact 通过 caller acceptance（`80%`）；所有 case 都跑满最低 3 回合（horizon requirement `100%`），持久 task runtime event 共记录每例的 model/tool/terminal lifecycle。通过的是 multi-artifact reporting（1 次可恢复验收失败后修复）和 verification/repair；失败的是 ledger join（artifact 对但有 provider 空响应和未 settle tool promise）、latest-record dedup（provider 空响应、sandbox escape/unsafe code attempt、未收尾）以及 inventory planning（artifact 对但 5 回合内未显式 `endTask`）。
-- 这轮的主要结论不是“算对了就算完成”：artifact success 高于 clean task success，模型收尾、工具 promise settle、越权代码拒绝和 provider transient failure 都必须计入可靠性。下一轮应重复同一 runner，加入 crash/restart、interrupt/goal-change、更多领域和真正 external acceptance，再比较窗口而不是把本次 `40%` 当作能力总分。
+- 已完成 Phase 8 的行为切片：新增 `COGNITIVE_ROUTING_BEHAVIOR_ENABLED` 与 `COGNITIVE_ROUTING_CHAT_IDS`，命中灰度且 route 为 deep/background 的 Reply 才显式复用 scoped workspace；deep 回合再有界启用记忆/人设/导演/上下文 digest 与 critic grounding。另新增 `MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED` + `MULTI_AGENT_ROUTE_CHAT_IDS`，fast/direct 灰度可收敛 chat specialist fan-out；researcher、CodeAct、Agency 权限和发送副作用均不受路由自动影响，默认关闭。
+- 已完成 Slice F 的关系/群规范证据门：0104/0105 保留 append-only as-of revision；`inferGroupNorms` 的模型结果不再直接写 active `group_norms`，而是进入 `hypothesis_update_audit` candidate，`saveVerifiedGroupNorms` 只接受带 source event 和 evidence 的 host-owned update；Person/Self/World 同样经 0109 gate。关系/群规范自动策略更新仍关闭，先以 read-only audit/replay 运营。
+- 已完成 Slice F 的 multi-agent route convergence：新增 `MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED` + `MULTI_AGENT_ROUTE_CHAT_IDS`，显式 allowlist 内的 fast/direct route 不再自动 fan-out chat specialists，deep/lookup 保留必要 grounding；默认仍保持 legacy specialist 行为。
+- 已完成 AGI-008 真实窗口：同一 runner 在真实 `step-3.7-flash` provider、真实 CodeAct host、per-case sandbox/temporary SQLite 下运行 frozen baseline 5 例与 expanded window 11 例，后者覆盖 programming repair、data processing、information verification、document output、cross-tool、social information organization，并注入 crash/restart（2 例）和 interrupt/goal-change（1 例）。原始报告为 [`2026-09-14-long-horizon-live.json`](../eval-results/2026-09-14-long-horizon-live.json) 与 [`2026-09-14-long-horizon-live-window-2.json`](../eval-results/2026-09-14-long-horizon-live-window-2.json)，对照为 [`2026-09-14-long-horizon-comparison.json`](../eval-results/2026-09-14-long-horizon-comparison.json)，持续运营汇总为 [`2026-09-14-agi-like-ops.json`](../eval-results/2026-09-14-agi-like-ops.json)。window-1 为 `0/5` verified、artifact `3/5`、external `4/5`；window-2 为 `4/11` verified、artifact `6/11`、external `8/11`；差异只能描述观测事实，报告明确不能支持稳定泛化结论。两窗口 scope violation、unauthorized side effect、duplicate action 均为 0；失败样本保留 provider empty、no explicit end、acceptance mismatch、unsafe code、unhandled promise 等原始 failure codes。
+- 最终验证：`npm run typecheck`、`npm run lint`、`npm run build`、`git diff --check` 和 `npm test` 均通过；本轮全量结果为 354 个测试文件、2831 个测试通过、4 个跳过（其中 4 个是当前宿主 bwrap 无法创建 `NETLINK_ROUTE` 的 live 隔离探针，策略仍保持 fail-closed）。
+- 首轮真实 held-out/long-horizon execution window（2026-09-14）已由同一 runner 重跑并固定为 frozen baseline：5 例、真实 provider `step-3.7-flash`、真实 `createHostApi`/`runHostCodeForTest`、每例独立 sandbox 和临时 SQLite；Telegram 未启动，terminal/browser 关闭，Telegram/memory/web/meta 等外部命名空间由 harness 拒绝，caller-owned acceptance 在 host 外独立复核。window-1 为 `0/5` verified，artifact `3/5`，external `4/5`，horizon `5/5`；Wilson 95% CI 分别为 `0--0.4345`、`0.2307--0.8824`、`0.3755--0.9638`。
+- 扩展第二窗口覆盖 11 例和 6 个新增任务域：window-2 为 `4/11` verified（`36.36%`，Wilson 95% CI `15.17%--64.62%`）、artifact `6/11`、external `8/11`、horizon `10/11`；注入的 crash/restart `2/2` 完成 checkpoint/recovery，interrupt/goal-change `1/1` 被记录。两窗口对照的 pass delta `+0.3636`，artifact delta `-0.0545`，external delta `-0.0727`；paired overlap 为原 5 例，新增域全部列在 comparison report，结论明确为“仍需更多重复窗口和长期 retention 数据”。
+- 这轮的主要结论不是“算对了就算完成”：artifact success 高于 clean task success，模型收尾、工具 promise settle、越权代码拒绝、provider transient failure、minimum horizon 和外部验收都必须计入可靠性。真实运行没有 scope violation、未授权副作用或 duplicate action；failure samples 全部保留在原始 JSON，不用重试挑选好看的结果。
 - 安全状态：`CORE_PERMISSION_GATE_ENABLED` 未因本轮改动开启；`AGENCY_RUNTIME_MODE=shadow`、`AGENCY_CODEACT_TRANSPORT_ENABLED=false`、`AGENCY_REPLY_TRANSPORT_ENABLED=false`、`AGENCY_WAIT_TRANSPORT_ENABLED=false`、`SOCIAL_PREDICTION_ENABLED=false`、`COGNITIVE_WORKSPACE_V2_ENABLED=false`、`COGNITIVE_ROUTING_BEHAVIOR_ENABLED=false`、`DEBT_AUTO_MATCH_ENABLED=false`、`AGENCY_LEGACY_REPLY_OBSERVATION_ENABLED=false`，Agency 只有显式调用的 readonly、`speak/ask`、`wait`、CodeAct 和 control adapter factories（含 Telegram/timing binding）及可选的已发送结果观测桥；Reply/wait authority bridges 默认关闭，未授权或策略拒绝时不会产生真实副作用。
 
 ## 3. 目标架构
@@ -177,7 +180,7 @@ Outcome Observer -> prediction/debt/model updates -> evaluation
 
 ```ts
 type Scope = {
-  visibility: 'global' | 'chat' | 'user' | 'task';
+  visibility: "global" | "chat" | "user" | "task";
   chatId?: number;
   userId?: number;
   taskId?: string;
@@ -200,19 +203,19 @@ type Scope = {
 interface CognitiveEvent {
   id: string;
   type:
-    | 'message_received'
-    | 'message_edited'
-    | 'user_correction'
-    | 'user_goal_change'
-    | 'user_stop'
-    | 'task_observation'
-    | 'tool_failure'
-    | 'bot_delivery'
-    | 'user_reaction'
-    | 'user_followup'
-    | 'world_change';
+    | "message_received"
+    | "message_edited"
+    | "user_correction"
+    | "user_goal_change"
+    | "user_stop"
+    | "task_observation"
+    | "tool_failure"
+    | "bot_delivery"
+    | "user_reaction"
+    | "user_followup"
+    | "world_change";
   scope: Scope;
-  source: 'telegram' | 'host' | 'scheduler' | 'tool' | 'model' | 'import';
+  source: "telegram" | "host" | "scheduler" | "tool" | "model" | "import";
   occurredAt: number;
   sequence: number;
   causationId?: string;
@@ -236,7 +239,7 @@ interface AgencyActionEnvelope {
   causationId?: string;
   scope: Scope;
   action: AgencyAction;
-  risk: 'read' | 'reversible' | 'irreversible';
+  risk: "read" | "reversible" | "irreversible";
   budget: { maxMs: number; maxLlmCalls: number; maxToolCalls: number };
   expectedOutcome?: string;
   idempotencyKey: string;
@@ -264,7 +267,7 @@ interface BeliefRecord {
   lastConfirmedAt?: number;
   expiresAt?: number;
   supersededBy?: string;
-  status: 'active' | 'stale' | 'contradicted' | 'superseded';
+  status: "active" | "stale" | "contradicted" | "superseded";
 }
 ```
 
@@ -344,7 +347,7 @@ interface BeliefRecord {
 任务：
 
 - 新增 `src/agent/agency-runtime.ts`：`propose -> validate -> authorize -> dispatch -> observe -> settle`。
-- 新增适配器：`reply-adapter`、`heart-adapter`、`meta-adapter`、`codeact-adapter`、`wait-adapter`、`observe-adapter`、`remember-adapter`、`correct-adapter`、`stop-adapter`。其中 `wait-adapter` 先以显式 host scheduler contract 落地，`codeact-adapter` 先以显式 task/queue contract 落地，实际主路径注册仍需统一 anchor/trigger/obligation 语义。
+- 新增适配器：`reply-adapter`、`heart-adapter`、`meta-adapter`、`codeact-adapter`、`wait-adapter`、`observe-adapter`、`remember-adapter`、`correct-adapter`、`stop-adapter`。其中 `wait-adapter` 以显式 host scheduler contract 落地，`codeact-adapter` 以显式 task/queue contract 落地；当前 Reply、Heart、timing、CodeAct、Core、scheduler 和 Meta action observation 入口都经统一的 `anchor/trigger/obligation` 语义建 envelope，主路径 authority 仍保持默认关闭。
 - legacy judge、Heart、Meta、CodeAct 暂时保留为后端，不再拥有独立的终态语义。
 - 为每个动作写 `agency_runs`、`agency_attempts`、`execution_receipts`，并支持 cancel、timeout、retry、resume 和 idempotency。
 - 把 `CORE_PERMISSION_GATE_ENABLED` 改造成运行模式，而不是单个布尔开关：`shadow`、`advisory`、`canary`、`authority`。
@@ -389,7 +392,7 @@ interface BeliefRecord {
 任务：
 
 - 引入可信的 external acceptance contract。caller contract 和 model-proposed checks 必须区分，模型不能伪造 caller provenance。
-- 扩充 holdout domains：编程修复、数据处理、信息核验、文档产出、浏览器交互、跨工具任务和社会信息整理。
+- 扩充 holdout domains：编程修复、数据处理、信息核验、文档产出、浏览器交互、跨工具任务和社会信息整理。当前真实 runner 已覆盖除浏览器交互外的六个新增域；浏览器命名空间在本窗口明确关闭并记录为未测能力，不把它伪装成通过。
 - 每个任务至少覆盖：明确目标、隐含约束、错误输入、工具失败、用户澄清、部分交付、重启恢复和环境变化。
 - 验收从“文件存在”升级为目标相关的结构、内容、来源、投递和可用性检查。
 - 将 task executor 的 checkpoint、workspace snapshot、action receipt 和 evidence contract 绑定，支持按 event replay 恢复。
@@ -464,7 +467,7 @@ interface BeliefRecord {
 
 任务：
 
-- 新增 replay runner：从 `cognitive_events` 重建 workspace、决策、动作和 projections，可注入固定模型响应。
+- 新增 replay runner：从 `cognitive_events` 重建 workspace、决策、动作和 projections，可注入固定模型响应；另有真实 provider/CodeAct host runner，caller/external acceptance 在 host 外完成。
 - 新增 paired evaluator：同一事件集分别运行 legacy/core、memory ON/OFF、skill ON/OFF、prediction update ON/OFF。
 - 保留现有 evidence harness 和 spot-the-bot，但明确标注其适用范围。
 - 持续性指标：1 天/7 天目标 retention、debt repayment、纠正记忆、重复错误率、uncertainty honesty。
@@ -478,12 +481,13 @@ interface BeliefRecord {
 - 每次 canary 都有冻结的 baseline、实验组、回滚条件和结果报告。
 - replay 能复现至少一个真实失败，并验证修复确实改变了结果。
 - 没有外部验收、held-out 或长期数据时，报告必须明确写“不足以支持 AGI/AGI-like 结论”。
+- `src/eval/agency-canary.ts` 提供冻结 baseline/experiment、显式回滚阈值和 Wilson 区间；`docs/runbooks/agi-canary.md` 规定 shadow→canary 的人工步骤，真实 Telegram 群和生产 authority 不由测试自动打开。
 
 ## 6. 数据库和模块落点
 
 ### 6.1 建议新增 migration
 
-基础切片已将 migration 追加到 `0105`；后续 migration 继续顺延，不重写历史：
+基础切片已将 migration 追加到 `0109`；后续 migration 继续顺延，不重写历史：
 
 - `0089_cognitive_events.sql`：不可变认知事件和唯一 dedupe key。
 - `0090_scope_boundaries.sql`：Core beliefs/world entities 的 scope 和 legacy backfill（AGI-001 已落地）。
@@ -503,6 +507,9 @@ interface BeliefRecord {
 - `0104_group_norm_revisions.sql`：群规范 append-only revision、legacy 快照和事件锚点读取索引。
 - `0105_relationship_revisions.sql`：关系 append-only revision、legacy 快照和按 chat/user/time 的事件锚点读取索引。
 - `0106_cognitive_route_observations.sql`：复杂度路由的 durable 成本/质量 observation、终态指标和反馈索引。
+- `0107_agency_action_semantics.sql`：Agency action 的 host-derived anchor、trigger、obligation 语义及查询索引。
+- `0108_cognitive_debt_legacy_boundaries.sql`：迁移前债务的首个 captured snapshot 边界；不猜测迁移前不可见历史。
+- `0109_hypothesis_update_audit.sql`：Self/Person/Group/World 的 candidate、host-evidence acceptance/rejection、counterevidence 和幂等审计。
 
 不要重写历史 migration。所有新表和新增列都要支持旧数据读取、回滚和幂等初始化。
 
@@ -522,7 +529,10 @@ interface BeliefRecord {
 - `src/agent/cognitive-workspace.ts`：在既有 workspace opt-in 下暴露 bounded social graph 只读部分，沿用同 chat/as-of 边界。
 - `src/agent/cognitive-routing.ts`：纯函数复杂度触发器和 `fast/deep/background` 路由决策；`cognitive-route-observations.ts` 持久化真实 Reply 回合的成本/质量窗口，但不拥有执行权限。
 - `src/agent/replay.ts`：固定输入、事件回放、projection 对比和失败重现。
-- `src/eval/agi-like-evaluator.ts`：paired replay 的 legacy/core、memory/skill/prediction ablation 和基础运营指标；`scripts/eval-long-horizon-live.ts` + `src/eval/long-horizon.ts` 已提供真实 provider/CodeAct host 的小规模 long-horizon execution window，social、crash/restart、interrupt 和更广 safety 指标仍需真实实验接入。
+- `src/eval/agi-like-evaluator.ts`：paired replay 的 legacy/core、memory/skill/prediction ablation 和基础运营指标；`src/eval/agency-canary.ts` + `docs/runbooks/agi-canary.md` 提供冻结 canary 验收/回滚模板；`scripts/eval-long-horizon-live.ts` + `src/eval/long-horizon.ts` 已提供真实 provider/CodeAct host 的 long-horizon execution window，`src/eval/long-horizon-report.ts`、`scripts/compare-long-horizon-reports.ts` 和 `scripts/eval-ops-report.ts` 生成带版本、配置、样本、时间窗、失败样本和 Wilson 区间的报告。
+- `src/agent/agency-action-semantics.ts` / `src/agent/agency-meta-actions.ts`：统一 action registration 的 anchor/trigger/obligation 语义与 metadata-only Meta observations。
+- `src/agent/semantic-debt-scorer.ts` / `src/agent/hypothesis-updates.ts`：默认关闭的 host-owned bounded semantic ranking、legacy debt boundary 和 Self/Person/Group/World evidence gate。
+- `src/agent/cognitive-routing.ts` / `src/pipeline/multiagent/orchestrator.ts`：默认关闭、按 allowlist 灰度的 route convergence，不把路由自动升级为 Agency 权限。
 - `src/sandbox/capability-check.ts`：隔离、网络、资源、挂载和启动自检。
 
 现有模块的迁移原则：先加 facade 和 adapter，再替换调用方；不要一次性删除 legacy reply、Heart、Meta 或 CodeAct。
@@ -541,13 +551,26 @@ AGENCY_MAX_LLM_CALLS
 AGENCY_MAX_TOOL_CALLS
 AGENCY_FAIL_CLOSED
 AGENCY_LEGACY_REPLY_OBSERVATION_ENABLED
+AGENCY_CODEACT_TRANSPORT_ENABLED
+AGENCY_REPLY_TRANSPORT_ENABLED
+AGENCY_WAIT_TRANSPORT_ENABLED
 SANDBOX_REQUIRE_ISOLATION
 DEBT_AUTO_MATCH_ENABLED
 DEBT_AUTO_REPAY_ENABLED
+DEBT_SEMANTIC_MATCH_ENABLED
+DEBT_SEMANTIC_MATCH_USAGE
+DEBT_SEMANTIC_MATCH_MAX_CANDIDATES
+DEBT_SEMANTIC_MATCH_MIN_SCORE
+DEBT_SEMANTIC_MATCH_TIMEOUT_MS
+GROUP_NORMS_AUTO_UPDATE_ENABLED
 PREDICTION_UPDATE_ENABLED
 WORLD_MODEL_PROJECTION_ENABLED
 SKILL_PROMOTION_MODE=human|verified_canary
 REPLAY_EVAL_ENABLED
+COGNITIVE_ROUTING_BEHAVIOR_ENABLED
+COGNITIVE_ROUTING_CHAT_IDS
+MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED
+MULTI_AGENT_ROUTE_CHAT_IDS
 ```
 
 灰度阶段：
@@ -592,10 +615,11 @@ REPLAY_EVAL_ENABLED
 ### 8.3 回放和长时测试
 
 - 1 天和 7 天真实历史切片回放。
-- 多步工具任务中间失败后换路线。
+- 多步工具任务中间失败后换路线；真实窗口已注入 crash/restart，并验证 checkpoint/recovery metadata。
 - 用户纠正、目标变更、停止、澄清、部分交付。
 - world fact 更新、冲突、过期、撤销和新证据覆盖。
 - memory/skill/prediction ON/OFF 成对实验。
+- 真实 long-horizon runner：frozen baseline 5 例 + expanded window 11 例；覆盖编程修复、数据处理、信息核验、文档产出、跨工具和社会信息整理，浏览器域保持关闭并明确标记未测。
 
 ### 8.4 安全测试
 
@@ -615,7 +639,7 @@ REPLAY_EVAL_ENABLED
 - **安全**：scope violation=0、未经授权副作用=0、隔离失败宿主执行=0、不可解释的 duplicate action=0。
 - **运营**：P95 延迟、每条消息 LLM/tool calls、token 成本、队列延迟、事件丢失和回滚次数。
 
-任何报告必须同时包含：代码版本、配置快照、样本数、时间范围、实验组、失败样本和不确定性。没有这些字段时只能称为 smoke test 或 engineering check。
+任何报告必须同时包含：代码版本、配置快照、样本数、时间范围、实验组、失败样本和不确定性。当前真实窗口报告另含 caller/external acceptance、crash/restart、interrupt/goal-change、durable event loss 和安全计数；没有这些字段时只能称为 smoke test 或 engineering check。当前两窗口的 16 个 case 没有 scope violation、unauthorized side effect、duplicate action 或 sandbox denial，但 verified success 仍只有 4/16，且没有 1 天/7 天 retention，因此不能支持 AGI/AGI-like 结论。
 
 ## 10. 交付顺序
 
@@ -654,24 +678,29 @@ REPLAY_EVAL_ENABLED
 
 ### Slice F: Social model + cost optimization
 
-- group event graph、social prediction error、repair evaluation、Group norm as-of revision 和 Person relationship as-of revision 的 metadata/replay 基础已完成（0102–0105 + `social-event-graph`/`social-predictions`/`group-norms`/`relationship`）；关系/群规范自动更新与更完整的长期 hypothesis 学习仍待后续阶段。
-- fast/deep/background routing 的确定性 shadow 基础、Reply scoped-workspace、deep grounding 专家和统一唤醒 background route 元数据/工作区切片已完成；0106 已提供按真实 Reply 回合记录的 route/score/行为门、延迟、工具调用、回复数和用户反馈窗口；仍需收敛 multi-agent 成本并做真实质量窗口验收。
-- 完成 paired evaluation 和持续运营报告。
+- group event graph、social prediction error、repair evaluation、Group norm as-of revision 和 Person relationship as-of revision 的 metadata/replay 基础已完成（0102–0105 + `social-event-graph`/`social-predictions`/`group-norms`/`relationship`）；0109 再加 Self/Person/Group/World evidence gate、counterevidence audit 和 candidate 状态，关系/群规范自动策略更新保持关闭，先由 read-only audit/replay 运营。
+- fast/deep/background routing 的确定性 shadow 基础、Reply scoped-workspace、deep grounding 专家和统一唤醒 background route 元数据/工作区切片已完成；0106 已提供按真实 Reply 回合记录的 route/score/行为门、延迟、工具调用、回复数和用户反馈窗口；`MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED` + 显式 allowlist 已提供按路由收敛 specialist fan-out，真实质量/成本窗口仍需后续运营数据验收。
+- paired evaluator、真实 held-out 双窗口、comparison 和 continuous-ops 报告均已落地；报告保留小样本/无长期 retention 的限制，不把工程窗口写成能力结论。
+- 0109 evidence gate、route convergence graylist、agency canary harness/runbook、真实 held-out 双窗口、comparison 和 continuous-ops 报告已落地；关系/群规范自动更新仍默认关闭，先以 read-only audit/replay 运营。
 
 ## 11. Definition of Done
 
 本计划完成的标准不是“所有模块都存在”，而是：
 
-- 普通消息和深路径消息都有明确的 event、workspace、action、outcome 语义。
-- 任何 belief、debt、prediction、goal、skill 都可追溯到来源、范围、时间和证据。
-- Core 能在 canary 范围内真实接管低风险动作，并能安全回退 legacy。
-- 任务成功由外部验收或 host observation 决定，模型不能自证成功。
-- 中断、重启、工具失败、目标变更和用户纠正能被回放并恢复。
-- memory/skill/prediction 的收益有 held-out ON/OFF 证据。
-- self-improvement 经过独立验证、灰度和 rollback。
-- sandbox、scope、幂等和副作用检查满足零违规发布门槛。
-- latency、token、队列和后台任务在长期运行预算内。
-- 文档、配置、migration、runbook 和指标与实际代码一致。
+当前工程自检（真实 Telegram canary、生产 authority 和长期 retention 仍不由仓库自动执行）：
+
+- [PASS] 普通消息和深路径消息都有明确的 event、workspace、action、outcome 语义；证据：0089–0109、Reply/Heart/Meta/CodeAct/unified tick wiring、统一 action semantics。
+- [PASS] belief、debt、prediction、goal、skill 的 scoped provenance、时间锚点和 host evidence 路径可追溯；证据：scope/history migrations、0108 legacy boundary、0109 hypothesis audit、workspace/replay tests。
+- [PENDING HUMAN] Core 能在 canary 范围内真实接管低风险动作并安全回退 legacy；工程证据：policy/canary harness、frozen baseline/experiment、runbook 和默认 shadow/fail-closed；缺真实内部 Telegram 群启用与回滚演练。
+- [PASS] 任务成功由 caller/external acceptance 或 host observation 决定，模型不能自证成功；证据：真实窗口 external acceptance、task evidence、CodeAct acceptance tests。
+- [PASS] 中断、重启、工具失败、目标变更和用户纠正可记录、回放并恢复到可验证边界；证据：durable task runtime events、2/2 crash/restart checkpoint/recovery、1/1 interrupt/goal-change、recovery tests。
+- [FAIL / EVIDENCE INSUFFICIENT] memory/skill/prediction 收益尚无真实 ON/OFF held-out 证据；已有 paired replay foundation 和真实窗口，但本次 16 例不是 ON/OFF 实验，不能宣称收益。
+- [PASS] self-improvement/skill promotion 仍有独立 host verification、主人审批、灰度/rollback ledger；本轮不自动发布 skill。
+- [PASS] sandbox、scope、幂等和副作用发布门通过当前测试/真实窗口；两窗口 scope violation、unauthorized side effect、duplicate action、sandbox denial 均为 0，bwrap 宿主限制仅产生既有 skip 且保持 fail-closed。
+- [FAIL / EVIDENCE INSUFFICIENT] 长期 latency/token/queue/background 预算尚无 1 天/7 天运营窗口；当前 16 例 continuous-ops 报告只可作为短窗口基线。
+- [PASS] 文档、配置、migration、runbook、指标与实现已对齐；0107–0109 顺延追加，真实报告包含版本、配置、样本、时间窗、实验组、失败样本和 Wilson 区间。
+
+因此，工程交付已达到“可审计、默认关闭、可继续人工 canary”的状态；严格的 §11 全部通过仍需上面标为 `PENDING HUMAN`/`EVIDENCE INSUFFICIENT` 的真实群和长期实验，不能在没有这些事实时打勾。
 
 ## 12. 第一批实施任务
 
@@ -682,8 +711,8 @@ REPLAY_EVAL_ENABLED
 3. `AGI-003`：`0089_cognitive_events` + append/dedupe/replay API（基础已完成）。
 4. `AGI-004`：outbox、correlation id 和 task runtime event 持久化消费者（基础已完成，tool 与 model-turn started/finished 事实和确定性 tool callback projection 已接入）。
 5. `AGI-005`：workspace v2 facade，接入 Reply、Heart、Meta、CodeAct 和 unified tick（opt-in 已完成）。
-6. `AGI-006`：AgencyAction envelope、host policy、attempt/receipt、usage meter、Core proposal shadow bridge、readonly intent adapter、显式 `speak/ask/wait/act/observe/remember/correct/stop` adapter factories、默认关闭的 legacy Reply observed-delivery bridge、Meta dispatch observation bridge 和 authority-only Reply/wait/Meta CodeAct transport（runtime/readonly bridge/观测桥/adapter contracts/Reply、wait、CodeAct wiring、Meta dispatch decision facts 与 durable event causation 已完成；其它 Meta 动作注册、canary/authority 验收仍待后续）。
-7. `AGI-007`：evidence-only debt resolution、matcher 和 prediction calibration（有界 revision ledger 已完成，semantic/长期学习和长期假设更新待补）。
-8. `AGI-008`：paired replay/holdout runner 与长期指标报告（paired replay 基础和首个 5 例真实 holdout/long-horizon window 已完成；首轮 `2/5`、`40%`，仍需重复窗口、扩大任务域并接入 crash/restart、interrupt 和 external acceptance）。
+6. `AGI-006`：AgencyAction envelope、host policy、attempt/receipt、usage meter、Core proposal shadow bridge、readonly intent adapter、显式 `speak/ask/wait/act/observe/remember/correct/stop` adapter factories、默认关闭的 legacy Reply observed-delivery bridge、统一 anchor/trigger/obligation semantics、全 Meta metadata-only observation registry、frozen canary/authority harness、runbook 和 authority-only Reply/wait/Meta CodeAct transport。工程实现与离线验收完成；真实群 canary、authority 开启、回滚演练和生产操作仍需人类。
+7. `AGI-007`：evidence-only debt resolution、确定性 matcher + 默认关闭的 bounded host-owned semantic scorer、0108 legacy debt boundary、counterevidence audit、Self/Person/Group/World hypothesis evidence gate 和 Slice F read-only relation/norm audit。工程实现完成；模型自证不能进入 active projection，关系/群规范自动策略更新保持关闭。
+8. `AGI-008`：paired replay/真实 held-out runner 与长期指标报告。frozen baseline 5 例为 `0/5` verified；第二窗口 11 例为 `4/11` verified，覆盖六个新增任务域并注入 `2/2` crash/restart recovery、`1/1` interrupt/goal-change；comparison/continuous-ops 报告已落地。当前证据只支持工程事实，不支持稳定泛化、1/7 天 retention 或 AGI-like 结论。
 
 在 `AGI-001`、`AGI-002`、`AGI-003` 没有通过前，不打开 Core authority、自动债务偿还、自动 skill promotion 或更宽的 CodeAct 权限。

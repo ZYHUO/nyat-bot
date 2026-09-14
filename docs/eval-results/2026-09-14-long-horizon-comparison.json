@@ -1,0 +1,213 @@
+{
+  "kind": "real_long_horizon_window_comparison",
+  "generatedAt": "2026-09-14T16:30:09.684Z",
+  "baseline": {
+    "window": "window-1",
+    "codeVersion": {
+      "revision": "1efbe8a",
+      "dirty": false
+    },
+    "sampleCount": 5,
+    "timeRange": {
+      "startedAt": "2026-09-14T16:20:58.520Z",
+      "finishedAt": "2026-09-14T16:23:36.352Z"
+    },
+    "passRate": 0,
+    "artifactAcceptanceRate": 0.6,
+    "externalAcceptanceRate": 0.8,
+    "confidenceIntervals": {
+      "passRate": {
+        "low": 0,
+        "high": 0.4345
+      },
+      "artifactAcceptanceRate": {
+        "low": 0.2307,
+        "high": 0.8824
+      },
+      "externalAcceptanceRate": {
+        "low": 0.3755,
+        "high": 0.9638
+      }
+    }
+  },
+  "experiment": {
+    "window": "window-2",
+    "codeVersion": {
+      "revision": "1efbe8a",
+      "dirty": true
+    },
+    "sampleCount": 11,
+    "timeRange": {
+      "startedAt": "2026-09-14T16:23:58.716Z",
+      "finishedAt": "2026-09-14T16:28:34.481Z"
+    },
+    "passRate": 0.3636,
+    "artifactAcceptanceRate": 0.5455,
+    "externalAcceptanceRate": 0.7273,
+    "confidenceIntervals": {
+      "passRate": {
+        "low": 0.1517,
+        "high": 0.6462
+      },
+      "artifactAcceptanceRate": {
+        "low": 0.2801,
+        "high": 0.7873
+      },
+      "externalAcceptanceRate": {
+        "low": 0.4344,
+        "high": 0.9025
+      }
+    },
+    "expandedDomains": [
+      "cross-tool task",
+      "data processing",
+      "document output",
+      "information verification",
+      "programming repair",
+      "social information organization"
+    ]
+  },
+  "deltas": {
+    "passRate": 0.3636,
+    "artifactAcceptanceRate": -0.0545,
+    "externalAcceptanceRate": -0.0727
+  },
+  "pairedTaskOverlap": [
+    "lh-latest-record-02",
+    "lh-ledger-join-01",
+    "lh-multi-artifact-03",
+    "lh-plan-inventory-05",
+    "lh-repair-loop-04"
+  ],
+  "newDomains": [
+    "cross-tool task",
+    "data processing",
+    "document output",
+    "information verification",
+    "programming repair",
+    "social information organization"
+  ],
+  "failureCases": [
+    {
+      "window": "window-1",
+      "id": "lh-ledger-join-01",
+      "domain": "tabular arithmetic",
+      "status": "failed",
+      "failureCodes": ["no_explicit_end"]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-latest-record-02",
+      "domain": "stateful deduplication",
+      "status": "failed",
+      "failureCodes": ["no_explicit_end"]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-multi-artifact-03",
+      "domain": "multi-artifact reporting",
+      "status": "failed",
+      "failureCodes": ["host_execution_failed", "no_explicit_end"]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-repair-loop-04",
+      "domain": "verification and repair",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "host_execution_failed",
+        "no_explicit_end",
+        "provider_empty_response"
+      ]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "no_explicit_end",
+        "provider_empty_response"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-repair-loop-04",
+      "domain": "verification and repair",
+      "status": "failed",
+      "failureCodes": ["no_explicit_end"]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "invalid_code_protocol",
+        "no_explicit_end",
+        "provider_empty_response"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-program-repair-06",
+      "domain": "programming repair",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "no_explicit_end",
+        "provider_empty_response",
+        "unhandled_tool_promise",
+        "unsafe_code_rejected"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-data-process-07",
+      "domain": "data processing",
+      "status": "failed",
+      "failureCodes": ["minimum_horizon_not_met"]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-information-verify-08",
+      "domain": "information verification",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "no_explicit_end",
+        "unhandled_tool_promise"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-cross-tool-10",
+      "domain": "cross-tool task",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "acceptance_pending_or_failed",
+        "no_explicit_end"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-social-organize-11",
+      "domain": "social information organization",
+      "status": "failed",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "host_execution_failed",
+        "no_explicit_end"
+      ]
+    }
+  ],
+  "conclusion": "窗口差异仅描述观测事实；仍需更多重复窗口和长期 retention 数据后再判断泛化。"
+}

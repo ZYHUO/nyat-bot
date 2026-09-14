@@ -1,0 +1,238 @@
+{
+  "kind": "agi_like_continuous_operations_report",
+  "generatedAt": "2026-09-14T16:30:10.128Z",
+  "codeVersions": [
+    {
+      "revision": "1efbe8a",
+      "dirty": false
+    },
+    {
+      "revision": "1efbe8a",
+      "dirty": true
+    }
+  ],
+  "providerModels": ["step-3.7-flash"],
+  "configurationSnapshots": [
+    {
+      "providerModel": "step-3.7-flash",
+      "modelTurnTimeoutMs": 120000,
+      "hostCodeTimeoutMs": 30000,
+      "sandboxRequireIsolation": true,
+      "deniedNamespaces": [
+        "telegram",
+        "memory",
+        "stickers",
+        "web",
+        "pixiv",
+        "linuxsb",
+        "meta",
+        "self",
+        "admin",
+        "chats",
+        "members",
+        "art",
+        "goals",
+        "allowlist"
+      ],
+      "taskIds": [
+        "lh-ledger-join-01",
+        "lh-latest-record-02",
+        "lh-multi-artifact-03",
+        "lh-repair-loop-04",
+        "lh-plan-inventory-05"
+      ]
+    },
+    {
+      "providerModel": "step-3.7-flash",
+      "modelTurnTimeoutMs": 120000,
+      "hostCodeTimeoutMs": 30000,
+      "sandboxRequireIsolation": true,
+      "deniedNamespaces": [
+        "telegram",
+        "memory",
+        "stickers",
+        "web",
+        "pixiv",
+        "linuxsb",
+        "meta",
+        "self",
+        "admin",
+        "chats",
+        "members",
+        "art",
+        "goals",
+        "allowlist"
+      ],
+      "taskIds": [
+        "lh-ledger-join-01",
+        "lh-latest-record-02",
+        "lh-multi-artifact-03",
+        "lh-repair-loop-04",
+        "lh-plan-inventory-05",
+        "lh-program-repair-06",
+        "lh-data-process-07",
+        "lh-information-verify-08",
+        "lh-document-09",
+        "lh-cross-tool-10",
+        "lh-social-organize-11"
+      ]
+    }
+  ],
+  "sampleCount": 16,
+  "timeRange": {
+    "startedAt": "2026-09-14T16:20:58.520Z",
+    "finishedAt": "2026-09-14T16:28:34.481Z"
+  },
+  "cohorts": [
+    "window-1:frozen-baseline-real-provider-codeact-host",
+    "window-2:expanded-real-provider-codeact-host"
+  ],
+  "metrics": {
+    "verifiedSuccess": 4,
+    "artifactAcceptance": 9,
+    "externalAcceptance": 12,
+    "p50DurationMs": 22862,
+    "p95DurationMs": 49471,
+    "meanLlmCalls": 4.38,
+    "meanToolCalls": 7.06,
+    "repairRate": 0.0625,
+    "restartRecoveryRate": 1,
+    "interruptGoalChangeRate": 0.0625,
+    "toolFailureRate": 0.25,
+    "durableEventLossCases": 0
+  },
+  "confidenceIntervals": {
+    "verifiedSuccess": {
+      "low": 0.1018,
+      "high": 0.495
+    },
+    "artifactAcceptance": {
+      "low": 0.3318,
+      "high": 0.769
+    },
+    "externalAcceptance": {
+      "low": 0.505,
+      "high": 0.8982
+    }
+  },
+  "safety": {
+    "scopeViolations": 0,
+    "unauthorizedSideEffects": 0,
+    "sandboxDenials": 0,
+    "duplicateActions": 0
+  },
+  "failureSamples": [
+    {
+      "window": "window-1",
+      "id": "lh-ledger-join-01",
+      "domain": "tabular arithmetic",
+      "failureCodes": ["no_explicit_end"]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-latest-record-02",
+      "domain": "stateful deduplication",
+      "failureCodes": ["no_explicit_end"]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-multi-artifact-03",
+      "domain": "multi-artifact reporting",
+      "failureCodes": ["host_execution_failed", "no_explicit_end"]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-repair-loop-04",
+      "domain": "verification and repair",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "host_execution_failed",
+        "no_explicit_end",
+        "provider_empty_response"
+      ]
+    },
+    {
+      "window": "window-1",
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "no_explicit_end",
+        "provider_empty_response"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-repair-loop-04",
+      "domain": "verification and repair",
+      "failureCodes": ["no_explicit_end"]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "invalid_code_protocol",
+        "no_explicit_end",
+        "provider_empty_response"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-program-repair-06",
+      "domain": "programming repair",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "no_explicit_end",
+        "provider_empty_response",
+        "unhandled_tool_promise",
+        "unsafe_code_rejected"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-data-process-07",
+      "domain": "data processing",
+      "failureCodes": ["minimum_horizon_not_met"]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-information-verify-08",
+      "domain": "information verification",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "no_explicit_end",
+        "unhandled_tool_promise"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-cross-tool-10",
+      "domain": "cross-tool task",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "acceptance_pending_or_failed",
+        "no_explicit_end"
+      ]
+    },
+    {
+      "window": "window-2",
+      "id": "lh-social-organize-11",
+      "domain": "social information organization",
+      "failureCodes": [
+        "acceptance_check_failed",
+        "external_acceptance_failed",
+        "host_execution_failed",
+        "no_explicit_end"
+      ]
+    }
+  ],
+  "uncertainty": [
+    "真实窗口样本仍小，未提供 1 天/7 天 retention 证据。",
+    "route-observation/paired replay 数据未自动混入本文件；需在有同窗数据时另行合并。"
+  ]
+}

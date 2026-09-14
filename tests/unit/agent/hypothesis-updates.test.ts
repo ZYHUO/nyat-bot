@@ -136,7 +136,7 @@ describe("host-evidence hypothesis gate", () => {
         userId: 7,
         relationshipDelta: 1,
       }).reason,
-    ).toBe("host_evidence_applied");
+    ).toBe("host_evidence_applied_with_counterevidence");
     expect(
       db.prepare("SELECT COUNT(*) AS count FROM chat_relationships").get(),
     ).toEqual({ count: 1 });
