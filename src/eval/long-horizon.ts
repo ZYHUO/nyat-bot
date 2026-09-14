@@ -1,5 +1,24 @@
 import type { AcceptanceContract } from "../agent/task-evidence.js";
 
+export type ExternalAcceptance =
+  | {
+      kind: "json_fields";
+      path: string;
+      fields: Readonly<Record<string, unknown>>;
+    }
+  | { kind: "text_contains"; path: string; required: readonly string[] }
+  | {
+      kind: "program_static";
+      path: string;
+      required: readonly string[];
+      forbidden?: readonly string[];
+    }
+  | {
+      kind: "cross_file";
+      paths: readonly string[];
+      required: readonly string[];
+    };
+
 export interface LongHorizonTask {
   id: string;
   domain: string;
@@ -10,6 +29,9 @@ export interface LongHorizonTask {
   minTurns: number;
   maxTurns: number;
   acceptance: AcceptanceContract;
+  externalAcceptance?: ExternalAcceptance;
+  crashRestart?: boolean;
+  interruptGoalChange?: string;
 }
 
 const REPORT_TEXT =
@@ -66,6 +88,11 @@ const LONG_HORIZON_TASKS: LongHorizonTask[] = [
           equals: 91,
         },
       ],
+    },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "result.json",
+      fields: { grandTotal: 91 },
     },
   },
   {
@@ -126,6 +153,11 @@ const LONG_HORIZON_TASKS: LongHorizonTask[] = [
         },
       ],
     },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "dedup.json",
+      fields: { uniqueIds: 4, scoreTotal: 25 },
+    },
   },
   {
     id: "lh-multi-artifact-03",
@@ -174,6 +206,11 @@ const LONG_HORIZON_TASKS: LongHorizonTask[] = [
         },
       ],
     },
+    externalAcceptance: {
+      kind: "text_contains",
+      path: "report.txt",
+      required: ["blue: 2 items, total 18", "grand total: 44"],
+    },
   },
   {
     id: "lh-repair-loop-04",
@@ -207,6 +244,11 @@ const LONG_HORIZON_TASKS: LongHorizonTask[] = [
           equals: { count: 6, evenSum: 14, oddSum: 61, min: 2, max: 27 },
         },
       ],
+    },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "answer.json",
+      fields: { stats: { count: 6, evenSum: 14, oddSum: 61 } },
     },
   },
   {
@@ -259,6 +301,292 @@ const LONG_HORIZON_TASKS: LongHorizonTask[] = [
           equals: 18,
         },
       ],
+    },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "inventory_report.json",
+      fields: { totalAvailable: 24, restockUnits: 18 },
+    },
+  },
+  {
+    id: "lh-program-repair-06",
+    domain: "programming repair",
+    goal:
+      "Read buggy.js and repair the average function into fixed.js. The caller requires an exported average(values) function, " +
+      "an empty array must return 0, and a non-empty numeric array must return its arithmetic mean. Do not change the input file.",
+    seedFiles: {
+      "buggy.js":
+        "export function average(values) {\n" +
+        "  return values.reduce((sum, value) => sum + value, 0) / values.length;\n" +
+        "}\n",
+    },
+    outputFiles: ["fixed.js"],
+    phaseInstructions: [
+      "Read buggy.js and set a repair plan. Do not write fixed.js or end the task.",
+      "Write fixed.js with the repaired exported average function. Do not end the task.",
+      "Read fixed.js, call runtime.verifyAcceptance, repair any failure, and end only after the caller and external checks pass.",
+    ],
+    minTurns: 3,
+    maxTurns: 5,
+    crashRestart: true,
+    acceptance: {
+      source: "caller",
+      checks: [{ kind: "nonempty_file", path: "fixed.js" }],
+    },
+    externalAcceptance: {
+      kind: "program_static",
+      path: "fixed.js",
+      required: ["export function average", "values.length", "return 0"],
+      forbidden: ["process", "require", "fetch", "child_process"],
+    },
+  },
+  {
+    id: "lh-data-process-07",
+    domain: "data processing",
+    goal:
+      "Read records.csv, group rows by department, sum amount and count rows, then write records.json with " +
+      '{"departments":{"<name>":{"count":number,"total":number}},"grandTotal":number}. Sort department keys alphabetically.',
+    seedFiles: {
+      "records.csv":
+        "department,amount\nalpha,12\nbeta,7\nalpha,5\ngamma,9\nbeta,11\n",
+    },
+    outputFiles: ["records.json"],
+    phaseInstructions: [
+      "Read records.csv and set a parsing and aggregation plan. Do not write records.json or end the task.",
+      "Parse the CSV, aggregate each department, and write records.json. Do not end the task.",
+      "Read records.json, verify the caller contract, repair if needed, and end after verification.",
+    ],
+    minTurns: 3,
+    maxTurns: 5,
+    acceptance: {
+      source: "caller",
+      checks: [
+        {
+          kind: "json_field",
+          path: "records.json",
+          field: ["departments"],
+          equals: {
+            alpha: { count: 2, total: 17 },
+            beta: { count: 2, total: 18 },
+            gamma: { count: 1, total: 9 },
+          },
+        },
+        {
+          kind: "json_field",
+          path: "records.json",
+          field: ["grandTotal"],
+          equals: 44,
+        },
+      ],
+    },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "records.json",
+      fields: { grandTotal: 44 },
+    },
+  },
+  {
+    id: "lh-information-verify-08",
+    domain: "information verification",
+    goal:
+      "Read claims.json and write verification.json. Preserve each claim id, mark claims with an exact matching source fact as verified, " +
+      'and mark all other claims unverified. Output {"claims":[{"id":string,"verified":boolean}],"verifiedCount":number} in input order.',
+    seedFiles: {
+      "claims.json": JSON.stringify(
+        {
+          claims: [
+            {
+              id: "c1",
+              statement: "alpha has value 3",
+              source: { subject: "alpha", value: 3 },
+            },
+            {
+              id: "c2",
+              statement: "beta has value 8",
+              source: { subject: "beta", value: 7 },
+            },
+            {
+              id: "c3",
+              statement: "gamma has value 4",
+              source: { subject: "gamma", value: 4 },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    },
+    outputFiles: ["verification.json"],
+    phaseInstructions: [
+      "Read claims.json and set a verification plan. Do not write verification.json or end the task.",
+      "Compare every claim with its source fact and write verification.json in input order. Do not end the task.",
+      "Read verification.json, call runtime.verifyAcceptance, repair errors, and end only after it passes.",
+    ],
+    minTurns: 3,
+    maxTurns: 5,
+    acceptance: {
+      source: "caller",
+      checks: [
+        {
+          kind: "json_field",
+          path: "verification.json",
+          field: ["claims"],
+          equals: [
+            { id: "c1", verified: true },
+            { id: "c2", verified: false },
+            { id: "c3", verified: true },
+          ],
+        },
+        {
+          kind: "json_field",
+          path: "verification.json",
+          field: ["verifiedCount"],
+          equals: 2,
+        },
+      ],
+    },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "verification.json",
+      fields: { verifiedCount: 2 },
+    },
+  },
+  {
+    id: "lh-document-09",
+    domain: "document output",
+    goal:
+      "Read brief.txt and write decision.md as a concise decision memo. It must contain the headings '# Decision', '# Evidence', " +
+      "and '# Risks', and include the exact decision words 'proceed' and 'rollback'. Do not invent a different decision.",
+    seedFiles: {
+      "brief.txt":
+        "Decision: proceed with the staged rollout. Evidence: two checks passed. Risk: rollback if error rate rises.\n",
+    },
+    outputFiles: ["decision.md"],
+    phaseInstructions: [
+      "Read brief.txt and set a memo plan. Do not write decision.md or end the task.",
+      "Write decision.md with the required headings and source-grounded decision/evidence/risk content. Do not end the task.",
+      "Read decision.md, verify the caller contract, repair if needed, and end after verification.",
+    ],
+    minTurns: 3,
+    maxTurns: 5,
+    acceptance: {
+      source: "caller",
+      checks: [{ kind: "nonempty_file", path: "decision.md" }],
+    },
+    externalAcceptance: {
+      kind: "text_contains",
+      path: "decision.md",
+      required: ["# Decision", "# Evidence", "# Risks", "proceed", "rollback"],
+    },
+  },
+  {
+    id: "lh-cross-tool-10",
+    domain: "cross-tool task",
+    goal:
+      "Read inventory.csv and rules.txt using separate file operations, apply the rule to compute reorder quantities, and write cross_tool.json " +
+      'with {"items":[{"name":string,"reorder":number}],"totalReorder":number}; sort items alphabetically and never use external tools.',
+    seedFiles: {
+      "inventory.csv": "name,stock\nclips,3\nink,8\npaper,12\n",
+      "rules.txt":
+        "Target stock is 10 for every item; reorder is max(0, target - stock).\n",
+    },
+    outputFiles: ["cross_tool.json"],
+    phaseInstructions: [
+      "Read inventory.csv and rules.txt in separate operations, then set a plan. Do not write cross_tool.json or end the task.",
+      "Apply the rule and write cross_tool.json. Do not end the task.",
+      "Read cross_tool.json, verify the caller contract, repair any failure, and end after verification.",
+    ],
+    minTurns: 3,
+    maxTurns: 5,
+    crashRestart: true,
+    acceptance: {
+      source: "caller",
+      checks: [
+        {
+          kind: "json_field",
+          path: "cross_tool.json",
+          field: ["items"],
+          equals: [
+            { name: "clips", reorder: 7 },
+            { name: "ink", reorder: 2 },
+            { name: "paper", reorder: 0 },
+          ],
+        },
+        {
+          kind: "json_field",
+          path: "cross_tool.json",
+          field: ["totalReorder"],
+          equals: 9,
+        },
+      ],
+    },
+    externalAcceptance: {
+      kind: "cross_file",
+      paths: ["inventory.csv", "rules.txt", "cross_tool.json"],
+      required: ["clips", "reorder", "totalReorder"],
+    },
+  },
+  {
+    id: "lh-social-organize-11",
+    domain: "social information organization",
+    goal:
+      "Read messages.json and organize social information into social_digest.json with participants, topics, and actionItems. " +
+      "Each action item must include owner, task, and priority (high/normal); preserve only actionable messages and sort actionItems by priority then owner.",
+    seedFiles: {
+      "messages.json": JSON.stringify(
+        [
+          {
+            from: "Aki",
+            text: "我来整理发布说明",
+            actionable: true,
+            priority: "high",
+          },
+          { from: "Bo", text: "周五一起看展吗", actionable: false },
+          {
+            from: "Chen",
+            text: "请把测试结果发群里",
+            actionable: true,
+            priority: "normal",
+          },
+        ],
+        null,
+        2,
+      ),
+    },
+    outputFiles: ["social_digest.json"],
+    phaseInstructions: [
+      "Read messages.json and set a plan for participants, topics, and actionable items. Do not write social_digest.json or end the task.",
+      "Write social_digest.json, retaining actionable owners/tasks and assigning priorities from the source. Do not end the task.",
+      "Read social_digest.json, verify the caller contract, repair errors, and end after verification.",
+    ],
+    minTurns: 3,
+    maxTurns: 5,
+    interruptGoalChange:
+      "Goal change from the user: keep the same digest, but prioritize unresolved action items and include their priority explicitly.",
+    acceptance: {
+      source: "caller",
+      checks: [
+        {
+          kind: "json_field",
+          path: "social_digest.json",
+          field: ["actionItems"],
+          equals: [
+            { owner: "Aki", task: "整理发布说明", priority: "high" },
+            { owner: "Chen", task: "把测试结果发群里", priority: "normal" },
+          ],
+        },
+        {
+          kind: "json_field",
+          path: "social_digest.json",
+          field: ["participants"],
+          equals: ["Aki", "Bo", "Chen"],
+        },
+      ],
+    },
+    externalAcceptance: {
+      kind: "json_fields",
+      path: "social_digest.json",
+      fields: { participants: ["Aki", "Bo", "Chen"] },
     },
   },
 ];

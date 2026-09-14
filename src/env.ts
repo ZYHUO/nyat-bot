@@ -806,6 +806,16 @@ const envSchema = z.object({
   // Durable cognitive event projection is safe to run without authority; debt
   // creation remains a separate opt-in until its false-positive rate is known.
   DEBT_AUTO_MATCH_ENABLED: booleanFromEnv.default(false),
+  // Optional host-owned semantic ranking after deterministic debt matching.
+  // It never resolves debt and is deliberately off until cost/quality is measured.
+  DEBT_SEMANTIC_MATCH_ENABLED: booleanFromEnv.default(false),
+  DEBT_SEMANTIC_MATCH_USAGE: z.string().default('judge'),
+  DEBT_SEMANTIC_MATCH_MAX_CANDIDATES: z.coerce.number().int().min(0).max(32).default(4),
+  DEBT_SEMANTIC_MATCH_MIN_SCORE: z.coerce.number().min(0).max(1).default(0.72),
+  DEBT_SEMANTIC_MATCH_TIMEOUT_MS: z.coerce.number().int().positive().max(10_000).default(2_500),
+  // LLM group-norm proposals do not mutate the durable hypothesis by default;
+  // verified host evidence uses the separate evidence-gated updater.
+  GROUP_NORMS_AUTO_UPDATE_ENABLED: booleanFromEnv.default(false),
 
   // 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。
   REPLY_MODE_ENABLED: booleanFromEnv.default(true),
@@ -996,6 +1006,18 @@ const envSchema = z.object({
   // chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token;
   // 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。
   MULTI_AGENT_CHAT_SPECIALISTS: booleanFromEnv.default(true),
+  // Route-convergence experiment: for an explicit allowlist, direct/fast
+  // replies stop spawning chat specialists; deep/lookup keep only work
+  // justified by their route. Default remains legacy.
+  MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED: booleanFromEnv.default(false),
+  MULTI_AGENT_ROUTE_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
   // Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。
   MULTI_AGENT_CHECKER_ENABLED: booleanFromEnv.default(true),
   MULTI_AGENT_CHECKER_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),

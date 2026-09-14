@@ -4,10 +4,11 @@
 // invents one. It records the decision as a bounded read-only `observe` action;
 // the intended judge action remains in expectedOutcome for replay/audit.
 
-import { createAgencyEnvelope, createAgencyRun, dispatchAgencyRun } from './agency-runtime.js';
-import type { AgencyRunStatus } from './agency-runtime.js';
-import type { AgencyAction } from './agency.js';
-import type { JudgeResult } from '../shared/types.js';
+import { createAgencyRun, dispatchAgencyRun } from "./agency-runtime.js";
+import { createAnchoredAgencyEnvelope } from "./agency-action-semantics.js";
+import type { AgencyRunStatus } from "./agency-runtime.js";
+import type { AgencyAction } from "./agency.js";
+import type { JudgeResult } from "../shared/types.js";
 
 export interface RecordAgencyProposalInput {
   chatId: number;
@@ -38,12 +39,15 @@ function validAnchor(value: string | undefined): boolean {
 }
 
 function proposalTarget(input: RecordAgencyProposalInput): string {
-  return `core:judge:${input.judgeResult.action}:message:${input.chatId}:${input.messageId}`.slice(0, 500);
+  return `core:judge:${input.judgeResult.action}:message:${input.chatId}:${input.messageId}`.slice(
+    0,
+    500,
+  );
 }
 
 function expectedOutcome(input: RecordAgencyProposalInput): string {
   return JSON.stringify({
-    kind: 'core_judge_proposal',
+    kind: "core_judge_proposal",
     action: input.judgeResult.action,
     replyPath: input.judgeResult.replyPath ?? null,
     level: input.judgeResult.level,
@@ -54,12 +58,18 @@ function expectedOutcome(input: RecordAgencyProposalInput): string {
   }).slice(0, 500);
 }
 
-function observeAdapter(action: AgencyAction): { recorded: true; target: string } {
+function observeAdapter(action: AgencyAction): {
+  recorded: true;
+  target: string;
+} {
   // This adapter has no external capability. It only settles the host-owned
   // observation when advisory/canary/authority mode explicitly allows reads.
   return {
     recorded: true,
-    target: action.type === 'observe' ? action.target : 'invalid-agency-proposal-action',
+    target:
+      action.type === "observe"
+        ? action.target
+        : "invalid-agency-proposal-action",
   };
 }
 
@@ -67,18 +77,18 @@ function observeAdapter(action: AgencyAction): { recorded: true; target: string 
 export async function recordAgencyProposal(
   input: RecordAgencyProposalInput,
 ): Promise<RecordAgencyProposalResult> {
-  if (!validId(input.chatId)) return { ok: false, reason: 'invalid_chat_id' };
+  if (!validId(input.chatId)) return { ok: false, reason: "invalid_chat_id" };
   if (!Number.isSafeInteger(input.messageId) || input.messageId <= 0) {
-    return { ok: false, reason: 'invalid_message_id' };
+    return { ok: false, reason: "invalid_message_id" };
   }
   if (!validAnchor(input.cognitiveAnchorEventId)) {
-    return { ok: false, reason: 'invalid_cognitive_anchor_event_id' };
+    return { ok: false, reason: "invalid_cognitive_anchor_event_id" };
   }
 
   const idempotencyKey = `core-proposal:${input.chatId}:${input.messageId}:${input.judgeResult.action}:${input.judgeResult.level}`;
-  const envelope = createAgencyEnvelope({
-    action: { type: 'observe', target: proposalTarget(input) },
-    scope: { visibility: 'chat', chatId: input.chatId },
+  const envelope = createAnchoredAgencyEnvelope({
+    action: { type: "observe", target: proposalTarget(input) },
+    scope: { visibility: "chat", chatId: input.chatId },
     idempotencyKey,
     correlationId: `core:chat:${input.chatId}:message:${input.messageId}`,
     ...(input.cognitiveAnchorEventId?.trim()
@@ -88,20 +98,32 @@ export async function recordAgencyProposal(
         : {}),
     expectedOutcome: expectedOutcome(input),
     budget: { maxMs: 1_000, maxLlmCalls: 0, maxToolCalls: 0 },
+    source: "core",
+    anchorEventId:
+      input.cognitiveAnchorEventId ??
+      `telegram:${input.chatId}:message:${input.messageId}`,
+    triggerEventId: `telegram:${input.chatId}:message:${input.messageId}`,
+    obligationId: input.proposalId
+      ? `proposal:${input.proposalId}`
+      : `message:${input.messageId}`,
   });
-  if (!envelope.ok || !envelope.envelope) return { ok: false, reason: envelope.reason ?? 'invalid_envelope' };
+  if (!envelope.ok || !envelope.envelope)
+    return { ok: false, reason: envelope.reason ?? "invalid_envelope" };
 
   const created = createAgencyRun(envelope.envelope);
-  if (!created.ok || !created.run) return { ok: false, reason: created.reason ?? 'agency_run_unavailable' };
+  if (!created.ok || !created.run)
+    return { ok: false, reason: created.reason ?? "agency_run_unavailable" };
 
-  const dispatched = await dispatchAgencyRun(created.run.id, { observe: observeAdapter });
+  const dispatched = await dispatchAgencyRun(created.run.id, {
+    observe: observeAdapter,
+  });
   const run = dispatched.run ?? created.run;
   return {
     ok: true,
     runId: run.id,
     status: run.status,
     reused: created.reused,
-    deferred: run.status === 'waiting',
+    deferred: run.status === "waiting",
     ...(dispatched.reason ? { reason: dispatched.reason } : {}),
   };
 }

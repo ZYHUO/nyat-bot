@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { Script } from "node:vm";
 import {
   mkdir,
   mkdtemp,
@@ -18,6 +19,8 @@ import {
 } from "../src/eval/long-horizon.js";
 import type { HostApi } from "../src/subagent/host-api.js";
 import type { TaskRuntimeEvent } from "../src/agent/task-runtime-events.js";
+import { getExecutionAudit } from "../src/agent/execution-audit.js";
+import type { ExternalAcceptance } from "../src/eval/long-horizon.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CHAT_ID = 1;
@@ -77,6 +80,7 @@ export interface LongHorizonCaseReport {
   domain: string;
   status: LiveCaseStatus;
   artifactStatus: "verified" | "failed" | "unverified";
+  externalAcceptanceStatus: "verified" | "failed" | "unverified";
   ended: boolean;
   turns: number;
   llmCalls: number;
@@ -88,6 +92,11 @@ export interface LongHorizonCaseReport {
   toolFailures: number;
   durableEventCount: number;
   repairAttempts: number;
+  crashRestartInjected: boolean;
+  interruptInjected: boolean;
+  goalChanged: boolean;
+  recoveryTimeMs: number | null;
+  checkpointCount: number;
   durationMs: number;
   failureCodes: string[];
 }
@@ -95,6 +104,12 @@ export interface LongHorizonCaseReport {
 export interface LongHorizonLiveReport {
   kind: "real_long_horizon_execution_evaluation";
   generatedAt: string;
+  window: string;
+  experimentGroup: string;
+  startedAt: string;
+  finishedAt: string;
+  timeRange: { startedAt: string; finishedAt: string };
+  configurationSnapshot: Record<string, unknown>;
   codeVersion: { revision: string; dirty: boolean };
   providerModel: string;
   taskCount: number;
@@ -103,7 +118,13 @@ export interface LongHorizonLiveReport {
   unverified: number;
   passRate: number;
   artifactAcceptanceRate: number;
+  externalAcceptanceRate: number;
   horizonRequirementRate: number;
+  confidenceIntervals: {
+    passRate: { low: number; high: number };
+    artifactAcceptanceRate: { low: number; high: number };
+    externalAcceptanceRate: { low: number; high: number };
+  };
   contract: {
     passRequires: string[];
     minTurns: number;
@@ -300,6 +321,121 @@ function classifyHostResult(ok: boolean, output: string): string | undefined {
   return undefined;
 }
 
+function wilson95(
+  successes: number,
+  total: number,
+): { low: number; high: number } {
+  if (total <= 0) return { low: 0, high: 0 };
+  const z = 1.959963984540054;
+  const p = successes / total;
+  const denominator = 1 + (z * z) / total;
+  const centre = (p + (z * z) / (2 * total)) / denominator;
+  const margin =
+    (z / denominator) *
+    Math.sqrt((p * (1 - p)) / total + (z * z) / (4 * total * total));
+  return {
+    low: Number(Math.max(0, centre - margin).toFixed(4)),
+    high: Number(Math.min(1, centre + margin).toFixed(4)),
+  };
+}
+
+async function readExternalFile(root: string, path: string): Promise<string> {
+  if (
+    !path ||
+    path.includes("\0") ||
+    path.startsWith("/") ||
+    path.split("/").some((part) => part === "..")
+  ) {
+    throw new Error("external_acceptance_invalid_path");
+  }
+  return readFile(join(root, path), "utf8");
+}
+
+function deepFieldMatches(value: unknown, expected: unknown): boolean {
+  if (expected === null || typeof expected !== "object")
+    return Object.is(value, expected);
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(expected) !== Array.isArray(value)
+  )
+    return false;
+  if (Array.isArray(expected)) {
+    return (
+      expected.length === (value as unknown[]).length &&
+      expected.every((item, index) =>
+        deepFieldMatches((value as unknown[])[index], item),
+      )
+    );
+  }
+  return Object.entries(expected as Record<string, unknown>).every(
+    ([key, item]) =>
+      deepFieldMatches((value as Record<string, unknown>)[key], item),
+  );
+}
+
+async function validateExternalAcceptance(
+  root: string,
+  contract?: ExternalAcceptance,
+): Promise<"verified" | "failed" | "unverified"> {
+  if (!contract) return "unverified";
+  try {
+    if (contract.kind === "json_fields") {
+      const parsed = JSON.parse(
+        await readExternalFile(root, contract.path),
+      ) as unknown;
+      const ok = Object.entries(contract.fields).every(([key, expected]) =>
+        deepFieldMatches(
+          parsed && typeof parsed === "object"
+            ? (parsed as Record<string, unknown>)[key]
+            : undefined,
+          expected,
+        ),
+      );
+      return ok ? "verified" : "failed";
+    }
+    if (contract.kind === "text_contains") {
+      const content = await readExternalFile(root, contract.path);
+      return contract.required.every((required) => content.includes(required))
+        ? "verified"
+        : "failed";
+    }
+    if (contract.kind === "cross_file") {
+      const contents = await Promise.all(
+        contract.paths.map((path) => readExternalFile(root, path)),
+      );
+      const joined = contents.join("\n");
+      return contract.required.every((required) => joined.includes(required))
+        ? "verified"
+        : "failed";
+    }
+    const content = await readExternalFile(root, contract.path);
+    if (contract.forbidden?.some((token) => content.includes(token)))
+      return "failed";
+    if (contract.required.some((token) => !content.includes(token)))
+      return "failed";
+    // Caller-owned verifier: execute only the repaired function in a fresh VM
+    // without process/require/fetch globals or any host namespace.
+    const source = content.replace(
+      /\bexport\s+function\s+average\b/,
+      "function average",
+    );
+    const sandbox: { __average?: (values: number[]) => number } = {};
+    new Script(`${source}\n;globalThis.__average = average;`).runInNewContext(
+      sandbox,
+      { timeout: 500 },
+    );
+    const average = sandbox.__average;
+    return typeof average === "function" &&
+      average([]) === 0 &&
+      average([2, 4, 6]) === 4
+      ? "verified"
+      : "failed";
+  } catch {
+    return "failed";
+  }
+}
+
 function unsafeCode(code: string): boolean {
   return /\b(?:process|require|import|fetch|Deno|Bun|child_process|fs|net|http|https|eval|Function|globalThis)\b/.test(
     code,
@@ -444,6 +580,12 @@ async function runCase(
   let inputTokens = 0;
   let outputTokens = 0;
   let repairAttempts = 0;
+  let crashRestartInjected = false;
+  let interruptInjected = false;
+  let goalChanged = false;
+  let recoveryTimeMs: number | null = null;
+  let checkpointCount = 0;
+  let segment = 0;
   let unhandledToolPromises = 0;
   const onUnhandledRejection = (): void => {
     unhandledToolPromises++;
@@ -458,7 +600,7 @@ async function runCase(
     segment: 0,
   });
 
-  const host = hostModule.createHostApi(CHAT_ID, {
+  let host = hostModule.createHostApi(CHAT_ID, {
     onEnd(summary) {
       ended = true;
       endSummary = summary;
@@ -475,6 +617,20 @@ async function runCase(
   try {
     for (let turn = 1; turn <= task.maxTurns; turn++) {
       turns = turn;
+      if (task.interruptGoalChange && !interruptInjected && turn === 2) {
+        interruptInjected = true;
+        goalChanged = true;
+        runtimeEventsModule.emitTaskRuntimeEvent({
+          kind: "user_interrupt_received",
+          taskId,
+          chatId: CHAT_ID,
+          cognitiveAnchorEventId,
+          turn,
+          segment,
+          resultSummary: "held_out_goal_change_injected",
+        });
+        messages.push({ role: "user", content: task.interruptGoalChange });
+      }
       llmCalls++;
       runtimeEventsModule.emitTaskRuntimeEvent({
         kind: "model_turn_started",
@@ -482,7 +638,7 @@ async function runCase(
         chatId: CHAT_ID,
         cognitiveAnchorEventId,
         turn,
-        segment: 0,
+        segment,
       });
 
       let providerTurn: ProviderTurn;
@@ -496,7 +652,7 @@ async function runCase(
           chatId: CHAT_ID,
           cognitiveAnchorEventId,
           turn,
-          segment: 0,
+          segment,
           resultSummary: "llm_response_received",
         });
       } catch (error) {
@@ -512,7 +668,7 @@ async function runCase(
           chatId: CHAT_ID,
           cognitiveAnchorEventId,
           turn,
-          segment: 0,
+          segment,
           errorCode: code,
           resultSummary: "llm_call_failed",
         });
@@ -578,6 +734,48 @@ async function runCase(
         content: `${hostObservation(turn, execution.ok, execution.output, hostCode)}${finishHint}\n${nextPhasePrompt(task, turn)}`,
       });
 
+      if (task.crashRestart && !crashRestartInjected && turn === 2 && !ended) {
+        const checkpointStartedAt = Date.now();
+        checkpointCount++;
+        runtimeEventsModule.emitTaskRuntimeEvent({
+          kind: "checkpoint_saved",
+          taskId,
+          chatId: CHAT_ID,
+          cognitiveAnchorEventId,
+          turn,
+          segment,
+          resultSummary: "held_out_restart_checkpoint",
+        });
+        await settleModelPromises(100);
+        const priorAudit = getExecutionAudit(host)?.snapshot();
+        segment++;
+        host = hostModule.createHostApi(CHAT_ID, {
+          onEnd(summary) {
+            ended = true;
+            endSummary = summary;
+          },
+          acceptance: task.acceptance,
+          isClosed: () => timedOut,
+          taskId,
+          maxTextSends: 0,
+          maxFileSends: 0,
+          cognitiveAnchorEventId,
+          ...(priorAudit ? { priorAudit } : {}),
+        });
+        denyExternalNamespaces(host);
+        crashRestartInjected = true;
+        recoveryTimeMs = Date.now() - checkpointStartedAt;
+        runtimeEventsModule.emitTaskRuntimeEvent({
+          kind: "task_started",
+          taskId,
+          chatId: CHAT_ID,
+          cognitiveAnchorEventId,
+          turn,
+          segment,
+          resultSummary: "held_out_restart_recovered",
+        });
+      }
+
       if (host.runtime.isWaitingForUser()) {
         failures.add("unexpected_wait");
         break;
@@ -606,6 +804,12 @@ async function runCase(
       failures.add("tool_lifecycle_unbalanced");
     }
     const artifact = await validateAcceptance(sandboxRoot, task.acceptance);
+    const externalAcceptanceStatus = await validateExternalAcceptance(
+      sandboxRoot,
+      task.externalAcceptance,
+    );
+    if (externalAcceptanceStatus === "failed")
+      failures.add("external_acceptance_failed");
     const horizonSatisfied = turns >= task.minTurns;
     if (ended && !horizonSatisfied) failures.add("minimum_horizon_not_met");
     if (artifact.status !== "verified") failures.add("acceptance_check_failed");
@@ -618,7 +822,8 @@ async function runCase(
         : ended &&
             artifact.status === "verified" &&
             horizonSatisfied &&
-            !hasFatalFailure
+            !hasFatalFailure &&
+            externalAcceptanceStatus === "verified"
           ? "verified"
           : "failed";
 
@@ -627,7 +832,7 @@ async function runCase(
       taskId,
       chatId: CHAT_ID,
       cognitiveAnchorEventId,
-      segment: 0,
+      segment,
       assessmentStatus: artifact.status,
       ...(status === "verified"
         ? {}
@@ -652,6 +857,7 @@ async function runCase(
       domain: task.domain,
       status,
       artifactStatus: artifact.status,
+      externalAcceptanceStatus,
       ended,
       turns,
       llmCalls,
@@ -665,6 +871,11 @@ async function runCase(
       ).length,
       durableEventCount: events.length,
       repairAttempts,
+      crashRestartInjected,
+      interruptInjected,
+      goalChanged,
+      recoveryTimeMs,
+      checkpointCount,
       durationMs: Date.now() - startedAt,
       failureCodes: [...failures].sort(),
     };
@@ -689,6 +900,7 @@ async function runCase(
       domain: task.domain,
       status: "failed",
       artifactStatus: "unverified",
+      externalAcceptanceStatus: "unverified",
       ended,
       turns,
       llmCalls,
@@ -700,6 +912,11 @@ async function runCase(
       toolFailures: 0,
       durableEventCount: 0,
       repairAttempts,
+      crashRestartInjected,
+      interruptInjected,
+      goalChanged,
+      recoveryTimeMs,
+      checkpointCount,
       durationMs: Date.now() - startedAt,
       failureCodes: [...failures].sort(),
     };
@@ -729,6 +946,8 @@ export async function runLongHorizonLiveEvaluation(options: {
   envPath: string;
   outputPath?: string;
   taskIds?: readonly string[];
+  window?: string;
+  experimentGroup?: string;
 }): Promise<LongHorizonLiveReport> {
   const originalCwd = process.cwd();
   const config = await loadProviderConfig(options.envPath);
@@ -755,6 +974,7 @@ export async function runLongHorizonLiveEvaluation(options: {
     const runtimeEventsModule =
       await import("../src/agent/task-runtime-events.js");
     const cases: LongHorizonCaseReport[] = [];
+    const startedAt = new Date().toISOString();
     for (const task of tasks) {
       const result = await runCase(
         task,
@@ -784,9 +1004,30 @@ export async function runLongHorizonLiveEvaluation(options: {
         (tasks.find((task) => task.id === item.id)?.minTurns ??
           Number.MAX_SAFE_INTEGER),
     ).length;
+    const finishedAt = new Date().toISOString();
+    const externalVerified = cases.filter(
+      (item) => item.externalAcceptanceStatus === "verified",
+    ).length;
     const report: LongHorizonLiveReport = {
       kind: "real_long_horizon_execution_evaluation",
-      generatedAt: new Date().toISOString(),
+      generatedAt: finishedAt,
+      window:
+        options.window ?? process.env["NYAT_LONG_HORIZON_WINDOW"] ?? "window-1",
+      experimentGroup:
+        options.experimentGroup ??
+        process.env["NYAT_LONG_HORIZON_GROUP"] ??
+        "real-provider-codeact-host",
+      startedAt,
+      finishedAt,
+      timeRange: { startedAt, finishedAt },
+      configurationSnapshot: {
+        providerModel: config.model,
+        modelTurnTimeoutMs: MODEL_TURN_TIMEOUT_MS,
+        hostCodeTimeoutMs: HOST_CODE_TIMEOUT_MS,
+        sandboxRequireIsolation: true,
+        deniedNamespaces: [...DENIED_NAMESPACES],
+        taskIds: tasks.map((task) => task.id),
+      },
       codeVersion: gitVersion(),
       providerModel: config.model,
       taskCount: cases.length,
@@ -795,7 +1036,13 @@ export async function runLongHorizonLiveEvaluation(options: {
       unverified,
       passRate: ratio(passed, cases.length),
       artifactAcceptanceRate: ratio(artifactVerified, cases.length),
+      externalAcceptanceRate: ratio(externalVerified, cases.length),
       horizonRequirementRate: ratio(horizonSatisfied, cases.length),
+      confidenceIntervals: {
+        passRate: wilson95(passed, cases.length),
+        artifactAcceptanceRate: wilson95(artifactVerified, cases.length),
+        externalAcceptanceRate: wilson95(externalVerified, cases.length),
+      },
       contract: {
         passRequires: [
           "caller-owned acceptance checks pass independently",
@@ -877,6 +1124,8 @@ async function main(): Promise<void> {
     envPath,
     outputPath: process.env["NYAT_LONG_HORIZON_REPORT"],
     taskIds,
+    window: process.env["NYAT_LONG_HORIZON_WINDOW"],
+    experimentGroup: process.env["NYAT_LONG_HORIZON_GROUP"],
   });
   if (report.passed === 0 && report.unverified === report.taskCount)
     process.exitCode = 1;
