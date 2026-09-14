@@ -561,6 +561,7 @@ async function runCase(
   executorModule: ExecutorModule,
   runtimeEventsModule: RuntimeEventsModule,
 ): Promise<LongHorizonCaseReport> {
+  const originalCwd = process.cwd();
   const startedAt = Date.now();
   const caseRoot = await mkdtemp(join(runRoot, "case-"));
   const sandboxRoot = await seedCase(caseRoot, task);
@@ -922,6 +923,7 @@ async function runCase(
     };
   } finally {
     process.off("unhandledRejection", onUnhandledRejection);
+    process.chdir(originalCwd);
   }
 }
 
@@ -1073,14 +1075,18 @@ export async function runLongHorizonLiveEvaluation(options: {
       cases,
       failureCases: cases.filter((item) => item.status !== "verified"),
     };
-    const outputPath = resolve(
+    const requestedOutputPath =
       options.outputPath ??
-        join(
-          REPO_ROOT,
-          "docs",
-          "eval-results",
-          `${report.generatedAt.slice(0, 10)}-long-horizon-live.json`,
-        ),
+      join(
+        REPO_ROOT,
+        "docs",
+        "eval-results",
+        `${report.generatedAt.slice(0, 10)}-long-horizon-live.json`,
+      );
+    const outputPath = resolve(
+      requestedOutputPath.startsWith("/")
+        ? requestedOutputPath
+        : join(REPO_ROOT, requestedOutputPath),
     );
     await mkdir(dirname(outputPath), { recursive: true });
     await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
