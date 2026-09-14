@@ -8,6 +8,9 @@ import { isDM } from '../shared/chat.js';
 import { isEchoOf } from '../shared/echo-text.js';
 import { markMessageAnswered } from '../meta/answered.js';
 import type { ApplyOutcome, MasterActionOutcome } from '../allowlist/bot-flow.js';
+import { appendCognitiveEvent } from '../agent/cognitive-events.js';
+import { recordPrediction } from '../agent/predictions.js';
+import { recordSocialDeliveryPrediction } from '../agent/social-predictions.js';
 
 /** Cross-task memory of recent bot lines in this process (beats Redis/NyatDB lag). */
 const recentBotTextsByChat = new Map<number, string[]>();
@@ -53,6 +56,40 @@ function makeSendAck(
     toString: () => label,
     [Symbol.toPrimitive]: () => label,
   };
+}
+
+/** Record a delivery without copying user-visible text into the event log. */
+function persistBotDeliveryEvent(input: {
+  chatId: number;
+  messageId: number;
+  taskId?: string;
+  kind: string;
+  replyToMessageId?: number;
+  cognitiveAnchorEventId?: string;
+}): string | undefined {
+  try {
+    const result = appendCognitiveEvent({
+      type: 'bot_delivery',
+      source: 'telegram',
+      scope: input.taskId
+        ? { visibility: 'task', taskId: input.taskId, chatId: input.chatId }
+        : { visibility: 'chat', chatId: input.chatId },
+      correlationId: input.taskId ? `task:${input.taskId}` : `telegram:${input.chatId}:delivery`,
+      dedupeKey: `delivery:${input.taskId ?? input.chatId}:${input.messageId}`,
+      ...(input.cognitiveAnchorEventId ? { causationId: input.cognitiveAnchorEventId } : {}),
+      fact: {
+        chatId: input.chatId,
+        messageId: input.messageId,
+        taskId: input.taskId ?? null,
+        kind: input.kind,
+        replyToMessageId: input.replyToMessageId ?? null,
+      },
+    });
+    return result?.event.id;
+  } catch {
+    /* delivery telemetry never blocks a successful send */
+    return undefined;
+  }
 }
 
 // 2026-09-04 协议泄漏事故：goal 19 检查任务里模型把
@@ -370,12 +407,16 @@ export function createHostApi(
     relatedQuoteIds?: number[];
     isClosed?: () => boolean;
     taskId?: string;
+    /** User target used for prediction calibration dimensions. */
+    targetUserId?: number;
     /** Max sendText calls (default 2; work mode may pass 5). */
     maxTextSends?: number;
     /** Max sendFile calls (default unlimited; self-play passes 1). */
     maxFileSends?: number;
     /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
     messageThreadId?: number;
+    /** Durable cognitive event that caused this task/runtime activity. */
+    cognitiveAnchorEventId?: string;
   },
 ): HostApi {
   const sandboxRoot = (() => {
@@ -387,7 +428,11 @@ export function createHostApi(
     }
     return '/tmp';
   })();
-  const audit = createExecutionAudit(sandboxRoot, opts.acceptance, opts.priorAudit);
+  const audit = createExecutionAudit(sandboxRoot, opts.acceptance, opts.priorAudit, {
+    taskId: opts.taskId,
+    chatId,
+    cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
+  });
   const banned = env().CODEACT_BANNED_WORDS;
   let ended = false;
   let textSent = 0;
@@ -767,30 +812,68 @@ export function createHostApi(
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               if (opts.taskId) markTaskVisible(opts.taskId);
               logger.info({ chatId, taskId: opts.taskId, deliveryKind: kind, messageId }, 'task delivery recorded');
+              // Task deliveries are already persisted by task-runtime-events;
+              // normal legacy replies need the same durable delivery fact.
+              const deliveryEventId = !opts.taskId
+                ? persistBotDeliveryEvent({
+                    chatId,
+                    messageId,
+                    kind,
+                    replyToMessageId: replyTo,
+                    cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
+                  })
+                : undefined;
               if (opts.taskId) {
                 emitTaskRuntimeEvent({
                   kind: 'model_message_sent',
                   taskId: opts.taskId,
                   chatId,
+                  cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
                   messageId,
                   deliveryKind: kind,
                 });
               }
               // Phase D：登记交付预测。模型 predict() 过 → source=model；否则系统先验。
-              void import('../agent/predictions.js')
-                .then(({ recordPrediction }) => {
-                  const pending = pendingPrediction;
-                  pendingPrediction = null;
-                  if (pending) {
-                    recordPrediction({
-                      chatId, taskId: opts.taskId, messageId,
-                      source: 'model', prediction: pending.text, predictedSentiment: pending.sentiment,
-                    });
-                  } else {
-                    recordPrediction({ chatId, taskId: opts.taskId, messageId });
-                  }
-                })
-                .catch(() => { /* telemetry never breaks delivery */ });
+              try {
+                const pending = pendingPrediction;
+                pendingPrediction = null;
+                if (pending) {
+                  recordPrediction({
+                    chatId, taskId: opts.taskId, messageId,
+                    source: 'model', prediction: pending.text, predictedSentiment: pending.sentiment,
+                    userId: opts.targetUserId, actionType: 'speak',
+                    sourceEventId: deliveryEventId,
+                  });
+                } else {
+                  recordPrediction({
+                    chatId,
+                    taskId: opts.taskId,
+                    messageId,
+                    userId: opts.targetUserId,
+                    actionType: 'speak',
+                    sourceEventId: deliveryEventId,
+                  });
+                }
+              } catch {
+                /* telemetry never breaks delivery */
+              }
+              // Group delivery also creates a bounded social expectation. The
+              // interaction graph/reaction bridge settles it from host facts;
+              // no reply strategy is changed by this telemetry.
+              if (env().SOCIAL_PREDICTION_ENABLED === true) {
+                try {
+                  recordSocialDeliveryPrediction({
+                    chatId,
+                    botMessageId: messageId,
+                    ...(opts.targetUserId === undefined ? {} : { targetUserId: opts.targetUserId }),
+                    ...(replyTo === undefined ? {} : { replyToMessageId: replyTo }),
+                    actionType: kind,
+                    ...(deliveryEventId ? { sourceEventId: deliveryEventId } : {}),
+                  });
+                } catch {
+                  /* social telemetry never breaks delivery */
+                }
+              }
               lastMessageId = messageId;
               lastSentNorm = part;
               sentTexts.push(part);
@@ -1222,6 +1305,13 @@ export function createHostApi(
               { from: chatId, to: tid, messageId, withFile: !!rawPath, preview: clean.slice(0, 60) },
               'host sendToChat delivered',
             );
+            persistBotDeliveryEvent({
+              chatId: tid,
+              messageId,
+              taskId: opts.taskId,
+              kind: 'cross_chat',
+              cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
+            });
             return makeSendAck(`cross_sent#${messageId}`, messageId);
           })(),
         );
@@ -1982,7 +2072,12 @@ export function createHostApi(
         waitingReason = String(reason ?? '').slice(0, 240);
         lastDeliveryKind = 'clarification';
         if (opts.taskId) {
-          emitTaskRuntimeEvent({ kind: 'task_waiting_user', taskId: opts.taskId, chatId });
+          emitTaskRuntimeEvent({
+            kind: 'task_waiting_user',
+            taskId: opts.taskId,
+            chatId,
+            cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
+          });
         }
       },
       isWaitingForUser() {

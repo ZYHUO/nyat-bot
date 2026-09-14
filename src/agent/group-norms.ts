@@ -28,6 +28,14 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function hasRevisionTable(): boolean {
+  try {
+    return Boolean(getDb().prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'group_norm_revisions'").get());
+  } catch {
+    return false;
+  }
+}
+
 /** 解析 LLM 输出为规范数组; 垃圾输出返回空数组。 */
 export function parseNormsOutput(raw: string): string[] {
   try {
@@ -75,10 +83,27 @@ export function saveGroupNorms(chatId: number, norms: string[], sampleCount: num
 }
 
 /** 读某群 norms; 无 → null。 */
-export function getGroupNorms(chatId: number): GroupNorms | null {
+export function getGroupNorms(chatId: number, asOfSec?: number): GroupNorms | null {
   if (chatId >= 0) return null;
   try {
-    const row = getDb().prepare('SELECT * FROM group_norms WHERE chat_id = ?').get(chatId) as
+    const boundedAsOf = Number.isSafeInteger(asOfSec) && (asOfSec as number) > 0 ? asOfSec : undefined;
+    const db = getDb();
+    const row = (hasRevisionTable()
+      ? (boundedAsOf === undefined
+        ? db.prepare(
+          `SELECT chat_id, norms, sample_count, last_updated_at
+             FROM group_norm_revisions WHERE chat_id = ?
+            ORDER BY revision DESC LIMIT 1`,
+        ).get(chatId)
+        : db.prepare(
+          `SELECT chat_id, norms, sample_count, last_updated_at
+             FROM group_norm_revisions
+            WHERE chat_id = ? AND last_updated_at <= ?
+            ORDER BY last_updated_at DESC, revision DESC LIMIT 1`,
+        ).get(chatId, boundedAsOf))
+      : (boundedAsOf === undefined
+        ? db.prepare('SELECT * FROM group_norms WHERE chat_id = ?').get(chatId)
+        : db.prepare('SELECT * FROM group_norms WHERE chat_id = ? AND last_updated_at <= ?').get(chatId, boundedAsOf))) as
       | { chat_id: number; norms: string; sample_count: number; last_updated_at: number }
       | undefined;
     if (!row) return null;

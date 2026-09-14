@@ -29,6 +29,7 @@ const { parseNormsOutput, saveGroupNorms, getGroupNorms, needsRefresh, inferGrou
 beforeEach(() => {
   db = new Database(':memory:');
   db.exec(readFileSync(join(__dirname, '../../../migrations/0063_group_norms.sql'), 'utf8'));
+  db.exec(readFileSync(join(__dirname, '../../../migrations/0104_group_norm_revisions.sql'), 'utf8'));
   callWithFallbackMock.mockReset();
 });
 
@@ -60,6 +61,17 @@ describe('saveGroupNorms / getGroupNorms', () => {
     expect(needsRefresh(-100123, 3600)).toBe(true);
     saveGroupNorms(-100123, ['短句'], 10);
     expect(needsRefresh(-100123, 3600)).toBe(false);
+  });
+
+  it('replays the latest norm revision at an as-of timestamp', () => {
+    const now = Math.floor(Date.now() / 1000);
+    saveGroupNorms(-100123, ['最初规范'], 5);
+    const first = db.prepare('SELECT last_updated_at FROM group_norm_revisions WHERE chat_id = ? ORDER BY revision DESC LIMIT 1').get(-100123) as { last_updated_at: number };
+    db.prepare('UPDATE group_norms SET norms = ?, sample_count = ?, last_updated_at = ? WHERE chat_id = ?')
+      .run(JSON.stringify(['后来规范']), 20, Math.max(now, first.last_updated_at + 10), -100123);
+
+    expect(getGroupNorms(-100123)!.norms).toEqual(['后来规范']);
+    expect(getGroupNorms(-100123, first.last_updated_at + 5)!.norms).toEqual(['最初规范']);
   });
 });
 

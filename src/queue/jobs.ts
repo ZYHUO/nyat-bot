@@ -22,6 +22,8 @@ export interface MessageJobData {
   type: 'message' | 'allowlist_review' | 'wait_resume' | 'chat_turn' | 'defer_resume';
   chatId: number;
   messageId?: number;
+  /** Durable message event used to anchor workspace reads. */
+  cognitiveAnchorEventId?: string;
   isEdit?: boolean;
   update: UpdateLike;
   enqueuedAt: number;

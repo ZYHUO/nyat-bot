@@ -233,6 +233,10 @@ export async function generateReply(
     /** Multi-Agent 预取的群往事(best-of-N 时复用,避免 recallEpisodes 的
      *  recall_count 被多稿各调一次而 ×N 失真)。提供时跳过内部 recallEpisodes。 */
     prefetchedEpisodes?: GroupEpisode[];
+    /** Opt-in route behavior: use the scoped workspace for a deep/background turn. */
+    useCognitiveWorkspace?: boolean;
+    /** Event id anchoring the workspace to the message's observed state. */
+    cognitiveAnchorEventId?: string;
   },
 ): Promise<{
   replies: ReplyOutput[];
@@ -406,6 +410,27 @@ export async function generateReply(
         return roster;
       } catch (err) {
         logger.debug({ err, chatId }, 'Failed to fetch member roster (non-critical)');
+        return undefined;
+      }
+    })()
+    : Promise.resolve(undefined);
+
+  // Phase 2 rollout: legacy reply can opt into the same scoped workspace used
+  // by CodeAct. The promise starts alongside the existing rich-context reads;
+  // disabled means no import or database work on the ordinary fast path.
+  const cognitiveWorkspacePromise = (env().COGNITIVE_WORKSPACE_V2_ENABLED || callOpts?.useCognitiveWorkspace === true)
+    ? (async () => {
+      try {
+        const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../../agent/cognitive-workspace.js');
+        const snapshot = await buildCognitiveWorkspace({
+          chatId,
+          ...(!message.isAnonymous && !message.isBot ? { userId: message.uid } : {}),
+          queryText: (message.textContent || message.captionContent || '').slice(0, 800),
+          asOfEventId: callOpts?.cognitiveAnchorEventId,
+        });
+        return renderCognitiveWorkspace(snapshot);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'legacy reply cognitive workspace failed (non-critical)');
         return undefined;
       }
     })()
@@ -747,8 +772,9 @@ export async function generateReply(
 
   // 中期记忆 pinned 块(flag off 时为 null,零开销)
   const midTermMemory = await getMidTermBlock(chatId).catch(() => null);
+  const cognitiveWorkspaceHint = await cognitiveWorkspacePromise;
 
-  const messages: ReplyMessage[] = buildMessages(
+  const buildMessageArgs = [
     systemPrompt,
     contextStr,
     message,
@@ -765,7 +791,12 @@ export async function generateReply(
     burstHint,
     expressionOverride,
     midTermMemory ?? undefined,
-  );
+  ] as const;
+  // Keep the legacy call arity stable while the workspace rollout is off. This
+  // matters for downstream wrappers that still mock the pre-workspace contract.
+  const messages: ReplyMessage[] = cognitiveWorkspaceHint
+    ? buildMessages(...buildMessageArgs, cognitiveWorkspaceHint)
+    : buildMessages(...buildMessageArgs);
 
   // P2 多模态直读(默认关):触发消息带图(或回复的是图)时,把原图直接喂给回复
   // 模型 —— 通用文本描述是"概述",丢细节;直读让模型自己看图回答"多少钱/哪个好/

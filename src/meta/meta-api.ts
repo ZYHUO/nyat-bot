@@ -3,6 +3,8 @@ import { logger } from '../shared/logger.js';
 import { getGlobalState } from './global-state.js';
 import type { DispatchTask, AttentionLayer } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
+import { dispatchCodeActTaskViaAgency } from '../agent/agency-codeact-dispatch.js';
+import { recordMetaDispatchObservation } from '../agent/agency-meta-observation.js';
 
 export interface DispatchArgs {
   contentDirection: string;
@@ -20,6 +22,8 @@ export interface DispatchArgs {
   interrupt?: boolean;
   /** Telegram forum topic (supergroup thread) id; routes reply into the correct topic. */
   messageThreadId?: number;
+  /** Durable Telegram event used to anchor this task's workspace. */
+  cognitiveAnchorEventId?: string;
   /**
    * 跳过 dispatch 期 timing gate。autoDispatchL0 已自带 gate（非 L0 时）所以
    * 必须传 true 防双重裁决；工作型 dispatch（日记 ack 等 direct 回应）也可传。
@@ -37,6 +41,8 @@ export function buildMetaApiContext(opts?: {
   defaultQuotes?: Map<number, number>;
   /** Default target userId per chat (from Attention). */
   defaultTargetUserIds?: Map<number, number>;
+  /** Default durable message event per chat (from Attention). */
+  defaultCognitiveAnchorEventIds?: Map<number, string>;
 }): Record<string, unknown> {
   const state = getGlobalState();
 
@@ -49,7 +55,36 @@ export function buildMetaApiContext(opts?: {
       if (!args?.contentDirection?.trim()) throw new Error('contentDirection required');
 
       const layer = opts?.chatLayer?.get(cid) ?? 'L2';
+      const observationQuotes = (args.quotes ?? [])
+        .map((q) => (typeof q === 'string' ? Number(q.replace(/^msg:/, '')) : Number(q)))
+        .filter((n) => Number.isSafeInteger(n) && n > 0);
+      const defaultObservationQuote = opts?.defaultQuotes?.get(cid);
+      if (!observationQuotes.length && defaultObservationQuote !== undefined) {
+        observationQuotes.push(defaultObservationQuote);
+      }
+      const observationAnchor = args.cognitiveAnchorEventId ?? opts?.defaultCognitiveAnchorEventIds?.get(cid);
+      const observeDecision = (
+        decision: 'proposed' | 'blocked' | 'skipped',
+        reason?: string,
+        quoteMessageIds: readonly number[] = observationQuotes,
+        taskId?: string,
+      ): void => {
+        void recordMetaDispatchObservation({
+          chatId: cid,
+          layer,
+          quoteMessageIds,
+          targetUserId: args.targetUserId,
+          interrupt: args.interrupt,
+          cognitiveAnchorEventId: observationAnchor,
+          taskId,
+          decision,
+          decisionReason: reason,
+        }).catch((err: unknown) => {
+          logger.debug({ err, chatId: cid, layer, decision, reason }, 'Meta decision observation failed (non-critical)');
+        });
+      };
       if (layer === 'L2' && !args.interrupt) {
+        observeDecision('blocked', 'l2_interrupt_required');
         logger.info({ chatId: cid, layer }, 'Meta dispatch blocked (L2 needs interrupt:true)');
         return { taskId: 'blocked_l2' };
       }
@@ -58,6 +93,7 @@ export function buildMetaApiContext(opts?: {
       // dispatch.taskToGroup(...) can't enqueue two CodeActs in one session.
       if (opts?.dispatchedChatIds) {
         if (opts.dispatchedChatIds.has(cid)) {
+          observeDecision('skipped', 'session_duplicate');
           logger.info({ chatId: cid }, 'Meta dispatch skipped (already dispatched this session)');
           return { taskId: 'skipped_dup' };
         }
@@ -85,6 +121,7 @@ export function buildMetaApiContext(opts?: {
       }
       if (busy) {
         unclaim();
+        observeDecision('skipped', 'codeact_busy');
         logger.info({ chatId: cid }, 'Meta dispatch skipped (chat busy)');
         return { taskId: 'skipped_busy' };
       }
@@ -96,6 +133,7 @@ export function buildMetaApiContext(opts?: {
           const { shouldSuppressMetaHeartDispatch } = await import('./heart-refractory.js');
           if (await shouldSuppressMetaHeartDispatch(cid)) {
             unclaim();
+            observeDecision('skipped', 'heart_refractory');
             logger.info({ chatId: cid, layer }, 'Meta dispatch skipped (heart refractory)');
             return { taskId: 'skipped_refractory' };
           }
@@ -121,6 +159,7 @@ export function buildMetaApiContext(opts?: {
           // Already answered — unclaim so gap-fill can still dispatch a
           // *different* (unanswered) L0 in the same chat this session.
           unclaim();
+          observeDecision('skipped', 'already_answered', quotes);
           logger.info({ chatId: cid, quotes }, 'Meta dispatch skipped (already answered quotes)');
           return { taskId: 'skipped_answered' };
         }
@@ -143,10 +182,12 @@ export function buildMetaApiContext(opts?: {
             userId: args.targetUserId,
             textPreview: args.contentDirection.slice(0, 200),
             messageThreadId: args.messageThreadId,
+            cognitiveAnchorEventId: args.cognitiveAnchorEventId ?? opts?.defaultCognitiveAnchorEventIds?.get(cid),
             deferCount: 0,
           });
           if (gate.verdict === 'suppress') {
             unclaim();
+            observeDecision('skipped', 'timing_gate_suppressed', quotes);
             logger.info(
               { chatId: cid, layer, reason: gate.reason },
               'Meta dispatch suppressed by timing gate',
@@ -182,6 +223,21 @@ export function buildMetaApiContext(opts?: {
         createdAt: Date.now(),
         status: 'queued',
         messageThreadId: args.messageThreadId,
+        cognitiveAnchorEventId: args.cognitiveAnchorEventId ?? opts?.defaultCognitiveAnchorEventIds?.get(cid),
+      };
+
+      // Persist the structured Meta decision before queueing. This is an
+      // observe-only Agency run; legacy queue behavior remains authoritative.
+      observeDecision('proposed', undefined, task.quoteMessageIds ?? [], task.id);
+
+      const releaseQuoteClaim = async (): Promise<void> => {
+        if (!quoteId) return;
+        try {
+          const { clearQuoteClaim } = await import('../subagent/task-store.js');
+          await clearQuoteClaim(cid, quoteId, task.id);
+        } catch {
+          /* quote claim cleanup is best effort */
+        }
       };
 
       // Atomic quote + chat locks BEFORE enqueue (kills same-ms double dispatch).
@@ -190,11 +246,14 @@ export function buildMetaApiContext(opts?: {
         const quoteId = quotes[0] ?? 0;
         if (quoteId > 0 && !(await tryClaimQuote(cid, quoteId, task.id))) {
           unclaim();
+          observeDecision('skipped', 'quote_already_claimed', task.quoteMessageIds ?? [], task.id);
           logger.info({ chatId: cid, quotes }, 'Meta dispatch skipped (quote already claimed)');
           return { taskId: 'skipped_dup' };
         }
         if (!(await tryMarkCodeActActive(cid, task.id))) {
+          await releaseQuoteClaim();
           unclaim();
+          observeDecision('skipped', 'active_lock_competition', task.quoteMessageIds ?? [], task.id);
           logger.info({ chatId: cid }, 'Meta dispatch skipped (chat active lock)');
           return { taskId: 'skipped_busy' };
         }
@@ -207,6 +266,37 @@ export function buildMetaApiContext(opts?: {
         { taskId: task.id, chatId: cid, layer, quotes, interrupt: !!args.interrupt },
         'Meta dispatch.taskToGroup',
       );
+
+      // Authority rollout owns the queue acceptance receipt. Other modes keep
+      // the legacy path so shadow/advisory/canary can be measured without
+      // changing user-visible dispatch behavior.
+      const agencyDispatch = await dispatchCodeActTaskViaAgency(task);
+      if (agencyDispatch.attempted) {
+        if (agencyDispatch.accepted) return { taskId: task.id };
+        task.status = 'failed';
+        task.resultSummary = `agency enqueue rejected: ${agencyDispatch.reason ?? 'unknown'}`.slice(0, 500);
+        state.putTask(task);
+        try {
+          const { persistCodeActTask } = await import('../subagent/task-store.js');
+          await persistCodeActTask(task);
+        } catch {
+          /* task status persistence is best effort */
+        }
+        try {
+          const { clearCodeActActive } = await import('../subagent/task-store.js');
+          await clearCodeActActive(cid, task.id);
+        } catch {
+          /* active lock cleanup is best effort */
+        }
+        await releaseQuoteClaim();
+        unclaim();
+        observeDecision('blocked', 'agency_enqueue_failed', task.quoteMessageIds ?? [], task.id);
+        logger.warn(
+          { taskId: task.id, chatId: cid, agencyRunId: agencyDispatch.agencyRunId, reason: agencyDispatch.reason },
+          'Meta dispatch rejected by Agency authority transport',
+        );
+        return { taskId: 'agency_enqueue_failed' };
+      }
       try {
         const { enqueueCodeActJob } = await import('../subagent/queue.js');
         await enqueueCodeActJob(task);
@@ -218,7 +308,9 @@ export function buildMetaApiContext(opts?: {
         } catch (err2) {
           const { clearCodeActActive } = await import('../subagent/task-store.js');
           await clearCodeActActive(cid, task.id);
+          await releaseQuoteClaim();
           unclaim();
+          observeDecision('blocked', 'enqueue_failed', task.quoteMessageIds ?? [], task.id);
           logger.warn({ err: err2, taskId: task.id }, 'Meta dispatch local enqueue failed');
           return { taskId: 'enqueue_failed' };
         }

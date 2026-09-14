@@ -34,6 +34,7 @@ import { searchKnowledge } from '../../knowledge/manager.js';
 import { recallEpisodes, type GroupEpisode } from '../../tracking/group-episodes.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import type { CognitiveRoute } from '../../agent/cognitive-routing.js';
 
 type ReplyCallOpts = NonNullable<Parameters<typeof generateReply>[7]>;
 type ReplyResult = Awaited<ReturnType<typeof generateReply>>;
@@ -49,6 +50,8 @@ export interface MultiAgentInput {
   replyPath: ReplyPath | undefined;
   segmenterConfig?: Parameters<typeof generateReply>[6];
   turnCallOpts?: ReplyCallOpts;
+  /** Explicit route behavior gate; absent means legacy replyPath routing. */
+  cognitiveRoute?: CognitiveRoute;
 }
 
 /** turn 打断 → 上抛;其它错误吞掉(返回 null = 该专家无产出)。 */
@@ -74,8 +77,9 @@ function settleSpecialist(
 }
 
 /** lookup 在 MULTI_AGENT_CRITIC_ON_LOOKUP 开时跑 Critic;chat 不跑。(deep 档已删。) */
-function routeRunsCritic(route: AgentRoute, e: ReturnType<typeof env>): boolean {
+function routeRunsCritic(route: AgentRoute, e: ReturnType<typeof env>, cognitiveRoute?: CognitiveRoute): boolean {
   if (!e.MULTI_AGENT_CRITIC_ENABLED) return false;
+  if (cognitiveRoute === 'deep') return true;
   if (route === 'lookup') return e.MULTI_AGENT_CRITIC_ON_LOOKUP;
   return false;
 }
@@ -83,13 +87,15 @@ function routeRunsCritic(route: AgentRoute, e: ReturnType<typeof env>): boolean 
 export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyResult> {
   const e = env();
   const route = routeReply(input.replyPath);
+  const deepCognitiveRoute = input.cognitiveRoute === 'deep';
   const queryText = (input.message.textContent || input.message.captionContent || '').trim();
   const turnSignal = input.turnCallOpts?.signal;
 
   // 路由 → 该跑哪些专家。chat 路径默认只跑记忆员+人设员+导演+上下文digest
-  // (MULTI_AGENT_CHAT_SPECIALISTS);lookup/deep 额外跑研究员。研究员只在 lookup/deep。
+  // (MULTI_AGENT_CHAT_SPECIALISTS);显式 deep 行为切片即使 chat specialists 关闭，
+  // 也只增加 grounding 专家，不自动引入外部研究员或写权限。
   const runResearcherFlag = routeNeedsSpecialists(route);
-  const runGroundingFlag = routeNeedsSpecialists(route) || e.MULTI_AGENT_CHAT_SPECIALISTS;
+  const runGroundingFlag = routeNeedsSpecialists(route) || e.MULTI_AGENT_CHAT_SPECIALISTS || deepCognitiveRoute;
 
   let researcherBlock: string | undefined;
   let memoryBlock: string | undefined;
@@ -121,7 +127,7 @@ export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyR
     if (runGroundingFlag && e.MULTI_AGENT_PERSONA_ENABLED) fan.push({ key: 'persona', p: runPersonaSpecialist({ ...commonArgs, senderName }) });
     // M6:导演对"短上下文 + 无念头 + 非查询"的闲聊收益低,跳过省延迟(有念头/够长/lookup 仍跑)。
     const directorWanted = runGroundingFlag && e.MULTI_AGENT_DIRECTOR_ENABLED
-      && (!!heartWhy || recentMsgCount >= 6 || runResearcherFlag);
+      && (!!heartWhy || recentMsgCount >= 6 || runResearcherFlag || deepCognitiveRoute);
     if (directorWanted) fan.push({ key: 'director', p: runDirector({ messageText: queryText, context: ctx, heartWhy, turnSignal }) });
     if (runGroundingFlag && e.MULTI_AGENT_CONTEXT_DIGEST_ENABLED) fan.push({ key: 'ctx', p: runContextDigest({ context: ctx, recentMsgCount, turnSignal }) });
 
@@ -211,7 +217,7 @@ export async function runMultiAgentReply(input: MultiAgentInput): Promise<ReplyR
   // ── Stage 4:深度 Critic 循环(deep 总跑;lookup 看 flag;回炉到通过或满 MAX_ROUNDS)
   // currentPrebuilt 累积 critic 反馈,Stage 5 复用(M1:人设 Critic 回炉带上 critic 反馈)。
   let currentPrebuilt = prebuiltToolResults;
-  if (routeRunsCritic(route, e) && result.replies.length > 0) {
+  if (routeRunsCritic(route, e, input.cognitiveRoute) && result.replies.length > 0) {
     for (let round = 0; round < e.MULTI_AGENT_CRITIC_MAX_ROUNDS; round++) {
       const draft = result.replies.map((r) => r.replyContent).filter(Boolean).join('\n');
       if (!draft) break;

@@ -11,7 +11,7 @@ export type AgencyAction =
   | { type: 'act'; goal: string; taskId?: string }
   | { type: 'ask'; question: string; replyToMessageId?: number }
   | { type: 'wait'; reason: string; waitSec?: number }
-  | { type: 'observe'; target: string }
+  | { type: 'observe'; target: string; args?: Record<string, unknown> }
   | { type: 'remember'; fact: string }
   | { type: 'correct'; debtId: number; resolution: string }
   | { type: 'stop'; reason: string };
@@ -23,6 +23,7 @@ export interface AgencyValidationResult {
 }
 
 const TEXTUAL_MAX = 4000;
+const OBSERVE_ARGS_MAX_BYTES = 4000;
 
 /**
  * 校验一条 AgencyAction 的结构与基本边界。
@@ -63,7 +64,25 @@ export function validateAgencyAction(raw: unknown): AgencyValidationResult {
     case 'observe': {
       const target = typeof a['target'] === 'string' ? a['target'].trim() : '';
       if (!target) return { ok: false, reason: 'observe:empty_target' };
-      return { ok: true, action: { type: 'observe', target: target.slice(0, 500) } };
+      let args: Record<string, unknown> | undefined;
+      if (a['args'] !== undefined) {
+        if (typeof a['args'] !== 'object' || a['args'] === null || Array.isArray(a['args'])) {
+          return { ok: false, reason: 'observe:bad_args' };
+        }
+        try {
+          const serialized = JSON.stringify(a['args']);
+          if (typeof serialized !== 'string' || serialized.length > OBSERVE_ARGS_MAX_BYTES) {
+            return { ok: false, reason: 'observe:args_too_large' };
+          }
+        } catch {
+          return { ok: false, reason: 'observe:args_not_serializable' };
+        }
+        args = a['args'] as Record<string, unknown>;
+      }
+      return {
+        ok: true,
+        action: { type: 'observe', target: target.slice(0, 500), ...(args ? { args } : {}) },
+      };
     }
     case 'remember': {
       const fact = typeof a['fact'] === 'string' ? a['fact'].trim() : '';

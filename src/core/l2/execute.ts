@@ -33,19 +33,32 @@ export interface RealExecuteResult {
 type ToolFn = (args: Record<string, unknown>, chatId: number | null) => Promise<unknown>;
 
 /** 只读工具实现（host 侧直调，不经 LLM）。 */
-async function toolMemorySearch(args: Record<string, unknown>): Promise<unknown> {
+function resolveReadChatId(args: Record<string, unknown>, intentChatId: number | null, required: boolean): number {
+  const hasExplicit = Object.prototype.hasOwnProperty.call(args, 'chatId');
+  const explicit = hasExplicit ? Number(args['chatId']) : undefined;
+  if (explicit !== undefined && (!Number.isSafeInteger(explicit) || explicit === 0)) {
+    throw new Error('invalid chatId');
+  }
+  if (intentChatId !== null && explicit !== undefined && explicit !== intentChatId) {
+    throw new Error(`scope violation: intent chat ${intentChatId} != requested ${explicit}`);
+  }
+  const resolved = explicit ?? intentChatId ?? 0;
+  if (required && resolved === 0) throw new Error('chats.recentMessages requires chatId');
+  return resolved;
+}
+
+async function toolMemorySearch(args: Record<string, unknown>, intentChatId: number | null): Promise<unknown> {
   const { searchMemory } = await import('../../memory/chroma.js');
   const query = String(args['query'] ?? '').slice(0, 200);
   if (!query) throw new Error('memory.search requires query');
-  const chatId = Number(args['chatId'] ?? 0) || 0;
+  const chatId = resolveReadChatId(args, intentChatId, false);
   // searchMemory(chatId, query)：chatId=0 → 全局搜（与 chroma 签名一致）
   return searchMemory(chatId, query).catch(() => []);
 }
 
-async function toolRecentMessages(args: Record<string, unknown>): Promise<unknown> {
+async function toolRecentMessages(args: Record<string, unknown>, intentChatId: number | null): Promise<unknown> {
   const { getRecent } = await import('../../pipeline/context/manager.js');
-  const chatId = Number(args['chatId'] ?? 0);
-  if (!chatId) throw new Error('chats.recentMessages requires chatId');
+  const chatId = resolveReadChatId(args, intentChatId, true);
   const msgs = await getRecent(chatId, 6);
   return msgs.map((m) => ({
     role: m.role,
@@ -82,15 +95,33 @@ async function toolSendText(args: Record<string, unknown>, intentChatId: number 
   return { messageId };
 }
 
-const TOOLS: Record<string, ToolFn> = {
+const READONLY_TOOLS: Record<string, ToolFn> = {
   'memory.search': toolMemorySearch,
   'chats.recentMessages': toolRecentMessages,
   'web.search': toolWebSearch,
+};
+
+/** Execute one allowlisted read tool after Agency has performed policy checks. */
+export async function executeReadonlyTool(
+  tool: string,
+  args: Record<string, unknown>,
+  intentChatId: number | null,
+): Promise<unknown> {
+  if (classify(tool, args) !== 'readonly') throw new Error(`not a readonly tool: ${tool}`);
+  const fn = READONLY_TOOLS[tool];
+  if (!fn) throw new Error(`no readonly L2 implementation: ${tool}`);
+  return fn(args, intentChatId);
+}
+
+const TOOLS: Record<string, ToolFn> = {
+  ...READONLY_TOOLS,
   'telegram.sendText': toolSendText,
 };
 
 /**
  * 真执行一条 authorized_intent。
+ * Core loop 的 readonly intent 在 Agency migration 可用时优先走
+ * `executeAuthorizedIntentViaAgency`；这里保留作写类动作和旧库兼容回退。
  * 前置：intent 必须 open/approved（approve 里验）；irreversible 必须 gateConfirm 过。
  * 后置：成功 → receipt（dryRun:false）+ intent consumed；失败 → receipt（ok:false）+ intent 保持（可重试一次，由调用方决定）。
  */

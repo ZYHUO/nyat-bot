@@ -153,6 +153,7 @@ async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number
       messageId: entry.messageId,
       update: entry.update,
       enqueuedAt: entry.enqueuedAt,
+      cognitiveAnchorEventId: entry.cognitiveAnchorEventId,
       coalesce: {
         batchSize,
         isLastInBatch: false,
@@ -160,7 +161,11 @@ async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number
       },
       skipReply: suppressed ? true : undefined,
       turnContext: isReplay
-        ? { isWaitReplay: entry.waitReplay === true, isDeferReplay: entry.deferReplay === true }
+        ? {
+            isWaitReplay: entry.waitReplay === true,
+            isDeferReplay: entry.deferReplay === true,
+            cognitiveAnchorEventId: entry.cognitiveAnchorEventId,
+          }
         : undefined,
     });
   } catch (err) {
@@ -195,6 +200,7 @@ async function runCommandEntry(
       messageId: entry.messageId,
       update: entry.update,
       enqueuedAt: entry.enqueuedAt,
+      cognitiveAnchorEventId: entry.cognitiveAnchorEventId,
       coalesce: {
         batchSize,
         isLastInBatch: true,
@@ -203,6 +209,7 @@ async function runCommandEntry(
       turnContext: {
         // 无 signal → 不可打断;命令本就直接交互、跳 gate
         epoch,
+        cognitiveAnchorEventId: entry.cognitiveAnchorEventId,
         obligationId: obligationCtx?.obligationId ?? entry.obligationId,
         obligationTargetUid: obligationCtx?.obligationTargetUid ?? entry.obligationTargetUid,
         obligationStrong: obligationCtx?.obligationStrong ?? entry.obligationStrong,
@@ -266,6 +273,7 @@ async function runJudgedEntry(
         messageId: current.messageId,
         update: current.update,
         enqueuedAt: current.enqueuedAt,
+        cognitiveAnchorEventId: current.cognitiveAnchorEventId,
         coalesce: {
           batchSize: currentBatch,
           isLastInBatch: true,
@@ -274,6 +282,7 @@ async function runJudgedEntry(
         turnContext: {
           signal: controller.signal,
           epoch,
+          cognitiveAnchorEventId: current.cognitiveAnchorEventId,
           obligationId: opts?.obligationCtx?.obligationId ?? current.obligationId,
           obligationTargetUid: opts?.obligationCtx?.obligationTargetUid ?? current.obligationTargetUid,
           obligationStrong: opts?.obligationCtx?.obligationStrong ?? current.obligationStrong,

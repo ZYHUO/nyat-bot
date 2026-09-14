@@ -1,21 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
 
+const envStore = {
+  SANDBOX_ALLOWED_COMMANDS: '',
+  SANDBOX_BLOCKED_COMMANDS: '',
+  CODEACT_TIMEOUT_MS: 10_000,
+  SANDBOX_TERMINAL_ENABLED: true,
+  SANDBOX_BWRAP_ENABLED: true,
+  SANDBOX_REQUIRE_ISOLATION: true,
+};
+
 // bwrap 隔离的单测: 参数构造(纯函数) + 真机隔离断言(有 bwrap 才跑)。
 // env() mock 必须带 SANDBOX_BWRAP_ENABLED, 否则 bwrapAvailable 走 catch→true。
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({
-    SANDBOX_ALLOWED_COMMANDS: '',
-    SANDBOX_BLOCKED_COMMANDS: '',
-    CODEACT_TIMEOUT_MS: 10_000,
-    SANDBOX_TERMINAL_ENABLED: true,
-    SANDBOX_BWRAP_ENABLED: true,
-  }),
+  env: () => envStore,
 }));
 
 import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { buildBwrapSpec, executeCommand } from '../../../src/sandbox/terminal.js';
 
 const HAS_BWRAP = existsSync('/usr/bin/bwrap');
+const HAS_BWRAP_RUNTIME = HAS_BWRAP && spawnSync('/usr/bin/bwrap', [
+  '--unshare-all', '--die-with-parent', '--ro-bind', '/usr', '/usr', '--proc', '/proc', '--dev', '/dev', '--', '/bin/true',
+], { stdio: 'ignore' }).status === 0;
 
 describe('buildBwrapSpec', () => {
   it('binds only the sandbox cwd writable, isolates namespaces', () => {
@@ -38,7 +45,7 @@ describe('buildBwrapSpec', () => {
 });
 
 describe('executeCommand isolation (live bwrap)', () => {
-  it.skipIf(!HAS_BWRAP)('sees an empty /root and cannot read host .env', async () => {
+  it.skipIf(!HAS_BWRAP_RUNTIME)('sees an empty /root and cannot read host .env', async () => {
     // 沙盒内 /root 不存在(没绑定) → ls 失败; 宿主 /root/xxb-ts/.env 不可读
     const r1 = await executeCommand('ls /root 2>&1; echo LS_EXIT:$?');
     expect(r1.stdout).toContain('LS_EXIT:2');
@@ -46,7 +53,7 @@ describe('executeCommand isolation (live bwrap)', () => {
     expect(r2.stdout).toContain('CAT_EXIT:1');
   });
 
-  it.skipIf(!HAS_BWRAP)('has no network and isolated pid 1', async () => {
+  it.skipIf(!HAS_BWRAP_RUNTIME)('has no network and isolated pid 1', async () => {
     const r = await executeCommand('cat /proc/1/cmdline 2>/dev/null | tr "\\0" " "; echo; echo PID:$$');
     // 沙盒内 PID 命名空间: $$ 应该是小数字(非宿主 pid)
     const m = r.stdout.match(/PID:(\d+)/);
@@ -54,7 +61,7 @@ describe('executeCommand isolation (live bwrap)', () => {
     expect(Number(m![1])).toBeLessThan(100);
   });
 
-  it.skipIf(!HAS_BWRAP)('cwd is writable, python3 works', async () => {
+  it.skipIf(!HAS_BWRAP_RUNTIME)('cwd is writable, python3 works', async () => {
     const r = await executeCommand('echo hello > iso-probe.txt && cat iso-probe.txt && python3 -c "print(1+1)" && rm iso-probe.txt');
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain('hello');
@@ -65,5 +72,17 @@ describe('executeCommand isolation (live bwrap)', () => {
     const r = await executeCommand('rm -rf /tmp/should-not-run');
     expect(r.exitCode).toBe(-1);
     expect(r.stderr).toContain('blocked by sandbox policy');
+  });
+
+  it('fails closed when bwrap is disabled and isolation is required', async () => {
+    envStore.SANDBOX_BWRAP_ENABLED = false;
+    try {
+      const r = await executeCommand('printf should-not-run');
+      expect(r.exitCode).toBe(-1);
+      expect(r.stderr).toContain('sandbox isolation unavailable');
+      expect(r.stdout).toBe('');
+    } finally {
+      envStore.SANDBOX_BWRAP_ENABLED = true;
+    }
   });
 });

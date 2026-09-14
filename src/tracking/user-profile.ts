@@ -118,10 +118,12 @@ export function recordUserMessage(
 
 // ── 读取侧（reply 时注入，同步，极快）────────────────────
 
-export function getUserProfilePrompt(chatId: number, uid: number): string | null {
-  const row = getDb().prepare(
-    'SELECT profile_prompt FROM user_profiles WHERE chat_id = ? AND uid = ?',
-  ).get(chatId, uid) as { profile_prompt: string | null } | undefined;
+export function getUserProfilePrompt(chatId: number, uid: number, asOfSec?: number): string | null {
+  const boundedAsOf = Number.isSafeInteger(asOfSec) && (asOfSec as number) > 0 ? asOfSec : undefined;
+  const row = (boundedAsOf === undefined
+    ? getDb().prepare('SELECT profile_prompt FROM user_profiles WHERE chat_id = ? AND uid = ?').get(chatId, uid)
+    : getDb().prepare('SELECT profile_prompt FROM user_profiles WHERE chat_id = ? AND uid = ? AND updated_at <= ?').get(chatId, uid, boundedAsOf)) as
+    { profile_prompt: string | null } | undefined;
   return row?.profile_prompt ?? null;
 }
 
@@ -133,10 +135,12 @@ export interface ProfileSection {
 }
 
 /** Read all non-empty structured profile sections for a user, in canonical order. */
-export function getProfileSections(chatId: number, uid: number): ProfileSection[] {
-  const rows = getDb().prepare(
-    'SELECT section_name, bullets FROM user_profile_sections WHERE chat_id = ? AND uid = ?',
-  ).all(chatId, uid) as Array<{ section_name: string; bullets: string }>;
+export function getProfileSections(chatId: number, uid: number, asOfSec?: number): ProfileSection[] {
+  const boundedAsOf = Number.isSafeInteger(asOfSec) && (asOfSec as number) > 0 ? asOfSec : undefined;
+  const rows = (boundedAsOf === undefined
+    ? getDb().prepare('SELECT section_name, bullets FROM user_profile_sections WHERE chat_id = ? AND uid = ?').all(chatId, uid)
+    : getDb().prepare('SELECT section_name, bullets FROM user_profile_sections WHERE chat_id = ? AND uid = ? AND updated_at <= ?').all(chatId, uid, boundedAsOf)) as
+    Array<{ section_name: string; bullets: string }>;
 
   const byName = new Map<string, string[]>();
   for (const r of rows) {

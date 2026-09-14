@@ -18,6 +18,7 @@ export function buildDeferEntry(job: ChatJob, formatted: FormattedMessage): Pend
     chatId: job.chatId,
     messageId: formatted.messageId,
     enqueuedAt: job.enqueuedAt,
+    cognitiveAnchorEventId: job.cognitiveAnchorEventId,
     obligationId: job.turnContext?.obligationId,
     obligationTargetUid: job.turnContext?.obligationTargetUid,
     obligationStrong: job.turnContext?.obligationStrong,

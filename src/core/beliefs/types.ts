@@ -4,6 +4,8 @@
 // 置信度只由 host 可验证 outcome 更新，LLM 自报不算数。
 // ────────────────────────────────────────
 
+import type { CognitiveScope, ScopeVisibility } from '../../shared/cognitive-scope.js';
+
 export interface BeliefInput {
   sourceTable: string;
   sourceRowId: number;
@@ -12,6 +14,8 @@ export interface BeliefInput {
   /** 强制：无 evidence 不落库 */
   evidence: string[];
   ttlSec?: number;
+  /** Optional ownership boundary. Omitted means a global/legacy write. */
+  scope?: CognitiveScope;
 }
 
 export type BeliefStatus = 'active' | 'stale' | 'contradicted';
@@ -32,6 +36,11 @@ export interface Belief {
   evidence: string[];
   createdAt: number;
   updatedAt: number;
+  scopeKey?: string;
+  visibility?: ScopeVisibility;
+  scopeChatId?: number | null;
+  scopeUserId?: number | null;
+  scopeTaskId?: string | null;
 }
 
 /** 读侧视图：status 可能被 TTL 翻成 stale，confidence 带时间衰减（不写回） */

@@ -89,6 +89,13 @@ describe('L2 real execute + gate', () => {
     expect(r.data).toEqual([{ text: 'hit' }]);
   });
 
+  it('readonly recentMessages rejects an explicit cross-chat read', async () => {
+    const id = mkIntent('chats.recentMessages', { chatId: -200 });
+    const r = await executeIntentReal(id);
+    expect(r.executed).toBe(false);
+    expect(r.reason).toContain('scope violation');
+  });
+
   it('未知工具 → fail-closed（irreversible，无确认直接拒）', async () => {
     const id = mkIntent('computer.run', { command: 'rm -rf /' });
     const r = await executeIntentReal(id);

@@ -1,0 +1,264 @@
+{
+  "kind": "real_long_horizon_execution_evaluation",
+  "generatedAt": "2026-09-14T05:18:33.839Z",
+  "codeVersion": {
+    "revision": "b89ae5a",
+    "dirty": true
+  },
+  "providerModel": "step-3.7-flash",
+  "taskCount": 5,
+  "passed": 2,
+  "failed": 3,
+  "unverified": 0,
+  "passRate": 0.4,
+  "artifactAcceptanceRate": 0.8,
+  "horizonRequirementRate": 1,
+  "contract": {
+    "passRequires": [
+      "caller-owned acceptance checks pass independently",
+      "runtime.endTask is explicitly called",
+      "at least the task minimum number of model turns completes",
+      "no denied external namespace or disabled capability is attempted"
+    ],
+    "minTurns": 3,
+    "maxTurns": 5,
+    "acceptance": "caller_owned"
+  },
+  "executionBoundary": {
+    "provider": "real",
+    "hostApi": "real_createHostApi",
+    "codeActRunner": "real_runHostCodeForTest",
+    "sandbox": "per_case_files_only",
+    "externalNamespaces": "denied",
+    "sqlite": "temporary",
+    "telegram": "not_started"
+  },
+  "tasks": [
+    {
+      "id": "lh-ledger-join-01",
+      "domain": "tabular arithmetic",
+      "outputFiles": [
+        "result.json"
+      ],
+      "minTurns": 3,
+      "maxTurns": 5
+    },
+    {
+      "id": "lh-latest-record-02",
+      "domain": "stateful deduplication",
+      "outputFiles": [
+        "dedup.json"
+      ],
+      "minTurns": 3,
+      "maxTurns": 5
+    },
+    {
+      "id": "lh-multi-artifact-03",
+      "domain": "multi-artifact reporting",
+      "outputFiles": [
+        "summary.json",
+        "report.txt"
+      ],
+      "minTurns": 3,
+      "maxTurns": 5
+    },
+    {
+      "id": "lh-repair-loop-04",
+      "domain": "verification and repair",
+      "outputFiles": [
+        "answer.json"
+      ],
+      "minTurns": 3,
+      "maxTurns": 5
+    },
+    {
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "outputFiles": [
+        "inventory_report.json"
+      ],
+      "minTurns": 3,
+      "maxTurns": 5
+    }
+  ],
+  "cases": [
+    {
+      "id": "lh-ledger-join-01",
+      "domain": "tabular arithmetic",
+      "status": "failed",
+      "artifactStatus": "verified",
+      "ended": true,
+      "turns": 4,
+      "llmCalls": 4,
+      "llmFailures": 1,
+      "inputTokens": 1438,
+      "outputTokens": 2853,
+      "toolCallsStarted": 7,
+      "toolCallsFinished": 7,
+      "toolFailures": 0,
+      "durableEventCount": 24,
+      "repairAttempts": 0,
+      "durationMs": 38760,
+      "failureCodes": [
+        "provider_empty_response",
+        "unhandled_tool_promise"
+      ]
+    },
+    {
+      "id": "lh-latest-record-02",
+      "domain": "stateful deduplication",
+      "status": "failed",
+      "artifactStatus": "failed",
+      "ended": false,
+      "turns": 5,
+      "llmCalls": 5,
+      "llmFailures": 3,
+      "inputTokens": 712,
+      "outputTokens": 2418,
+      "toolCallsStarted": 1,
+      "toolCallsFinished": 1,
+      "toolFailures": 1,
+      "durableEventCount": 14,
+      "repairAttempts": 0,
+      "durationMs": 69970,
+      "failureCodes": [
+        "acceptance_check_failed",
+        "no_explicit_end",
+        "provider_empty_response",
+        "sandbox_escape_attempt",
+        "unsafe_code_rejected"
+      ]
+    },
+    {
+      "id": "lh-multi-artifact-03",
+      "domain": "multi-artifact reporting",
+      "status": "verified",
+      "artifactStatus": "verified",
+      "ended": true,
+      "turns": 4,
+      "llmCalls": 4,
+      "llmFailures": 0,
+      "inputTokens": 1421,
+      "outputTokens": 1983,
+      "toolCallsStarted": 8,
+      "toolCallsFinished": 8,
+      "toolFailures": 0,
+      "durableEventCount": 26,
+      "repairAttempts": 1,
+      "durationMs": 14858,
+      "failureCodes": [
+        "acceptance_pending_or_failed"
+      ]
+    },
+    {
+      "id": "lh-repair-loop-04",
+      "domain": "verification and repair",
+      "status": "verified",
+      "artifactStatus": "verified",
+      "ended": true,
+      "turns": 3,
+      "llmCalls": 3,
+      "llmFailures": 0,
+      "inputTokens": 895,
+      "outputTokens": 2172,
+      "toolCallsStarted": 4,
+      "toolCallsFinished": 4,
+      "toolFailures": 0,
+      "durableEventCount": 16,
+      "repairAttempts": 0,
+      "durationMs": 13909,
+      "failureCodes": []
+    },
+    {
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "status": "failed",
+      "artifactStatus": "verified",
+      "ended": false,
+      "turns": 5,
+      "llmCalls": 5,
+      "llmFailures": 0,
+      "inputTokens": 1365,
+      "outputTokens": 1089,
+      "toolCallsStarted": 6,
+      "toolCallsFinished": 6,
+      "toolFailures": 0,
+      "durableEventCount": 24,
+      "repairAttempts": 0,
+      "durationMs": 12069,
+      "failureCodes": [
+        "no_explicit_end"
+      ]
+    }
+  ],
+  "failureCases": [
+    {
+      "id": "lh-ledger-join-01",
+      "domain": "tabular arithmetic",
+      "status": "failed",
+      "artifactStatus": "verified",
+      "ended": true,
+      "turns": 4,
+      "llmCalls": 4,
+      "llmFailures": 1,
+      "inputTokens": 1438,
+      "outputTokens": 2853,
+      "toolCallsStarted": 7,
+      "toolCallsFinished": 7,
+      "toolFailures": 0,
+      "durableEventCount": 24,
+      "repairAttempts": 0,
+      "durationMs": 38760,
+      "failureCodes": [
+        "provider_empty_response",
+        "unhandled_tool_promise"
+      ]
+    },
+    {
+      "id": "lh-latest-record-02",
+      "domain": "stateful deduplication",
+      "status": "failed",
+      "artifactStatus": "failed",
+      "ended": false,
+      "turns": 5,
+      "llmCalls": 5,
+      "llmFailures": 3,
+      "inputTokens": 712,
+      "outputTokens": 2418,
+      "toolCallsStarted": 1,
+      "toolCallsFinished": 1,
+      "toolFailures": 1,
+      "durableEventCount": 14,
+      "repairAttempts": 0,
+      "durationMs": 69970,
+      "failureCodes": [
+        "acceptance_check_failed",
+        "no_explicit_end",
+        "provider_empty_response",
+        "sandbox_escape_attempt",
+        "unsafe_code_rejected"
+      ]
+    },
+    {
+      "id": "lh-plan-inventory-05",
+      "domain": "planning and constrained aggregation",
+      "status": "failed",
+      "artifactStatus": "verified",
+      "ended": false,
+      "turns": 5,
+      "llmCalls": 5,
+      "llmFailures": 0,
+      "inputTokens": 1365,
+      "outputTokens": 1089,
+      "toolCallsStarted": 6,
+      "toolCallsFinished": 6,
+      "toolFailures": 0,
+      "durableEventCount": 24,
+      "repairAttempts": 0,
+      "durationMs": 12069,
+      "failureCodes": [
+        "no_explicit_end"
+      ]
+    }
+  ]
+}

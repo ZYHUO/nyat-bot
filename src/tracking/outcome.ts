@@ -12,6 +12,7 @@ import { applyRelationshipEvent } from './relationship.js';
 import { NEGATIVE_PATTERNS, REPAIR_PATTERNS, POSITIVE_PATTERNS, countMatches } from './behavior-patterns.js';
 import { persistReplyOutcomeScores, ASI_ENABLED, ASI_SAMPLE_RATE } from './asi-scoring.js';
 import { env } from '../env.js';
+import { recordCognitiveRouteFeedback } from '../agent/cognitive-route-observations.js';
 
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
@@ -30,6 +31,7 @@ export async function recordReply(
   triggerText: string,
   replyText: string,
   action: string,
+  routeObservationId?: number,
 ): Promise<void> {
   const redis = getRedis();
   const key = PENDING_KEY_PREFIX + chatId;
@@ -44,6 +46,9 @@ export async function recordReply(
     timestamp: now(),
     chat_id: chatId,
     msgs_after: 0,
+    ...(Number.isSafeInteger(routeObservationId) && (routeObservationId ?? 0) > 0
+      ? { route_observation_id: routeObservationId }
+      : {}),
   };
 
   try {
@@ -115,6 +120,13 @@ export async function checkOutcome(
         replyText: string;
         signal: string;
       }> = [];
+      const routeFeedbackCandidates: Array<{ id: number; outcome: 'positive' | 'negative'; signal: string }> = [];
+      const recordRouteFeedback = (entry: Record<string, unknown>, outcome: 'positive' | 'negative', signal: string): void => {
+        const id = entry.route_observation_id;
+        if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) {
+          routeFeedbackCandidates.push({ id, outcome, signal });
+        }
+      };
 
       // ── #1 Deterministic explicit-reaction scan (runs before the window logic) ──
       // If the current message replies to a pending bot reply (or directly follows
@@ -187,6 +199,7 @@ export async function checkOutcome(
             replyText: String(entry.reply_text ?? ''),
             signal,
           });
+          recordRouteFeedback(entry, outcome, signal);
           if (!currentMessage.isBot) {
             try { applyMoodEvent(chatId, moodDelta, `outcome_${signal}`); } catch { /* non-critical */ }
             try {
@@ -223,6 +236,7 @@ export async function checkOutcome(
             replyText: String(entry.reply_text ?? ''),
             signal,
           });
+          recordRouteFeedback(entry, outcome, signal);
           // Stage E/F: only apply mood/relationship effects for human interactions, not bot-to-bot
           if (!currentMessage.isBot) {
             try { applyMoodEvent(chatId, 5, `outcome_positive_${signal}`); } catch { /* non-critical */ }
@@ -245,6 +259,7 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
+          recordRouteFeedback(entry, outcome, signal);
           // Stage E/F: only apply mood/relationship effects for human interactions, not bot-to-bot
           if (!currentMessage.isBot) {
             try { applyMoodEvent(chatId, -3, 'outcome_ignored'); } catch { /* non-critical */ }
@@ -294,6 +309,9 @@ export async function checkOutcome(
       // Redis deletes are cross-store — best-effort outside the transaction
       for (const field of toDelete) {
         await redis.hdel(key, field);
+      }
+      for (const feedback of routeFeedbackCandidates) {
+        recordCognitiveRouteFeedback(feedback);
       }
 
     if (resolvedCount > 0) {

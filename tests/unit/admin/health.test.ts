@@ -4,8 +4,8 @@ import { checkHealth } from '../../../src/admin/health.js';
 // Mock sqlite module
 vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => ({
-    prepare: () => ({
-      get: () => ({ '1': 1 }),
+    prepare: (sql: string) => ({
+      get: () => sql.includes('COUNT(*)') ? { count: 0 } : { '1': 1 },
     }),
   }),
 }));
@@ -42,6 +42,8 @@ describe('checkHealth', () => {
     expect(health.checks.redis.ok).toBe(true);
     expect(health.checks.redis.latency_ms).toBeGreaterThanOrEqual(0);
     expect(health.checks.sqlite.ok).toBe(true);
+    expect(health.checks.cognitive.ok).toBe(true);
+    expect(health.checks.cognitive.outbox_pending).toBe(0);
     expect(health.uptime).toBeGreaterThan(0);
     expect(health.checks.timestamp).toBeGreaterThan(0);
   });

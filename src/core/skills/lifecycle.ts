@@ -14,6 +14,12 @@
 import { getDb } from '../../db/sqlite.js';
 import { logger } from '../../shared/logger.js';
 import type { LifecycleRow, LifecycleStatus, ProposeInput } from './types.js';
+import {
+  createSkillRevision,
+  setSkillRevisionTestSummary,
+  updateSkillRevisionStatus,
+  updateSkillRevisionVersion,
+} from './revisions.js';
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -28,6 +34,8 @@ function rowToLifecycle(r: Record<string, unknown>): LifecycleRow {
     reviewer: (r['reviewer'] as number | null) ?? null,
     reviewedAt: (r['reviewed_at'] as number | null) ?? null,
     skillId: (r['skill_id'] as number | null) ?? null,
+    ...(r['revision_id'] !== undefined ? { revisionId: (r['revision_id'] as number | null) ?? null } : {}),
+    ...(r['rollback_reason'] !== undefined ? { rollbackReason: (r['rollback_reason'] as string | null) ?? null } : {}),
     version: (r['version'] as number) ?? 1,
     createdAt: r['created_at'] as number,
     updatedAt: r['updated_at'] as number,
@@ -71,6 +79,20 @@ export function proposeSkill(input: ProposeInput): number {
     now,
     id,
   );
+  createSkillRevision({
+    lifecycleId: id,
+    name,
+    version: 1,
+    artifact: {
+      triggerWhen: trigger.slice(0, 500),
+      steps: steps.slice(0, 2000),
+      pitfalls: (input.pitfalls ?? '').slice(0, 1000),
+      summary: (input.summary ?? '').slice(0, 300),
+      tags: (input.tags ?? []).slice(0, 4),
+      tier: input.tier ?? 'small',
+      mergedFrom: (input.mergedFrom ?? []).slice(0, 20),
+    },
+  });
   return id;
 }
 
@@ -111,6 +133,22 @@ export interface VerifyResult {
   reason?: string;
 }
 
+interface VerifyCheckSummary {
+  name: 'proposal_body' | 'required_fields' | 'redline_scan' | 'published_name_unique';
+  ok: boolean;
+  reason: string;
+}
+
+function persistVerifySummary(id: number, checks: VerifyCheckSummary[], status: 'passed' | 'failed', reason?: string): void {
+  setSkillRevisionTestSummary(id, {
+    verifier: 'host_static_v1',
+    status,
+    checks,
+    ...(reason ? { reason: reason.slice(0, 160) } : {}),
+    at: nowSec(),
+  });
+}
+
 /**
  * 沙箱 verify（确定性）：字段完整 + 红线扫描 + 同名去重。
  * 通过 → verified；失败 → rejected（verify_log 留原因）。
@@ -124,13 +162,25 @@ export function verifySkill(id: number): VerifyResult {
   try {
     body = JSON.parse(row.verifyLog ?? '{}') as { triggerWhen?: string; steps?: string };
   } catch {
+    persistVerifySummary(id, [{ name: 'proposal_body', ok: false, reason: 'invalid_json' }], 'failed', 'corrupt_proposal_body');
     return reject(id, 'verify failed: corrupt proposal body');
   }
   const steps = body.steps ?? '';
-  for (const pat of REDLINE_PATTERNS) {
-    if (pat.test(steps) || pat.test(body.triggerWhen ?? '')) {
-      return reject(id, `verify failed: redline hit ${String(pat)}`);
-    }
+  const requiredFieldsOk = Boolean(body.triggerWhen?.trim() && steps.trim());
+  const redline = REDLINE_PATTERNS.find((pat) => pat.test(steps) || pat.test(body.triggerWhen ?? ''));
+  const checks: VerifyCheckSummary[] = [
+    { name: 'proposal_body', ok: true, reason: 'parsed' },
+    { name: 'required_fields', ok: requiredFieldsOk, reason: requiredFieldsOk ? 'present' : 'missing_trigger_or_steps' },
+    { name: 'redline_scan', ok: !redline, reason: redline ? `pattern:${String(redline).slice(0, 120)}` : 'no_redline' },
+  ];
+  if (!requiredFieldsOk) {
+    persistVerifySummary(id, checks, 'failed', 'missing_trigger_or_steps');
+    return reject(id, 'verify failed: missing trigger/steps');
+  }
+  if (redline) {
+    const reason = `verify failed: redline hit ${String(redline)}`;
+    persistVerifySummary(id, checks, 'failed', reason);
+    return reject(id, reason);
   }
   // 同名去重：已有 published 同名 skill → 拒（走版本化）
   try {
@@ -139,23 +189,46 @@ export function verifySkill(id: number): VerifyResult {
         `SELECT l.id FROM core_skill_lifecycle l WHERE l.name = ? AND l.status = 'published' AND l.id != ? LIMIT 1`,
       )
       .get(row.name, id) as { id: number } | undefined;
-    if (dup) return reject(id, `verify failed: duplicate of published #${dup.id} (use updateSkillVersion)`);
+    const unique = !dup;
+    checks.push({ name: 'published_name_unique', ok: unique, reason: unique ? 'unique' : `duplicate_lifecycle:${dup?.id ?? 'unknown'}` });
+    if (dup) {
+      const reason = `verify failed: duplicate of published #${dup.id} (use updateSkillVersion)`;
+      persistVerifySummary(id, checks, 'failed', reason);
+      return reject(id, reason);
+    }
   } catch {
     /* fail-open 去重（表缺时），红线已过 */
+    checks.push({ name: 'published_name_unique', ok: true, reason: 'check_unavailable' });
   }
+  persistVerifySummary(id, checks, 'passed');
   setStatus(id, 'verified');
   return { ok: true };
 }
 
-function reject(id: number, reason: string): VerifyResult {
+/** Host-controlled rejection used by verify, pruning and the owner command. */
+export function rejectSkill(id: number, reason: string): VerifyResult {
+  const row = getLifecycle(id);
+  if (!row) return { ok: false, reason: 'not found' };
+  if (row.status !== 'proposed' && row.status !== 'verified') {
+    return { ok: false, reason: `bad state: ${row.status}` };
+  }
+  const boundedReason = reason.trim().slice(0, 400) || 'rejected by host';
   try {
-    getDb()
-      .prepare(`UPDATE core_skill_lifecycle SET status = 'rejected', verify_log = ?, updated_at = ? WHERE id = ?`)
-      .run(reason, nowSec(), id);
+    const result = getDb()
+      .prepare(`UPDATE core_skill_lifecycle SET status = 'rejected', verify_log = ?, updated_at = ? WHERE id = ? AND status IN ('proposed', 'verified')`)
+      .run(boundedReason, nowSec(), id);
+    if (result.changes !== 1) return { ok: false, reason: 'state changed' };
+    updateSkillRevisionStatus(id, 'rejected');
+    return { ok: true };
   } catch (err) {
     logger.debug({ err, id }, 'rejectLifecycle failed (non-critical)');
+    return { ok: false, reason: 'db error' };
   }
-  return { ok: false, reason };
+}
+
+function reject(id: number, reason: string): VerifyResult {
+  const result = rejectSkill(id, reason);
+  return result.ok ? { ok: false, reason } : result;
 }
 
 /** 只推状态，不碰 verify_log（proposal 内容住里面，verify 通过不能覆盖）。 */
@@ -164,6 +237,7 @@ function setStatus(id: number, status: LifecycleStatus): void {
     getDb()
       .prepare(`UPDATE core_skill_lifecycle SET status = ?, updated_at = ? WHERE id = ?`)
       .run(status, nowSec(), id);
+    updateSkillRevisionStatus(id, status);
   } catch (err) {
     logger.debug({ err, id }, 'setLifecycleStatus failed (non-critical)');
   }
@@ -184,6 +258,7 @@ export function approveSkill(id: number, reviewerUid: number): VerifyResult {
     getDb()
       .prepare(`UPDATE core_skill_lifecycle SET status = 'approved', reviewer = ?, reviewed_at = ?, updated_at = ? WHERE id = ?`)
       .run(reviewerUid, nowSec(), nowSec(), id);
+    updateSkillRevisionStatus(id, 'approved');
     return { ok: true };
   } catch (err) {
     logger.debug({ err, id }, 'approveSkill failed (non-critical)');
@@ -229,6 +304,7 @@ export async function publishSkill(id: number, tier?: 'small' | 'big'): Promise<
     getDb()
       .prepare(`UPDATE core_skill_lifecycle SET status = 'published', skill_id = ?, updated_at = ? WHERE id = ?`)
       .run(skillId, nowSec(), id);
+    updateSkillRevisionStatus(id, 'published', skillId);
     logger.info({ lifecycleId: id, skillId, name: row.name }, 'core skill published');
     return { ok: true };
   } catch (err) {
@@ -247,6 +323,7 @@ export function updateSkillVersion(publishedId: number, input: ProposeInput): nu
   const nid = proposeSkill(input);
   try {
     getDb().prepare(`UPDATE core_skill_lifecycle SET version = ? WHERE id = ?`).run(row.version + 1, nid);
+    updateSkillRevisionVersion(nid, row.version + 1);
   } catch {
     /* non-critical */
   }

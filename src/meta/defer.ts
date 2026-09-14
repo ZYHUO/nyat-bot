@@ -32,6 +32,8 @@ export interface MetaDeferEntry {
   textPreview?: string;
   pressure?: number;
   payload?: Record<string, unknown>;
+  /** Durable Telegram event used to anchor replay/workspace reads. */
+  cognitiveAnchorEventId?: string;
   /** 本条已被 defer 的次数（首次为 0，每次 drain 递增）。 */
   deferCount: number;
 }

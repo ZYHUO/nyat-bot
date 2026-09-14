@@ -103,6 +103,41 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
+  // Durable cognitive projection — explicitly gated so event logging can be
+  // enabled independently of debt creation or any Agency authority.
+  if (env().COGNITIVE_OUTBOX_ENABLED === true) {
+    reg({
+      name: 'cognitive-outbox',
+      everySec: 15,
+      run: async () => {
+        const { drainCognitiveOutbox } = await import('../agent/cognitive-outbox-worker.js');
+        const { projectCognitiveOutboxItem } = await import('../agent/cognitive-projector.js');
+        const result = await drainCognitiveOutbox(
+          async (item) => {
+            await projectCognitiveOutboxItem(item, { createDebts: env().DEBT_AUTO_MATCH_ENABLED === true });
+          },
+          { workerId: `cron:cognitive:${process.pid}`, batchSize: 50, leaseSec: 90, maxAttempts: 5 },
+        );
+        if (result.claimed > 0) logger.info({ result }, 'cognitive outbox projection tick');
+      },
+    });
+  }
+
+  // Social prediction expiry is a metadata-only projection. Keep it separate
+  // from debt auto-repayment so silence outcomes settle even when debt sweeps
+  // remain disabled; the helper is fail-soft when migration 0103 is absent.
+  if (env().SOCIAL_PREDICTION_ENABLED === true) {
+    reg({
+      name: 'social-prediction-sweep',
+      everySec: 15 * 60,
+      run: async () => {
+        const { expireSocialPredictions } = await import('../agent/social-predictions.js');
+        const expired = expireSocialPredictions({ limit: 500 });
+        if (expired > 0) logger.info({ expired }, 'social prediction silence outcomes settled');
+      },
+    });
+  }
+
   // Memory "dream" — nightly forgetting of old, never-recalled memories
   reg({
     name: 'memory-dream',

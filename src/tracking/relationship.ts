@@ -37,6 +37,13 @@ export interface RelState {
   lastSummary: string;
 }
 
+interface RelationshipRow {
+  affinity: number;
+  interaction_count: number;
+  last_interaction_at: number;
+  last_summary: string;
+}
+
 const AFFINITY_MIN = -100;
 const AFFINITY_MAX = 100;
 
@@ -53,11 +60,24 @@ function clampAffinity(v: number): number {
   return v;
 }
 
+function neutralRelationship(): RelState {
+  return { affinity: 0, count: 0, bucket: '一般', lastSummary: '' };
+}
+
+function stateFromRow(row: RelationshipRow, atSec: number): RelState {
+  const hoursElapsed = Math.max(0, (atSec - row.last_interaction_at) / 3600);
+  const affinity = decayValence(row.affinity, hoursElapsed, RELATIONSHIP_DECAY_RATE);
+  return {
+    affinity,
+    count: row.interaction_count,
+    bucket: affinityBucket(affinity),
+    lastSummary: row.last_summary ?? '',
+  };
+}
+
 /** Read relationship state. Returns default-zero when disabled or unknown. */
 export function getRelationship(chatId: number, uid: number): RelState {
-  if (!env().RELATIONSHIP_ENABLED) {
-    return { affinity: 0, count: 0, bucket: '一般', lastSummary: '' };
-  }
+  if (!env().RELATIONSHIP_ENABLED) return neutralRelationship();
   try {
     const db = getDb();
     const row = db
@@ -66,30 +86,41 @@ export function getRelationship(chatId: number, uid: number): RelState {
          FROM chat_relationships WHERE chat_id = ? AND uid = ?`,
       )
       .get(chatId, uid) as
-      | {
-          affinity: number;
-          interaction_count: number;
-          last_interaction_at: number;
-          last_summary: string;
-        }
+      | RelationshipRow
       | undefined;
-    if (!row) {
-      return { affinity: 0, count: 0, bucket: '一般', lastSummary: '' };
-    }
+    if (!row) return neutralRelationship();
     // Apply time-decay toward 0 on read. last_interaction_at is unix seconds.
     // Decayed value is NOT persisted — fresh interactions re-anchor via applyRelationshipEvent.
     const now = Math.floor(Date.now() / 1000);
-    const hoursElapsed = Math.max(0, (now - row.last_interaction_at) / 3600);
-    const decayed = decayValence(row.affinity, hoursElapsed, RELATIONSHIP_DECAY_RATE);
-    return {
-      affinity: decayed,
-      count: row.interaction_count,
-      bucket: affinityBucket(decayed),
-      lastSummary: row.last_summary ?? '',
-    };
+    return stateFromRow(row, now);
   } catch (err) {
     logger.debug({ err, chatId, uid }, 'getRelationship failed (non-critical)');
-    return { affinity: 0, count: 0, bucket: '一般', lastSummary: '' };
+    return neutralRelationship();
+  }
+}
+
+/**
+ * Read the latest relationship snapshot visible at an event timestamp.
+ * Returns null when the revision ledger is unavailable or no relationship row
+ * existed yet. The current mutable snapshot is intentionally never consulted.
+ */
+export function getRelationshipAt(chatId: number, uid: number, asOfSec: number): RelState | null {
+  if (!env().RELATIONSHIP_ENABLED) return neutralRelationship();
+  if (!Number.isSafeInteger(asOfSec) || asOfSec <= 0) return null;
+  try {
+    const row = getDb()
+      .prepare(
+        `SELECT affinity, interaction_count, last_interaction_at, last_summary
+           FROM chat_relationship_revisions
+          WHERE chat_id = ? AND uid = ? AND updated_at <= ?
+          ORDER BY updated_at DESC, revision DESC
+          LIMIT 1`,
+      )
+      .get(chatId, uid, asOfSec) as RelationshipRow | undefined;
+    return row ? stateFromRow(row, asOfSec) : null;
+  } catch (err) {
+    logger.debug({ err, chatId, uid, asOfSec }, 'getRelationshipAt failed (non-critical)');
+    return null;
   }
 }
 

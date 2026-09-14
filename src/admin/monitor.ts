@@ -5,6 +5,12 @@ import type { Env } from '../env.js';
 import { timingSafeEqual } from 'crypto';
 import { listObligationSnapshots } from './obligations.js';
 import { getRecent } from '../pipeline/context/manager.js';
+import { getCognitiveRouteWindow } from '../agent/cognitive-route-observations.js';
+import { listAgencyRunSummaries } from '../agent/agency-runtime.js';
+import type { AgencyRunStatus } from '../agent/agency-runtime.js';
+import { getTaskRecoverySummary } from '../agent/task-runtime-events.js';
+import { listSkillRevisionVerificationSummaries } from '../core/skills/revisions.js';
+import type { SkillRevisionStatus } from '../core/skills/revisions.js';
 
 interface MonitorDeps {
   redis: Redis;
@@ -105,6 +111,117 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
     }
     const snapshots = await listObligationSnapshots(deps.redis, chatId);
     return c.json({ ok: true, snapshots });
+  });
+
+  // Read-only route cost/quality window for canary operations. The underlying
+  // query is already bounded and returns aggregate metadata only.
+  api.get('/route-observations', async (c) => {
+    const rawChatId = c.req.query('chat_id');
+    const rawSince = c.req.query('since');
+    const rawLimit = c.req.query('limit');
+    const filters: { chatId?: number; since?: number; limit?: number } = {};
+    if (rawChatId !== undefined) {
+      const chatId = Number(rawChatId);
+      if (!Number.isSafeInteger(chatId) || chatId === 0) {
+        return c.json({ ok: false, error: 'invalid chat_id' }, 400);
+      }
+      filters.chatId = chatId;
+    }
+    if (rawSince !== undefined) {
+      const since = Number(rawSince);
+      if (!Number.isSafeInteger(since) || since <= 0) {
+        return c.json({ ok: false, error: 'invalid since' }, 400);
+      }
+      filters.since = since;
+    }
+    if (rawLimit !== undefined) {
+      const limit = Number(rawLimit);
+      if (!Number.isSafeInteger(limit) || limit <= 0) {
+        return c.json({ ok: false, error: 'invalid limit' }, 400);
+      }
+      filters.limit = Math.min(200, limit);
+    }
+    const rows = getCognitiveRouteWindow(filters);
+    return c.json({ ok: true, rows });
+  });
+
+  // Redacted Agency lifecycle window. Content-bearing action arguments and
+  // adapter results stay out of the monitor response.
+  api.get('/agency-runs', async (c) => {
+    const rawChatId = c.req.query('chat_id');
+    const rawSince = c.req.query('since');
+    const rawStatus = c.req.query('status');
+    const rawLimit = c.req.query('limit');
+    const filters: { chatId?: number; since?: number; status?: AgencyRunStatus; limit?: number } = {};
+    if (rawChatId !== undefined) {
+      const chatId = Number(rawChatId);
+      if (!Number.isSafeInteger(chatId) || chatId === 0) return c.json({ ok: false, error: 'invalid chat_id' }, 400);
+      filters.chatId = chatId;
+    }
+    if (rawSince !== undefined) {
+      const since = Number(rawSince);
+      if (!Number.isSafeInteger(since) || since <= 0) return c.json({ ok: false, error: 'invalid since' }, 400);
+      filters.since = since;
+    }
+    if (rawStatus !== undefined) {
+      if (!['pending', 'running', 'waiting', 'succeeded', 'failed', 'cancelled', 'expired'].includes(rawStatus)) {
+        return c.json({ ok: false, error: 'invalid status' }, 400);
+      }
+      filters.status = rawStatus as AgencyRunStatus;
+    }
+    if (rawLimit !== undefined) {
+      const limit = Number(rawLimit);
+      if (!Number.isSafeInteger(limit) || limit <= 0) return c.json({ ok: false, error: 'invalid limit' }, 400);
+      filters.limit = Math.min(200, limit);
+    }
+    const rows = listAgencyRunSummaries(filters);
+    return c.json({ ok: true, rows });
+  });
+
+  // Read-only task recovery summary. Runtime events and acceptance evidence
+  // are aggregated server-side; task direction and model/tool content stay out
+  // of the response.
+  api.get('/task-recovery', async (c) => {
+    const taskId = c.req.query('task_id')?.trim() ?? '';
+    const rawChatId = c.req.query('chat_id');
+    if (!taskId || taskId.length > 120 || taskId.includes('\0')) {
+      return c.json({ ok: false, error: 'invalid task_id' }, 400);
+    }
+    let chatId: number | undefined;
+    if (rawChatId !== undefined) {
+      const parsed = Number(rawChatId);
+      if (!Number.isSafeInteger(parsed) || parsed === 0) return c.json({ ok: false, error: 'invalid chat_id' }, 400);
+      chatId = parsed;
+    }
+    const summary = getTaskRecoverySummary(taskId, chatId);
+    if (!summary) return c.json({ ok: false, error: 'task_recovery_not_found' }, 404);
+    return c.json({ ok: true, summary });
+  });
+
+  // Bounded verification lineage for release/evaluation windows. The skill
+  // artifact, check reasons and rollback text stay out of this monitor view.
+  api.get('/skill-verifications', async (c) => {
+    const rawStatus = c.req.query('status');
+    const rawSince = c.req.query('since');
+    const rawLimit = c.req.query('limit');
+    const filters: { status?: SkillRevisionStatus; since?: number; limit?: number } = {};
+    const statuses: SkillRevisionStatus[] = ['candidate', 'verified', 'approved', 'published', 'rejected', 'deprecated', 'rolled_back'];
+    if (rawStatus !== undefined) {
+      if (!statuses.includes(rawStatus as SkillRevisionStatus)) return c.json({ ok: false, error: 'invalid status' }, 400);
+      filters.status = rawStatus as SkillRevisionStatus;
+    }
+    if (rawSince !== undefined) {
+      const since = Number(rawSince);
+      if (!Number.isSafeInteger(since) || since <= 0) return c.json({ ok: false, error: 'invalid since' }, 400);
+      filters.since = since;
+    }
+    if (rawLimit !== undefined) {
+      const limit = Number(rawLimit);
+      if (!Number.isSafeInteger(limit) || limit <= 0) return c.json({ ok: false, error: 'invalid limit' }, 400);
+      filters.limit = Math.min(200, limit);
+    }
+    const rows = listSkillRevisionVerificationSummaries(filters);
+    return c.json({ ok: true, rows });
   });
 
   // File proxy (server-side fetch, no token exposure)

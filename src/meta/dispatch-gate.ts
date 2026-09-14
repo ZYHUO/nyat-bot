@@ -38,6 +38,7 @@ import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import { setMetaWaitAnchor } from './timing-adapter.js';
 import { scheduleMetaDeferReeval } from './defer.js';
 import type { AttentionLayer } from './types.js';
+import { dispatchWaitViaAgency, isAgencyWaitTransportEnabled } from '../agent/agency-wait-dispatch.js';
 
 export type DispatchGateVerdict = 'allow' | 'suppress';
 
@@ -56,6 +57,7 @@ export async function evaluateDispatchGate(opts: {
   textPreview?: string;
   messageThreadId?: number;
   payload?: Record<string, unknown>;
+  cognitiveAnchorEventId?: string;
   /** 本条消息已被 defer 的次数（defer 重放时从 payload 带出，首次为 0）。 */
   deferCount?: number;
 }): Promise<DispatchGateResult> {
@@ -168,11 +170,35 @@ export async function evaluateDispatchGate(opts: {
             textPreview: (opts.textPreview ?? '').slice(0, 200),
             pressure: layer === 'L1' ? 60 : 30,
             createdAt: Date.now(),
+            cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
             payload: opts.payload,
           },
           waitSec + 120,
         );
-        await transitionToWait(chatId, waitSec, opts.messageId, opts.userId);
+        const agencyWait = isAgencyWaitTransportEnabled()
+          ? opts.messageId !== undefined
+            ? await dispatchWaitViaAgency({
+                chatId,
+                triggerMessageId: opts.messageId,
+                ...(opts.userId !== undefined && opts.userId > 0 ? { triggerUserId: opts.userId } : {}),
+                waitSec,
+                reason: `dispatch_gate:${opts.reason}`,
+                source: 'dispatch_gate',
+                ...(opts.cognitiveAnchorEventId ? { cognitiveAnchorEventId: opts.cognitiveAnchorEventId } : {}),
+              })
+            : { attempted: true, accepted: false, reason: 'trigger_message_id_required' }
+          : { attempted: false, accepted: false, reason: 'agency_wait_transport_disabled' };
+        if (agencyWait.attempted) {
+          if (!agencyWait.accepted) {
+            logger.warn(
+              { chatId, layer, messageId: opts.messageId, agencyRunId: agencyWait.agencyRunId, reason: agencyWait.reason },
+              'Dispatch gate wait rejected by Agency authority transport',
+            );
+            return { verdict: 'suppress', reason: 'wait_transport_failed' };
+          }
+        } else {
+          await transitionToWait(chatId, waitSec, opts.messageId, opts.userId);
+        }
       } catch (err) {
         logger.warn({ err, chatId }, 'dispatch gate wait setup failed — fail-open allow');
         return { verdict: 'allow', reason: 'wait_setup_failed' };
@@ -195,6 +221,7 @@ export async function evaluateDispatchGate(opts: {
           textPreview: (opts.textPreview ?? '').slice(0, 200),
           pressure: layer === 'L1' ? 60 : 30,
           payload: opts.payload,
+          cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
         },
         deferCount: opts.deferCount ?? 0,
         retryAfterMs: decision.retryAfterMs ?? 45_000,

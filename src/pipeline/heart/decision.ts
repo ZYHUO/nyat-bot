@@ -47,6 +47,8 @@ export interface HeartInput {
   lastSpokeSecAgo?: number;
   /** 连发提示(G4):★ 锚点是一波 N 条连发的末尾,整体评估 */
   burstNote?: string;
+  /** Optional bounded scoped workspace block for the V2 rollout. */
+  cognitiveWorkspaceHint?: string;
   signal?: AbortSignal;
 }
 
@@ -157,7 +159,10 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     ? `\n(你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,正处于对话中)`
     : '';
   const burstLine = input.burstNote ? `\n${input.burstNote}` : '';
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${burstLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  const workspaceLine = input.cognitiveWorkspaceHint?.trim()
+    ? `\n\n${input.cognitiveWorkspaceHint.trim().slice(0, 3000)}`
+    : '';
+  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${burstLine}${workspaceLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
 
   let raw: string;
   try {

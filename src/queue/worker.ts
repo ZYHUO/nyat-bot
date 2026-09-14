@@ -60,6 +60,7 @@ async function processMessage(job: Job<MessageJobData>): Promise<void> {
     type: job.data.type,
     chatId: job.data.chatId,
     messageId: job.data.messageId,
+    cognitiveAnchorEventId: job.data.cognitiveAnchorEventId,
     update: job.data.update,
     enqueuedAt: job.data.enqueuedAt,
     coalesce: job.data.coalesce,

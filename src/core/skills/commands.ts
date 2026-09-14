@@ -8,7 +8,7 @@
 
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
-import { getLifecycle, listLifecycle, verifySkill } from './lifecycle.js';
+import { getLifecycle, listLifecycle, rejectSkill, verifySkill } from './lifecycle.js';
 import { approveSkill } from './lifecycle.js';
 import { publishSkill } from './lifecycle.js';
 
@@ -89,19 +89,9 @@ export async function handleSkillCommand(
 
   if (sub === 'reject') {
     if (!idRaw || !Number.isFinite(id)) return '用法：/skill reject <id>喵~';
-    const row = getLifecycle(id);
-    if (!row) return `没找到 #${idRaw} 喵~`;
-    if (row.status !== 'proposed' && row.status !== 'verified') {
-      return `#${id} 现在是 ${row.status}，驳不动喵~`;
-    }
-    const { getDb } = await import('../../db/sqlite.js');
-    try {
-      getDb().prepare(`UPDATE core_skill_lifecycle SET status='rejected', verify_log='rejected by master via /skill', updated_at=? WHERE id=?`).run(Math.floor(Date.now() / 1000), id);
-      logger.info({ id, reviewer: uid }, 'skill rejected via /skill');
-      return `#${id} 已驳回喵~`;
-    } catch {
-      return `#${id} 驳回失败喵~`;
-    }
+    const r = rejectSkill(id, 'rejected by master via /skill');
+    logger.info({ id, reviewer: uid, ok: r.ok, reason: r.reason }, 'skill rejected via /skill');
+    return r.ok ? `#${id} 已驳回喵~` : `#${id} 驳回失败：${r.reason}喵~`;
   }
 
   return '用法：/skill pending | show <id> | verify <id> | approve <id> | publish <id> | reject <id>喵~';

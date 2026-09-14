@@ -34,6 +34,7 @@ import {
 import { preloadSkills } from './pipeline/tools/registry.js';
 import { startMetaLoop, stopMetaLoop } from './meta/index.js';
 import { startCodeActWorker, closeCodeActWorker } from './subagent/index.js';
+import { getSandboxCapability } from './sandbox/terminal.js';
 
 async function main(): Promise<void> {
   logger.info('xxb-ts starting…');
@@ -52,6 +53,18 @@ async function main(): Promise<void> {
   // 3. Run SQLite migrations
   const appConfig = getConfig();
   runMigrations(appConfig.migrationsDir);
+
+  // Autonomous tool execution is unavailable unless the configured isolation
+  // capability is present. Keep the process alive for chat/health, but make the
+  // safety state explicit before workers start.
+  if (config.SANDBOX_ENABLED && config.SANDBOX_TERMINAL_ENABLED) {
+    const capability = getSandboxCapability();
+    if (capability.isolationRequired && !capability.bwrapAvailable) {
+      logger.error({ capability }, 'Sandbox isolation unavailable; autonomous terminal execution is blocked');
+    } else {
+      logger.info({ capability }, 'Sandbox capability verified');
+    }
+  }
 
   // 3.1 NyatDB (optional embedded engine; default off)
   try {

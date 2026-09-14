@@ -15,6 +15,8 @@ export interface PendingEntry {
   chatId: number;
   messageId?: number;
   enqueuedAt: number;
+  /** Durable message event used to anchor replay/workspace reads. */
+  cognitiveAnchorEventId?: string;
   direct?: boolean;
   isEdit?: boolean;
   waitReplay?: boolean;

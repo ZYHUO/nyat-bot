@@ -57,6 +57,7 @@ beforeEach(() => {
   db.exec(readFileSync('migrations/0083_core_belief_view.sql', 'utf8'));
   db.exec(readFileSync('migrations/0084_core_blackboard.sql', 'utf8'));
   seedOldTables();
+  db.exec(readFileSync('migrations/0090_scope_boundaries.sql', 'utf8'));
   envStore['CORE_DUAL_WRITE'] = true;
 });
 
@@ -79,6 +80,20 @@ describe('phase2 dual-write', () => {
   it('syncWorldEntity: entity → entity.status belief', () => {
     syncWorldEntity(1);
     expect(getActiveBeliefs('entity.status')).toHaveLength(1);
+  });
+
+  it('syncWorldEntity preserves task scope instead of widening it to chat', () => {
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(
+      `INSERT INTO world_entities
+       (name, kind, properties, source_chat_id, last_updated_at, created_at, scope_key, visibility)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('task-private', 'project', '{}', -100, now, now, 'task:task-a@chat:-100', 'task');
+    const id = Number((db.prepare('SELECT id FROM world_entities WHERE name = ?').get('task-private') as { id: number }).id);
+    syncWorldEntity(id);
+    expect(getActiveBeliefs('entity.status', { scope: { visibility: 'task', chatId: -100, taskId: 'task-a' } })).toHaveLength(1);
+    expect(getActiveBeliefs('entity.status', { scope: { visibility: 'task', chatId: -100, taskId: 'task-b' } })).toEqual([]);
+    expect(getActiveBeliefs('entity.status', { scope: { visibility: 'chat', chatId: -100 } })).toEqual([]);
   });
 
   it('syncGoal: active goal → goal.state；非 active 不写', () => {

@@ -26,6 +26,7 @@ import {
   metaSleepGate,
   messageHasMedia,
 } from '../../meta/bookkeeping.js';
+import { appendTelegramMessageEvent } from '../../agent/cognitive-events.js';
 
 async function handleUpdate(ctx: Context): Promise<void> {
   const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
@@ -56,6 +57,16 @@ async function handleUpdate(ctx: Context): Promise<void> {
   void import('../../metrics/social-ledger.js')
     .then(({ recordMessageSeen }) => recordMessageSeen(chatId))
     .catch(() => { /* telemetry never breaks ingest */ });
+
+  // AGI-003: durable metadata-only ingress fact. Keep the id locally so every
+  // downstream path reads the same event-anchored snapshot.
+  const cognitiveAnchorEventId = appendTelegramMessageEvent({
+    update: ctx.update,
+    chatId,
+    messageId,
+    ...(userId && userId > 0 ? { userId } : {}),
+    occurredAt: Math.floor(msg.edit_date ?? msg.date ?? Date.now() / 1000),
+  });
 
   // 消息入口可观测（2026-08-22「bot 没回复我」排查的教训：入口没有 info 日志，
   // 「消息到底进没进系统」无法一秒定位）。dedup 之后记，重复投递不算。
@@ -104,6 +115,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
     isEdit,
     update: ctx.update,
     enqueuedAt: Date.now(),
+    cognitiveAnchorEventId,
   };
 
   // Silence-alert 数据源:人类消息入站埋点(排除 bot 自己 / 匿名频道)。
@@ -205,6 +217,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
               username: fm.username || fm.fullName,
               textPreview: (fm.textContent || rawText).slice(0, 200),
               messageThreadId: fm.messageThreadId,
+              cognitiveAnchorEventId,
             });
           } catch (err) {
             logger.debug({ err, chatId, messageId }, 'post-task window ingest failed');
@@ -266,6 +279,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                 textPreview,
                 pressure: 100,
                 messageThreadId: fm.messageThreadId,
+                cognitiveAnchorEventId,
                 payload: {
                   username: fm.username || undefined,
                   fullName: fm.fullName || undefined,
@@ -303,6 +317,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                   chatId,
                   formatted: fm,
                   layer: layerDec.layer,
+                  cognitiveAnchorEventId,
                 });
                 if (heart.verdict !== 'allow') return;
 
@@ -320,6 +335,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                   textPreview,
                   pressure: basePressure + elevBoost,
                   messageThreadId: fm.messageThreadId,
+                  cognitiveAnchorEventId,
                   payload: {
                     username: fm.username || undefined,
                     fullName: fm.fullName || undefined,
@@ -354,6 +370,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                     textPreview,
                     pressure: 55,
                     messageThreadId: fm.messageThreadId,
+                    cognitiveAnchorEventId,
                     payload: {
                       username: fm.username || undefined,
                       fullName: fm.fullName || undefined,
@@ -395,6 +412,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
             isDirect,
             layer: layerDec.layer,
             directKind,
+            cognitiveAnchorEventId,
           });
           if (timing.verdict === 'silence') {
             logger.info(
@@ -421,6 +439,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
           textPreview,
           pressure: basePressure + (layerDec.pressureBoost ?? 0),
           messageThreadId: fm.messageThreadId,
+          cognitiveAnchorEventId,
           payload: {
             username: fm.username || undefined,
             fullName: fm.fullName || undefined,
@@ -531,6 +550,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
       enqueuedAt: Date.now(),
       direct: isDirect,
       isEdit,
+      cognitiveAnchorEventId,
       obligationId: obligation?.id,
       obligationTargetUid: obligation?.targetUid,
       obligationStrong: obligation?.mustReplyStrong,

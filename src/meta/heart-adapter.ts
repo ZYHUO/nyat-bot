@@ -22,6 +22,7 @@ import {
 import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
+import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
@@ -48,6 +49,7 @@ export async function evaluateMetaHeart(opts: {
   chatId: number;
   formatted: FormattedMessage;
   layer: AttentionLayer;
+  cognitiveAnchorEventId?: string;
 }): Promise<MetaHeartResult> {
   const e = env();
   const { chatId, formatted, layer } = opts;
@@ -137,7 +139,25 @@ export async function evaluateMetaHeart(opts: {
     }
   }
 
+  const cognitiveWorkspacePromise = e.COGNITIVE_WORKSPACE_V2_ENABLED
+    ? (async () => {
+      try {
+        const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
+        const snapshot = await buildCognitiveWorkspace({
+          chatId,
+          ...(!formatted.isAnonymous && formatted.uid > 0 ? { userId: formatted.uid } : {}),
+          queryText: (formatted.textContent || formatted.captionContent || '').slice(0, 800),
+          asOfEventId: opts.cognitiveAnchorEventId,
+        });
+        return renderCognitiveWorkspace(snapshot, 2200);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta Heart cognitive workspace failed (non-critical)');
+        return undefined;
+      }
+    })()
+    : Promise.resolve(undefined);
   const selfState = await composeSelfState(chatId);
+  const cognitiveWorkspaceHint = await cognitiveWorkspacePromise;
   let lastSpokeSecAgo: number | undefined;
   if (tstate?.lastBotReplyAt) {
     lastSpokeSecAgo = (Date.now() - tstate.lastBotReplyAt) / 1000;
@@ -155,6 +175,7 @@ export async function evaluateMetaHeart(opts: {
     botName: getBotDisplayName(),
     selfState,
     lastSpokeSecAgo,
+    cognitiveWorkspaceHint,
     burstNote: engagementNote,
   });
 
@@ -173,6 +194,7 @@ export async function evaluateMetaHeart(opts: {
           reason: `heart:${heart.why || 'wait'}`,
           messageId: formatted.messageId,
           userId: formatted.uid,
+          cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
           textPreview: (formatted.textContent || '').slice(0, 200),
           pressure: 70,
           createdAt: Date.now(),
@@ -195,7 +217,26 @@ export async function evaluateMetaHeart(opts: {
         'EX',
         waitSec + 120,
       );
-      await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
+      const agencyWait = await dispatchWaitViaAgency({
+        chatId,
+        triggerMessageId: formatted.messageId,
+        ...(formatted.uid > 0 ? { triggerUserId: formatted.uid } : {}),
+        waitSec,
+        reason: `heart:${heart.why || 'wait'}`,
+        source: 'meta_heart',
+        ...(opts.cognitiveAnchorEventId ? { cognitiveAnchorEventId: opts.cognitiveAnchorEventId } : {}),
+      });
+      if (agencyWait.attempted) {
+        if (!agencyWait.accepted) {
+          logger.warn(
+            { chatId, messageId: formatted.messageId, agencyRunId: agencyWait.agencyRunId, reason: agencyWait.reason },
+            'Meta heart wait rejected by Agency authority transport',
+          );
+          return { verdict: 'silence', layer: 'L1', reason: 'heart_wait_transport_failed' };
+        }
+      } else {
+        await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
+      }
     } catch (err) {
       // Wait setup failed (anchor written but WAIT transition/enqueue failed).
       // Fail-open to allow (like timing-adapter does) — the message enters

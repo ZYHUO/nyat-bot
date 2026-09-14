@@ -110,4 +110,15 @@ describe('heart decision (S13 心流)', () => {
     const sys = callMock.mock.calls[0]![0].messages[0].content as string;
     expect(sys).toContain('你困得不行。');
   });
+
+  it('injects a bounded scoped workspace only when supplied by the caller', async () => {
+    callMock.mockResolvedValue({ content: '{"act":"pass","why":"看到了"}' });
+    await heartDecision({
+      ...baseInput,
+      cognitiveWorkspaceHint: '[统一认知工作区 scope=chat:-100]\n[工作区不确定性]\n- 需要核实',
+    });
+    const userMsg = callMock.mock.calls[0]![0].messages[1].content as string;
+    expect(userMsg).toContain('scope=chat:-100');
+    expect(userMsg).toContain('需要核实');
+  });
 });

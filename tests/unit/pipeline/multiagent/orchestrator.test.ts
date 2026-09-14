@@ -133,6 +133,19 @@ describe('runMultiAgentReply (Phase 2-5 + Best-of-N + 人设Critic)', () => {
     expect(writerOpts().memoryFindings).toBeUndefined();
   });
 
+  it('deep cognitive route enables grounding experts even when chat specialists are off', async () => {
+    setEnv({ chatSpecialists: false, critic: false, personaCritic: false });
+    (runMemorySpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(memoryOk('DEEP_MEM'));
+    (runPersonaSpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(personaOk('DEEP_PER'));
+
+    await runMultiAgentReply({ ...baseInput('direct'), cognitiveRoute: 'deep' });
+
+    expect(runResearcher).not.toHaveBeenCalled();
+    expect(runMemorySpecialist).toHaveBeenCalledTimes(1);
+    expect(runPersonaSpecialist).toHaveBeenCalledTimes(1);
+    expect(writerOpts().memoryFindings).toContain('DEEP_MEM');
+  });
+
   it('lookup:研究员+记忆员+人设员并行 + 核查员跑;Critic 默认不跑', async () => {
     (runResearcher as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(researcherOk());
     (runMemorySpecialist as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(memoryOk());

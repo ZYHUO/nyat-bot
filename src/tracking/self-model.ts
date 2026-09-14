@@ -39,11 +39,12 @@ export function saveSelfNotes(notes: { note: string; evidence?: string }[]): num
 }
 
 /** 取最新的自我认知（注入 prompt 用）。 */
-export function getActiveSelfNotes(limit = 5): SelfNote[] {
+export function getActiveSelfNotes(limit = 5, asOfSec?: number): SelfNote[] {
   try {
-    return getDb()
-      .prepare(`SELECT * FROM self_model_notes ORDER BY created_at DESC, id DESC LIMIT ?`)
-      .all(limit) as SelfNote[];
+    const boundedAsOf = Number.isSafeInteger(asOfSec) && (asOfSec as number) > 0 ? asOfSec : undefined;
+    return (boundedAsOf === undefined
+      ? getDb().prepare(`SELECT * FROM self_model_notes ORDER BY created_at DESC, id DESC LIMIT ?`).all(limit)
+      : getDb().prepare(`SELECT * FROM self_model_notes WHERE created_at <= ? ORDER BY created_at DESC, id DESC LIMIT ?`).all(boundedAsOf, limit)) as SelfNote[];
   } catch (err) {
     logger.debug({ err }, 'getActiveSelfNotes failed (non-fatal)');
     return [];

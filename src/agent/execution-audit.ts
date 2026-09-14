@@ -1,4 +1,6 @@
 import { validateAcceptance, type AcceptanceContract, type AcceptanceCheck, type AcceptanceResult } from './task-evidence.js';
+import { randomUUID } from 'node:crypto';
+import { emitTaskRuntimeEvent } from './task-runtime-events.js';
 
 export interface AuditSnapshot {
   totalCalls: number;
@@ -8,6 +10,14 @@ export interface AuditSnapshot {
   lastFailedName?: string;
   proposal?: AcceptanceContract;
 }
+
+export interface ExecutionAuditEventContext {
+  taskId?: string;
+  chatId?: number;
+  cognitiveAnchorEventId?: string;
+  turn?: () => number | undefined;
+  segment?: () => number | undefined;
+}
 function returnedFailure(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
@@ -16,7 +26,12 @@ function returnedFailure(value: unknown): boolean {
 }
 
 /** Host-only controller. No receipt-writing capability is exposed in the model runtime. */
-export function createExecutionAudit(root: string, caller?: AcceptanceContract, prior?: AuditSnapshot) {
+export function createExecutionAudit(
+  root: string,
+  caller?: AcceptanceContract,
+  prior?: AuditSnapshot,
+  eventContext?: ExecutionAuditEventContext,
+) {
   const contract = caller ? structuredClone(caller) : undefined;
   const state: AuditSnapshot = prior ? structuredClone(prior) : { totalCalls: 0, failedCalls: 0, retryCount: 0, receipts: [] };
   let verifiedAt = -1;
@@ -61,17 +76,76 @@ export function createExecutionAudit(root: string, caller?: AcceptanceContract, 
           return async (...args: unknown[]) => {
             inflight++;
             const name = `${namespace}.${key}`;
+            const taskId = eventContext?.taskId;
+            const chatId = eventContext?.chatId;
+            const invocationId = taskId && chatId !== undefined ? randomUUID() : undefined;
+            if (invocationId) {
+              emitTaskRuntimeEvent({
+                kind: 'tool_started',
+                taskId: taskId!,
+                chatId: chatId!,
+                cognitiveAnchorEventId: eventContext?.cognitiveAnchorEventId,
+                invocationId,
+                turn: eventContext?.turn?.(),
+                segment: eventContext?.segment?.(),
+                toolName: name,
+              });
+            }
             try {
               const result: unknown = await Reflect.apply(value, target, args);
-              record(name, !returnedFailure(result));
+              const ok = !returnedFailure(result);
+              record(name, ok);
+              if (invocationId) {
+                emitTaskRuntimeEvent({
+                  kind: 'tool_finished',
+                  taskId: taskId!,
+                  chatId: chatId!,
+                  cognitiveAnchorEventId: eventContext?.cognitiveAnchorEventId,
+                  invocationId,
+                  turn: eventContext?.turn?.(),
+                  segment: eventContext?.segment?.(),
+                  toolName: name,
+                  ...(ok ? {} : { errorCode: failureCode(result) }),
+                });
+              }
               return result;
-            } catch (err) { record(name, false); throw err; }
+            } catch (err) {
+              record(name, false);
+              if (invocationId) {
+                emitTaskRuntimeEvent({
+                  kind: 'tool_finished',
+                  taskId: taskId!,
+                  chatId: chatId!,
+                  cognitiveAnchorEventId: eventContext?.cognitiveAnchorEventId,
+                  invocationId,
+                  turn: eventContext?.turn?.(),
+                  segment: eventContext?.segment?.(),
+                  toolName: name,
+                  errorCode: failureCode(err),
+                });
+              }
+              throw err;
+            }
             finally { inflight--; }
           };
         },
       });
     },
   };
+}
+
+function failureCode(value: unknown): string {
+  if (value instanceof Error && value.name && value.name !== 'Error') return value.name.slice(0, 80);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    for (const key of ['code', 'errorCode']) {
+      const candidate = record[key];
+      if (typeof candidate === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(candidate.trim())) return candidate.trim();
+    }
+    if (typeof record['exitCode'] === 'number') return `exit_code_${record['exitCode']}`;
+    if (record['ok'] === false || record['success'] === false || record['error']) return 'host_result_failed';
+  }
+  return 'tool_failed';
 }
 export type ExecutionAudit = ReturnType<typeof createExecutionAudit>;
 const audits = new WeakMap<object, ExecutionAudit>();
