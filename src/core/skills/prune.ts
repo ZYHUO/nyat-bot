@@ -15,6 +15,7 @@
 
 import { getDb } from '../../db/sqlite.js';
 import { logger } from '../../shared/logger.js';
+import { rejectSkill } from './lifecycle.js';
 
 export interface PruneResult {
   expired: number;
@@ -27,15 +28,14 @@ export interface PruneResult {
 export function pruneExpiredProposals(maxAgeSec = 30 * 86400): PruneResult {
   try {
     const cutoff = Math.floor(Date.now() / 1000) - maxAgeSec;
-    const r = getDb()
-      .prepare(
-        `UPDATE core_skill_lifecycle SET status = 'rejected',
-         verify_log = 'pruned: proposal expired (>30d without verify)',
-         updated_at = ?
-         WHERE status = 'proposed' AND created_at < ?`,
-      )
-      .run(Math.floor(Date.now() / 1000), cutoff);
-    return { expired: Number(r.changes) };
+    const rows = getDb()
+      .prepare(`SELECT id FROM core_skill_lifecycle WHERE status = 'proposed' AND created_at < ?`)
+      .all(cutoff) as Array<{ id?: number }>;
+    let expired = 0;
+    for (const row of rows) {
+      if (row.id !== undefined && rejectSkill(Number(row.id), 'pruned: proposal expired (>30d without verify)').ok) expired += 1;
+    }
+    return { expired };
   } catch (err) {
     logger.debug({ err }, 'pruneExpiredProposals failed (non-critical)');
     return { expired: 0 };

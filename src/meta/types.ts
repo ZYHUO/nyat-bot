@@ -16,6 +16,8 @@ export interface AttentionItem {
   payload?: Record<string, unknown>;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
+  /** Durable Telegram event used to anchor workspace/replay reads. */
+  cognitiveAnchorEventId?: string;
 }
 
 import type { AcceptanceContract, AcceptanceResult } from '../agent/task-evidence.js';
@@ -54,6 +56,8 @@ export interface DispatchTask {
   resultSummary?: string;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
+  /** Durable Telegram event used to anchor task workspace reads. */
+  cognitiveAnchorEventId?: string;
 }
 
 export interface SubagentCallback {

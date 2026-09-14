@@ -13,6 +13,7 @@ import { getBeliefSnapshot } from './blackboard/snapshot.js';
 import { env } from './env-shim.js';
 import type { BeliefView } from './beliefs/types.js';
 import type { FormattedMessage } from '../shared/types.js';
+import type { CognitiveScope } from '../shared/cognitive-scope.js';
 
 export interface CoreState {
   /** 身份段（静态，不烧 token 查表） */
@@ -46,6 +47,11 @@ export async function assembleState(
   // 快照优先：L2 开工后冻结的视图；没有快照读实时（L1 路径）。
   const beliefs: BeliefView[] = [];
   if (e.CORE_BELIEF_VIEW_ENABLED) {
+    const scope: CognitiveScope = {
+      visibility: 'chat',
+      chatId,
+      ...(message.uid > 0 ? { userId: message.uid } : {}),
+    };
     const snap = getBeliefSnapshot(chatId);
     if (snap) {
       beliefs.push(...snap.slice(0, budget));
@@ -53,7 +59,7 @@ export async function assembleState(
       for (const pred of CHAT_PREDICATES) {
         if (beliefs.length >= budget) break;
         try {
-          const got = getActiveBeliefs(pred);
+          const got = getActiveBeliefs(pred, { scope });
           for (const b of got) {
             if (beliefs.length >= budget) break;
             if (b.effectiveStatus !== 'contradicted') beliefs.push(b);

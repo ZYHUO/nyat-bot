@@ -14,7 +14,7 @@ import { drainInterrupts, isHardStop } from '../agent/interrupts.js';
 import { compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
 import { persistDigest } from '../meta/session-digest.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
-import { createDebt, resolveOpenDebtsByTask } from '../agent/cognitive-debts.js';
+import { createDebt, resolveOpenDebtsByTaskWithEvidence } from '../agent/cognitive-debts.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
 function startTypingHeartbeat(chatId: number): () => void {
@@ -308,7 +308,13 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   task.waitingForUser = false;
   state.putTask(task);
   await persistCodeActTask(task);
-  emitTaskRuntimeEvent({ kind: 'task_started', taskId: task.id, chatId: task.chatId, segment: task.segment });
+  emitTaskRuntimeEvent({
+    kind: 'task_started',
+    taskId: task.id,
+    chatId: task.chatId,
+    segment: task.segment,
+    cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+  });
 
   // CGM 叙事流:dispatch 事件本身也是一条 digest("派 X 去 chat Y")。
   // 埋点放在 executor 任务起点而不是 meta-api.ts —— meta-api 归另一 workstream,
@@ -363,6 +369,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   const host = createHostApi(task.chatId, {
     taskId: task.id,
+    targetUserId: task.targetUserId,
     acceptance: task.acceptance,
     priorAudit: task.audit,
     defaultReplyTo: replyAnchor && replyAnchor > 0 ? replyAnchor : undefined,
@@ -378,6 +385,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     // 没意思仍安静 endTask（原 maxText/File=0「私下练习」让自玩完全不可见）。
     maxFileSends: isSelfPlay ? 1 : undefined,
     messageThreadId: task.messageThreadId,
+    cognitiveAnchorEventId: task.cognitiveAnchorEventId,
   });
 
   const audit = getExecutionAudit(host)!;
@@ -633,7 +641,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   if (env().WORLD_STATE_ENABLED) {
     try {
       const { buildWorldStateBlock } = await import('../agent/world-state.js');
-      const block = buildWorldStateBlock(task.contentDirection);
+      const block = buildWorldStateBlock(task.contentDirection, 4, {
+        visibility: 'task',
+        taskId: task.id,
+        chatId: task.chatId,
+      });
       if (block) systemPrompt += block;
     } catch {
       /* best-effort */
@@ -716,14 +728,15 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   let workspaceBlock = '';
   try {
-    const { buildCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
-    const workspace = await buildCognitiveWorkspace({ chatId: task.chatId, taskId: task.id, userId: task.targetUserId });
-    workspaceBlock = [
-      workspace.activeGoals.length ? `## 当前关注\n${workspace.activeGoals.map((x) => `- ${x}`).join('\n')}` : '',
-      workspace.currentTask ? `## 当前任务状态\n${workspace.currentTask.state}${workspace.currentTask.next ? `\n${workspace.currentTask.next}` : ''}` : '',
-      workspace.uncertainties.length ? `## 未确定事项\n${workspace.uncertainties.map((x) => `- ${x}`).join('\n')}` : '',
-      workspace.parts.map((x) => x.text).join('\n\n'),
-    ].filter(Boolean).join('\n\n');
+    const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
+    const workspace = await buildCognitiveWorkspace({
+      chatId: task.chatId,
+      taskId: task.id,
+      userId: task.targetUserId,
+      queryText: (anchorText || task.contentDirection).slice(0, 800),
+      asOfEventId: task.cognitiveAnchorEventId,
+    });
+    workspaceBlock = renderCognitiveWorkspace(workspace);
   } catch (err) {
     logger.debug({ err, taskId: task.id }, 'cognitive workspace unavailable');
   }
@@ -825,13 +838,25 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     const block = pending
       .map((input) => `- ${input.from ?? '用户'}: ${input.text}`)
       .join('\n');
-    if (pending.some((input) => isHardStop(input.text))) {
+    const pendingHardStop = pending.some((input) => isHardStop(input.text));
+    const pendingResolution = pendingHardStop ? '用户已停止该任务，债务关闭' : undefined;
+    const pendingEventId = emitTaskRuntimeEvent({
+      kind: pendingHardStop ? 'user_interrupt_received' : 'user_clarification_received',
+      taskId: task.id,
+      chatId: task.chatId,
+      cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+      ...(pendingResolution ? { resolution: pendingResolution } : {}),
+      resultSummary: pendingHardStop ? 'failed_user_stopped' : 'clarification_received',
+    });
+    if (pendingHardStop) {
       host.runtime.endTask('failed_user_stopped');
       endSummary = 'failed_user_stopped';
       task.waitingForUser = false;
       task.waitingReason = undefined;
       if (task.checkpointKey) await clearCheckpoint(task.checkpointKey);
-      resolveOpenDebtsByTask(task.id, '用户已停止该任务，债务关闭');
+      if (pendingEventId && pendingResolution) {
+        resolveOpenDebtsByTaskWithEvidence({ taskId: task.id, chatId: task.chatId, resolution: pendingResolution, resolutionEventId: pendingEventId });
+      }
       task.status = 'failed';
       await persistCodeActTask(task);
     } else {
@@ -839,7 +864,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       task.waitingForUser = false;
       task.waitingReason = undefined;
       task.status = 'running';
-      resolveOpenDebtsByTask(task.id, '用户已回答澄清，任务恢复执行');
+      if (pendingEventId) {
+        resolveOpenDebtsByTaskWithEvidence({ taskId: task.id, chatId: task.chatId, resolution: '用户已回答澄清，任务恢复执行', resolutionEventId: pendingEventId });
+      }
       await persistCodeActTask(task);
     }
   }
@@ -860,10 +887,20 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         try {
           const interrupts = await drainInterrupts(task.id);
             if (interrupts.length > 0) {
-              emitTaskRuntimeEvent({ kind: 'user_interrupt_received', taskId: task.id, chatId: task.chatId, turn, segment });
+              const hardStop = interrupts.some((i) => isHardStop(i.text));
+              const interruptResolution = hardStop ? '用户已停止该任务，债务关闭' : undefined;
+              const interruptEventId = emitTaskRuntimeEvent({
+                kind: 'user_interrupt_received',
+                taskId: task.id,
+                chatId: task.chatId,
+                cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+                turn,
+                segment,
+                ...(interruptResolution ? { resolution: interruptResolution } : {}),
+              });
               logger.info({ taskId: task.id, chatId: task.chatId, count: interrupts.length }, 'task user interrupt received');
 
-            if (interrupts.some((i) => isHardStop(i.text))) {
+            if (hardStop) {
               logger.info({ taskId: task.id, chatId: task.chatId, turn }, 'agent task hard-stopped by user');
               const { incrCounter } = await import('../metrics/registry.js');
               incrCounter('codeact_hardstop_total', { chat: task.chatId });
@@ -875,7 +912,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
               if (task.checkpointKey) await clearCheckpoint(task.checkpointKey);
               task.waitingForUser = false;
               task.pendingUserInput = undefined;
-              resolveOpenDebtsByTask(task.id, '用户已停止该任务，债务关闭');
+              if (interruptEventId && interruptResolution) {
+                resolveOpenDebtsByTaskWithEvidence({ taskId: task.id, chatId: task.chatId, resolution: interruptResolution, resolutionEventId: interruptEventId });
+              }
               task.status = 'failed';
               await persistCodeActTask(task);
               break;
@@ -929,6 +968,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         break;
       }
       let llmText = '';
+      emitTaskRuntimeEvent({
+        kind: 'model_turn_started',
+        taskId: task.id,
+        chatId: task.chatId,
+        cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+        turn,
+        segment,
+      });
       try {
         const result = await callWithFallback({
           usage: env().CODEACT_USAGE,
@@ -937,7 +984,26 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           temperature: 0.7,
         });
         llmText = result.content ?? '';
+        emitTaskRuntimeEvent({
+          kind: 'model_turn_finished',
+          taskId: task.id,
+          chatId: task.chatId,
+          cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+          turn,
+          segment,
+          resultSummary: 'llm_response_received',
+        });
       } catch (err) {
+        emitTaskRuntimeEvent({
+          kind: 'model_turn_finished',
+          taskId: task.id,
+          chatId: task.chatId,
+          cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+          turn,
+          segment,
+          errorCode: 'llm_failed',
+          resultSummary: 'llm_call_failed',
+        });
         logger.warn({ err, taskId: task.id, turn }, 'CodeAct LLM failed');
         break;
       }
@@ -1039,7 +1105,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           logger.warn({ err, taskId: task.id }, 'agent segment summary failed');
         }
 
-        emitTaskRuntimeEvent({ kind: 'checkpoint_saved', taskId: task.id, chatId: task.chatId, segment: segment + 1, turn: task.totalTurns });
+        emitTaskRuntimeEvent({
+          kind: 'checkpoint_saved',
+          taskId: task.id,
+          chatId: task.chatId,
+          segment: segment + 1,
+          turn: task.totalTurns,
+          cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+        });
         const key = await saveCheckpoint(task, {
           history,
           progressSummary,
@@ -1161,9 +1234,31 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
       task.status = endSummary.startsWith('failed') || endSummary === 'user_stopped' ? 'failed' : 'done';
       task.resultSummary = endSummary || 'done';
+      const terminalResolution = task.status === 'done'
+        ? `任务完成: ${String(endSummary).slice(0, 200)}`
+        : undefined;
+      const terminalEventId = emitTaskRuntimeEvent({
+        kind: task.status === 'done' ? 'task_completed' : 'task_failed',
+        taskId: task.id,
+        chatId: task.chatId,
+        cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+        segment,
+        turn: task.totalTurns,
+        resultSummary: task.resultSummary,
+        ...(terminalResolution ? { resolution: terminalResolution } : {}),
+        assessmentStatus: task.assessment.status,
+      });
       if (task.status === 'done') {
-        // 任务完成 → 偿还名下的未完成/等待债务（承诺债务由 goal 生命周期另行处理）。
-        resolveOpenDebtsByTask(task.id, `任务完成: ${String(endSummary).slice(0, 200)}`);
+        // 任务完成只能用这次 host 终态事件作为 resolution evidence；事件不可写时
+        // 宁可保留债务，也不回退到没有 provenance 的直接清债。
+        if (terminalEventId && terminalResolution) {
+          resolveOpenDebtsByTaskWithEvidence({
+            taskId: task.id,
+            chatId: task.chatId,
+            resolution: terminalResolution,
+            resolutionEventId: terminalEventId,
+          });
+        }
       } else if (endSummary !== 'failed_user_stopped') {
         // 任务失败 = 一笔未完成认知，后续可主动修复或向用户说明。
         createDebt({
@@ -1172,11 +1267,12 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           taskId: task.id,
           kind: 'unfinished_task',
           statement: `任务未完成: ${String(endSummary).slice(0, 300)}`,
-          sourceEventIds: [`task:${task.id}`],
+          sourceEventIds: terminalEventId ? [terminalEventId] : [`task:${task.id}`],
           priority: 6,
           confidence: 1,
           ttlSec: 7 * 24 * 3600,
           nextCheckInSec: 6 * 3600,
+          ...(terminalEventId ? { dedupeKey: `event-debt:${terminalEventId}:unfinished_task` } : {}),
         });
       }
       saveTaskEvidence({ taskId: task.id, chatId: task.chatId, lifecycle: task.status,

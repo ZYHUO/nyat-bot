@@ -101,4 +101,18 @@ describe('belief view', () => {
     expect(b!.effectiveStatus).toBe('stale');
     expect(b!.decayedConfidence).toBeCloseTo(0.5);
   });
+
+  it('filters newer belief revisions from an event-anchored read', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const id = upsertBelief({
+      sourceTable: 'x',
+      sourceRowId: 2,
+      predicate: 'p',
+      summary: '当前判断',
+      evidence: ['event:new'],
+      scope: { visibility: 'chat', chatId: -100 },
+    });
+    db.prepare('UPDATE core_beliefs SET updated_at = ?, created_at = ? WHERE id = ?').run(now, now, id);
+    expect(getActiveBeliefs('p', { scope: { visibility: 'chat', chatId: -100 }, asOf: now - 10 })).toEqual([]);
+  });
 });

@@ -14,6 +14,7 @@ const envStore: Record<string, unknown> = {
   JUDGE_KNOWLEDGE_ENABLED: false,
   JUDGE_KNOWLEDGE_PERMANENT: true,
   JUDGE_KNOWLEDGE_GROUP: true,
+  AGENCY_RUNTIME_MODE: 'shadow',
 };
 
 vi.mock('../../../../src/db/sqlite.js', () => ({ getDb: () => db }));
@@ -63,10 +64,13 @@ beforeEach(() => {
   db = new Database(':memory:');
   db.exec(readFileSync('migrations/0083_core_belief_view.sql', 'utf8'));
   db.exec(readFileSync('migrations/0084_core_blackboard.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0089_cognitive_events.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0092_agency_runs.sql', 'utf8'));
   vi.mocked(l0Rule).mockReset();
   vi.mocked(microJudge).mockReset();
   envStore['CORE_BELIEF_VIEW_ENABLED'] = false;
   envStore['CORE_V2_CHAT_IDS'] = '';
+  envStore['AGENCY_RUNTIME_MODE'] = 'shadow';
 });
 
 describe('core loop classifyLevel', () => {
@@ -119,6 +123,41 @@ describe('core runCoreTick', () => {
     expect(n).toBe(1);
   });
 
+  it('L1 proposal → durable Agency run，shadow 策略只进入 waiting 且幂等', async () => {
+    vi.mocked(l0Rule).mockReturnValue(null);
+    vi.mocked(microJudge).mockResolvedValue({
+      action: 'REPLY',
+      level: 'L1_MICRO',
+      replyPath: 'direct',
+      confidence: 0.9,
+      latencyMs: 100,
+    });
+    const { runCoreTick } = await import('../../../../src/core/loop.js');
+    const input = {
+      chatId: -100,
+      message: msg('请观察这条消息', { messageId: 42 }),
+      recentMessages: [],
+      cognitiveAnchorEventId: 'telegram-event-42',
+    };
+    const first = await runCoreTick(input);
+    expect(first.agencyRunId).toEqual(expect.any(String));
+    const row = db.prepare(
+      'SELECT status, action_json, expected_outcome, causation_id FROM agency_runs WHERE id = ?',
+    ).get(first.agencyRunId) as { status: string; action_json: string; expected_outcome: string; causation_id: string };
+    expect(row.status).toBe('waiting');
+    expect(row.causation_id).toBe('telegram-event-42');
+    expect(JSON.parse(row.action_json)).toEqual({
+      type: 'observe',
+      target: 'core:judge:REPLY:message:-100:42',
+    });
+    expect(row.expected_outcome).toContain('"action":"REPLY"');
+
+    const second = await runCoreTick(input);
+    expect(second.agencyRunId).toBe(first.agencyRunId);
+    const count = (db.prepare('SELECT COUNT(*) AS c FROM agency_runs').get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
   it('L1 失败 → legacy fallback（不拦旧链路）', async () => {
     vi.mocked(l0Rule).mockReturnValue(null);
     vi.mocked(microJudge).mockRejectedValue(new Error('llm down'));
@@ -164,6 +203,53 @@ describe('core runCoreTick', () => {
     });
     expect(r.level).toBe('l2-upgrade');
     expect(r.l2DryRun).toEqual([]);
+  });
+
+  it('permission gate 打开时，readonly intent 经 Agency shadow 而不是直调工具', async () => {
+    envStore['CORE_PERMISSION_GATE_ENABLED'] = true;
+    envStore['AGENCY_RUNTIME_MODE'] = 'shadow';
+    vi.mocked(l0Rule).mockReturnValue(null);
+    vi.mocked(microJudge).mockResolvedValue({
+      action: 'REPLY',
+      level: 'L1_MICRO',
+      confidence: 0.9,
+      latencyMs: 100,
+    });
+    const { runCoreTick } = await import('../../../../src/core/loop.js');
+    const r = await runCoreTick({
+      chatId: -100,
+      message: msg('@nyatbot 看一下上下文'),
+      recentMessages: [],
+    });
+    expect(r.l2DryRun).toHaveLength(1);
+    expect(r.l2DryRun?.[0]).toMatchObject({
+      tool: 'chats.recentMessages',
+      tier: 'readonly',
+      approved: false,
+      executed: false,
+    });
+    expect(r.l2DryRun?.[0]?.agencyRunId).toEqual(expect.any(String));
+    expect(db.prepare('SELECT status FROM agency_runs WHERE id = ?').get(r.l2DryRun?.[0]?.agencyRunId)).toEqual({ status: 'waiting' });
+  });
+
+  it('Agency migration 不可用时，readonly gate 保留 legacy fallback', async () => {
+    envStore['CORE_PERMISSION_GATE_ENABLED'] = true;
+    envStore['AGENCY_RUNTIME_MODE'] = 'authority';
+    db.exec('DROP TABLE agency_runs');
+    vi.mocked(l0Rule).mockReturnValue(null);
+    vi.mocked(microJudge).mockResolvedValue({
+      action: 'REPLY',
+      level: 'L1_MICRO',
+      confidence: 0.9,
+      latencyMs: 100,
+    });
+    const { runCoreTick } = await import('../../../../src/core/loop.js');
+    const r = await runCoreTick({
+      chatId: -100,
+      message: msg('@nyatbot 看一下上下文'),
+      recentMessages: [],
+    });
+    expect(r.l2DryRun).toEqual([{ tool: 'chats.recentMessages', tier: 'readonly', approved: true, executed: true }]);
   });
 });
 

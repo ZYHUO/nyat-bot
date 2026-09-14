@@ -43,6 +43,7 @@ export async function metaTick(): Promise<void> {
             userId: d.userId,
             textPreview: d.textPreview,
             pressure: d.pressure,
+            cognitiveAnchorEventId: d.cognitiveAnchorEventId,
             payload: {
               ...(d.payload ?? {}),
               deferCount: d.deferCount,

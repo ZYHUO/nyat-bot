@@ -118,6 +118,8 @@ export interface ChatJob {
   messageId?: number;
   update: UpdateLike;
   enqueuedAt: number;
+  /** Durable message event used to anchor event-aware workspace reads. */
+  cognitiveAnchorEventId?: string;
   /** Phase 1: debounce coalesce metadata. Non-last-in-batch jobs skip judge/reply. */
   coalesce?: {
     batchSize: number;
@@ -140,6 +142,8 @@ export interface ChatJob {
    * forced-continue after interrupt); epoch: cognition-turn generation id.
    */
   turnContext?: {
+    /** Durable message event used to anchor event-aware workspace reads. */
+    cognitiveAnchorEventId?: string;
     obligationId?: string;
     obligationTargetUid?: number;
     obligationStrong?: boolean;

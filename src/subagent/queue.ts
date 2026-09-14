@@ -12,6 +12,7 @@ import {
   clearCodeActActive,
   persistCodeActTask,
 } from './task-store.js';
+import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
 
 export const CODEACT_QUEUE_NAME = 'xxb-codeact';
 
@@ -49,6 +50,13 @@ export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
     const { enqueueSubagentTaskLocal } = await import('./executor.js');
     enqueueSubagentTaskLocal(task);
   }
+  emitTaskRuntimeEvent({
+    kind: 'task_queued',
+    taskId: task.id,
+    chatId: task.chatId,
+    segment: task.segment,
+    cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+  });
 }
 
 /**
@@ -75,6 +83,13 @@ export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void>
     const { enqueueSubagentTaskLocal } = await import('./executor.js');
     enqueueSubagentTaskLocal(task);
   }
+  emitTaskRuntimeEvent({
+    kind: 'task_queued',
+    taskId: task.id,
+    chatId: task.chatId,
+    segment: task.segment,
+    cognitiveAnchorEventId: task.cognitiveAnchorEventId,
+  });
 }
 
 async function processCodeActJob(job: Job<DispatchTask>, token?: string): Promise<void> {

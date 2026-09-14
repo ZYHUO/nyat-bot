@@ -198,6 +198,7 @@ export function buildMessages(
   burstHint?: string,
   expressionOverride?: string,
   midTermMemory?: string,
+  cognitiveWorkspaceHint?: string,
 ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
   const stablePrefixParts: string[] = [];
   const volatileParts: string[] = [];
@@ -412,6 +413,10 @@ export function buildMessages(
   // 中期记忆(MaiBot 借鉴):滚出窗口的旧对话压缩摘要,pinned 背景
   if (midTermMemory) {
     volatileParts.push(`[中期记忆] 更早对话的压缩摘要(背景参考,别逐句复述):\n${midTermMemory}`);
+  }
+
+  if (cognitiveWorkspaceHint) {
+    volatileParts.push(cognitiveWorkspaceHint);
   }
 
   if (checkinData) {

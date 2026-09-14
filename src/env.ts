@@ -448,6 +448,63 @@ const envSchema = z.object({
   CORE_BELIEF_VIEW_ENABLED: booleanFromEnv.default(false),
   CORE_BLACKBOARD_ENABLED: booleanFromEnv.default(false),
   CORE_PERMISSION_GATE_ENABLED: booleanFromEnv.default(false),
+  // Host-owned Agency rollout mode. The default keeps Core proposals observable
+  // without allowing them to dispatch adapters or create external side effects.
+  AGENCY_RUNTIME_MODE: z.enum(['shadow', 'advisory', 'canary', 'authority']).default('shadow'),
+  AGENCY_CANARY_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
+  AGENCY_MAX_LLM_CALLS: z.coerce.number().int().min(0).max(100).default(2),
+  AGENCY_MAX_TOOL_CALLS: z.coerce.number().int().min(0).max(100).default(8),
+  AGENCY_FAIL_CLOSED: booleanFromEnv.default(true),
+  // Explicit authority-only CodeAct queue binding. Shadow/advisory/canary keep
+  // the legacy host path; authority rejects instead of silently bypassing it.
+  AGENCY_CODEACT_TRANSPORT_ENABLED: booleanFromEnv.default(false),
+  // Explicit authority-only Reply text binding. Authority failures never fall
+  // back to legacy sender.sendDirect; keep the rollout opt-in.
+  AGENCY_REPLY_TRANSPORT_ENABLED: booleanFromEnv.default(false),
+  // Explicit authority-only wait/timing binding. Authority failures never
+  // fall back to direct transitionToWait; keep the rollout opt-in.
+  AGENCY_WAIT_TRANSPORT_ENABLED: booleanFromEnv.default(false),
+  // Record successful legacy Reply deliveries as observed Agency outcomes.
+  // This never dispatches or sends; keep it opt-in until the ledger is sized.
+  AGENCY_LEGACY_REPLY_OBSERVATION_ENABLED: booleanFromEnv.default(false),
+  // Durable perception/event log. Disable only for emergency rollback; callers
+  // remain fail-soft when the migration is not present yet.
+  COGNITIVE_EVENTS_ENABLED: booleanFromEnv.default(true),
+  COGNITIVE_OUTBOX_ENABLED: booleanFromEnv.default(true),
+  // Assemble the scoped cognitive workspace for legacy reply/Heart/Meta paths.
+  // Keep it opt-in until latency and prompt-budget measurements are available.
+  COGNITIVE_WORKSPACE_V2_ENABLED: booleanFromEnv.default(false),
+  // Deterministic fast/deep/background routing telemetry. It is shadow-only
+  // until a later rollout explicitly consumes the decision for behavior.
+  COGNITIVE_ROUTING_ENABLED: booleanFromEnv.default(false),
+  // Optional behavior rollout: deep Reply routes and signal-bearing background
+  // ticks may opt into the scoped workspace. Empty chat list means all chats;
+  // keep disabled by default.
+  COGNITIVE_ROUTING_BEHAVIOR_ENABLED: booleanFromEnv.default(false),
+  COGNITIVE_ROUTING_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
+  // Metadata-only group interaction expectations and host-observed social
+  // prediction error. It never changes reply selection; keep rollout opt-in.
+  SOCIAL_PREDICTION_ENABLED: booleanFromEnv.default(false),
   // 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。
   CORE_V2_ENABLED: booleanFromEnv.default(true),
   // Phase 2 双写：旧表写入后同步 belief（读投影）。默认开（best-effort，
@@ -746,6 +803,19 @@ const envSchema = z.object({
   // 认知债务后台扫描（CSR）：过期清理 + 到期债务记录 + 预测误差摘要。默认关，灰度开。
   DEBT_SWEEP_ENABLED: booleanFromEnv.default(false),
   DEBT_SWEEP_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
+  // Durable cognitive event projection is safe to run without authority; debt
+  // creation remains a separate opt-in until its false-positive rate is known.
+  DEBT_AUTO_MATCH_ENABLED: booleanFromEnv.default(false),
+  // Optional host-owned semantic ranking after deterministic debt matching.
+  // It never resolves debt and is deliberately off until cost/quality is measured.
+  DEBT_SEMANTIC_MATCH_ENABLED: booleanFromEnv.default(false),
+  DEBT_SEMANTIC_MATCH_USAGE: z.string().default('judge'),
+  DEBT_SEMANTIC_MATCH_MAX_CANDIDATES: z.coerce.number().int().min(0).max(32).default(4),
+  DEBT_SEMANTIC_MATCH_MIN_SCORE: z.coerce.number().min(0).max(1).default(0.72),
+  DEBT_SEMANTIC_MATCH_TIMEOUT_MS: z.coerce.number().int().positive().max(10_000).default(2_500),
+  // LLM group-norm proposals do not mutate the durable hypothesis by default;
+  // verified host evidence uses the separate evidence-gated updater.
+  GROUP_NORMS_AUTO_UPDATE_ENABLED: booleanFromEnv.default(false),
 
   // 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。
   REPLY_MODE_ENABLED: booleanFromEnv.default(true),
@@ -815,8 +885,10 @@ const envSchema = z.object({
   SANDBOX_ENABLED: booleanFromEnv.default(false),
   SANDBOX_TERMINAL_ENABLED: booleanFromEnv.default(true),
   SANDBOX_BROWSER_ENABLED: booleanFromEnv.default(true),
-  // Phase 15 真隔离: bwrap userns 沙盒默认开。设 0 回退宿主 exec(应急, 无隔离)。
+  // Phase 15 真隔离: bwrap userns 沙盒默认开。
   SANDBOX_BWRAP_ENABLED: booleanFromEnv.default(true),
+  // 隔离能力不可用时默认拒绝执行；仅在明确应急配置为 false 时允许宿主回退。
+  SANDBOX_REQUIRE_ISOLATION: booleanFromEnv.default(true),
   SANDBOX_ALLOWED_COMMANDS: z.string().default(''),
   SANDBOX_BLOCKED_COMMANDS: z.string().default('rm -rf,shutdown,reboot,mkfs,halt,dd if=,chmod 777'),
 
@@ -934,6 +1006,18 @@ const envSchema = z.object({
   // chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token;
   // 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。
   MULTI_AGENT_CHAT_SPECIALISTS: booleanFromEnv.default(true),
+  // Route-convergence experiment: for an explicit allowlist, direct/fast
+  // replies stop spawning chat specialists; deep/lookup keep only work
+  // justified by their route. Default remains legacy.
+  MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED: booleanFromEnv.default(false),
+  MULTI_AGENT_ROUTE_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
   // Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。
   MULTI_AGENT_CHECKER_ENABLED: booleanFromEnv.default(true),
   MULTI_AGENT_CHECKER_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),

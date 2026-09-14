@@ -135,6 +135,10 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         timings,
         job,
       });
+      if (bkResult.cognitiveAnchorEventId) {
+        job.cognitiveAnchorEventId = bkResult.cognitiveAnchorEventId;
+        if (job.turnContext) job.turnContext.cognitiveAnchorEventId = bkResult.cognitiveAnchorEventId;
+      }
       if (bkResult?.shouldAbort) {
         logger.debug({ chatId: job.chatId, reason: bkResult.reason }, "Pipeline complete (bookkeeping intercept)");
         return;
@@ -249,7 +253,9 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         const queued = await pushSleepPending(job.chatId, {
           entry: {
             update: job.update, chatId: job.chatId, messageId: formatted.messageId,
-            enqueuedAt: job.enqueuedAt, waitReplay: true, sleepCatchup: true,
+            enqueuedAt: job.enqueuedAt,
+            cognitiveAnchorEventId: job.cognitiveAnchorEventId,
+            waitReplay: true, sleepCatchup: true,
           },
           rule: l0?.rule,
           ts: Date.now(),
@@ -435,6 +441,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           chatId: job.chatId,
           message: formatted,
           legacy: judgeResult,
+          cognitiveAnchorEventId: job.cognitiveAnchorEventId,
           burstHint,
           focusLevel,
         });
@@ -461,4 +468,3 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     await releaseHeldChatLock();
   }
 }
-

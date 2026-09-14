@@ -487,6 +487,45 @@ describe("processPipeline path branching", () => {
     );
   });
 
+  it("enables scoped workspace only for an opted-in non-fast cognitive route", async () => {
+    mockJudge.mockResolvedValue({
+      action: "REPLY",
+      replyPath: "direct",
+      level: "L1_MICRO",
+      latencyMs: 12,
+    });
+    mockFormatMessage.mockReturnValue({
+      ...makeFormattedMessage(),
+      textContent: "请把这个目标持续关注下去",
+    });
+    mockEnv.mockReturnValue({
+      BOT_USERNAME: "xxb_bot",
+      BOT_NICKNAMES: ["xxb"],
+      JUDGE_WINDOW_SIZE: 20,
+      OUTCOME_TRACKING_ENABLED: false,
+      CHANNEL_SOURCE_IDS: [],
+      COGNITIVE_ROUTING_ENABLED: true,
+      COGNITIVE_ROUTING_BEHAVIOR_ENABLED: true,
+      COGNITIVE_ROUTING_CHAT_IDS: [-100123],
+    });
+
+    await processPipeline(makeJob());
+
+    expect(mockGenerateReply).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "REPLY",
+      -100123,
+      9999,
+      "direct",
+      undefined,
+      expect.objectContaining({
+        isAddressed: false,
+        useCognitiveWorkspace: true,
+      }),
+    );
+  });
+
   it("applies chat-local path policy overlay before retrieval", async () => {
     mockJudge.mockResolvedValue({
       action: "REPLY",

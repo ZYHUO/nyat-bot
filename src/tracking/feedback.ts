@@ -10,6 +10,10 @@ import { logger } from '../shared/logger.js';
 import { getActiveTopics } from './topic-registry.js';
 import { recordReward } from './topic-bandit.js';
 import { getForwardSource } from '../pipeline/rhythm/taste.js';
+import { appendCognitiveEvent } from '../agent/cognitive-events.js';
+import { resolvePrediction } from '../agent/predictions.js';
+import { getBotUid } from '../bot/bot.js';
+import { recordSocialInteraction } from '../agent/social-event-graph.js';
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
@@ -35,6 +39,69 @@ function textSentiment(text: string): number {
   if (POSITIVE_RE.test(lower)) return 0.7;
   if (NEGATIVE_RE.test(lower)) return -0.7;
   return 0;
+}
+
+/** Record an observed user↔bot social edge without making feedback depend on the graph. */
+function persistSocialFeedback(input: {
+  chatId: number;
+  userId: number;
+  botMessageId: number;
+  kind: 'reply' | 'support' | 'conflict' | 'repair';
+  correlationSuffix: string;
+}): void {
+  try {
+    const botUid = getBotUid();
+    if (!Number.isSafeInteger(botUid) || botUid <= 0) return;
+    recordSocialInteraction({
+      chatId: input.chatId,
+      fromUid: input.userId,
+      toUid: botUid,
+      kind: input.kind,
+      messageId: input.botMessageId,
+      correlationId: `telegram:${input.chatId}:social-feedback:${input.botMessageId}:${input.correlationSuffix}`,
+      dedupeKey: `social-feedback:${input.kind}:${input.chatId}:${input.botMessageId}:${input.userId}`,
+    });
+  } catch {
+    // The feedback loop remains authoritative; social indexing is best-effort.
+  }
+}
+
+const CORRECTION_RE = /(不对|不对吧|不是这样|你搞错|错了|纠正|更正|记错|弄错|误会了|wrong|incorrect)/i;
+
+/** Persist feedback as metadata only; raw reply text stays in its normal store. */
+function persistFeedbackEvent(input: {
+  type: 'user_reaction' | 'user_followup' | 'user_correction';
+  chatId: number;
+  userId: number;
+  botMessageId: number;
+  sentiment?: number;
+  feedbackKind: string;
+  emoji?: string;
+  correction?: boolean;
+}): string | undefined {
+  try {
+    const result = appendCognitiveEvent({
+      type: input.type,
+      source: 'telegram',
+      scope: { visibility: 'chat', chatId: input.chatId, userId: input.userId },
+      occurredAt: nowSec(),
+      correlationId: `telegram:${input.chatId}:feedback:${input.botMessageId}`,
+      dedupeKey: `feedback:${input.type}:${input.chatId}:${input.botMessageId}:${input.userId}:${input.emoji ?? 'text'}`,
+      fact: {
+        chatId: input.chatId,
+        userId: input.userId,
+        botMessageId: input.botMessageId,
+        sentiment: input.sentiment ?? null,
+        feedbackKind: input.feedbackKind,
+        emoji: input.emoji ?? null,
+        correction: input.correction ?? false,
+      },
+    });
+    return result?.event.id;
+  } catch {
+    /* event telemetry never blocks feedback */
+    return undefined;
+  }
 }
 
 export interface FeedbackRow {
@@ -65,11 +132,31 @@ export function recordReaction(params: {
          VALUES ('reaction', ?, ?, ?, ?, ?, ?)`,
       )
       .run(params.userId, params.botMessageId, params.chatId, params.emoji, s, nowSec());
+    const outcomeEventId = persistFeedbackEvent({
+      type: 'user_reaction',
+      chatId: params.chatId,
+      userId: params.userId,
+      botMessageId: params.botMessageId,
+      sentiment: s,
+      feedbackKind: 'reaction',
+      emoji: params.emoji,
+    });
+    persistSocialFeedback({
+      chatId: params.chatId,
+      userId: params.userId,
+      botMessageId: params.botMessageId,
+      kind: s > 0 ? 'support' : 'conflict',
+      correlationSuffix: params.emoji,
+    });
     logger.debug({ userId: params.userId, emoji: params.emoji, s }, 'feedback: reaction');
     // Phase D：预测闭环——用户 reaction 到达即回填预测误差（fail-soft）。
-    void import('../agent/predictions.js')
-      .then(({ resolvePrediction }) => resolvePrediction({ chatId: params.chatId, messageId: params.botMessageId, actualSentiment: s, feedbackKind: 'reaction' }))
-      .catch(() => { /* non-critical */ });
+    resolvePrediction({
+      chatId: params.chatId,
+      messageId: params.botMessageId,
+      actualSentiment: s,
+      feedbackKind: 'reaction',
+      outcomeEventId,
+    });
     // H4.2 reaction→bandit 回流：跟 recordReplySentiment 同口径——本群 live
     // topics 均分 reward（保守，避免错归因放大）。
     // taste 闭环：如果这条是转发的落点（目标群），reward 回给*源群*的 live topics。
@@ -107,11 +194,42 @@ export function recordReplySentiment(params: {
          VALUES ('replier_sentiment', ?, ?, ?, ?, ?, ?)`,
       )
       .run(params.userId, params.botMessageId, params.chatId, total, params.userText.slice(0, 300), nowSec());
+    const actualSentiment = s !== 0 ? s : 0.4;
+    const outcomeEventId = persistFeedbackEvent({
+      type: 'user_followup',
+      chatId: params.chatId,
+      userId: params.userId,
+      botMessageId: params.botMessageId,
+      sentiment: actualSentiment,
+      feedbackKind: 'replier_sentiment',
+      correction: CORRECTION_RE.test(params.userText),
+    });
+    persistSocialFeedback({
+      chatId: params.chatId,
+      userId: params.userId,
+      botMessageId: params.botMessageId,
+      kind: CORRECTION_RE.test(params.userText) ? 'repair' : 'reply',
+      correlationSuffix: 'followup',
+    });
+    if (CORRECTION_RE.test(params.userText)) {
+      persistFeedbackEvent({
+        type: 'user_correction',
+        chatId: params.chatId,
+        userId: params.userId,
+        botMessageId: params.botMessageId,
+        feedbackKind: 'user_correction',
+        correction: true,
+      });
+    }
     logger.debug({ userId: params.userId, s, total, text: params.userText.slice(0, 50) }, 'feedback: reply');
     // Phase D：预测闭环——reply 情绪回填（无情绪词的追问按轻度正反馈计，followup 本身是 engagement）。
-    void import('../agent/predictions.js')
-      .then(({ resolvePrediction }) => resolvePrediction({ chatId: params.chatId, messageId: params.botMessageId, actualSentiment: s !== 0 ? s : 0.4, feedbackKind: 'replier_sentiment' }))
-      .catch(() => { /* non-critical */ });
+    resolvePrediction({
+      chatId: params.chatId,
+      messageId: params.botMessageId,
+      actualSentiment: s !== 0 ? s : 0.4,
+      feedbackKind: 'replier_sentiment',
+      outcomeEventId,
+    });
     // H4 bandit 回流：这次回复是对 bot 跟进某话题的反馈 → 折成 reward。
     // 话题归因：本群当前 live 话题（topic-registry getActiveTopics），命中多个
     // 时均分 reward（保守，避免错归因放大）。同步调用（registry 是纯 SQLite）。

@@ -103,6 +103,7 @@ async function interceptDiaryAttention(
     chatLayer: Map<number, AttentionLayer>;
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
+    defaultCognitiveAnchorEventIds: Map<number, string>;
   },
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
@@ -111,6 +112,7 @@ async function interceptDiaryAttention(
     chatLayer: opts.chatLayer,
     defaultQuotes: opts.defaultQuotes,
     defaultTargetUserIds: opts.defaultTargetUserIds,
+    defaultCognitiveAnchorEventIds: opts.defaultCognitiveAnchorEventIds,
   });
   const journal = api['journal'] as {
     tryWrite: (args?: {
@@ -128,6 +130,7 @@ async function interceptDiaryAttention(
         quotes?: number[];
         targetUserId?: number;
         messageThreadId?: number;
+        cognitiveAnchorEventId?: string;
       },
     ) => Promise<{ taskId: string }>;
   };
@@ -173,6 +176,7 @@ async function interceptDiaryAttention(
       quotes: a.messageId ? [a.messageId] : undefined,
       targetUserId: a.userId && a.userId > 0 ? a.userId : undefined,
       messageThreadId: a.messageThreadId,
+      cognitiveAnchorEventId: a.cognitiveAnchorEventId,
     });
     if (dispatched.taskId !== 'skipped_busy') return;
     // Cap retries: without this, a busy chat requeues diary_ack every tick →
@@ -254,6 +258,7 @@ async function interceptDiaryAttention(
             toneGuidance: '短、像发微信',
             quotes: a.messageId ? [a.messageId] : undefined,
             messageThreadId: a.messageThreadId,
+            cognitiveAnchorEventId: a.cognitiveAnchorEventId,
           });
           continue;
         }
@@ -266,6 +271,7 @@ async function interceptDiaryAttention(
           toneGuidance: '短、傲娇、像发微信；别小作文',
           quotes: a.messageId ? [a.messageId] : undefined,
           messageThreadId: a.messageThreadId,
+          cognitiveAnchorEventId: a.cognitiveAnchorEventId,
         });
         logger.info({ chatId: a.chatId }, 'Meta subagent_request journal.recent');
         continue;
@@ -285,6 +291,7 @@ async function interceptDiaryAttention(
               toneGuidance: '短、像发微信',
               quotes: a.messageId ? [a.messageId] : undefined,
               messageThreadId: a.messageThreadId,
+              cognitiveAnchorEventId: a.cognitiveAnchorEventId,
             });
           }
           continue;
@@ -354,11 +361,14 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   chatLayer: Map<number, AttentionLayer>;
   defaultQuotes: Map<number, number>;
   defaultTargetUserIds: Map<number, number>;
+  defaultCognitiveAnchorEventIds: Map<number, string>;
 } {
   const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
   const chatLayer = new Map<number, AttentionLayer>();
   const defaultQuotes = new Map<number, number>();
   const defaultTargetUserIds = new Map<number, number>();
+  const defaultCognitiveAnchorEventIds = new Map<number, string>();
+  const anchorOrder = new Map<number, number>();
   for (const a of attention) {
     const prev = chatLayer.get(a.chatId);
     if (!prev || (rank[a.layer] ?? 0) >= (rank[prev] ?? 0)) {
@@ -375,8 +385,15 @@ function buildAttentionMaps(attention: AttentionItem[]): {
     } else if (a.userId && a.userId > 0 && !defaultTargetUserIds.has(a.chatId)) {
       defaultTargetUserIds.set(a.chatId, a.userId);
     }
+    if (a.cognitiveAnchorEventId) {
+      const order = a.messageId && a.messageId > 0 ? a.messageId : a.createdAt;
+      if (!anchorOrder.has(a.chatId) || order >= (anchorOrder.get(a.chatId) ?? 0)) {
+        anchorOrder.set(a.chatId, order);
+        defaultCognitiveAnchorEventIds.set(a.chatId, a.cognitiveAnchorEventId);
+      }
+    }
   }
-  return { chatLayer, defaultQuotes, defaultTargetUserIds };
+  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds };
 }
 
 async function runMetaCode(
@@ -387,6 +404,7 @@ async function runMetaCode(
     chatLayer: Map<number, AttentionLayer>;
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
+    defaultCognitiveAnchorEventIds: Map<number, string>;
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
@@ -414,6 +432,7 @@ async function autoDispatchL0(
     chatLayer: Map<number, AttentionLayer>;
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
+    defaultCognitiveAnchorEventIds: Map<number, string>;
   },
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
@@ -422,6 +441,7 @@ async function autoDispatchL0(
     chatLayer: maps?.chatLayer,
     defaultQuotes: maps?.defaultQuotes,
     defaultTargetUserIds: maps?.defaultTargetUserIds,
+    defaultCognitiveAnchorEventIds: maps?.defaultCognitiveAnchorEventIds,
   });
   const d = api['dispatch'] as {
     taskToGroup: (
@@ -433,6 +453,7 @@ async function autoDispatchL0(
         relatedQuotes?: number[];
         targetUserId?: number;
         messageThreadId?: number;
+        cognitiveAnchorEventId?: string;
         skipDispatchGate?: boolean;
       },
     ) => Promise<{ taskId: string }>;
@@ -591,6 +612,7 @@ async function autoDispatchL0(
           textPreview: latest.textPreview,
           messageThreadId: latest.messageThreadId,
           payload: latest.payload,
+          cognitiveAnchorEventId: latest.cognitiveAnchorEventId,
           deferCount:
             typeof latest.payload?.['deferCount'] === 'number'
               ? (latest.payload['deferCount'] as number)
@@ -630,6 +652,7 @@ async function autoDispatchL0(
       relatedQuotes: relatedQuotes.length ? relatedQuotes : undefined,
       targetUserId: latest.userId && latest.userId > 0 ? latest.userId : undefined,
       messageThreadId: latest.messageThreadId,
+      cognitiveAnchorEventId: latest.cognitiveAnchorEventId,
       // autoDispatch 已在上方自带 gate（非 L0 时），taskToGroup 里别再过一次。
       skipDispatchGate: true,
     });
@@ -685,6 +708,45 @@ async function requeueBusyL0(
   }
 }
 
+/** Build one bounded workspace per chat for the opt-in Meta rollout. */
+async function buildMetaWorkspaceBlock(
+  attention: AttentionItem[],
+  callbacks: SubagentCallback[],
+): Promise<string> {
+  if (!env().COGNITIVE_WORKSPACE_V2_ENABLED) return '';
+  const users = new Map<number, number | undefined>();
+  const anchors = new Map<number, { id: string; order: number }>();
+  for (const item of attention) {
+    if (!users.has(item.chatId)) users.set(item.chatId, item.userId);
+    if (item.cognitiveAnchorEventId) {
+      const order = item.messageId && item.messageId > 0 ? item.messageId : item.createdAt;
+      const previous = anchors.get(item.chatId);
+      if (!previous || order >= previous.order) {
+        anchors.set(item.chatId, { id: item.cognitiveAnchorEventId, order });
+      }
+    }
+  }
+  for (const callback of callbacks) {
+    if (!users.has(callback.chatId)) users.set(callback.chatId, undefined);
+  }
+  const chats = [...users.entries()].slice(0, 8);
+  const blocks = await Promise.all(chats.map(async ([chatId, userId]) => {
+    try {
+      const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
+      const snapshot = await buildCognitiveWorkspace({
+        chatId,
+        ...(!userId ? {} : { userId }),
+        ...(anchors.get(chatId) ? { asOfEventId: anchors.get(chatId)!.id } : {}),
+      });
+      return renderCognitiveWorkspace(snapshot, 2600);
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta cognitive workspace failed (non-critical)');
+      return '';
+    }
+  }));
+  return blocks.filter(Boolean).join('\n\n');
+}
+
 export async function runMetaSession(
   attention: AttentionItem[],
   callbacks: SubagentCallback[],
@@ -703,6 +765,7 @@ export async function runMetaSession(
     chatLayer: maps.chatLayer,
     defaultQuotes: maps.defaultQuotes,
     defaultTargetUserIds: maps.defaultTargetUserIds,
+    defaultCognitiveAnchorEventIds: maps.defaultCognitiveAnchorEventIds,
   });
   let codeRan = dispatchedChatIds.size > 0;
 
@@ -806,6 +869,8 @@ export async function runMetaSession(
           .map((c) => `- task=${c.taskId} chat=${c.chatId} ok=${c.ok} summary=${c.summary.slice(0, 200)}`)
           .join('\n');
 
+  const workspaceBlock = await buildMetaWorkspaceBlock(metaAttention, callbacks);
+
   // flag 开 → digest 注入改读 SQLite session_digests(全局叙事流,重启不丢);
   // flag 关 → 维持内存 40 条旧路径。SQLite 读取失败时 recentPersistedDigests 返回 []。
   const digestBlock = (
@@ -823,6 +888,7 @@ export async function runMetaSession(
     deltaText('meta-digests', `## Recent session digests\n${digestBlock || '(none)'}`),
     ephemeralText('meta-attention', `## Attention set\n${attentionBlock || '(none)'}`),
     ephemeralText('meta-callbacks', `## Callbacks\n${callbackBlock}`),
+    ephemeralText('meta-workspaces', workspaceBlock ? `## Scoped cognitive workspaces\n${workspaceBlock}` : ''),
     volatileText(
       'meta-now',
       `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
@@ -885,6 +951,7 @@ export async function runMetaSession(
         chatLayer: metaMaps.chatLayer,
         defaultQuotes: metaMaps.defaultQuotes,
         defaultTargetUserIds: metaMaps.defaultTargetUserIds,
+        defaultCognitiveAnchorEventIds: metaMaps.defaultCognitiveAnchorEventIds,
       });
       codeRan = true;
     } catch (err) {

@@ -47,6 +47,7 @@ import { acquireChatLock } from "../../queue/chat-lock.js";
 import { AIError } from "../../shared/errors.js";
 import { isCallerAbort } from "../../shared/abort.js";
 import { env } from "../../env.js";
+import { dispatchReplyViaAgency, isAgencyReplyTransportEnabled } from "../../agent/agency-reply-dispatch.js";
 import { logger } from "../../shared/logger.js";
 import { recordBotReply } from "../../tracking/stats.js";
 import { recordBotReply as recordTimingBotReply } from "../timing/state-store.js";
@@ -55,6 +56,9 @@ import { recordSelfReply } from "../../tracking/self-history.js";
 import { getChatState, transitionToStop } from "../timing/chat-runtime.js";
 import { pickRevisitCandidates } from "../turn/answered-store.js";
 import { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay, type ChatStyle } from "../../tracking/chat-style.js";
+import { recordSocialDeliveryPrediction } from "../../agent/social-predictions.js";
+import type { CognitiveRoute } from "../../agent/cognitive-routing.js";
+import { completeCognitiveRouteObservation } from "../../agent/cognitive-route-observations.js";
 
 function isNoSendPermissionError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -93,6 +97,12 @@ export interface ChatLockState {
   held: boolean;
 }
 
+export interface DeliveryTelemetry {
+  status: 'sent' | 'silent' | 'failed' | 'blocked' | 'interrupted';
+  toolCalls?: number;
+  replyCount?: number;
+}
+
 export async function generateAndSendReplies(args: {
   job: ChatJob;
   formatted: FormattedMessage;
@@ -104,12 +114,27 @@ export async function generateAndSendReplies(args: {
   timings: Record<string, number>;
   lockState: ChatLockState;
   releaseHeldChatLock: () => Promise<void>;
-}): Promise<void> {
+  useCognitiveWorkspace?: boolean;
+  cognitiveRoute?: CognitiveRoute;
+  cognitiveRouteObservationId?: number;
+}): Promise<DeliveryTelemetry> {
   const {
     job, formatted, judgeResult, botUid,
     effectiveReplyPath,
-    e, start, timings, lockState, releaseHeldChatLock,
+    e, start, timings, lockState, releaseHeldChatLock, useCognitiveWorkspace, cognitiveRoute,
   } = args;
+  const finishRouteObservation = (telemetry: DeliveryTelemetry): DeliveryTelemetry => {
+    if (args.cognitiveRouteObservationId !== undefined) {
+      completeCognitiveRouteObservation({
+        id: args.cognitiveRouteObservationId,
+        status: telemetry.status,
+        latencyMs: Math.round(performance.now() - start),
+        ...(telemetry.toolCalls !== undefined ? { toolCalls: telemetry.toolCalls } : {}),
+        ...(telemetry.replyCount !== undefined ? { replyCount: telemetry.replyCount } : {}),
+      });
+    }
+    return telemetry;
+  };
   let sendPermissionDenied = false;
 
   // 指令服从层:点名/回复 bot/私聊语境下的自然语言指令 → prompt 强注入 +
@@ -158,6 +183,7 @@ export async function generateAndSendReplies(args: {
   }
 
   let maxPlaceholderMsgId: number | undefined;
+  const agencyReplyTransport = isAgencyReplyTransportEnabled();
   try {
     // 6.0 控制指令(别理我/别理@某人/可以说话了/记住X/忘掉X):在 typing 之前用 LLM
     // 听懂(取代旧 L0 关键词)。命中 → 静默执行 + emoji ack,不 typing、不回复。
@@ -176,7 +202,7 @@ export async function generateAndSendReplies(args: {
             const ok = await executeControlActions([action], job.chatId, formatted.uid, formatted.messageId);
             if (ok) {
               logger.info({ chatId: job.chatId, action: action.action, target: action.controlTarget ?? "self" }, "Pipeline complete (control directive, silent)");
-              return;
+              return finishRouteObservation({ status: 'silent' });
             }
           }
         } catch (err) {
@@ -336,7 +362,7 @@ export async function generateAndSendReplies(args: {
     // 命令意图(签到)只在寻址时才生效 —— 见 reply.ts 的 3.5 段注释。
     const isAddressedForCommands =
       job.chatId > 0 || !!(judgeResult.rule && ADDRESSED_RULES.has(judgeResult.rule));
-    const baseTurnCallOpts = job.turnContext || instructionInfo || latenessSec !== undefined
+    const baseTurnCallOpts = job.turnContext || instructionInfo || latenessSec !== undefined || useCognitiveWorkspace || job.cognitiveAnchorEventId
       ? {
           signal: job.turnContext?.signal,
           burstIds: e.TURN_BURST_JUDGE_ENABLED ? job.turnContext?.burstMessageIds : undefined,
@@ -352,6 +378,8 @@ export async function generateAndSendReplies(args: {
           latenessHint: latenessSec !== undefined
             ? '[迟到回复] 你刚才没在看这个群(在忙别的),过了好一会儿才看到这条消息。回复**开头**自然带一句迟到的语气("刚没看到""才看到喵"之类),轻描淡写就好,不用正式道歉。'
             : undefined,
+          useCognitiveWorkspace: useCognitiveWorkspace === true,
+          cognitiveAnchorEventId: job.cognitiveAnchorEventId,
         }
       : undefined;
     const turnCallOpts = { ...(baseTurnCallOpts ?? {}), isAddressed: isAddressedForCommands };
@@ -369,6 +397,7 @@ export async function generateAndSendReplies(args: {
         replyPath: effectiveReplyPath,
         segmenterConfig,
         turnCallOpts,
+        cognitiveRoute,
       },
       isMultiAgentChat(job.chatId),
     );
@@ -382,6 +411,7 @@ export async function generateAndSendReplies(args: {
       j: typeof job,
       fmt: typeof formatted,
     ): Promise<void> => {
+      if (agencyReplyTransport) return;
       if (!result.polls || result.polls.length === 0) return;
       if (j.chatId > 0) return; // 仅群聊
       try {
@@ -416,6 +446,7 @@ export async function generateAndSendReplies(args: {
     // 调度时机:modelSilent 路径立即排(react-only 是合法回应);文本路径
     // 推迟到打断/陈旧检查之后排 —— 否则被丢弃的回复会留下孤儿 reaction。
     const scheduleReactions = (): void => {
+      if (agencyReplyTransport) return;
       if (!replyResult.reactions || replyResult.reactions.length === 0) return;
       for (const r of replyResult.reactions) {
         setTimeout(() => {
@@ -450,7 +481,7 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId, reacted: !!replyResult.reactions },
         "Pipeline complete (model chose silence)",
       );
-      return;
+      return finishRouteObservation({ status: 'silent', toolCalls: replyResult.toolsUsed.length, replyCount: 0 });
     }
 
     // Re-acquire chat lock before sending
@@ -465,7 +496,7 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId, rule: judgeResult.rule },
         "Concurrent reply suppressed after newer assistant turn",
       );
-      return;
+      return finishRouteObservation({ status: 'blocked', toolCalls: replyResult.toolsUsed.length, replyCount: 0 });
     }
 
     // G3: 投递前最后一道打断检查 — 生成完成与开始发送之间用户又说话了,
@@ -483,6 +514,7 @@ export async function generateAndSendReplies(args: {
     // 人味预算还在、5 分钟冷却。对 bot 是浪费一次生成,对人味是真实感。
     if (
       job.chatId < 0 &&
+      !agencyReplyTransport &&
       !instructionInfo &&
       env().NODE_ENV !== 'test' && // 3% 骰子会让测试薛定谔
       !(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)) &&
@@ -506,7 +538,7 @@ export async function generateAndSendReplies(args: {
           if (maxPlaceholderMsgId) {
             await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
           }
-          return; // 打了一半,算了
+          return finishRouteObservation({ status: 'silent', toolCalls: replyResult.toolsUsed.length, replyCount: 0 }); // 打了一半,算了
         }
       } catch (err) {
         logger.debug({ err, chatId: job.chatId }, 'typing ghost failed (non-critical)');
@@ -630,17 +662,19 @@ export async function generateAndSendReplies(args: {
     // G10: 每回合"人味预算"(actor 模式)— 确认前缀/typo/撤回重发/后补编辑
     // 一回合最多触发一个,效果像偶发的真实行为而不是抽搐生成器。
     // 指令回复预算清零:让它"原样重复/翻译/报数"时不能被错别字篡改。
-    let humanizerBudget = instructionInfo ? 0 : job.turnContext ? 1 : Number.POSITIVE_INFINITY;
+    let humanizerBudget = agencyReplyTransport
+      ? 0
+      : instructionInfo ? 0 : job.turnContext ? 1 : Number.POSITIVE_INFINITY;
 
     // ── Humanizer: ack prefix(纳入人味预算)──
     const totalReplyLength = replies.reduce((sum, r) => sum + (r.replyContent?.length ?? 0), 0);
-    const ackPrefix = humanizerBudget > 0
+    const ackPrefix = !agencyReplyTransport && humanizerBudget > 0
       ? decideAckPrefix(totalReplyLength, humanizerConfig)
       : { shouldSend: false as const, prefix: null, delay: 0 };
     if (ackPrefix.shouldSend) humanizerBudget--;
 
     const stickerPolicy = {
-      enabled: override?.sticker_policy?.enabled ?? true,
+      enabled: !agencyReplyTransport && (override?.sticker_policy?.enabled ?? true),
       mode: override?.sticker_policy?.mode ?? "ai",
       sendPosition: override?.sticker_policy?.send_position ?? "after",
     };
@@ -648,7 +682,7 @@ export async function generateAndSendReplies(args: {
 
     // ── Humanizer: thinking interjection (insert between 1st and 2nd segments) ──
     // Skip for DM — users expect instant response in private chat
-    const thinkingResult = isDmChat
+    const thinkingResult = agencyReplyTransport || isDmChat
       ? { shouldInsert: false, text: '' }
       : decideThinkingInterjection(totalReplyLength, replies.length, humanizerConfig);
     if (thinkingResult.shouldInsert && replies.length >= 2) {
@@ -853,7 +887,11 @@ export async function generateAndSendReplies(args: {
           : effectiveText;
 
         if (!isStickerOnly && !skipTextSend) {
-          if (replyIdx === 0 && maxPlaceholderMsgId) {
+          if (agencyReplyTransport && replyIdx === 0 && maxPlaceholderMsgId) {
+            await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
+            maxPlaceholderMsgId = undefined;
+          }
+          if (replyIdx === 0 && maxPlaceholderMsgId && !agencyReplyTransport) {
             // 审计 #39a:编辑失败时 placeholder 还停留在"思考中…",此时
             // 无条件 push 会把没送达的回复记成已发送(污染上下文/outcome)。
             const edited = await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText)
@@ -885,7 +923,7 @@ export async function generateAndSendReplies(args: {
             }
           } else {
             // ── Voice reply (P5): model marked this reply as voice ──
-            if (reply.voice === true && e.TTS_ENABLED) {
+            if (reply.voice === true && e.TTS_ENABLED && !agencyReplyTransport) {
               try {
                 const { synthesizeVoice } = await import('../../ai/tts.js');
                 const { sendVoice } = await import('../../bot/sender/telegram.js');
@@ -900,14 +938,29 @@ export async function generateAndSendReplies(args: {
                 logger.warn({ err, chatId: job.chatId }, 'Voice synthesis failed — falling back to text');
               }
             }
-            const sent = await sender.sendDirect(job.chatId, effectiveText, replyToId);
+            const sent = agencyReplyTransport
+              ? await (async () => {
+                  const agency = await dispatchReplyViaAgency({
+                    chatId: job.chatId,
+                    triggerMessageId: formatted.messageId,
+                    segment: replyIdx,
+                    text: effectiveText,
+                    ...(replyToId !== undefined ? { replyToMessageId: replyToId } : {}),
+                    ...(job.cognitiveAnchorEventId ? { cognitiveAnchorEventId: job.cognitiveAnchorEventId } : {}),
+                  });
+                  if (!agency.attempted || !agency.accepted || agency.messageId === undefined) {
+                    throw new Error(`AGENCY_REPLY_REJECTED:${agency.reason ?? 'unknown'}`);
+                  }
+                  return { messageId: agency.messageId };
+                })()
+              : await sender.sendDirect(job.chatId, effectiveText, replyToId);
             // Mark this target quoted only after a real text reply went out with the quote.
             if (replyToId !== undefined) quotedTargets.add(replyToId);
 
             // ── Humanizer: delete-and-resend ──
             let currentMessageId: number | undefined = sent.messageId;
             let currentBaseText = recordedText;
-            if (deleteResend.shouldDeleteResend && sent.messageId) {
+            if (!agencyReplyTransport && deleteResend.shouldDeleteResend && sent.messageId) {
               await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               await new Promise((resolve) => setTimeout(resolve, deleteResend.deleteDelay * 1000));
               await deleteMessage(job.chatId, sent.messageId).catch(() => {});
@@ -924,7 +977,7 @@ export async function generateAndSendReplies(args: {
             }
 
             // ── Humanizer: typo correction via edit ──
-            if (typoResult && typoResult.correction === 'edit' && currentMessageId) {
+            if (!agencyReplyTransport && typoResult && typoResult.correction === 'edit' && currentMessageId) {
               if (Math.random() < 0.4) {
                 // #9 四成概率拖到几分钟后才想起来改(被打断就忘了)
                 scheduleDeferredTypoFix(job.chatId, currentMessageId, typoResult.originalText, Math.floor(Date.now() / 1000));
@@ -938,7 +991,7 @@ export async function generateAndSendReplies(args: {
             }
 
             // ── Humanizer: typo append (send correct char as follow-up) ──
-            if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
+            if (!agencyReplyTransport && typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
               const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
               await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
@@ -950,7 +1003,7 @@ export async function generateAndSendReplies(args: {
             }
 
             // ── Humanizer: afterthought edit (skip for interjections and DM) ──
-            if (!isDmChat && !isInterjection && currentMessageId && humanizerBudget > 0) {
+            if (!agencyReplyTransport && !isDmChat && !isInterjection && currentMessageId && humanizerBudget > 0) {
               const afterthought = decideAfterthoughtEdit(currentBaseText, humanizerConfig);
               if (afterthought.shouldEdit) {
                 humanizerBudget--;
@@ -965,7 +1018,7 @@ export async function generateAndSendReplies(args: {
               }
             }
 
-            if (stickerFileId && stickerPolicy.sendPosition === "after") {
+            if (!agencyReplyTransport && stickerFileId && stickerPolicy.sendPosition === "after") {
               const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {
                 logger.warn({ err, chatId: job.chatId }, "Sticker send (after) failed, continuing");
                 return undefined;
@@ -1052,6 +1105,33 @@ export async function generateAndSendReplies(args: {
       },
       'Reply sent',
     );
+
+    // Optional migration telemetry: link real legacy Telegram deliveries to
+    // durable Agency runs without dispatching a second send operation.
+    if (e.AGENCY_LEGACY_REPLY_OBSERVATION_ENABLED) {
+      void import('../../agent/agency-reply-observation.js')
+        .then(({ recordLegacyReplyObservations }) => {
+          const observed = recordLegacyReplyObservations(
+            sentMessages.map((sent, segment) => ({
+              chatId: job.chatId,
+              triggerMessageId: formatted.messageId,
+              messageId: sent.messageId,
+              text: sent.text,
+              ...(job.cognitiveAnchorEventId ? { cognitiveAnchorEventId: job.cognitiveAnchorEventId } : {}),
+              segment,
+              judgeAction: judgeResult.action,
+              replyPath: effectiveReplyPath,
+            })),
+          );
+          logger.debug(
+            { chatId: job.chatId, triggerMessageId: formatted.messageId, ...observed },
+            'Legacy Reply delivery observed by Agency',
+          );
+        })
+        .catch((err) => {
+          logger.debug({ err, chatId: job.chatId }, 'Legacy Reply Agency observation failed (non-critical)');
+        });
+    }
 
     // 自发代发认领:回复本身就是 `/cmd@bot ...`(模型 direct 路径直接打命令,
     // 没走 USE_BOT_COMMAND 工具)→ 补登记 pending,让对方回执能被接回来。
@@ -1168,12 +1248,34 @@ export async function generateAndSendReplies(args: {
     timings["saveAssistant"] = Math.round(performance.now() - t7);
     await releaseHeldChatLock();
 
+    // Record a metadata-only expectation for group replies. Later Telegram
+    // reply/reaction/repair events settle it; expiry handles observed silence.
+    // This is telemetry only and deliberately does not alter the reply path.
+    if (e.SOCIAL_PREDICTION_ENABLED === true && job.chatId < 0 && !formatted.isBot && formatted.uid > 0 && sentMessages.length > 0) {
+      for (let i = 0; i < sentMessages.length; i++) {
+        const sent = sentMessages[i]!;
+        try {
+          recordSocialDeliveryPrediction({
+            chatId: job.chatId,
+            botMessageId: sent.messageId,
+            targetUserId: formatted.uid,
+            triggerMessageId: formatted.messageId,
+            ...(i === 0 && replies[0]?.targetMessageId ? { replyToMessageId: replies[0].targetMessageId } : {}),
+            actionType: judgeResult.action,
+          });
+        } catch {
+          /* social telemetry never blocks an already successful delivery */
+        }
+      }
+    }
+
     // 11. Record reply outcome for FIRST reply (primary)
     if (e.OUTCOME_TRACKING_ENABLED && sentMessages.length > 0) {
       const first = sentMessages[0]!;
       recordReply(
         job.chatId, first.messageId, formatted.messageId,
         formatted.uid, formatted.textContent, first.text, judgeResult.action,
+        args.cognitiveRouteObservationId,
       ).catch((err) => {
         logger.debug({ err, chatId: job.chatId }, "Outcome recording failed (non-critical)");
       });
@@ -1221,6 +1323,7 @@ export async function generateAndSendReplies(args: {
         })
         .catch(() => { /* telemetry never breaks delivery */ });
     }
+    return finishRouteObservation({ status: 'sent', toolCalls: replyResult.toolsUsed.length, replyCount: sentMessages.length });
   } catch (err) {
     if (maxPlaceholderMsgId) {
       await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
@@ -1241,6 +1344,7 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId },
         "Reply generation interrupted by new message, propagating for replan",
       );
+      finishRouteObservation({ status: 'interrupted' });
       throw err;
     }
 
@@ -1261,7 +1365,15 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, triggerUid: formatted.uid },
         'Chat put into STOP due to missing send permission; short TTL (recovers on direct wakeup or 20min)',
       );
-      return;
+      return finishRouteObservation({ status: 'failed' });
+    }
+
+    if (agencyReplyTransport) {
+      logger.warn(
+        { chatId: job.chatId, messageId: formatted.messageId },
+        'Agency Reply authority transport failed; no legacy fallback',
+      );
+      return finishRouteObservation({ status: 'failed' });
     }
 
     try {
@@ -1269,5 +1381,6 @@ export async function generateAndSendReplies(args: {
     } catch {
       logger.warn({ chatId: job.chatId }, "Fallback message also failed");
     }
+    return finishRouteObservation({ status: 'failed' });
   }
 }

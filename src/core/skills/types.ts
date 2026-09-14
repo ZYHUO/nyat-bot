@@ -32,6 +32,8 @@ export interface LifecycleRow {
   reviewer: number | null;
   reviewedAt: number | null;
   skillId: number | null;
+  revisionId?: number | null;
+  rollbackReason?: string | null;
   version: number;
   createdAt: number;
   updatedAt: number;

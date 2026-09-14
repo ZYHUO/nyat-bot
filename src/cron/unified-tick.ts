@@ -17,6 +17,8 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { isAsleep } from '../tracking/sleep.js';
 import { isWithinActiveHours } from './active-hours.js';
+import { classifyCognitiveRoute, shouldApplyCognitiveRoute, type CognitiveRoutingDecision } from '../agent/cognitive-routing.js';
+import { getLatestTelegramMessageEventId } from '../agent/cognitive-events.js';
 
 // Phase 3：TickAction → CandidateAction（suppressor 打分形状）。quiet 无映射。
 function toCandidate(a: TickAction): import('../core/drives/score.js').CandidateAction | null {
@@ -86,6 +88,10 @@ export interface WorldState {
   topics?: { chatId: number; label: string }[];
   /** 最近几条 session digest（bot 自己的连续叙事：刚做过什么/还在等什么）。 */
   recentDigests?: string[];
+  /** Opt-in scoped workspace blocks shared with reply/Heart/Meta. */
+  cognitiveWorkspaces?: { chatId: number; text: string }[];
+  /** Background route decision; metadata only, never an authority grant. */
+  cognitiveRoute?: CognitiveRoutingDecision;
 }
 
 const LAST_CARE_KEY = 'xxb:proactive:last_care:';
@@ -177,12 +183,79 @@ export async function buildWorldState(): Promise<WorldState> {
     dueGoals = listDueGoals(now).map((g) => ({ id: g.id, topic: g.topic, lastFinding: g.last_finding }));
   } catch { /* keep empty */ }
 
-  // 到期认知债务（CSR Phase B）——主动偿还的候选料，模型决定用不用
+  // 到期认知债务（CSR Phase B）——只暴露 chat-level obligations；task 私有债务
+  // 留给对应任务恢复路径，避免统一 tick 把别的任务状态带进群聊决策。
   let dueDebts: WorldState['dueDebts'] = [];
   try {
-    const { listDueDebts } = await import('../agent/cognitive-debts.js');
-    dueDebts = listDueDebts(5).map((d) => ({ id: d.id, kind: d.kind, chatId: d.chatId, statement: d.statement }));
+    const { listDueDebtsScoped } = await import('../agent/cognitive-debts.js');
+    const byId = new Map<number, NonNullable<WorldState['dueDebts']>[number]>();
+    for (const group of groups.slice(0, 5)) {
+      for (const debt of listDueDebtsScoped({ visibility: 'chat', chatId: group.chatId }, 5)) {
+        byId.set(debt.id, { id: debt.id, kind: debt.kind, chatId: debt.chatId, statement: debt.statement });
+      }
+    }
+    dueDebts = [...byId.values()]
+      .sort((a, b) => a.id - b.id)
+      .slice(0, 5);
   } catch { /* keep empty */ }
+
+  // The unified tick is itself a background worker. Keep its route decision
+  // deterministic and metadata-only; the rollout gate below is the only
+  // place where it may widen the bounded workspace read.
+  let cognitiveRoute: CognitiveRoutingDecision | undefined;
+  if (e.COGNITIVE_ROUTING_ENABLED || e.COGNITIVE_ROUTING_BEHAVIOR_ENABLED) {
+    cognitiveRoute = classifyCognitiveRoute({
+      action: 'IGNORE',
+      background: true,
+      explicitGoal: dueGoals.length > 0,
+      openDebtCount: dueDebts.length,
+      contextTokens: groups.reduce((total, group) => total + group.lastTexts.length, 0),
+    });
+  }
+
+  // Unified tick is the last legacy path to receive the common workspace. It is
+  // deliberately opt-in and bounded: the default tick remains its cheap world
+  // state scan until latency/token measurements justify widening the rollout.
+  let cognitiveWorkspaces: NonNullable<WorldState['cognitiveWorkspaces']> = [];
+  const routeWorkspaceEnabled = cognitiveRoute?.route === 'background'
+    && cognitiveRoute.signals.length > 0
+    && e.COGNITIVE_ROUTING_BEHAVIOR_ENABLED === true;
+  const useCognitiveWorkspace = e.COGNITIVE_WORKSPACE_V2_ENABLED
+    || (routeWorkspaceEnabled && groups.some((group) => shouldApplyCognitiveRoute(cognitiveRoute!, {
+      enabled: e.COGNITIVE_ROUTING_BEHAVIOR_ENABLED === true,
+      chatIds: e.COGNITIVE_ROUTING_CHAT_IDS,
+    }, group.chatId)));
+  if (useCognitiveWorkspace && groups.length) {
+    try {
+      const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
+      const eligibleGroups = e.COGNITIVE_WORKSPACE_V2_ENABLED
+        ? groups.slice(0, 5)
+        : groups
+          .filter((group) => shouldApplyCognitiveRoute(cognitiveRoute!, {
+            enabled: e.COGNITIVE_ROUTING_BEHAVIOR_ENABLED === true,
+            chatIds: e.COGNITIVE_ROUTING_CHAT_IDS,
+          }, group.chatId))
+          .slice(0, 5);
+      const blocks = await Promise.all(eligibleGroups.map(async (group) => {
+        try {
+          const cognitiveAnchorEventId = getLatestTelegramMessageEventId(group.chatId);
+          const snapshot = await buildCognitiveWorkspace({
+            chatId: group.chatId,
+            queryText: group.lastTexts.slice(0, 800),
+            ...(cognitiveAnchorEventId ? { asOfEventId: cognitiveAnchorEventId } : {}),
+          });
+          const text = renderCognitiveWorkspace(snapshot, 1800);
+          return text ? { chatId: group.chatId, text } : null;
+        } catch (err) {
+          logger.debug({ err, chatId: group.chatId }, 'unified tick cognitive workspace failed (non-critical)');
+          return null;
+        }
+      }));
+      cognitiveWorkspaces = blocks.filter((block): block is { chatId: number; text: string } => Boolean(block));
+    } catch (err) {
+      logger.debug({ err }, 'unified tick cognitive workspace import failed (non-critical)');
+    }
+  }
 
   // RSS fuel（所有群的 fuel 总量，粗粒度即可；另取最新几条标题当真实话题料）
   let rssNewCount = 0;
@@ -381,6 +454,8 @@ export async function buildWorldState(): Promise<WorldState> {
     lastCareAgoSec,
     topics,
     recentDigests,
+    cognitiveWorkspaces,
+    cognitiveRoute,
   };
 }
 
@@ -466,6 +541,12 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         .map((g) => `  群 ${g.chatId}: 沉默 ${Math.floor(g.silentSec / 60)} 分钟。最近: ${g.lastTexts.slice(0, 150)}`)
         .join('\n')
     : '  (无活跃群)';
+  const workspaceLines = (state.cognitiveWorkspaces ?? []).slice(0, 3).length
+    ? (state.cognitiveWorkspaces ?? []).slice(0, 3).map((workspace) => `  群 ${workspace.chatId}:\n${workspace.text.slice(0, 1200)}`).join('\n')
+    : '  (工作区未启用或暂无 projection)';
+  const routeLine = state.cognitiveRoute
+    ? `后台认知路由：${state.cognitiveRoute.route}（score=${state.cognitiveRoute.score}, reason=${state.cognitiveRoute.reason}）。它只决定是否读取有范围的工作区，不授予发送、工具或 Agency 权限。`
+    : '后台认知路由：未启用（保持统一唤醒的 legacy 读取预算）。';
   const goalLines = state.dueGoals.length
     ? state.dueGoals.map((g) => `  goal#${g.id}: 「${g.topic}」${g.lastFinding ? `上次发现: ${g.lastFinding.slice(0, 60)}` : '(首次检查)'}`).join('\n')
     : '  (无到期目标)';
@@ -559,6 +640,10 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `群:`,
     groupLines,
+    ``,
+    `统一认知工作区（有范围、带不确定性；仅作背景，不是权限）:`,
+    routeLine,
+    workspaceLines,
     ``,
     `群里在聊的话题:`,
     topicLines,

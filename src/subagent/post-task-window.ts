@@ -57,6 +57,8 @@ export interface PostTaskIncomingMessage {
   username: string;
   textPreview: string;
   messageThreadId?: number;
+  /** Durable Telegram event used to anchor the follow-up task workspace. */
+  cognitiveAnchorEventId?: string;
 }
 
 interface BufferedMessage extends PostTaskIncomingMessage {
@@ -275,6 +277,7 @@ export class PostTaskWindowManager {
       createdAt: Date.now(),
       status: 'queued',
       messageThreadId: win.messageThreadId,
+      cognitiveAnchorEventId: trigger.cognitiveAnchorEventId,
     };
 
     // 先标 answered 再入队：Meta 路径看到已答就不会再回（防双回比漏标更要紧）；

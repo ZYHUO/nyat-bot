@@ -24,6 +24,7 @@ import { needsLookup } from "./path-heuristic.js";
 import { logger } from "../../shared/logger.js";
 import { buildDeferEntry } from "../shared.js";
 import { env } from "../../env.js";
+import { dispatchWaitViaAgency } from "../../agent/agency-wait-dispatch.js";
 
 export interface HeartResult {
   /** true = pipeline should return immediately (side effects + logging already done) */
@@ -177,7 +178,27 @@ export async function runHeartBranch(ctx: {
       );
       return { shouldReturn: true };
     }
+    // The workspace is an opt-in companion to Heart. Start it beside the
+    // self-state reads so the fast path pays neither import nor DB cost.
+    const cognitiveWorkspacePromise = e.COGNITIVE_WORKSPACE_V2_ENABLED
+      ? (async () => {
+        try {
+          const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../../agent/cognitive-workspace.js');
+          const snapshot = await buildCognitiveWorkspace({
+            chatId: job.chatId,
+            ...(!formatted.isAnonymous && formatted.uid > 0 ? { userId: formatted.uid } : {}),
+            queryText: (formatted.textContent || formatted.captionContent || '').slice(0, 800),
+            asOfEventId: job.cognitiveAnchorEventId,
+          });
+          return renderCognitiveWorkspace(snapshot, 2200);
+        } catch (err) {
+          logger.debug({ err, chatId: job.chatId }, 'Heart cognitive workspace failed (non-critical)');
+          return undefined;
+        }
+      })()
+      : Promise.resolve(undefined);
     const selfState = await composeSelfState(job.chatId);
+    const cognitiveWorkspaceHint = await cognitiveWorkspacePromise;
     // 审计 #38 slice 2:快照挂上 turnContext,写手同回合直接复用
     job.turnContext.selfState = selfState;
     let lastSpokeSecAgo: number | undefined;
@@ -192,6 +213,7 @@ export async function runHeartBranch(ctx: {
       botName: getBotDisplayName(),
       selfState,
       lastSpokeSecAgo,
+      cognitiveWorkspaceHint,
       burstNote: [
         heartBurstIds.length > 1
           ? `(★ 是一波 ${heartBurstIds.length} 条连发的末尾,把整波当一个完整念头来评估)`
@@ -261,7 +283,10 @@ export async function runHeartBranch(ctx: {
         try {
           await setWaitAnchor(job.chatId, {
             update: job.update, chatId: job.chatId,
-            messageId: formatted.messageId, enqueuedAt: job.enqueuedAt, waitReplay: true,
+            messageId: formatted.messageId,
+            enqueuedAt: job.enqueuedAt,
+            cognitiveAnchorEventId: job.cognitiveAnchorEventId,
+            waitReplay: true,
             waitStartedAt: Date.now(),
             obligationId: job.turnContext.obligationId,
             obligationTargetUid: job.turnContext.obligationTargetUid,
@@ -269,10 +294,30 @@ export async function runHeartBranch(ctx: {
           }, waitSec + 120);
         } catch { /* non-critical */ }
       }
-      await transitionToWait(
-        job.chatId, waitSec, formatted.messageId, formatted.uid,
-        job.turnContext.obligationId,
-      );
+      const agencyWait = await dispatchWaitViaAgency({
+        chatId: job.chatId,
+        triggerMessageId: formatted.messageId,
+        ...(formatted.uid > 0 ? { triggerUserId: formatted.uid } : {}),
+        waitSec,
+        reason: `heart:${heart.why || 'wait'}`,
+        source: 'heart',
+        ...(job.turnContext.obligationId ? { obligationId: job.turnContext.obligationId } : {}),
+        ...(job.cognitiveAnchorEventId ? { cognitiveAnchorEventId: job.cognitiveAnchorEventId } : {}),
+      });
+      if (agencyWait.attempted) {
+        if (!agencyWait.accepted) {
+          logger.warn(
+            { chatId: job.chatId, messageId: formatted.messageId, agencyRunId: agencyWait.agencyRunId, reason: agencyWait.reason },
+            'Heart wait rejected by Agency authority transport',
+          );
+          return { shouldReturn: true };
+        }
+      } else {
+        await transitionToWait(
+          job.chatId, waitSec, formatted.messageId, formatted.uid,
+          job.turnContext.obligationId,
+        );
+      }
       logger.info({ chatId: job.chatId, why: heart.why, triggerUid: formatted.uid }, "Pipeline complete (heart=wait)");
       return { shouldReturn: true };
     }

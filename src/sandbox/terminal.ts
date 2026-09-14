@@ -9,20 +9,21 @@ const MAX_OUTPUT = 4000;
 // ── 真隔离: bwrap userns 沙盒(Phase 15) ──
 // executeCommand 默认走 bwrap: 与宿主隔离 mount/user/pid/net(无 lo 外网,
 // 保留回环做本地 DNS 兜底),cwd=data/sandbox 以读写绑定,PATH/SSL 只读绑定。
-// 降级: bwrap 二进制缺失或启动失败 → 走旧宿主 exec(纵深防御模式集仍先生效),
-// 并打 warn 日志(上线后应为 0, 可按此报警)。
+// 隔离能力缺失或启动失败时默认拒绝执行；只有明确关闭
+// SANDBOX_REQUIRE_ISOLATION 才允许应急宿主回退。
 const BWRAP_BIN = '/usr/bin/bwrap';
 let bwrapMissingLogged = false;
 
 function bwrapAvailable(): boolean {
-  // SANDBOX_BWRAP_ENABLED 默认 true; 运维可显式设 0 回退宿主执行(应急)。
+  // SANDBOX_BWRAP_ENABLED 只代表 bwrap 是否参与，回退策略由
+  // SANDBOX_REQUIRE_ISOLATION 单独控制。
   try {
     if (!env().SANDBOX_BWRAP_ENABLED) return false;
   } catch { return true; }
   if (existsSync(BWRAP_BIN)) return true;
   if (!bwrapMissingLogged) {
     bwrapMissingLogged = true;
-    logger.warn('sandbox: bwrap binary missing, falling back to host exec (no isolation)');
+    logger.warn('sandbox: bwrap binary missing, isolation unavailable');
   }
   return false;
 }
@@ -132,6 +133,35 @@ export interface CommandResult {
   durationMs: number;
 }
 
+export interface SandboxCapability {
+  terminalEnabled: boolean;
+  bwrapEnabled: boolean;
+  isolationRequired: boolean;
+  bwrapBinary: string;
+  bwrapAvailable: boolean;
+  reason?: string;
+}
+
+/** Synchronous capability check for health/admin surfaces. */
+export function getSandboxCapability(): SandboxCapability {
+  const configuration = env();
+  const bwrapEnabled = configuration.SANDBOX_BWRAP_ENABLED;
+  const available = bwrapEnabled && existsSync(BWRAP_BIN);
+  return {
+    terminalEnabled: configuration.SANDBOX_TERMINAL_ENABLED,
+    bwrapEnabled,
+    isolationRequired: configuration.SANDBOX_REQUIRE_ISOLATION !== false,
+    bwrapBinary: BWRAP_BIN,
+    bwrapAvailable: available,
+    ...(available ? {} : { reason: bwrapEnabled ? 'bwrap binary missing' : 'bwrap disabled by configuration' }),
+  };
+}
+
+function isolationUnavailable(cwd: string, start: number, reason: string): CommandResult {
+  logger.warn({ cwd, reason }, 'sandbox terminal: isolation unavailable, command denied');
+  return { stdout: '', stderr: `sandbox isolation unavailable: ${reason}`, exitCode: -1, durationMs: Date.now() - start };
+}
+
 export function executeCommand(command: string, opts?: { timeoutMs?: number }): Promise<CommandResult> {
   const timeoutMs = opts?.timeoutMs ?? env().CODEACT_TIMEOUT_MS;
   if (!env().SANDBOX_TERMINAL_ENABLED) {
@@ -143,7 +173,8 @@ export function executeCommand(command: string, opts?: { timeoutMs?: number }): 
   }
   const cwd = resolveSandboxRoot();
   const start = Date.now();
-  // 真隔离优先: bwrap 沙盒内执行; 不可用/启动失败 → 降级宿主 exec(模式集已先生效)。
+  const requireIsolation = env().SANDBOX_REQUIRE_ISOLATION !== false;
+  // 真隔离优先: bwrap 沙盒内执行。不可用时默认 fail-closed。
   if (bwrapAvailable()) {
     const spec = buildBwrapSpec(command, cwd, timeoutMs);
     return new Promise((resolve) => {
@@ -156,21 +187,28 @@ export function executeCommand(command: string, opts?: { timeoutMs?: number }): 
         if (err && (err as NodeJS.ErrnoException & { killed?: boolean }).killed) {
           resolve({ stdout: truncate(stdout), stderr: truncate(stderr) + '\n(timeout)', exitCode: -1, durationMs });
         } else if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
-          logger.warn('sandbox: bwrap spawn ENOENT, falling back to host exec');
-          resolve(hostExec(command, cwd, timeoutMs, start));
+          if (requireIsolation) resolve(isolationUnavailable(cwd, start, 'bwrap disappeared before spawn'));
+          else {
+            logger.warn('sandbox: bwrap spawn ENOENT, emergency host fallback enabled');
+            resolve(hostExec(command, cwd, timeoutMs, start));
+          }
         } else {
-          resolve({ stdout: truncate(stdout), stderr: truncate(stderr), exitCode: (err as { code?: number } | null)?.code ?? 0, durationMs });
+          const failure = err ? `sandbox isolation failed: ${truncate(stderr || err.message)}` : truncate(stderr);
+          resolve({ stdout: truncate(stdout), stderr: failure, exitCode: (err as { code?: number } | null)?.code ?? 0, durationMs });
         }
       });
-      proc.on('error', () => {
-        resolve({ stdout: '', stderr: 'spawn error', exitCode: -1, durationMs: Date.now() - start });
+      proc.on('error', (err) => {
+        if (requireIsolation) resolve(isolationUnavailable(cwd, start, err.message || 'bwrap spawn error'));
+        else resolve(hostExec(command, cwd, timeoutMs, start));
       });
     });
   }
+  if (requireIsolation) return Promise.resolve(isolationUnavailable(cwd, start, env().SANDBOX_BWRAP_ENABLED ? 'bwrap unavailable' : 'bwrap disabled'));
+  logger.warn('sandbox: emergency host fallback enabled (SANDBOX_REQUIRE_ISOLATION=false)');
   return hostExec(command, cwd, timeoutMs, start);
 }
 
-/** 降级路径: 宿主 exec(无隔离, 仅纵深防御模式集)。bwrap 缺失/禁用/启动失败时用。 */
+/** Emergency-only host exec (no isolation). */
 function hostExec(command: string, cwd: string, timeoutMs: number, start: number): Promise<CommandResult> {
   return new Promise((resolve) => {
     const proc = exec(command, {

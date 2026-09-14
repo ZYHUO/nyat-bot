@@ -107,6 +107,27 @@ describe('decideTick', () => {
     callWithFallbackMock.mockRejectedValue(new Error('down'));
     expect((await decideTick(state)).action.type).toBe('quiet');
   });
+
+  it('includes bounded background route metadata when routing telemetry is enabled', async () => {
+    const state = {
+      hourBeijing: 14, masterSilentSec: null, masterLastText: '',
+      groups: [], dueGoals: [], rssNewCount: 0, selfPlayCooldownLeftSec: 0, lastCareAgoSec: 0,
+      cognitiveRoute: {
+        route: 'background' as const,
+        score: 0,
+        signals: [],
+        primarySignal: null,
+        reason: 'no_complexity_signal',
+        shouldUseWorkspace: true,
+      },
+    };
+    callWithFallbackMock.mockResolvedValue({ content: '{"action":"quiet","reason":"nothing"}' });
+    await decideTick(state);
+    const request = callWithFallbackMock.mock.calls[0]?.[0] as { messages?: Array<{ content?: unknown }> };
+    expect(String(request.messages?.[1]?.content)).toContain('后台认知路由：background');
+    expect(String(request.messages?.[1]?.content)).toContain('reason=no_complexity_signal');
+    expect(String(request.messages?.[1]?.content)).toContain('不授予发送、工具或 Agency 权限');
+  });
 });
 
 describe('runUnifiedTick execution mapping', () => {

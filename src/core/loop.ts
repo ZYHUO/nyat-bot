@@ -31,6 +31,8 @@ export interface CoreTickInput {
   chatId: number;
   message: FormattedMessage;
   recentMessages: FormattedMessage[];
+  /** Durable Telegram/cognitive event that caused this Core tick. */
+  cognitiveAnchorEventId?: string;
   burstHint?: string;
   focusLevel?: number;
 }
@@ -39,8 +41,10 @@ export interface CoreTickResult {
   level: CoreLevel;
   /** L1 的会话判决（复用旧 JudgeResult 形状，下游可直接用） */
   judgeResult?: JudgeResult;
+  /** Core proposal 对应的 durable Agency run（若 Agency 表已启用）。 */
+  agencyRunId?: string;
   /** L2 dry-run 的工具审批记录（Phase 1 不执行真工具） */
-  l2DryRun?: Array<{ tool: string; tier: string; approved: boolean }>;
+  l2DryRun?: Array<{ tool: string; tier: string; approved: boolean; agencyRunId?: string; executed?: boolean }>;
   state?: CoreState;
   fallbackToLegacy?: boolean;
 }
@@ -202,6 +206,30 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
     /* non-critical */
   }
 
+  // Phase 7：把 L1 判决接入 durable Agency，但只用无副作用 observe
+  // action。默认 shadow 会得到 waiting；不会凭 judge 结果捏造回复正文。
+  let agencyRunId: string | undefined;
+  try {
+    const { recordAgencyProposal } = await import('../agent/agency-proposals.js');
+    const recorded = await recordAgencyProposal({
+      chatId: input.chatId,
+      messageId: input.message.messageId,
+      judgeResult,
+      proposalId,
+      cognitiveAnchorEventId: input.cognitiveAnchorEventId,
+    });
+    agencyRunId = recorded.runId;
+    if (recorded.deferred) {
+      logger.debug(
+        { chatId: input.chatId, messageId: input.message.messageId, agencyRunId, reason: recorded.reason },
+        'core proposal deferred by Agency policy',
+      );
+    }
+  } catch (err) {
+    // Agency persistence is additive; an unavailable/old database never blocks legacy behavior.
+    logger.debug({ err, chatId: input.chatId }, 'core Agency proposal bridge failed (non-critical)');
+  }
+
   // Phase 6：自动 promote（host 侧，fail-soft）。
   // readonly proposal（REPLY→recentMessages）→ 自动转 authorized_intent（open），
   // L2 在 gate 开时真执行（只读上下文备查），关时 dry-run。
@@ -222,7 +250,7 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
   }
 
   if (level === 'l1-converse') {
-    return { level, judgeResult, state };
+    return { level, judgeResult, agencyRunId, state };
   }
 
   // ── L2 upgrade（Phase 1：只 dry-run，不执行真工具） ──
@@ -238,12 +266,12 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
     (en) => en.chatId === input.chatId || en.chatId === null,
   );
   if (intents.length === 0) {
-    return { level, judgeResult, state, l2DryRun: [] };
+    return { level, judgeResult, agencyRunId, state, l2DryRun: [] };
   }
   // 有 intent：Phase 5 真执行 —— CORE_PERMISSION_GATE_ENABLED 开才调
   // executeIntentReal；关则沿用 Phase 1 dry-run（classify+approve 只记日志）。
   // 无论哪档，L2 永不直通 pipeline 回复（返回 judgeResult，执行结果只进 receipt）。
-  const dryRun: Array<{ tool: string; tier: string; approved: boolean; executed?: boolean }> = [];
+  const dryRun: NonNullable<CoreTickResult['l2DryRun']> = [];
   let gateOn = false;
   try {
     const { env: envShim } = await import('./env-shim.js');
@@ -261,13 +289,35 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
     } catch {
       continue;
     }
+    const tier = classify(tool, args);
+    if (gateOn && tier === 'readonly') {
+      const { executeAuthorizedIntentViaAgency } = await import('../agent/agency-intent-adapter.js');
+      const r = await executeAuthorizedIntentViaAgency(intent.id);
+      if (r.agencyUnavailable) {
+        // Old databases may not have 0092 yet. Preserve the pre-Agency gate
+        // behavior only for unavailable infrastructure, never for policy denial.
+        const { executeIntentReal } = await import('./l2/execute.js');
+        const legacy = await executeIntentReal(intent.id);
+        dryRun.push({ tool, tier, approved: legacy.executed, executed: legacy.executed });
+        logger.debug(
+          { chatId: input.chatId, tool, reason: r.reason },
+          'core L2 Agency unavailable, fell back to legacy readonly executor',
+        );
+        continue;
+      }
+      dryRun.push({ tool, tier, approved: r.executed, executed: r.executed, ...(r.agencyRunId ? { agencyRunId: r.agencyRunId } : {}) });
+      logger.info(
+        { chatId: input.chatId, tool, tier, executed: r.executed, agencyRunId: r.agencyRunId, reason: r.reason },
+        'core L2 readonly Agency dispatch',
+      );
+      continue;
+    }
     if (gateOn) {
       const { executeIntentReal } = await import('./l2/execute.js');
       const r = await executeIntentReal(intent.id);
       dryRun.push({ tool, tier: r.tier ?? classify(tool, args), approved: r.executed, executed: r.executed });
       continue;
     }
-    const tier = classify(tool, args);
     const ap = await approve(tier, intent.id);
     dryRun.push({ tool, tier, approved: ap.ok });
     logger.info(
@@ -276,7 +326,7 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
     );
     void setEntryStatus;
   }
-  return { level, judgeResult, state, l2DryRun: dryRun };
+  return { level, judgeResult, agencyRunId, state, l2DryRun: dryRun };
 }
 
 /** pipeline 侧调用：graylist 内才跑 core，否则直接 legacy（零开销）。 */
@@ -298,6 +348,7 @@ export async function shadowCompare(opts: {
   chatId: number;
   message: FormattedMessage;
   legacy: JudgeResult;
+  cognitiveAnchorEventId?: string;
   burstHint?: string;
   focusLevel?: number;
 }): Promise<void> {
@@ -307,6 +358,7 @@ export async function shadowCompare(opts: {
       chatId: opts.chatId,
       message: opts.message,
       recentMessages,
+      cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
       burstHint: opts.burstHint,
       focusLevel: opts.focusLevel,
     });
@@ -320,6 +372,7 @@ export async function shadowCompare(opts: {
         // Phase 6 可观测：belief 段是否参与了这次 core 判（diverged 归因用）
         beliefCount: r.state?.beliefs.length ?? 0,
         promoted: (r.l2DryRun ?? []).length > 0,
+        agencyRunId: r.agencyRunId,
       },
       'core shadow compare',
     );

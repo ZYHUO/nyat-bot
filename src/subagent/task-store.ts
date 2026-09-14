@@ -43,6 +43,23 @@ export async function tryClaimQuote(
   }
 }
 
+/** Release a quote claim only when it still belongs to this task. */
+export async function clearQuoteClaim(
+  chatId: number,
+  messageId: number,
+  taskId: string,
+): Promise<void> {
+  if (!Number.isFinite(messageId) || messageId <= 0) return;
+  try {
+    const redis = getRedis();
+    const key = QUOTE_CLAIM_KEY(chatId, messageId);
+    const cur = await redis.get(key);
+    if (cur === taskId) await redis.del(key);
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function clearCodeActActive(chatId: number, taskId: string): Promise<void> {
   try {
     const redis = getRedis();

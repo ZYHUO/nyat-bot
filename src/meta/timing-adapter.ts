@@ -27,6 +27,7 @@ import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
 import { scheduleMetaDeferReeval } from './defer.js';
+import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
@@ -40,6 +41,8 @@ export interface MetaWaitAnchor {
   pressure?: number;
   createdAt: number;
   payload?: Record<string, unknown>;
+  /** Durable Telegram event used to anchor workspace/replay reads. */
+  cognitiveAnchorEventId?: string;
 }
 
 function waitAnchorKey(chatId: number): string {
@@ -88,6 +91,7 @@ export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> 
       textPreview: anchor.textPreview,
       pressure: anchor.pressure,
       payload: anchor.payload,
+      cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
     });
     logger.info({ chatId, messageId: anchor.messageId }, 'Meta timing wait-resume → Attention');
     return true;
@@ -121,6 +125,7 @@ export async function evaluateMetaTiming(opts: {
   directKind?: string | null;
   /** 本条消息已被 defer 的次数（来自 Attention payload，首次为 0/undefined）。 */
   deferCount?: number;
+  cognitiveAnchorEventId?: string;
 }): Promise<{ verdict: MetaTimingVerdict; reason: string }> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) {
@@ -229,10 +234,30 @@ export async function evaluateMetaTiming(opts: {
           textPreview: (formatted.textContent || '').slice(0, 200),
           pressure: layer === 'L1' ? 60 : 30,
           createdAt: Date.now(),
+          cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
         },
         waitSec + 120,
       );
-      await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
+      const agencyWait = await dispatchWaitViaAgency({
+        chatId,
+        triggerMessageId: formatted.messageId,
+        ...(formatted.uid > 0 ? { triggerUserId: formatted.uid } : {}),
+        waitSec,
+        reason: `meta_timing:${decision.reason}`,
+        source: 'meta_timing',
+        ...(opts.cognitiveAnchorEventId ? { cognitiveAnchorEventId: opts.cognitiveAnchorEventId } : {}),
+      });
+      if (agencyWait.attempted) {
+        if (!agencyWait.accepted) {
+          logger.warn(
+            { chatId, layer, messageId: formatted.messageId, agencyRunId: agencyWait.agencyRunId, reason: agencyWait.reason },
+            'Meta timing wait rejected by Agency authority transport',
+          );
+          return { verdict: 'silence', reason: 'wait_transport_failed' };
+        }
+      } else {
+        await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
+      }
     } catch (err) {
       logger.warn({ err, chatId }, 'Meta timing wait setup failed — fail-open allow');
       return { verdict: 'allow', reason: 'wait_setup_failed' };
@@ -268,6 +293,7 @@ export async function evaluateMetaTiming(opts: {
               }
             : {}),
         },
+        cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
       },
       deferCount,
       retryAfterMs,
