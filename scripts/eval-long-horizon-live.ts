@@ -531,7 +531,12 @@ function gitVersion(): { revision: string; dirty: boolean } {
       ["status", "--porcelain", "--untracked-files=no"],
       { cwd: REPO_ROOT, encoding: "utf8" },
     );
-    return { revision, dirty: status.trim().length > 0 };
+    const dirty = status
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+      .some((path) => !path.startsWith("docs/eval-results/"));
+    return { revision, dirty };
   } catch {
     return { revision: "unknown", dirty: true };
   }
