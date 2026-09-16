@@ -1,0 +1,307 @@
+// ────────────────────────────────────────
+// Tool Registry — Vercel AI SDK tool definitions
+// ────────────────────────────────────────
+
+import { z } from 'zod';
+import type { ZodTypeAny } from 'zod';
+import { tool } from 'ai';
+import type { Tool } from 'ai';
+import { executeSearch } from './search.js';
+import { executeFetch } from './web-fetch.js';
+import { executeRecall } from './recall.js';
+import { executeIpQuality } from './ip-quality.js';
+import { addTimer, listTimers, deleteTimer } from './timer.js';
+import { queryBotKnowledge } from './bot-knowledge.js';
+import { executePoll } from './poll.js';
+import { buildJargonTool } from './jargon-tool.js';
+import {
+  queryMemorySchema, executeQueryMemory,
+  queryPersonProfileSchema, executeQueryPersonProfile,
+  fetchHistorySchema, executeFetchHistory,
+  sendImageSchema, executeSendImage,
+} from './agent-tools.js';
+import { env } from '../../env.js';
+import { loadSkills, type LoadedSkillEntry } from './skill-loader.js';
+
+// Skills are loaded once at startup and cached
+let _skillsCache: Record<string, LoadedSkillEntry> | undefined;
+let _skillsLoading: Promise<void> | undefined;
+
+export function preloadSkills(): Promise<void> {
+  if (_skillsLoading) return _skillsLoading;
+  _skillsLoading = loadSkills(env().SKILLS_DIR).then((skills) => {
+    _skillsCache = skills;
+  });
+  return _skillsLoading;
+}
+
+function buildSchemasAndTools(
+  chatId: number,
+  userId: number,
+): { tools: Record<string, Tool>; schemas: Map<string, ZodTypeAny> } {
+  const e = env();
+  const tools: Record<string, Tool> = {};
+  const schemas = new Map<string, ZodTypeAny>();
+
+  const register = (name: string, schema: ZodTypeAny, t: Tool) => {
+    tools[name] = t;
+    schemas.set(name, schema);
+  };
+
+  const searchSchema = z.object({
+    query: z.string().describe('搜索查询关键词'),
+  });
+  register(
+    'SEARCH',
+    searchSchema,
+    tool({
+      description: '搜索互联网获取最新信息。当用户询问你不确定的事实、新闻、或需要实时数据时使用。',
+      parameters: searchSchema,
+      execute: async ({ query }) => executeSearch(query),
+    }),
+  );
+
+  // 注意:不要用 z.string().url() —— 它生成 JSON Schema format:"uri",
+  // OpenAI 工具端点直接 400(冒烟实测)。URL 合法性由 web-fetch 的
+  // SSRF/协议校验把关,这里只收字符串。
+  const fetchSchema = z.object({
+    url: z.string().describe('要抓取的网页URL(http/https 完整地址)'),
+  });
+  register(
+    'FETCH',
+    fetchSchema,
+    tool({
+      description: '抓取并读取指定URL的网页内容。当用户分享链接或需要读取特定网页时使用。',
+      parameters: fetchSchema,
+      execute: async ({ url }) => executeFetch(url),
+    }),
+  );
+
+  const recallSchema = z.object({
+    query: z.string().describe('回忆检索关键词:某个人的名字/某件旧事/某个话题'),
+    topK: z.number().int().min(1).max(20).optional().describe('召回条数,默认8'),
+  });
+  register(
+    'RECALL',
+    recallSchema,
+    tool({
+      description: '从长期记忆里语义检索本群过去的对话(谁说过什么、某旧事的来龙去脉)。当用户提到某人/某旧事/某话题需要回忆时使用。可多次调用细化查询。',
+      parameters: recallSchema,
+      execute: async ({ query, topK }) => executeRecall(chatId, query, topK),
+    }),
+  );
+
+  if (e.IP_QUALITY_API_URL) {
+    const ipSchema = z.object({
+      ip: z.string().describe('要查询的IP地址或域名'),
+    });
+    register(
+      'IP_QUALITY',
+      ipSchema,
+      tool({
+        description: '查询IP地址或域名的质量信息，包括地理位置、ISP、是否为代理等。',
+        parameters: ipSchema,
+        execute: async ({ ip }) => executeIpQuality(ip),
+      }),
+    );
+  }
+
+  if (e.TIMER_API_URL) {
+    const addTimerSchema = z.object({
+      name: z.string().describe('定时器名称'),
+      cron_expression: z.string().describe('Cron表达式（北京时间）：分 时 日 月 周，如 "30 14 12 4 *"'),
+      one_time: z.boolean().default(false).describe('是否为一次性触发（触发后自动删除）'),
+      message: z.string().optional().describe('提醒消息内容'),
+    });
+    register(
+      'ADD_TIMER',
+      addTimerSchema,
+      tool({
+        description: [
+          '创建定时提醒或定时任务。支持自然语言时间，模型负责将其转换为 cron 表达式（北京时间 UTC+8）。',
+          '示例:',
+          '  "3小时后提醒我" → one_time=true，cron=当前时间+3h',
+          '  "每天早上8点" → cron="0 8 * * *"，one_time=false',
+          '  "下午3点提醒一次" → one_time=true，cron="0 15 <今天日> <今月> *"',
+          '  "每周一早上9点" → cron="0 9 * * 1"',
+          '注意: cron表达式用本地北京时间，分 时 日 月 周。one_time=true表示只触发一次后自动删除。',
+        ].join('\n'),
+        parameters: addTimerSchema,
+        execute: async (params) => addTimer({ ...params, chatId, userId }),
+      }),
+    );
+
+    const listTimersSchema = z.object({});
+    register(
+      'LIST_TIMERS',
+      listTimersSchema,
+      tool({
+        description: '列出当前群组的所有活跃定时器。',
+        parameters: listTimersSchema,
+        execute: async () => listTimers(chatId),
+      }),
+    );
+
+    const deleteTimerSchema = z.object({
+      id: z.string().describe('要删除的定时器ID'),
+    });
+    register(
+      'DELETE_TIMER',
+      deleteTimerSchema,
+      tool({
+        description: '删除指定ID的定时器。',
+        parameters: deleteTimerSchema,
+        execute: async ({ id }) => deleteTimer(id),
+      }),
+    );
+  }
+
+  const botKnowledgeSchema = z.object({
+    query: z.string().describe('Bot用户名（不含@）或 "list"'),
+  });
+  register(
+    'BOT_KNOWLEDGE',
+    botKnowledgeSchema,
+    tool({
+      description: '查询本群其他bot的知识。传入bot用户名查看该bot信息，或传"list"列出所有已知bot。',
+      parameters: botKnowledgeSchema,
+      execute: async ({ query }) => queryBotKnowledge(chatId, query),
+    }),
+  );
+
+  // 借力其他 bot:代发其命令(P2,flag 默认关;闸/安全门全在 execute 里)
+  if (e.BOT_DELEGATION_ENABLED) {
+    const useBotCmdSchema = z.object({
+      bot_username: z.string().describe('目标 bot 的用户名(不含 @)'),
+      command: z.string().describe('要发的命令,/xxx 形式'),
+      args: z.string().optional().describe('命令参数(可选),如 IP、歌名'),
+    });
+    register(
+      'USE_BOT_COMMAND',
+      useBotCmdSchema,
+      tool({
+        description: [
+          '借用本群另一个 bot 的命令来帮用户办事(如查股价/IP/歌)。',
+          '仅在:用户的需求确实要靠那个 bot、且自己的 SEARCH/记忆答不了时才用;先用 BOT_KNOWLEDGE 确认该 bot 有这条命令。',
+          '能不能代发由系统把关(没学熟/需管理员/结果在按钮后/对方不理 bot 都会被拒,届时改成把命令告诉用户)。',
+        ].join('\n'),
+        parameters: useBotCmdSchema,
+        execute: async ({ bot_username, command, args }) =>
+          (await import('./bot-delegation.js')).executeUseBotCommand(chatId, bot_username, command, args ?? ''),
+      }),
+    );
+  }
+
+  const pollSchema = z.object({
+    question: z.string().describe('投票问题'),
+    options: z.array(z.string()).min(2).max(10).describe('选项列表，2-10个'),
+  });
+  register(
+    'CREATE_POLL',
+    pollSchema,
+    tool({
+      description: '创建投票。当用户想发起投票或群内决策时使用。',
+      parameters: pollSchema,
+      execute: async ({ question, options }) => executePoll(chatId, question, options),
+    }),
+  );
+
+  if (_skillsCache) {
+    for (const [name, entry] of Object.entries(_skillsCache)) {
+      register(name, entry.parameterSchema, entry.tool);
+    }
+  }
+
+  // Jargon query tool (Stage D)
+  const jargonDef = buildJargonTool(chatId);
+  if (jargonDef) {
+    register(jargonDef.name, jargonDef.schema, jargonDef.tool);
+  }
+
+  // ── Agent builtin tools(MaiBot Maisaka builtin_tool 对应)──
+  // 让模型按需拉记忆/画像/历史,而不是全靠预注入。只读、容错。
+  register(
+    'QUERY_MEMORY',
+    queryMemorySchema,
+    tool({
+      description: '检索本群长期记忆。当聊到过去的事、需要回忆"之前谁说过什么"时使用。',
+      parameters: queryMemorySchema,
+      execute: async ({ query }) => executeQueryMemory(chatId, query),
+    }),
+  );
+  register(
+    'QUERY_PERSON_PROFILE',
+    queryPersonProfileSchema,
+    tool({
+      description: '查询某个群友的画像(性格、偏好、你和TA的关系)。当回复涉及具体的人、需要了解TA时使用。',
+      parameters: queryPersonProfileSchema,
+      execute: async ({ name }) => executeQueryPersonProfile(chatId, name),
+    }),
+  );
+  register(
+    'FETCH_HISTORY',
+    fetchHistorySchema,
+    tool({
+      description: '拉取比当前上下文更早的聊天记录。当话题指向"刚才/上面聊的"但上下文里看不到时使用。',
+      parameters: fetchHistorySchema,
+      execute: async ({ before_message_id, count }) => executeFetchHistory(chatId, before_message_id, count),
+    }),
+  );
+  if (e.SEND_IMAGE_TOOL_ENABLED) {
+    register(
+      'SEND_IMAGE',
+      sendImageSchema,
+      tool({
+        description: '把上下文里某条消息的图片转发到群里。仅当回复确实需要把图分享出来时使用(如有人问"哪张图"),不要滥用。',
+        parameters: sendImageSchema,
+        execute: async ({ message_id, caption }) => executeSendImage(chatId, message_id, caption),
+      }),
+    );
+  }
+
+  return { tools, schemas };
+}
+
+export function buildToolSet(
+  chatId: number,
+  userId: number,
+  only?: string[],
+): Record<string, Tool> {
+  const all = buildSchemasAndTools(chatId, userId).tools;
+  if (!only || only.length === 0) return all;
+  // 专家工具子集:只保留 allow 名单里的工具(研究员拿 SEARCH/FETCH 等)。
+  const allow = new Set(only);
+  const out: Record<string, Tool> = {};
+  for (const [name, t] of Object.entries(all)) {
+    if (allow.has(name)) out[name] = t;
+  }
+  return out;
+}
+
+/**
+ * Parse tool arguments with the same Zod schemas as the AI SDK tools, then execute.
+ * Used by the planner path so model-emitted JSON cannot skip validation.
+ */
+export async function executeValidatedToolStep(
+  toolName: string,
+  rawArgs: unknown,
+  chatId: number,
+  userId: number,
+): Promise<unknown> {
+  const { tools, schemas } = buildSchemasAndTools(chatId, userId);
+  const schema = schemas.get(toolName);
+  const t = tools[toolName];
+  if (!schema || !t?.execute) {
+    throw new Error(`Unknown or non-executable tool: ${toolName}`);
+  }
+  const parsed = schema.parse(rawArgs ?? {});
+  const out = t.execute(parsed as never, {
+    toolCallId: 'planner',
+    messages: [],
+  });
+  return await Promise.resolve(out);
+}
+
+export function getToolNames(chatId: number, userId: number): string[] {
+  return Object.keys(buildToolSet(chatId, userId));
+}

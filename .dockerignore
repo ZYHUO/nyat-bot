@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.env.*
+*.log
+logs/
+data/
+.git
+tests/
+coverage/
+*.md
+!prompts/**/*.md

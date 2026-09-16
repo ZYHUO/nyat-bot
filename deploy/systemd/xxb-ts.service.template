@@ -1,0 +1,22 @@
+[Unit]
+Description=xxb-ts Telegram bot
+After=network-online.target redis-server.service redis.service qdrant.service
+Wants=network-online.target redis-server.service qdrant.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__ENV_FILE__
+Environment=TZ=Asia/Shanghai
+ExecStart=__NODE_BIN__ __ENTRYPOINT__
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+StandardOutput=append:__WORKDIR__/logs/app.log
+StandardError=append:__WORKDIR__/logs/app.log
+
+[Install]
+WantedBy=multi-user.target

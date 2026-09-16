@@ -1,0 +1,142 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { parseJudgeAction } from '../../../src/pipeline/judge/micro.js';
+
+// We test parseJudgeAction separately — it's a pure function
+// For callWithFallback tests, we mock the AI provider
+
+describe('parseJudgeAction', () => {
+  it('parses valid JSON response', () => {
+    const result = parseJudgeAction('{"action": "REPLY", "replyPath": "planned", "confidence": 0.9, "reasoning": "asked a question"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+    expect(result!.confidence).toBe(0.9);
+    expect(result!.reasoning).toBe('asked a question');
+  });
+
+  it('maps legacy REPLY_PRO to REPLY + planned', () => {
+    const result = parseJudgeAction('{"action": "REPLY_PRO", "confidence": 0.85}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+  });
+
+  it('maps legacy REPLY_MAX to REPLY + planned', () => {
+    const result = parseJudgeAction('{"action": "REPLY_MAX", "confidence": 0.85}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+  });
+
+  it('parses IGNORE', () => {
+    const result = parseJudgeAction('{"action": "IGNORE", "confidence": 0.95, "reasoning": "not relevant"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+  });
+
+  it('parses REJECT', () => {
+    const result = parseJudgeAction('{"action": "REJECT", "confidence": 1.0}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REJECT');
+  });
+
+  it('handles markdown code blocks', () => {
+    const result = parseJudgeAction('```json\n{"action": "REPLY", "confidence": 0.8}\n```');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+  });
+
+  it('handles uppercase ACTION key', () => {
+    const result = parseJudgeAction('{"ACTION": "IGNORE"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+  });
+
+  it('extracts action from messy JSON', () => {
+    const result = parseJudgeAction('Sure, here is my decision:\n{"action": "REPLY"}\nLet me explain...');
+    // This won't parse as JSON directly, but regex should catch it
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+  });
+
+  it('extracts keyword from plain text', () => {
+    const result = parseJudgeAction('I think we should IGNORE this message because it is not relevant.');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+    expect(result!.confidence).toBe(0.3);
+  });
+
+  it('maps REPLY_PRO keyword extraction to REPLY + planned', () => {
+    const result = parseJudgeAction('This deserves a REPLY_PRO response');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+  });
+
+  it('returns null for completely unparseable response', () => {
+    const result = parseJudgeAction('I am not sure what to do here.');
+    expect(result).toBeNull();
+  });
+
+  it('defaults confidence to 0.5 when not provided in JSON', () => {
+    const result = parseJudgeAction('{"action": "REPLY"}');
+    expect(result).not.toBeNull();
+    expect(result!.replyPath).toBe('direct');
+    expect(result!.confidence).toBe(0.5);
+  });
+
+  it('handles lowercase action values', () => {
+    const result = parseJudgeAction('{"action": "reply"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('direct');
+  });
+
+  it('falls back to default reply path when replyPath is invalid', () => {
+    const result = parseJudgeAction('{"action": "REPLY_PRO", "replyPath": "unknown"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+    expect(result!.replyPath).toBe('planned');
+  });
+
+  it('strips paired thinking blocks wrapping JSON (reasoning-model residue)', () => {
+    const result = parseJudgeAction('<think>让我想想……这条消息在问问题</think>\n{"action": "REPLY", "confidence": 0.8}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('REPLY');
+  });
+
+  it('strips unclosed thinking prefix (StepFun only-thinking response)', () => {
+    const result = parseJudgeAction('一些推理过程……</think>\n{"action": "IGNORE", "confidence": 0.9}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+  });
+
+  it('thinking residue keywords do not cause false-positive keyword fallback', () => {
+    // thinking 里提到 REPLY 但真正的决策是 IGNORE —— 剥干净后必须走 JSON, 不能被关键词带偏
+    const result = parseJudgeAction('<think>要不要 REPLY 呢? 不, 没必要</think>\n{"action": "IGNORE"}');
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe('IGNORE');
+  });
+
+  it('returns null for empty/thinking-only responses', () => {
+    expect(parseJudgeAction('')).toBeNull();
+    expect(parseJudgeAction('<think>还在想……</think>')).toBeNull();
+  });
+});
+
+// Fallback chain tests - mock the AI provider
+describe('Fallback chain logic', () => {
+  // These tests verify the callWithFallback logic using mocks
+  // We can't easily mock the entire module chain in unit tests,
+  // so we test the parse logic above and trust the integration
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('callWithFallback is importable', async () => {
+    // Verify the module can be imported without errors
+    const { callWithFallback } = await import('../../../src/ai/fallback.js');
+    expect(typeof callWithFallback).toBe('function');
+  });
+});
