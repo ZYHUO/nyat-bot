@@ -35,6 +35,15 @@ Most chat bots are **responding** systems: cue in, text out. Real group members 
 - 🧠 **3-level judge pipeline** — L0 local rules → L1 micro AI → L2 full AI (fallback path when Heart is off; Meta graylist chats skip it to avoid double replies)
 - 🎯 **Multi-model routing + Smart Group** — per-usage provider chains (reply / judge / vision / summarize / deep_think) with auto-assign from a live health/latency pool, hedged requests, circuit breakers, Redis runtime overrides
 
+**NyatOS layer (in progress, shadow-only)**
+- 🧾 **Frame** (`src/nyatos/frame.ts`) — one bounded, factual view per turn: conversation field (topics / floor / pace / who-talks-to-whom), inner state, Telegram capabilities, the bot's own recent acts *with outcomes*, wall-clock facts, and its own identity (so it can tell an `@mention` of itself from a stranger's name). Fail-soft per register: an unreadable register becomes a visible unknown, never a crash.
+- 👥 **Single decision point** (`src/nyatos/shadow.ts`) — a second judgement run in parallel on live traffic that **records but never sends**, so the rewrite can be measured against the shipping path before it is trusted.
+- 🗣️ **Participation self-awareness** (`src/nyatos/budget.ts`) — reports what the bot has *done* ("you've said 6 things this hour", "you just spoke"), never a quota it is allowed. Restraint comes from the persona; the host only reports.
+- ⏱️ **Cognitive clock** (`src/agent/cognitive-clock.ts`) — `own_action_result` (the bot seeing what it just did, and how it landed) and `self_scheduled_wake` (deciding when to think again) as first-class events.
+- 🌍 **Host-observable world facts** (`src/agent/world-facts.ts`) — group title / type / username / description recorded as `world_change` events, the missing producer for the World projection.
+
+> Honest status: the Frame + shadow are live and measured; the single decision point is **not** the production path. A 54-sample comparison found it wants to speak far more often than the shipping gates allow (48 times in 28 minutes, median gap 7s), and it did not restrain itself even when told it had just sent four unanswered messages. The gates therefore stay, and the self-awareness facts above were added so the model can regulate itself instead of being silently overridden. See `docs/plans/2026-09-18-dispatch-gate-review.md`.
+
 **Being a group member**
 - 🗣️ **Addressee & floor awareness** — explicit (mention/reply/quote) + implicit scoring for *who* is being talked to; thread disentangling; never interrupts a 1-on-1 streak
 - 💬 **Natural pickup** — stays present after speaking: follows up questions/statements from either side without needing @ or quote; holds back in hot chats
@@ -43,6 +52,10 @@ Most chat bots are **responding** systems: cue in, text out. Real group members 
 - ✍️ **Humanizer V2** — typo injection + silent edit correction, read delays, ack prefixes, delete-and-resend, sticker-only short replies, thinking interjections, afterthought edits, typing alignment, jitter, smart segmentation
 - 😻 **Reactions, polls, forwards** — lightweight `setMessageReaction` acknowledgments (hard-capped per chat/day), polls as initiative carriers, taste-scored cross-group forwarding (see Taste below)
 - 👥 **Social state** — member roster, per-chat mood, decaying per-user affinity, reputation, behavioral roles, social graph between members ("A and B interact a lot"), reply-outcome tracking
+- 🧾 **Self-awareness** — the bot sees its own recent acts *with how they landed* (nobody replied / someone did / it got pushback), how much of the current stretch was its own talking, and how long since it last spoke. It regulates itself from that instead of being silently overridden by a timer.
+- 🩹 **Relationship repair** (`src/tracking/repair.ts`) — when one of its own lines landed badly and it never came back to it, that is surfaced as a fact ("10 分钟前你说…，对方的反应不太好，之后你没再提"). The model decides whether to return to it; nothing auto-apologises.
+- 🧵 **Cross-day threads** (`src/tracking/open-threads.ts`) — explicit commitments survive past the 30-minute working-memory TTL, so it can say "对了，昨天你说那个…" the way a person does. Only explicit promises are recorded; it never dredges up a conversation the human moved past.
+- 😤 **Edges that include teeth** — the persona may swear when genuinely provoked, and the CodeAct path may say "让我想想" *before* going off to work, rather than going silent for thirty seconds and answering in one lump.
 
 **Taste & curiosity (H3/H4)**
 - 👅 **Taste scoring** — deterministic 0ms scoring of "worth forwarding" (funny / useful / resonant); LLM only *chooses* among candidates, never judges taste; 7-day cross-group dedup, ≤2 per chat
@@ -132,14 +145,29 @@ Cron: model health · profile sync · idle proactive · channel ingest
 | H1 timing | Floor/addressee, group pace, silence convergence | #54 |
 | H2 style | Dialect exemplar cold-start + hard constraints, per-message feed | #55, #58 |
 | H3 initiative | Taste scoring + cross-group share, polls in main flow, mention unlock + heard-but-pass | #57, #59, #60 |
-| H4 curiosity | Topic bandit + reaction reward reflux, spot-the-bot harness | #61 |
+| H4 curiosity | Topic bandit + reaction reward reflux | #61 |
 | H4.1/H4.2 hardening | Usage-level `jsonMode` defaults (kill dirty-JSON parse failures at the root), taste 0.5 recalibrated on 194-message replay | #62–#64 |
 
 Next: reaction samples still at zero — the bandit/taste closed loops are live but waiting for their first real-world rewards. Offline replay (`scripts/offline-backfill.ts`) bootstraps norms/exemplars from history without sending a single message.
 
+### 🕳️ Known traps (learned the hard way)
+
+This codebase has repeatedly contained code that *exists, compiles, and passes its own tests* while doing nothing at runtime. Three distinct failure shapes, all found by replaying real data rather than reading code:
+
+1. **Written but never read** — `core_blackboard` had 1,752 observation rows and no reader (`visibleToL1` was exported and never called).
+2. **Read but never written** — the World projection consumed `world_change` events, but nothing in the repo ever emitted one, so `world_entities` stayed empty. `action-board` defines a `repair` action with a priority weight; nothing produced it.
+3. **Present but wrong** — `world_entities` held 2,711 rows of reply instructions mis-stored as entity names, and they were being injected into the live prompt.
+
+Two habits keep finding these:
+
+- **Replay real data.** `grep` over logs answers a different question than you think: the `rule` field is only logged on the sleep path, so counting it said "0 hits" for rules that fire constantly. Replaying the real function over real messages found them immediately.
+- **Check the built bundle.** `grep -c 'src/path/file.ts' dist/index.js` answers "is this in the running program" far more reliably than any import-graph analysis — it caught six genuinely dead files, and correctly flagged two that static analysis had wrongly cleared.
+- **A test is not evidence of liveness.** Several deleted files had passing tests that only imported the module itself. Passing tests prove the code *works*, never that it *runs*.
+
 ### 📏 Evaluation
 
-- **Spot-the-bot harness** (`src/eval/spot-the-bot.ts`) — bot + human samples shuffled, outside judges mark bot-or-not. Core metric: `P(judged human | bot)` with `P(judged bot | human)` as calibration; assists: quote/reaction rate, mean survival rounds.
+- **Long-horizon evaluation** (`src/eval/long-horizon.ts`, `long-horizon-report.ts`) — frozen-baseline vs expanded runs with external acceptance, crash/restart and interrupt/goal-change injection; driven by `scripts/eval-long-horizon-live.ts` and compared via `scripts/compare-long-horizon-reports.ts`. Engineering evidence only — 16 cases with no 1/7-day retention, so the delta is not a learning claim.
+- **Agency canary** (`src/eval/agency-canary.ts`) — deterministic window evaluation over `agency_runs`; no real Telegram canary yet.
 - **Offline replay** (`scripts/offline-backfill.ts`) — real Redis history through norms/exemplar/taste with `--dry` preview; read-only on history, write-only on tables.
 - **Full suite is the gate** — `npm test` fully green is the merge bar; a failing test is a real regression, never skipped.
 
@@ -187,10 +215,12 @@ src/
 │   ├── nl-commands.ts    #   natural language → command routing
 │   ├── timing/           #   rhythm/sequence state (gate + chat runtime)
 │   └── tools/            #   tool system
+├── nyatos/               # NyatOS: Frame assembly + single-decision shadow + participation budget
 ├── queue/                # BullMQ queue
 ├── shared/               # types + logging (pino) + config
-├── eval/                 # spot-the-bot harness
+├── eval/                 # long-horizon runner + agency canary
 └── tracking/             # activity + mood + relations + reputation + ASI + outcomes
+                          #   + self-history (own acts with outcomes) + repair + open-threads
 prompts/                  # AI prompt templates (Markdown)
 ├── identity/             #   persona: persona.md + behavior-style.md (reply or not)
 ├── safety/               #   guardrails
