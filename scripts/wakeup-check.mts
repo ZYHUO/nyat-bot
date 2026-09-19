@@ -19,6 +19,7 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
+import { getLifeState } from '../src/tracking/life-state.js';
 
 const DAYS = Number(process.argv[2] ?? 3);
 // 定向债上线时间（2026-09-19 19:59 UTC）。**只认这之后的醒来**：
@@ -130,7 +131,18 @@ const stale = all.length - cases.length;
 if (stale > 0) console.log(`（已忽略 ${stale} 个定向债上线前的疑似醒来——那些样本没有债可还）\n`);
 if (cases.length === 0) {
   console.log('\n还没有"定向债生效后的醒来"样本。判定要等一次自然醒来。');
-  console.log(`bot 当前在睡（醒来约北京 09:09 = 01:09 UTC），DEBT_SINCE=${new Date(DEBT_SINCE * 1000).toISOString()}\n`);
+  // **醒来时间必须算，不能写死**：这一行原本硬编码"北京 09:09"，而睡眠点是按日
+  // seed + 当日发言量偏移的动态值，每天不同、且我修改过行为之后它也会变。
+  // （同一个错我在这个会话里犯过六次：写死在数字旁边的叙述不会随数字更新。）
+  let wakeBj = '';
+  for (let min = 0; min <= 600; min += 5) {
+    const t = new Date(Date.now() + min * 60000);
+    if (getLifeState(t).state !== 'sleeping') {
+      wakeBj = new Date(t.getTime() + 8 * 3600000).toISOString().slice(11, 16);
+      break;
+    }
+  }
+  console.log(`bot 当前在睡（醒来约北京 ${wakeBj || '未知'}，即 UTC ${wakeBj ? String((Number(wakeBj.slice(0, 2)) + 16) % 24).padStart(2, '0') + ':' + wakeBj.slice(3) : '-'}），DEBT_SINCE=${new Date(DEBT_SINCE * 1000).toISOString()}\n`);
   process.exit(0);
 }
 
