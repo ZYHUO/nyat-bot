@@ -153,8 +153,23 @@ if (comparable === 0) {
 console.log(`\n  单决策点想 speak：${speakWant} 次，其中线上真回了：${speakWantSpoke} 次`);
 console.log(`  单决策点想 silent：${silentWant} 次，其中线上真没说：${silentWantSilent} 次`);
 console.log(`\n  top-level 一致率：${(rate * 100).toFixed(1)}%`);
-console.log(`\n  注意方向：一致率**低**通常不是 shadow 判错，而是线上还有别的抑制层`);
-console.log(`  （gate/budget/dup）在替它做"别说"的决定——那正是要拆除的东西。`);
+// 这句解释曾经写死成"（gate/budget/dup）在替它做'别说'的决定"。60 轮后它已经过时：
+// 实测最大的抑制层是 Meta heart，而且生产里有三条路径**绕过**心流直接产生任务
+// （same_speaker_burst / post-task / direct-L0）。把归因写死在挨着数字的地方，
+// 数字更新了它不会跟着更新——这个会话已经吃过一次（计算 15% 而叙述说"绝大部分"）。
+// 所以这里只列事实来源，归因交给读的人。
+const { execSync: _exec } = await import('node:child_process');
+const layers = [
+  'Meta heart（实测 12,009 次判定只放行 7.7%）',
+  'timing gate（TIMING_GATE_ENABLED 时）',
+  '去重/自复读/语义重复守卫',
+  'L2 旁观硬丢（META_DEFER_ENABLED 关时）',
+];
+const bypasses = 'same_speaker_burst / post-task continuation / direct-L0（这三条绕过心流）';
+console.log(`\n  注意方向：一致率低可能来自多种原因，别只归给一条。当前线上的抑制层：`);
+for (const l of layers) console.log(`    · ${l}`);
+console.log(`  以及绕过抑制层的路径：${bypasses}`);
+console.log(`  归因需要另做（哪个群、哪个时段、哪条路径），这个数本身不给答案。`);
 // ── 分解：不一致里有多少是"物理拦掉"，多少是"真的分歧" ──────────────
 // 2026-09-19 实测（补身体前后对比）：
 //   补身体前 speak 1675/1732 (96.7%) → 一致率 10.1%
