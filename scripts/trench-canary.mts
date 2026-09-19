@@ -237,6 +237,34 @@ try {
   }
 } catch (err) { console.log('  （分群读数失败）'); }
 
+// 决策来源分布：live_outcome 账本此前**只写不读**（round 56 发现，与观测日志同类）。
+// 给它一个消费方，同时这正是 Phase 1 需要的路径归因——绕过心流的三条路各占多少。
+console.log('\n【决策来源】live_outcome 分布（近 24h）');
+try {
+  const cutoff = Math.floor(Date.now() / 1000) - 86400;
+  const rows = sql(`SELECT json_extract(fact_json,'$.outcome') AS o, COUNT(*) AS n
+    FROM cognitive_events
+    WHERE type='social_prediction' AND json_extract(fact_json,'$.schema')='shadow_live_outcome.v1'
+      AND occurred_at >= ${cutoff}
+    GROUP BY o ORDER BY n DESC`);
+  let tot = 0;
+  for (const r of rows) tot += Number(r.n);
+  for (const r of rows) {
+    const label: Record<string, string> = {
+      spoke: '说了（心流放行/直接）',
+      silent: '没说（心流否决）',
+      wait: '等（心流 wait）',
+      legacy: 'legacy 路径',
+      intercepted: '被拦截（绕过心流）',
+    };
+    console.log(`  ${String(r.o).padEnd(12)} ${String(r.n).padStart(6)}  ${(Number(r.n) / Math.max(tot, 1) * 100).toFixed(0).padStart(3)}%  ${label[String(r.o)] ?? ''}`);
+  }
+  console.log(`  合计 ${tot}`);
+  if (!rows.some((r) => r.o === 'intercepted')) {
+    console.log('  （无 intercepted —— 绕过路径未入账，或该窗口内没有绕过事件）');
+  }
+} catch { /* 读不到就跳过 */ }
+
 console.log('\n【海沟自身】');
 for (const [k, v] of Object.entries(trench)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 
