@@ -506,6 +506,14 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // 触发条件是负向的（HEART_ENABLED 开着而 META_HEART_ENABLED 关着），
           // 所以单独设 META_HEART_ENABLED=false 不会静音，也不会无人接管。
           if (heartPath === 'bypass') {
+            // 可观测性：旁路生效时必须留一条 info。**第一版这里一行日志都没有**，
+            // 于是往灰名单放了群之后，无法从日志判断旁路是否真的在跑——
+            // 而灰度实验的全部意义就是"能看出开关生效了没有"。
+            // 计数由金丝雀的 "Meta heart: BYPASSED" 读取，作为灰度生效的判据之一。
+            logger.info(
+              { chatId, messageId, layer: layerDec.layer },
+              'Meta heart: BYPASSED (trench grey release)',
+            );
             void (async () => {
               try {
                 // 被旁路掉的裁决记成 wait：让 shadow 对照能看到"心流本来会参一脚",

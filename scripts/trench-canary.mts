@@ -203,6 +203,9 @@ try {
   }
   if (bypassList.length === 0) {
     console.log('  （当前无旁路群——这是对照组本身）');
+  } else {
+    const fired = logCount('Meta heart: BYPASSED');
+    console.log(`  旁路实际生效次数：${fired}${fired === 0 ? '  ← 名单非空但零触发，灰度没生效！' : '  ← 灰度已生效'}`);
   }
 } catch (err) { console.log('  （分群读数失败）'); }
 
