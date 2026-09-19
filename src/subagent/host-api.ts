@@ -58,6 +58,16 @@ function makeSendAck(
   };
 }
 
+/**
+ * 连发事实注记：同一任务里距上一条发出仅 gapSec 秒时，sendText 回执里附一句
+ * 人话事实，让模型自己意识到在刷屏/同义改写。不拦截——只报事实，说不说由它决定。
+ * gapSec 为 null（本任务第一条）时不加注记。导出走纯函数是为了可单测。
+ */
+export function buildPacingAckSuffix(gapSec: number | null): string {
+  if (gapSec === null || gapSec >= 90) return '';
+  return `（距你上一条仅 ${gapSec} 秒——同一个意思别换个说法再发；真有新东西再说）`;
+}
+
 /** Record a delivery without copying user-visible text into the event log. */
 function persistBotDeliveryEvent(input: {
   chatId: number;
@@ -497,6 +507,7 @@ export function createHostApi(
   let currentPlan: string[] | null = null;
   let planDirty = false;
   let lastSentNorm = '';
+  let lastTextSentAt = 0;
   let metaRequested = false;
   // 承诺闭环：本任务发出过的文字（backstop 扫承诺措辞用）、跨群送达次数、是否已立 goal。
   const sentTexts: string[] = [];
@@ -1039,7 +1050,11 @@ export function createHostApi(
               logger.debug({ err, chatId }, 'host post-task noteBotSpoke failed');
             }
 
-            return makeSendAck(`text_sent#${lastMessageId}`, lastMessageId);
+            const gapSec = lastTextSentAt > 0 ? Math.round((Date.now() - lastTextSentAt) / 1000) : null;
+            lastTextSentAt = Date.now();
+            const pacingSuffix =
+              env().SEND_PACING_FACT_ENABLED && gapSec !== null ? buildPacingAckSuffix(gapSec) : '';
+            return makeSendAck(`text_sent#${lastMessageId}${pacingSuffix}`, lastMessageId);
           })(),
         );
       },

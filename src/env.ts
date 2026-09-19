@@ -379,6 +379,9 @@ const envSchema = z.object({
   // 与 scratchpad 的区别：那是 30 分钟工作记忆，这是跨天。只记**明确承诺**，
   // 不做"记住所有对话"——那会变成让人出戏的机械回忆。
   OPEN_THREADS_ENABLED: booleanFromEnv.default(false),
+  // sendText 回执带上"距上一条仅 N 秒"的事实注记，让模型自己意识到在连发/同义改写。
+  // 不拦截、不扣分——只给事实，改不改由 persona 决定（2026-09-19 困困问候连刷 6 条事件）。
+  SEND_PACING_FACT_ENABLED: booleanFromEnv.default(false),
   TIMING_GATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
   TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),
