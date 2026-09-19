@@ -1095,7 +1095,13 @@ export function createHostApi(
               }
               // 定向债销账：真的回给了锚点那个人，就还掉欠他的一句。
               // 这是"衰减由闭环驱动而不是由时钟驱动"的兑现点。
-              if (replyTo !== undefined && opts.targetUserId && opts.targetUserId > 0) {
+              // 用**生效的锚点**判断，不是只认模型显式传的 replyTo。
+              // 第一版写 `replyTo !== undefined`，而生产里多数发送的锚点是 host 用
+              // defaultReplyTo 兜底填的（模型常常不显式给），于是销账在多数发送上
+              // 根本不触发——债只增不减，定向债退化成单相思。
+              // 这和 round 11 的锚点修复是同一个教训：要认生效的那个值。
+              const anchorForDebt = replyTo ?? opts.defaultReplyTo ?? null;
+              if (anchorForDebt !== null && opts.targetUserId && opts.targetUserId > 0) {
                 void import('../nyatos/debt.js').then((m) => m.discharge(chatId, opts.targetUserId!, 1)).catch(() => {});
               }
               if (opts.taskId) markTaskVisible(opts.taskId);
