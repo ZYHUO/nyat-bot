@@ -109,24 +109,27 @@ function nightSenders(chatId: number, beforeSec: number): Set<number> {
 
 /** 一个桶：给定一群、一段时间、一组夜间发送者，统计 bot 发言里有多少锚在他们身上。 */
 function bucket(chatId: number, from: number, to: number, senders: Set<number>) {
-  // **anchor_ok 用真值，不是代理**：self_replies.trigger_uid 就是 bot 回复的目标
-  // uid（host-api 传 opts.targetUserId）。第一版写"无法解出被引用的 uid，用非空
-  // 锚点作代理"——那是没去看调用方传了什么。真值：trigger_uid ∈ 夜间消息发送者
-  // 集合，正好是红队可证伪检验要求的那个量。
+  // 三个量分开算，因为它们回答不同的问题：
+  //   noAnchor  发送时没有任何引用锚点（trigger_uid<=0）——**"往空里倾倒"的直接信号**
+  //   offTarget 有锚点但目标不是夜间发过言的人      —— 方向错了
+  //   onTarget  有锚点且目标在夜间发送者集合内      —— 定向还债
+  //
+  // 第一版只算 anchor_ok（onTarget/onTarget+offTarget），冒烟实测两个桶都是 100%：
+  // 发送者集合取"醒来前 8 小时"，热群有 190 人，几乎任何回复目标都落在里面，
+  // 于是红队那个可证伪检验**永远测不出痉挛**。判别力在 noAnchor 上。
   const rows = sql(
     `SELECT trigger_uid FROM self_replies
      WHERE chat_id=${chatId} AND ts >= ${from} AND ts < ${to}`,
   ) as unknown as Array<{ trigger_uid: number | null }>;
-  let ok = 0;
-  let bad = 0;
+  let onTarget = 0, offTarget = 0, noAnchor = 0;
   for (const r of rows) {
     const uid = Number(r.trigger_uid);
-    if (uid > 0 && senders.has(uid)) ok += 1;
-    else bad += 1;
+    if (!(uid > 0)) { noAnchor += 1; continue; }
+    if (senders.has(uid)) onTarget += 1;
+    else offTarget += 1;
   }
-  return { total: rows.length, anchored: ok, unanchored: bad, senders: senders.size };
-}
-const all = [...wakeups.map((w) => ({ chat: w.chat, at: w.at })),
+  return { total: rows.length, onTarget, offTarget, noAnchor, senders: senders.size };
+}const all = [...wakeups.map((w) => ({ chat: w.chat, at: w.at })),
   ...candidates.map((c) => ({ chat: c.chat, at: c.at }))];
 const cases = all.filter((c) => c.at >= DEBT_SINCE).slice(0, 10);
 const stale = all.length - cases.length;
@@ -156,14 +159,14 @@ for (const cs of cases) {
   const day = bucket(cs.chat, cs.at - 12 * 3600, cs.at - 6 * 3600, senders);
   if (wake.total === 0 || day.total === 0) continue;
 
-  const wakeZero = wake.unanchored / wake.total;
-  const dayZero = day.unanchored / day.total;
+  const wakeZero = wake.noAnchor / wake.total;
+  const dayZero = day.noAnchor / day.total;
   // 两者都 0 = 完全一致（不是 0 倍）；白天 0 而醒来 >0 = 醒来明显更散
   const ratio = dayZero === 0 ? (wakeZero === 0 ? 1 : Infinity) : wakeZero / dayZero;
 
   console.log(`chat ${cs.chat}（醒来 @ ${new Date(cs.at * 1000).toISOString().slice(11, 16)} UTC，夜间发送者 ${senders.size} 人）`);
-  console.log(`  醒来桶：${wake.total} 条，无锚点 ${wake.unanchored}（${(wakeZero * 100).toFixed(0)}%）`);
-  console.log(`  白天桶：${day.total} 条，无锚点 ${day.unanchored}（${(dayZero * 100).toFixed(0)}%）`);
+  console.log(`  醒来桶：${wake.total} 条，无锚点 ${wake.noAnchor}（${(wakeZero * 100).toFixed(0)}%），定向到夜间发送者 ${wake.onTarget}，锚错人 ${wake.offTarget}`);
+  console.log(`  白天桶：${day.total} 条，无锚点 ${day.noAnchor}（${(dayZero * 100).toFixed(0)}%），定向 ${day.onTarget}，锚错 ${day.offTarget}`);
 
   let verdict: string;
   if (ratio >= 3) verdict = '痉挛 —— 醒来后的话不指向夜里任何人，定向债没起作用';
