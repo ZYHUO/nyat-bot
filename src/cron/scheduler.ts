@@ -171,6 +171,27 @@ export function startCronJobs(deps?: CronDeps): void {
             if (await recoverIfStuck(id)) stuckReset += 1;
           } catch { /* per-chat fail-soft */ }
         }
+        // 压力轨迹：每次泵浦记录相位 + P 最高的几个群。
+        //
+        // **这段曾经被我自己吃掉**：round 48 加进来，后来某次编辑把整块替换掉了，
+        // 而日志里那 3 条 pump tick 全是旧进程的（20:03/20:33/21:03），当前进程
+        // 一条都没有。我据那些陈旧日志判断过"P 全零 = 睡眠积压没生效"——
+        // 那是一次拿旧进程的显示当现状的诊断。
+        //
+        // **按 P 降序取前 5，不是取 active_groups 的前 5 个**：zrange 头部的群恰好
+        // P=0（实测 6 个群有气压，而日志里 5 个全是 0），不排序的话轨迹是一条假零线。
+        try {
+          const { readTrench } = await import('../nyatos/trench.js');
+          const { getLifeState } = await import('../tracking/life-state.js');
+          const phase = getLifeState().state;
+          const allIds = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0);
+          const top = (await Promise.all(
+            allIds.map(async (id) => ({ id, p: (await readTrench(id)).p })),
+          ))
+            .sort((a, b) => b.p - a.p)
+            .slice(0, 5);
+          logger.info({ phase, pumped, stuckReset, top }, 'trench pump tick: phase + top pressures');
+        } catch { /* 观测失败不影响泵浦 */ }
         if (pumped > 0) logger.debug({ pumped }, 'trench pump: halved pressure');
         if (stuckReset > 0) logger.warn({ stuckReset }, 'trench: pressure stuck at P_MAX for 6h — hard reset');
       },
