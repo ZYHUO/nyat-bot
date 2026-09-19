@@ -358,7 +358,17 @@ async function handleUpdate(ctx: Context): Promise<void> {
 
         if (!isDirect && layerDec.layer !== 'L0') {
           const { env } = await import('../../env.js');
-          if (env().HEART_ENABLED) {
+          // Nyat Trench Phase 1 预备：Meta heart 是这个仓库实际在做抑制的那一层
+          // （实测 12,009 次判定只放行 7.7%，而影子想 speak 85.6%）。
+          //
+          // META_HEART_ENABLED=false 时**旁路它的 allow/silence 裁决**，消息仍按
+          // 既有的 layer 分级进 attention——只是不再被心流二次否决。
+          //
+          // 默认 true（当前行为，零变化）。翻成 false 之前必须先有两样东西：
+          //   ① envelope 从 shadow 拨到 enforce 并读过真实拦截率（论文 §九·补五）
+          //   ② 金丝雀的 Phase 2 一致率与发送量曲线可作为对照基线
+          // 顺序反了就是把刹车片拔了再装新的。
+          if (env().META_HEART_ENABLED && env().HEART_ENABLED) {
             void (async () => {
               try {
                 const { evaluateMetaHeart } = await import('../../meta/heart-adapter.js');

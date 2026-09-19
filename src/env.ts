@@ -809,7 +809,12 @@ const envSchema = z.object({
   // G8/S13 心流:L0 未命中的被动群消息,judge L1/L2 + gate 合并为一次
   // 带人格+自我状态的"心流判断"(reply/wait/pass)。1 次调用替代 1-3 次。
   HEART_ENABLED: booleanFromEnv.default(false),
-  // 心流反思:仅在决定 reply 时,用**同一个** heart 模型把「念头」再磨一遍(更抓重点),
+
+  // Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。
+  // 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。
+  // false = 旁路它的 allow/silence，消息按既有 layer 分级直接进 attention。
+  // 翻它之前必须先：envelope 已 enforce 且读过真实拦截率 + 金丝雀有对照基线。
+  META_HEART_ENABLED: booleanFromEnv.default(true),  // 心流反思:仅在决定 reply 时,用**同一个** heart 模型把「念头」再磨一遍(更抓重点),
   // 不改决策(act/path)、不换模型;失败/超时保底用原念头。只在 reply 轮加一次调用。默认关。
   HEART_REFLECT_ENABLED: booleanFromEnv.default(false),
   // (旧名,弃用,留着防 .env 报错)
