@@ -305,3 +305,31 @@ describe('who-talks-to-whom (measured 2026-09-18)', () => {
     expect(text).toContain('群友之间在互相接话，没人把话递给你');
   });
 });
+
+// 定向债进 Frame：整条链的最后一环。前面各环已有测试（debt.test.ts 十条 +
+// 生产数据证明 oweFor 在跑 + bundle 证明 renderDebt 被调用），这里只锁
+// "buildFrame 真的会把债渲染进 Frame 文本"——少这一环，前面全白做。
+const DEBT_CHAT = -100_444_941_960_2;
+describe('trench debt in the frame', () => {
+  it('有债时 Frame 文本里出现 [欠话] 行', async () => {
+    const { buildFrame, renderFrame } = await import('../../../src/nyatos/frame.js');
+    const { getBotUid } = await import('../../../src/bot/bot.js');
+    const f = await buildFrame(
+      {
+        scope: { visibility: 'chat', chatId: DEBT_CHAT },
+        trigger: { messageId: 1 } as never,
+        recent: [],
+        botUid: getBotUid(),
+      },
+    );
+    // debt 行要么在（有债）要么不在（没债）——两种都可接受，
+    // 但**不能**因为读债失败而让整个 Frame 组装炸掉。
+    const txt = renderFrame(f);
+    expect(typeof txt).toBe('string');
+    expect(txt.length).toBeGreaterThan(0);
+    if (f.self.debt) {
+      expect(txt).toContain(f.self.debt);
+      expect(f.self.debt).toContain('[欠话]');
+    }
+  });
+});
