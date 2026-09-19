@@ -143,6 +143,8 @@ export interface BuildFrameInput {
    * 只有把它渲染进生成 prompt 的调用方该付这次查询（2026-09-19 review 结论）。
    */
   withImpulses?: boolean;
+  /** 是否读"自己约自己的唤醒"（self_scheduled_wake）。默认 false，理由同 withImpulses。 */
+  withSelfWakes?: boolean;
 }
 
 function nowSec(): number {

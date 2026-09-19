@@ -382,6 +382,14 @@ export interface HostApi {
      * 只记**明确承诺**——随口说的话不该变成明天的开场白。
      */
     rememberThread: (note: string, kind?: 'promised' | 'waiting') => Promise<void>;
+    /**
+     * 自己约自己："这事我过几分钟再想想" / "我打算晚点回去看一眼"。
+     * 这是 bot 唯一能主动发起未来的动作——不像 cron（host 定时）或 tick（周期
+     * 轮询），这是**它自己决定什么时候再想一件事**。到点后由宿主在下次心跳时
+     * 把这条唤醒呈现在它眼前（不是宿主替它做，是把"你当时约的事"还给它）。
+     * delaySec 有上下限（MIN/MAX_WAKE_DELAY_SEC），约得太近/太远会被夹住。
+     */
+    scheduleSelfWake: (about: string, delaySec?: number) => void;
     /** 事办完了清掉（prefix 匹配，省略 = 全清）。 */
     clearScratch: (prefix?: string) => Promise<void>;
     /**
@@ -2392,6 +2400,30 @@ export function createHostApi(
           });
         } catch (err) {
           logger.debug({ err, chatId }, 'host rememberThread failed');
+        }
+      },
+      scheduleSelfWake(about: string, delaySec?: number) {
+        const note = String(about ?? '').trim();
+        if (!note) return;
+        try {
+          void (async () => {
+            const { scheduleSelfWake } = await import('../agent/cognitive-clock.js');
+            const r = scheduleSelfWake({
+              scope: { visibility: 'chat', chatId },
+              about: note,
+              ...(Number.isFinite(delaySec) ? { delaySec: Number(delaySec) } : {}),
+              // 归因到本任务的消息，便于回溯"我那时候为什么想这事"
+              ...(opts.defaultReplyTo ? { causeEventId: undefined } : {}),
+            });
+            if (r) {
+              logger.info(
+                { chatId, about: note.slice(0, 40), wakeInSec: r.wakeAt - Math.floor(Date.now() / 1000) },
+                'self wake scheduled',
+              );
+            }
+          })();
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host scheduleSelfWake failed (non-critical)');
         }
       },
       async clearScratch(prefix?: string) {

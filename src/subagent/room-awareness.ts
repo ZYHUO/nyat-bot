@@ -52,6 +52,8 @@ export interface RoomAwarenessInput {
   messageThreadId?: number;
   /** bot 自己最近发过的消息（新的在前或旧的在前都行，内部排序），用于自我统计 */
   recentBotTexts?: readonly string[];
+  /** 是否读"自己约自己的唤醒"（self_scheduled_wake 账本）。默认 false，理由同 withImpulses。 */
+  withSelfWakes?: boolean;
 }
 
 export interface RoomAwareness {
@@ -91,6 +93,7 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
       botUsername: identity.username,
       botDisplayName: getBotDisplayName(),
       withImpulses: true,
+      withSelfWakes: true,
     });
     const rendered = renderFrame(frame, { maxMessages: 8, maxChars: 1200 }).trim();
     if (!rendered) return { text: '', signals };
@@ -142,6 +145,30 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
         '这些是你自己的念头，用它们判断"我现在还想不想说"，但**不要**把这段念白发给用户。',
       );
       signals.push(`impulses:${impulses.length}`);
+    }
+
+    // 自己约自己的事：到点了。这是 bot 唯一能"主动发起未来"的机制——
+    // 不是 cron 定时，是它自己说"这事我过几分钟再想想"。
+    // 默认可选退出（!== false）：这个渲染器的职责就是"把自我处境给模型看"，
+    // 而 self_scheduled_wake 是其中唯一关于未来的部分。查询便宜（一次索引扫描）。
+    if (input.withSelfWakes !== false) {
+      try {
+        const { listDueSelfWakes } = await import('../agent/cognitive-clock.js');
+        const due = listDueSelfWakes({ visibility: 'chat', chatId: input.chatId }, Math.floor(Date.now() / 1000), 3);
+        if (due.length > 0) {
+          lines.push('');
+          lines.push('[你约过自己的事]（这是你当时说"过会儿再想"的，现在到点了）：');
+          for (const w of due) {
+            lines.push(`- ${w.about ?? '（没写是什么）'}`);
+          }
+          lines.push(
+            '想起来了就自然接一句，或者真的去做；已经不感兴趣了就让它过去，不用勉强。',
+          );
+          signals.push(`self_wakes:${due.length}`);
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: input.chatId }, 'room awareness: self wakes unavailable');
+      }
     }
     if (frame.self.openThreads) signals.push('threads');
     if (frame.addressedToOthers) signals.push('addressed_to_others');
