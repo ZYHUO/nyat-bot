@@ -26,3 +26,5 @@ exports/
 
 # 运行时观测产物（trench JSONL 等）
 var/
+
+# trench 的 VITEST 观测改道文件（生产日志 var/trench.jsonl 已由 var/ 覆盖）

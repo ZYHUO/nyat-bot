@@ -4,6 +4,14 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 // 测试的是**积累**这一半——"醒来后会不会变平缓"由释放与泵浦负责，
 // 而那两个已有测试。这里只锁"读到的但没法回的会变成气压"。
 
+// observe() 用 appendFileSync 写 var/trench.jsonl —— 那是**生产**观测文件。
+// 不 mock 的话每次跑测试都往里写假 chatId（已发生过：178 行测试残留混进生产日志）。
+const fsMock = { appendFileSync: vi.fn(), mkdirSync: vi.fn() };
+vi.mock('node:fs', () => ({
+  appendFileSync: (...a: unknown[]) => fsMock.appendFileSync(...a),
+  mkdirSync: (...a: unknown[]) => fsMock.mkdirSync(...a),
+}));
+
 const store = new Map<string, string>();
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({

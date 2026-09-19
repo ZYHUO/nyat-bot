@@ -53,7 +53,15 @@ const KEY_P = 'xxb:trench:p:';
 const KEY_THETA = 'xxb:trench:theta:';
 const KEY_LAST_PUMP = 'xxb:trench:lastpump:';
 
-const OBSERVATION_LOG = 'var/trench.jsonl';
+// 观测日志路径。
+//
+// **VITEST 下改道**：与 src/db/sqlite.ts、src/db/redis.ts 同一套隔离约定——
+// 测试里 getRedis() 走 db 0、getDb() 走 :memory:，所以观测也必须改道，否则
+// observe() 的 appendFileSync 会把测试的假 chatId 写进生产 var/trench.jsonl。
+// 实测踩过两次：trench.test.ts 的 afterEach 删掉过 178 行真实事件；
+// echo.test.ts 的 settleEcho 又写进一批 chatId=-100 的假脉冲。
+const isVitest = !!process.env['VITEST'];
+const OBSERVATION_LOG = isVitest ? 'var/trench.test.jsonl' : 'var/trench.jsonl';
 
 export interface TrenchReading {
   chatId: number;
