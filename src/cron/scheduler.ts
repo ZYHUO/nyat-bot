@@ -160,10 +160,12 @@ export function startCronJobs(deps?: CronDeps): void {
         for (const id of raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0)) {
           // 卡死自恢复：P 连续顶在 P_MAX 若干小时 → 硬复位。
           //
-          // **必须在泵浦之前查**。曾经的顺序是 pump() 先跑（把 P 减半）再查，
-          // 于是 recoverIfStuck 永远看到减半后的值，**永远检测不到顶格**——
-          // pfull_since 计时键一次都没建过，自锁看门狗是个结构上不可达的安全网
-          // （论文约束 4 因此没有实现，只有代码）。
+          // **在泵浦之前查**（round 84 加）。曾经 pump() 先跑再查，于是泵浦减半的
+          // 那些 tick 上 recoverIfStuck 会读到减半后的值而漏判。但注意 round 101 的
+          // 实证修正：**它不是"结构上不可达"**——cron 30 分钟一次而半衰期 60 分钟，
+          // 约每隔一个 tick 泵浦不减半，那些 tick 上旧顺序照样检测得到。
+          // 真实缺陷是"最多延迟一个 tick（30 分钟）"，对 6 小时阈值是 8% 延迟。
+          // 提前查让它变成即时检测，不是从不可用变成可用。
           //
           // 策略在 trench.ts 的 recoverIfStuck() 里（可测），cron 只负责调用。
           try {
