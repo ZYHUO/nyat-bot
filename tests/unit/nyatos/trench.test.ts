@@ -147,3 +147,39 @@ describe('Trench L0 — 五条不可协商约束', () => {
     expect(s).not.toContain('还剩');
   });
 });
+
+// ── 多模型评审第 22 轮查出的事实错误，钉死在这里 ──────────────────
+// 论文原文声称"P=12 时 r ≤ 6 不会吵"，并称之为"结构性保证"。
+// 但 g(12)=0.35+0.65=1.0，θ=4.0 → r(12)=4.0。R_MAX=6 在 θ 冻结期永不生效。
+// 真正的上界是 θ，不是 clamp——这条测试防止它再次被说成结构性保证。
+describe('速率上界的真实来源（评审修正）', () => {
+  it('P=12 时 r = θ·g(12) = 4.0，不是 R_MAX=6', async () => {
+    const { getRedis } = await import('../../../src/db/redis.js');
+    const chat = -999888777;
+    await getRedis().set(`xxb:trench:p:${chat}`, String(P_MAX));
+    const r = await m.readTrench(chat);
+    await getRedis().del(`xxb:trench:p:${chat}`);
+    expect(r.rate).toBeCloseTo(4.0, 5);          // θ·g(P_MAX)
+    expect(r.rate).toBeLessThan(R_MAX);          // R_MAX 根本没参与
+  });
+
+  it('R_MAX 是结构性死代码：θ 被硬钳 ≤4.0，所以 r 永远 ≤4.0', async () => {
+    // 评审第 22 轮的发现比"θ=4.0 时死钳"更强：
+    // setThetaForTest/readTrench 都把 θ 夹在 [0.35, 4.0]，所以 θ·g(P) ≤ 4.0·1.0 = 4.0
+    // ——R_MAX=6 在任何可达 θ 下都不生效。真正的速率上界是 θ 的钳，不是 R_MAX。
+    const { getRedis } = await import('../../../src/db/redis.js');
+    const chat = -999888778;
+    await m.setThetaForTest(chat, 7);            // 请求 θ=7
+    const theta = (await m.readTrench(chat)).theta;
+    expect(theta).toBeLessThanOrEqual(4.0);       // 被夹回 4.0
+    await getRedis().set(`xxb:trench:p:${chat}`, String(P_MAX));
+    expect((await m.readTrench(chat)).rate).toBeLessThanOrEqual(4.0);
+    await getRedis().del(`xxb:trench:p:${chat}`);
+    await getRedis().del(`xxb:trench:theta:${chat}`);
+  });
+
+  it('不会消失那一半是对的：P=0 时 r = θ·g(0) = 1.4', async () => {
+    const r = await m.readTrench(-999888779);
+    expect(r.rate).toBeCloseTo(1.4, 5);
+  });
+});
