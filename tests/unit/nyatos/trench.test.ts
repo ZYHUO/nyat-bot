@@ -1,5 +1,4 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { rmSync } from 'node:fs';
 
 // Nyat Trench · L0 海床的硬测试。
 // 论文 §7：五条不可协商约束进 trench.test.ts，任一条红即 CI 失败。
@@ -15,13 +14,18 @@ const redisMock = {
   set: vi.fn(async (k: string, v: string) => { store.set(k, v); return 'OK'; }),
   del: vi.fn(async (k: string) => { store.delete(k); return 1; }),
 };
+// observe() 用 appendFileSync 写 var/trench.jsonl —— 那是**生产**观测文件。
+// 不 mock 的话，每次跑测试都会往里写假 chatId，trench.test.ts 的 afterEach
+// 甚至直接 rmSync 掉它（已经删掉过 178 行真实 pump 事件）。
+const fsMock = { appendFileSync: vi.fn(), mkdirSync: vi.fn() };
+vi.mock('node:fs', () => ({ appendFileSync: (...a: unknown[]) => fsMock.appendFileSync(...a), mkdirSync: (...a: unknown[]) => fsMock.mkdirSync(...a) }));
+
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 
 const m = await import('../../../src/nyatos/trench.js');
 const { P_MIN, P_MAX, R_MIN, R_MAX } = m;
 
 beforeEach(() => { store.clear(); redisMock.get.mockClear(); redisMock.get.mockImplementation(async (k: string) => store.get(k) ?? null); });
-afterEach(() => { try { rmSync(m.TRENCH_OBSERVATION_LOG, { force: true }); } catch { /* ok */ } });
 
 describe('Trench L0 — 五条不可协商约束', () => {
   it('① 有界：两万次随机注入后 P 仍在 [0,12]，r 仍在 [0.25,6]', async () => {
@@ -57,18 +61,17 @@ describe('Trench L0 — 五条不可协商约束', () => {
     expect(hi.rate).toBeLessThanOrEqual(R_MAX);       // 不会吵
   });
 
-  it('② 可观测：脉冲/泄放/泵浦都写 JSONL', async () => {
+  it('② 可观测：脉冲/泄放/泵浦都写 JSONL（断言在 mock 的 fs 上）', async () => {
     const chat = -103;
     await m.pulseForUnheard(chat, 0.5);
     await m.releasePressure(chat);
     await m.pump(chat);
-    const { readFileSync } = await import('node:fs');
-    const lines = readFileSync(m.TRENCH_OBSERVATION_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-    const kinds = lines.map((l) => l.kind);
+    const writes = fsMock.appendFileSync.mock.calls.map((c) => JSON.parse(String(c[1])) as Record<string, unknown>);
+    const kinds = writes.map((w) => w.kind);
     expect(kinds).toContain('pulse');
     expect(kinds).toContain('release');
     expect(kinds).toContain('pump');
-    for (const l of lines) expect(typeof l.ts).toBe('number');
+    for (const w of writes) expect(typeof w.ts).toBe('number');
   });
 
   it('③ 可强制复位：reset 后 P=0，且不依赖其他状态', async () => {

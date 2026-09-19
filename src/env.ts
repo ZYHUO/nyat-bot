@@ -425,6 +425,12 @@ const envSchema = z.object({
   TRENCH_BURST_MAX: z.coerce.number().int().positive().default(150),
   TRENCH_BURST_MAX_ACTIVE: z.coerce.number().int().positive().default(100),
   TRENCH_BURST_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
+  // Nyat Trench L0 × 睡眠：读到的但没法回的消息记成气压（0.5/条）。
+  // 此前这段积累完全不存在——睡眠时段消息进 pending 队列，醒来时 P=0，
+  // bot 像什么都没发生过。加上之后醒来后气压偏高 → 速率上限被 g(P) 抬高，
+  // 即"睡一觉错过一场对话，醒来头几句是密的"，之后被释放与泵浦压平。
+  // 多不多说仍由模型在 Frame 里判断，宿主只提供事实。
+  TRENCH_SLEEP_PULSE_ENABLED: booleanFromEnv.default(false),
   TRENCH_GATE_ENABLED: booleanFromEnv.default(false),
   ECHO_ENABLED: booleanFromEnv.default(false),
   TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),

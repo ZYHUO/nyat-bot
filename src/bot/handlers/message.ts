@@ -303,6 +303,25 @@ async function handleUpdate(ctx: Context): Promise<void> {
         });
         if (sleep === 'silent' || sleep === 'queued') {
           logger.info({ chatId, messageId, sleep, layer: layerDec.layer }, 'Meta path: asleep');
+          // Nyat Trench · L0 与睡眠的接口。
+          //
+          // 论文 §三 机制二里 P 的定义是"想说而未说出口的冲动存量"。睡眠时段 bot
+          // 读得到每一条消息却说不了——那正是 P 该积累的时刻，而此前这整段积累
+          // 完全不存在：消息进 pending 队列，没有任何东西记录"我想回但不能回"。
+          //
+          // 结果就是醒来时 P=0，bot 像什么都没发生过一样。而人是反过来的：
+          // 睡一觉错过一整场对话，醒来头几句话是密的、急的，然后才平缓。
+          //
+          // 这里只做一件事：把"读到但没法回"记成 0.5 的气压。
+          // 醒来后多不多说，仍由模型在 Frame 里自己判断——宿主不替它决定。
+          //
+          // 只对人类消息计（bot/广告/验证消息不算"想回"），且只对排队的不对静默丢弃的
+          // （queued 是真会补看的，silent 是划过去的——那个不该留气压）。
+          if (env().TRENCH_SLEEP_PULSE_ENABLED && sleep === 'queued' && !fm.isBot) {
+            void import('../../nyatos/trench.js')
+              .then(({ pulseForUnheard }) => pulseForUnheard(chatId, 0.5))
+              .catch(() => { /* 非关键路径：观测失败不影响睡眠排程 */ });
+          }
           noteLiveOutcome('silent');
           return 'done';
         }
