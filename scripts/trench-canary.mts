@@ -43,10 +43,20 @@ function sql(q: string): Row[] {
   const out = execSync(`sqlite3 -json "${DB}" "${q.replace(/"/g, '\\"')}"`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   return out.trim() ? JSON.parse(out) : [];
 }
-function logCount(pattern: string): number {
+function logCount(pattern: string, day?: string): number {
   try {
     const txt = readFileSync(LOG, 'utf8');
-    return txt.split(pattern).length - 1;
+    if (!day) return txt.split(pattern).length - 1;
+    // 按天过滤：全量计数跨进程跨历史，是存量不是速率，灰度实验不可用。
+    let n = 0;
+    for (const line of txt.split('\n')) {
+      if (!line.includes(pattern)) continue;
+      try {
+        const d = JSON.parse(line) as { time?: number };
+        if (typeof d.time === 'number' && new Date(d.time).toISOString().slice(0, 10) === day) n += 1;
+      } catch { /* 跳过坏行 */ }
+    }
+    return n;
   } catch {
     return -1;
   }
@@ -55,12 +65,13 @@ function logCount(pattern: string): number {
 const since = Math.floor(Date.now() / 1000) - DAYS * 86400;
 
 // ── 1. 安全面：守卫命中（这些数字掉下去 = 事故补丁被误删）────────────
+const TODAY = new Date().toISOString().slice(0, 10);
 const guards = {
-  'anchor dedup（同消息只回一次 · 167 次基线）': logCount('dropped duplicate reply anchor'),
-  '语义重复（6 条同义问候事故 · 28 次基线）': logCount('rejected semantic repeat'),
-  '字面自复读（128 次基线）': logCount('rejected self-echo (local)'),
-  '内部记账泄漏（已回复 #id 事故）': logCount('sendText_status_ack_leak'),
-  '工具占位符泄漏（invalid chatId 事故）': logCount('sendText_tool_leak'),
+  'anchor dedup（同消息只回一次）': logCount('dropped duplicate reply anchor', TODAY),
+  '语义重复（6 条同义问候事故）': logCount('rejected semantic repeat', TODAY),
+  '字面自复读': logCount('rejected self-echo (local)', TODAY),
+  '内部记账泄漏（已回复 #id 事故）': logCount('sendText_status_ack_leak', TODAY),
+  '工具占位符泄漏（invalid chatId 事故）': logCount('sendText_tool_leak', TODAY),
 };
 
 // ── 2. 活性面：说与不说 ────────────────────────────────────────
@@ -121,7 +132,7 @@ try {
 } catch { /* 读不到相位就不报，不影响其余指标 */ }
 
 console.log(`\n═══ Nyat Trench 行为金丝雀 · 近 ${DAYS} 天 ${phaseLine} ═══\n`);
-console.log('【安全面】这些数字下降 = 事故补丁被误删，立刻回滚');
+console.log(`【安全面】守卫命中·今天 ${TODAY}（下降 = 事故补丁被误删，立刻回滚）`);
 for (const [k, v] of Object.entries(guards)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 console.log('\n【活性面】');
 console.log(`  发送总数 ${act.n ?? 0}｜其中主动 ${act.proactive ?? 0}｜outcome 未结算 ${act.unknown_outcome ?? 0}`);
@@ -210,7 +221,11 @@ try {
   const untilClause = UNTIL ? ` AND ts < ${UNTIL}` : '';
   const untilClauseEvt = UNTIL ? ` AND occurred_at < ${UNTIL}` : '';
   const win = SINCE || UNTIL ? `（${new Date(cutoff * 1000).toISOString().slice(11, 16)}${UNTIL ? `–${new Date(UNTIL * 1000).toISOString().slice(11, 16)}` : '–现在'} UTC）` : '';
-  const onlyChat = process.argv[process.argv.indexOf('--chat') + 1];
+  // **必须判断 indexOf > 0**：不传 --chat 时 indexOf 返回 -1，argv[-1+1]=argv[0]
+  // 是 node 可执行文件路径，Number() 得 NaN，SQL 报 "no such column: NaN"，
+  // 而它被外层 catch 吞掉只显示"分群读数失败"——一个静默失效的对照出口。
+  const chatIdx = process.argv.indexOf('--chat');
+  const onlyChat = chatIdx > 0 ? process.argv[chatIdx + 1] : undefined;
   const perChat = onlyChat
     ? [{ chat_id: Number(onlyChat), sends: Number((sql(`SELECT COUNT(*) AS sends FROM self_replies
         WHERE ts >= ${cutoff}${untilClause} AND chat_id=${Number(onlyChat)}`)[0]?.sends ?? 0)) }]
