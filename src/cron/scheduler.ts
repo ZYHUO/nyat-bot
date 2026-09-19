@@ -196,7 +196,8 @@ export function startCronJobs(deps?: CronDeps): void {
         const { getRedis } = await import('../db/redis.js');
         const raw = await getRedis().zrange('xxb:active_groups', 0, 19);
         const ids = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0);
-        await detectWakeTransition(ids);
+        const woke = await detectWakeTransition(ids);
+        logger.info({ woke, active: ids.length }, 'trench cron: wake-detect ran');
       },
     });
   }
@@ -213,7 +214,11 @@ export function startCronJobs(deps?: CronDeps): void {
       everySec: 1800,
       run: async () => {
         const { backfillEcho } = await import('../agent/echo.js');
-        await backfillEcho();
+        const n = await backfillEcho();
+        // 无条件心跳：backfillEcho 只在 settled>0 时自己打日志，于是"在跑但结算 0 条"
+        // 和"没在跑"在日志里完全无法区分。2026-09-19 我就因此分不清——
+        // echo: backfilled 一次都没出现过，而我无法判断这是不是又一个静默死亡。
+        logger.info({ settled: n }, 'trench cron: echo-backfill ran');
       },
     });
   }
