@@ -822,6 +822,15 @@ async function recordTickVerdict(input: {
  * 拦下时把"你嗓子有点哑"作为事实写进 tick_verdict 的 vetoed，而不是静默丢弃。
  */
 async function trenchGateAllows(chatId: number): Promise<{ ok: boolean; why?: string }> {
+  // Nyat Trench L1 包络：tick 的发送不走 host-api（那是被点名才走的路），
+  // 所以包络必须在这里也接一次——否则主动发言全在边界之外。
+  if (env().TRENCH_ENVELOPE_MODE === 'enforce') {
+    try {
+      const { checkEnvelope } = await import('../nyatos/envelope.js');
+      const v = await checkEnvelope(chatId, false);   // tick 的发言天生是主动发言
+      if (!v.ok) return { ok: false, why: `envelope:${v.why ?? 'blocked'}` };
+    } catch { /* fail-open */ }
+  }
   if (!env().TRENCH_GATE_ENABLED) return { ok: true };
   try {
     const { canSpeakActively, activeSpeechCooldownRemainingSec } = await import('../nyatos/budget.js');
@@ -1137,6 +1146,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');
+      if (env().TRENCH_ENVELOPE_MODE !== 'off') void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(a.chatId)).catch(() => {});
       // Phase 3 satiate：刚主动开过口 → connection 抑制（防连 tick 刷屏）
       try {
         const { satiate } = await import('../core/drives/store.js');
