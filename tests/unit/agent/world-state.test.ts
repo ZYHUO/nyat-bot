@@ -73,3 +73,50 @@ describe('findEntities / buildWorldStateBlock', () => {
     expect(all[0]!.name).toBe('新实体');
   });
 });
+
+describe('entity-name shape guard (2026-09-18 pollution fix)', () => {
+  // Background: world_entities was found to contain 2,711 rows that were ALL
+  // reply instructions, because callers passed `contentDirection` straight in.
+  // Those rows were then rendered into the live prompt as "[相关世界实体]".
+  // These tests pin the guard so the pollution cannot come back.
+
+  it('accepts real entity names', () => {
+    for (const name of ['Rust', '显示器选购', '@awei', 'Sub2API', '喵团子']) {
+      expect(upsertEntity(name, 'topic', {}), name).not.toBeNull();
+    }
+  });
+
+  it('rejects reply instructions', () => {
+    const instructions = [
+      '@a76526 用 reply+@ 点了你上一句 #80208「是你们这群人思想太不纯洁了喵～」。针对那句短评/接话，禁止空问候（在呢/怎么啦/啥事）。',
+      '回应主人上一条消息，简短自然接一句 禁止复读自己上一句。',
+      '短回 #153465。短接话，自然延续 禁止复读自己上一句。',
+      '先弄清对方这一句和你上一句的关系再回',
+    ];
+    for (const text of instructions) {
+      expect(upsertEntity(text, 'topic', {}), text.slice(0, 30)).toBeNull();
+    }
+    expect(db.prepare('SELECT count(*) c FROM world_entities').get()).toMatchObject({ c: 0 });
+  });
+
+  it('rejects over-long names and newline/markdown-shaped text', () => {
+    expect(upsertEntity('x'.repeat(81), 'topic', {})).toBeNull();
+    expect(upsertEntity('正常名字\n第二行', 'topic', {})).toBeNull();
+    expect(upsertEntity('话题 #123 引用', 'topic', {})).toBeNull();
+  });
+
+  it('accepts a real long group title (needs headroom past 40 chars)', () => {
+    // Measured against the 2,710 polluted rows from the 2026-09-18 backup: the
+    // shape rules reject 100% of them at every limit 40..80, so the cap can stay
+    // generous enough for genuine chat titles.
+    const title = 'Uzumaru公群 | 音游交流群版 🔥东南亚上押1920U 不灵不开 灵车狂欢';
+    expect(title.length).toBeGreaterThan(40);
+    expect(upsertEntity(title, 'place', { type: 'supergroup' }, -1003184176508)).not.toBeNull();
+  });
+
+  it('still allows a legitimate short topic to be written and read back', () => {
+    expect(upsertEntity('显示器选购', 'topic', { 状态: '讨论中' }, -100123)).not.toBeNull();
+    const block = buildWorldStateBlock('显示器选购');
+    expect(block).toContain('显示器选购');
+  });
+});

@@ -13,6 +13,7 @@ import { NEGATIVE_PATTERNS, REPAIR_PATTERNS, POSITIVE_PATTERNS, countMatches } f
 import { persistReplyOutcomeScores, ASI_ENABLED, ASI_SAMPLE_RATE } from './asi-scoring.js';
 import { env } from '../env.js';
 import { recordCognitiveRouteFeedback } from '../agent/cognitive-route-observations.js';
+import { actOutcomeFromSignal, closeSelfActOutcome } from './self-history.js';
 
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
@@ -192,6 +193,14 @@ export async function checkOutcome(
           toDelete.push(explicitField);
           explicitResolved.add(explicitField);
           resolvedCount++;
+          // Self-history: attach the observed result to the specific message the
+          // bot sent, so the model later sees "this one got corrected" as a fact.
+          // Reuses this signal instead of observing the same event twice.
+          closeSelfActOutcome({
+            chatId,
+            botMessageId: Number(entry.bot_message_id ?? 0),
+            outcome: actOutcomeFromSignal(signal),
+          });
           // An explicit reaction is a followup — score it.
           scoreCandidates.push({
             insertIdx,
@@ -229,6 +238,13 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
+          // Self-history: someone engaged with this message. The model needs this
+          // positive signal too, otherwise it only ever sees its failures.
+          closeSelfActOutcome({
+            chatId,
+            botMessageId: Number(entry.bot_message_id ?? 0),
+            outcome: actOutcomeFromSignal(signal),
+          });
           // A reply/mention is a followup — score it.
           scoreCandidates.push({
             insertIdx,
@@ -259,6 +275,13 @@ export async function checkOutcome(
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
+          // Self-history: nobody engaged with this message. That is the fact the
+          // model needs in order to notice it is talking too much.
+          closeSelfActOutcome({
+            chatId,
+            botMessageId: Number(entry.bot_message_id ?? 0),
+            outcome: actOutcomeFromSignal(signal),
+          });
           recordRouteFeedback(entry, outcome, signal);
           // Stage E/F: only apply mood/relationship effects for human interactions, not bot-to-bot
           if (!currentMessage.isBot) {
