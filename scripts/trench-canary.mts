@@ -120,6 +120,23 @@ try {
   if (rate < 0.5 && ag + dis > 50) fail.push(`判定点一致率仅 ${(rate * 100).toFixed(0)}%——两个决策点仍在互相打架`);
 } catch { /* 该指标依赖 shadow 覆盖群，读不到就跳过 */ }
 
+// 决策栈有效性：每层实测终止了多少条。这是"能不能删"的唯一硬指标 ——
+// 一层的净贡献 = 它终止的条数里，去掉更廉价的共享层（denoise/floor/asleep）也能抓到的。
+// 2026-09-19 实测：legacy pipeline 终止 807 次，其中 796 次被 denoise/floor/asleep
+// 干掉，只有 11 次是 judge+gate+heart 这 3770 行的独有贡献。
+console.log('\n【决策栈有效性】每层实测终止条数（净贡献 = 减去廉价共享层后剩下的）');
+const denoise = logCount('Pipeline complete (denoise');
+const floorN = logCount('Pipeline complete (floor');
+const asleepN = logCount('Pipeline complete (asleep');
+const heartPass = logCount('Pipeline complete (heart=pass');
+const cheap = denoise + floorN + asleepN;
+const stackOnly = heartPass;
+console.log(`  廉价共享层（denoise/floor/asleep）：${cheap}`);
+console.log(`  决策栈独有终止（heart=pass）：${stackOnly}  ← 删它可能丢的就是这些`);
+console.log(`  legacy 实际发送：${logCount('"msg":"Reply sent"')}｜Meta 路径发送：${logCount('"msg":"host sendText"')}`);
+console.log(`  读法：stackOnly 占 legacy 总终止的 ${(cheap + stackOnly) > 0 ? ((stackOnly / (cheap + stackOnly)) * 100).toFixed(1) : '0'}%。`);
+console.log(`        这个数越小，"删决策栈"越接近无行为变化——但它永远不该归零后才删。`);
+
 console.log('\n【海沟自身】');
 for (const [k, v] of Object.entries(trench)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 
