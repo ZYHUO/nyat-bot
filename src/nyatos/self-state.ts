@@ -57,12 +57,17 @@ export function readSelfState(chatId: number): SelfState | null {
     if (myRecentCount === 0) return null;
     const share30m = total > 0 ? myRecentCount / total : 0;
 
-    // 连续未被接住：从最新往回数，遇到 replied/reacted/mentioned/corrected 就停
+    // 连续未被接住：从最新往回数，遇到有人接就停。
+    //
+    // **只数已结算为 ignored 的。** 第一版把 unknown 也数进去，实测直接造假：
+    // 98.6% 的 outcome 是 unknown（Echo 还没把它们结掉），于是 streak 一路虚涨到
+    // 14——那不是"没人理我"，是"我们根本没去问过有没有人理"。
+    // 读数的铁律：不知道就不能装作知道。
     let unansweredStreak = 0;
     for (const row of mine) {
       const o = String(row.outcome ?? 'unknown');
-      if (o === 'replied' || o === 'reacted' || o === 'mentioned' || o === 'corrected') break;
-      unansweredStreak += 1;
+      if (o === 'ignored') { unansweredStreak += 1; continue; }
+      break;
     }
 
     // 近期回声：最近 20 条里有人接的占比（unknown 不计入分母——没结算的没有发言权）

@@ -39,14 +39,24 @@ describe('readSelfState', () => {
     expect(m.readSelfState(-100)!.unansweredStreak).toBe(0);
   });
 
-  it('连续 3 条没人接 → streak=3', () => {
+  it('连续 3 条 ignored → streak=3', () => {
     mine.push(
       { bot_message_id: 1, outcome: 'ignored' },
       { bot_message_id: 2, outcome: 'ignored' },
-      { bot_message_id: 3, outcome: 'unknown' },
+      { bot_message_id: 3, outcome: 'ignored' },
       { bot_message_id: 4, outcome: 'replied' },
     );
     expect(m.readSelfState(-100)!.unansweredStreak).toBe(3);
+  });
+
+  it('unknown 不算"没人接"——那是没去问，不是没人理', () => {
+    mine.push(
+      { bot_message_id: 1, outcome: 'unknown' },
+      { bot_message_id: 2, outcome: 'unknown' },
+      { bot_message_id: 3, outcome: 'ignored' },
+    );
+    // 第一条就是 unknown → 直接断，不许拿"没结算"冒充"被无视"
+    expect(m.readSelfState(-100)!.unansweredStreak).toBe(0);
   });
 
   it('样本不足时 recentEcho=-1（别用 3 条数据下结论）', () => {
