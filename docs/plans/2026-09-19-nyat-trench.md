@@ -840,13 +840,13 @@ intercepted       0    0%   ← 修复后尚未有新事件
 | 论断 | 证据位置 |
 |---|---|
 | 五层判定、三层无信息 | `logs/app.log`（94,660 行）+ `cognitive_events` |
-| `canSpeakActively()` 零调用方 | `grep -rn "canSpeakActively" src/` → 1 hit（自身定义） |
+| `canSpeakActively()` 零调用方 | `grep -rn "canSpeakActively" src/` → 1 hit（自身定义）→ **round 15 已复活为发送前硬闸**，但 round 35 实测它只拦主动发言，而生产 100% 发送带锚点=全豁免；真正在管事的是包络 |
 | Phase 2.3 负结果 | `src/nyatos/budget.ts` 头部注释（54 样本，2026-09-18） |
-| 守卫命中量 | anchor dedup 167 / self-echo 128 / semantic repeat 28 |
-| 影子判定分布 | `cognitive_events WHERE type='social_prediction'`：speak 226 / wait 2 / silent 0 |
-| outcome 覆盖率 | `self_replies` 3,337 行，98.7% = unknown |
+| 守卫命中量 | anchor dedup 167 / self-echo 128 / semantic repeat 28 → **今日 174 / 131 / 30**（`scripts/trench-canary.mts`） |
+| 影子判定分布 | ~~speak 226 / wait 2 / silent 0~~ → **今日 speak 970 / wait 22 / silent 35**（清醒口径，剔除睡眠样本） |
+| outcome 覆盖率 | `self_replies` 3,337 行，98.7% = unknown → **存量不可恢复**（`scripts/backfill-outcomes.mts` 实测仅 6/1664 可回填）；新增发送的结算率约 12–56%（按时段） |
 | 七子系统规模 | `find src/<dir> -name '*.ts' \| xargs wc -l` |
-| token 日耗 | `llm_token_daily` 09-19：58.42M |
+| token 日耗 | `llm_token_daily` 09-19：**156.8M**（reply 90.9M / summarize 33.2M / judge 27.4M）——初稿写 58.42M，漏了 judge 侧 |
 
 ## 附录 B：讨论会成员与产出
 
