@@ -114,6 +114,8 @@ export interface Frame {
     trench?: TrenchReading;
     /** 自我状态的一行身体感受（"这半小时几乎都是你在说，而且连着 3 条没人接"）。 */
     selfState?: string;
+    /** 定向债的一行身体感受（"你睡着的时候 A（欠 2 句）——总共欠 3 句"）。 */
+    debt?: string;
     /** Seconds until another ACTIVE message is appropriate (0 = free now). */
     activeSpeechCooldownSec?: number;
     /** Things the bot said it would come back to, if any are worth raising. */
@@ -252,6 +254,14 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
     self.trench = await readTrench(chatId ?? 0);
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: trench unavailable');
+  }
+  // 定向债：睡眠期按发送者记的"欠谁一句"。衰减由还债驱动，不由时钟驱动。
+  try {
+    const { renderDebt } = await import('./debt.js');
+    const line = await renderDebt(chatId ?? 0);
+    if (line) self.debt = line;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'frame: debt unavailable');
   }
   // Nyat Trench 自我状态：决策点缺失的三个数（share30m / unansweredStreak / recentEcho）。
   // 这是 10.1% 一致率的直接病因——它不知道自己刚叭叭了一堆没人理。
@@ -467,6 +477,8 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
     if (t) lines.push(t);
   }
   if (frame.self.selfState) lines.push(frame.self.selfState);
+  // 定向债：欠谁一句话。fail-soft——读不到就不加这一行。
+  if (frame.self.debt) lines.push(frame.self.debt);
   const spacingLine = renderActiveSpeechSpacing(frame.self.activeSpeechCooldownSec ?? 0);
   if (spacingLine) lines.push(spacingLine);
   if (frame.self.openThreads) lines.push(frame.self.openThreads);

@@ -1081,6 +1081,11 @@ export function createHostApi(
               }
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               if (messageId > 0) void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
+              // 定向债销账：真的回给了锚点那个人，就还掉欠他的一句。
+              // 这是"衰减由闭环驱动而不是由时钟驱动"的兑现点。
+              if (replyTo !== undefined && opts.targetUserId && opts.targetUserId > 0) {
+                void import('../nyatos/debt.js').then((m) => m.discharge(chatId, opts.targetUserId!, 1)).catch(() => {});
+              }
               if (opts.taskId) markTaskVisible(opts.taskId);
               logger.info({ chatId, taskId: opts.taskId, deliveryKind: kind, messageId }, 'task delivery recorded');
               // Self-history: Meta is the production main path, so without this the

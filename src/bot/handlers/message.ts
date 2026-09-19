@@ -323,6 +323,16 @@ async function handleUpdate(ctx: Context): Promise<void> {
             void import('../../nyatos/trench.js')
               .then(({ pulseForUnheard }) => pulseForUnheard(chatId, 0.5))
               .catch(() => { /* 非关键路径：观测失败不影响睡眠排程 */ });
+            // 定向债：同一个动作再按**发送者**记一笔。标量 P 管速率（不变），
+            // 这本账管方向——醒来知道该对谁说。评审 3：无方向的积压醒来后只被
+            // 半衰期压平（时钟驱动），有方向则被"还债"驱动（闭环驱动）。
+            if (fm.uid > 0) {
+              void import('../../nyatos/debt.js')
+                .then(({ oweFor }) => oweFor(chatId, fm.uid, 0.5))
+                .catch((err) => logger.warn({ err, chatId, uid: fm.uid }, 'trench debt: record failed'));
+            } else {
+              logger.warn({ chatId }, 'trench debt: skipped, fm.uid not > 0');
+            }
           }
           noteLiveOutcome('silent');
           return 'done';

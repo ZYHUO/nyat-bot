@@ -432,6 +432,10 @@ const envSchema = z.object({
   // 多不多说仍由模型在 Frame 里判断，宿主只提供事实。
   TRENCH_SLEEP_PULSE_ENABLED: booleanFromEnv.default(false),
   TRENCH_GATE_ENABLED: booleanFromEnv.default(false),
+  // Nyat Trench 定向债：睡眠期按**发送者**记"欠谁一句"，醒来只准对那个人兑现。
+  // 评审 3 的反对意见：无方向的睡眠积压醒来后只被半衰期压平（时钟驱动=痉挛签名），
+  // 有方向则被"还债"驱动（闭环驱动=活人）。速率上界仍由标量 P 决定，不改积分器。
+  TRENCH_DEBT_ENABLED: booleanFromEnv.default(false),
   ECHO_ENABLED: booleanFromEnv.default(false),
   TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),
   ROOM_AWARENESS_ENABLED: booleanFromEnv.default(false),
