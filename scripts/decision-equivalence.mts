@@ -19,6 +19,16 @@
  */
 
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+/** 日志里某个子串出现的次数（金丝雀同一套读数）。 */
+function logCount(pattern: string): number {
+  try {
+    return readFileSync('logs/app.log', 'utf8').split(pattern).length - 1;
+  } catch {
+    return -1;
+  }
+}
 
 const DAYS = Number(process.argv[2] ?? 7);
 const DB = process.env.SQLITE_PATH ?? './data/xxb.db';
@@ -84,8 +94,22 @@ console.log(`  单决策点想 silent：${silentWant} 次，其中线上真没�
 console.log(`\n  top-level 一致率：${(rate * 100).toFixed(1)}%`);
 console.log(`\n  注意方向：一致率**低**通常不是 shadow 判错，而是线上还有别的抑制层`);
 console.log(`  （gate/budget/dup）在替它做"别说"的决定——那正是要拆除的东西。`);
-console.log(`\n  Phase 2 准入（论文 §9）：一致率 > 85% 才把判定点上真身。`);
-console.log(`  当前结论：${rate > 0.85 ? '已达标，可以推进判定点切换' : '未达标——先拆抑制层，或等 shadow 与 live 的覆盖面对齐'}\n`);
+// ── 分解：不一致里有多少是"物理拦掉"，多少是"真的分歧" ──────────────
+// 2026-09-19 实测（补身体前后对比）：
+//   补身体前 speak 1675/1732 (96.7%) → 一致率 10.1%
+//   补身体后 speak  970/ 972 (99.8%) → 一致率 14.2%
+// 身体事实确实到了模型眼前（why 里开始出现"没人理我"），但**判定不变**。
+// 这不是 bug，是对论文的确认：克制必须是物理的（L0 海沟 + L1 闸门），
+// 不能是信息的——budget.ts 头部的 Phase 2.3 负结果早就测过同一件事。
+const gated = Math.max(0, logCount('BLOCKED by trench gate'));
+const dupBlocked = Math.max(0, logCount('rejected semantic repeat') + logCount('rejected self-echo (local)'));
+console.log(`\n  ── 不一致的分解 ──`);
+console.log(`  物理拦掉（硬闸 + 去重）约 ${gated + dupBlocked} 次；判定点 speak 而线上静默 ${disagree} 次`);
+console.log(`  无法归因于物理约束的（≈真的分歧）：约 ${Math.max(0, disagree - gated - dupBlocked)} 次`);
+console.log(`  读法：前者不是"判定点错了"，是"身体在管事"——它永远不该被抹平。\n`);
+
+console.log(`  Phase 2 准入（论文 §9）：一致率 > 85% 才把判定点上真身。`);
+console.log(`  当前结论：${rate > 0.85 ? '已达标' : '未达标——但先看清不达标是哪一笔账造成的'}\n`);
 
 // 附：bot 发言密度（用于判断"线上是不是其实很安静"）
 console.log(`参考：近 ${DAYS} 天 bot 发言 ${botSpoke.length} 条。\n`);
