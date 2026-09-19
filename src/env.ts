@@ -408,6 +408,10 @@ const envSchema = z.object({
   // 只是 Frame 里多一行身体感受，且 P 有了唯一衰减方。
   // Nyat Trench L2 反射：Echo 学习闭环（确定性回填 + 标量 E ∈ [0.05,0.90] + P 脉冲）。
   // 论文 §3.2 机制三。零 LLM：判据全部来自 bot_interactions / self_replies 的宿主事实。
+  // Nyat Trench L1 沟壁：发送前硬闸。把 canSpeakActively()（此前零调用方的死代码）
+  // 变成唯一发送出口的前置条件——论文 §1.2 实测确认此前 6条/h+90s 只是事后记账+劝告。
+  // 只拦主动发言；被 @/被回复/DM 豁免。
+  TRENCH_GATE_ENABLED: booleanFromEnv.default(false),
   ECHO_ENABLED: booleanFromEnv.default(false),
   TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),
   ROOM_AWARENESS_ENABLED: booleanFromEnv.default(false),

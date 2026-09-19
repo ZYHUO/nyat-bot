@@ -810,6 +810,33 @@ async function recordTickVerdict(input: {
   }
 }
 
+/**
+ * Nyat Trench · L1 沟壁——tick 路径的发送前硬闸。
+ *
+ * 为什么必须在这里也有一道：**生产里 1572 次群发送全部带引用锚点**，也就是说
+ * "主动发言"根本不走 host-api 的 sendText（那是被点名才走的路），而是走这里
+ * 直接调 telegram.sendMessage。第一版闸门只加在 host-api，等于加在没有流量的
+ * 那条路上——这正是"接上了但是死的"的又一种形态。
+ *
+ * 判据与 host-api 完全一致：**只拦主动发言**（tick 的这几个分支天生全是主动发言），
+ * 拦下时把"你嗓子有点哑"作为事实写进 tick_verdict 的 vetoed，而不是静默丢弃。
+ */
+async function trenchGateAllows(chatId: number): Promise<{ ok: boolean; why?: string }> {
+  if (!env().TRENCH_GATE_ENABLED) return { ok: true };
+  try {
+    const { canSpeakActively, activeSpeechCooldownRemainingSec } = await import('../nyatos/budget.js');
+    const [allowed, cooldownLeft] = await Promise.all([
+      canSpeakActively(chatId),
+      activeSpeechCooldownRemainingSec(chatId),
+    ]);
+    if (!allowed) return { ok: false, why: 'budget_spent' };
+    if (cooldownLeft > 0) return { ok: false, why: 'just_spoke' };
+    return { ok: true };
+  } catch {
+    return { ok: true }; // 闸门读失败不拦路（fail-open，别让 Redis 抖动静音 bot）
+  }
+}
+
 async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<void> {
   const e = env();
   const redis = getRedis();
@@ -909,6 +936,18 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       if (a.text.includes('[object Object]')) {
         logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — corrupt text');
+        return;
+      }
+      // L1 沟壁：主动开口（哪怕是私聊主人）也要过硬闸。私聊不是豁免理由——
+      // 豁免给的是"有人叫我"，不是"这个频道是我的"。
+      const careGate = await trenchGateAllows(e.MASTER_UID);
+      if (!careGate.ok) {
+        logger.info({ why: careGate.why }, 'unified tick: care_master BLOCKED by trench gate');
+        await recordTickVerdict({
+          chosen: 'quiet',
+          vetoed: [{ action: 'care_master', reason: `trench_gate:${careGate.why}` }],
+          reason: verdict.reason,
+        });
         return;
       }
       if (CARE_PEDDLE_RE.test(a.text)) {
@@ -1038,6 +1077,17 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       } catch (err) {
         logger.debug({ err, chatId: a.chatId }, 'reward gate failed (fail-open)');
       }
+      // L1 沟壁：主动发言的发送前硬闸（见 trenchGateAllows 的说明）
+      const gate = await trenchGateAllows(a.chatId);
+      if (!gate.ok) {
+        logger.info({ chatId: a.chatId, why: gate.why }, 'unified tick: group_speak BLOCKED by trench gate');
+        await recordTickVerdict({
+          chosen: 'quiet',
+          vetoed: [{ action: 'group_speak', reason: `trench_gate:${gate.why}` }],
+          reason: verdict.reason,
+        });
+        return;
+      }
       const { sendMessage } = await import('../bot/sender/telegram.js');
       const { addAssistant } = await import('../pipeline/context/manager.js');
       let messageId = 0;
@@ -1131,6 +1181,17 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           }
         }
       } catch { /* fail-open */ }
+      // L1 沟壁：想起某人也是主动开口，同样过硬闸
+      const remGate = await trenchGateAllows(a.chatId);
+      if (!remGate.ok) {
+        logger.info({ chatId: a.chatId, why: remGate.why }, 'unified tick: remember_user BLOCKED by trench gate');
+        await recordTickVerdict({
+          chosen: 'quiet',
+          vetoed: [{ action: 'remember_user', reason: `trench_gate:${remGate.why}` }],
+          reason: verdict.reason,
+        });
+        return;
+      }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
       if (!(await tryAcquireProactiveSlot(a.chatId, 'unified-tick-remember'))) return;
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');

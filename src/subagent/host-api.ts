@@ -630,6 +630,8 @@ export function createHostApi(
    * burst 分人要回复不同 id 的合法场景不受影响：那些 id 本来就是不同的。
    */
   const repliedAnchors = new Set<number>();
+  /** Nyat Trench L1：本任务被壳拦下的原因（空 = 没被拦）。供 endTask 时回灌给模型。 */
+  const blockedByGate: string[] = [];
 
   const assertOpen = () => {
     if (opts.isClosed?.()) throw new Error('host_closed');
@@ -1026,6 +1028,44 @@ export function createHostApi(
                   { chatId, part: i + 1, of: parts.length, replyTo: null, preview: part.slice(0, 60) },
                   'host sendText continuation',
                 );
+              }
+              // Nyat Trench · L1 沟壁：发送前硬闸。
+              //
+              // 论文 §1.2 的实测：`canSpeakActively()` 在全仓库只有一个引用——它自己的
+              // 定义。此前"每小时 6 条 + 90 秒"靠 spendParticipation() 在**发送之后**
+              // fire-and-forget 计数 + Frame 里一句劝告执行，发送前没有任何东西能拦。
+              // 这里把它变成唯一发送出口的前置条件。
+              //
+              // 只拦**主动发言**（没有引用锚点 = 没人在叫我）。被 @/被回复/DM 一律放行：
+              // 无视直接提问是另一种失败（论文 §4 表 5 的既有豁免语义）。
+              //
+              // 拦下时不静默丢弃（那是旧 gate 的形态）：把"你撞到了什么"作为事实
+              // 回灌给模型，同一转可以改主意；同时记一条壳否决，成为 Echo 的负样本。
+              const isAddressed = replyTo !== undefined || opts.defaultReplyTo !== undefined;
+              if (!isAddressed && chatId < 0 && env().TRENCH_GATE_ENABLED) {
+                const { canSpeakActively, activeSpeechCooldownRemainingSec } = await import('../nyatos/budget.js');
+                const [allowed, cooldownLeft] = await Promise.all([
+                  canSpeakActively(chatId),
+                  activeSpeechCooldownRemainingSec(chatId),
+                ]);
+                if (!allowed || cooldownLeft > 0) {
+                  const why = !allowed ? 'budget_spent' : 'just_spoke';
+                  logger.warn(
+                    { chatId, why, part: i + 1, of: parts.length, preview: part.slice(0, 50) },
+                    'host sendText: BLOCKED by trench gate (active speech)',
+                  );
+                  blockedByGate.push(why);
+                  // 世界回弹：不静默丢弃（那是旧 gate 的形态），把"你撞到了什么"
+                  // 作为事实抛回给模型——同 semanticRepeatError 的既有形状，它会
+                  // 在 [observation:error] 里看到，然后自己决定重说什么或直接收尾。
+                  throw new Error(
+                    why === 'budget_spent'
+                      ? '未发送：这一个小时你主动说的话到额度了，嗓子有点哑（宿主硬闸，不是建议）。' +
+                        '被叫到的消息不受这个限，但这条没人叫你——那就等下个时段，或者直接就这事收尾。'
+                      : `未发送：你 ${Math.ceil(cooldownLeft)} 秒前刚在这个群说过话，嗓子还没缓过来。` +
+                        '不是不让你说，是这条没人叫你，而你刚开口过。',
+                  );
+                }
               }
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               if (opts.taskId) markTaskVisible(opts.taskId);
