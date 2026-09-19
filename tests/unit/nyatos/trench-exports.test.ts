@@ -110,3 +110,36 @@ describe('观测日志的轮转', () => {
     expect(val).toBeLessThan(64 * 1024 * 1024);
   });
 });
+
+// 账本闭合率：每条 shadow 判定过的消息都该有 live outcome。
+// 2026-09-19 实测只有 77%，缺口是 5 处 return 'done' 分支不记账——
+// 其中两条是真缺口（L2 drop 丢弃、plain attention ingested 不经心流）。
+// 这里锁住"所有终态分支都记账"，防止新增分支再漏。
+describe('live outcome 账本闭合', () => {
+  function unrecordedReturns(rel: string): Array<[number, string]> {
+    const src = execSync(`cat ${REPO}/${rel}`, { encoding: 'utf8' });
+    const lines = src.split('\n');
+    const out: Array<[number, string]> = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (!/return 'done';/.test(lines[i]!)) continue;
+      const ctx = lines.slice(Math.max(0, i - 30), i).join('\n');
+      if (!ctx.includes('noteLiveOutcome(')) {
+        const raw = lines.slice(Math.max(0, i - 25), i).reverse().find((l) => /logger\.(info|debug|warn)/.test(l)) ?? '';
+        // 先判断是不是错误兜底（**用完整行**判断——截断会把 'failed' 切掉），再截断供报错用
+        const isErr = /failed|fail/i.test(raw);
+        out.push([i + 1, isErr ? 'ERROR_PATH' : raw.trim().slice(0, 70)]);
+      }
+    }
+    return out;
+  }
+
+  it('message.ts 里每个 return done 的分支都记账（错误兜底除外）', () => {
+    const gaps = unrecordedReturns('src/bot/handlers/message.ts');
+    // 允许的例外：纯错误兜底路径（ingest 失败时）——它们在失败前已记过账。
+    const errorOnly = gaps.filter(([, tag]) => tag === 'ERROR_PATH');
+    const real = gaps.filter(([, tag]) => tag !== 'ERROR_PATH');
+    expect(real.map(([ln, tag]) => `line ${ln}: ${tag}`), '这些终态分支不入账').toEqual([]);
+    // 错误兜底仍然要在前文有账
+    expect(errorOnly.length).toBeLessThanOrEqual(2);
+  });
+});

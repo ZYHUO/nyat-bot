@@ -577,6 +577,10 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // Heart 全关：L2 旁观硬丢（旧行为）。META_DEFER_ENABLED 时放行进 gate。
           if (layerDec.layer === 'L2' && !env().META_DEFER_ENABLED) {
             logger.debug({ chatId, messageId }, 'Meta path: L2 drop (no Attention)');
+            // 丢弃也是 live 的一个裁决，要入账。2026-09-19 实测账本闭合率只有 77%，
+            // 缺口主要就是这两条 drop 分支——它们让 shadow 判定过的消息没有对应 outcome，
+            // 于是"shadow 想说 vs live 做了"这个 join 少了四分之一。
+            noteLiveOutcome('silent');
             return 'done';
           }
         }
@@ -643,6 +647,11 @@ async function handleUpdate(ctx: Context): Promise<void> {
           }
         }
         logger.info({ chatId, messageId, layer: layerDec.layer }, 'Meta attention ingested');
+        // 这条路径**不问心流**（L0 / direct / timing gate 放行后）直接进 attention。
+        // 与 same_speaker_burst、post-task 并列，是绕过心流的第三条/第四条路径。
+        // 不记的后果同上：join 缺样本。记 'intercepted' ——被拦下未经心流裁决，
+        // 由更便宜的确定性层直接放行。
+        noteLiveOutcome('intercepted');
         return 'done';
       };
 
