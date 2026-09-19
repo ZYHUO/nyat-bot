@@ -388,6 +388,13 @@ const envSchema = z.object({
   // Je 不可达一律 fail-open 放行（不可因基础设施故障吞掉一句话）。
   SEMANTIC_DUP_ENABLED: booleanFromEnv.default(false),
   SEMANTIC_DUP_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
+  // 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字/事实（模型幻觉）。
+  // 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」。
+  // 先用确定性闸门（含具体数字才问）压调用量；JeV 不可达一律 fail-open。
+  GROUNDING_CHECK_ENABLED: booleanFromEnv.default(false),
+  // topic_present 低于此值算"聊天里没提过"，user_asked 低于此值算"用户没在问"；两者都低才拦。
+  GROUNDING_PRESENT_MAX: z.coerce.number().min(0).max(1).default(0.35),
+  GROUNDING_ASKED_MAX: z.coerce.number().min(0).max(1).default(0.35),
   // TypeSafe System One 接入。/v1/systemone；key 是 secret（.env，勿提交）。
   TYPESAFE_ENDPOINT: z.string().default('https://api.typesafe.ai/v1/systemone'),
   TYPESAFE_MODEL: z.string().default('jev-latest'),

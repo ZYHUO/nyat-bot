@@ -794,6 +794,11 @@ export function createHostApi(
               );
               throw new Error('echo_self_text');
             }
+            // 语义守卫/接地性守卫要用到的群内上下文（下面的 try 里填，context 读失败就留空）
+            let recentChatMixed: string[] = [];
+            let recentUserLines: string[] = [];
+            let recentBotTexts: string[] = [];
+            let recentBotAtSec: number | null = null;
             try {
               const { getRecent } = await import('../pipeline/context/manager.js');
               // Wide window: dual-write holes + busy groups push prior bot lines out of 16.
@@ -812,6 +817,18 @@ export function createHostApi(
                 .slice(-12)
                 .map((m) => String(m.textContent ?? '').trim())
                 .filter((t) => t.replace(/\s+/g, '').length >= 6);
+              // 供语义守卫（跨任务复读）与接地性守卫（幻觉断言）复用同一份上下文
+              recentChatMixed = recent
+                .slice(-15)
+                .map((m) => `${m.role === 'assistant' ? 'bot' : '用户'}: ${String(m.textContent ?? '').trim()}`)
+                .filter((l) => l.length > 6);
+              recentUserLines = userLines;
+              const recentBots = recent
+                .filter((m) => m.role === 'assistant')
+                .map((m) => ({ t: String(m.textContent ?? '').trim(), ts: Number(m.timestamp ?? 0) }))
+                .filter((m) => m.t.replace(/\s+/g, '').length >= 6);
+              recentBotTexts = recentBots.map((m) => m.t);
+              recentBotAtSec = recentBots.length > 0 ? (recentBots[recentBots.length - 1]?.ts ?? null) : null;
               const hitSelf = botLines.find((b) => isEchoOf(clean, b));
               if (hitSelf) {
                 logger.info(
@@ -855,23 +872,59 @@ export function createHostApi(
             }
 
             // 语义重复守卫：同义改写刷屏（「困到流口水了」→「困到打哈欠了」）字面相似度
-            // 只有 0.13~0.27，上面的字面守卫结构上抓不到，只能问语义。只在第 2+ 次任务内
-            // 发送时跑（首次发送零成本）；JeV 不可达一律 fail-open，绝不因检查失败吞消息。
-            if (env().SEMANTIC_DUP_ENABLED && textSent > 0 && sentTexts.length > 0) {
+            // 只有 0.13~0.27，上面的字面守卫结构上抓不到，只能问语义。
+            // 触发条件二选一：① 本任务第 2+ 次发送；② 本任务首次发送，但**本群 bot 刚刚
+            // 说过话**（<=300s）——后者补的是跨任务复读：2026-09-19 事故里 bot 被用户
+            // 「什么——」触发的新任务复读了上一任务的幻觉结论，而原守卫只看本任务的 sentTexts。
+            // JeV 不可达一律 fail-open，绝不因检查失败吞消息。
+            const crossTaskEcho =
+              textSent === 0 &&
+              recentBotAtSec !== null &&
+              Math.floor(Date.now() / 1000) - recentBotAtSec <= 300;
+            if (env().SEMANTIC_DUP_ENABLED && (textSent > 0 || crossTaskEcho)) {
               try {
                 const { checkSemanticRepeat, semanticRepeatError } = await import('./semantic-dup.js');
-                const dup = await checkSemanticRepeat(sentTexts, clean);
-                if (dup.isRepeat) {
-                  logger.info(
-                    { chatId, preview: clean.slice(0, 60), probability: dup.probability, prior: dup.collidedWith?.slice(0, 60) },
-                    'host sendText rejected semantic repeat',
-                  );
-                  throw new Error(semanticRepeatError(dup));
+                const priors = textSent > 0 ? sentTexts : recentBotTexts.slice(-1);
+                if (priors.length > 0) {
+                  const dup = await checkSemanticRepeat(priors, clean);
+                  if (dup.isRepeat) {
+                    logger.info(
+                      { chatId, preview: clean.slice(0, 60), probability: dup.probability, prior: dup.collidedWith?.slice(0, 60), crossTask: textSent === 0 },
+                      'host sendText rejected semantic repeat',
+                    );
+                    throw new Error(semanticRepeatError(dup));
+                  }
                 }
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (msg.startsWith('重复表达未发送')) throw err;
                 logger.debug({ err, chatId }, 'semantic-dup check failed — fail-open');
+              }
+            }
+
+            // 接地性守卫：断言一个聊天里没人提过、用户也没问的具体数字/事实 = 模型幻觉。
+            // 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」，
+            // 该话题在本群 441 条历史/Qdrant 全库/belief/图片里全部零命中。
+            // 确定性闸门（含具体数字才问）+ 一次 JeV 调用；不可达一律 fail-open。
+            if (env().GROUNDING_CHECK_ENABLED && recentChatMixed.length > 0) {
+              try {
+                const { checkUngroundedClaim, ungroundedClaimError } = await import('./grounding-check.js');
+                const g = await checkUngroundedClaim(
+                  clean,
+                  recentChatMixed,
+                  recentUserLines[recentUserLines.length - 1] ?? '',
+                );
+                if (g.ungrounded) {
+                  logger.warn(
+                    { chatId, preview: clean.slice(0, 60), topicPresent: g.topicPresent, userAsked: g.userAsked },
+                    'host sendText rejected ungrounded claim',
+                  );
+                  throw new Error(ungroundedClaimError());
+                }
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.startsWith('未发送：')) throw err;
+                logger.debug({ err, chatId }, 'grounding check failed — fail-open');
               }
             }
 
