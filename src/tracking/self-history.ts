@@ -89,8 +89,10 @@ export function actOutcomeFromSignal(signal: string): ActOutcome {
       return 'corrected';
     case 'ignored_5_msgs':
       return 'ignored';
+    // 时间感知的 ignored：等太久（≥OUTCOME_MAX_WAIT_SEC）且期间确有人说过话。
+    // 形如 ignored_660s_no_reply；前缀匹配而不是逐个秒数枚举。
     default:
-      return 'unknown';
+      return signal.startsWith('ignored_') ? 'ignored' : 'unknown';
   }
 }
 

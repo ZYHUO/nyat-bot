@@ -1083,6 +1083,31 @@ export function createHostApi(
               } catch (err) {
                 logger.debug({ err, chatId }, 'host sendText self-history failed (non-critical)');
               }
+              // Nyat Trench · Outcome 管道的写入侧补漏。
+              //
+              // 98.6% 的 self_replies 永远 outcome='unknown' 的根因就在这一行缺失：
+              // `recordReply()` 建的 pending 哈希是 `checkOutcome()` 唯一的匹配源，
+              // 而它只在 legacy pipeline（deliver.ts）和 proactive tick 里被调——
+              // **生产主路径（98% 的发送）从来不建 pending**。于是它写的 self_replies
+              // 行没有对应的 pending 条目，观察器无从闭合，outcome 永远是 unknown。
+              //
+              // 后果不只是统计难看：Echo 学不到东西、selfState 的 unansweredStreak
+              // 永远是 0、决策点因此永远拿不到"我刚说的话有人接没人接"这个身体事实。
+              try {
+                await import('../tracking/outcome.js').then(({ recordReply }) =>
+                  recordReply(
+                    chatId,
+                    messageId,
+                    replyTo ?? 0,
+                    opts.targetUserId ?? 0,
+                    '',
+                    part,
+                    'codeact_speak',
+                  ),
+                );
+              } catch (err) {
+                logger.debug({ err, chatId }, 'host sendText outcome-pending failed (non-critical)');
+              }
               // NyatOS participation budget: this is where the Meta path — the
               // production main path — actually sends, so this is where the
               // throttle must be spent. Wiring it only into

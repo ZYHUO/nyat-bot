@@ -82,6 +82,13 @@ console.log('【安全面】这些数字下降 = 事故补丁被误删，立刻�
 for (const [k, v] of Object.entries(guards)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 console.log('\n【活性面】');
 console.log(`  发送总数 ${act.n ?? 0}｜其中主动 ${act.proactive ?? 0}｜outcome 未结算 ${act.unknown_outcome ?? 0}`);
+// 结算率：整个架构的瓶颈数字。它上不去，Echo 学不到、selfState 没有身体事实、
+// 决策点永远拿不到"我刚说的话有人接没人接"——一切删除都因此不能做。
+// 只看近 2 小时：历史积压（3201 条陈年 unknown）永远结不掉，
+// 把它算进分母等于用沉没成本惩罚现在的管道。要测的是"管道现在还通不通"。
+const settleRow = sql(`SELECT COUNT(*) n, SUM(CASE WHEN outcome<>'unknown' THEN 1 ELSE 0 END) s FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 7200}`)[0] ?? {};
+const settleRate = (settleRow.n ?? 0) > 0 ? Number(settleRow.s ?? 0) / Number(settleRow.n ?? 1) : 0;
+console.log(`  **结算率：${(settleRate * 100).toFixed(1)}%** （论文 §7.2 指标 3 目标 <10% unknown，即 >90% 结算）`);
 console.log(`  Echo 目标：主动发言的 unknown 占比 < 10%（论文 §7.2 指标 3）`);
 console.log('\n【决策面】五层判定的真实用量（判断哪层可以死）');
 for (const [k, v] of Object.entries(decisions)) console.log(`  ${String(v).padStart(6)}  ${k}`);
@@ -96,6 +103,7 @@ if ((act.n ?? 0) === 0) fail.push('零发送——系统可能被闸静音了');
 if (guards['anchor dedup（同消息只回一次 · 167 次基线）'] === 0 && logCount('"msg":"host sendText"') > 100) {
   // 不是每条都需要 anchor，但完全为 0 且发送量不小，说明守卫可能失效
 }
+if (settleRate < 0.05 && (settleRow.n ?? 0) > 20) fail.push(`结算率 ${pct(settleRate)}——outcome 管道又断了，Echo/selfState 会全部失明`);
 if (qRate > 0.2) fail.push(`问号率 ${pct(qRate)} 远超真人基准——prompt 纪律退化`);
 if (maoRate > 0.45) fail.push(`句末喵 ${pct(maoRate)}——又开始每句都喵`);
 

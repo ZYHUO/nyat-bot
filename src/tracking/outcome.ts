@@ -18,6 +18,18 @@ import { actOutcomeFromSignal, closeSelfActOutcome } from './self-history.js';
 const PENDING_KEY_PREFIX = 'xxb:reply_outcome:pending:';
 const OUTCOME_CHECK_WINDOW = 5;
 const PENDING_TTL = 3600;
+/**
+ * 「等太久也算没人接」的时间下限。
+ *
+ * 原来只有 `msgsAfter >= 5` 一条判据。实测（2026-09-19）在消息不密的群里这条永远
+ * 达不到：一次发言之后一小时只有几条消息，条目 TTL（3600s）就到了，outcome 永远
+ * 停在 unknown——于是系统「从来没去问过有没有人理」，而不是「问了知道没人理」。
+ * 这两者的差别是整个 Nyat Trench 学习闭环能不能启动的前提。
+ *
+ * 第二个判据的意思是：**已经过了 10 分钟，期间至少有 1 条人类消息来过又走了，
+ * 仍然没有一条指向我** → 敢判 ignored。
+ */
+const OUTCOME_MAX_WAIT_SEC = 600;
 const REFLECTION_THRESHOLD = 15;
 const REFLECTION_INTERVAL = 86400;
 const MAX_OUTCOMES = 100;
@@ -273,9 +285,14 @@ export async function checkOutcome(
         const msgsAfter = ((entry.msgs_after as number) ?? 0) + 1;
         entry.msgs_after = msgsAfter;
 
-        if (msgsAfter >= OUTCOME_CHECK_WINDOW) {
+        // 时间感知的 ignored：条数够，或者等太久且期间确有人说过话。
+        const entryAgeSec = now() - Number(entry.timestamp ?? now());
+        const waitedLongEnough = entryAgeSec >= OUTCOME_MAX_WAIT_SEC && msgsAfter >= 1;
+        if (msgsAfter >= OUTCOME_CHECK_WINDOW || waitedLongEnough) {
           const outcome = 'negative';
-          const signal = `ignored_${OUTCOME_CHECK_WINDOW}_msgs`;
+          const signal = waitedLongEnough && msgsAfter < OUTCOME_CHECK_WINDOW
+            ? `ignored_${entryAgeSec}s_no_reply`
+            : `ignored_${OUTCOME_CHECK_WINDOW}_msgs`;
           toInsert.push([chatId, now(), entry.trigger_text, entry.reply_text, outcome, signal, entry.action]);
           toDelete.push(field);
           resolvedCount++;
