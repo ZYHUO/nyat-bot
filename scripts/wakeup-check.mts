@@ -109,21 +109,23 @@ function nightSenders(chatId: number, beforeSec: number): Set<number> {
 
 /** 一个桶：给定一群、一段时间、一组夜间发送者，统计 bot 发言里有多少锚在他们身上。 */
 function bucket(chatId: number, from: number, to: number, senders: Set<number>) {
+  // **anchor_ok 用真值，不是代理**：self_replies.trigger_uid 就是 bot 回复的目标
+  // uid（host-api 传 opts.targetUserId）。第一版写"无法解出被引用的 uid，用非空
+  // 锚点作代理"——那是没去看调用方传了什么。真值：trigger_uid ∈ 夜间消息发送者
+  // 集合，正好是红队可证伪检验要求的那个量。
   const rows = sql(
-    `SELECT bot_message_id, trigger_msg_id FROM self_replies
+    `SELECT trigger_uid FROM self_replies
      WHERE chat_id=${chatId} AND ts >= ${from} AND ts < ${to}`,
-  ) as unknown as Array<{ bot_message_id: number; trigger_msg_id: number | null }>;
-  let anchored = 0;
-  let unanchored = 0;
+  ) as unknown as Array<{ trigger_uid: number | null }>;
+  let ok = 0;
+  let bad = 0;
   for (const r of rows) {
-    const anchor = r.trigger_msg_id;
-    // anchor_ok：有引用锚点（我们无法直接解出被引用的 uid，用"非空锚点"作代理）
-    if (anchor !== null && anchor > 0) anchored += 1;
-    else unanchored += 1;
+    const uid = Number(r.trigger_uid);
+    if (uid > 0 && senders.has(uid)) ok += 1;
+    else bad += 1;
   }
-  return { total: rows.length, anchored, unanchored, senders: senders.size };
+  return { total: rows.length, anchored: ok, unanchored: bad, senders: senders.size };
 }
-
 const all = [...wakeups.map((w) => ({ chat: w.chat, at: w.at })),
   ...candidates.map((c) => ({ chat: c.chat, at: c.at }))];
 const cases = all.filter((c) => c.at >= DEBT_SINCE).slice(0, 10);
