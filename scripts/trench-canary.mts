@@ -118,8 +118,10 @@ try {
   if (ls.state === 'sleeping') {
     // 找出醒来时刻
     let wakeAt = '';
-    for (let h = 0; h <= 12; h++) {
-      const t = new Date(Date.now() + h * 3600000);
+    // **按 5 分钟步进，不是 1 小时**：小时粒度会让金丝雀报"北京 08:40"
+    // 而 wakeup-check.mts（5 分钟粒度）报"08:12"——同一个事实两台仪器两个值。
+    for (let m = 0; m <= 600; m += 5) {
+      const t = new Date(Date.now() + m * 60000);
       if (getLifeState(t).state !== 'sleeping') {
         wakeAt = new Date(t.getTime() + 8 * 3600000).toISOString().slice(11, 16);
         break;
