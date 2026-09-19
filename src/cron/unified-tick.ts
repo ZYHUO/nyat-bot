@@ -1147,6 +1147,8 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');
       if (env().TRENCH_ENVELOPE_MODE !== 'off') void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(a.chatId)).catch(() => {});
+      // L0：主动发言也要抽气压（同 host-api 的发送路径，两条路都不能漏）
+      void import('../nyatos/trench.js').then((m) => m.releasePressure(a.chatId)).catch(() => {});
       // Phase 3 satiate：刚主动开过口 → connection 抑制（防连 tick 刷屏）
       try {
         const { satiate } = await import('../core/drives/store.js');

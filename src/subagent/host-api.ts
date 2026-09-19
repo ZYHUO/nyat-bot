@@ -1080,7 +1080,19 @@ export function createHostApi(
                 }
               }
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
-              if (messageId > 0) void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
+              if (messageId > 0) {
+                void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
+                // Nyat Trench L0：说出口了 → 抽走 85% 气压。
+                //
+                // **这一行原本不存在。**`releasePressure` 写好了、单测绿着，
+                // 而全仓库唯一的引用是注释——于是积分器少了它主要的排水路径：
+                // P 只被时间泵每小时减半，从不在发言时被抽走。论文里"抽水速率严格
+                // 超过填充速率上界，稳态 P 有界"这句话，那 85% 在生产里从未发生。
+                //
+                // 这是我这个会话里第四次"写了没调用"（renderEcho / resetTrench /
+                // recentImpulses / releasePressure），而这次踩的是核心机制。
+                void import('../nyatos/trench.js').then((m) => m.releasePressure(chatId)).catch(() => {});
+              }
               // 定向债销账：真的回给了锚点那个人，就还掉欠他的一句。
               // 这是"衰减由闭环驱动而不是由时钟驱动"的兑现点。
               if (replyTo !== undefined && opts.targetUserId && opts.targetUserId > 0) {
