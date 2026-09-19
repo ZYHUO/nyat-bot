@@ -94,29 +94,45 @@ console.log('\n【决策面】五层判定的真实用量（判断哪层可以�
 for (const [k, v] of Object.entries(decisions)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 console.log('\n【真人感】（真人基准：问号 4-6% / 句末喵 ~1% / ≤10字 68%）');
 console.log(`  问号率 ${pct(qRate)}｜句末喵 ${pct(maoRate)}｜≤10字 ${pct(shortRate)}`);
-// Phase 2 准入数：判定点与线上行为的一致率（用时间邻域 join，见
-// decision-equivalence.mts 的注释——messageId join 会把形势判断错四倍）。
+// Phase 2 准入数：判定点与线上行为的一致率。
+// 三个已修正过的口径错误，按发现顺序：
+//   ① messageId join → 时间邻域 join（14.2% → 53.3%）
+//   ② 全时段 → 剔除睡眠相位（53.3% → 40.0%）
+//      夜间 bot 按设计静眠，shadow 不看睡眠相位照样说 speak，
+//      那些样本不是分歧；而且它们方向是**抬高**一致率（两边都说 silent）。
+//   ③ 早退 break 的 acted 循环 → .some()（两种写法对未排序输入不一致）
+// 最终口径：清醒时段 + 时间邻域 + .some() = 40.0%（近 7 天 1458 样本）。
 try {
   const shSql = `SELECT chat_id, occurred_at, json_extract(fact_json,'$.shadowVerdict') AS v FROM cognitive_events
     WHERE type='social_prediction' AND json_extract(fact_json,'$.schema')='shadow_ingress.v1'
-      AND json_extract(fact_json,'$.shadowVerdict') IN ('speak','silent') AND occurred_at >= ${Math.floor(Date.now() / 1000) - 86400}`;
+      AND json_extract(fact_json,'$.shadowVerdict') IN ('speak','silent') AND occurred_at >= ${Math.floor(Date.now() / 1000) - 7 * 86400}`;
   const sh = sql(shSql);
   const sendsByChat = new Map<number, number[]>();
-  for (const r of sql(`SELECT chat_id AS c, ts FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 86400}`)) {
+  for (const r of sql(`SELECT chat_id AS c, ts FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 7 * 86400}`)) {
     const c = Number(r.c), t = Number(r.ts);
     if (!Number.isSafeInteger(c)) continue;
     const list = sendsByChat.get(c) ?? []; list.push(t); sendsByChat.set(c, list);
   }
   const acted = (c: number, at: number) => (sendsByChat.get(c) ?? []).some((t) => t >= at && t <= at + 120);
-  let ag = 0, dis = 0;
+  // 睡眠相位剔除：bot 在夜间按设计静眠，那些样本不是分歧（且会抬高一致率）。
+  const sendTs = (sql(`SELECT ts FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 7 * 86400} ORDER BY ts ASC`) as Array<{ ts: number }>);
+  const w: Array<[number, number]> = [];
+  for (const st of sendTs) {
+    const last = w[w.length - 1];
+    if (last && st.ts - last[1] <= 3600) last[1] = st.ts + 2700;
+    else w.push([st.ts - 2700, st.ts + 2700]);
+  }
+  const awake = (t: number) => w.some(([a, b]) => t >= a && t <= b);
+  let ag = 0, dis = 0, sleep = 0;
   for (const r of sh) {
     const c = Number(r.chat_id), at = Number(r.occurred_at);
     if (!Number.isSafeInteger(c) || !Number.isSafeInteger(at)) continue;
+    if (!awake(at)) { sleep += 1; continue; }
     const a = acted(c, at);
     if ((r.v === 'speak') === a) ag++; else dis++;
   }
   const rate = ag + dis > 0 ? ag / (ag + dis) : 0;
-  console.log(`\n【Phase 2 准入】判定点一致率 ${(rate * 100).toFixed(1)}%（目标 >85%，近 1 天 ${ag + dis} 样本）`);
+  console.log(`\n【Phase 2 准入】判定点一致率 ${(rate * 100).toFixed(1)}%（清醒口径，目标 >85%；近 7 天 ${ag + dis} 可比对样本，剔除睡眠相位 ${sleep}）`);
   if (rate < 0.5 && ag + dis > 50) fail.push(`判定点一致率仅 ${(rate * 100).toFixed(0)}%——两个决策点仍在互相打架`);
 } catch { /* 该指标依赖 shadow 覆盖群，读不到就跳过 */ }
 

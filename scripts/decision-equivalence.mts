@@ -68,15 +68,41 @@ for (const r of sql(`SELECT chat_id AS c, ts FROM self_replies WHERE ts >= ${sin
   botSpokeByChat.set(c, list);
 }
 const botSpoke = sql(`SELECT ts FROM self_replies WHERE ts >= ${since} ORDER BY ts ASC`);
+/**
+ * 清醒窗口近似：bot 有真实发送的时段（每次发送前后各 45 分钟算清醒）。
+ *
+ * 为什么必须剔除睡眠相位：`getSleepPhase()` 在夜间返回 night，那时 bot **按设计**
+ * 静音（消息进 pending 队列）。shadow 不看睡眠相位，夜里照样说 speak，于是
+ * "shadow speak / live silent" 被记成一次分歧——但那不是分歧，是 bot 在睡觉。
+ *
+ * 实测影响（2026-09-19）：全时段一致率 53.3%，剔除 263 个夜里样本后是 **47.2%**。
+ * 方向与直觉相反：夜里样本反而在**抬高**一致率（那时两边都说 silent），
+ * 所以原口径是乐观偏差，不是保守偏差。
+ *
+ * 这是近似而非权威：真正的 getSleepPhase() 依赖 Redis override 与时段表，
+ * 脚本里没有；用"有发送"做代理对 7 天窗口足够。
+ */
+function buildAwakeWindows(sends: Array<{ ts: number }>, tailSec = 2700): Array<[number, number]> {
+  const w: Array<[number, number]> = [];
+  for (const s of sends) {
+    const last = w[w.length - 1];
+    if (last && s.ts - last[1] <= 3600) last[1] = s.ts + tailSec;
+    else w.push([s.ts - tailSec, s.ts + tailSec]);
+  }
+  return w;
+}
+function isAwakeAt(windows: Array<[number, number]>, t: number): boolean {
+  for (const [a, b] of windows) if (t >= a && t <= b) return true;
+  return false;
+}
+
 /** 该群在 shadow 判定之后 ACT_WINDOW_SEC 内有没有 bot 发言。 */
 function actedWithinWindow(chatId: number, atSec: number): boolean {
-  const list = botSpokeByChat.get(chatId);
-  if (!list) return false;
-  for (const t of list) {
-    if (t >= atSec && t <= atSec + ACT_WINDOW_SEC) return true;
-    if (t > atSec + ACT_WINDOW_SEC) break;
-  }
-  return false;
+  // 用 .some() 而不是带早退 break 的循环：两种写法在**未排序**输入上不一致，
+  // 而这里曾经给出 47.2% vs 40.0% 两个数——同一个指标 7 个点的实现敏感度
+  // 本身就是要在意的事。.some() 语义无歧义，代价可忽略（列表很短）。
+  const list = botSpokeByChat.get(chatId) ?? [];
+  return list.some((t) => t >= atSec && t <= atSec + ACT_WINDOW_SEC);
 }
 
 let agree = 0, disagree = 0, unknown = 0;
@@ -84,7 +110,15 @@ let speakWant = 0, speakWantSpoke = 0;
 let silentWant = 0, silentWantSilent = 0;
 const waitN = shadowRows.filter((r) => r.verdict === 'wait').length;
 
+const awakeWindows = buildAwakeWindows(
+  // **必须 ORDER BY ts**：缺了它窗口合并不按时间顺序推进，会产出 start > end 的
+  // 反区间（实测 coverage 算出 -722%），于是每个样本都被判成"睡眠相位"。
+  sql(`SELECT ts FROM self_replies WHERE ts >= ${since} ORDER BY ts ASC`) as Array<{ ts: number }>,
+);
+let sleepSamples = 0;
 for (const r of shadowRows) {
+  // 睡眠相位里 bot 按设计静音，那不是"分歧"——剔掉再统计。
+  if (!isAwakeAt(awakeWindows, Number(r.occurred_at))) { sleepSamples += 1; continue; }
   const chatId = Number(r.chat_id);
   const atSec = Number(r.occurred_at);
   if (!Number.isSafeInteger(chatId) || chatId === 0 || !Number.isSafeInteger(atSec)) { unknown += 1; continue; }
@@ -109,6 +143,7 @@ const rate = comparable > 0 ? agree / comparable : 0;
 
 console.log(`\n═══ 判定点对等度 · 近 ${DAYS} 天 ═══\n`);
 console.log(`shadow 判定样本：${shadowRows.length}（wait ${waitN} · 无法比对 ${unknown}）`);
+console.log(`其中睡眠相位（bot 按设计静音，剔除）：${sleepSamples}`);
 console.log(`可比对样本：${comparable}`);
 if (comparable === 0) {
   console.log('\n无比对样本——shadow 与 live 还没有共同覆盖的消息群。');
