@@ -402,6 +402,10 @@ const envSchema = z.object({
   // 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进
   // CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与——
   // 2026-09-19 真人对比分析定为此为"差一口气"的最大来源。fail-soft，默认关。
+  // 「喵」尾巴纪律：同一群 bot 上一条刚用喵收尾、180 秒内这条又用 → 直接摘掉多余的喵。
+  // prompt 规则三轮只把 57% 压到 50%，情绪 thread 里照样连喵（单 thread 6/9）。
+  // 全局比例是模型看不见的，连续重复这种关系约束才拦得住。
+  NYA_TAIL_DISCIPLINE_ENABLED: booleanFromEnv.default(false),
   ROOM_AWARENESS_ENABLED: booleanFromEnv.default(false),
   // ── 定型判断基座 src/ai/judge-substrate.ts ───────────────────────
   // bot 每天 ~45M token 大多花在"换回一个小决定"（gate 三选一、heart 说/等/不说、
