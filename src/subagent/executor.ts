@@ -865,6 +865,31 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     ];
   }
 
+  // 房间感知：把"这个圈子现在什么状况"塞进任务上下文。真人不是只回上一条的——
+  // 他们知道谁在跟谁聊、自己多久没说话、有没有人在跟自己说话。这些信号 frame.ts
+  // 早算好了，但以前只喂 NyatOS shadow（生产只开 3 个群），主回复路径看不到。
+  // fail-soft：读不到就不注入。flag：ROOM_AWARENESS_ENABLED（默认关）。
+  if (!isSelfPlay) {
+    try {
+      const [{ renderRoomAwareness }, { getBotUid }] = await Promise.all([
+        import('./room-awareness.js'),
+        import('../bot/bot.js'),
+      ]);
+      const room = await renderRoomAwareness({
+        chatId: task.chatId,
+        botUid: getBotUid(),
+        quoteMessageId: task.quoteMessageIds?.[0],
+        messageThreadId: task.messageThreadId,
+      });
+      if (room.text) {
+        history.push({ role: 'user', content: room.text });
+        logger.info({ taskId: task.id, chatId: task.chatId, signals: room.signals.join(','), chars: room.text.length }, 'room awareness injected');
+      }
+    } catch (err) {
+      logger.debug({ err, taskId: task.id }, 'room awareness injection failed (non-critical)');
+    }
+  }
+
   if (task.pendingUserInput?.length) {
     const pending = task.pendingUserInput;
     task.pendingUserInput = undefined;

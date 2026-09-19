@@ -399,6 +399,10 @@ const envSchema = z.object({
   TYPESAFE_ENDPOINT: z.string().default('https://api.typesafe.ai/v1/systemone'),
   TYPESAFE_MODEL: z.string().default('jev-latest'),
   TYPESAFE_API_KEY: z.string().default(''),
+  // 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进
+  // CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与——
+  // 2026-09-19 真人对比分析定为此为"差一口气"的最大来源。fail-soft，默认关。
+  ROOM_AWARENESS_ENABLED: booleanFromEnv.default(false),
   // ── 定型判断基座 src/ai/judge-substrate.ts ───────────────────────
   // bot 每天 ~45M token 大多花在"换回一个小决定"（gate 三选一、heart 说/等/不说、
   // shadow、judge）。这里把这类判断收敛到一个可插拔基座：typesafe 主后端，
