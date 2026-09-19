@@ -163,62 +163,14 @@ export function startCronJobs(deps?: CronDeps): void {
           } catch { /* per-chat fail-soft */ }
           // 卡死自恢复：P 连续顶在 P_MAX 若干小时 → 硬复位。
           //
-          // 为什么必须有这个：`resetTrench` 此前只有测试能调（死代码扫描发现它是
-          // TESTONLY），而论文约束 4 要求"任何 host 否决器必须可被强制解锁"。
-          //  satiation latch 事故的根因正是"clock 被非权威方刷新 → 4 天 66 veto 无人知"。
-          // 没有自动恢复，就等于把同一个事故形态留在了新架构里。
-          //
-          // P 顶格意味着注入持续超过抽水——正常聊天不会这样（一次发言抽 85%）。
-          // 所以顶格数小时只可能是"没人说话但消息一直在进"（睡眠期之外）或抽水路径坏了。
+          // 策略在 trench.ts 的 recoverIfStuck() 里（可测），cron 只负责调用。
+          // 论文约束 4：任何 host 否决器必须可被强制解锁——而 resetTrench 一度只有
+          // 测试能调，等于把 satiation latch 事故的形状留在了新架构里。
           try {
-            const { readTrench, resetTrench, P_MAX } = await import('../nyatos/trench.js');
-            const r = await readTrench(id);
-            if (r.p >= P_MAX - 0.001) {
-              const rawSince = await getRedis().get(`xxb:trench:pfull_since:${id}`);
-              const nowSec = Math.floor(Date.now() / 1000);
-              if (rawSince === null) {
-                await getRedis().set(`xxb:trench:pfull_since:${id}`, String(nowSec), 'EX', 12 * 3600);
-              } else if (nowSec - Number(rawSince) >= 6 * 3600) {
-                await resetTrench(id);
-                await getRedis().del(`xxb:trench:pfull_since:${id}`);
-                stuckReset += 1;
-              }
-            } else {
-              await getRedis().del(`xxb:trench:pfull_since:${id}`);
-            }
+            const { recoverIfStuck } = await import('../nyatos/trench.js');
+            if (await recoverIfStuck(id)) stuckReset += 1;
           } catch { /* per-chat fail-soft */ }
         }
-        // 每次泵浦同时记睡眠相位：醒来这件事必须**可观测**，否则无法判断
-        // "醒来后气压高 → 前几句密"这个行为是否真的发生。零额外成本（一次本地调用）。
-        try {
-          const { getLifeState } = await import('../tracking/life-state.js');
-          const phase = getLifeState().state;
-          // 相位跳变检测：醒来这一刻必须**当场**记录，否则 30 分钟的泵浦粒度
-          // 会把进入醒来时的气压已经泵浦减半，最有趣的那组数字就丢了。
-          const PHASE_KEY = 'xxb:trench:lastphase';
-          const prev = await getRedis().get(PHASE_KEY);
-          if (prev !== phase) {
-            await getRedis().set(PHASE_KEY, phase);
-            if (prev === 'sleeping' && phase !== 'sleeping') {
-              const { readTrench: rt } = await import('../nyatos/trench.js');
-              const ids = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0).slice(0, 8);
-              const atWake = await Promise.all(ids.map(async (id) => ({ id, p: (await rt(id)).p })));
-              logger.warn(
-                { event: 'trench_wakeup', chats: atWake.filter((x) => x.p > 0) },
-                'trench: bot woke up — pressure carried into the first minutes',
-              );
-            }
-          }
-          const { readTrench } = await import('../nyatos/trench.js');
-          const top = await Promise.all(
-            raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0).slice(0, 5)
-              .map(async (id) => ({ id, p: (await readTrench(id)).p })),
-          );
-          logger.info(
-            { phase, pumped, top },
-            'trench pump tick: phase + top pressures',
-          );
-        } catch { /* 观测失败不影响泵浦 */ }
         if (pumped > 0) logger.debug({ pumped }, 'trench pump: halved pressure');
         if (stuckReset > 0) logger.warn({ stuckReset }, 'trench: pressure stuck at P_MAX for 6h — hard reset');
       },

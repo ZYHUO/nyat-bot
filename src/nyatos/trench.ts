@@ -52,6 +52,7 @@ const PUMP_HALFLIFE_SEC = 3600;
 const KEY_P = 'xxb:trench:p:';
 const KEY_THETA = 'xxb:trench:theta:';
 const KEY_LAST_PUMP = 'xxb:trench:lastpump:';
+const KEY_PFULL_SINCE = 'xxb:trench:pfull_since:';
 
 // 观测日志路径。
 //
@@ -235,6 +236,48 @@ export async function resetTrench(chatId: number): Promise<void> {
     logger.warn({ chatId }, 'trench hard reset by operator');
   } catch (err) {
     logger.debug({ err, chatId }, 'trench reset failed (non-critical)');
+  }
+}
+
+/**
+ * 卡死自恢复：P 连续顶在 P_MAX 超过 stuckHours → 硬复位。
+ *
+ * 为什么抽成函数：之前这段逻辑内联在 cron 里，测试只能"复刻它的判断"而不是调用它
+ * ——而复刻的测试验的是复印件。这个仓库最爱的那类失败。
+ *
+ * @returns 是否执行了复位
+ */
+export async function recoverIfStuck(chatId: number, stuckHours = 6): Promise<boolean> {
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return false;
+  try {
+    const redis = getRedis();
+    const pRaw = await redis.get(chatKey(KEY_P, chatId));
+    const p = clamp(Number(pRaw === null ? 0 : pRaw), P_MIN, P_MAX);
+    if (p < P_MAX - 0.001) {
+      // 没顶格：清掉计时键，避免残留导致将来误复位
+      await redis.del(chatKey(KEY_PFULL_SINCE, chatId));
+      return false;
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sinceKey = chatKey(KEY_PFULL_SINCE, chatId);
+    const sinceRaw = await redis.get(sinceKey);
+    if (sinceRaw === null) {
+      await redis.set(sinceKey, String(nowSec), 'EX', Math.round(stuckHours * 3600 * 2));
+      return false;
+    }
+    const since = Number(sinceRaw);
+    if (!Number.isFinite(since) || nowSec - since < stuckHours * 3600) return false;
+
+    await resetTrench(chatId);
+    await redis.del(sinceKey);
+    logger.warn(
+      { chatId, stuckHours, p },
+      'trench: pressure pinned at P_MAX — hard reset by recoverIfStuck',
+    );
+    return true;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'recoverIfStuck failed (non-critical)');
+    return false;
   }
 }
 
