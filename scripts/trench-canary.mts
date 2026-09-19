@@ -256,6 +256,7 @@ try {
       wait: '等（心流 wait）',
       legacy: 'legacy 路径',
       intercepted: '被拦截（绕过心流）',
+      asleep: '在睡（作息，不是心流决定）',
     };
     console.log(`  ${String(r.o).padEnd(12)} ${String(r.n).padStart(6)}  ${(Number(r.n) / Math.max(tot, 1) * 100).toFixed(0).padStart(3)}%  ${label[String(r.o)] ?? ''}`);
   }

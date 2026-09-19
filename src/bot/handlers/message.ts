@@ -231,7 +231,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
         // saw 3 of 12 messages, because coalesce/cooldown/engagement had already
         // dropped the rest. Those dropped messages are exactly what the rewrite
         // must be judged on. Fire-and-forget: never delays or blocks the reply.
-        const noteLiveOutcome = (outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted'): void => {
+        const noteLiveOutcome = (outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted' | 'asleep'): void => {
           if (!env().NYATOS_SHADOW_ENABLED) return;
           // Only record for chats the shadow actually observed; otherwise the
           // ledger fills with outcomes that have no matching shadow verdict and
@@ -334,7 +334,9 @@ async function handleUpdate(ctx: Context): Promise<void> {
               logger.warn({ chatId }, 'trench debt: skipped, fm.uid not > 0');
             }
           }
-          noteLiveOutcome('silent');
+          // 睡眠记 'asleep' 而不是 'silent'：实测睡眠占 silent 的 15%，
+          // 混在一起会让"心流否决率"虚高——那不是心流的决定，是作息。
+          noteLiveOutcome('asleep');
           return 'done';
         }
 

@@ -363,7 +363,9 @@ export async function runIngressShadow(input: {
 export function recordLiveOutcome(input: {
   chatId: number;
   messageId: number;
-  outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted';
+  // 'asleep' 与 'silent' 分开：2026-09-19 实测睡眠占 silent 的 15%，
+  // 把它混进"心流否决"会让"心流到底否决了多少"这个数虚高。
+  outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted' | 'asleep';
 }): void {
   try {
     appendCognitiveEvent({
