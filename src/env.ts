@@ -331,6 +331,11 @@ const envSchema = z.object({
   // ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ──
   // 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。
   TIMING_GATE_ENABLED: booleanFromEnv.default(false),
+
+  // gate 的 LLM 分支开关。false = 所有确定性层原样保留，走到 LLM 之前直接 continue。
+  // 实测依据：324 次调用 199 次解析失败(61%)，成功里 124/125 是 no_action
+  // （理由清一色同一条规则的改写）。token 占比仅 ~0.2%，省 token 不是理由。
+  TIMING_GATE_LLM_ENABLED: booleanFromEnv.default(true),
   // 阶段 1：消息去抖窗口（毫秒）。0 = 关闭去抖。
   // 同一 chat 内，新消息会重置定时器；超过 MAX_BUFFER_MS 强制 flush 防止饥饿。
   TIMING_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(2000),

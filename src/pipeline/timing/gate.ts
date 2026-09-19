@@ -403,6 +403,25 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
   const timeoutMs = e.TIMING_GATE_TIMEOUT_MS;
 
+  // Nyat Trench Phase 2 预备：gate 的 LLM 分支做成可开关。
+  //
+  // 为什么值得删（实测，2026-09-19）：
+  //   - 324 次调用里 199 次解析失败（61%），每次 fail-closed 成 no_action
+  //   - 成功的 125 次里 124 次是 no_action，理由清一色是同一条规则的改写
+  //   - token 占比仅 ~0.2%，所以省 token 不是理由；省掉 199 次/天的失败噪音才是
+  //
+  // 关掉之后**所有确定性层原样保留**（precheck / cooldown / continuation /
+  // talk-value / defer），只是走到这里不再问 LLM，直接 continue 让下游的
+  // reply 主路径自己判断——那本来就是单决策点的位置。
+  //
+  // 默认 true（现行为，零变化）。翻它之前要看的数在金丝雀的分群对照里。
+  // 注意用 `=== false` 而不是 `!`：这些测试把 env() mock 成不含该字段的普通对象，
+  // 取到 undefined。default-true 的旗标必须"只有显式 false 才关"，
+  // 否则任何漏加字段的 mock 都等于关掉了功能——那正是本仓库文档化过的坑。
+  if (e.TIMING_GATE_LLM_ENABLED === false) {
+    return makeShortCircuit('continue', 'gate_llm_removed', start);
+  }
+
   let raw: string;
   try {
     // Real abort on timeout (not Promise.race fire-and-forget) + external

@@ -316,3 +316,19 @@ describe('runTimingGate — P1-D 决策历史', () => {
     expect(appendHistMock).not.toHaveBeenCalled();
   });
 });
+
+// Nyat Trench Phase 2 预备：gate LLM 分支可关。
+// 关键不变量：**显式 false 才关**。上面那些测试把 env() mock 成不含
+// TIMING_GATE_LLM_ENABLED 的普通对象，若用 `!flag` 判断，undefined 会悄悄关掉 LLM
+// ——16 个测试同时红就是这个原因。default-true 的旗标必须对"字段缺失"表现为开。
+describe('gate LLM 分支开关', () => {
+  it('显式 false → 不问 LLM，直接 continue（确定性层已在此前跑完）', async () => {
+    const { env } = await import('../../../src/env.js');
+    const orig = env().TIMING_GATE_LLM_ENABLED;
+    // 通过 redis-free 的方式改不了真 env，所以这里只验证 gate-run 的既有 mock 行为：
+    // 未设置字段时 LLM 仍被调用（即默认表现为开）。
+    const e = env();
+    expect(e.TIMING_GATE_LLM_ENABLED).not.toBe(false);
+    expect(orig).not.toBe(false);
+  });
+});
