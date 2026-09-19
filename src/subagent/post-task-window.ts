@@ -293,6 +293,19 @@ export class PostTaskWindowManager {
       { chatId: win.chatId, taskId: task.id, trigger: trigger.messageId, continuations: win.continuations },
       'post-task continuation dispatched',
     );
+    // 入账：这条续答**绕过了 Meta/心流**（设计如此：接住话头要顺势，不值得再问一轮）。
+    // 但不入账会让 live_outcome 账本漏掉整个绕过路径——2026-09-19 实测近 24h 有
+    // 122 条 post-task 续答 + 279 条 same_speaker_burst 从未入账，占决策事件约 23%。
+    // 而 Phase 1 要测的是"判定点 vs 心流"，漏掉绕过路径等于把被测对象排除在样本外。
+    void import('../nyatos/shadow.js')
+      .then(({ isNyatosShadowChat, recordLiveOutcome }) => {
+        if (!isNyatosShadowChat(win.chatId, {
+          enabled: env().NYATOS_SHADOW_ENABLED,
+          chatIds: env().NYATOS_SHADOW_CHAT_IDS,
+        })) return;
+        recordLiveOutcome({ chatId: win.chatId, messageId: trigger.messageId, outcome: 'intercepted' });
+      })
+      .catch(() => { /* telemetry only */ });
   }
 }
 

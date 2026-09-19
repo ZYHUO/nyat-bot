@@ -381,6 +381,14 @@ async function handleUpdate(ctx: Context): Promise<void> {
                 { chatId, messageId, uid: userId },
                 'Meta attention ingested (same_speaker_burst)',
               );
+              // 入账：这条消息**没有问过心流**就被强制摄进 attention。
+              //
+              // 不记的后果（2026-09-19 实测）：近 24h 有约 401 个绕过事件
+              // （same_speaker_burst 279 + post-task 122）从未进 live_outcome 账本，
+              // 占决策事件约 23%。于是任何基于 social_prediction 的对照分析都会
+              //  systematically 漏掉"绕过心流的那部分"——而 Phase 1 要测的恰恰是
+              // "判定点 vs 心流"，漏掉它等于把要测的对象排除在样本外。
+              noteLiveOutcome('intercepted');
               return 'done';
             }
           } catch (err) {
