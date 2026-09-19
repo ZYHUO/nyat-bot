@@ -871,15 +871,17 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // fail-soft：读不到就不注入。flag：ROOM_AWARENESS_ENABLED（默认关）。
   if (!isSelfPlay) {
     try {
-      const [{ renderRoomAwareness }, { getBotUid }] = await Promise.all([
+      const [{ renderRoomAwareness }, { getBotUid }, { getRecentBotTextsInChat }] = await Promise.all([
         import('./room-awareness.js'),
         import('../bot/bot.js'),
+        import('../tracking/self-history.js'),
       ]);
       const room = await renderRoomAwareness({
         chatId: task.chatId,
         botUid: getBotUid(),
         quoteMessageId: task.quoteMessageIds?.[0],
         messageThreadId: task.messageThreadId,
+        recentBotTexts: getRecentBotTextsInChat(task.chatId).slice(-12),
       });
       if (room.text) {
         history.push({ role: 'user', content: room.text });

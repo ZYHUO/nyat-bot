@@ -902,23 +902,6 @@ export function createHostApi(
               }
             }
 
-            // 「喵」别当标点用：同一群里 bot 上一条刚用喵收尾，这条又用——听感就是复读机。
-            // prompt 已经讲了三轮（57%→50%），但情绪 thread 里管不住（实测单 thread 内 6/9 连喵）。
-            // 比例目标是模型看不见的，**关系约束**它能懂，但最终还是得靠物理手段：直接摘掉多余的喵。
-            // 不是改写内容，只摘尾巴上的那个字；摘完为空就不动。
-            if (env().NYA_TAIL_DISCIPLINE_ENABLED && textSent === 0 && recentBotAtSec !== null) {
-              const gapSec = Math.floor(Date.now() / 1000) - recentBotAtSec;
-              const prev = recentBotTexts[recentBotTexts.length - 1];
-              const meTail = /喵[~。！？!?,，\s]*$/;
-              if (gapSec <= 180 && prev !== undefined && meTail.test(prev) && meTail.test(clean)) {
-                const trimmed = clean.replace(/喵([~。！？!?,，\s]*)$/, '$1').replace(/\s+$/, '');
-                if (trimmed.length >= 2) {
-                  logger.info({ chatId, preview: clean.slice(0, 40), gapSec }, 'host sendText: trimmed redundant 喵 tail');
-                  clean = trimmed;
-                }
-              }
-            }
-
             // 接地性守卫：断言一个聊天里没人提过、用户也没问的具体数字/事实 = 模型幻觉。
             // 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」，
             // 该话题在本群 441 条历史/Qdrant 全库/belief/图片里全部零命中。

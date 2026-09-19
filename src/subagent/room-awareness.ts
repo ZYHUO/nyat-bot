@@ -26,12 +26,28 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/** 句末带"喵"的比例与平均长度——喂给模型看的自我事实，不是配额也不是拦截。 */
+function ownSpeechStats(botTexts: readonly string[]): string | null {
+  const texts = botTexts.filter((t) => t.replace(/\s+/g, '').length >= 2).slice(-12);
+  if (texts.length < 4) return null;
+  const tail = texts.filter((t) => /喵[~。！？!?,，\s]*$/.test(t)).length;
+  const avg = Math.round(texts.reduce((s, t) => s + t.replace(/\s+/g, '').length, 0) / texts.length);
+  if (tail / texts.length < 0.4) return null; // 没到需要提醒的程度就别啰嗦
+  return (
+    `[你自已的毛病] 你最近 ${texts.length} 条消息里有 ${tail} 条拿"喵"收尾，` +
+    `平均 ${avg} 字。群友里几乎没人这么说话——每句都喵，听起来像复读机，不像人。` +
+    '这条你自己决定：语气到了就喵，没到就直接收。'
+  );
+}
+
 export interface RoomAwarenessInput {
   chatId: number;
   botUid: number;
   /** 本次任务要回的那条消息 id（用于 triggerAge）与 forum 线程 */
   quoteMessageId?: number;
   messageThreadId?: number;
+  /** bot 自己最近发过的消息（新的在前或旧的在前都行，内部排序），用于自我统计 */
+  recentBotTexts?: readonly string[];
 }
 
 export interface RoomAwareness {
@@ -76,6 +92,23 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
 
     if (frame.field) signals.push('field');
     if (frame.inner) signals.push('inner');
+
+    // 自我统计：把自己的行为数据变成模型能看见的事实。
+    // 2026-09-19：prompt 讲了三轮"别每句都喵"，模型只从 57% 降到 50%——因为全局比例
+    // 是它在决策瞬间**看不见**的统计量，而它恰恰在情绪高点最想喵。写死规则去摘尾巴是
+    // 规则引擎，违背"让 LLM 接管 harness"；给它看数字，让它自己掂量。
+    // 自己取，别让调用方操心；调用方显式给了就用调用方的
+    let ownTexts = input.recentBotTexts;
+    if (!ownTexts) {
+      try {
+        const { getRecentBotTextsInChat } = await import('../tracking/self-history.js');
+        ownTexts = getRecentBotTextsInChat(input.chatId, 12, 360);
+      } catch (err) {
+        logger.debug({ err, chatId: input.chatId }, 'room awareness: self-history unavailable');
+      }
+    }
+    const own = ownSpeechStats(ownTexts ?? []);
+    if (own) signals.push('self_stats');
     const lines: string[] = [];
     lines.push('[这个房间现在什么样]（以下是你的处境感知，不是要你汇报的内容）');
     lines.push(rendered);
@@ -83,6 +116,10 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
       '用法：真人不是只回"上一条"的——他们看圈子在聊什么、自己多久没说话、有没有人正在跟自己说话。' +
       '上面的信息是给你判断"现在该不该说、说给谁、说什么"用的，**不要**把这些字段名念出来。',
     );
+    if (own) {
+      lines.push('');
+      lines.push(own);
+    }
     if (frame.self.openThreads) signals.push('threads');
     if (frame.addressedToOthers) signals.push('addressed_to_others');
     return { text: lines.join('\n'), signals };

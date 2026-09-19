@@ -31,6 +31,16 @@ vi.mock('../../../src/bot/bot.js', () => ({
   getBotUid: () => 8392759490,
 }));
 
+vi.mock('../../../src/tracking/self-history.js', () => ({
+  getRecentBotTextsInChat: vi.fn(() => [
+    '已举报，等踢喵',
+    '谁看了啊笨',
+    '叫妈也没用，本喵又不是 ATM 喵',
+    '想得挺美，本喵的钱是大风刮来的喵',
+    '那快开啊，别硬扛',
+  ]),
+}));
+
 const { renderRoomAwareness } = await import('../../../src/subagent/room-awareness.js');
 
 describe('renderRoomAwareness', () => {
@@ -56,6 +66,25 @@ describe('renderRoomAwareness', () => {
     expect(r.text).toBe('');
     expect(r.signals).toEqual([]);
     envMock.ROOM_AWARENESS_ENABLED = true;
+  });
+
+  it('surfaces the bot own 喵-tail rate as a FACT, not a quota', async () => {
+    const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759490 });
+    expect(r.text).toContain('你自已的毛病');
+    expect(r.text).toContain('拿"喵"收尾');
+    // The whole point: the model decides. No hard trimming, no refusal.
+    expect(r.signals).toContain('self_stats');
+    expect(r.text).not.toContain('禁止');
+    expect(r.text).not.toContain('必须');
+    expect(r.text).toContain('你自己决定');
+  });
+
+  it('stays quiet about 喵 when the rate is already natural', async () => {
+    const mod = await import('../../../src/tracking/self-history.js');
+    (mod.getRecentBotTextsInChat as unknown as { mockReturnValueOnce: (v: unknown) => void })
+      .mockReturnValueOnce(['那快开啊，别硬扛', '谁看了啊笨', '想得挺美', '别瞎脑补', '路过而已']);
+    const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759490 });
+    expect(r.text).not.toContain('你自已的毛病');
   });
 
   it('fails soft when the frame cannot be built', async () => {

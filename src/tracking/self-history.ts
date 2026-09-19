@@ -338,6 +338,33 @@ export function getRecentSelfReplies(
 }
 
 /**
+ * bot 在这个群最近发过的话（不分触发者，用于自我统计）。
+ *
+ * 为什么不复用 getRecentSelfReplies：那个按 trigger_uid 过滤，语义是"我回过这个人的话"；
+ * 而"我最近说话是什么样"要按群取，跟触发者无关。2026-09-19 用在 room-awareness 的
+ * 自我统计上（喵尾巴率、平均长度）——把自己的行为数据变成模型能看见的事实，
+ * 而不是写死规则去摘它的尾巴。
+ */
+export function getRecentBotTextsInChat(chatId: number, limit = 12, withinMin = 360): string[] {
+  if (!env().SELF_HISTORY_ENABLED) return [];
+  try {
+    const db = getDb();
+    const cutoff = Math.floor(Date.now() / 1000) - withinMin * 60;
+    const rows = db
+      .prepare(
+        `SELECT reply_text AS text FROM self_replies
+         WHERE chat_id = ? AND ts >= ?
+         ORDER BY ts DESC, id DESC LIMIT ?`,
+      )
+      .all(chatId, cutoff, limit) as { text: string }[];
+    return rows.map((r) => String(r.text ?? '')).filter(Boolean);
+  } catch (err) {
+    logger.debug({ err, chatId }, 'getRecentBotTextsInChat failed (non-critical)');
+    return [];
+  }
+}
+
+/**
  * 取某群最近 N 条 bot 自己的发言(不按 uid 过滤)——口头禅自动惩罚闭环的数据源。
  * 返回 [] when disabled.
  */
