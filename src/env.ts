@@ -339,6 +339,46 @@ const envSchema = z.object({
   TIMING_STATE_TTL_SEC: z.coerce.number().int().positive().default(86400),
   // 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。
   TIMING_GATE_USAGE: z.string().default('judge'),
+  // 确定性前置检查：烧 LLM 之前先判定"这条明显是群友之间在聊、与 bot 无关"。
+  // 依据 2026-09-18 实测：gate 的 LLM 分支 121/122 给出同一个 no_action，
+  // 理由全部命中 timing-gate.md 里那条显式规则（"群友彼此在聊 → 别硬挤"）。
+  // 保守设计：只在结构完全明确时短路，模糊情况仍交给 LLM（失败方向是多烧一次，不是丢回复）。
+  TIMING_GATE_PRECHECK_ENABLED: booleanFromEnv.default(false),
+  // 冷却作为"事实"交给模型，而不是静默丢弃。
+  // 旧行为把决定权从模型拿走，且 dispatch gate 还会再拦一次——
+  // 而 heart 的 LLM 调用已经烧掉了（实测 6h 内 68 次 cooldown 短路发生在
+  // heart 决定 reply 之后）。开=模型自己掂量；关=旧的静默丢弃。
+  HEART_COOLDOWN_AS_FACT: booleanFromEnv.default(false),
+  // heart 已经带事实做过时机判断（它自己就是 gate）→ 派发前不再重复过闸。
+  // 实测 6h 内 68 次 cooldown + 38 次 talk-value 短路发生在 heart 决定 reply
+  // 之后 = 那次 heart 调用白烧。开=模型自己控制；关=旧的双闸行为。
+  HEART_DECIDES_TIMING: booleanFromEnv.default(false),
+  // 关系修复：把"我说了句没讨好的话、之后没再提"作为事实交给模型，
+  // 由它决定要不要回去说点什么。宿主只呈现，不代发、不自动道歉。
+  // 触发信号已存在（outcome.ts 的 explicit_negative / repair_loop → 'corrected'），
+  // 但此前没有消费方（action-board 的 repair 动作有定义、无生产者）。
+  REPAIR_ENABLED: booleanFromEnv.default(false),
+  // 主动发言意愿闸（reward model）：主动开口前用一次便宜的 judge 判断
+  // "现在发这句话合不合适"。原作者注释：取代扁平概率、针对主动 bot 的
+  // 头号失败模式（不合时宜地打断）。fail-OPEN：闸门故障绝不让 bot 变哑。
+  // 此前硬编码 true 但零调用方；2026-09-19 接进 unified-tick 的 4 个主动发送点。
+  REWARD_GATE_ENABLED: booleanFromEnv.default(false),
+  // 回收超期未验证的 skill 提案（proposed > 30d → rejected）。
+  // prune.ts 自称"幂等，可定期跑"但零调用方；接在 skill-consolidate（写提案的地方）。
+  SKILL_PRUNE_ENABLED: booleanFromEnv.default(false),
+  // 信念验证：消费 stale_belief 债务（world_change 产生），把被世界变化证伪的
+  // 信念标为 contradicted（getActiveBeliefs 已排除，不再进 prompt）。
+  // 此前三件套都在、互不相识：world-facts 产生事件 → projector 建债务 →
+  // contradict 能标记，但债务无人读（实测 20 条全 open、207 条 belief 全 active）。
+  BELIEF_VERIFY_ENABLED: booleanFromEnv.default(false),
+  // Agency 控制动作的宿主实现（observe/remember/correct/stop）。
+  // agency-control-adapters 只提供"外壳"（scope/预算/回执契约），宿主实现从未提供，
+  // 所以 runtime 派发这些动作时没有可执行体。实现见 agency-host-adapters.ts。
+  AGENCY_CONTROL_ADAPTERS_ENABLED: booleanFromEnv.default(false),
+  // 跨天的未了事：bot 答应过/在等的（"明天告诉你"），能像真人那样"对了，昨天你说那个…"。
+  // 与 scratchpad 的区别：那是 30 分钟工作记忆，这是跨天。只记**明确承诺**，
+  // 不做"记住所有对话"——那会变成让人出戏的机械回忆。
+  OPEN_THREADS_ENABLED: booleanFromEnv.default(false),
   TIMING_GATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
   TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),
@@ -451,6 +491,10 @@ const envSchema = z.object({
   // 开了也只影响 eval harness 和未来的 graylist 群。
   CORE_BELIEF_VIEW_ENABLED: booleanFromEnv.default(false),
   CORE_BLACKBOARD_ENABLED: booleanFromEnv.default(false),
+  // L0 每消息留痕（core_blackboard kind='observation'）。
+  // 2026-09-18 起默认 OFF：该 kind 没有任何读取方（`visibleToL1` 从未被调用），
+  // 开着只会让 core_blackboard 累积无人消费的行。等真正的读取方落地再开。
+  CORE_BLACKBOARD_OBSERVATIONS_ENABLED: booleanFromEnv.default(false),
   CORE_PERMISSION_GATE_ENABLED: booleanFromEnv.default(false),
   // Host-owned Agency rollout mode. The default keeps Core proposals observable
   // without allowing them to dispatch adapters or create external side effects.
@@ -485,6 +529,25 @@ const envSchema = z.object({
   // remain fail-soft when the migration is not present yet.
   COGNITIVE_EVENTS_ENABLED: booleanFromEnv.default(true),
   COGNITIVE_OUTBOX_ENABLED: booleanFromEnv.default(true),
+  // Event-sourced NyatOS kernel shadow. It records one trigger/frame/action
+  // chain but does not replace the legacy sender until a canary opts in.
+  COGNITIVE_KERNEL_ENABLED: booleanFromEnv.default(false),
+  // Kernel shadow graylist. Empty = all chats once the flag is on; set a few
+  // internal chatIds so the first rollout stays measurable and bounded.
+  COGNITIVE_KERNEL_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
+  // Close kernel actions whose dispatch budget expired after a crash. It only
+  // writes terminal `interrupted` outcomes; it never re-sends a message.
+  COGNITIVE_KERNEL_RECOVERY_ENABLED: booleanFromEnv.default(false),
   // Assemble the scoped cognitive workspace for legacy reply/Heart/Meta paths.
   // Keep it opt-in until latency and prompt-budget measurements are available.
   COGNITIVE_WORKSPACE_V2_ENABLED: booleanFromEnv.default(false),
@@ -509,6 +572,34 @@ const envSchema = z.object({
   // Metadata-only group interaction expectations and host-observed social
   // prediction error. It never changes reply selection; keep rollout opt-in.
   SOCIAL_PREDICTION_ENABLED: booleanFromEnv.default(false),
+  // Phase 1 SocialAct shadow: records the legacy judge's action contract only.
+  // It never sends, changes reply selection, or stores message text. Empty chat
+  // list means all chats once explicitly enabled.
+  SOCIAL_ACT_SHADOW_ENABLED: booleanFromEnv.default(false),
+  SOCIAL_ACT_SHADOW_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
+  // Event-backed mission/process continuity. It only emits durable wake and
+  // checkpoint records; tools and Telegram side effects still need a separate
+  // host-owned adapter/authority decision.
+  COGNITIVE_CONTINUITY_ENABLED: booleanFromEnv.default(false),
+  COGNITIVE_CONTINUITY_INTERVAL_SEC: z.coerce.number().int().min(15).default(60),
+  // Host-side process wake execution. It only projects recent metadata and
+  // checkpoints durable wakes; it does not grant authority or call an LLM.
+  COGNITIVE_PROCESS_RUNTIME_ENABLED: booleanFromEnv.default(false),
+  // Record what Telegram reports about a chat (title/type/username/description)
+  // as host-observable world facts. This is the missing producer for
+  // `world_change`: the projector already consumed that event type, but nothing
+  // emitted it, so the World entity table stayed empty. Facts only, no inference.
+  WORLD_FACTS_ENABLED: booleanFromEnv.default(false),
   // 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。
   CORE_V2_ENABLED: booleanFromEnv.default(true),
   // Phase 2 双写：旧表写入后同步 belief（读投影）。默认开（best-effort，
@@ -1104,9 +1195,51 @@ const envSchema = z.object({
   MOOD_INJECT_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 
   // ── Self-narrative (Stage F): bot 记得自己对每个用户说过什么 ──
+  // 同一开关也驱动"我最近在这个群的整体表现"（含每条消息的真实结果），
+  // 心流决策会看到这个事实块 —— 模型据此自己判断要不要收着点。
   SELF_HISTORY_ENABLED: booleanFromEnv.default(false),
   SELF_HISTORY_INJECT_LIMIT: z.coerce.number().int().positive().default(5),
   SELF_HISTORY_WINDOW_DAYS: z.coerce.number().int().positive().default(30),
+  // 心流看到的"近况"窗口（分钟）。只影响行为史事实块，不影响对某人的一致性注入。
+  SELF_HISTORY_WINDOW_MIN: z.coerce.number().int().min(5).max(720).default(45),
+  // 认知时钟：把模型自己的行动结果写进事件账本（own_action_result），
+  // 并允许它记录"下次什么时候再想"（self_scheduled_wake）。
+  // 没有前者，模型看不见自己刚做过什么（自激事故的根因）；没有后者，
+  // 注意力主权在宿主手里，系统永远是被动应答器。
+  COGNITIVE_CLOCK_ENABLED: booleanFromEnv.default(false),
+
+  // ── NyatOS Phase 2: 单决策点并联影子 ──
+  // 用同一个 Frame 跑一次「说话/等待/不说」的判断，**只记录不发送**，
+  // 与现有 pipeline 的实际选择对比。目的是在信任新架构之前先量化它，
+  // 而不是直接上线然后观察。绝不产生任何外部副作用。
+  NYATOS_SHADOW_ENABLED: booleanFromEnv.default(false),
+  // 影子判断的灰度群（空 = 开启后全量）。影子每次会多一次 LLM 调用，
+  // 先限定内部群可以把成本与干扰都控制住。
+  NYATOS_SHADOW_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => Number.isSafeInteger(n) && n !== 0);
+    }),
+  NYATOS_SHADOW_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
+
+  // ── NyatOS 发言额度：宿主提供的物理节流，但模型可见 ──
+  // 2026-09-18 的 54 样本实测：单决策点在 28 分钟内想说 48 次（中位间隔 7 秒），
+  // 即使明确告知"你刚发了 4 条没人回"仍然继续想说。所以旧 cooldown 的第二份
+  // 工作——防止自我重复失控——不能交给模型。但它不该是一个隐形计时器，
+  // 而应该是模型能看见、能花、能推理的额度（像消息长度上限一样属于现实约束）。
+  NYATOS_BUDGET_ENABLED: booleanFromEnv.default(false),
+  NYATOS_BUDGET_WINDOW_SEC: z.coerce.number().int().min(60).max(86_400).default(3600),
+  NYATOS_BUDGET_MAX_ACTS: z.coerce.number().int().min(1).max(200).default(6),
+  // 两次主动发言之间的最小间隔（秒）。计数额度挡不住"1 分钟连发 6 条"——
+  // Phase 2.3 实测的 48 次/28 分钟、中位间隔 7 秒正是这个形状。
+  // 这是"我刚说过，让别人说"的那一半，与计数额度互补。0 = 关闭。
+  NYATOS_BUDGET_MIN_GAP_SEC: z.coerce.number().int().min(0).max(3600).default(90),
 
   // ── Relationship narrative (Stage F): 每对 (chat,user) 累计 affinity ──
   RELATIONSHIP_ENABLED: booleanFromEnv.default(false),

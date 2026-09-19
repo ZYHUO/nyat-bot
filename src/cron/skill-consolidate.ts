@@ -127,7 +127,20 @@ export async function runSkillConsolidate(): Promise<void> {
     }
 
     pruneBigSkills(env().SKILL_MAX_BIG);
-    logger.info({ proposed, archived: archivedIds.length }, 'skill-consolidate: done');
+    // Recycle proposals that were never verified. `prune.ts` documents itself as
+    // "幂等，可定期跑（cron 或 tick 里顺手调）" but had no caller, so proposals
+    // accumulated as 'proposed' forever. This cron already writes proposals, so
+    // it is the natural place to retire the stale ones.
+    let pruned = 0;
+    if (env().SKILL_PRUNE_ENABLED) {
+      try {
+        const { pruneExpiredProposals } = await import('../core/skills/prune.js');
+        pruned = pruneExpiredProposals().expired;
+      } catch (err) {
+        logger.debug({ err }, 'skill-consolidate: prune failed (non-critical)');
+      }
+    }
+    logger.info({ proposed, archived: archivedIds.length, pruned }, 'skill-consolidate: done');
   } catch (err) {
     logger.warn({ err }, 'runSkillConsolidate failed');
   }

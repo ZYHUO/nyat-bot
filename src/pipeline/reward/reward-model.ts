@@ -15,11 +15,11 @@
 import { callWithFallback } from '../../ai/fallback.js';
 import { getRedis } from '../../db/redis.js';
 import { logger } from '../../shared/logger.js';
+import { env } from '../../env.js';
 import { slimContextForAI } from '../context/slim.js';
 import { getBotUid } from '../../bot/bot.js';
 import type { FormattedMessage } from '../../shared/types.js';
 
-const REWARD_GATE_ENABLED = true;     // tunable
 const REWARD_GATE_TIMEOUT_MS = 6000;  // tunable
 const REWARD_GATE_CONTEXT_MSGS = 12;  // tunable — how many recent msgs the judge sees
 
@@ -58,7 +58,7 @@ export async function runRewardGate(
   proposedText: string,
   kind: 'proactive' | 'idle' = 'proactive',
 ): Promise<RewardVerdict> {
-  if (!REWARD_GATE_ENABLED || !proposedText.trim()) {
+  if (!env().REWARD_GATE_ENABLED || !proposedText.trim()) {
     return { accept: true, reasoning: 'disabled' };
   }
 

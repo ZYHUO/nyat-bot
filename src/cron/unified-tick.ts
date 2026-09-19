@@ -685,7 +685,13 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
             { role: 'system', content: TICK_SYSTEM },
             { role: 'user', content: attempt === 0 ? user : `${user}\n\n(上次输出无法解析。这次只输出一个 JSON 对象,不要任何其他文字/围栏/解释。)` },
           ],
-          maxTokens: 400,
+          // Token budget must cover the largest legal answer. The verdict schema
+          // carries up to 9 fields, and `text`/`idea`/`plan`/`reason` are all
+          // free-form Chinese — measured 2026-09-18: at 400 tokens this failed
+          // 1057 times in 24h, 1033 of them returning EMPTY content and the rest
+          // truncated mid-field (e.g. `{"action": "care_master", "text`).
+          // Same class of bug as the shadow's 600-token budget.
+          maxTokens: 1500,
           temperature: attempt === 0 ? 0.7 : 0.3,
         }),
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('tick_timeout')), 25_000)),
@@ -769,6 +775,19 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       try {
         const { sendMessage } = await import('../bot/sender/telegram.js');
         const { addAssistant } = await import('../pipeline/context/manager.js');
+      // Proactive willingness gate — see the group_speak site for rationale.
+      try {
+        const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+        const { getRecent } = await import('../pipeline/context/manager.js');
+        const recent = await getRecent(e.MASTER_UID, 12).catch(() => []);
+        const gateVerdict = await runRewardGate(e.MASTER_UID, recent, a.text, 'proactive');
+        if (!gateVerdict.accept) {
+          logger.info({ chatId: e.MASTER_UID, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: proactive rejected by reward gate');
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: e.MASTER_UID }, 'reward gate failed (fail-open)');
+      }
         const messageId = await sendMessage(e.MASTER_UID, a.text);
         if (messageId) {
           await addAssistant(e.MASTER_UID, { textContent: a.text, messageId });
@@ -852,6 +871,26 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined group speak');
         return;
       }
+      // Proactive willingness gate (reward model): the text is written but not
+      // yet sent — exactly the moment this judge exists for. Its own header says
+      // it "replaces a flat probability with a content-aware decision", and the
+      // #1 failure mode of proactive bots is interrupting when unwanted.
+      // Fail-OPEN by design: a gate outage must never silence the bot.
+      try {
+        const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+        const { getRecent } = await import('../pipeline/context/manager.js');
+        const recent = await getRecent(a.chatId, 12).catch(() => []);
+        const verdict2 = await runRewardGate(a.chatId, recent, text, 'proactive');
+        if (!verdict2.accept) {
+          logger.info(
+            { chatId: a.chatId, why: verdict2.reasoning.slice(0, 80) },
+            'unified tick: group_speak rejected by reward gate',
+          );
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: a.chatId }, 'reward gate failed (fail-open)');
+      }
       const { sendMessage } = await import('../bot/sender/telegram.js');
       const { addAssistant } = await import('../pipeline/context/manager.js');
       let messageId = 0;
@@ -933,6 +972,19 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined remember_user');
         return;
+      }
+      // Proactive willingness gate — see the group_speak site for rationale.
+      try {
+        const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+        const { getRecent } = await import('../pipeline/context/manager.js');
+        const recent = await getRecent(a.chatId, 12).catch(() => []);
+        const gateVerdict = await runRewardGate(a.chatId, recent, text, 'proactive');
+        if (!gateVerdict.accept) {
+          logger.info({ chatId: a.chatId, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: proactive rejected by reward gate');
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: a.chatId }, 'reward gate failed (fail-open)');
       }
       const { sendMessage } = await import('../bot/sender/telegram.js');
       const { addAssistant } = await import('../pipeline/context/manager.js');
@@ -1081,6 +1133,19 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             `[转发跟话] 你刚把一条有意思的消息转到这个群。自然地跟一句为什么转（比如"这个太好笑了转给你们看看"），一句话，别复述转发内容，别自我介绍。`,
           );
           if (line) {
+            // Proactive willingness gate — see the group_speak site for rationale.
+            try {
+              const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+              const { getRecent } = await import('../pipeline/context/manager.js');
+              const recent = await getRecent(a.toChatId, 12).catch(() => []);
+              const gateVerdict = await runRewardGate(a.toChatId, recent, line, 'proactive');
+              if (!gateVerdict.accept) {
+                logger.info({ chatId: a.toChatId, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: share line rejected by reward gate');
+                return;
+              }
+            } catch (err) {
+              logger.debug({ err, chatId: a.toChatId }, 'reward gate failed (fail-open)');
+            }
             const mid = await sendMessage(a.toChatId, line);
             if (mid) await addAssistant(a.toChatId, { textContent: line, messageId: mid });
           }

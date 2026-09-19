@@ -123,6 +123,57 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
+  // Belief verification — consumes the `stale_belief` debts the outbox above
+  // creates. Without it those debts accumulated unread (20 open, measured
+  // 2026-09-19) and beliefs the world had invalidated stayed in the prompt.
+  // Slow on purpose: beliefs do not go stale by the minute.
+  if (env().BELIEF_VERIFY_ENABLED === true) {
+    reg({
+      name: 'belief-verify',
+      everySec: 1800,
+      run: async () => {
+        const { verifyStaleBeliefs } = await import('../agent/belief-verify.js');
+        verifyStaleBeliefs();
+      },
+    });
+  }
+
+  // Event-backed mission/process continuity. This tick only claims due wake
+  // records and schedules durable process work; it never calls a model, tool,
+  // or Telegram adapter by itself.
+  if (env().COGNITIVE_CONTINUITY_ENABLED === true) {
+    reg({
+      name: 'cognitive-continuity',
+      everySec: env().COGNITIVE_CONTINUITY_INTERVAL_SEC,
+      run: async () => {
+        const { runCognitiveContinuityTick } = await import('../agent/cognitive-continuity.js');
+        const result = runCognitiveContinuityTick();
+        let processResult: Record<string, number> | undefined;
+        if (env().COGNITIVE_PROCESS_RUNTIME_ENABLED === true) {
+          const { runCognitiveProcessTick } = await import('../agent/cognitive-process-runtime.js');
+          processResult = { ...await runCognitiveProcessTick() };
+        }
+        if (result.missionsWoken > 0 || result.processesWoken > 0 || (processResult?.claimed ?? 0) > 0) {
+          logger.info({ ...result, processResult }, 'cognitive continuity wake tick');
+        }
+      },
+    });
+  }
+
+  // Kernel crash recovery. A turn that reached `dispatched` and then lost its
+  // process has no terminal outcome; this tick closes only the actions whose
+  // host budget has expired, as `interrupted`, and never re-sends anything.
+  if (env().COGNITIVE_KERNEL_RECOVERY_ENABLED === true) {
+    reg({
+      name: 'cognitive-kernel-recovery',
+      everySec: 60,
+      run: async () => {
+        const { recoverStaleKernelActions } = await import('../agent/cognitive-recovery.js');
+        recoverStaleKernelActions();
+      },
+    });
+  }
+
   // Social prediction expiry is a metadata-only projection. Keep it separate
   // from debt auto-repayment so silence outcomes settle even when debt sweeps
   // remain disabled; the helper is fail-soft when migration 0103 is absent.
