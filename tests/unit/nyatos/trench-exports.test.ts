@@ -89,3 +89,24 @@ describe('新架构旗标的读取方核对', () => {
     expect(offenders, `这些旗标只有定义、没有读取方：${offenders.join(', ')}`).toEqual([]);
   });
 });
+
+// 类5：**数据写了没人读**。var/trench.jsonl 的唯一消费方是运维 grep（没有工具读它），
+// 而时间泵每小时给每个活跃群写一行 → 20 群 ≈ 1MB/天，不设上限就是只涨不消费的成本。
+// 这是这个会话的第五类"孤立正确、系统里缺席"，前四类是函数/字段/渲染/旗标。
+describe('观测日志的轮转', () => {
+  it('源码里有大小阈值与 rename（不是无限 append）', () => {
+    const src = execSync(`cat ${REPO}/src/nyatos/trench.ts`, { encoding: 'utf8' });
+    expect(src).toContain('OBSERVATION_MAX_BYTES');
+    expect(src).toContain('renameSync(OBSERVATION_LOG');
+  });
+
+  it('阈值是正数且量级合理（不设为 0 也不设成 1GB）', () => {
+    const src = execSync(`cat ${REPO}/src/nyatos/trench.ts`, { encoding: 'utf8' });
+    const m = src.match(/OBSERVATION_MAX_BYTES\s*=\s*([\d_* ]+)/);
+    expect(m).not.toBeNull();
+    // 去掉下划线求值（源码写的是 8 * 1024 * 1024）
+    const val = Number(m![1]!.replace(/_/g, '').replace(/\s+/g, '').split('*').reduce((a, b) => Number(a) * Number(b), 1));
+    expect(val).toBeGreaterThan(1024 * 1024);
+    expect(val).toBeLessThan(64 * 1024 * 1024);
+  });
+});

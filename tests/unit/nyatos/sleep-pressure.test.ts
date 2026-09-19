@@ -6,10 +6,12 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 // observe() 用 appendFileSync 写 var/trench.jsonl —— 那是**生产**观测文件。
 // 不 mock 的话每次跑测试都往里写假 chatId（已发生过：178 行测试残留混进生产日志）。
-const fsMock = { appendFileSync: vi.fn(), mkdirSync: vi.fn() };
+const fsMock = { appendFileSync: vi.fn(), mkdirSync: vi.fn(), renameSync: vi.fn(), statSync: vi.fn(() => ({ size: 0 })) };
 vi.mock('node:fs', () => ({
   appendFileSync: (...a: unknown[]) => fsMock.appendFileSync(...a),
   mkdirSync: (...a: unknown[]) => fsMock.mkdirSync(...a),
+  renameSync: (...a: unknown[]) => fsMock.renameSync(...a),
+  statSync: (...a: unknown[]) => fsMock.statSync(...a),
 }));
 
 const store = new Map<string, string>();

@@ -17,7 +17,7 @@ const redisMock = {
 // observe() 用 appendFileSync 写 var/trench.jsonl —— 那是**生产**观测文件。
 // 不 mock 的话，每次跑测试都会往里写假 chatId，trench.test.ts 的 afterEach
 // 甚至直接 rmSync 掉它（已经删掉过 178 行真实 pump 事件）。
-const fsMock = { appendFileSync: vi.fn(), mkdirSync: vi.fn() };
+const fsMock = { appendFileSync: vi.fn(), mkdirSync: vi.fn(), renameSync: vi.fn(), statSync: vi.fn(() => ({ size: 0 })) };
 vi.mock('node:fs', () => ({ appendFileSync: (...a: unknown[]) => fsMock.appendFileSync(...a), mkdirSync: (...a: unknown[]) => fsMock.mkdirSync(...a) }));
 
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));

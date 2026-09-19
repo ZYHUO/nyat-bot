@@ -29,7 +29,7 @@
 //   所以宿主必须持有一个**模型看得见但改不了**的量。P/θ 就是那个量。
 
 import { getRedis } from '../db/redis.js';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { logger } from '../shared/logger.js';
 
@@ -89,9 +89,19 @@ function gain(p: number): number {
   return 0.35 + 0.65 * (p / P_MAX);
 }
 
+/** 观测日志的轮转阈值：超过就改名成 .1（只保留一代）。 */
+const OBSERVATION_MAX_BYTES = 8 * 1024 * 1024;
+
 function observe(event: Record<string, unknown>): void {
   try {
     mkdirSync(dirname(OBSERVATION_LOG), { recursive: true });
+    // 轮转：这个日志没有任何工具消费方（唯一读取方式是运维 grep），
+    // 而时间泵每个小时给每个活跃群写一行——20 群 ≈ 480 行/小时 ≈ 1MB/天，
+    // 不设上限就是一条只涨不消费的纯成本。保留一代 .1 够做"上一次"的对照。
+    try {
+      const st = statSync(OBSERVATION_LOG);
+      if (st.size > OBSERVATION_MAX_BYTES) renameSync(OBSERVATION_LOG, `${OBSERVATION_LOG}.1`);
+    } catch { /* 文件不存在 = 首次写入，无需轮转 */ }
     appendFileSync(OBSERVATION_LOG, `${JSON.stringify({ ts: Math.floor(Date.now() / 1000), ...event })}\n`);
   } catch {
     /* 观测失败绝不影响主路径 */
