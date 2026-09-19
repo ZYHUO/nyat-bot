@@ -1042,6 +1042,18 @@ export function createHostApi(
               // 拦下时不静默丢弃（那是旧 gate 的形态）：把"你撞到了什么"作为事实
               // 回灌给模型，同一转可以改主意；同时记一条壳否决，成为 Echo 的负样本。
               const isAddressed = replyTo !== undefined || opts.defaultReplyTo !== undefined;
+              // Nyat Trench L1 包络：对**所有**发言生效（含被叫到的）。
+              // 原 budget 只拦主动发言，而生产流量全在"被叫到"那条路上（全带锚点），
+              // 所以那 6 条/小时从来没拦到过任何东西。shadow 模式下只记录不拦。
+              const env0 = await import('../nyatos/envelope.js').then((m) => m.checkEnvelope(chatId, isAddressed)).catch(() => ({ ok: true, mode: 'off' }) as const);
+              if (!env0.ok) {
+                const { observeEnvelopeShadow, renderEnvelopeBlock } = await import('../nyatos/envelope.js');
+                observeEnvelopeShadow(chatId, isAddressed, env0 as never);
+                if (env0.mode === 'enforce') {
+                  logger.warn({ chatId, addressed: isAddressed, why: (env0 as { why?: string }).why }, 'host sendText: BLOCKED by envelope');
+                  throw new Error(renderEnvelopeBlock(env0 as never, isAddressed));
+                }
+              }
               if (!isAddressed && chatId < 0 && env().TRENCH_GATE_ENABLED) {
                 const { canSpeakActively, activeSpeechCooldownRemainingSec } = await import('../nyatos/budget.js');
                 const [allowed, cooldownLeft] = await Promise.all([
@@ -1068,6 +1080,7 @@ export function createHostApi(
                 }
               }
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
+              if (messageId > 0) void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
               if (opts.taskId) markTaskVisible(opts.taskId);
               logger.info({ chatId, taskId: opts.taskId, deliveryKind: kind, messageId }, 'task delivery recorded');
               // Self-history: Meta is the production main path, so without this the

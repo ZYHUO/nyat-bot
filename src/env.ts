@@ -411,6 +411,14 @@ const envSchema = z.object({
   // Nyat Trench L1 沟壁：发送前硬闸。把 canSpeakActively()（此前零调用方的死代码）
   // 变成唯一发送出口的前置条件——论文 §1.2 实测确认此前 6条/h+90s 只是事后记账+劝告。
   // 只拦主动发言；被 @/被回复/DM 豁免。
+  // Nyat Trench L1 包络：对所有发言生效的物理边界（含被叫到的）。
+  // 原 budget 只拦主动发言，而生产 1572 次群发送全带引用锚点=全豁免，
+  // 最忙群 266 条/天(11/h) 已超 6/h 上限而无人管——物理边界在流量的那条路上是洞。
+  // 默认 shadow：只记录"本来会被拦"，先看数再 enforce。
+  TRENCH_ENVELOPE_MODE: z.string().default('off'),        // off | shadow | enforce
+  TRENCH_BURST_MAX: z.coerce.number().int().positive().default(8),
+  TRENCH_BURST_MAX_ACTIVE: z.coerce.number().int().positive().default(3),
+  TRENCH_BURST_WINDOW_SEC: z.coerce.number().int().positive().default(300),
   TRENCH_GATE_ENABLED: booleanFromEnv.default(false),
   ECHO_ENABLED: booleanFromEnv.default(false),
   TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),
