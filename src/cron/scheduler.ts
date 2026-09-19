@@ -158,17 +158,20 @@ export function startCronJobs(deps?: CronDeps): void {
         let pumped = 0;
         let stuckReset = 0;
         for (const id of raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0)) {
-          try {
-            if (await pump(id)) pumped += 1;
-          } catch { /* per-chat fail-soft */ }
           // 卡死自恢复：P 连续顶在 P_MAX 若干小时 → 硬复位。
           //
+          // **必须在泵浦之前查**。曾经的顺序是 pump() 先跑（把 P 减半）再查，
+          // 于是 recoverIfStuck 永远看到减半后的值，**永远检测不到顶格**——
+          // pfull_since 计时键一次都没建过，自锁看门狗是个结构上不可达的安全网
+          // （论文约束 4 因此没有实现，只有代码）。
+          //
           // 策略在 trench.ts 的 recoverIfStuck() 里（可测），cron 只负责调用。
-          // 论文约束 4：任何 host 否决器必须可被强制解锁——而 resetTrench 一度只有
-          // 测试能调，等于把 satiation latch 事故的形状留在了新架构里。
           try {
             const { recoverIfStuck } = await import('../nyatos/trench.js');
             if (await recoverIfStuck(id)) stuckReset += 1;
+          } catch { /* per-chat fail-soft */ }
+          try {
+            if (await pump(id)) pumped += 1;
           } catch { /* per-chat fail-soft */ }
         }
         // 压力轨迹：每次泵浦记录相位 + P 最高的几个群。
