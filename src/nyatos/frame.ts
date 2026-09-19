@@ -29,6 +29,7 @@ import { logger } from '../shared/logger.js';
 import type { FormattedMessage } from '../shared/types.js';
 import type { CognitiveScope } from '../shared/cognitive-scope.js';
 import { collectConversationField, type ConversationField } from '../agent/conversation-field.js';
+import { renderTrench, type TrenchReading } from './trench.js';
 import { getLatestInnerState, getLatestCapabilitySnapshot } from '../agent/nyatos-state.js';
 import { getSelfActSummary } from '../tracking/self-history.js';
 import { nextSelfWake } from '../agent/cognitive-clock.js';
@@ -109,6 +110,8 @@ export interface Frame {
      * silently blocked by a timer it cannot see.
      */
     budget?: ParticipationBudget;
+    /** Nyat Trench L0 海床读数（宿主持有的有界积分器）。只读事实，不是配额。 */
+    trench?: TrenchReading;
     /** Seconds until another ACTIVE message is appropriate (0 = free now). */
     activeSpeechCooldownSec?: number;
     /** Things the bot said it would come back to, if any are worth raising. */
@@ -239,6 +242,15 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
 
   // ── self ──
   const self: Frame['self'] = { recentActs: [] };
+
+  // Nyat Trench L0：海床读数。fail-soft——读不到就不加这一行，
+  // 绝不让"身体读不到"变成"Frame 组装失败"。
+  try {
+    const { readTrench } = await import('./trench.js');
+    self.trench = await readTrench(chatId ?? 0);
+  } catch (err) {
+    logger.debug({ err, chatId }, 'frame: trench unavailable');
+  }
   let sinceBotSpokeSec: number | undefined;
   try {
     // One read serves both "what I did" and "how long since I spoke".
@@ -438,6 +450,11 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
   }
   const budgetLine = renderParticipationBudget(frame.self.budget ?? null);
   if (budgetLine) lines.push(budgetLine);
+  // Nyat Trench L0：把宿主持有的有界积分器渲染成身体感受（不是配额）。
+  if (frame.self.trench) {
+    const t = renderTrench(frame.self.trench);
+    if (t) lines.push(t);
+  }
   const spacingLine = renderActiveSpeechSpacing(frame.self.activeSpeechCooldownSec ?? 0);
   if (spacingLine) lines.push(spacingLine);
   if (frame.self.openThreads) lines.push(frame.self.openThreads);

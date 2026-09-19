@@ -402,6 +402,11 @@ const envSchema = z.object({
   // 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进
   // CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与——
   // 2026-09-19 真人对比分析定为此为"差一口气"的最大来源。fail-soft，默认关。
+  // Nyat Trench L0 海床：有界积分器（气压 P / 岸线 θ）+ 时间泵 cron。
+  // 论文 docs/plans/2026-09-19-nyat-trench.md。v1 只做"身体先行"：
+  // 纯增量，不动任何现有决策路径——heart/judge/gate 照旧跑，
+  // 只是 Frame 里多一行身体感受，且 P 有了唯一衰减方。
+  TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),
   ROOM_AWARENESS_ENABLED: booleanFromEnv.default(false),
   // ── 定型判断基座 src/ai/judge-substrate.ts ───────────────────────
   // bot 每天 ~45M token 大多花在"换回一个小决定"（gate 三选一、heart 说/等/不说、

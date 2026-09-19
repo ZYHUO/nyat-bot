@@ -138,6 +138,32 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
+  // Nyat Trench · L0 时间泵。
+  //
+  // 论文 §3.2：海床积分器的唯一衰减方。气压 P 若只增不减，r=clamp(θ·g(P)) 会
+  // 永久钉在上界——那正是 satiation latch 事故的形状（时钟被绕 → 永久饱和 →
+  // 4 天 0 主动发言无人知）。泵每 PUMP_HALFLIFE_SEC 内部去重，所以这里每 30 分钟
+  // 调一次是安全的 guard，不是额外衰减。
+  //
+  // 零 token、零 LLM：一次 Redis 读 + 一次写 + 一条 JSONL。
+  if (env().TRENCH_PUMP_ENABLED === true) {
+    reg({
+      name: 'trench-pump',
+      everySec: 1800,
+      run: async () => {
+        const { pump } = await import('../nyatos/trench.js');
+        // 同一份活跃群集合（unified-tick 的 discoverGroups 是私有的，不新导公共接口）
+        const { getRedis } = await import('../db/redis.js');
+        const raw = await getRedis().zrange('xxb:active_groups', 0, 19);
+        let pumped = 0;
+        for (const id of raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0)) {
+          try { if (await pump(id)) pumped += 1; } catch { /* per-chat fail-soft */ }
+        }
+        if (pumped > 0) logger.debug({ pumped }, 'trench pump: halved pressure');
+      },
+    });
+  }
+
   // Event-backed mission/process continuity. This tick only claims due wake
   // records and schedules durable process work; it never calls a model, tool,
   // or Telegram adapter by itself.
