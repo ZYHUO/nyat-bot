@@ -164,6 +164,22 @@ export function startCronJobs(deps?: CronDeps): void {
         try {
           const { getLifeState } = await import('../tracking/life-state.js');
           const phase = getLifeState().state;
+          // 相位跳变检测：醒来这一刻必须**当场**记录，否则 30 分钟的泵浦粒度
+          // 会把进入醒来时的气压已经泵浦减半，最有趣的那组数字就丢了。
+          const PHASE_KEY = 'xxb:trench:lastphase';
+          const prev = await getRedis().get(PHASE_KEY);
+          if (prev !== phase) {
+            await getRedis().set(PHASE_KEY, phase);
+            if (prev === 'sleeping' && phase !== 'sleeping') {
+              const { readTrench: rt } = await import('../nyatos/trench.js');
+              const ids = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0).slice(0, 8);
+              const atWake = await Promise.all(ids.map(async (id) => ({ id, p: (await rt(id)).p })));
+              logger.warn(
+                { event: 'trench_wakeup', chats: atWake.filter((x) => x.p > 0) },
+                'trench: bot woke up — pressure carried into the first minutes',
+              );
+            }
+          }
           const { readTrench } = await import('../nyatos/trench.js');
           const top = await Promise.all(
             raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0).slice(0, 5)
