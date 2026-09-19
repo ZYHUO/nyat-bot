@@ -59,7 +59,13 @@ export type CognitiveEventType =
   // the host owns attention and the system stays a passive responder: it only
   // exists while being addressed.
   | 'own_action_result'
-  | 'self_scheduled_wake';
+  | 'self_scheduled_wake'
+  // The tick's own decision. unified-tick used to write nothing to this ledger at
+  // all — what it chose, what its veto chain rejected, why it went quiet lived only
+  // in logs. Without it there is no queryable "this is what I chose", so none of the
+  // agency metrics (self-attribution, cost of preference, continuity of choice) can
+  // be computed. Host-side only: zero tokens.
+  | 'tick_verdict';
 
 export type CognitiveEventSource = 'telegram' | 'host' | 'scheduler' | 'tool' | 'model' | 'import';
 

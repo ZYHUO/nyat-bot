@@ -709,6 +709,42 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
 
 // ── 动作执行（映射到既有执行器，执行保留）─────
 
+/**
+ * 把这次 tick 的判断写进认知账本。
+ *
+ * 此前 unified-tick 全文 0 次写 cognitive_events——它选了什么、被哪条否决链
+ * veto 掉、为什么 quiet，全部只落在日志里。后果是结构性的：`own_action_result`
+ * 32 条而 `bot_delivery` 1092 条（2.9%），且 32 条 causation_id 全空，
+ * 系统没有任何办法回答"这是我自己的选择吗"。
+ * 在账本看不见自己的选择之前，"主观能动性"的任何指标都不可测。
+ *
+ * 纯 host 写入，零 token。fail-soft：写失败不影响 tick 本身。
+ */
+async function recordTickVerdict(input: {
+  chosen: string;
+  vetoed: Array<{ action: string; reason: string }>;
+  reason: string;
+}): Promise<void> {
+  try {
+    const { appendCognitiveEvent } = await import('../agent/cognitive-events.js');
+    if (!appendCognitiveEvent) return;
+    const now = Math.floor(Date.now() / 1000);
+    appendCognitiveEvent({
+      type: 'tick_verdict',
+      source: 'scheduler',
+      scope: { visibility: 'global' },
+      occurredAt: now,
+      correlationId: `tick:${now}`,
+      fact: {
+        schema: 'tick_verdict.v1',
+        chosen: input.chosen,
+        vetoed: input.vetoed.slice(0, 6),
+        reason: input.reason.slice(0, 120),
+      },
+    });
+  } catch { /* 记账失败绝不拦 tick */ }
+}
+
 async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<void> {
   const e = env();
   const redis = getRedis();
@@ -731,6 +767,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             { action: a.type, reason },
             'unified tick: vetoed by drive satiation suppressor',
           );
+          await recordTickVerdict({
+            chosen: 'quiet',
+            vetoed: [{ action: a.type, reason }],
+            reason: 'vetoed_by_suppressor',
+          });
           return;
         }
       }
@@ -742,6 +783,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
   switch (a.type) {
     case 'quiet':
       logger.info({ reason: verdict.reason }, 'unified tick: quiet');
+      await recordTickVerdict({ chosen: 'quiet', vetoed: [], reason: verdict.reason });
       return;
 
     case 'care_master': {
@@ -794,11 +836,13 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         }
         await redis.set(LAST_CARE_KEY + e.MASTER_UID, String(now));
         await markProactiveSent(e.MASTER_UID, 'unified-tick');
-        // Phase 3 satiate：刚关心过主人 → connection 抑制
-        try {
-          const { satiate } = await import('../core/drives/store.js');
-          satiate('connection');
-        } catch { /* non-critical */ }
+        // 注意：这里**不** satiate('connection')。care_master 是 DM，connection 是
+        // 全局 drive；在私聊里关心一次主人就把全局 connection 打满，会让接下来最多
+        // 一个半衰期（6h）内所有群里的主动发言（group_speak 同样服务 connection）
+        // 全被 suppressor 否决——实测后果：DM 越关心，群里越安静。
+        // 防重复由本分支自己的 masterSilentSec / lastCareAgoSec 两道护栏负责，
+        // 不需要靠全局 drive 饱和。
+        await recordTickVerdict({ chosen: 'care_master', vetoed: [], reason: verdict.reason });
         logger.info({ text: a.text.slice(0, 60) }, 'unified tick: cared for master');
       } catch (err) {
         logger.warn({ err }, 'unified tick: care_master send failed');
@@ -922,6 +966,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         const { satiate } = await import('../core/drives/store.js');
         satiate('connection');
       } catch { /* non-critical */ }
+      await recordTickVerdict({ chosen: 'group_speak', vetoed: [], reason: verdict.reason });
       logger.info({ chatId: a.chatId }, 'unified tick: spoke in group');
       return;
     }
