@@ -42,7 +42,8 @@ function sql(q: string): Row[] {
 
 // shadow 判定（只看 ingress 那条；live_outcome 是另一条事件，分开算）
 const shadowRows = sql(`
-  SELECT json_extract(fact_json,'$.messageId') AS mid,
+  SELECT chat_id AS chat_id, occurred_at AS occurred_at,
+         json_extract(fact_json,'$.messageId') AS mid,
          json_extract(fact_json,'$.shadowVerdict') AS verdict
   FROM cognitive_events
   WHERE type='social_prediction'
@@ -50,14 +51,33 @@ const shadowRows = sql(`
     AND occurred_at >= ${since}
     AND json_extract(fact_json,'$.shadowVerdict') IN ('speak','silent','wait')`);
 
-// 线上：哪些消息被回过（trigger_msg_id）＋ 哪些消息 bot 自己发过言
-const liveReplied = new Set<number>();
-for (const r of sql(`SELECT DISTINCT trigger_msg_id AS m FROM self_replies WHERE trigger_msg_id IS NOT NULL AND trigger_msg_id > 0 AND ts >= ${since}`)) {
-  const m = Number(r.m);
-  if (Number.isSafeInteger(m) && m > 0) liveReplied.add(m);
+// 线上：bot 在每个群的发言时刻表。
+//
+// **为什么不用 trigger_msg_id = shadow.messageId 这个 join**：实测（2026-09-19）
+// 那个 join 给出一致率 14.2%，而按"shadow 判定后 120 秒内该群有没有 bot 发言"
+// 重算是 53.3%。差 4 倍的原因：shadow 判的是消息 N，而 bot 回复时往往锚在更晚的
+// 消息 M 上（群里还在流动），于是 trigger_msg_id 根本对不上。
+// 度量方法错误会把形势判断错四倍——这不是小事，所以这里用时间邻域。
+const ACT_WINDOW_SEC = 120;
+const botSpokeByChat = new Map<number, number[]>();
+for (const r of sql(`SELECT chat_id AS c, ts FROM self_replies WHERE ts >= ${since} ORDER BY ts ASC`)) {
+  const c = Number(r.c), t = Number(r.ts);
+  if (!Number.isSafeInteger(c) || !Number.isSafeInteger(t)) continue;
+  const list = botSpokeByChat.get(c) ?? [];
+  list.push(t);
+  botSpokeByChat.set(c, list);
 }
-// bot 自己的发言时刻（用于判断"它当时说没说话"）
 const botSpoke = sql(`SELECT ts FROM self_replies WHERE ts >= ${since} ORDER BY ts ASC`);
+/** 该群在 shadow 判定之后 ACT_WINDOW_SEC 内有没有 bot 发言。 */
+function actedWithinWindow(chatId: number, atSec: number): boolean {
+  const list = botSpokeByChat.get(chatId);
+  if (!list) return false;
+  for (const t of list) {
+    if (t >= atSec && t <= atSec + ACT_WINDOW_SEC) return true;
+    if (t > atSec + ACT_WINDOW_SEC) break;
+  }
+  return false;
+}
 
 let agree = 0, disagree = 0, unknown = 0;
 let speakWant = 0, speakWantSpoke = 0;
@@ -65,9 +85,10 @@ let silentWant = 0, silentWantSilent = 0;
 const waitN = shadowRows.filter((r) => r.verdict === 'wait').length;
 
 for (const r of shadowRows) {
-  const mid = Number(r.mid);
-  if (!Number.isSafeInteger(mid) || mid <= 0) { unknown += 1; continue; }
-  const spoke = liveReplied.has(mid);
+  const chatId = Number(r.chat_id);
+  const atSec = Number(r.occurred_at);
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || !Number.isSafeInteger(atSec)) { unknown += 1; continue; }
+  const spoke = actedWithinWindow(chatId, atSec);
   const v = String(r.verdict);
   if (v === 'speak') {
     speakWant += 1;

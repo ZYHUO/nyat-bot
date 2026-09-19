@@ -94,6 +94,32 @@ console.log('\n【决策面】五层判定的真实用量（判断哪层可以�
 for (const [k, v] of Object.entries(decisions)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 console.log('\n【真人感】（真人基准：问号 4-6% / 句末喵 ~1% / ≤10字 68%）');
 console.log(`  问号率 ${pct(qRate)}｜句末喵 ${pct(maoRate)}｜≤10字 ${pct(shortRate)}`);
+// Phase 2 准入数：判定点与线上行为的一致率（用时间邻域 join，见
+// decision-equivalence.mts 的注释——messageId join 会把形势判断错四倍）。
+try {
+  const shSql = `SELECT chat_id, occurred_at, json_extract(fact_json,'$.shadowVerdict') AS v FROM cognitive_events
+    WHERE type='social_prediction' AND json_extract(fact_json,'$.schema')='shadow_ingress.v1'
+      AND json_extract(fact_json,'$.shadowVerdict') IN ('speak','silent') AND occurred_at >= ${Math.floor(Date.now() / 1000) - 86400}`;
+  const sh = sql(shSql);
+  const sendsByChat = new Map<number, number[]>();
+  for (const r of sql(`SELECT chat_id AS c, ts FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 86400}`)) {
+    const c = Number(r.c), t = Number(r.ts);
+    if (!Number.isSafeInteger(c)) continue;
+    const list = sendsByChat.get(c) ?? []; list.push(t); sendsByChat.set(c, list);
+  }
+  const acted = (c: number, at: number) => (sendsByChat.get(c) ?? []).some((t) => t >= at && t <= at + 120);
+  let ag = 0, dis = 0;
+  for (const r of sh) {
+    const c = Number(r.chat_id), at = Number(r.occurred_at);
+    if (!Number.isSafeInteger(c) || !Number.isSafeInteger(at)) continue;
+    const a = acted(c, at);
+    if ((r.v === 'speak') === a) ag++; else dis++;
+  }
+  const rate = ag + dis > 0 ? ag / (ag + dis) : 0;
+  console.log(`\n【Phase 2 准入】判定点一致率 ${(rate * 100).toFixed(1)}%（目标 >85%，近 1 天 ${ag + dis} 样本）`);
+  if (rate < 0.5 && ag + dis > 50) fail.push(`判定点一致率仅 ${(rate * 100).toFixed(0)}%——两个决策点仍在互相打架`);
+} catch { /* 该指标依赖 shadow 覆盖群，读不到就跳过 */ }
+
 console.log('\n【海沟自身】');
 for (const [k, v] of Object.entries(trench)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 
