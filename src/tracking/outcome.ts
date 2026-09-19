@@ -208,11 +208,30 @@ export async function checkOutcome(
           // Self-history: attach the observed result to the specific message the
           // bot sent, so the model later sees "this one got corrected" as a fact.
           // Reuses this signal instead of observing the same event twice.
-          closeSelfActOutcome({
+          const closeOk = closeSelfActOutcome({
             chatId,
             botMessageId: Number(entry.bot_message_id ?? 0),
             outcome: actOutcomeFromSignal(signal),
           });
+          // Nyat Trench L2：**每一次活路径结算都要更新 E**。
+          //
+          // 在此之前 settleEcho 只被 echo.ts 的 backfillEcho 调用，而那个回填器
+          // 实测每次都是 settled:0（主动发言一天只有 12 条，且七成"无人后续"不可判）。
+          // 于是活路径每天结算几百条，E 却**永远停在初值 0.45**——回声这个信号
+          // 从来没被更新过，而它在 Frame 里一直显示着。
+          //
+          // y 的取值沿用论文 §3.2 的口径：接住的程度决定回声，不决定气压；
+          // 气压只由"被无视/插砸"推高（见 settleEcho 内部）。
+          if (closeOk) {
+            const y = signal === 'user_replied' ? 1.0
+              : signal === 'explicit_positive' ? 0.5
+              : signal === 'user_mentioned_bot' ? 0.25
+              : signal.startsWith('ignored_') ? 0
+              : -0.5;
+            void import('../agent/echo.js')
+              .then(({ settleEcho }) => settleEcho(chatId, y))
+              .catch(() => { /* 回声是增强，不是关键路径 */ });
+          }
           // An explicit reaction is a followup — score it.
           scoreCandidates.push({
             insertIdx,
