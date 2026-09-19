@@ -228,7 +228,11 @@ export async function resetTrench(chatId: number): Promise<void> {
   }
 }
 
-/** 测试/运维用：把岸线写回去（生产不开放，θ 第一期冻结）。 */
+/** 测试/运维用：把岸线写回去（生产不开放，θ 第一期冻结）。
+ *
+ * 这是**故意**只有测试会调的导出：θ 在第一期冻结为 4.0，生产没有任何理由改它；
+ * 它存在的意义是让测试能验证 θ 被硬钳在 [0.35, 4.0]，从而证明 R_MAX 是死钳。
+ * tests/unit/nyatos/trench-exports.test.ts 把它登记为唯一允许的 TESTONLY 导出。 */
 export async function setThetaForTest(chatId: number, theta: number): Promise<void> {
   const redis = getRedis();
   await redis.set(chatKey(KEY_THETA, chatId), String(clamp(theta, THETA_MIN, THETA_MAX)));
