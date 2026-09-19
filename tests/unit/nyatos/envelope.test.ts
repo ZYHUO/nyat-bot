@@ -65,11 +65,13 @@ describe('L1 包络', () => {
     expect((await m.checkEnvelope(-100, true)).ok).toBe(true);
   });
 
-  it('拦下的话分两种：爆了 vs 太快', async () => {
-    const burst = m.renderEnvelopeBlock({ ok: false, why: 'blocked_by_burst', retryAfterSec: 120, mode: 'enforce' }, true);
-    expect(burst).toContain('回得太密');
-    expect(burst).not.toContain('禁止');
+  it('拦下的话分两种：回得太密（被叫到）vs 说得太快（主动）', () => {
+    const addressed = m.renderEnvelopeBlock({ ok: false, why: 'blocked_by_burst', retryAfterSec: 120, mode: 'enforce' }, true);
+    expect(addressed).toContain('回得太密');
+    expect(addressed).toContain('并成一条');      // 给的是可执行的出路
+    expect(addressed).not.toContain('禁止');
     const active = m.renderEnvelopeBlock({ ok: false, why: 'blocked_by_burst', retryAfterSec: 60, mode: 'enforce' }, false);
-    expect(active).toContain('说得太密');
+    expect(active).toContain('说得太快');
+    expect(active).toContain('没人叫你');          // 说清为什么它不适用 direct 豁免
   });
 });

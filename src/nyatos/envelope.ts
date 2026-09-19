@@ -127,7 +127,7 @@ export function renderEnvelopeBlock(v: EnvelopeVerdict, addressed: boolean): str
   if (v.why === 'blocked_by_burst') {
     return addressed
       ? `未发送：你这会儿回得太密了（${Math.ceil(wait)} 秒内已经回了一批）。不是不让你回，是一口气回太多别人跟不上——缓一下，或者把想说的并成一条。`
-      : `未发送：你这会儿说得太密了。等 ${Math.ceil(wait)} 秒，或者真有别的事就先做别的。`;
+      : `未发送：你说得太快了，等 ${Math.ceil(wait)} 秒。不是不让你说，是这会儿没人叫你，而你刚才已经说得够密。`;
   }
   return '未发送：你这一段话说得太快了。歇一下再说。';
 }
