@@ -177,7 +177,31 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
-  // Nyat Trench · L2 反射：Echo 回填 + E 更新 + P 脉冲。
+  // Nyat Trench · 醒来检测（独立 2 分钟快 tick）。
+  //
+  // **为什么必须独立**：时间泵每 30 分钟一次且先减半 P。若复用它，0:14 醒来要等
+  // 0:34 才记录，P 已被减半两次，记录值只剩实际醒来值的四分之一——那会让
+  // "睡眠积压"这个特性看起来完全没生效。
+  //
+  // **为什么差点又没有**：这功能在 round 48 加进泵浦 cron，round 49 我抽取
+  // recoverIfStuck 时把整块内联检测一起吃掉了，而没有任何东西报警——
+  // 它没有一个测试在跑。round 71 才发现。现在的守护是 tests/unit/nyatos/
+  // trench-exports.test.ts（导出必须有 src 调用方）。
+  if (env().TRENCH_PUMP_ENABLED === true) {
+    reg({
+      name: 'trench-wake-detect',
+      everySec: 120,
+      run: async () => {
+        const { detectWakeTransition } = await import('../nyatos/trench.js');
+        const { getRedis } = await import('../db/redis.js');
+        const raw = await getRedis().zrange('xxb:active_groups', 0, 19);
+        const ids = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0);
+        await detectWakeTransition(ids);
+      },
+    });
+  }
+
+  // Nyat Trench · L2 反射：Echo 回填 + E 更新 + P 脉冲。  // Nyat Trench · L2 反射：Echo 回填 + E 更新 + P 脉冲。
   //
   // 修的是一个纯写入侧缺漏：主动发言（trigger_uid=0）从不进 outcome.ts 的
   // pending 队列，所以那条闭合管道对它从未生效——实测 self_replies 3,337 行里

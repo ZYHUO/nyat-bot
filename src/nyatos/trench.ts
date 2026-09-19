@@ -240,6 +240,42 @@ export async function resetTrench(chatId: number): Promise<void> {
 }
 
 /**
+ * 相位跳变检测：睡→醒的那一瞬间当场记录各群气压。
+ *
+ * 为什么必须**独立于时间泵**：泵浦每 30 分钟一次，且先减半 P。如果用它检测，
+ * 00:14 醒来要等 00:34 才被记录，而 P 已被减半两次——记录值只有实际醒来值的
+ * 四分之一，足以让"睡眠积压"这个特性看起来完全没生效。
+ *
+ * @returns 是否检测到本次调用是新的一次醒来
+ */
+export async function detectWakeTransition(activeChatIds: number[]): Promise<boolean> {
+  const KEY = 'xxb:trench:lastphase';
+  try {
+    const { getLifeState } = await import('../tracking/life-state.js');
+    const redis = getRedis();
+    const phase = getLifeState().state;
+    const prev = await redis.get(KEY);
+    if (prev === phase) return false;
+    await redis.set(KEY, phase);
+    if (prev === 'sleeping' && phase !== 'sleeping') {
+      const atWake = await Promise.all(
+        activeChatIds.map(async (id) => ({ id, p: (await readTrench(id)).p })),
+      );
+      const elevated = atWake.filter((x) => x.p > 0);
+      logger.warn(
+        { event: 'trench_wakeup', chats: elevated },
+        'trench: bot woke up — pressure carried into the first minutes',
+      );
+      return true;
+    }
+    return false;
+  } catch (err) {
+    logger.debug({ err }, 'wake transition detect failed (non-critical)');
+    return false;
+  }
+}
+
+/**
  * 卡死自恢复：P 连续顶在 P_MAX 超过 stuckHours → 硬复位。
  *
  * 为什么抽成函数：之前这段逻辑内联在 cron 里，测试只能"复刻它的判断"而不是调用它
