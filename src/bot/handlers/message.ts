@@ -22,7 +22,7 @@ import {
   tryMetaIngressIntercepts,
 } from '../../meta/ingress-intercepts.js';
 import { classifyAttentionLayer } from '../../meta/classify-layer.js';
-import { heartRoute } from '../../meta/heart-route.js';
+import { heartRoute, hasTimedBypass } from '../../meta/heart-route.js';
 import {
   runMetaBookkeepingHooks,
   metaSleepGate,
@@ -404,7 +404,9 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // 顺序反了就是把刹车片拔了再装新的。
           // 传 chatId：旁路支持按群灰度（名单优先于全局开关），
           // 这样"先开一个群试试"不要求先全局翻旗。
-          const heartPath = heartRoute(env(), chatId);
+          // 额外查时限旁路：TTL 到期自动恢复，实验因此不需要有人记得撤。
+          const timedBypass = await hasTimedBypass(chatId).catch(() => false);
+          const heartPath = timedBypass ? 'bypass' : heartRoute(env(), chatId);
           if (heartPath === 'heart') {
             void (async () => {
               try {
