@@ -399,6 +399,16 @@ const envSchema = z.object({
   TYPESAFE_ENDPOINT: z.string().default('https://api.typesafe.ai/v1/systemone'),
   TYPESAFE_MODEL: z.string().default('jev-latest'),
   TYPESAFE_API_KEY: z.string().default(''),
+  // ── 定型判断基座 src/ai/judge-substrate.ts ───────────────────────
+  // bot 每天 ~45M token 大多花在"换回一个小决定"（gate 三选一、heart 说/等/不说、
+  // shadow、judge）。这里把这类判断收敛到一个可插拔基座：typesafe 主后端，
+  // 既有 chat LLM+JSON 兜底。三条底线：fail-open、DM/private 不走外部服务、可整体关掉。
+  JUDGE_SUBSTRATE_ENABLED: booleanFromEnv.default(false),
+  JUDGE_SUBSTRATE_BACKEND: z.string().default('typesafe'), // typesafe | chat
+  JUDGE_SUBSTRATE_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
+  JUDGE_SUBSTRATE_CACHE_TTL_MS: z.coerce.number().int().nonnegative().default(120000),
+  JUDGE_SUBSTRATE_BREAKER_FAILS: z.coerce.number().int().positive().default(3),
+  JUDGE_SUBSTRATE_BREAKER_COOLDOWN_MS: z.coerce.number().int().positive().default(60000),
   TIMING_GATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
   TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),

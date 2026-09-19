@@ -886,7 +886,7 @@ export function createHostApi(
                 const { checkSemanticRepeat, semanticRepeatError } = await import('./semantic-dup.js');
                 const priors = textSent > 0 ? sentTexts : recentBotTexts.slice(-1);
                 if (priors.length > 0) {
-                  const dup = await checkSemanticRepeat(priors, clean);
+                  const dup = await checkSemanticRepeat(priors, clean, { chatId });
                   if (dup.isRepeat) {
                     logger.info(
                       { chatId, preview: clean.slice(0, 60), probability: dup.probability, prior: dup.collidedWith?.slice(0, 60), crossTask: textSent === 0 },
@@ -913,6 +913,7 @@ export function createHostApi(
                   clean,
                   recentChatMixed,
                   recentUserLines[recentUserLines.length - 1] ?? '',
+                  { chatId },
                 );
                 if (g.ungrounded) {
                   logger.warn(
