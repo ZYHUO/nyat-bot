@@ -17,7 +17,7 @@ import type { DriveState } from './types.js';
 export interface ScoreWorld {
   masterSilentSec: number | null;
   lastCareAgoSec: number;
-  groups: { chatId: number; silentSec: number }[];
+  groups: { chatId: number; silentSec: number; /** bot 自己多久没在这个群开口（与群沉默不同） */ botSilentSec?: number }[];
   dueGoals: { id: number }[];
   rssNewCount: number;
   absentUsers: { chatId: number; uid: number }[];
@@ -28,11 +28,17 @@ export interface ScoreWorld {
 /** 候选动作（与 TickAction 同构的子集；Phase 3 只给已有动作打分，不发明新动作）。 */
 export type CandidateAction =
   | { type: 'care_master' }
-  | { type: 'group_speak'; chatId: number }
+  | { type: 'group_speak'; chatId: number; /** 它自己没说出口的念头（有则带上，LLM 可据此说话） */ about?: string }
   | { type: 'remember_user'; chatId: number }
   | { type: 'self_play' }
   | { type: 'check_goal'; goalId: number }
   | { type: 'share'; fromChatId: number; toChatId: number }
+  // 在场但静默的参与：**不对外发声**的自发动作。之前 tick 的候选集里
+  // 没有任何东西是"我可以在有人时做的事"——所有候选要么对外说，要么 quiet，
+  // 于是"自主"只能寄生在无人时。这两个类型让主体在有人的环境里也有事可做：
+  // 把起过的念头记下来、把想回头的事约下去。用户侧零可见变化。
+  | { type: 'note_impulse'; chatId: number; about: string }
+  | { type: 'remember_thread'; chatId: number; about: string }
   | { type: 'quiet' };
 
 const HOUR = 3600;
@@ -84,6 +90,12 @@ export function drivesServedBy(a: CandidateAction): DriveName[] {
       return ['competence'];
     case 'share':
       return ['curiosity', 'connection'];
+    // 内部动作不对外发声，因而不服务 connection/curiosity 的"社交"分量——
+    // 它们服务 autonomy（这是我自己的事），这正是"在场但静默的参与"该有的驱动归属。
+    case 'note_impulse':
+      return ['autonomy'];
+    case 'remember_thread':
+      return ['autonomy', 'curiosity'];
     case 'quiet':
       return [];
   }

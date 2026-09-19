@@ -14,7 +14,13 @@ import type { CandidateAction, ScoreWorld } from '../drives/score.js';
 
 export interface ProposalInput {
   world: Omit<ScoreWorld, 'absentUsers'> & {
-    groups: { chatId: number; silentSec: number; lastTexts?: string }[];
+    groups: { chatId: number; silentSec: number; lastTexts?: string; botSilentSec?: number }[];
+    /**
+     * 它自己起过、但没说出口的念头：影子判定 speak 而线上最终没发的那批。
+     * 这是目前唯一现成的"我有自己的事"来源——比 goals.origin='self'（0 行）
+     * 便宜，而且内容就是它当时自己想说的话。
+     */
+    unactedImpulses?: Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }>;
     dueGoals: { id: number; topic: string }[];
     absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
     shareCandidates?: { fromChatId: number; messageId: number; toChatId?: number }[];
@@ -23,6 +29,8 @@ export interface ProposalInput {
 }
 
 const TWO_HOURS = 7200;
+/** 我自己在这个群多久没开口才够资格再说话（与"群多安静"无关）。 */
+const SELF_SPEAK_MIN_GAP_SEC = 45 * 60;
 
 /**
  * 生成候选动作（确定性规则，与 tick prompt 里的硬否决对齐）：
@@ -51,6 +59,35 @@ export function proposeActions(input: ProposalInput): CandidateAction[] {
   if (coldest && coldest.silentSec >= TWO_HOURS) {
     out.push({ type: 'group_speak', chatId: coldest.chatId });
   }
+
+  // ── 自己的事 + 自己的间隔（2026-09-19）────────────────────────
+  // 上面那条 group_speak 的门槛是"群冷场 2 小时"。问题是：它把"开口的理由"
+  // 绑定在**房间的空旷**上，于是自主性只能寄生在无人时——人在场且热络时，
+  // 没有任何一条规则会触发自发行为。创始人指出这就是"自主是给人看的"。
+  //
+  // 新路由换成两个跟"我自己"有关的条件：
+  //   ① 我自己在这个群有没说出口的念头（unactedImpulses）——"我有自己的事"
+  //   ② 我自己在这个群已经 N 分钟没开口（botSilentSec）——"我不会连续念叨"
+  // 房间多安静降为辅助，不再是前提。这两条都取自宿主可观测事实，不是 LLM 自述。
+  for (const g of world.groups) {
+    const own = world.unactedImpulses?.find((u) => u.chatId === g.chatId);
+    if (!own) continue;
+    const gap = g.botSilentSec ?? 0;
+    if (gap < SELF_SPEAK_MIN_GAP_SEC) continue;
+    if (out.some((a) => a.type === 'group_speak' && a.chatId === g.chatId)) continue;
+    out.push({ type: 'group_speak', chatId: g.chatId, about: own.about });
+  }
+
+  // 在场但静默的参与：有没说出口的念头，但还没到开口的间隔 → 先把念头记下来。
+  // 用户侧零可见变化，但它开始在有人的环境里积累"自己的事"。
+  for (const u of world.unactedImpulses ?? []) {
+    const g = world.groups.find((x) => x.chatId === u.chatId);
+    if (g && (g.botSilentSec ?? 0) >= SELF_SPEAK_MIN_GAP_SEC) continue; // 该说就说不该记
+    if (out.some((a) => a.type === 'group_speak' && a.chatId === u.chatId)) continue;
+    out.push({ type: 'note_impulse', chatId: u.chatId, about: u.about });
+    break; // 一次只记一条，别把后台跑成批处理
+  }
+
 
   const absent = world.absentUsers.find((u) => u.absentDays >= 3);
   if (absent) {

@@ -26,7 +26,7 @@ function toCandidate(a: TickAction): import('../core/drives/score.js').Candidate
     case 'care_master':
       return { type: 'care_master' };
     case 'group_speak':
-      return { type: 'group_speak', chatId: a.chatId };
+      return { type: 'group_speak', chatId: a.chatId, ...(a.about === undefined ? {} : { about: a.about }) };
     case 'remember_user':
       return { type: 'remember_user', chatId: a.chatId };
     case 'self_play':
@@ -35,6 +35,11 @@ function toCandidate(a: TickAction): import('../core/drives/score.js').Candidate
       return { type: 'check_goal', goalId: a.goalId };
     case 'share':
       return { type: 'share', fromChatId: a.fromChatId, toChatId: a.toChatId };
+    // 在场但静默的参与：不对外发声，所以没有"文本"要传，也没有 suppress 的社交分量
+    case 'note_impulse':
+      return { type: 'note_impulse', chatId: a.chatId, about: a.about };
+    case 'remember_thread':
+      return { type: 'remember_thread', chatId: a.chatId, about: a.about };
     case 'quiet':
       return null;
   }
@@ -44,11 +49,15 @@ function toCandidate(a: TickAction): import('../core/drives/score.js').Candidate
 
 export type TickAction =
   | { type: 'care_master'; text: string }
-  | { type: 'group_speak'; chatId: number }
+  | { type: 'group_speak'; chatId: number; /** 它自己没说出口的念头，供 LLM 参考 */ about?: string }
   | { type: 'remember_user'; chatId: number; name: string; absentDays: number }
   | { type: 'self_play'; idea: string; plan: string[] }
   | { type: 'check_goal'; goalId: number }
   | { type: 'share'; fromChatId: number; messageId: number; toChatId: number }
+  // 在场但静默的参与（不对外发声）。给主体一件"有人时也能做的事"，
+  // 否则它的自主性永远只能寄生在无人时。
+  | { type: 'note_impulse'; chatId: number; about: string }
+  | { type: 'remember_thread'; chatId: number; about: string }
   | { type: 'quiet'; reason: string };
 
 export interface TickVerdict {
@@ -62,7 +71,7 @@ export interface WorldState {
   hourBeijing: number;
   masterSilentSec: number | null; // null = MASTER_UID 未配
   masterLastText: string;
-  groups: { chatId: number; silentSec: number; lastTexts: string }[];
+  groups: { chatId: number; silentSec: number; lastTexts: string; botSilentSec?: number }[];
   /**
    * H3.1 转发候选(taste 确定性打分 ≥阈值 的真人消息,每群 ≤2 条)。
    * LLM 只能从这里选 share 目标,不许编造 messageId。
@@ -166,11 +175,16 @@ export async function buildWorldState(): Promise<WorldState> {
         const recent = await getRecent(chatId, 6);
         if (!recent.length) continue;
         const silentSec = now - (recent[recent.length - 1]!.timestamp ?? now);
+        // 我自己多久没在这个群开口——和"群多久没人说话"是两件事。
+        // "自主只在无人时启动"的根源就是把前者错当成后者；
+        // 一个人不会因为房间安静才说话，他是因为自己有话、且没在连续念叨。
+        const own = recent.filter((m) => m.role === 'assistant');
+        const botSilentSec = own.length > 0 ? now - (own[own.length - 1]!.timestamp ?? now) : Number.POSITIVE_INFINITY;
         const lastTexts = recent
           .slice(-3)
           .map((m) => `${m.role === 'assistant' ? '[bot]' : (m.fullName || m.username || '?')}: ${(m.textContent ?? '').slice(0, 50)}`)
           .join(' / ');
-        groups.push({ chatId, silentSec, lastTexts });
+        groups.push({ chatId, silentSec, lastTexts, botSilentSec });
       } catch { /* skip chat */ }
     }
     groups.sort((a, b) => a.silentSec - b.silentSec);
@@ -525,6 +539,8 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - check_goal: 有到期关注目标，去查查进展。goalId。
 - share: A 群有条真有意思的消息（见「值得转发的」），转到 B 群给那边的人看。fromChatId=来源群，messageId=那条消息，toChatId=目标群。**只能选候选列表里的，不许编 id；目标群选当前话题能接住它的（别往正经群倒梗、别往梗群倒正经）；A 转 A（同群）禁止**。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
+- note_impulse: 你自己起过个念头但还没说出口（见「你自已没说出口的念头」），而现在**不是开口的时候**。选它=把那个念头记下来，**不会发给任何人**。这是你唯一的"做了但没人看见"的动作——真人也会把话咽回去但记在心里。
+- remember_thread: 有一件你想回头再管的事（同上来源），选它=挂到"以后再说"的清单上，**不会发给任何人**。
 
 判断原则（像真人，不像机器）：
 - 真人不会每 5 分钟都想说话。quiet 仍是常见答案，但**有料就该动**——群里的话题可以跟进、自己刚做成的事可以分享、冷场可以自然冒泡。
@@ -532,7 +548,7 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
 - 上下文里刚出现过你自己的自玩汇报时，下一周期优先 quiet，不要用 care_master 继续推销。
 
-只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|share", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "fromChatId": 数字(share 时), "messageId": 数字(share 时), "toChatId": 数字(share 时), "reason": "一句话为什么"}`;
+只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|share|note_impulse|remember_thread", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "fromChatId": 数字(share 时), "messageId": 数字(share 时), "toChatId": 数字(share 时), "about": "…"(note_impulse/remember_thread 时写你要记的是什么), "reason": "一句话为什么"}`;
 
 /** 单次 LLM 决策。失败 → quiet（fail-closed）。 */
 export async function decideTick(state: WorldState): Promise<TickVerdict> {
@@ -573,12 +589,47 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         )
         .join('\n')
     : '  (没有)';
+  // 它自己没说出口的念头（ NyatOS 影子判定 speak 而线上静默的那批）
+  let impulseLines = '';
+  try {
+    const own = await collectUnactedImpulses(state.groups.map((g) => g.chatId));
+    impulseLines = own.length
+      ? own.map((o) => `  群 ${o.chatId}: ${o.minutesAgo} 分钟前你想过——「${o.about}」`).join('\n')
+      : '';
+  } catch { /* 没就不显示 */ }
   const shareLines = (state.shareCandidates ?? []).length
     ? state.shareCandidates!
         .map((c) => `  群 ${c.fromChatId} #${c.messageId} (分${c.score}): 「${c.text}」`)
         .join('\n')
     : '  (没有值得转的)';
-  // Phase 3 drives（只做 scorer + suppressor 提示，不决策）：世界状态派生
+/**
+ * 它自己起过、但没说出口的念头。
+ *
+ * 定义要保守：只看 NyatOS 影子判定为 speak、而同一批消息上线上结果仍为静默的样本
+ * （那两个本来就是为"对比单决策点与真实行为"而设计的成对事件）。取每个群最近一条，
+ * 时间窗 6 小时。读不到就返回空——这个数据是"自己的事"的燃料，但不是必需项。
+ */
+async function collectUnactedImpulses(chatIds: number[], withinMin = 360): Promise<Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }>> {
+  const out: Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }> = [];
+  try {
+    const { getRecentImpulses } = await import('../agent/impulse-history.js');
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const chatId of chatIds) {
+      const impulses = getRecentImpulses(chatId, 5, withinMin).filter((i) => i.verdict === 'speak');
+      const first = impulses[0];
+      if (!first || !first.why) continue;
+      out.push({
+        chatId,
+        about: first.why,
+        minutesAgo: Math.max(1, Math.round((nowSec - first.atSec) / 60)),
+        verdict: first.verdict,
+      });
+    }
+  } catch { /* 没有就不自主，别硬造 */ }
+  return out;
+}
+
+// Phase 3 drives（只做 scorer + suppressor 提示，不决策）：世界状态派生
   // drive 值 → 候选动作按期望增益排序 → 拼进 prompt 给 LLM 看。fail-soft：
   // 任一步抛错 → driveLines 空，prompt 与改造前逐字节一致。
   let driveLines: string[] = [];
@@ -613,6 +664,10 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
           fromChatId: c.fromChatId,
           messageId: c.messageId,
         })),
+        // 它自己起过、没说出口的念头：影子判定 speak 而线上最终静默的那批。
+        // 这是目前唯一现成的"我有自己的事"来源（goals.origin='self' 是 0 行），
+        // 而且内容就是它当时自己想说的话，不是我替它编的。
+        unactedImpulses: await collectUnactedImpulses(state.groups.map((g) => g.chatId)),
       },
       masterConfigured: env().MASTER_UID > 0,
     });
@@ -650,6 +705,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `当时冲你来但你没接的话头 / 群里新发生的事（想起来了可以自然捡回一句/欢迎新人，别刻意补账）:`,
     missedLines,
+    ``,
+    `你自已没说出口的念头（你当时想接却没接的；不是现在必须说，可以记下、可以装作没想过）:`,
+    impulseLines || '  （没有）',
     ``,
     `你最近做的事（session digest）:`,
     digestLines,
@@ -787,6 +845,44 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
   }
 
   switch (a.type) {
+    // ── 在场但静默的参与 ────────────────────────────────────────
+    // 这两个分支**没有任何 telegram 发送**。它们让主体在有人的环境里也能
+    // 做自己的事：把起过的念头记进账本、把想回头的事约下去。
+    // 用户侧零可见变化——这是"可以先跑起来再谈开口"的那一层。
+    case 'note_impulse': {
+      try {
+        const { appendCognitiveEvent } = await import('../agent/cognitive-events.js');
+        appendCognitiveEvent({
+          type: 'tick_verdict',
+          source: 'scheduler',
+          scope: { visibility: 'chat', chatId: a.chatId },
+          occurredAt: now,
+          correlationId: `impulse:${a.chatId}:${now}`,
+          fact: {
+            schema: 'tick_verdict.v1',
+            chosen: 'note_impulse',
+            vetoed: [],
+            reason: verdict.reason,
+            about: a.about.slice(0, 120),
+          },
+        });
+        logger.info({ chatId: a.chatId, about: a.about.slice(0, 40) }, 'unified tick: noted own impulse (silent)');
+      } catch { /* 记账失败不影响 */ }
+      return;
+    }
+
+    case 'remember_thread': {
+      try {
+        const { rememberThread } = await import('../tracking/open-threads.js');
+        rememberThread({ chatId: a.chatId, uid: 0, note: a.about, kind: 'waiting' });
+        logger.info({ chatId: a.chatId, about: a.about.slice(0, 40) }, 'unified tick: remembered own thread (silent)');
+      } catch (err) {
+        logger.debug({ err, chatId: a.chatId }, 'remember_thread failed (non-critical)');
+      }
+      await recordTickVerdict({ chosen: 'remember_thread', vetoed: [], reason: verdict.reason }).catch(() => undefined);
+      return;
+    }
+
     case 'quiet':
       logger.info({ reason: verdict.reason }, 'unified tick: quiet');
       await recordTickVerdict({ chosen: 'quiet', vetoed: [], reason: verdict.reason });
