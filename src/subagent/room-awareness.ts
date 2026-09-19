@@ -104,6 +104,14 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
 
     if (frame.field) signals.push('field');
     if (frame.inner) signals.push('inner');
+    // 身体事实：这些是 2026-09-19 之后新加的几段。signals 清单原本只报
+    // field/inner/self_stats，于是"注入了 606 字"根本证明不了它们在里面——
+    // 而我在Frame里已经错过三次"填了没渲染"，可观测性不能再缺同一环。
+    if (frame.self.trench) signals.push('trench');
+    if (frame.self.selfState) signals.push('self_state');
+    if (frame.self.debt) signals.push('debt');
+    if (frame.self.echo) signals.push('echo');
+    if (frame.self.recentImpulses?.length) signals.push('impulses');
 
     // 自我统计：把自己的行为数据变成模型能看见的事实。
     // 2026-09-19：prompt 讲了三轮"别每句都喵"，模型只从 57% 降到 50%——因为全局比例
