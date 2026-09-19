@@ -86,6 +86,7 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
       botUid: input.botUid,
       botUsername: identity.username,
       botDisplayName: getBotDisplayName(),
+      withImpulses: true,
     });
     const rendered = renderFrame(frame, { maxMessages: 8, maxChars: 1200 }).trim();
     if (!rendered) return { text: '', signals };
@@ -119,6 +120,24 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
     if (own) {
       lines.push('');
       lines.push(own);
+    }
+    // 自己的冲动史：单决策点这几条消息上想说什么。这是"它想参与"的直接证据，
+    // 之前 1070 条判定写进账本后没有任何读者。给它看，它才知道自己想说话。
+    const impulses = (frame.self.recentImpulses ?? []).slice(0, 4);
+    if (impulses.length > 0) {
+      const spoke = impulses.filter((i) => i.verdict === 'speak').length;
+      lines.push('');
+      lines.push(
+        `[你刚才的念头] 最近 ${impulses.length} 条消息里，你有 ${spoke} 次是想接话的` +
+          '（下面是她当时给自己的理由，不是要你复述）：',
+      );
+      for (const imp of impulses) {
+        lines.push(`- ${imp.minutesAgo} 分钟前 ${imp.verdict}：${imp.why}`);
+      }
+      lines.push(
+        '这些是你自己的念头，用它们判断"我现在还想不想说"，但**不要**把这段念白发给用户。',
+      );
+      signals.push(`impulses:${impulses.length}`);
     }
     if (frame.self.openThreads) signals.push('threads');
     if (frame.addressedToOthers) signals.push('addressed_to_others');

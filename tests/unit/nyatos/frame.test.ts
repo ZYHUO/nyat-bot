@@ -67,6 +67,19 @@ describe('frame assembly', () => {
     });
     expect(frame.clock.nowIso).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
     expect(frame.clock.weekday).toMatch(/周/);
+    // 冲动史默认不读：shadow 每条消息都 buildFrame，它不该为这份数据付查询
+    expect(frame.self.recentImpulses).toBeUndefined();
+
+    const withImpulses = await m.buildFrame({
+      scope: { visibility: 'chat', chatId: -100 },
+      trigger: msg({ messageId: 9 }) as never,
+      recent: [msg() as never],
+      botUid: 999,
+      withImpulses: true,
+    });
+    // opt-in 后走读取路径；账本为空 → 不设字段（而不是塞空数组或抛错）
+    expect(withImpulses.self.recentImpulses).toBeUndefined();
+    expect(withImpulses.unknowns).not.toContain('冲动史');
     expect(frame.clock.triggerAgeSec).toBeGreaterThanOrEqual(59);
     const text = m.renderFrame(frame);
     expect(text).toContain('[现在]');

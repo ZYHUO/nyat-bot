@@ -83,6 +83,24 @@ export interface Frame {
   self: {
     /** Bounded recent acts with outcomes, newest first. */
     recentActs: Array<{ minutesAgo: number; preview: string; outcome: string }>;
+    /**
+     * What the single decision point WANTED to do on recent messages, newest
+     * first. This is the bot's own impulse history — it is not an action, it is
+     * the thing the action layer never sees.
+     *
+     * Why it exists (2026-09-19): the NyatOS shadow records speak/silent/wait on
+     * every message it observes (1,013 speak vs 35 silent over four days) and
+     * **nothing ever reads it back**. So the reply path has no idea that the
+     * decision point wanted to speak on 95% of messages — it cannot learn
+     * restraint or eagerness from a history it cannot see. Exposing it here is
+     * pure wiring: the data already exists, only the reader was missing.
+     */
+    recentImpulses?: Array<{
+      minutesAgo: number;
+      verdict: string;
+      /** What the decision point said it wanted — its own words, unedited. */
+      why: string;
+    }>;
     /** When the bot told itself to think again. */
     pendingWake?: { minutesAhead: number; about?: string };
     /**
@@ -119,6 +137,12 @@ export interface BuildFrameInput {
   botUsername?: string;
   botDisplayName?: string;
   budget?: Partial<FrameBudget>;
+  /**
+   * 是否读"自己最近的冲动史"（social_prediction 账本）。
+   * 默认 false：shadow 每条消息都会 buildFrame，而它自己不需要这份数据——
+   * 只有把它渲染进生成 prompt 的调用方该付这次查询（2026-09-19 review 结论）。
+   */
+  withImpulses?: boolean;
 }
 
 function nowSec(): number {
@@ -224,6 +248,20 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
         outcome: act.outcome,
       }));
       sinceBotSpokeSec = summary.sinceLastSpokeSec;
+    }
+    // 自己的冲动史：单决策点最近想说什么。只读认知账本，读不到就不加这一段。
+    try {
+      const { getRecentImpulses } = await import('../agent/impulse-history.js');
+      const impulses = getRecentImpulses(chatId ?? 0, 4, 90);
+      if (impulses.length > 0) {
+        self.recentImpulses = impulses.map((imp) => ({
+          minutesAgo: Math.max(1, Math.round((now - imp.atSec) / 60)),
+          verdict: imp.verdict,
+          why: imp.why.slice(0, 90),
+        }));
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'frame: impulse history unavailable');
     }
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: self history unavailable');

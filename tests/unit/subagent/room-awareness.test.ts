@@ -17,7 +17,14 @@ vi.mock('../../../src/nyatos/frame.js', () => ({
     field: { talkers: 3, addressee: 'bot', mood: '吵' },
     inner: null,
     capability: null,
-    self: { recentActs: [], openThreads: '昨天说要告诉他冷处理' },
+    self: {
+      recentActs: [],
+      openThreads: '昨天说要告诉他冷处理',
+      recentImpulses: [
+        { minutesAgo: 3, verdict: 'speak', why: '这条在问我会不会修交换机，我会' },
+        { minutesAgo: 8, verdict: 'silent', why: '他俩在互相抬杠，没我什么事' },
+      ],
+    },
     addressedToOthers: { handle: '@someone_else' },
     recentLines: [],
     unknowns: [],
@@ -85,6 +92,38 @@ describe('renderRoomAwareness', () => {
       .mockReturnValueOnce(['那快开啊，别硬扛', '谁看了啊笨', '想得挺美', '别瞎脑补', '路过而已']);
     const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759490 });
     expect(r.text).not.toContain('你自已的毛病');
+  });
+
+  it('surfaces the bot own impulses (the 1070 recorded verdicts nobody read)', async () => {
+    const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759490 });
+    expect(r.text).toContain('[你刚才的念头]');
+    expect(r.text).toContain('想接话');
+    // Its own reasons must be quoted verbatim — the point is that IT sees them.
+    expect(r.text).toContain('这条在问我会不会修交换机，我会');
+    expect(r.text).toContain('他俩在互相抬杠，没我什么事');
+    // But it must not recite them to the user.
+    expect(r.text).toContain('不要');
+    expect(r.signals).toContain('impulses:2');
+  });
+
+  it('omits the impulse block when there is no history', async () => {
+    const frameMod = await import('../../../src/nyatos/frame.js');
+    (frameMod.buildFrame as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({
+        schema: 'frame.v1',
+        scope: { visibility: 'chat', chatId: -1002943259956 },
+        asOf: 0,
+        identity: { uid: 1, username: 'x', displayName: '啾咪囝' },
+        clock: { nowIso: 'x', weekday: '六', triggerAgeSec: 1 },
+        field: null,
+        inner: null,
+        capability: null,
+        self: { recentActs: [] },
+        recentLines: [],
+        unknowns: [],
+      });
+    const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759500 });
+    expect(r.text).not.toContain('[你刚才的念头]');
   });
 
   it('fails soft when the frame cannot be built', async () => {
