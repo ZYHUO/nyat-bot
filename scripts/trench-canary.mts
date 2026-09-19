@@ -176,6 +176,36 @@ console.log(`  legacy 实际发送：${logCount('"msg":"Reply sent"')}｜Meta �
 console.log(`  读法：stackOnly 占 legacy 总终止的 ${(cheap + stackOnly) > 0 ? ((stackOnly / (cheap + stackOnly)) * 100).toFixed(1) : '0'}%。`);
 console.log(`        这个数越小，"删决策栈"越接近无行为变化——但它永远不该归零后才删。`);
 
+// 分群对照：按群灰度实验（META_HEART_BYPASS_CHAT_IDS）的唯一可读出口。
+// 没有它，"旁路了某个群"和"没旁路"在数字上分不开——而这个会话的教训是：
+// 一个读不出组间差异的实验等于没做。
+console.log('\n【分群对照】每群的发送率（旁路实验的读数）');
+let bypassList: number[] = [];
+try {
+  const { env } = await import('../src/env.js');
+  bypassList = env().META_HEART_BYPASS_CHAT_IDS;
+} catch { /* 读不到名单就只报分群，不标旁路 */ }
+try {
+  const cutoff = Math.floor(Date.now() / 1000) - DAYS * 86400;
+  const perChat = sql(`
+    SELECT chat_id,
+           COUNT(*) AS sends
+    FROM self_replies WHERE ts >= ${cutoff}
+    GROUP BY chat_id ORDER BY sends DESC LIMIT 10`);
+  for (const r of perChat) {
+    const chat = Number(r.chat_id);
+    const inbound = Number((sql(`SELECT COUNT(*) AS n FROM cognitive_events
+      WHERE type='message_received' AND chat_id=${chat} AND occurred_at >= ${cutoff}`)[0]?.n ?? 0));
+    const sends = Number(r.sends);
+    const rate = inbound > 0 ? (sends / inbound) * 100 : 0;
+    const tag = bypassList.includes(chat) ? '  ← 旁路中' : '';
+    console.log(`  chat ${chat}: 发送 ${sends} / 入站 ${inbound} = ${rate.toFixed(0)}%${tag}`);
+  }
+  if (bypassList.length === 0) {
+    console.log('  （当前无旁路群——这是对照组本身）');
+  }
+} catch (err) { console.log('  （分群读数失败）'); }
+
 console.log('\n【海沟自身】');
 for (const [k, v] of Object.entries(trench)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 
