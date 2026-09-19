@@ -179,6 +179,11 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'action_envelope_outcome',
   'own_action_result',
   'self_scheduled_wake',
+  // 注意：这个 Set 是手写的运行时就闸，与上面 TS 的 CognitiveEventType 联合体
+  // **不是同一处**。2026-09-19 加了 tick_verdict 只改联合体，这里漏了 →
+  // normalizeInput 抛 unknown cognitive event type，而调用方的 fail-soft catch
+  // 把它吞掉，账本静默 0 行（看起来像"tick 没跑"，其实跑了）。
+  'tick_verdict',
 ]);
 const EVENT_SOURCES: ReadonlySet<string> = new Set(['telegram', 'host', 'scheduler', 'tool', 'model', 'import']);
 const MAX_FACT_BYTES = 8 * 1024;

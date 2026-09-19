@@ -724,6 +724,7 @@ async function recordTickVerdict(input: {
   chosen: string;
   vetoed: Array<{ action: string; reason: string }>;
   reason: string;
+  goalId?: number;
 }): Promise<void> {
   try {
     const { appendCognitiveEvent } = await import('../agent/cognitive-events.js');
@@ -740,9 +741,14 @@ async function recordTickVerdict(input: {
         chosen: input.chosen,
         vetoed: input.vetoed.slice(0, 6),
         reason: input.reason.slice(0, 120),
+        ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
       },
     });
-  } catch { /* 记账失败绝不拦 tick */ }
+  } catch (err) {
+    // 记账失败的可见性很重要：这个功能的全部意义就是"账本能看见 tick 的选择"，
+    // 静默失败会让它看起来像 tick 没做决定。绝不拦 tick，但必须留痕。
+    logger.warn({ err: err instanceof Error ? err.message : String(err), chosen: input.chosen }, 'tick verdict NOT recorded');
+  }
 }
 
 async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<void> {
@@ -1108,6 +1114,14 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         if (!(await tryAcquireProactiveSlot(targetChat, 'unified-tick-goal'))) return;
         // 派发即占坑，避免下个 tick 同一 goal 再入队（真正 finding 仍由 executor 终态覆盖）。
         recordCheck(goal.id, null);
+        // 记账：这是 tick 自己的选择。check_goal 是当前最高频的自发动作
+        // （日志里连续出现），不记下来账本依旧看不见它在干什么。
+        await recordTickVerdict({
+          chosen: 'check_goal',
+          vetoed: [],
+          reason: verdict.reason,
+          goalId: goal.id,
+        }).catch(() => undefined);
         const { enqueueCodeActJob } = await import('../subagent/queue.js');
         await enqueueCodeActJob({
           id: `goal_${goal.id}_${now}_${Math.floor(Math.random() * 1e6)}`,
