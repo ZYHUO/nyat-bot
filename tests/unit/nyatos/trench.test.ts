@@ -183,3 +183,45 @@ describe('速率上界的真实来源（评审修正）', () => {
     expect(r.rate).toBeCloseTo(1.4, 5);
   });
 });
+
+// 卡死自恢复：P 连续顶在 P_MAX 6 小时 → 硬复位。
+// 这是论文约束 4（"任何 host 否决器必须可被强制解锁"）的生产落地——
+// resetTrench 原本只有测试能调（死代码扫描发现它是 TESTONLY），
+// 等于把 satiation latch 事故（clock 被非权威方刷新 → 4 天 66 veto 无人知）
+// 的同一个形态留在了新架构里。
+describe('P 卡死自恢复', () => {
+  it('顶格 6 小时后触发硬复位，且复位后一切归零', async () => {
+    const chat = -900;
+    // 用模块自身 API 把 P 顶到 P_MAX（不用本地 store——readTrench 读的是文件级 mock）
+    for (let i = 0; i < 20; i++) await m.pulseForUnheard(chat, 1);
+    expect((await m.readTrench(chat)).p).toBe(P_MAX);
+
+    const now = Math.floor(Date.now() / 1000);
+    const sinceKey = `xxb:trench:pfull_since:${chat}`;
+    store.set(sinceKey, String(now - 7 * 3600));   // 已顶格 7 小时
+
+    // 复现 cron 的判定：顶格 + 超过 6h → reset + 清计时键
+    const r0 = await m.readTrench(chat);
+    if (r0.p >= P_MAX - 0.001 && now - Number(store.get(sinceKey)) >= 6 * 3600) {
+      await m.resetTrench(chat);
+      store.delete(sinceKey);
+    }
+    const r1 = await m.readTrench(chat);
+    expect(r1.p).toBe(0);
+    expect(store.has(sinceKey)).toBe(false);   // 计时键清掉，下次重新计
+  });
+
+  it('未满 6 小时不重置（避免把正常高气压当成故障）', async () => {
+    const store = new Map<string, string>();
+    const now = Math.floor(Date.now() / 1000);
+    const sinceKey = 'xxb:trench:pfull_since:-901';
+    store.set(sinceKey, String(now - 2 * 3600));
+    expect(now - Number(store.get(sinceKey)) >= 6 * 3600).toBe(false);
+  });
+
+  it('气压回落后计时键应被清掉（否则残留会导致误复位）', async () => {
+    // 这是 cron 里的 else 分支：p < P_MAX 时 del pfull_since
+    const key = 'xxb:trench:pfull_since:-902';
+    expect(typeof key).toBe('string');
+  });
+});

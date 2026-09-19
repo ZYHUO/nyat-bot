@@ -105,12 +105,6 @@ export async function readDebt(chatId: number, topN = 5): Promise<Debt[]> {
   }
 }
 
-/** 总债（这群里"该还说没说"的总量）。 */
-export async function totalDebt(chatId: number): Promise<number> {
-  const d = await readDebt(chatId, 50);
-  return d.reduce((s, x) => s + x.owed, 0);
-}
-
 /**
  * 渲染成 Frame 事实行。
  *

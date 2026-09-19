@@ -64,10 +64,11 @@ describe('定向债', () => {
     expect(rest[0]!.uid).toBe(222);
   });
 
-  it('总债是所有债主之和', async () => {
+  it('总债是所有债主之和（readDebt 已够，不需要第二个求和出口）', async () => {
     await m.oweFor(-100, 111, 1);
     await m.oweFor(-100, 222, 2);
-    expect(await m.totalDebt(-100)).toBe(3);
+    const all = await m.readDebt(-100, 50);
+    expect(all.reduce((s, x) => s + x.owed, 0)).toBe(3);
   });
 
   it('渲染是"欠话"不是工单队列', async () => {

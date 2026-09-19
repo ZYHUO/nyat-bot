@@ -156,8 +156,37 @@ export function startCronJobs(deps?: CronDeps): void {
         const { getRedis } = await import('../db/redis.js');
         const raw = await getRedis().zrange('xxb:active_groups', 0, 19);
         let pumped = 0;
+        let stuckReset = 0;
         for (const id of raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0)) {
-          try { if (await pump(id)) pumped += 1; } catch { /* per-chat fail-soft */ }
+          try {
+            if (await pump(id)) pumped += 1;
+          } catch { /* per-chat fail-soft */ }
+          // 卡死自恢复：P 连续顶在 P_MAX 若干小时 → 硬复位。
+          //
+          // 为什么必须有这个：`resetTrench` 此前只有测试能调（死代码扫描发现它是
+          // TESTONLY），而论文约束 4 要求"任何 host 否决器必须可被强制解锁"。
+          //  satiation latch 事故的根因正是"clock 被非权威方刷新 → 4 天 66 veto 无人知"。
+          // 没有自动恢复，就等于把同一个事故形态留在了新架构里。
+          //
+          // P 顶格意味着注入持续超过抽水——正常聊天不会这样（一次发言抽 85%）。
+          // 所以顶格数小时只可能是"没人说话但消息一直在进"（睡眠期之外）或抽水路径坏了。
+          try {
+            const { readTrench, resetTrench, P_MAX } = await import('../nyatos/trench.js');
+            const r = await readTrench(id);
+            if (r.p >= P_MAX - 0.001) {
+              const rawSince = await getRedis().get(`xxb:trench:pfull_since:${id}`);
+              const nowSec = Math.floor(Date.now() / 1000);
+              if (rawSince === null) {
+                await getRedis().set(`xxb:trench:pfull_since:${id}`, String(nowSec), 'EX', 12 * 3600);
+              } else if (nowSec - Number(rawSince) >= 6 * 3600) {
+                await resetTrench(id);
+                await getRedis().del(`xxb:trench:pfull_since:${id}`);
+                stuckReset += 1;
+              }
+            } else {
+              await getRedis().del(`xxb:trench:pfull_since:${id}`);
+            }
+          } catch { /* per-chat fail-soft */ }
         }
         // 每次泵浦同时记睡眠相位：醒来这件事必须**可观测**，否则无法判断
         // "醒来后气压高 → 前几句密"这个行为是否真的发生。零额外成本（一次本地调用）。
@@ -191,6 +220,7 @@ export function startCronJobs(deps?: CronDeps): void {
           );
         } catch { /* 观测失败不影响泵浦 */ }
         if (pumped > 0) logger.debug({ pumped }, 'trench pump: halved pressure');
+        if (stuckReset > 0) logger.warn({ stuckReset }, 'trench: pressure stuck at P_MAX for 6h — hard reset');
       },
     });
   }

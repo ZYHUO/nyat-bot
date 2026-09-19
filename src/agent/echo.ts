@@ -224,8 +224,3 @@ function botSelfTokens(): string[] {
     return [];
   }
 }
-
-/** 供定时任务调用：跑一轮回填。 */
-export async function runEchoBackfill(): Promise<number> {
-  return backfillEcho();
-}
