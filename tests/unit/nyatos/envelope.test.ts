@@ -34,9 +34,11 @@ describe('L1 包络', () => {
     }
   });
 
-  it('enforce 模式下爆了就拦', async () => {
+  it('enforce 模式下超总量就拦', async () => {
     envMock.TRENCH_ENVELOPE_MODE = 'enforce';
     const verdicts = [];
+    // 用小上限跑（生产默认 150/100 是回测出来的，测试里用 8 快速验证逻辑）
+    envMock.TRENCH_BURST_MAX = 8;
     for (let i = 0; i < 10; i++) { await m.spendEnvelope(-100); verdicts.push(await m.checkEnvelope(-100, true)); }
     // 第 8 次 spend 之后 used=8 >= 8，那一次 check 就该被拦
     expect(verdicts.slice(0, 7).every((v) => v.ok)).toBe(true);

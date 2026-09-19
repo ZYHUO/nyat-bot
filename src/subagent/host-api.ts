@@ -1092,7 +1092,12 @@ export function createHostApi(
                 // closest available provenance, and only the first bubble carries
                 // the quote anchor. trigger_msg_id is informational; failure to
                 // attribute it does not affect the behaviour feed.
-                recordSelfReply(chatId, opts.targetUserId ?? 0, replyTo ?? null, part, messageId);
+                // 锚点要记**生效的那个**：replyTo 为空时 host 会用 defaultReplyTo 兜底填，
+                // 而兜底之后这条其实就是"被叫到的"。只记 replyTo 会让兜底发送被
+                // 下游（Echo 判据、包络回测的主动/被叫到分类）误判成主动发言
+                // ——2026-09-19 回测因此把 413/425 条错判成"主动插话太密"。
+                const effectiveAnchor = replyTo ?? opts.defaultReplyTo ?? null;
+                recordSelfReply(chatId, opts.targetUserId ?? 0, effectiveAnchor, part, messageId);
               } catch (err) {
                 logger.debug({ err, chatId }, 'host sendText self-history failed (non-critical)');
               }

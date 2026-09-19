@@ -416,9 +416,15 @@ const envSchema = z.object({
   // 最忙群 266 条/天(11/h) 已超 6/h 上限而无人管——物理边界在流量的那条路上是洞。
   // 默认 shadow：只记录"本来会被拦"，先看数再 enforce。
   TRENCH_ENVELOPE_MODE: z.string().default('off'),        // off | shadow | enforce
-  TRENCH_BURST_MAX: z.coerce.number().int().positive().default(8),
-  TRENCH_BURST_MAX_ACTIVE: z.coerce.number().int().positive().default(3),
-  TRENCH_BURST_WINDOW_SEC: z.coerce.number().int().positive().default(300),
+  // 默认值不是拍的，是回测出来的（scripts/envelope-backtest.mts，近 3 天 1841 条）：
+  //   实测小时窗峰值 107 / p99 64 / p95 37；5 分钟窗峰值 19 / p99 16。
+  //   设 150/100 的代价是**拦掉 1 条（0.1%）**——对现有行为不可见；
+  //   而判定点投影要把最忙群从 266 条/天推到 ~1048 条/天（峰值小时 107 → ~172），
+  //   这个上界正好落在那段空白里：现在看不见，放大后接得住。
+  // 第一版用 5 分钟窗 + 8/3，回测会拦 23%——因为 bot 本来就突到 19 条/5 分钟。
+  TRENCH_BURST_MAX: z.coerce.number().int().positive().default(150),
+  TRENCH_BURST_MAX_ACTIVE: z.coerce.number().int().positive().default(100),
+  TRENCH_BURST_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
   TRENCH_GATE_ENABLED: booleanFromEnv.default(false),
   ECHO_ENABLED: booleanFromEnv.default(false),
   TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),
