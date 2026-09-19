@@ -474,6 +474,16 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
       .map((a) => `${a.minutesAgo}分钟前「${a.preview}」→ ${label[a.outcome] ?? a.outcome}`);
     lines.push(`[你自己最近做的] ${parts.join('；')}`);
   }
+
+  // 冲动史：单决策点**想**做什么（不是做过了什么）。
+  // 2026-09-19 第三次抓到同一形态：字段填好了、注释写着"只缺读取方"，
+  // 而 renderFrame 从来没读它——于是 bot 依旧看不见自己 95% 的消息都想接话。
+  if (frame.self.recentImpulses && frame.self.recentImpulses.length > 0) {
+    lines.push('[念头] 你最近心里冒过的念头（想接的念头，不是已经做了的事）：');
+    for (const imp of frame.self.recentImpulses.slice(0, 4)) {
+      lines.push(`  · ${imp.minutesAgo} 分钟前想「${imp.verdict}」：${imp.why}`);
+    }
+  }
   if (frame.self.pendingWake) {
     lines.push(
       `[你自己定的下一次] ${frame.self.pendingWake.minutesAhead} 分钟后你打算再想想`

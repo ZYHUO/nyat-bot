@@ -359,3 +359,47 @@ describe('trench echo in the frame', () => {
     }
   });
 });
+
+// 冲动史进 Frame：2026-09-19 第三次抓到"字段填好但渲染端没读"的形态。
+// 上面那段注释还专门写着"只缺读取方，这里是纯接线"——而读取方一直不存在。
+// 主路径 room-awareness.ts 传 withImpulses:true，所以链路是通的，缺的只是渲染。
+describe('impulse history in the frame', () => {
+  async function realFrame(withImpulses: boolean) {
+    const { buildFrame } = await import('../../../src/nyatos/frame.js');
+    const { getBotUid } = await import('../../../src/bot/bot.js');
+    return buildFrame(
+      {
+        scope: { visibility: 'chat', chatId: -100_444_941_960_2 },
+        trigger: { messageId: 1 } as never,
+        recent: [],
+        botUid: getBotUid(),
+        withImpulses,
+      },
+    );
+  }
+
+  it('有冲动史时 Frame 出现 [念头] 行，且保留决策点原话', async () => {
+    const { renderFrame } = await import('../../../src/nyatos/frame.js');
+    const f = await realFrame(true);
+    // 注入两条（真实库里可能没有，这里测渲染而非查询）
+    f.self.recentImpulses = [
+      { minutesAgo: 3, verdict: 'speak', why: '看到有人问签到的事，想凑上去' },
+      { minutesAgo: 9, verdict: 'wait', why: '他们在聊别的，等一会儿' },
+    ];
+    const txt = renderFrame(f);
+    expect(txt).toContain('[念头]');
+    expect(txt).toContain('看到有人问签到的事，想凑上去');
+    expect(txt).toContain('想接的念头，不是已经做了的事');   // 区分"想"与"做"
+  });
+
+  it('没有冲动史时不渲染空段', async () => {
+    const { renderFrame } = await import('../../../src/nyatos/frame.js');
+    const f = await realFrame(true);
+    expect(renderFrame(f)).not.toContain('[念头]');
+  });
+
+  it('不 opt-in 时不该出现（查询是 opt-in 的，渲染不能反客为主）', async () => {
+    const f = await realFrame(false);
+    expect(f.self.recentImpulses).toBeUndefined();
+  });
+});
