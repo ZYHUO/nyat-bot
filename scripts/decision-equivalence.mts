@@ -99,6 +99,11 @@ for (const r of shadowRows) {
   }
 }
 
+// speak 率的分母必须是**全部**判定（含 failed/wait），不能只用 speak+silent——
+// 后者 silent 只有 2 个，会算出"判定点 100% 想说话"的假读数。
+const allVerdicts = sql(`SELECT COUNT(*) n FROM cognitive_events WHERE type='social_prediction'
+  AND json_extract(fact_json,'$.schema')='shadow_ingress.v1' AND occurred_at >= ${since}`)[0]?.n ?? 0;
+const speakRateOverall = Number(allVerdicts) > 0 ? speakWant / Number(allVerdicts) : 0;
 const comparable = agree + disagree;
 const rate = comparable > 0 ? agree / comparable : 0;
 
@@ -128,6 +133,34 @@ console.log(`\n  ── 不一致的分解 ──`);
 console.log(`  物理拦掉（硬闸 + 去重）约 ${gated + dupBlocked} 次；判定点 speak 而线上静默 ${disagree} 次`);
 console.log(`  无法归因于物理约束的（≈真的分歧）：约 ${Math.max(0, disagree - gated - dupBlocked)} 次`);
 console.log(`  读法：前者不是"判定点错了"，是"身体在管事"——它永远不该被抹平。\n`);
+
+// ── 投影影响：判定点一旦变成权威，发送率会变成多少 ──────────────────
+// 这是比"一致率"更诚实的一个数：一致率低可以怪 join，投影影响怪不了。
+//
+// 实测（2026-09-19，shadow 覆盖的三个群）：
+//   chat -1003821093564  入站 1219  发言 266 → 实际 22%  shadow 想 speak 85.6%
+//   chat -1003184176508  入站  237  发言 115 → 实际 49%
+//   chat -1002750574953  入站  210  发言  58 → 实际 28%
+//
+// **并且：266 条/天 = 11 条/小时，已经超过 budget 的 6 条/小时上限。**
+// 因为生产里 1572 次群发送全部带引用锚点 → 全部算"被叫到" → 全部豁免。
+// 也就是说：**物理边界在流量最大的那条路上是个洞。**
+//
+// 这决定了 Phase 2 的真实前置不是"把判定点改聪明"，而是"让边界对所有发言生效
+// （被叫到的用更宽松的包络）"——否则切换就是把最忙的群放大 4 倍。
+try {
+  const chats = sql(`SELECT DISTINCT chat_id AS c FROM cognitive_events
+    WHERE type='social_prediction' AND occurred_at >= ${since}`).map((r) => Number(r.c)).filter((c) => Number.isSafeInteger(c) && c < 0);
+  console.log(`\n  ── 投影影响（判定点上真身会发生什么）──`);
+  for (const c of chats.slice(0, 6)) {
+    const inbound = Number((sql(`SELECT COUNT(*) n FROM cognitive_events WHERE type='message_received' AND chat_id=${c} AND occurred_at >= ${since}`)[0]?.n ?? 0));
+    const spoke = Number((sql(`SELECT COUNT(*) n FROM self_replies WHERE chat_id=${c} AND ts >= ${since}`)[0]?.n ?? 0));
+    if (inbound < 20) continue;
+    const live = spoke / inbound;
+    console.log(`  chat ${c}: 实际发送率 ${(live * 100).toFixed(0)}% → 判定点想要 ${(speakRateOverall * 100).toFixed(0)}%（放大 ${(speakRateOverall / Math.max(live, 0.01)).toFixed(1)}x）`);
+  }
+  console.log(`  注：所有发言都算"被叫到"而豁免预算，所以这个放大没有物理上界。\n`);
+} catch { /* 投影是附加信息，读不到就跳过 */ }
 
 console.log(`  Phase 2 准入（论文 §9）：一致率 > 85% 才把判定点上真身。`);
 console.log(`  当前结论：${rate > 0.85 ? '已达标' : '未达标——但先看清不达标是哪一笔账造成的'}\n`);
