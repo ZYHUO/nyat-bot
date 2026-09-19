@@ -22,6 +22,7 @@ import {
   tryMetaIngressIntercepts,
 } from '../../meta/ingress-intercepts.js';
 import { classifyAttentionLayer } from '../../meta/classify-layer.js';
+import { heartRoute } from '../../meta/heart-route.js';
 import {
   runMetaBookkeepingHooks,
   metaSleepGate,
@@ -362,13 +363,16 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // （实测 12,009 次判定只放行 7.7%，而影子想 speak 85.6%）。
           //
           // META_HEART_ENABLED=false 时**旁路它的 allow/silence 裁决**，消息仍按
-          // 既有的 layer 分级进 attention——只是不再被心流二次否决。
+          // 既有的 layer 分级进 attention（见下方 else 分支）——只是不再被心流二次否决。
+          // 单独设 META_HEART_ENABLED=false **不会**静音：只有配 HEART_ENABLED=false
+          // 才会整段不走，那是既有的总开关。
           //
           // 默认 true（当前行为，零变化）。翻成 false 之前必须先有两样东西：
           //   ① envelope 从 shadow 拨到 enforce 并读过真实拦截率（论文 §九·补五）
           //   ② 金丝雀的 Phase 2 一致率与发送量曲线可作为对照基线
           // 顺序反了就是把刹车片拔了再装新的。
-          if (env().META_HEART_ENABLED && env().HEART_ENABLED) {
+          const heartPath = heartRoute(env());
+          if (heartPath === 'heart') {
             void (async () => {
               try {
                 const { evaluateMetaHeart } = await import('../../meta/heart-adapter.js');
@@ -460,8 +464,55 @@ async function handleUpdate(ctx: Context): Promise<void> {
             return 'done';
           }
 
-          // Heart off: L2 旁观硬丢（旧行为）。META_DEFER_ENABLED 时放行进 gate，
-          // 让 talk-value 频率阈值 + LLM 决定是否回复，而非无条件丢弃。
+          // Phase 1 旁路：心流不再裁决，但消息**仍要进 attention**。
+          //
+          // 第一版写成"META_HEART_ENABLED 假就整块跳过"，结果 ingest 完全不发生——
+          // bot 直接静音，而不是"按 layer 分级进 attention"。注释与代码不一致，
+          // 而且正是这个仓库最爱的那类失败。这里显式补上 ingest。
+          //
+          // 触发条件是负向的（HEART_ENABLED 开着而 META_HEART_ENABLED 关着），
+          // 所以单独设 META_HEART_ENABLED=false 不会静音，也不会无人接管。
+          if (heartPath === 'bypass') {
+            void (async () => {
+              try {
+                // 被旁路掉的裁决记成 wait：让 shadow 对照能看到"心流本来会参一脚",
+                // 而不是假装它没发生过。
+                noteLiveOutcome('wait');
+                await getAttentionAccumulator().ingestAsync({
+                  chatId,
+                  layer: layerDec.layer,
+                  reason: `trench_bypass_${layerDec.layer}`,
+                  messageId,
+                  userId,
+                  textPreview,
+                  // 分级压升沿用心流自己的基准，不引入新的经验参数。
+                  pressure: layerDec.layer === 'L0' ? 100 : layerDec.layer === 'L1' ? 70 : 30,
+                  messageThreadId: fm.messageThreadId,
+                  cognitiveAnchorEventId,
+                  payload: {
+                    username: fm.username || undefined,
+                    fullName: fm.fullName || undefined,
+                    heartPath: 'trench_bypass',
+                    ...(fm.replyTo
+                      ? {
+                          replyTo: {
+                            messageId: fm.replyTo.messageId,
+                            uid: fm.replyTo.uid,
+                            fullName: fm.replyTo.fullName,
+                            textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
+                          },
+                        }
+                      : {}),
+                  },
+                });
+              } catch (err) {
+                logger.debug({ err, chatId, messageId }, 'trench bypass ingest failed');
+              }
+            })();
+            return 'done';
+          }
+
+          // Heart 全关：L2 旁观硬丢（旧行为）。META_DEFER_ENABLED 时放行进 gate。
           if (layerDec.layer === 'L2' && !env().META_DEFER_ENABLED) {
             logger.debug({ chatId, messageId }, 'Meta path: L2 drop (no Attention)');
             return 'done';
