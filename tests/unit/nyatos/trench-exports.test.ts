@@ -61,3 +61,31 @@ describe('新架构导出的消费方核对', () => {
     expect(src).toContain('export async function setThetaForTest');
   });
 });
+
+// 同一纪律换一类对象：**旗标**。一个 zero-reader 的旗标意味着它的功能既开不了
+// 也关不掉——而那正是.env 里一个让人安心的假开关。
+describe('新架构旗标的读取方核对', () => {
+  const FLAGS = [
+    'TRENCH_PUMP_ENABLED',
+    'TRENCH_GATE_ENABLED',
+    'TRENCH_ENVELOPE_MODE',
+    'TRENCH_SLEEP_PULSE_ENABLED',
+    'TRENCH_DEBT_ENABLED',
+    'ECHO_ENABLED',
+    'META_HEART_ENABLED',
+    'META_HEART_BYPASS_CHAT_IDS',
+    'TIMING_GATE_LLM_ENABLED',
+  ];
+
+  it('每个旗标都在 env.ts 之外有真实读取方', () => {
+    const offenders: string[] = [];
+    for (const f of FLAGS) {
+      const out = execSync(
+        `grep -rn "\\.${f}\\b" ${REPO}/src --include='*.ts' | grep -v "src/env.ts" || true`,
+        { encoding: 'utf8' },
+      );
+      if (!out.trim()) offenders.push(f);
+    }
+    expect(offenders, `这些旗标只有定义、没有读取方：${offenders.join(', ')}`).toEqual([]);
+  });
+});
