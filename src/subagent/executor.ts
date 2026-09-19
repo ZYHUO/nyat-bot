@@ -103,6 +103,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 3.5. **排版克制**：支持 Telegram 富文本——星号粗体、_斜体_、||剧透||、行内代码/代码块、大于号引用块。但真人群聊几乎不排版：**日常闲聊一律纯文字**，只有内容真需要时才用（贴代码、发长文、强调个别词）。为排版而排版比没有更假。
 4. 一轮可以发送一条或多条真正有价值的消息，是否分段由语境决定；中间交流不会自动结束任务。输出：极短思考 + 一个 \`\`\`js 代码块。
 5. **await 完 send* 再** runtime.endTask("一句话摘要")。中途 sendText 后可以继续观察和执行；最终交付用 sendFinal。
+5.5. **要花时间就先吱一声。** 被问到要查/要想的事，**第一步就 await telegram.sendText("让我想想喵")**（或「我看看」「等我翻翻」），然后才去查去想，有结果再发。真人是边说边想的，不会沉默半分钟再一口气说完。长任务尤其要这样——否则人家以为你没在干活。注意：这不是"播报机器状态"（「正在检索…」那种仍然禁止），区别是**真群友会不会这么说**。一句话能答的别加开场白。
 6. 无日记工具；要写/读日记 → meta.request。禁止编造「写完了」。
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
 8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
@@ -110,6 +111,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 9. **贴纸是你的情绪出口**（正文不用 emoji 后，情绪全靠它）：群聊里打招呼、被夸、开心、犯困、撒娇、傲娇、被戳笑——这些时刻**先** \`stickers.pick(mood)\` 拿贴纸 \`telegram.sendSticker\` 发出去**再**接文字，比纯文字生动得多。库存 1400+ 张，playful/cute/sleepy/teasing/shy 全有。别每条都发（一天几张的频率），但情绪到位时别憋着。私聊少用。**正文非必要不用 emoji**——情绪用贴纸表达，sendText 的文字里别夹表情符号；「喵」「～」是口癖照用。给别人的消息贴表情回应（telegram.react）不受此限。
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
+11.5. **跨天的承诺**：如果答应的是**明天/以后**才有下文的（「明天帮你查」「等你想好了再说」）→ 调 runtime.rememberThread("明天要查的事")，这样明天你还能想起来提。区别：setScratch 是本次对话的工作记忆（30 分钟），rememberThread 是能记到明天的。**只记明确答应的**——随口一句不用记，不然明天冒出来会很怪。
 12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
 12. **多步任务可以使用计划**（auto+plan）：只有确实有助于推进时才 runtime.setPlan；计划是可修改的工作假设，不是必须逐项播报的清单。用户纠正或新证据出现时，及时调整或放弃不再适用的步骤。
 13. **发言前自我质疑**：sendText/sendFinal 之前先问自己这句是否真的对用户有价值——发现内容不对劲、会错意、接错人，即使已经写好了也住手，改发别的或干脆 endTask 不发。中途消息不要泄漏内部思考、工具名或空洞的“处理中”。**回答「找到了吗/有回信没/现在什么情况」这类状态问题前，必须先实际查（chats.recentMessages / memory.searchDigests），禁止凭印象汇报**——你以为的「还没回」可能只是你没去看。
@@ -1202,7 +1204,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             maxTokens: 300,
             temperature: 0.5,
           });
-          const text = (fallback.content ?? '').trim().slice(0, 300);
+          let text = (fallback.content ?? '').trim().slice(0, 300);
+          // This path sends straight through sendMessage, bypassing the guards in
+          // host sendText. Apply the same tool-leak check here, or a placeholder
+          // echoed by the model reaches the user through the back door.
+          const { findToolPlaceholder } = await import('./host-api.js');
+          const leak = findToolPlaceholder(text);
+          if (leak) {
+            text = text.split(leak).join('').trim();
+            logger.warn({ taskId: task.id, leak }, 'failsafe reply: stripped tool-result placeholder');
+          }
           if (text && !closed) {
             try {
               const { sendMessage } = await import('../bot/sender/telegram.js');
@@ -1328,13 +1339,19 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
 
       // AGI Level 5 Phase 6: 任务终态把 topic 实体写入世界状态。
+      //
+      // 2026-09-18: `contentDirection` is a reply *instruction*, not a topic name.
+      // Passing it here polluted world_entities with 2,711 instruction rows that
+      // were then rendered into the live prompt as "[相关世界实体]". The shape
+      // guard now lives in upsertEntity itself, so any caller is covered; this
+      // call site additionally skips the write when the text is clearly a
+      // directive rather than a name.
       if (env().WORLD_STATE_ENABLED) {
         void import('../agent/world-state.js')
           .then(({ upsertEntity }) => {
-            const topic = task.contentDirection.replace(/\[goal:\d+\]/g, '').trim().slice(0, 100);
-            if (topic.length >= 2) {
-              upsertEntity(topic, 'topic', { last_outcome: task.assessment?.status ?? 'unverified' }, task.chatId);
-            }
+            const topic = task.contentDirection.replace(/\[goal:\d+\]/g, '').trim();
+            // upsertEntity rejects non-entity shapes; nothing else to do here.
+            upsertEntity(topic, 'topic', { last_outcome: task.assessment?.status ?? 'unverified' }, task.chatId);
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'world state upsert failed'));
       }
@@ -1417,9 +1434,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
                   const masterUid = env().MASTER_UID;
                   if (goal && masterUid > 0 && goal.chat_id !== masterUid) {
                     const { sendMessage } = await import('../bot/sender/telegram.js');
+                    // `cannot` is model output and reaches a user directly here.
+                    const { findToolPlaceholder } = await import('./host-api.js');
+                    let reason = cannot.slice(0, 200);
+                    const leak = findToolPlaceholder(reason);
+                    if (leak) reason = reason.split(leak).join('').trim() || '遇到了一些问题';
                     await sendMessage(
                       masterUid,
-                      `主人，之前交代的那件事「${goal.topic.slice(0, 60)}」本喵办不到……${cannot.slice(0, 200)}`,
+                      `主人，之前交代的那件事「${goal.topic.slice(0, 60)}」本喵办不到……${reason}`,
                     );
                   }
                 } catch (err) {

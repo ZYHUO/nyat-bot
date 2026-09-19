@@ -117,9 +117,50 @@ export function stripApiCallLines(text: string): { clean: string; stripped: numb
   return { clean: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), stripped };
 }
 
+// Tool-result placeholders: what host tools return when a call cannot be served
+// (bad argument, disabled feature, empty result). They are scaffolding for the
+// MODEL to read, never text to send — observed 2026-09-18: the bot passed
+// "(invalid chatId)" straight into the master's DM after calling
+// chats.recentMessages with a bad id and echoing the result.
+//
+// Kept as one list rather than a loose regex so a new placeholder is a
+// deliberate addition, and the guard stays exact instead of over-matching
+// legitimate messages that merely contain parentheses.
+const TOOL_PLACEHOLDERS: readonly string[] = [
+  '(invalid chatId)',
+  '(invalid uid)',
+  '(context unavailable)',
+  '(memory unavailable)',
+  '(digest persist disabled)',
+  '(empty query)',
+  '(empty topic)',
+  '(empty)',
+  '(no hits)',
+  '(pixiv disabled)',
+  '(web search disabled)',
+  '(linux.sb disabled)',
+  '(那个群最近没有记录)',
+  '(没有找到相关记录)',
+  '(检索失败)',
+  '(读取失败)',
+  '(谈资库读取失败)',
+];
+
+/** First tool-result placeholder found in `text`, or null. */
+export function findToolPlaceholder(text: string): string | null {
+  for (const ph of TOOL_PLACEHOLDERS) {
+    if (text.includes(ph)) return ph;
+  }
+  // A bare parenthesised `invalid …` / `… unavailable` is the same class even if
+  // a new tool invents one we have not listed yet.
+  const generic = text.match(/\((?:invalid [^()]{1,40}|[^()]{1,40} unavailable|no [a-z ]{1,30} found)\)/i);
+  return generic ? generic[0] : null;
+}
+
 import { createExecutionAudit, attachExecutionAudit, type AuditSnapshot } from '../agent/execution-audit.js';
 import { markTaskVisible } from '../agent/task-progress.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
+import { recordSelfReply } from '../tracking/self-history.js';
 import type { AcceptanceContract, AcceptanceCheck, AcceptanceResult } from '../agent/task-evidence.js';
 import * as sandboxPaths from '../sandbox/paths.js';
 
@@ -299,6 +340,12 @@ export interface HostApi {
     drainUnviewedResults?: () => string[];
     /** 工作记忆：记下「在等什么/答应了什么」，30 分钟自动过期。 */
     setScratch: (text: string) => Promise<void>;
+    /**
+     * 跨天的未了事：明确答应过、或明确在等的（"明天告诉你"）。
+     * 与 setScratch 的区别：那是本次对话的工作记忆（30 分钟），这是能记到明天的。
+     * 只记**明确承诺**——随口说的话不该变成明天的开场白。
+     */
+    rememberThread: (note: string, kind?: 'promised' | 'waiting') => Promise<void>;
     /** 事办完了清掉（prefix 匹配，省略 = 全清）。 */
     clearScratch: (prefix?: string) => Promise<void>;
     /**
@@ -657,6 +704,26 @@ export function createHostApi(
                 'sendText_object_coercion: text contains "[object Object]" — sendFile/sendText return {messageId}; send the file, then describe it in a separate plain-text sendText without interpolating the return value',
               );
             }
+            // Tool-result leakage: host tools return bracketed placeholders like
+            // "(invalid chatId)" / "(那个群最近没有记录)" on failure. When a model
+            // passes one straight through to sendText, the user receives internal
+            // scaffolding as a message — observed 2026-09-18: the bot sent
+            // "(invalid chatId)" verbatim into the master's DM because it had
+            // called chats.recentMessages with a bad id and echoed the result.
+            // Treat a payload that IS such a placeholder as a leak; strip it from
+            // a longer sentence (the model may have wrapped it in real words).
+            {
+              const leak = findToolPlaceholder(clean);
+              if (leak) {
+                const withoutPlaceholder = clean.split(leak).join('').trim();
+                if (!withoutPlaceholder) {
+                  logger.warn({ chatId, leak }, 'host sendText rejected: payload was a tool-result placeholder');
+                  throw new Error('sendText_tool_leak: the text is a tool result placeholder, not something to say; call the tool with a valid argument, or say something in your own words');
+                }
+                logger.warn({ chatId, leak, kept: withoutPlaceholder.length }, 'host sendText: stripped tool-result placeholder from model text');
+                clean = withoutPlaceholder;
+              }
+            }
             assertNotBanned(clean);
 
             // Reject parroting the user's latest line(s) — common when direction embeds user text.
@@ -812,6 +879,34 @@ export function createHostApi(
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               if (opts.taskId) markTaskVisible(opts.taskId);
               logger.info({ chatId, taskId: opts.taskId, deliveryKind: kind, messageId }, 'task delivery recorded');
+              // Self-history: Meta is the production main path, so without this the
+              // model would only ever see its legacy-pipeline acts (checkin/cards)
+              // and never the conversation replies it actually sent — it could not
+              // notice its own repetition. Records the real receipt, not intent.
+              try {
+                // opts has no trigger message/uid: the task's quoteIds are the
+                // closest available provenance, and only the first bubble carries
+                // the quote anchor. trigger_msg_id is informational; failure to
+                // attribute it does not affect the behaviour feed.
+                recordSelfReply(chatId, opts.targetUserId ?? 0, replyTo ?? null, part, messageId);
+              } catch (err) {
+                logger.debug({ err, chatId }, 'host sendText self-history failed (non-critical)');
+              }
+              // NyatOS participation budget: this is where the Meta path — the
+              // production main path — actually sends, so this is where the
+              // throttle must be spent. Wiring it only into
+              // pipeline/stages/deliver.ts meant the budget never decreased on
+              // real traffic (measured 2026-09-18: 96 "speak" shadow verdicts in
+              // 23 minutes while Redis held zero budget keys, so every Frame
+              // still advertised a full "6/6 remaining").
+              if (env().NYATOS_BUDGET_ENABLED) {
+                void import('../nyatos/budget.js')
+                  .then(({ spendParticipation, markActiveSpeech }) => {
+                    spendParticipation(chatId);
+                    markActiveSpeech(chatId);
+                  })
+                  .catch((err) => logger.debug({ err, chatId }, 'budget spend failed (non-critical)'));
+              }
               // Task deliveries are already persisted by task-runtime-events;
               // normal legacy replies need the same durable delivery fact.
               const deliveryEventId = !opts.taskId
@@ -1020,7 +1115,19 @@ export function createHostApi(
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
               const { messageId } = await tgSendFile(chatId, target, {
-                caption: caption ? String(caption).slice(0, 1000) : undefined,
+                // A caption is user-visible text; strip tool scaffolding like any
+                // other send path.
+                caption: caption
+                  ? (() => {
+                      let c = String(caption).slice(0, 1000);
+                      const leak = findToolPlaceholder(c);
+                      if (leak) {
+                        c = c.split(leak).join('').trim();
+                        logger.warn({ chatId, leak }, 'sendFile: stripped tool-result placeholder from caption');
+                      }
+                      return c || undefined;
+                    })()
+                  : undefined,
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
               });
@@ -1115,8 +1222,17 @@ export function createHostApi(
         assertOpen();
         return trackInflight(
           (async () => {
-            const clean = String(text ?? '').trim();
+            let clean = String(text ?? '').trim();
             if (!clean) return { skipped: true as const, reason: 'empty_text' };
+            // Speaking a tool placeholder aloud is the same leak as typing it.
+            {
+              const leak = findToolPlaceholder(clean);
+              if (leak) {
+                clean = clean.split(leak).join('').trim();
+                if (!clean) return { skipped: true as const, reason: 'tool_leak' };
+                logger.warn({ chatId, leak }, 'sendVoice: stripped tool-result placeholder');
+              }
+            }
             try {
               const { synthesizeVoice } = await import('../ai/tts.js');
               const { sendVoice: tgSendVoice } = await import('../bot/sender/telegram.js');
@@ -1246,8 +1362,21 @@ export function createHostApi(
               throw new Error('sendToChat_invalid_target: group chatId (negative) or user uid (positive) required');
             }
             if (crossSends >= 2) throw new Error('sendToChat_limit:2');
-            const clean = String(text ?? '').trim();
+            let clean = String(text ?? '').trim();
             if (!clean) throw new Error('empty text');
+            // Same tool-result leak guard as host sendText: sending to another
+            // chat must not be a back door for scaffolding.
+            {
+              const leak = findToolPlaceholder(clean);
+              if (leak) {
+                const withoutPlaceholder = clean.split(leak).join('').trim();
+                if (!withoutPlaceholder) {
+                  throw new Error('sendText_tool_leak: the text is a tool result placeholder, not something to say; call the tool with a valid argument, or say something in your own words');
+                }
+                logger.warn({ chatId: tid, leak }, 'telegram.sendMessage: stripped tool-result placeholder');
+                clean = withoutPlaceholder;
+              }
+            }
             assertNotBanned(clean);
             // 确认目标可达：群→bot 必须在；个人→必须已有私聊（getChat 成功）。
             try {
@@ -2111,6 +2240,19 @@ export function createHostApi(
           await setScratch(chatId, text);
         } catch (err) {
           logger.debug({ err, chatId }, 'host setScratch failed');
+        }
+      },
+      async rememberThread(note: string, kind?: 'promised' | 'waiting') {
+        try {
+          const { rememberThread } = await import('../tracking/open-threads.js');
+          rememberThread({
+            chatId,
+            uid: opts.targetUserId ?? 0,
+            note,
+            kind: kind === 'waiting' ? 'waiting' : 'promised',
+          });
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host rememberThread failed');
         }
       },
       async clearScratch(prefix?: string) {
