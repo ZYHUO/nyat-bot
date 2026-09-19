@@ -589,14 +589,15 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         )
         .join('\n')
     : '  (没有)';
-  // 它自己没说出口的念头（ NyatOS 影子判定 speak 而线上静默的那批）
-  let impulseLines = '';
+  // 它自己没说出口的念头（NyatOS 影子判定 speak 而线上静默的那批）。
+  // 只算一次：proposeActions 也要用它，每个 tick 两遍 × 每群一次查询是白烧。
+  let ownImpulses: Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }> = [];
   try {
-    const own = await collectUnactedImpulses(state.groups.map((g) => g.chatId));
-    impulseLines = own.length
-      ? own.map((o) => `  群 ${o.chatId}: ${o.minutesAgo} 分钟前你想过——「${o.about}」`).join('\n')
-      : '';
-  } catch { /* 没就不显示 */ }
+    ownImpulses = await collectUnactedImpulses(state.groups.map((g) => g.chatId));
+  } catch { /* 没就不自主，别硬造 */ }
+  const impulseLines = ownImpulses.length
+    ? ownImpulses.map((o) => `  群 ${o.chatId}: ${o.minutesAgo} 分钟前你想过——「${o.about}」`).join('\n')
+    : '';
   const shareLines = (state.shareCandidates ?? []).length
     ? state.shareCandidates!
         .map((c) => `  群 ${c.fromChatId} #${c.messageId} (分${c.score}): 「${c.text}」`)
@@ -667,7 +668,7 @@ async function collectUnactedImpulses(chatIds: number[], withinMin = 360): Promi
         // 它自己起过、没说出口的念头：影子判定 speak 而线上最终静默的那批。
         // 这是目前唯一现成的"我有自己的事"来源（goals.origin='self' 是 0 行），
         // 而且内容就是它当时自己想说的话，不是我替它编的。
-        unactedImpulses: await collectUnactedImpulses(state.groups.map((g) => g.chatId)),
+        unactedImpulses: ownImpulses,
       },
       masterConfigured: env().MASTER_UID > 0,
     });
