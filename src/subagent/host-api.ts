@@ -820,6 +820,27 @@ export function createHostApi(
               throw new Error('near_dup_reply');
             }
 
+            // 语义重复守卫：同义改写刷屏（「困到流口水了」→「困到打哈欠了」）字面相似度
+            // 只有 0.13~0.27，上面的字面守卫结构上抓不到，只能问语义。只在第 2+ 次任务内
+            // 发送时跑（首次发送零成本）；JeV 不可达一律 fail-open，绝不因检查失败吞消息。
+            if (env().SEMANTIC_DUP_ENABLED && textSent > 0 && sentTexts.length > 0) {
+              try {
+                const { checkSemanticRepeat, semanticRepeatError } = await import('./semantic-dup.js');
+                const dup = await checkSemanticRepeat(sentTexts, clean);
+                if (dup.isRepeat) {
+                  logger.info(
+                    { chatId, preview: clean.slice(0, 60), probability: dup.probability, prior: dup.collidedWith?.slice(0, 60) },
+                    'host sendText rejected semantic repeat',
+                  );
+                  throw new Error(semanticRepeatError(dup));
+                }
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.startsWith('重复表达未发送')) throw err;
+                logger.debug({ err, chatId }, 'semantic-dup check failed — fail-open');
+              }
+            }
+
             // MaiBot-style split (same segmenter as legacy reply). One sendText may
             // become multiple bubbles; only the first carries reply-to.
             const maxLen = chatId > 0 ? 280 : 160;

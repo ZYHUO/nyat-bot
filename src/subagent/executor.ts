@@ -143,6 +143,36 @@ function extractJs(text: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
+/**
+ * 工具返回值 → 喂给模型的字符串。
+ *
+ * host 的发送类工具用 `makeSendAck` 返回**带自定义字符串化**的对象，人话回执全挂在
+ * `toString`/`Symbol.toPrimitive` 上（"text_sent#123"、"file_sent:x.png#45"、
+ * "file_send_failed:原因…"）。`JSON.stringify` 会跳过函数和符号键，压成
+ * `{"messageId":123}`——模型收到的等于空话。2026-09-19 实测：sendText 连发 6 条
+ * 同义问候，模型却看不到「你 5 秒前刚发过一条」的回执注记，正是这一行把注记吃掉。
+ * 所以：有自定义字符串化的对象优先 String()；普通数据（数组/普通对象）才 JSON。
+ */
+export function stringifyToolResult(out: unknown): string {
+  if (out === undefined) return 'ok';
+  if (typeof out === 'string') return out;
+  if (out === null) return 'null';
+  if (typeof out === 'object' && !Array.isArray(out)) {
+    const o = out as Record<string | symbol, unknown>;
+    if (typeof o[Symbol.toPrimitive] === 'function') return String(out);
+    // 自有/原型上的自定义 toString（普通对象的 toString 来自 Object.prototype）
+    const proto = Object.getPrototypeOf(out) as object | null;
+    const custom =
+      Object.prototype.hasOwnProperty.call(out, 'toString') ||
+      (proto !== null &&
+        proto !== Object.prototype &&
+        typeof (proto as { toString?: unknown }).toString === 'function');
+    if (custom) return String(out);
+  }
+  if (typeof out === 'number' || typeof out === 'boolean') return String(out);
+  return JSON.stringify(out);
+}
+
 async function runHostCode(
   code: string,
   host: HostApi,
@@ -206,7 +236,7 @@ async function runHostCode(
     if (opts.isClosed()) {
       return { ok: false, output: 'codeact_timeout' };
     }
-    let output = out === undefined ? 'ok' : typeof out === 'string' ? out : JSON.stringify(out);
+    let output = stringifyToolResult(out);
     // 「只回 ok」机制修复：查询类工具结果被调了但没 return → host 留了摘要，捡回来
     // 给它看（2026-08-21 goal_2：搜到 1247 字却报「工具只回 ok，办不到」）。
     if (out === undefined) {

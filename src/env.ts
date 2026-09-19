@@ -382,6 +382,16 @@ const envSchema = z.object({
   // sendText 回执带上"距上一条仅 N 秒"的事实注记，让模型自己意识到在连发/同义改写。
   // 不拦截、不扣分——只给事实，改不改由 persona 决定（2026-09-19 困困问候连刷 6 条事件）。
   SEND_PACING_FACT_ENABLED: booleanFromEnv.default(false),
+  // 语义重复守卫：bot 在同一任务里把同一个意思换个说法再发一遍（同义改写刷屏）。
+  // 字面 bigram Jaccard ≥0.85 的 anti-repeat 抓不到这种（实测相似度仅 0.13~0.27），
+  // 所以这里用 TypeSafe System One (Jev) 问一个 Noul。仅在第 2+ 次任务内发送时调用；
+  // Je 不可达一律 fail-open 放行（不可因基础设施故障吞掉一句话）。
+  SEMANTIC_DUP_ENABLED: booleanFromEnv.default(false),
+  SEMANTIC_DUP_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
+  // TypeSafe System One 接入。/v1/systemone；key 是 secret（.env，勿提交）。
+  TYPESAFE_ENDPOINT: z.string().default('https://api.typesafe.ai/v1/systemone'),
+  TYPESAFE_MODEL: z.string().default('jev-latest'),
+  TYPESAFE_API_KEY: z.string().default(''),
   TIMING_GATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
   TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),
