@@ -73,8 +73,15 @@ export function setDriveValue(name: DriveName, value: number): void {
     const v = Math.min(1, Math.max(0, value));
     getDb()
       .prepare(
+        // 注意：ON CONFLICT **不碰 updated_at**。这个时间戳的唯一用途是 satiation
+        // 的衰减计时（rowToState: age = now - updated_at）。tick 每次都会调本函数
+        // 刷新 value，如果顺手刷新 updated_at，衰减时钟就被无限归零——
+        // 2026-09-19 实测后果：connection/autonomy 的 satiation 永久钉在 1.0，
+        // drive satiation suppressor 据此否决掉每一个社交动作，
+        // unified-tick 4 天 81 个 tick 里 66 个被 veto、0 次主动发言。
+        // 只有 satiate() 该动这个时钟（它才是真正写入 satiation 的那一个）。
         `INSERT INTO core_drives (name, value, satiation, updated_at) VALUES (?, ?, 0, ?)
-         ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+         ON CONFLICT(name) DO UPDATE SET value = excluded.value`,
       )
       .run(name, v, nowSec());
   } catch (err) {
