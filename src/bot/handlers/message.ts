@@ -402,7 +402,9 @@ async function handleUpdate(ctx: Context): Promise<void> {
           //   ① envelope 从 shadow 拨到 enforce 并读过真实拦截率（论文 §九·补五）
           //   ② 金丝雀的 Phase 2 一致率与发送量曲线可作为对照基线
           // 顺序反了就是把刹车片拔了再装新的。
-          const heartPath = heartRoute(env());
+          // 传 chatId：旁路支持按群灰度（名单优先于全局开关），
+          // 这样"先开一个群试试"不要求先全局翻旗。
+          const heartPath = heartRoute(env(), chatId);
           if (heartPath === 'heart') {
             void (async () => {
               try {

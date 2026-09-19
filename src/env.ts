@@ -826,6 +826,19 @@ const envSchema = z.object({
   // 带人格+自我状态的"心流判断"(reply/wait/pass)。1 次调用替代 1-3 次。
   HEART_ENABLED: booleanFromEnv.default(false),
 
+  // Nyat Trench Phase 1 旁路的**灰度群列表**。空 = 不旁路任何群（默认）。
+  // 为什么需要灰度：翻旗的预期效果是把最忙群的发送率从 22% 抬到 86%（投影 3.9x），
+  // 全量翻等于同时改所有群的行为，出了问题也分不清是哪群的什么条件触发的。
+  // 按仓库既有约定（TURN_ACTOR_CHAT_IDS 同款）先开一个群，看金丝雀曲线再决定扩不扩。
+  // 名单里的群走 bypass（心流不否决，消息仍按 layer 进 attention）。
+  META_HEART_BYPASS_CHAT_IDS: z
+    .string()
+    .default('')
+    .transform((s) => {
+      const t = s.trim();
+      if (!t) return [] as number[];
+      return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+    }),
   // Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。
   // 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。
   // false = 旁路它的 allow/silence，消息按既有 layer 分级直接进 attention。
