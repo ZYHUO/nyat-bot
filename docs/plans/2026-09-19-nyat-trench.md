@@ -157,15 +157,15 @@ src/nyatos/budget.ts:163:  export async function canSpeakActively(...)
 
 ```
             ┌─────────────────────────────┐
-   L4 洋流  │  subagent：无状态探索，用完即焚 │  Current
+   L4 洋流  │  subagent：无状态探索，用完即焚 │  Current   ← 未建
             ├─────────────────────────────┤
-   L3 皮层  │  meta(想) + reply(说)        │  Cortex   ← 只读 P/θ/E
+   L3 皮层  │  meta(想) + reply(说)        │  Cortex   ← 未建（现有 meta/reply 原样保留）
             ├─────────────────────────────┤
-   L2 反射  │  judge(判定) + Echo(唯一学习) │  Reflex   ← 唯一写 E、唯一 P+=δ
+   L2 反射  │  judge(判定) + Echo(唯一学习) │  Reflex   ← ✅ 已建（echo.ts）
             ├─────────────────────────────┤
-   L1 沟壁  │  wall：路由/预算/超时/clamp  │  Wall     ← 只读，只会说不
+   L1 沟壁  │  wall：路由/预算/超时/clamp  │  Wall     ← ✅ 已建（envelope.ts + 发送前硬闸）
             ├─────────────────────────────┤
-   L0 海床  │  trench：P/θ + 泵 + 硬复位   │  Bed      ← 全系统唯一有状态者
+   L0 海床  │  trench：P/θ + 泵 + 硬复位   │  Bed      ← ✅ 已建（trench.ts，另加睡眠积压/定向债/卡死恢复）
             └─────────────────────────────┘
 ```
 
