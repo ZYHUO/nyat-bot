@@ -15,6 +15,18 @@ import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 
 const DAYS = Number(process.argv[2] ?? 7);
+// 时间窗（可选）：--since HH:MM --until HH:MM（UTC）。用于对比"旁路期间 vs 之前"——
+// 整段聚合的数字分不出这两者，而时限旁路的意义恰恰在于它是一个有界窗口。
+const si = process.argv.indexOf('--since');
+const ui = process.argv.indexOf('--until');
+function todayAt(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  const d = new Date();
+  d.setUTCHours(h ?? 0, m ?? 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+const SINCE = si > 0 ? todayAt(process.argv[si + 1]!) : null;
+const UNTIL = ui > 0 ? todayAt(process.argv[ui + 1]!) : null;
 const DB = process.env.SQLITE_PATH ?? './data/xxb.db';
 const LOG = 'logs/app.log';
 
@@ -186,16 +198,20 @@ try {
   bypassList = env().META_HEART_BYPASS_CHAT_IDS;
 } catch { /* 读不到名单就只报分群，不标旁路 */ }
 try {
-  const cutoff = Math.floor(Date.now() / 1000) - DAYS * 86400;
+  const cutoff = SINCE ?? (Math.floor(Date.now() / 1000) - DAYS * 86400);
+  const untilClause = UNTIL ? ` AND ts < ${UNTIL}` : '';
+  const untilClauseEvt = UNTIL ? ` AND occurred_at < ${UNTIL}` : '';
+  const win = SINCE || UNTIL ? `（${new Date(cutoff * 1000).toISOString().slice(11, 16)}${UNTIL ? `–${new Date(UNTIL * 1000).toISOString().slice(11, 16)}` : '–现在'} UTC）` : '';
   const perChat = sql(`
     SELECT chat_id,
            COUNT(*) AS sends
-    FROM self_replies WHERE ts >= ${cutoff}
+    FROM self_replies WHERE ts >= ${cutoff}${untilClause}
     GROUP BY chat_id ORDER BY sends DESC LIMIT 10`);
+  console.log(`  时间窗：${win || `近 ${DAYS} 天`}`);
   for (const r of perChat) {
     const chat = Number(r.chat_id);
     const inbound = Number((sql(`SELECT COUNT(*) AS n FROM cognitive_events
-      WHERE type='message_received' AND chat_id=${chat} AND occurred_at >= ${cutoff}`)[0]?.n ?? 0));
+      WHERE type='message_received' AND chat_id=${chat} AND occurred_at >= ${cutoff}${untilClauseEvt}`)[0]?.n ?? 0));
     const sends = Number(r.sends);
     const rate = inbound > 0 ? (sends / inbound) * 100 : 0;
     const tag = bypassList.includes(chat) ? '  ← 旁路中' : '';
