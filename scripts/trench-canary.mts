@@ -19,14 +19,22 @@ const DAYS = Number(process.argv[2] ?? 7);
 // 整段聚合的数字分不出这两者，而时限旁路的意义恰恰在于它是一个有界窗口。
 const si = process.argv.indexOf('--since');
 const ui = process.argv.indexOf('--until');
-function todayAt(hhmm: string): number {
-  const [h, m] = hhmm.split(':').map(Number);
+// 接受两种写法：`HH:MM`（今天 UTC）或 `YYYY-MM-DD HH:MM`。
+// 第二种是为了做对照组：**同群、同时段、不同日期**——上一轮发现发送率按小时在
+// 21%~74% 之间跳，拿整段平均或全站平均都无法归因，只有同时段不同日期能比。
+function parseAt(spec: string): number {
+  const datePart = spec.match(/^(\d{4}-\d{2}-\d{2})\s+(.+)$/);
   const d = new Date();
+  if (datePart) {
+    d.setUTCFullYear(Number(datePart[1]!.slice(0, 4)), Number(datePart[1]!.slice(5, 7)) - 1, Number(datePart[1]!.slice(8, 10)));
+    spec = datePart[2]!;
+  }
+  const [h, m] = spec.split(':').map(Number);
   d.setUTCHours(h ?? 0, m ?? 0, 0, 0);
   return Math.floor(d.getTime() / 1000);
 }
-const SINCE = si > 0 ? todayAt(process.argv[si + 1]!) : null;
-const UNTIL = ui > 0 ? todayAt(process.argv[ui + 1]!) : null;
+const SINCE = si > 0 ? parseAt(process.argv[si + 1]!) : null;
+const UNTIL = ui > 0 ? parseAt(process.argv[ui + 1]!) : null;
 const DB = process.env.SQLITE_PATH ?? './data/xxb.db';
 const LOG = 'logs/app.log';
 
@@ -202,11 +210,15 @@ try {
   const untilClause = UNTIL ? ` AND ts < ${UNTIL}` : '';
   const untilClauseEvt = UNTIL ? ` AND occurred_at < ${UNTIL}` : '';
   const win = SINCE || UNTIL ? `（${new Date(cutoff * 1000).toISOString().slice(11, 16)}${UNTIL ? `–${new Date(UNTIL * 1000).toISOString().slice(11, 16)}` : '–现在'} UTC）` : '';
-  const perChat = sql(`
-    SELECT chat_id,
-           COUNT(*) AS sends
-    FROM self_replies WHERE ts >= ${cutoff}${untilClause}
-    GROUP BY chat_id ORDER BY sends DESC LIMIT 10`);
+  const onlyChat = process.argv[process.argv.indexOf('--chat') + 1];
+  const perChat = onlyChat
+    ? [{ chat_id: Number(onlyChat), sends: Number((sql(`SELECT COUNT(*) AS sends FROM self_replies
+        WHERE ts >= ${cutoff}${untilClause} AND chat_id=${Number(onlyChat)}`)[0]?.sends ?? 0)) }]
+    : sql(`
+        SELECT chat_id,
+               COUNT(*) AS sends
+        FROM self_replies WHERE ts >= ${cutoff}${untilClause}
+        GROUP BY chat_id ORDER BY sends DESC LIMIT 10`);
   console.log(`  时间窗：${win || `近 ${DAYS} 天`}`);
   for (const r of perChat) {
     const chat = Number(r.chat_id);
