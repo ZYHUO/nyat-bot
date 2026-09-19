@@ -433,6 +433,17 @@ async function handleUpdate(ctx: Context): Promise<void> {
                   noteLiveOutcome(heart.reason?.startsWith('heart_wait') ? 'wait' : 'silent');
                   return;
                 }
+                // 心流**放行**也要入账。
+                //
+                // `recordLiveOutcome` 的类型联合里有 'spoke'，文档说"记录 live path
+                // 实际做了什么"，但全仓没有任何调用方传过它——金丝雀的【决策来源】
+                // 分布里 spoke 恒为 0。于是账本只记否决、不记放行，
+                // "shadow 想说 vs live 做了"的这个 join 少了一半。
+                //
+                // 放过之后仍可能因别的原因没真的发出去（被下游守卫拦、任务失败），
+                // 所以这里记的是心流的**裁决**（放行），不是"最终发出"——
+                // 后者由 self_replies 记。两者互补，不重复。
+                noteLiveOutcome('spoke');
 
                 const elevLayer = heart.layer;
                 const elevReason = heart.reason;
