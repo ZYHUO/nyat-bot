@@ -45,6 +45,13 @@ export interface ShadowDecision {
   latencyMs: number;
   /** True when the model call failed and this is a fail-closed default. */
   failed: boolean;
+  /**
+   * Bounded error class when the call THREW (not when it merely parsed badly).
+   * Needed because every failure used to collapse into why='shadow_error' with the
+   * detail at debug level, i.e. invisible in production while 14% of the period's
+   * verdicts were silently unusable (2026-09-19).
+   */
+  errorHint?: string;
 }
 
 export interface ShadowComparison {
@@ -191,8 +198,18 @@ export async function decideShadow(
       failed: false,
     };
   } catch (err) {
-    logger.debug({ err }, 'shadow decision failed (non-critical)');
-    return { verdict: 'silent', why: 'shadow_error', latencyMs: Date.now() - started, failed: true };
+    // 这里的失败此前只走 debug —— 生产日志 level 30 下完全不可见，而账本里它
+    // 长得跟一句真的"沉默"一模一样（2026-09-19 实测：6 小时 37 次，占该时段
+    // 判定的 14%，我却无法诊断任何一次）。失败必须比"决定不说话"更吵。
+    const hint = err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 120) : String(err).slice(0, 120);
+    logger.warn({ err: hint, latencyMs: Date.now() - started }, 'shadow decision THREW (counted as silent)');
+    return {
+      verdict: 'silent',
+      why: 'shadow_error',
+      errorHint: hint,
+      latencyMs: Date.now() - started,
+      failed: true,
+    };
   }
 }
 
@@ -318,6 +335,7 @@ export async function runIngressShadow(input: {
         // often the shadow wanted to speak.
         shadowVerdict: shadow.failed ? 'failed' : shadow.verdict,
         shadowWhy: shadow.why,
+        ...(shadow.errorHint ? { shadowError: shadow.errorHint } : {}),
         latencyMs: shadow.latencyMs,
         failed: shadow.failed,
         bubbleCount: shadow.bubbles?.length ?? 0,
