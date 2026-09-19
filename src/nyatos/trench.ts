@@ -261,7 +261,7 @@ export async function detectWakeTransition(activeChatIds: number[]): Promise<boo
       const atWake = await Promise.all(
         activeChatIds.map(async (id) => ({ id, p: (await readTrench(id)).p })),
       );
-      const elevated = atWake.filter((x) => x.p > 0);
+      const elevated = atWake.filter((x) => x.p > 0).sort((a, b) => b.p - a.p);
       logger.warn(
         { event: 'trench_wakeup', chats: elevated },
         'trench: bot woke up — pressure carried into the first minutes',
