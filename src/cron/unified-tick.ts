@@ -1055,6 +1055,29 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           const m = topicHint.match(/优先跟「(.+?)」/);
           if (m?.[1]) recordPull(a.chatId, m[1]);
         } catch { /* non-critical */ }
+        // ── 主动发言进账（2026-09-19）────────────────────────────
+        // 此前 unified-tick 一次都没写过 self_replies / pending，于是"主动开口被无视"
+        // 这件事**在系统里不存在**：2828 行 self_replies 里 34 行有 outcome，
+        // 34 行全部是 reactive（trigger_uid<>0）；trigger_uid=0 的 7 行全 unknown。
+        // 折衷方案（"想不想不变、时机学会"）的第一周工作量就是这条线——
+        // 没有它，"被无视"连判定都产不出，遑论学习。
+        // trigger_uid=0 = 主动，trigger_msg_id=null = 无触发消息。
+        try {
+          const { recordSelfReply } = await import('../tracking/self-history.js');
+          recordSelfReply(a.chatId, 0, null, text, messageId);
+        } catch (err) {
+          logger.debug({ err, chatId: a.chatId }, 'unified tick: recordSelfReply failed (non-critical)');
+        }
+        try {
+          const { recordReply } = await import('../tracking/outcome.js');
+          // 位置参数：botMessageId / triggerMessageId(null=无触发) / triggerUserId(0=主动)
+          // / triggerText('' 因为没人触发) / replyText / action
+          // triggerMessageId=0 / triggerUserId=0 是本仓库"没有触发者"的既有记号
+          // （outcome.ts 自己用 `?? 0`），主动发言本来就没有触发消息。
+          await recordReply(a.chatId, messageId, 0, 0, '', text, 'group_speak');
+        } catch (err) {
+          logger.debug({ err, chatId: a.chatId }, 'unified tick: outcome recordReply failed (non-critical)');
+        }
       }
       if (missedHere.length) {
         try {

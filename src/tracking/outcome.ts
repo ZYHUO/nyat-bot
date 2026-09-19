@@ -266,6 +266,10 @@ export async function checkOutcome(
           continue;
         }
 
+        // 只有**人类**消息算"面前有人"。别的 bot 在刷屏不等于有人听——
+        // 双 bot 房间里旧逻辑会把机器喧嚣当观众，于是主动发言永远判不到 ignored。
+        // （2026-09-19：这是"被无视"判定的第一处误判源。）
+        if (currentMessage.isBot) continue;
         const msgsAfter = ((entry.msgs_after as number) ?? 0) + 1;
         entry.msgs_after = msgsAfter;
 
