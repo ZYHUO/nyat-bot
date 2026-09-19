@@ -79,11 +79,14 @@ describe('renderRoomAwareness', () => {
     const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759490 });
     expect(r.text).toContain('你自已的毛病');
     expect(r.text).toContain('拿"喵"收尾');
+    // It must stay a fact the model can act on, never a quota or a refusal.
+    expect(r.text).toContain('你自己决定');
+    expect(r.text).not.toContain('禁止');
+    expect(r.text).not.toContain('必须');
     // The whole point: the model decides. No hard trimming, no refusal.
     expect(r.signals).toContain('self_stats');
     expect(r.text).not.toContain('禁止');
     expect(r.text).not.toContain('必须');
-    expect(r.text).toContain('你自己决定');
   });
 
   it('stays quiet about 喵 when the rate is already natural', async () => {
