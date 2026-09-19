@@ -475,15 +475,16 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
     lines.push(`[你自己最近做的] ${parts.join('；')}`);
   }
 
-  // 冲动史：单决策点**想**做什么（不是做过了什么）。
-  // 2026-09-19 第三次抓到同一形态：字段填好了、注释写着"只缺读取方"，
-  // 而 renderFrame 从来没读它——于是 bot 依旧看不见自己 95% 的消息都想接话。
-  if (frame.self.recentImpulses && frame.self.recentImpulses.length > 0) {
-    lines.push('[念头] 你最近心里冒过的念头（想接的念头，不是已经做了的事）：');
-    for (const imp of frame.self.recentImpulses.slice(0, 4)) {
-      lines.push(`  · ${imp.minutesAgo} 分钟前想「${imp.verdict}」：${imp.why}`);
-    }
-  }
+  // 冲动史**不在这里渲染**。
+  //
+  // 2026-09-19：我加过一段 [念头]，后来追查真实注入文本时发现 room-awareness.ts
+  // 早就有一段更好的 [你刚才的念头]——带计数概要（"最近 N 条里你有 M 次想接话"）
+  // 和行为指引（"用它们判断我现在还想不想说"），数据和 why 文本完全相同。
+  // 于是同一份冲动在 prompt 里出现两遍，白吃约 115 字预算。
+  //
+  // 而 renderFrame 的唯一冲动消费方就是 room-awareness（shadow 的 buildFrame
+  // 不传 withImpulses，从来没见过这段），所以这里渲染等于纯重复。
+  // recentImpulses 字段保留：它仍是 buildFrame 的产出，消费方在 room-awareness。
   if (frame.self.pendingWake) {
     lines.push(
       `[你自己定的下一次] ${frame.self.pendingWake.minutesAhead} 分钟后你打算再想想`

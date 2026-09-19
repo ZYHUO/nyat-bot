@@ -69,7 +69,11 @@ export function getRecentImpulses(chatId: number, limit = 4, withinMin = 90): Im
     }
     return out;
   } catch (err) {
-    logger.debug({ err, chatId }, 'getRecentImpulses failed (non-critical)');
+    // **必须 warn 不是 debug**：2026-09-19 我用错了 Node 跑探针（better-sqlite3
+    // 加载失败），这个 catch 静默返回 []，于是我据以判定"[念头] 不工作"——
+    // 而真相是探针自己坏了。debug 级在生产等于不可见，一个会静默消失的
+    // 冲动史会让上面所有"它没出现"的判断都变成假阴性。
+    logger.warn({ err, chatId }, 'getRecentImpulses failed — impulse history SILENTLY empty');
     return [];
   }
 }
