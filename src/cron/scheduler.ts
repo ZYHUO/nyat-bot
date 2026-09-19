@@ -164,6 +164,23 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
+  // Nyat Trench · L2 反射：Echo 回填 + E 更新 + P 脉冲。
+  //
+  // 修的是一个纯写入侧缺漏：主动发言（trigger_uid=0）从不进 outcome.ts 的
+  // pending 队列，所以那条闭合管道对它从未生效——实测 self_replies 3,337 行里
+  // 98.7% 永远是 unknown。本任务用 bot_interactions 做一次纯 SQL 回扫。
+  // 零 LLM、零 token。
+  if (env().ECHO_ENABLED === true) {
+    reg({
+      name: 'echo-backfill',
+      everySec: 1800,
+      run: async () => {
+        const { backfillEcho } = await import('../agent/echo.js');
+        await backfillEcho();
+      },
+    });
+  }
+
   // Event-backed mission/process continuity. This tick only claims due wake
   // records and schedules durable process work; it never calls a model, tool,
   // or Telegram adapter by itself.

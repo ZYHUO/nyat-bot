@@ -406,6 +406,9 @@ const envSchema = z.object({
   // 论文 docs/plans/2026-09-19-nyat-trench.md。v1 只做"身体先行"：
   // 纯增量，不动任何现有决策路径——heart/judge/gate 照旧跑，
   // 只是 Frame 里多一行身体感受，且 P 有了唯一衰减方。
+  // Nyat Trench L2 反射：Echo 学习闭环（确定性回填 + 标量 E ∈ [0.05,0.90] + P 脉冲）。
+  // 论文 §3.2 机制三。零 LLM：判据全部来自 bot_interactions / self_replies 的宿主事实。
+  ECHO_ENABLED: booleanFromEnv.default(false),
   TRENCH_PUMP_ENABLED: booleanFromEnv.default(false),
   ROOM_AWARENESS_ENABLED: booleanFromEnv.default(false),
   // ── 定型判断基座 src/ai/judge-substrate.ts ───────────────────────
