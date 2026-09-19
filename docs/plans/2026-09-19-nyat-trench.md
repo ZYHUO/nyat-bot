@@ -275,9 +275,9 @@ E 驱动两件事：岸线高度 `θ_eff = θ_min + (θ_max−θ_min)·(E*/max(E
 |---|---|---|---|
 | 1 | precheck `isClearlyHumanToHuman`(0ms，覆盖 88% gate 调用) | L1 沟壁·路由段 | **原函数原样搬入不改一行**，命中即不排醒觉检查 |
 | 2 | LLM gate（125 次判定 124 次 no_action） | **删除** | 判定合并进一转；continue/wait/no_action ↔ speak/wait/silent |
-| 3 | cooldown + defer（含"不可丢消息"） | 拆两半 | cooldown → P 越线后泄放（抽 85%）；不丢消息 → reservation 的 entry_payload，**完整保留 defer.ts 的"载荷即暂存 + dedupToken exactly-once + 预算耗尽放行"三件套** |
+| 3 | cooldown + defer（含"不可丢消息"） | 拆两半 | ~~cooldown → P 越线后泄放~~ **部分成立**（releasePressure 已接，但它不是 cooldown）；~~不丢消息 → reservation~~ **reservation 未建**，defer.ts 三件套**原样保留在原地**（功能没丢，新家没建） |
 | 4 | talk-value 攒批阈值 | L1 省调用预过滤 | `computeAvgIntervalSec` / `idleEquiv` / `focusAdjust` / `BURST_GAP_SEC` **全部原样保留** |
-| 5 | participation budget 6条/h + 90s | **L1 发送闸（硬闸复活）** | `canSpeakActively()` 从死代码变成唯一发送出口的前置条件；direct（@我/回我/DM）豁免 |
+| 5 | participation budget 6条/h + 90s | **L1 发送闸（硬闸复活）** | `canSpeakActively()` 已复活为前置条件，但 direct 豁免在生产几乎总触发（100% 发送带锚点）→ 实际由包络接管 |
 | 6 | NyatOS shadow 判定 | **升级为唯一决策点** | 226 条 speak 不再只是记录，**真的产生气压**（每团 1.0） |
 | 7 | 语义重复守卫（28 次命中） | L1 发送闸最后一道 | `semantic-dup.ts` 连它的三条硬约束一起搬 |
 | 8 | 字面自复读守卫（128 次命中） | L1 发送闸 | `anti-repeat.ts` |
