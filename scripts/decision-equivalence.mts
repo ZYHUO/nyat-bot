@@ -1,0 +1,91 @@
+/**
+ * Nyat Trench · 判定点对等度（Decision Equivalence）
+ *
+ * 论文 §9：删除不是里程碑，是结果；每次删除以对等测试为前置。
+ *
+ * 但七子系统深度耦合，"逐条消息 A/B"要双倍判定调用（一天 5842 万 token 无余量）。
+ * 可做的对等是：**同一批消息上，单决策点（shadow）想做的 vs 线上真实做的**，
+ * 取 top-level 一致率。这是 Phase 2 "判定点上真身" 的准入判据。
+ *
+ *   shadow:  cognitive_events WHERE type='social_prediction'  (verdict=speak/wait/silent)
+ *   live:   self_replies WHERE trigger_msg_id = 该消息          (bot 实际回没回)
+ *
+ * 一致性定义（top-level 二值化）：
+ *   shadow speak  ⇔  live 真的回了这条
+ *   shadow silent ⇔  live 没回
+ *   wait 单独统计（它不映射到"回没回"）
+ *
+ * 用法：npx tsx scripts/decision-equivalence.mts [天数]
+ */
+
+import { execSync } from 'node:child_process';
+
+const DAYS = Number(process.argv[2] ?? 7);
+const DB = process.env.SQLITE_PATH ?? './data/xxb.db';
+const since = Math.floor(Date.now() / 1000) - DAYS * 86400;
+
+interface Row { [k: string]: unknown }
+function sql(q: string): Row[] {
+  const out = execSync(`sqlite3 -json "${DB}" "${q.replace(/"/g, '\\"')}"`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  return out.trim() ? JSON.parse(out) : [];
+}
+
+// shadow 判定（只看 ingress 那条；live_outcome 是另一条事件，分开算）
+const shadowRows = sql(`
+  SELECT json_extract(fact_json,'$.messageId') AS mid,
+         json_extract(fact_json,'$.shadowVerdict') AS verdict
+  FROM cognitive_events
+  WHERE type='social_prediction'
+    AND json_extract(fact_json,'$.schema')='shadow_ingress.v1'
+    AND occurred_at >= ${since}
+    AND json_extract(fact_json,'$.shadowVerdict') IN ('speak','silent','wait')`);
+
+// 线上：哪些消息被回过（trigger_msg_id）＋ 哪些消息 bot 自己发过言
+const liveReplied = new Set<number>();
+for (const r of sql(`SELECT DISTINCT trigger_msg_id AS m FROM self_replies WHERE trigger_msg_id IS NOT NULL AND trigger_msg_id > 0 AND ts >= ${since}`)) {
+  const m = Number(r.m);
+  if (Number.isSafeInteger(m) && m > 0) liveReplied.add(m);
+}
+// bot 自己的发言时刻（用于判断"它当时说没说话"）
+const botSpoke = sql(`SELECT ts FROM self_replies WHERE ts >= ${since} ORDER BY ts ASC`);
+
+let agree = 0, disagree = 0, unknown = 0;
+let speakWant = 0, speakWantSpoke = 0;
+let silentWant = 0, silentWantSilent = 0;
+const waitN = shadowRows.filter((r) => r.verdict === 'wait').length;
+
+for (const r of shadowRows) {
+  const mid = Number(r.mid);
+  if (!Number.isSafeInteger(mid) || mid <= 0) { unknown += 1; continue; }
+  const spoke = liveReplied.has(mid);
+  const v = String(r.verdict);
+  if (v === 'speak') {
+    speakWant += 1;
+    if (spoke) { speakWantSpoke += 1; agree += 1; } else { disagree += 1; }
+  } else if (v === 'silent') {
+    silentWant += 1;
+    if (!spoke) { silentWantSilent += 1; agree += 1; } else { disagree += 1; }
+  }
+}
+
+const comparable = agree + disagree;
+const rate = comparable > 0 ? agree / comparable : 0;
+
+console.log(`\n═══ 判定点对等度 · 近 ${DAYS} 天 ═══\n`);
+console.log(`shadow 判定样本：${shadowRows.length}（wait ${waitN} · 无法比对 ${unknown}）`);
+console.log(`可比对样本：${comparable}`);
+if (comparable === 0) {
+  console.log('\n无比对样本——shadow 与 live 还没有共同覆盖的消息群。');
+  console.log('（shadow 只在 NYATOS_SHADOW_CHAT_IDS 的三个群里跑）\n');
+  process.exit(0);
+}
+console.log(`\n  单决策点想 speak：${speakWant} 次，其中线上真回了：${speakWantSpoke} 次`);
+console.log(`  单决策点想 silent：${silentWant} 次，其中线上真没说：${silentWantSilent} 次`);
+console.log(`\n  top-level 一致率：${(rate * 100).toFixed(1)}%`);
+console.log(`\n  注意方向：一致率**低**通常不是 shadow 判错，而是线上还有别的抑制层`);
+console.log(`  （gate/budget/dup）在替它做"别说"的决定——那正是要拆除的东西。`);
+console.log(`\n  Phase 2 准入（论文 §9）：一致率 > 85% 才把判定点上真身。`);
+console.log(`  当前结论：${rate > 0.85 ? '已达标，可以推进判定点切换' : '未达标——先拆抑制层，或等 shadow 与 live 的覆盖面对齐'}\n`);
+
+// 附：bot 发言密度（用于判断"线上是不是其实很安静"）
+console.log(`参考：近 ${DAYS} 天 bot 发言 ${botSpoke.length} 条。\n`);

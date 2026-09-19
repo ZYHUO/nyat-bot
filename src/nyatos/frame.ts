@@ -112,6 +112,8 @@ export interface Frame {
     budget?: ParticipationBudget;
     /** Nyat Trench L0 海床读数（宿主持有的有界积分器）。只读事实，不是配额。 */
     trench?: TrenchReading;
+    /** 自我状态的一行身体感受（"这半小时几乎都是你在说，而且连着 3 条没人接"）。 */
+    selfState?: string;
     /** Seconds until another ACTIVE message is appropriate (0 = free now). */
     activeSpeechCooldownSec?: number;
     /** Things the bot said it would come back to, if any are worth raising. */
@@ -250,6 +252,15 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
     self.trench = await readTrench(chatId ?? 0);
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: trench unavailable');
+  }
+  // Nyat Trench 自我状态：决策点缺失的三个数（share30m / unansweredStreak / recentEcho）。
+  // 这是 10.1% 一致率的直接病因——它不知道自己刚叭叭了一堆没人理。
+  try {
+    const { readSelfState, renderSelfState } = await import('./self-state.js');
+    const st = readSelfState(chatId ?? 0);
+    if (st) self.selfState = renderSelfState(st);
+  } catch (err) {
+    logger.debug({ err, chatId }, 'frame: self state unavailable');
   }
   let sinceBotSpokeSec: number | undefined;
   try {
@@ -455,6 +466,7 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
     const t = renderTrench(frame.self.trench);
     if (t) lines.push(t);
   }
+  if (frame.self.selfState) lines.push(frame.self.selfState);
   const spacingLine = renderActiveSpeechSpacing(frame.self.activeSpeechCooldownSec ?? 0);
   if (spacingLine) lines.push(spacingLine);
   if (frame.self.openThreads) lines.push(frame.self.openThreads);
