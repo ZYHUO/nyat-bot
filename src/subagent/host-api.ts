@@ -167,6 +167,32 @@ export function findToolPlaceholder(text: string): string | null {
   return generic ? generic[0] : null;
 }
 
+// ────────────────────────────────────────
+// 内部记账格式泄漏 — "（已回复 #3193）"
+// ────────────────────────────────────────
+//
+// 2026-09-19 05:22 生产事故：Group 里 bot 先正常回了「2698 换块屏…」，
+// 紧接着又发了一条 `（已回复 #3193）`。这不是工具占位符——全仓源码里根本没有
+// 这个字符串。真正的来源是模型自己：`runtime.endTask(summary)` 的记录格式
+// 在 session_digests 里有 1104 条，全部长成「已回复 @谁 #id，做了什么」。
+// 模型把这条**写给自己看的记账摘要**当成了用户消息发了出去。
+//
+// 所以这属于第三类泄漏：不是工具脚手架，是"内部状态记账"滑进了用户通道。
+// 只拦"整条就是一个状态记账"的极窄形态——带 `#id` 的状态词 + 无其它内容，
+// 这样「已读不回是吧」这类正常吐槽不会误伤。
+const STATUS_ACK_HEADS = '(已回复|已答复|已读|已发送|已收到|已转达|已送到|已处理|已看)';
+/** 整条消息 ∈ {（已回复 #3193）/ 已回复 3193 / (已回复 #3193) } */
+const STATUS_ACK_RE = new RegExp(
+  `^[（(]?\\s*${STATUS_ACK_HEADS}\\s*#?\\s*\\d{1,12}\\s*[)）,，]?\\s*$`,
+);
+
+/** 整条是否只是一个"我已处理 #id"式内部记账；是则返回匹配串，否则 null。 */
+export function findInternalStatusAck(text: string): string | null {
+  const t = text.trim();
+  if (!t || t.length > 40) return null;
+  return STATUS_ACK_RE.test(t) ? t : null;
+}
+
 import { createExecutionAudit, attachExecutionAudit, type AuditSnapshot } from '../agent/execution-audit.js';
 import { markTaskVisible } from '../agent/task-progress.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
@@ -734,6 +760,14 @@ export function createHostApi(
                 logger.warn({ chatId, leak, kept: withoutPlaceholder.length }, 'host sendText: stripped tool-result placeholder from model text');
                 clean = withoutPlaceholder;
               }
+              // 内部记账泄漏：整条只是「（已回复 #3193）」这种 endTask 摘要格式。
+              {
+                const ack = findInternalStatusAck(clean);
+                if (ack) {
+                  logger.warn({ chatId, ack }, 'host sendText rejected: internal status-ack leaked as message');
+                  throw new Error('sendText_status_ack_leak: 「已回复 #id」是写给自己看的记账摘要（runtime.endTask 的参数），不是发给用户的话；想记账就 endTask 收尾，真想跟用户说就用自己的话讲。');
+                }
+              }
             }
             assertNotBanned(clean);
 
@@ -1161,6 +1195,11 @@ export function createHostApi(
                         c = c.split(leak).join('').trim();
                         logger.warn({ chatId, leak }, 'sendFile: stripped tool-result placeholder from caption');
                       }
+                      // 内部记账（「已回复 #3193」）不能借 caption 溜出去：丢 caption，文件照发
+                      if (findInternalStatusAck(c)) {
+                        logger.warn({ chatId, preview: c.slice(0, 40) }, 'sendFile: dropped internal status-ack caption');
+                        return undefined;
+                      }
                       return c || undefined;
                     })()
                   : undefined,
@@ -1267,6 +1306,11 @@ export function createHostApi(
                 clean = clean.split(leak).join('').trim();
                 if (!clean) return { skipped: true as const, reason: 'tool_leak' };
                 logger.warn({ chatId, leak }, 'sendVoice: stripped tool-result placeholder');
+              }
+              // 「已回复 #3193」念出来同样是泄漏
+              if (findInternalStatusAck(clean)) {
+                logger.warn({ chatId, preview: clean.slice(0, 40) }, 'sendVoice: rejected internal status-ack');
+                return { skipped: true as const, reason: 'status_ack_leak' };
               }
             }
             try {
@@ -1411,6 +1455,11 @@ export function createHostApi(
                 }
                 logger.warn({ chatId: tid, leak }, 'telegram.sendMessage: stripped tool-result placeholder');
                 clean = withoutPlaceholder;
+              }
+              const ack = findInternalStatusAck(clean);
+              if (ack) {
+                logger.warn({ chatId: tid, ack }, 'telegram.sendMessage: rejected internal status-ack');
+                throw new Error('sendText_status_ack_leak: 「已回复 #id」是 endTask 记账摘要，不是发给用户的话；用自己的话讲。');
               }
             }
             assertNotBanned(clean);
