@@ -619,6 +619,18 @@ export function createHostApi(
     }
   };
 
+  /**
+   * 本任务已经引用过的消息 id。
+   *
+   * 2026-09-19 实测：一个任务对「眼熟」连发 3 条，其中第 1、3 条都带
+   * replyTo=265827 —— 用户看到的就是"两条回复指向同一个人"，观感是复读+抢话。
+   * 既有规则"分句仅首条带 reply_to"只在**单次** sendText 内部生效，
+   * 挡不住模型发起多次独立 sendText。
+   *
+   * burst 分人要回复不同 id 的合法场景不受影响：那些 id 本来就是不同的。
+   */
+  const repliedAnchors = new Set<number>();
+
   const assertOpen = () => {
     if (opts.isClosed?.()) throw new Error('host_closed');
   };
@@ -981,7 +993,18 @@ export function createHostApi(
               }
               await sendChatAction(chatId, 'typing', opts.messageThreadId);
               // 分句：仅首条带 reply_to；后续默认不带。另一次 sendText 若显式传 messageId 才 quote（特别许愿）。
-              const replyTo = i === 0 ? resolveReplyTo(replyToMessageId) : undefined;
+              // 同一任务里，同一条消息只允许被引用一次。第二次起再传同一个 id
+              // （显式或 fallback）一律不引用——不然就是两条回复戳同一个人。
+              const wanted = parseMsgId(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo);
+              const alreadyAnchored = wanted !== undefined && repliedAnchors.has(wanted);
+              if (i === 0 && alreadyAnchored) {
+                logger.info(
+                  { chatId, anchor: wanted, preview: part.slice(0, 60) },
+                  'host sendText: dropped duplicate reply anchor (already replied to this message in this task)',
+                );
+              }
+              const replyTo = i === 0 && !alreadyAnchored ? resolveReplyTo(replyToMessageId) : undefined;
+              if (i === 0 && replyTo) repliedAnchors.add(replyTo);
               if (i === 0) firstReplyTo = replyTo;
               if (i === 0 && chatId < 0 && !replyTo && !opts.defaultReplyTo) {
                 logger.warn({ chatId }, 'host sendText: group send without reply_to anchor');
