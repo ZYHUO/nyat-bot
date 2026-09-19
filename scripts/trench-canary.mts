@@ -77,7 +77,30 @@ const trench = {
 
 function pct(x: number): string { return `${(x * 100).toFixed(1)}%`; }
 
-console.log(`\n═══ Nyat Trench 行为金丝雀 · 近 ${DAYS} 天 ═══\n`);
+// 睡眠相位：没有它，"发送 0"读起来像故障，实际是按设计在睡。
+// 2026-09-19 我因此误诊了好几轮"没有流量"——真相是 getSleepPhase()='night'，
+// 消息全部进 pending 队列（日志里是 Meta path: asleep）。先报相位再报数字。
+let phaseLine = '';
+try {
+  const { getLifeState } = await import('../src/tracking/life-state.js');
+  const ls = getLifeState();
+  if (ls.state === 'sleeping') {
+    // 找出醒来时刻
+    let wakeAt = '';
+    for (let h = 0; h <= 12; h++) {
+      const t = new Date(Date.now() + h * 3600000);
+      if (getLifeState(t).state !== 'sleeping') {
+        wakeAt = new Date(t.getTime() + 8 * 3600000).toISOString().slice(11, 16);
+        break;
+      }
+    }
+    phaseLine = `（当前睡眠相位：**在睡**，醒来约北京 ${wakeAt}——本时段的发送量为 0 是设计使然，不是故障）`;
+  } else {
+    phaseLine = '（当前清醒）';
+  }
+} catch { /* 读不到相位就不报，不影响其余指标 */ }
+
+console.log(`\n═══ Nyat Trench 行为金丝雀 · 近 ${DAYS} 天 ${phaseLine} ═══\n`);
 console.log('【安全面】这些数字下降 = 事故补丁被误删，立刻回滚');
 for (const [k, v] of Object.entries(guards)) console.log(`  ${String(v).padStart(6)}  ${k}`);
 console.log('\n【活性面】');
