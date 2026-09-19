@@ -74,8 +74,15 @@ describe('Echo — 标量', () => {
       const s = m.renderEcho(e);
       if (s) { expect(s).toContain('[回声]'); expect(s).not.toMatch(/0\.\d\d/); }
     }
-    // 但"蔫"的时候必须给一句托底，别让它把低回声当成不该说话
-    expect(m.renderEcho(0.1)).toContain('不代表不该说');
+  });
+
+  it('所有低档位都必须带托底——"没人接"不等于"不该说"', () => {
+    // 第一版只在最低档带托底。frame 测试在一个真实群（E≈0.3-0.5）上抓到中间档
+    // '接的人不多' 没有任何托底——而那正是模型最可能解读成"我该闭嘴"的档位。
+    for (const e of [0.05, 0.2, 0.35, 0.45]) {
+      expect(m.renderEcho(e)).toContain('不代表不该说');
+    }
+    expect(m.renderEcho(0.8)).not.toContain('不代表不该说');
   });
 });
 

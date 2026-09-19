@@ -333,3 +333,29 @@ describe('trench debt in the frame', () => {
     }
   });
 });
+
+// 回声进 Frame：这一行原本漏接了。renderEcho 从写下起就是 TESTONLY（死代码扫描
+// 2026-09-19 发现），于是 E 在 Redis 里算、在学，模型从未看见过它。
+describe('trench echo in the frame', () => {
+  it('有回声读数时 Frame 文本出现 [回声] 行，且读不到时不炸 Frame', async () => {
+    const { buildFrame, renderFrame } = await import('../../../src/nyatos/frame.js');
+    const { getBotUid } = await import('../../../src/bot/bot.js');
+    const f = await buildFrame(
+      {
+        scope: { visibility: 'chat', chatId: -100_444_941_960_2 },
+        trigger: { messageId: 1 } as never,
+        recent: [],
+        botUid: getBotUid(),
+      },
+    );
+    const txt = renderFrame(f);
+    expect(typeof txt).toBe('string');
+    if (f.self.echo) {
+      expect(txt).toContain(f.self.echo);
+      expect(f.self.echo).toContain('[回声]');
+      // 低声望时必须带托底，别让模型把"没人接"当成"不该说"
+      expect(f.self.echo).toMatch(/有人接|接的人不多|没什么动静/);
+      if (!f.self.echo.includes('挺有人接')) expect(f.self.echo).toContain('不代表不该说');
+    }
+  });
+});

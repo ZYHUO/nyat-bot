@@ -116,6 +116,8 @@ export interface Frame {
     selfState?: string;
     /** 定向债的一行身体感受（"你睡着的时候 A（欠 2 句）——总共欠 3 句"）。 */
     debt?: string;
+    /** 回声的一行身体感受（"你最近说什么都没什么动静——但这不代表不该说"）。 */
+    echo?: string;
     /** Seconds until another ACTIVE message is appropriate (0 = free now). */
     activeSpeechCooldownSec?: number;
     /** Things the bot said it would come back to, if any are worth raising. */
@@ -254,6 +256,15 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
     self.trench = await readTrench(chatId ?? 0);
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: trench unavailable');
+  }
+  // 回声：E 标量（Echo 唯一的学习产出）。补上漏接的那一行。
+  try {
+    const { readEcho, renderEcho } = await import('../agent/echo.js');
+    const e = await readEcho(chatId ?? 0);
+    const line = renderEcho(e);
+    if (line) self.echo = line;
+  } catch (err) {
+    logger.debug({ err, chatId }, 'frame: echo unavailable');
   }
   // 定向债：睡眠期按发送者记的"欠谁一句"。衰减由还债驱动，不由时钟驱动。
   try {
@@ -479,6 +490,10 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
   if (frame.self.selfState) lines.push(frame.self.selfState);
   // 定向债：欠谁一句话。fail-soft——读不到就不加这一行。
   if (frame.self.debt) lines.push(frame.self.debt);
+  // 回声：E 标量的身体感受。**这一行原本漏了**——renderEcho 从写下起就没接进
+  // Frame（2026-09-19 死代码扫描发现它是 TESTONLY），于是 E 在 Redis 里算、在学，
+  // 模型却从未看见过它。一个观测不到自己的回声的人，学不到"我说的话有人接没人接"。
+  if (frame.self.echo) lines.push(frame.self.echo);
   const spacingLine = renderActiveSpeechSpacing(frame.self.activeSpeechCooldownSec ?? 0);
   if (spacingLine) lines.push(spacingLine);
   if (frame.self.openThreads) lines.push(frame.self.openThreads);

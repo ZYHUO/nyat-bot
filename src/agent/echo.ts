@@ -106,8 +106,8 @@ export async function settleEcho(chatId: number, y: number): Promise<{ e: number
  */
 export function renderEcho(e: number): string {
   if (e >= 0.7) return '[回声] 你在这群说话挺有人接的。';
-  if (e >= 0.5) return '';
-  if (e >= 0.3) return '[回声] 你最近说话，接的人不多。';
+  if (e >= 0.5) return '';                                    // 常态，不唠叨
+  if (e >= 0.3) return '[回声] 你最近说话，接的人不多——但这不代表不该说。';
   return '[回声] 你最近说什么都没什么动静——但这不代表不该说。';
 }
 
