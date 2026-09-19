@@ -32,7 +32,11 @@ function ownSpeechStats(botTexts: readonly string[]): string | null {
   if (texts.length < 4) return null;
   const tail = texts.filter((t) => /喵[~。！？!?,，\s]*$/.test(t)).length;
   const avg = Math.round(texts.reduce((s, t) => s + t.replace(/\s+/g, '').length, 0) / texts.length);
-  if (tail / texts.length < 0.4) return null; // 没到需要提醒的程度就别啰嗦
+  // 阈值 0.15：真人基准约 1%，所以只要明显高于常人就需要提醒。
+  // 第一版用 0.4 是错的——实测各群 25%/33%/58%/58%，最活跃的群（6 小时 224 条）
+  // 只有 33%，永远收不到提醒，而习惯正是在那里形成的。一行事实约 50 token，
+  // 相对每天 580 万的量级可以忽略，没必要为省它而让模型看不见自己。
+  if (tail / texts.length < 0.15) return null;
   return (
     `[你自已的毛病] 你最近 ${texts.length} 条消息里有 ${tail} 条拿"喵"收尾，` +
     `平均 ${avg} 字。群友里几乎没人这么说话——每句都喵，听起来像复读机，不像人。` +
