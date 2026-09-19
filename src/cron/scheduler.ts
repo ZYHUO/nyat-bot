@@ -159,6 +159,21 @@ export function startCronJobs(deps?: CronDeps): void {
         for (const id of raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0)) {
           try { if (await pump(id)) pumped += 1; } catch { /* per-chat fail-soft */ }
         }
+        // 每次泵浦同时记睡眠相位：醒来这件事必须**可观测**，否则无法判断
+        // "醒来后气压高 → 前几句密"这个行为是否真的发生。零额外成本（一次本地调用）。
+        try {
+          const { getLifeState } = await import('../tracking/life-state.js');
+          const phase = getLifeState().state;
+          const { readTrench } = await import('../nyatos/trench.js');
+          const top = await Promise.all(
+            raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0).slice(0, 5)
+              .map(async (id) => ({ id, p: (await readTrench(id)).p })),
+          );
+          logger.info(
+            { phase, pumped, top },
+            'trench pump tick: phase + top pressures',
+          );
+        } catch { /* 观测失败不影响泵浦 */ }
         if (pumped > 0) logger.debug({ pumped }, 'trench pump: halved pressure');
       },
     });
