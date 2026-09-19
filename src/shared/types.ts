@@ -81,6 +81,21 @@ export interface ReplyOutput {
   hesitateBefore?: boolean;
   /** P5: 用 TTS 语音发送而非文字 */
   voice?: boolean;
+  /**
+   * 模型自定的媒体计划(贴纸/图片/语音/投票/反应 + 相对文字的位置)。
+   * 宿主只做现实校验(素材存在/权限/体积),不用冷却表或随机数改写模型选择。
+   */
+  media?: {
+    kind: 'sticker' | 'photo' | 'voice' | 'poll' | 'reaction';
+    ref?: string | string[];
+    options?: string[];
+    emoji?: string;
+    position?: 'before' | 'after' | 'instead';
+  };
+  /** 模型自定的气泡间隔(ms)。omit = 默认打字节奏。 */
+  delayMs?: number;
+  /** 模型自述"打了一半想算了"：宿主呈现 typing 后不发。 */
+  typingGhost?: boolean;
 }
 
 export interface RetrievedContext {

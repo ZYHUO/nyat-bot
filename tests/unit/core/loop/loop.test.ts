@@ -6,6 +6,7 @@ let db: Database.Database;
 const envStore: Record<string, unknown> = {
   CORE_BELIEF_VIEW_ENABLED: false,
   CORE_BLACKBOARD_ENABLED: false,
+  CORE_BLACKBOARD_OBSERVATIONS_ENABLED: false,
   CORE_PERMISSION_GATE_ENABLED: false,
   CORE_V2_ENABLED: true,
   CORE_V2_CHAT_IDS: '',
@@ -276,5 +277,39 @@ describe('core assembleState + system prompt', () => {
     expect(isCoreChat(-100)).toBe(false);
     envStore['CORE_V2_ENABLED'] = true;
     envStore['CORE_V2_CHAT_IDS'] = '';
+  });
+});
+
+describe('blackboard observation write (2026-09-18 write-amplification fix)', () => {
+  // `observation` entries had no reader (`visibleToL1` is exported but never
+  // called; every listEntries caller asks for `authorized_intent`), so the write
+  // accumulated 1,752 unconsumed rows in production. It is now gated by its own
+  // flag, default OFF, and these tests pin that.
+
+  it('does not write observations when the flag is off', async () => {
+    const { shadowCompare } = await import('../../../../src/core/loop.js');
+    envStore['CORE_BLACKBOARD_OBSERVATIONS_ENABLED'] = false;
+    vi.mocked(l0Rule).mockReturnValue({ action: 'IGNORE', level: 'L0_RULE', rule: 'at_others', latencyMs: 0 } as never);
+    await shadowCompare({
+      chatId: -100,
+      message: msg('hello'),
+      legacy: { action: 'IGNORE', level: 'L0_RULE', latencyMs: 0 } as never,
+    });
+    const rows = db.prepare("SELECT count(*) c FROM core_blackboard WHERE kind='observation'").get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  it('writes observations only when explicitly enabled', async () => {
+    const { shadowCompare } = await import('../../../../src/core/loop.js');
+    envStore['CORE_BLACKBOARD_OBSERVATIONS_ENABLED'] = true;
+    vi.mocked(l0Rule).mockReturnValue({ action: 'IGNORE', level: 'L0_RULE', rule: 'at_others', latencyMs: 0 } as never);
+    await shadowCompare({
+      chatId: -100,
+      message: msg('hello'),
+      legacy: { action: 'IGNORE', level: 'L0_RULE', latencyMs: 0 } as never,
+    });
+    const rows = db.prepare("SELECT count(*) c FROM core_blackboard WHERE kind='observation'").get() as { c: number };
+    expect(rows.c).toBeGreaterThan(0);
+    envStore['CORE_BLACKBOARD_OBSERVATIONS_ENABLED'] = false;
   });
 });

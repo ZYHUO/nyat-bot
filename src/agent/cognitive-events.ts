@@ -23,7 +23,43 @@ export type CognitiveEventType =
   | 'user_followup'
   | 'world_change'
   | 'social_interaction'
-  | 'social_prediction';
+  | 'social_act_proposed'
+  | 'social_act_outcome'
+  | 'inner_state_updated'
+  | 'affect_episode_updated'
+  | 'mission_proposed'
+  | 'mission_observed'
+  | 'mission_wake_requested'
+  | 'sensor_proposed'
+  | 'sensor_observed'
+  | 'value_proposed'
+  | 'value_evaluated'
+  | 'value_adopted'
+  | 'cognitive_process_wake'
+  | 'cognitive_process_checkpoint'
+  | 'cognitive_process_stopped'
+  | 'action_circuit_proposed'
+  | 'action_circuit_evaluated'
+  | 'action_circuit_published'
+  | 'capability_observed'
+  | 'social_prediction'
+  | 'cognitive_trigger'
+  | 'cognitive_frame_observed'
+  | 'action_envelope_proposed'
+  | 'action_envelope_transition'
+  | 'action_envelope_outcome'
+  // The two event types that close the cognitive loop (NyatOS Phase 1.4).
+  //
+  // `own_action_result` is the bot's own act coming back with an observed
+  // outcome. Without it the model cannot see what it just did — the blind spot
+  // behind the documented self-reinforcing loop (heart.ts:66-76: 69 replies,
+  // only 12 went through the heart).
+  //
+  // `self_scheduled_wake` is the bot deciding when to think next. Without it,
+  // the host owns attention and the system stays a passive responder: it only
+  // exists while being addressed.
+  | 'own_action_result'
+  | 'self_scheduled_wake';
 
 export type CognitiveEventSource = 'telegram' | 'host' | 'scheduler' | 'tool' | 'model' | 'import';
 
@@ -73,10 +109,13 @@ export interface ListCognitiveEventsOptions {
   correlationId?: string;
   scope?: CognitiveScope;
   afterSequence?: number;
+  /** Global scope replay cursor. `sequence` is only correlation-local. */
+  afterOccurredAt?: number;
+  afterEventId?: string;
   type?: CognitiveEventType;
   limit?: number;
   /** Use occurred-at order for bounded projections that are not replay streams. */
-  order?: 'replay' | 'occurred_at_desc';
+  order?: 'replay' | 'occurred_at' | 'occurred_at_desc';
 }
 
 export interface CognitiveOutboxItem {
@@ -107,7 +146,33 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'user_followup',
   'world_change',
   'social_interaction',
+  'social_act_proposed',
+  'social_act_outcome',
+  'inner_state_updated',
+  'affect_episode_updated',
+  'mission_proposed',
+  'mission_observed',
+  'mission_wake_requested',
+  'sensor_proposed',
+  'sensor_observed',
+  'value_proposed',
+  'value_evaluated',
+  'value_adopted',
+  'cognitive_process_wake',
+  'cognitive_process_checkpoint',
+  'cognitive_process_stopped',
+  'action_circuit_proposed',
+  'action_circuit_evaluated',
+  'action_circuit_published',
+  'capability_observed',
   'social_prediction',
+  'cognitive_trigger',
+  'cognitive_frame_observed',
+  'action_envelope_proposed',
+  'action_envelope_transition',
+  'action_envelope_outcome',
+  'own_action_result',
+  'self_scheduled_wake',
 ]);
 const EVENT_SOURCES: ReadonlySet<string> = new Set(['telegram', 'host', 'scheduler', 'tool', 'model', 'import']);
 const MAX_FACT_BYTES = 8 * 1024;
@@ -454,6 +519,16 @@ export function listCognitiveEvents(opts: ListCognitiveEventsOptions = {}): Cogn
       where.push('sequence > ?');
       params.push(opts.afterSequence);
     }
+    if (opts.afterOccurredAt !== undefined) {
+      const afterEventId = opts.afterEventId?.trim();
+      if (afterEventId) {
+        where.push('(occurred_at > ? OR (occurred_at = ? AND id > ?))');
+        params.push(opts.afterOccurredAt, opts.afterOccurredAt, afterEventId);
+      } else {
+        where.push('occurred_at > ?');
+        params.push(opts.afterOccurredAt);
+      }
+    }
     if (opts.type) {
       where.push('type = ?');
       params.push(opts.type);
@@ -462,6 +537,8 @@ export function listCognitiveEvents(opts: ListCognitiveEventsOptions = {}): Cogn
     const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const order = opts.order === 'occurred_at_desc'
       ? 'occurred_at DESC, id DESC'
+      : opts.order === 'occurred_at'
+        ? 'occurred_at ASC, id ASC'
       : 'correlation_id ASC, sequence ASC';
     const rows = db.prepare(`SELECT * FROM cognitive_events ${filter} ORDER BY ${order} LIMIT ?`).all(...params, limit) as Record<string, unknown>[];
     return rows.map(rowToEvent);

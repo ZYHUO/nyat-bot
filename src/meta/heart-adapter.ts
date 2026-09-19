@@ -23,6 +23,9 @@ import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
 import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
+import { getSelfActSummary, renderSelfActSummary } from '../tracking/self-history.js';
+import { nextSelfWake, renderPendingWake } from '../agent/cognitive-clock.js';
+import { findUnrepairedActs, renderUnrepairedActs } from '../tracking/repair.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
@@ -113,15 +116,21 @@ export async function evaluateMetaHeart(opts: {
     return { verdict: 'silence', layer, reason: 'heart_bot_monologue' };
   }
 
+  let cooldownRemainingMs = 0;
   if (!continuation) {
     try {
-      const cool = await getGateCooldownRemainingMs(chatId, tstate);
-      if (cool > 0) {
-        logger.info({ chatId, cool, messageId: formatted.messageId }, 'Meta heart: cooldown silence');
-        return { verdict: 'silence', layer, reason: 'heart_cooldown' };
-      }
+      cooldownRemainingMs = await getGateCooldownRemainingMs(chatId, tstate);
     } catch {
       /* fail-open to heart */
+    }
+    // HEART_COOLDOWN_AS_FACT: don't silently drop before the model has seen the
+    // situation. The cooldown becomes a fact in the prompt ("你 N 秒前刚说过话
+    // ——自己掂量") and the model decides. Silent dropping took the decision away
+    // from the model AND made the later dispatch-gate check a second gate over a
+    // decision that was never made. Off = legacy silent pass.
+    if (cooldownRemainingMs > 0 && !e.HEART_COOLDOWN_AS_FACT) {
+      logger.info({ chatId, cool: cooldownRemainingMs, messageId: formatted.messageId }, 'Meta heart: cooldown silence');
+      return { verdict: 'silence', layer, reason: 'heart_cooldown' };
     }
 
     engagement = computeEngagement(recentMessages, botUid, messagesLast5Min);
@@ -167,6 +176,24 @@ export async function evaluateMetaHeart(opts: {
   // recomputing — avoids a redundant pass over recentMessages.
   const engagementNote = continuation ? undefined : engagement?.note ?? undefined;
 
+  // The model's own recent behaviour, as facts. Meta is the production main
+  // path, so this must be wired here too — wiring only pipeline/heart would
+  // leave the feature dead on the path that actually runs.
+  // Rendering only: the host draws no conclusion, the model decides.
+  let selfHistory: string | undefined;
+  if (e.SELF_HISTORY_ENABLED) {
+    try {
+      const parts = [
+        renderSelfActSummary(getSelfActSummary(chatId, e.SELF_HISTORY_WINDOW_MIN * 60)),
+        // "when I said I'd think again" lives only in the event ledger.
+        renderPendingWake(nextSelfWake({ visibility: 'chat', chatId })),
+        // Acts that landed badly and were never revisited — the repair offer.
+        renderUnrepairedActs(findUnrepairedActs(chatId)),
+      ].filter(Boolean);
+      selfHistory = parts.length ? parts.join('\n') : undefined;
+    } catch { /* non-critical: history is an aid, never a gate */ }
+  }
+
   const heart = await heartDecision({
     chatId,
     message: formatted,
@@ -176,7 +203,16 @@ export async function evaluateMetaHeart(opts: {
     selfState,
     lastSpokeSecAgo,
     cognitiveWorkspaceHint,
-    burstNote: engagementNote,
+    ...(selfHistory ? { selfHistory } : {}),
+    burstNote: [
+      engagementNote,
+      // The fact the dispatch gate used to act on. Handing it to the model here
+      // is what makes HEART_COOLDOWN_AS_FACT / HEART_DECIDES_TIMING possible:
+      // the model weighs it, instead of the host overriding it afterwards.
+      cooldownRemainingMs > 0
+        ? `(你 ${Math.round(cooldownRemainingMs / 1000)} 秒前刚说过话——不是不让你说,是你自己掂量现在接合不合适)`
+        : undefined,
+    ].filter(Boolean).join('\n') || undefined,
   });
 
   void import('../pipeline/heart/mind.js')

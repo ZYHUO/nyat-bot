@@ -27,7 +27,7 @@
 import type { FormattedMessage, JudgeResult } from '../shared/types.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { getBotDisplayName, getBotUid } from '../bot/bot.js';
+import { getBotDisplayName, getBotIdentity, getBotUid } from '../bot/bot.js';
 import { runTimingGate } from '../pipeline/timing/gate.js';
 import {
   getChatState,
@@ -45,6 +45,15 @@ export type DispatchGateVerdict = 'allow' | 'suppress';
 export interface DispatchGateResult {
   verdict: DispatchGateVerdict;
   reason: string;
+}
+
+/** Nicknames for the pre-check; never throws when the bot is not initialised. */
+function safeBotNicknames(): string[] {
+  try {
+    return getBotIdentity().nicknames ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export async function evaluateDispatchGate(opts: {
@@ -137,6 +146,9 @@ export async function evaluateDispatchGate(opts: {
       botUid: getBotUid() || 0,
       botName: getBotDisplayName(),
       botPersona,
+      // Nicknames let the pre-check recognise a mention by name, not just @handle.
+      // Defensive: a missing identity must not break the gate call itself.
+      botNicknames: safeBotNicknames(),
       isDirectInteraction: false,
       lastSpokeSecAgo,
       prefetchedState,

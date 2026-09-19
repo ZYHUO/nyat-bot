@@ -127,20 +127,34 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
   const level = classifyLevel(l0, direct);
 
   // L0 observation 上黑板（best-effort，不拦路）
-  try {
-    writeEntry({
-      kind: 'observation',
-      author: 'l0',
-      content: JSON.stringify({
-        level,
-        l0rule: l0?.rule ?? null,
-        mentioned: direct.mentioned,
-        messageId: input.message.messageId,
-      }),
-      chatId: input.chatId,
-    });
-  } catch {
-    /* non-critical */
+  //
+  // 2026-09-18: this used to write an `observation` entry for every L0-classified
+  // message. The design (docs/core-v2.md) says L1 reads observations via
+  // `visibleToL1`, but that reader was never built — `visibleToL1` is exported
+  // and never called, and every `listEntries` caller asks for `authorized_intent`.
+  // So the write accumulated 1,752 unconsumed rows (status always `open`) with no
+  // consumer and no pruning: pure write amplification on the hot path, and it
+  // made the blackboard look like it held state when it only held telemetry.
+  //
+  // The classification result is already observable via logger.debug and the
+  // cognitive event ledger (which IS consumed). Re-enable only together with a
+  // real consumer; the flag exists so that stays an explicit decision.
+  if (env().CORE_BLACKBOARD_OBSERVATIONS_ENABLED) {
+    try {
+      writeEntry({
+        kind: 'observation',
+        author: 'l0',
+        content: JSON.stringify({
+          level,
+          l0rule: l0?.rule ?? null,
+          mentioned: direct.mentioned,
+          messageId: input.message.messageId,
+        }),
+        chatId: input.chatId,
+      });
+    } catch {
+      /* non-critical */
+    }
   }
 
   if (level === 'l0-pass') {

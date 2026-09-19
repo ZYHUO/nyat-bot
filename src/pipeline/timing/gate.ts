@@ -31,6 +31,7 @@ import { checkTalkValueThreshold } from './talk-value.js';
 import { isTimingDegraded } from './state-store.js';
 import { hasDeferBudget } from './defer.js';
 import { appendGateHistory, formatGateHistoryBlock, getGateHistory } from './gate-history.js';
+import { isClearlyHumanToHuman } from './precheck.js';
 
 export type GateAction = 'continue' | 'wait' | 'no_action';
 
@@ -69,6 +70,8 @@ export interface GateInput {
   botUid: number;
   botName: string;
   botPersona: string;
+  /** Bot nicknames, so the pre-check recognises a mention by name (not just @). */
+  botNicknames?: string[];
   /** True when pipeline already determined this is a direct interaction. */
   isDirectInteraction: boolean;
   /**
@@ -316,6 +319,39 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
       }
     } catch (err) {
       logger.debug({ err, chatId: input.chatId }, 'talk-value check failed (fail-open to LLM gate)');
+    }
+  }
+
+  // ── Deterministic pre-check (cost) ──
+  //
+  // Measured 2026-09-18: the LLM branch answered `no_action` in 121 of 122
+  // decisions (43/43 in the last 6h), and every reason traced back to one
+  // explicit rule in timing-gate.md — "群友们彼此在聊、不是在跟我聊 →
+  // no_action，别硬挤". This answers that case structurally, at 0ms.
+  //
+  // Conservative by construction: only fires when nobody addresses the bot AND
+  // the window shows humans talking to each other. Anything ambiguous still
+  // reaches the LLM, so the failure mode is an extra call, never a dropped reply.
+  if (e.TIMING_GATE_PRECHECK_ENABLED && !input.proactiveMode) {
+    try {
+      if (
+        isClearlyHumanToHuman({
+          message: input.message,
+          recentMessages: input.recentMessages,
+          botUid: input.botUid,
+          botUsername: input.botName,
+          botNicknames: input.botNicknames ?? [],
+          proactiveMode: input.proactiveMode,
+        })
+      ) {
+        logger.info(
+          { chatId: input.chatId, reason: 'human_to_human_precheck' },
+          'gate precheck: no_action without LLM',
+        );
+        return makeShortCircuit('no_action', 'precheck_human_to_human', start);
+      }
+    } catch (err) {
+      logger.debug({ err, chatId: input.chatId }, 'gate precheck failed (fall through to LLM)');
     }
   }
 

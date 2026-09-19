@@ -25,6 +25,9 @@ import { logger } from "../../shared/logger.js";
 import { buildDeferEntry } from "../shared.js";
 import { env } from "../../env.js";
 import { dispatchWaitViaAgency } from "../../agent/agency-wait-dispatch.js";
+import { getSelfActSummary, renderSelfActSummary } from "../../tracking/self-history.js";
+import { nextSelfWake, renderPendingWake } from "../../agent/cognitive-clock.js";
+import { findUnrepairedActs, renderUnrepairedActs } from "../../tracking/repair.js";
 
 export interface HeartResult {
   /** true = pipeline should return immediately (side effects + logging already done) */
@@ -100,11 +103,18 @@ export async function runHeartBranch(ctx: {
         ? 0
         : await getGateCooldownRemainingMs(job.chatId, tstate);
     if (cooldownRemainingMs > 0) {
-      // 冷却短路:刚 pass/wait 过 → 不再为每条消息烧一次心流调用。
-      // P0-B:defer 语义下不丢消息 —— 重排到冷却结束带完整语境重评
-      // (MaiBot delayed-task)。重放预算耗尽/排程失败 → **穿透给心流
-      // 裁决**(review #1:兜底方向是多烧一次 LLM,不是丢消息);
-      // flag 关保持旧静默丢弃。
+      // 冷却不再静默丢弃（2026-09-18 改）：旧行为是"刚 pass/wait 过 → 无 LLM
+      // 直接 pass"。问题有两个：
+      //   1) 它把决定权从模型手里拿走，而模型永远看不到自己为什么被拦；
+      //   2) 它在 dispatch gate 里**又拦一次**，而 heart 的调用已经烧掉了。
+      // 现在冷却作为**事实**交给模型（见下面的 burstNote），由它自己掂量。
+      // 只有明确不该烧调用的情况才短路：defer 重排仍然保留（它省的是整个回合）。
+      // HEART_COOLDOWN_AS_FACT: hand the cooldown to the model instead of
+      // dropping silently. The model sees "你 N 秒前刚说过话——自己掂量" and
+      // decides. Off = legacy silent drop.
+      if (e.HEART_COOLDOWN_AS_FACT) {
+        bypassEngagementHardPass = true; // the model decides; don't double-gate it
+      } else {
       const deferMode = e.TURN_GATE_DEFER_COOLDOWN && isTurnActorChat(job.chatId);
       if (!deferMode) {
         logger.debug({ chatId: job.chatId, uid: formatted.uid, lastGateUid: tstate?.lastGateUid }, "Heart skipped (cooldown), pass");
@@ -135,6 +145,7 @@ export async function runHeartBranch(ctx: {
           "Heart cooldown defer budget exhausted, falling through to heart",
         );
         bypassEngagementHardPass = true;
+      }
       }
     }
     // P2 参与预算:占比/速率/群速/精力 合成一个 0..1 标量。
@@ -204,6 +215,24 @@ export async function runHeartBranch(ctx: {
     let lastSpokeSecAgo: number | undefined;
     if (tstate?.lastBotReplyAt) lastSpokeSecAgo = (Date.now() - tstate.lastBotReplyAt) / 1000;
     const heartBurstIds = job.turnContext.burstMessageIds ?? [];
+    // The model's own recent behaviour, as facts. Without it, the model cannot
+    // notice it has already spoken several times in a row — the blind spot behind
+    // the documented self-reinforcing loop (see the CONVERSATIONAL_L0 comment).
+    // Rendering only: the host draws no conclusion from this.
+    let selfHistory: string | undefined;
+    if (e.SELF_HISTORY_ENABLED) {
+      try {
+        const parts = [
+          renderSelfActSummary(getSelfActSummary(job.chatId, e.SELF_HISTORY_WINDOW_MIN * 60)),
+          // "when I said I'd think again" lives only in the event ledger, so it is
+          // rendered from there rather than copied into self_replies.
+          renderPendingWake(nextSelfWake({ visibility: 'chat', chatId: job.chatId })),
+          // Acts that landed badly and were never revisited — the repair offer.
+          renderUnrepairedActs(findUnrepairedActs(job.chatId)),
+        ].filter(Boolean);
+        selfHistory = parts.length ? parts.join('\n') : undefined;
+      } catch { /* non-critical: history is an aid, never a gate */ }
+    }
     const heart = await heartDecision({
       chatId: job.chatId,
       message: formatted,
@@ -214,9 +243,18 @@ export async function runHeartBranch(ctx: {
       selfState,
       lastSpokeSecAgo,
       cognitiveWorkspaceHint,
+      ...(selfHistory ? { selfHistory } : {}),
       burstNote: [
         heartBurstIds.length > 1
           ? `(★ 是一波 ${heartBurstIds.length} 条连发的末尾,把整波当一个完整念头来评估)`
+          : undefined,
+        // The gate used to stop these AFTER the model had already decided to
+        // reply, which burned this very call for nothing (measured 2026-09-18:
+        // 68 cooldown + 38 talk-value short-circuits in 6h, all after a heart
+        // reply). Telling the model up front lets it make the call itself —
+        // cheaper and more human than being overridden by a timer.
+        cooldownRemainingMs > 0
+          ? `(你 ${Math.round(cooldownRemainingMs / 1000)} 秒前刚说过话——不是不让你说,是你自己掂量现在接合不合适)`
           : undefined,
         // 分人回复修复:多锚点回合里心流仍读实时上下文,可能看到兄弟组
         // 刚发的回复而理性地觉得"刚说过话了"从而 pass——这是给★这个人

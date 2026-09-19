@@ -13,11 +13,13 @@ NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot. TypeScript, Node ≥22,
 
 Baseline: `npm run typecheck`, `npm run lint` and the vitest suite are **all clean** — zero warnings, zero failures. Any output is a real regression. (Earlier revisions of this file claimed two known unused-var warnings in `message.ts:57` / `prompt-builder.ts:169`, and AGENTS.md claimed one; both were stale — those warnings no longer exist.)
 
-⚠️ **Run tests with the same Node the service uses.** `/usr/local/bin/node` is v25.x, but the systemd unit runs `/root/.hermes/node/bin/node` (v22), and `better-sqlite3`'s prebuilt binary is compiled for the v22 ABI. Under v25 the native module fails to load and **226 tests fail spuriously** with `Module did not self-register`. Always:
+⚠️ **Run tests with the same Node the service uses.** The systemd unit runs `/opt/node22/bin/node` (v22.22.2) — confirm with `systemctl show xxb-ts -p ExecStart`. `better-sqlite3`'s prebuilt binary is compiled for the v22 ABI, so any other Node fails to load the native module and **113 files / 808 tests fail spuriously** with `Module did not self-register`. Always:
 
 ```bash
-export PATH=/root/.hermes/node/bin:$PATH && npm run test
+export PATH=/opt/node22/bin:$PATH && npm run test
 ```
+
+Do **not** use `/root/.hermes/node/bin/node`: that path was right historically but is now v26.8.2, and trusting it is why this warning kept getting re-learned. Verify against the systemd unit, not against a path written in a doc.
 
 ## Non-obvious conventions
 

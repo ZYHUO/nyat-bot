@@ -39,6 +39,10 @@ import { classifyCognitiveRoute, shouldApplyCognitiveRoute, type CognitiveRoutin
 import { incrCounter } from "../../metrics/registry.js";
 import { dispatchWaitViaAgency } from "../../agent/agency-wait-dispatch.js";
 import { recordCognitiveRouteDecision } from "../../agent/cognitive-route-observations.js";
+import {
+  cognitiveTurnRuntime,
+  type CognitiveTurn,
+} from "../../agent/cognitive-turn-runtime.js";
 
 export interface PostJudgeResult {
   /** true = pipeline should return (no reply or reply already sent) */
@@ -58,8 +62,22 @@ export async function runPostJudge(ctx: {
   releaseHeldChatLock: () => Promise<void>;
   sleepBypass: boolean;
   burstHint?: string;
+  kernelTurn?: CognitiveTurn;
+  kernelActionEnvelopeId?: string;
 }): Promise<PostJudgeResult> {
-  const { judgeResult, formatted, job, e, botUid, recentMessages, start, timings, lockState, releaseHeldChatLock, sleepBypass, burstHint } = ctx;
+  const { judgeResult, formatted, job, e, botUid, recentMessages, start, timings, lockState, releaseHeldChatLock, sleepBypass, burstHint, kernelTurn, kernelActionEnvelopeId } = ctx;
+  const closeKernel = (
+    status: "completed" | "failed" | "blocked" | "skipped" | "interrupted",
+    reason: string,
+  ): void => {
+    if (!kernelTurn) return;
+    cognitiveTurnRuntime.settle(kernelTurn, {
+      ...(kernelActionEnvelopeId ? { envelopeId: kernelActionEnvelopeId } : {}),
+      status,
+      reason,
+      receipt: { stage: "post_judge", rule: judgeResult.rule ?? null },
+    });
+  };
 
   // If L0 returned REPLY without a replyPath, resolve direct vs planned.
   // 心流模式:确定性关键词启发式(0ms)——@/回复bot/私聊这些最高频
@@ -142,6 +160,7 @@ export async function runPostJudge(ctx: {
   if (judgeResult.action === "IGNORE" || judgeResult.action === "REJECT") {
     const totalMs = Math.round(performance.now() - start);
     logger.debug({ chatId: job.chatId, totalMs, timings }, "Pipeline complete (no reply)");
+    closeKernel("skipped", `judge_${judgeResult.action.toLowerCase()}`);
     return { completed: true };
   }
 
@@ -157,11 +176,13 @@ export async function runPostJudge(ctx: {
 
   // 5.4 Mute / unmute / self-mute commands
   if (await tryMuteCommandIntercepts(job.chatId, formatted, judgeResult)) {
+    closeKernel("completed", "mute_command_intercept");
     return { completed: true };
   }
 
   // 5.42 Pre-mute-gate intercepts (DM command guard, watch/game, consent reply)
   if (await tryPreMuteIntercepts(job.chatId, formatted, judgeResult)) {
+    closeKernel("completed", "pre_mute_intercept");
     return { completed: true };
   }
 
@@ -169,6 +190,7 @@ export async function runPostJudge(ctx: {
   if (!formatted.isAnonymous) {
     if (muteState.level === 2) {
       logger.debug({ chatId: job.chatId, uid: formatted.uid }, "Pipeline: user hard-muted bot, skipping reply");
+      closeKernel("skipped", "hard_muted");
       return { completed: true };
     }
     if (
@@ -180,6 +202,7 @@ export async function runPostJudge(ctx: {
       !judgeResult.rule?.includes("lookup")
     ) {
       logger.debug({ chatId: job.chatId, uid: formatted.uid }, "Pipeline: user soft-muted bot, skipping proactive reply");
+      closeKernel("skipped", "soft_muted");
       return { completed: true };
     }
   }
@@ -214,6 +237,7 @@ export async function runPostJudge(ctx: {
             ? "Pipeline complete (asleep, queued for catch-up)"
             : "Pipeline complete (asleep, not replayable, silenced)",
         );
+        closeKernel("skipped", queued ? "sleep_queue" : "sleep_silence");
         return { completed: true };
       }
       // 'pass'(豁免)/'wake'(被吵醒)→ 继续往下走
@@ -324,6 +348,7 @@ export async function runPostJudge(ctx: {
             { chatId: job.chatId, messageId: formatted.messageId, agencyRunId: agencyWait.agencyRunId, reason: agencyWait.reason },
             "Pipeline gate wait rejected by Agency authority transport",
           );
+          closeKernel("failed", "agency_wait_rejected");
           return { completed: true };
         }
       } else {
@@ -336,10 +361,11 @@ export async function runPostJudge(ctx: {
         );
       }
       const totalMs = Math.round(performance.now() - start);
-        logger.info(
+      logger.info(
           { chatId: job.chatId, totalMs, waitSec: gateDecision.waitSec, reason: gateDecision.reason, triggerUid: formatted.uid, timings },
           "Pipeline complete (gate=wait, no reply)",
         );
+      closeKernel("completed", "timing_wait");
       return { completed: true };
     }
 
@@ -368,6 +394,7 @@ export async function runPostJudge(ctx: {
             { chatId: job.chatId, totalMs, reason: gateDecision.reason, retryAfterMs: gateDecision.retryAfterMs, triggerUid: formatted.uid, timings },
             "Pipeline complete (gate defer → timed re-eval)",
           );
+          closeKernel("skipped", "timing_deferred");
           return { completed: true };
         }
         if (canReschedule) {
@@ -387,6 +414,7 @@ export async function runPostJudge(ctx: {
             { chatId: job.chatId, totalMs, reason: gateDecision.reason, triggerUid: formatted.uid, timings },
             "Pipeline complete (gate cooldown defer, no reply — non-actor)",
           );
+          closeKernel("skipped", "timing_defer_non_actor");
           return { completed: true };
         }
       } else {
@@ -408,6 +436,7 @@ export async function runPostJudge(ctx: {
         { chatId: job.chatId, totalMs, reason: gateDecision.reason, triggerUid: formatted.uid, timings },
         "Pipeline complete (gate=no_action, no reply)",
       );
+      closeKernel("skipped", "timing_no_action");
       return { completed: true };
       } // end else (regular no_action drop; deferOnly-burn falls through to reply)
     }
@@ -449,6 +478,7 @@ export async function runPostJudge(ctx: {
               { chatId: job.chatId, messageId: formatted.messageId, reason: s.reason, totalMs },
               "Pipeline complete (silence: stayed quiet, context saved)",
             );
+            closeKernel("skipped", "rhythm_silence");
             return { completed: true };
           }
         }
@@ -460,6 +490,7 @@ export async function runPostJudge(ctx: {
 
   // 5.5-5.7 Post-mute-gate intercepts
   if (await tryPostMuteIntercepts(job.chatId, formatted, judgeResult)) {
+    closeKernel("completed", "post_mute_intercept");
     return { completed: true };
   }
 
@@ -487,6 +518,7 @@ export async function runPostJudge(ctx: {
     useCognitiveWorkspace: applyCognitiveRoute,
     cognitiveRoute: applyCognitiveRoute ? cognitiveRouting?.route : undefined,
     cognitiveRouteObservationId,
+    kernelActionEnvelopeId,
   });
 
   return { completed: true };

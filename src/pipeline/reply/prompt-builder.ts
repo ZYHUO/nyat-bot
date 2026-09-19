@@ -69,9 +69,12 @@ export function buildSystemPrompt(userId?: number, _chatId?: number): string {
   // L2: Safety
   layers.push(loadCachedPrompt('safety/guardrails.md'));
 
-  // L3: Contract — explain JSON output format from the schema
+  // L3: Contract — explain JSON output format from the schema.
+  // The schema file is prompt text only (real validation is zod in
+  // pipeline/reply/parser.ts), so it carries field names, types and one-line
+  // meanings — not JSON-Schema boilerplate.
   const schemaRaw = loadCachedPrompt('contract/reply-schema.json');
-  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下 JSON Schema 输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。\n\n⚠️ 输出一个**符合** schema 的 JSON 实例(也就是你的回复),**绝对不要**把上面的 schema 定义本身(\`$schema\`/\`title\`/\`oneOf\`/\`$defs\` 那些东西)原样输出回来。\n\n正确示例(单条):\n\`\`\`json\n{"replyContent":"对对对笑死","targetMessageId":123}\n\`\`\`\n正确示例(多条短泡泡):\n\`\`\`json\n[{"replyContent":"嗯?","targetMessageId":120},{"replyContent":"原来是这样","targetMessageId":123}]\n\`\`\``;
+  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下结构输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。\n\n⚠️ 输出一个**符合**上面结构的 JSON 实例(也就是你的回复),**绝对不要**把上面的字段定义本身原样输出回来。\n\n正确示例(单条):\n\`\`\`json\n{"replyContent":"对对对笑死","targetMessageId":123}\n\`\`\`\n正确示例(多条短泡泡):\n\`\`\`json\n[{"replyContent":"嗯?","targetMessageId":120},{"replyContent":"原来是这样","targetMessageId":123}]\n\`\`\``;
 
   // G2 统一动作空间:回复不再只有"发文字"一种形态
   if (env().TURN_ACTION_PLANNER_ENABLED) {

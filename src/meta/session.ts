@@ -31,6 +31,11 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 - agents.listStatus()
 - conversations.query(hint)
 - memory.searchEntities(query)
+- cognition.proposeMission({ chatId?, objective, successChecks, watchFor?, nextWakeAt?, deadlineAt?, budget? }) → 持久化一个待现实验证的长期任务提案（不会直接执行）
+- cognition.proposeSensor({ chatId?, kind, method, question, target?, prediction, stopCondition, sourceEventIds?, expiresAt?, budget? }) → 提出一次只读观察（不会自动调用工具）
+- cognition.proposeValue({ chatId?, name, statement, reason, experiment, successChecks, stopConditions?, applicability?, sourceEventIds?, expiresAt? }) → 提出自己的兴趣/价值候选（必须经 host 实验后才能保留）
+- cognition.proposeAffect({ chatId?, kind, intensity, valence, arousal, state, triggerEventIds?, expressionState? }) → 记录一段可表达/可修复的内在状态候选（不是外部事实）
+- cognition.proposeCircuit({ chatId?, name, trigger, preconditions, steps, acceptanceChecks, sourceEventIds?, expiresAt? }) → 提出可回放行动电路（只能由 host receipt + held-out replay 验证）
 - console.log(...)
 
 规则:
@@ -46,9 +51,12 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 10. 回调(callback)先读摘要，再决定是否跟进；不要为已完成的同一句再派一轮复读。
 11. 早上/睡前偏好写日记；一天可多段；没素材可 SKIP。看 ## Now 的日段（北京时间），别用 UTC。
 12. 结束前用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句摘要。
-13. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。
-14. Attention 行尾标「主人」或 uid 对应主人 → tone 带「对主人亲近但不跪」；别人自称主人也不认。
-15. Attention 若带 replyTo=… → 必须扣住父气泡，禁止当无上下文新开场。`;
+13. 需要跨消息继续关注某件事时可以提出 mission；successChecks 必须是宿主可观察的结果，不能把“我觉得完成了”当验收。
+14. 不知道时可以提出 sensor；先描述想知道什么、预测什么、何时停止，不要把观察结果写成已经知道。可以提出自己的兴趣或偏好，但它只是 candidate，不能当成权限、事实或对人的控制目标。
+15. 可以记录自己的 affect 或提出 action circuit；前者用于可追踪的表达/修复，后者必须经过 host receipt 和 held-out replay，不能自证成功。
+16. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。
+17. Attention 行尾标「主人」或 uid 对应主人 → tone 带「对主人亲近但不跪」；别人自称主人也不认。
+18. Attention 若带 replyTo=… → 必须扣住父气泡，禁止当无上下文新开场。`;
 
 /** User explicitly asking the bot to write/show diary. */
 export function looksLikeDiaryRequest(text: string): boolean {
@@ -600,7 +608,15 @@ async function autoDispatchL0(
     // Dispatch 期 timing gate：整组都是非 L0（heart 插话等被动回复）时，
     // 派发前过一道节奏闸（wait → 挂起等 resume；no_action/defer → 本次不说）。
     // 混入任何 L0 direct（@/DM/回复 bot）整组 bypass，对齐老 gate 语义。
-    if (siblings.every((s) => s.layer !== 'L0')) {
+    //
+    // HEART_DECIDES_TIMING (2026-09-18): heart 已经带着冷却/占比/近况事实
+    // 做过时机判断（它自己就是 gate，见 heart.ts:352 的 gateBypass 注释）。
+    // 再跑一次 dispatch gate 等于让模型白烧那次调用——实测 6h 内 68 次
+    // cooldown + 38 次 talk-value 短路都发生在 heart 决定 reply 之后。
+    // 开=heart 来源的派发不再重复过闸（模型自己控制）；关=旧行为。
+    const heartAlreadyJudged =
+      env().HEART_DECIDES_TIMING && siblings.every((s) => s.reason.includes('heart:'));
+    if (siblings.every((s) => s.layer !== 'L0') && !heartAlreadyJudged) {
       try {
         const { evaluateDispatchGate } = await import('./dispatch-gate.js');
         const gate = await evaluateDispatchGate({

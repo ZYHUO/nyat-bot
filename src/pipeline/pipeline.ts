@@ -27,6 +27,12 @@ import { pushSleepPending } from "../tracking/sleep-queue.js";
 import { runHeartBranch } from "./heart/heart.js";
 import { classifyAddressee } from "./floor/addressee.js";
 import { recordFloorDecision } from "./floor/store.js";
+import { isSocialActShadowChat, recordLegacySocialActShadow } from "../agent/social-act.js";
+import { isKernelShadowChat } from "../agent/cognitive-kernel.js";
+import {
+  cognitiveTurnRuntime,
+  type CognitiveTurn,
+} from "../agent/cognitive-turn-runtime.js";
 
 // ── Main pipeline orchestrator ──────────────────────────────────────
 
@@ -360,7 +366,21 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // not_me → 同 ambient,但 reason 区分(duet/forwarded/bot_message);
     // to_me / to_other → 走原 judge 链(Heart LLM 看全文自己决断)。
     // 注意:to_other 不短路 —— 只是不找我,不代表不值得听(Heart 会判)。
-    if (e.FLOOR_ENABLED && job.chatId < 0 && !formatted.isBot) {
+    //
+    // 例外:**指向本 bot 的**斜杠命令永不被 floor 沉默。命令是事务性请求(签到/
+    // 图鉴/游戏要出回执),而 floor 的 ambient 只是"没点名"的启发式。生产实证:
+    // /cards 这类自有白名单命令被 floor 判 ambient 后在这里 return,根本走不到
+    // 下面的 dispatchCommand(pre-mute 拦截层),用户敲命令拿不到任何回执。
+    //
+    // 只放行"无 @ 后缀或明确 @ 本 bot"的命令(`/cards`、`/cards@nyatbot`)。带
+    // **其他 bot** @ 后缀的(`/play@AnitaBriso_bot`)继续走 floor:那是别人家的
+    // 命令,L0 判定 unknown_command 之前不该多绕规则链。L0 的 getCommandName 保证
+    // 只有白名单命令会 REPLY,其余 0ms IGNORE,故放行不引入抢话风险。
+    const rawCommandText = formatted.textContent || formatted.captionContent || "";
+    const slashMatch = rawCommandText.match(/^\s*\/(\w+)(?:@(\w+))?/);
+    const isOwnSlashCommand = Boolean(slashMatch) &&
+      (!slashMatch?.[2] || slashMatch[2].toLowerCase() === botIdentity.username.toLowerCase());
+    if (e.FLOOR_ENABLED && job.chatId < 0 && !formatted.isBot && !isOwnSlashCommand) {
       try {
         const addr = classifyAddressee(
           formatted, recentMessages, botUid,
@@ -431,6 +451,133 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
     timings["judge"] = Math.round(performance.now() - t3);
 
+    // NyatOS kernel shadow: give every Telegram turn one trigger/frame/action
+    // chain. The legacy judge and sender remain authoritative until a canary
+    // explicitly opts into a different transport.
+    let kernelTurn: CognitiveTurn | undefined;
+    let kernelActionEnvelopeId: string | undefined;
+    if (isKernelShadowChat(job.chatId, { enabled: e.COGNITIVE_KERNEL_ENABLED, chatIds: e.COGNITIVE_KERNEL_CHAT_IDS })) {
+      try {
+        const scope = { visibility: "chat" as const, chatId: job.chatId };
+        const openedTurn = cognitiveTurnRuntime.open({
+          scope,
+          kind: "telegram_message",
+          source: "telegram",
+          ...(job.cognitiveAnchorEventId ? { anchorEventId: job.cognitiveAnchorEventId } : {}),
+          correlationId: `kernel:telegram:${job.chatId}:${formatted.messageId}`,
+          dedupeKey: `kernel:telegram:${job.chatId}:${formatted.messageId}`,
+          occurredAt: formatted.timestamp,
+          metadata: {
+            messageId: formatted.messageId,
+            userId: formatted.uid,
+            hasMedia: Boolean(formatted.imageFileId || formatted.sticker || formatted.audioFileId || formatted.documentFileId),
+            addressed: Boolean(formatted.replyTo?.uid === botUid),
+          },
+        });
+        kernelTurn = openedTurn ?? undefined;
+        if (kernelTurn) {
+          const action = cognitiveTurnRuntime.propose(kernelTurn, {
+            lane: judgeResult.action === "REPLY" ? "social" : "reflection",
+            kind: judgeResult.action === "REPLY" ? "speak" : "wait",
+            payload: {
+              source: "legacy_judge",
+              action: judgeResult.action,
+              level: judgeResult.level,
+              rule: judgeResult.rule ?? null,
+              replyPath: judgeResult.replyPath ?? null,
+              triggerMessageId: formatted.messageId,
+              targetUserId: formatted.uid > 0 ? formatted.uid : null,
+            },
+            ...(judgeResult.action === "REPLY"
+              ? { prediction: { expectedEffect: "deliver a relevant social response", watchFor: ["follow_up", "reaction", "correction", "silence"] } }
+              : {}),
+            idempotencyKey: `telegram-reply:${job.chatId}:${formatted.messageId}`,
+          });
+          kernelActionEnvelopeId = action?.id;
+          if (action) {
+            const board = cognitiveTurnRuntime.arbitrate(kernelTurn, { nowSec: formatted.timestamp });
+            logger.debug(
+              { chatId: job.chatId, messageId: formatted.messageId, selected: board?.selected?.id ?? null, deferred: board?.deferredCount ?? 0, rejected: board?.rejectedCount ?? 0 },
+              "NyatOS action board shadow",
+            );
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId, messageId: formatted.messageId }, "NyatOS kernel shadow failed (non-critical)");
+      }
+    }
+
+    // Phase 1 SocialAct shadow: adapt the existing Heart/legacy judge decision
+    // into the action contract without copying message text or changing the
+    // sender path. Meta's direct path has its own metadata observation bridge.
+    if (isSocialActShadowChat(job.chatId, {
+      enabled: e.SOCIAL_ACT_SHADOW_ENABLED,
+      chatIds: e.SOCIAL_ACT_SHADOW_CHAT_IDS,
+    })) {
+      // Shadow collection includes Redis/SQLite reads and (when the cache is
+      // cold) one Telegram membership probe. Keep it off the reply critical
+      // path: the legacy judge/sender must not wait for telemetry.
+      void (async () => {
+       try {
+        const { collectConversationField, deriveInnerStateFromConversationField } = await import("../agent/conversation-field.js");
+        const { recordCapabilitySnapshot, recordInnerState } = await import("../agent/nyatos-state.js");
+        const { buildHostCapabilitySnapshot } = await import("../agent/nyatos-contracts.js");
+        const { observeTelegramCapabilitySnapshot } = await import("../agent/capability-observer.js");
+        const conversationField = await collectConversationField({
+          chatId: job.chatId,
+          recent: recentMessages,
+          botUid,
+          ...(formatted.messageThreadId ? { threadId: formatted.messageThreadId } : {}),
+          botAddressed:
+            job.chatId > 0 ||
+            formatted.replyTo?.uid === botUid ||
+            isMentioningSelf(
+              formatted.textContent || formatted.captionContent || "",
+              botIdentity.username,
+              botIdentity.nicknames,
+            ),
+          ...(job.cognitiveAnchorEventId ? { asOfEventId: job.cognitiveAnchorEventId } : {}),
+        });
+        const innerState = deriveInnerStateFromConversationField(conversationField);
+        const scope = { visibility: 'chat' as const, chatId: job.chatId };
+        const capabilitySnapshot = await observeTelegramCapabilitySnapshot({
+          scope,
+          ...(formatted.messageThreadId ? { threadId: formatted.messageThreadId } : {}),
+        }) ?? buildHostCapabilitySnapshot({
+          scope,
+          observedAt: conversationField.asOf,
+          chatKind: job.chatId > 0 ? 'private' : 'group',
+          // No host probe result is not evidence of a permission. Keep every
+          // effect unknown until Telegram or a real receipt says otherwise.
+        });
+        const recorded = recordLegacySocialActShadow({
+          chatId: job.chatId,
+          message: formatted,
+          judgeResult,
+          ...(job.cognitiveAnchorEventId ? { cognitiveAnchorEventId: job.cognitiveAnchorEventId } : {}),
+          ...(job.turnContext?.obligationTargetUid ? { obligationTargetUid: job.turnContext.obligationTargetUid } : {}),
+          ...(formatted.messageThreadId ? { threadId: formatted.messageThreadId } : {}),
+          conversationField,
+          innerState,
+          capability: capabilitySnapshot,
+        });
+        recordInnerState(innerState, {
+          scope: { visibility: 'chat', chatId: job.chatId },
+          ...(job.cognitiveAnchorEventId ? { causationId: job.cognitiveAnchorEventId } : {}),
+          occurredAt: conversationField.asOf,
+        });
+        recordCapabilitySnapshot(capabilitySnapshot, {
+          ...(job.cognitiveAnchorEventId ? { causationId: job.cognitiveAnchorEventId } : {}),
+        });
+        if (recorded) {
+          logger.debug({ chatId: job.chatId, messageId: formatted.messageId, eventId: recorded.eventId, inserted: recorded.inserted }, 'SocialAct shadow recorded');
+        }
+       } catch (err) {
+         logger.debug({ err, chatId: job.chatId, messageId: formatted.messageId }, 'SocialAct shadow failed (non-critical)');
+       }
+      })();
+    }
+
     // Core v2 Phase 1 shadow: graylist 群里，旧判之后跑 core 分层判，
     // 只记日志对比（agree/分歧），不改行为。fire-and-forget，失败静默。
     // CORE_V2_CHAT_IDS 为空 → isCoreChat 全 false → 零开销。
@@ -462,6 +609,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       releaseHeldChatLock,
       sleepBypass,
       burstHint,
+      kernelTurn,
+      kernelActionEnvelopeId,
     });
     if (postResult.completed) return;
   } finally {

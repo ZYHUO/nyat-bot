@@ -33,7 +33,8 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 
 - Vitest suite is **fully green**. A failing test is a real regression — fix it, don't skip it.
 - `tsc --noEmit` and `eslint` are **clean — zero warnings**. Anything they print is new. (This file used to claim one known `prompt-builder.ts:169` warning and CLAUDE.md claimed two; both were stale.)
-- ⚠️ **Use the service's Node when running tests**: `/usr/local/bin/node` is v25, the service runs v22 (`/root/.hermes/node/bin/node`), and `better-sqlite3`'s prebuilt binary only loads under v22. Wrong Node → **226 spurious failures** (`Module did not self-register`). Prefix with `export PATH=/root/.hermes/node/bin:$PATH`.
+- ⚠️ **Use the service's Node when running tests**: the systemd unit runs `/opt/node22/bin/node` (v22.22.2) — check with `systemctl show xxb-ts -p ExecStart`. `better-sqlite3`'s prebuilt binary only loads under the v22 ABI, so any other Node breaks the suite with `Module did not self-register` (wrong Node → **113 files / 808 tests** fail spuriously). Prefix with `export PATH=/opt/node22/bin:$PATH`.
+  - **Do not use `/root/.hermes/node/bin/node`**: that path was correct historically but is now **v26.8.2**, and it is the reason this warning kept getting re-learned. Always verify against the systemd unit rather than trusting a path written in docs.
 
 ## Non-obvious conventions (these bite)
 
@@ -73,6 +74,6 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 
 ## Before you commit
 
-- Run `export PATH=/root/.hermes/node/bin:$PATH && npm run typecheck && npm run lint && npm run test` — all must be **completely** clean; there are no known-noise exceptions.
+- Run `export PATH=/opt/node22/bin:$PATH && npm run typecheck && npm run lint && npm run test` — all must be **completely** clean; there are no known-noise exceptions.
 - New feature → new `env` flag (default OFF) + graylist; new schema → new `migrations/00NN_*.sql` (idempotent, never edit old ones); new cron task → wrap in `safeRun`, flag-gate it.
 - Match surrounding code: comment density, naming, ESM `import type` discipline, no `process.env` reads outside `env.ts`.

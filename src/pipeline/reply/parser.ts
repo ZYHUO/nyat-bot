@@ -38,6 +38,30 @@ const replyOutputSchema = z.object({
   voice: z.boolean().optional(),
 });
 
+/**
+ * Model-declared media plan for one bubble.
+ *
+ * The model owns expression: what to attach, where it sits relative to the
+ * text, and when the bubble goes out. The host only checks reality (the asset
+ * exists, the Telegram permission is present, the size budget holds); it does
+ * not second-guess the choice with a rule table or an RNG. Unsupported values
+ * are dropped at this boundary rather than silently swapped for a host-preferred
+ * variant — a dropped media item is visible as a missing attachment, whereas a
+ * substituted one corrupts what the model was trying to say.
+ */
+export const replyMediaSchema = z.object({
+  kind: z.enum(['sticker', 'photo', 'voice', 'poll', 'reaction']),
+  /** sticker: intent words. photo/voice: sandbox-relative path. poll: question. */
+  ref: z.union([z.string(), z.array(z.string())]).optional(),
+  /** poll only. */
+  options: z.array(z.string()).max(10).optional(),
+  /** reaction only; normalised against Telegram's allowed set. */
+  emoji: z.string().optional(),
+  /** Where the media sits relative to this bubble's text. */
+  position: z.enum(['before', 'after', 'instead']).optional(),
+});
+export type ReplyMedia = z.infer<typeof replyMediaSchema>;
+
 export interface ParsedReply {
   replyContent: string;
   targetMessageId: number;
@@ -63,6 +87,23 @@ export interface ParsedReply {
   modelStickerAct?: boolean;
   /** G10: 模型表达的投递意图 — 这句想停顿酝酿一拍再发(重点/转折处) */
   hesitateBefore?: boolean;
+  /**
+   * 模型自定的媒体计划(贴纸/图片/语音/投票/反应 + 与文字的相对位置)。
+   * 投递层只做现实校验(素材存在、权限具备、体积合规),不再用冷却表或
+   * 随机数改写模型的选择。
+   */
+  media?: ReplyMedia;
+  /**
+   * 模型自定的气泡间隔(ms)。omit = 用默认打字节奏;0 = 立即发。
+   * 这是"何时发"的主权:真人知道自己想停顿多久,不由宿主掷骰子决定。
+   */
+  delayMs?: number;
+  /**
+   * 模型自述"这句打了一半想算了"。宿主会呈现"正在输入…"然后不发。
+   * 这是表达主权的一部分:真人有权把话咽回去,但必须由本人决定,
+   * 不能由宿主随机丢弃一条已经决定要发的回复。
+   */
+  typingGhost?: boolean;
 }
 
 /**
@@ -527,6 +568,28 @@ function validateAndReturn(
     }
     if (data['hesitateBefore'] === true || data['hesitate_before'] === true) {
       result.hesitateBefore = true;
+    }
+    // Model-declared media plan. Invalid shapes are dropped whole (rather than
+    // partially applied) so a malformed plan never yields a half-attached
+    // bubble; the model sees the attachment is missing and can retry.
+    const rawMedia = data['media'];
+    if (rawMedia !== undefined) {
+      const mediaParsed = replyMediaSchema.safeParse(rawMedia);
+      if (mediaParsed.success) {
+        result.media = mediaParsed.data;
+      } else {
+        logger.debug({ issues: mediaParsed.error.issues }, 'Reply media plan dropped (invalid shape)');
+      }
+    }
+    // Model-declared inter-bubble delay. Anything outside the allowed window is
+    // ignored (falls back to the default typing cadence) instead of clamped,
+    // so the model cannot accidentally stall a turn for minutes.
+    const rawDelay = data['delayMs'] ?? data['delay_ms'];
+    if (typeof rawDelay === 'number' && Number.isFinite(rawDelay) && rawDelay >= 0 && rawDelay <= 60_000) {
+      result.delayMs = Math.trunc(rawDelay);
+    }
+    if (data['typingGhost'] === true || data['typing_ghost'] === true) {
+      result.typingGhost = true;
     }
     return result;
   }

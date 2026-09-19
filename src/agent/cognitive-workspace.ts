@@ -428,6 +428,155 @@ export async function buildCognitiveWorkspace(
     }
   }
 
+  // NyatOS state is an event-backed read projection. It is deliberately
+  // appended after the existing social graph so old workspace callers see no
+  // extra material unless the shadow path has actually produced observations.
+  try {
+    const {
+      getLatestCapabilitySnapshot,
+      getLatestInnerState,
+      listAffectEpisodes,
+      listMissionProposals,
+    } = await import('./nyatos-state.js');
+    const { listSensorProposals, listValueProposals } = await import('./active-proposals.js');
+    const chatScope = { visibility: 'chat' as const, chatId: scope.chatId };
+    const visibleAt = (occurredAt: number): boolean =>
+      anchorOccurredAt === undefined || occurredAt <= anchorOccurredAt;
+    const innerState = getLatestInnerState(chatScope);
+    if (innerState && visibleAt(innerState.occurredAt)) {
+      const value = innerState.value;
+      parts.push({
+        id: 'workspace:inner-state',
+        tier: 'ephemeral',
+        text:
+          `[当前内在状态（host projection）]\n` +
+          `- attention=${value.attention.toFixed(2)} energy=${value.energy.toFixed(2)} ` +
+          `curiosity=${value.curiosity.toFixed(2)} connection=${value.connection.toFixed(2)}\n` +
+          `- confidence=${value.confidence.toFixed(2)} uncertainty=${value.uncertainty.toFixed(2)} ` +
+          `need=${value.currentNeed ?? 'none'} unresolved=${value.unresolved.length}\n` +
+          `这是可修正的当前寄存器，不是外部事实，也不是行动许可。`,
+      });
+      provenance.push({
+        provider: 'nyatos-inner-state',
+        source: `event:${innerState.eventId}`,
+        scope: `chat:${scope.chatId}`,
+      });
+    }
+
+    const capability = getLatestCapabilitySnapshot(chatScope);
+    if (capability && visibleAt(capability.occurredAt)) {
+      const value = capability.value;
+      parts.push({
+        id: 'workspace:capability',
+        tier: 'delta',
+        text:
+          `[宿主能力事实]\n` +
+          `- chatKind=${value.chatKind} observedAt=${value.observedAt}\n` +
+          `- sendText=${value.observed.canSendText ?? 'unknown'} ` +
+          `sendMedia=${value.observed.canSendMedia ?? 'unknown'} ` +
+          `react=${value.observed.canReact ?? 'unknown'} poll=${value.observed.canPoll ?? 'unknown'} ` +
+          `sticker=${value.observed.canSendSticker ?? 'unknown'} voice=${value.observed.canSendVoice ?? 'unknown'}\n` +
+          (value.admin
+            ? `- membership=${value.admin.status} delete=${value.admin.canDeleteMessages ?? 'unknown'} ` +
+              `pin=${value.admin.canPinMessages ?? 'unknown'} manageTopics=${value.admin.canManageTopics ?? 'unknown'}\n`
+            : '') +
+          `能力必须以 host receipt 为准，model proposal 不能自授权。`,
+      });
+      provenance.push({
+        provider: 'nyatos-capability',
+        source: `event:${capability.eventId}`,
+        scope: `chat:${scope.chatId}`,
+      });
+    }
+
+    const missions = listMissionProposals(chatScope, Math.min(5, budget.maxGoals))
+      .filter((mission) => visibleAt(mission.occurredAt));
+    if (missions.length) {
+      for (const mission of missions) {
+        const objective = safeText(mission.value.objective, 180);
+        if (objective && !activeGoals.includes(objective)) activeGoals.push(objective);
+      }
+      parts.push({
+        id: 'workspace:mission-proposals',
+        tier: 'delta',
+        text:
+          `[未结算的自主任务提案]\n` +
+          missions.map((mission) => `- ${safeText(mission.value.objective, 180)} (proposed)`).join('\n') +
+          `\n提案不是已完成目标，必须等待 host evidence。`,
+      });
+      provenance.push({
+        provider: 'nyatos-missions',
+        source: `chat:${scope.chatId}`,
+        scope: `chat:${scope.chatId}`,
+      });
+    }
+
+    const sensors = listSensorProposals(chatScope, Math.min(4, budget.maxGoals))
+      .filter((sensor) => visibleAt(sensor.occurredAt));
+    if (sensors.length) {
+      parts.push({
+        id: 'workspace:sensor-proposals',
+        tier: 'delta',
+        text:
+          `[待宿主观察的主动问题]\n` +
+          sensors.map((sensor) => {
+            const status = sensor.latestObservation?.status ?? 'candidate';
+            return `- ${safeText(sensor.proposal.question, 180)} via ${sensor.proposal.method} (${status})`;
+          }).join('\n') +
+          `\n观察提案不是观察结果；没有 receipt 时必须保持未知。`,
+      });
+      provenance.push({
+        provider: 'nyatos-sensors',
+        source: `chat:${scope.chatId}`,
+        scope: `chat:${scope.chatId}`,
+      });
+    }
+
+    const values = listValueProposals(chatScope, Math.min(4, budget.maxGoals))
+      .filter((value) => visibleAt(value.occurredAt));
+    if (values.length) {
+      parts.push({
+        id: 'workspace:value-proposals',
+        tier: 'delta',
+        text:
+          `[自主兴趣/价值候选]\n` +
+          values.map((value) => {
+            const status = value.adopted ? 'adopted' : value.latestEvaluation?.status ?? 'candidate';
+            return `- ${safeText(value.proposal.name, 100)}: ${safeText(value.proposal.statement, 180)} (${status})`;
+          }).join('\n') +
+          `\n候选必须经过 host 实验和 evidence 才能保留，不是权限或对他人的控制目标。`,
+      });
+      provenance.push({
+        provider: 'nyatos-values',
+        source: `chat:${scope.chatId}`,
+        scope: `chat:${scope.chatId}`,
+      });
+    }
+
+    const affects = listAffectEpisodes(chatScope, 6)
+      .filter((episode) => visibleAt(episode.occurredAt));
+    const activeAffects = affects.filter((episode) => episode.value.status === 'active');
+    if (activeAffects.length) {
+      parts.push({
+        id: 'workspace:affect',
+        tier: 'ephemeral',
+        text:
+          `[未完成的情绪事件（metadata）]\n` +
+          activeAffects
+            .map((episode) => `- ${episode.value.kind} intensity=${episode.value.intensity.toFixed(2)} valence=${episode.value.valence.toFixed(2)}`)
+            .join('\n') +
+          `\n情绪可被表达、观察或修复，但不能替代外部证据。`,
+      });
+      provenance.push({
+        provider: 'nyatos-affect',
+        source: `chat:${scope.chatId}`,
+        scope: `chat:${scope.chatId}`,
+      });
+    }
+  } catch (err) {
+    logger.debug({ err, chatId: scope.chatId }, 'workspace NyatOS projection failed (non-critical)');
+  }
+
   if (worldProjection) {
     const personPart = projectionPart(
       "workspace:target-user",

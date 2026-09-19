@@ -1,4 +1,5 @@
 import type { Bot, Context } from 'grammy';
+import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { isDM } from '../../shared/chat.js';
 import { isDuplicate } from '../middleware/dedup.js';
@@ -224,17 +225,64 @@ async function handleUpdate(ctx: Context): Promise<void> {
           }
         }
 
+        // NyatOS Phase 2.4: ingress shadow. Runs BEFORE any gate so the sample
+        // is unbiased — the earlier version sat after the heart branch and only
+        // saw 3 of 12 messages, because coalesce/cooldown/engagement had already
+        // dropped the rest. Those dropped messages are exactly what the rewrite
+        // must be judged on. Fire-and-forget: never delays or blocks the reply.
+        const noteLiveOutcome = (outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted'): void => {
+          if (!env().NYATOS_SHADOW_ENABLED) return;
+          // Only record for chats the shadow actually observed; otherwise the
+          // ledger fills with outcomes that have no matching shadow verdict and
+          // the join becomes meaningless.
+          void import('../../nyatos/shadow.js')
+            .then(({ isNyatosShadowChat, recordLiveOutcome }) => {
+              if (!isNyatosShadowChat(chatId, {
+                enabled: env().NYATOS_SHADOW_ENABLED,
+                chatIds: env().NYATOS_SHADOW_CHAT_IDS,
+              })) return;
+              recordLiveOutcome({ chatId, messageId: fm.messageId, outcome });
+            })
+            .catch(() => { /* telemetry only */ });
+        };
+        if (env().NYATOS_SHADOW_ENABLED && fm.role === 'user' && !fm.isBot) {
+          void (async () => {
+            try {
+              const [{ runIngressShadow }, { getRecent }] = await Promise.all([
+                import('../../nyatos/shadow.js'),
+                import('../../pipeline/context/manager.js'),
+              ]);
+              const recent = await getRecent(chatId, 20).catch(() => []);
+              await runIngressShadow({
+                chatId,
+                message: fm,
+                recent,
+                botUid: getBotIdentity().uid,
+                enabled: env().NYATOS_SHADOW_ENABLED,
+                chatIds: env().NYATOS_SHADOW_CHAT_IDS,
+              });
+            } catch (err) {
+              logger.debug({ err, chatId }, 'ingress shadow failed (non-critical)');
+            }
+          })();
+        }
+
         if (metaMuteBlocksReply(chatId, fm, isDirect)) {
           logger.debug({ chatId, uid: fm.uid }, 'Meta path: muted, skip Attention');
+          noteLiveOutcome('silent');
           return 'done';
         }
 
         const intercept = await tryMetaIngressIntercepts(chatId, fm, { isDirect });
         if (intercept === 'handled') {
           logger.info({ chatId, messageId }, 'Meta path: feature intercept handled');
+          noteLiveOutcome('intercepted');
           return 'done';
         }
-        if (intercept === 'legacy') return 'legacy';
+        if (intercept === 'legacy') {
+          noteLiveOutcome('legacy');
+          return 'legacy';
+        }
 
         const textPreview = (fm.textContent || rawText).slice(0, 200);
         const layerDec = classifyAttentionLayer({
@@ -254,6 +302,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
         });
         if (sleep === 'silent' || sleep === 'queued') {
           logger.info({ chatId, messageId, sleep, layer: layerDec.layer }, 'Meta path: asleep');
+          noteLiveOutcome('silent');
           return 'done';
         }
 
@@ -319,7 +368,14 @@ async function handleUpdate(ctx: Context): Promise<void> {
                   layer: layerDec.layer,
                   cognitiveAnchorEventId,
                 });
-                if (heart.verdict !== 'allow') return;
+                if (heart.verdict !== 'allow') {
+                  // Silence decided by the heart (cooldown / engagement / pass /
+                  // refractory). Recording it lets the shadow comparison ask the
+                  // question that matters: "the gate said no — would a single
+                  // decision have spoken?"
+                  noteLiveOutcome(heart.reason?.startsWith('heart_wait') ? 'wait' : 'silent');
+                  return;
+                }
 
                 const elevLayer = heart.layer;
                 const elevReason = heart.reason;

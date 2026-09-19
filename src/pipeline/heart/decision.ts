@@ -49,6 +49,13 @@ export interface HeartInput {
   burstNote?: string;
   /** Optional bounded scoped workspace block for the V2 rollout. */
   cognitiveWorkspaceHint?: string;
+  /**
+   * Concrete facts about the bot's own recent behaviour in this chat.
+   * Rendered by src/agent/self-history.ts; empty when there is nothing to show.
+   * This is what lets the model notice it is over-participating — the host does
+   * not decide that for it.
+   */
+  selfHistory?: string;
   signal?: AbortSignal;
 }
 
@@ -158,11 +165,18 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const presence = input.lastSpokeSecAgo !== undefined && input.lastSpokeSecAgo < 180
     ? `\n(你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,正处于对话中)`
     : '';
+  // The model's own recent behaviour, as facts. Placed right before the decision
+  // so it is in view when judging; the older daily rules stay in the system
+  // prompt. Both are needed: rules say "what generally works", this says
+  // "what I just did".
+  const selfHistoryBlock = input.selfHistory?.trim()
+    ? `\n\n${input.selfHistory.trim().slice(0, 900)}`
+    : '';
   const burstLine = input.burstNote ? `\n${input.burstNote}` : '';
   const workspaceLine = input.cognitiveWorkspaceHint?.trim()
     ? `\n\n${input.cognitiveWorkspaceHint.trim().slice(0, 3000)}`
     : '';
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${burstLine}${workspaceLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
 
   let raw: string;
   try {

@@ -140,11 +140,18 @@ export function computeEngagement(
 
   budget = Math.max(budget, HARD_PASS_BUDGET + 0.01);
 
-  // 注记只发群速一种:"自己话密"已由 heart.md 刷屏自检 + 自我状态的
-  // focus 在场感覆盖,三个声音同时喊"闭嘴"会把心流吓哑(review #10)。
-  const note = budget < 0.5 && velocityFactor
-    ? '(群里刷得很快,你凑热闹的兴致一般,收着点)'
-    : null;
+  // 注记是"体感"，不是"禁令"。同一件事（自己话密）现在由两处覆盖：
+  //   1) self-history 的「这一波你说得有点多」（占比，事实）
+  //   2) 这里的 note（当下的感觉）
+  // heart.md 的旧「刷屏自检」已删除（助手腔），所以这里补上"话密"的体感——
+  // 否则模型只看到数字，不知道该拿它怎么办。
+  // 措辞是感觉不是命令：三个声音同时喊"闭嘴"会把心流吓哑（review #10），
+  // 所以只说"你自己"的状态，不命令收手。
+  const parts: string[] = [];
+  if (share >= 0.25) parts.push('这波你说得挺多');
+  if (replies5m >= 3) parts.push('刚连着回了好几条');
+  if (velocityFactor) parts.push('群里刷得很快');
+  const note = parts.length > 0 ? `(${parts.join('，')}——你自己掂量)` : null;
 
   return { budget, note, factors };
 }

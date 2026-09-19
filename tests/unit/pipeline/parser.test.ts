@@ -338,3 +338,59 @@ describe('single-quoted / Python-dict salvage (DeepSeek quirk)', () => {
     expect(salvageReplyContent('not a dict')).toBeNull();
   });
 });
+
+describe('模型表达主权字段 (media / delayMs / typingGhost)', () => {
+  const fallbackId = 999;
+
+  it('parses a full model-declared media plan', () => {
+    const raw = JSON.stringify({
+      replyContent: '给你看个东西',
+      targetMessageId: 123,
+      media: { kind: 'photo', ref: 'art/cat.png', position: 'after' },
+      delayMs: 1500,
+    });
+    const result = parseReplyResponse(raw, fallbackId)[0]!;
+    expect(result.media).toEqual({ kind: 'photo', ref: 'art/cat.png', position: 'after' });
+    expect(result.delayMs).toBe(1500);
+  });
+
+  it('accepts a sticker plan resolved by intent, before the text', () => {
+    const raw = JSON.stringify({
+      replyContent: '哈哈',
+      targetMessageId: 1,
+      media: { kind: 'sticker', ref: ['laughing'], position: 'before' },
+    });
+    const result = parseReplyResponse(raw, fallbackId)[0]!;
+    expect(result.media?.kind).toBe('sticker');
+    expect(result.media?.position).toBe('before');
+  });
+
+  it('drops an invalid media plan whole instead of half-applying it', () => {
+    const raw = JSON.stringify({
+      replyContent: 'hi',
+      targetMessageId: 1,
+      media: { kind: 'hologram', ref: 'x' },
+    });
+    const result = parseReplyResponse(raw, fallbackId)[0]!;
+    expect(result.media).toBeUndefined();
+    // The text still goes out — only the unusable attachment is dropped.
+    expect(result.replyContent).toBe('hi');
+  });
+
+  it('ignores an out-of-range delay instead of clamping it', () => {
+    const tooLong = JSON.stringify({ replyContent: 'hi', targetMessageId: 1, delayMs: 999_999 });
+    expect(parseReplyResponse(tooLong, fallbackId)[0]!.delayMs).toBeUndefined();
+    const negative = JSON.stringify({ replyContent: 'hi', targetMessageId: 1, delayMs: -5 });
+    expect(parseReplyResponse(negative, fallbackId)[0]!.delayMs).toBeUndefined();
+    // Zero is meaningful: send with no pause.
+    const zero = JSON.stringify({ replyContent: 'hi', targetMessageId: 1, delayMs: 0 });
+    expect(parseReplyResponse(zero, fallbackId)[0]!.delayMs).toBe(0);
+  });
+
+  it('parses the model-declared typing ghost', () => {
+    const raw = JSON.stringify({ replyContent: '算了', targetMessageId: 1, typingGhost: true });
+    expect(parseReplyResponse(raw, fallbackId)[0]!.typingGhost).toBe(true);
+    const off = JSON.stringify({ replyContent: '算了', targetMessageId: 1 });
+    expect(parseReplyResponse(off, fallbackId)[0]!.typingGhost).toBeUndefined();
+  });
+});

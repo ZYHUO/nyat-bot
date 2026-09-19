@@ -29,6 +29,53 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
       .then(({ pokeGlobalWake }) => pokeGlobalWake('dm'))
       .catch(() => {});
   }
+
+  // Reply-outcome observation. The legacy pipeline does this in
+  // pipeline/stages/bookkeeping.ts; Meta skips that stage entirely, so without
+  // this hook the outcomes of every conversation reply sent on the main path
+  // would never resolve — the self-history facts shown to the model would stay
+  // "unknown" forever, and mood/relationship effects would never apply.
+  if (env().OUTCOME_TRACKING_ENABLED && formatted.uid > 0 && !formatted.isBot) {
+    void (async () => {
+      try {
+        const [{ checkOutcome, generateReflection }, { getBotIdentity }, { callWithFallback }] =
+          await Promise.all([
+            import('../tracking/outcome.js'),
+            import('../bot/bot.js'),
+            import('../ai/fallback.js'),
+          ]);
+        const { needsReflection } = await checkOutcome(chatId, formatted, getBotIdentity().username);
+        if (!needsReflection) return;
+        await generateReflection(chatId, async (prompt) => {
+          try {
+            const result = await callWithFallback({
+              usage: 'summarize',
+              messages: [{ role: 'user', content: prompt }],
+              maxTokens: 300,
+              temperature: 0.3,
+            });
+            return result.content;
+          } catch (err) {
+            logger.warn({ err, chatId }, 'Meta: reflection AI call failed');
+            return null;
+          }
+        });
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta: outcome check failed (non-critical)');
+      }
+    })();
+  }
+
+  // World facts: record what Telegram reports about this chat (title, type,
+  // username, description) as host-observable world entities. The World
+  // projection had a consumer but no producer — nothing ever emitted
+  // `world_change`, so `world_entities` stayed empty. Cached for 30 min inside
+  // the module, so this is one getChat per chat per half hour, not per message.
+  if (env().WORLD_FACTS_ENABLED) {
+    void import('../agent/world-facts.js')
+      .then(({ observeAndRecordChatFacts }) => observeAndRecordChatFacts(chatId, true))
+      .catch((err) => logger.debug({ err, chatId }, 'Meta: world facts failed (non-critical)'));
+  }
 }
 
 export type MetaSleepVerdict = 'continue' | 'queued' | 'silent';

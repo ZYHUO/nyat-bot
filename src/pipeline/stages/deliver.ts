@@ -37,6 +37,10 @@ import {
 } from "../../bot/sender/telegram.js";
 import { recordReply } from "../../tracking/outcome.js";
 import {
+  isSocialActShadowChat,
+  recordLegacySocialActOutcome,
+} from "../../agent/social-act.js";
+import {
   getReadyStickersByIntent,
   recordStickerSent,
 } from "../../knowledge/sticker/store.js";
@@ -59,6 +63,10 @@ import { getChatStyle, styleSegmenterOverlay, styleHumanizerOverlay, type ChatSt
 import { recordSocialDeliveryPrediction } from "../../agent/social-predictions.js";
 import type { CognitiveRoute } from "../../agent/cognitive-routing.js";
 import { completeCognitiveRouteObservation } from "../../agent/cognitive-route-observations.js";
+import {
+  cognitiveTurnRuntime,
+  type CognitiveTurn,
+} from "../../agent/cognitive-turn-runtime.js";
 
 function isNoSendPermissionError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -117,11 +125,14 @@ export async function generateAndSendReplies(args: {
   useCognitiveWorkspace?: boolean;
   cognitiveRoute?: CognitiveRoute;
   cognitiveRouteObservationId?: number;
+  kernelTurn?: CognitiveTurn;
+  kernelActionEnvelopeId?: string;
 }): Promise<DeliveryTelemetry> {
   const {
     job, formatted, judgeResult, botUid,
     effectiveReplyPath,
     e, start, timings, lockState, releaseHeldChatLock, useCognitiveWorkspace, cognitiveRoute,
+    kernelTurn, kernelActionEnvelopeId,
   } = args;
   const finishRouteObservation = (telemetry: DeliveryTelemetry): DeliveryTelemetry => {
     if (args.cognitiveRouteObservationId !== undefined) {
@@ -136,6 +147,96 @@ export async function generateAndSendReplies(args: {
     return telemetry;
   };
   let sendPermissionDenied = false;
+  let socialTypingStartedAt: number | undefined;
+  let socialPlannedBubbleCount = 0;
+  let socialPlannedReactions = 0;
+  let socialDeliveredStickerCount = 0;
+  let socialDeliveredVoiceCount = 0;
+  let socialPollCount = 0;
+
+  const recordSocialActDeliveryOutcome = (
+    status: 'sent' | 'silent' | 'blocked' | 'failed' | 'interrupted',
+    details: {
+      reason?: string;
+      plannedBubbleCount?: number;
+      deliveredBubbleCount?: number;
+      targetMessageIds?: number[];
+      deliveredMessageIds?: number[];
+      typingBeforeMs?: number;
+      stickers?: number;
+      voices?: number;
+      polls?: number;
+      reactions?: number;
+      observedEffects?: {
+        canSendText?: boolean | null;
+        canSendMedia?: boolean | null;
+        canReact?: boolean | null;
+        canPoll?: boolean | null;
+        canSendSticker?: boolean | null;
+        canSendVoice?: boolean | null;
+        canDeleteOwn?: boolean | null;
+      };
+    } = {},
+  ): void => {
+    if (kernelTurn) {
+      const kernelStatus = status === "sent" || status === "silent"
+        ? "completed"
+        : status === "interrupted"
+          ? "interrupted"
+          : status;
+      cognitiveTurnRuntime.settle(kernelTurn, {
+        ...(kernelActionEnvelopeId ? { envelopeId: kernelActionEnvelopeId } : {}),
+        status: kernelStatus,
+        ...(details.reason ? { reason: details.reason } : {}),
+        receipt: {
+          stage: "delivery",
+          status,
+          plannedBubbleCount: details.plannedBubbleCount ?? socialPlannedBubbleCount,
+          deliveredBubbleCount: details.deliveredBubbleCount ?? 0,
+          deliveredMessageIds: details.deliveredMessageIds ?? [],
+          stickers: details.stickers ?? socialDeliveredStickerCount,
+          voices: details.voices ?? socialDeliveredVoiceCount,
+          polls: details.polls ?? socialPollCount,
+          reactions: details.reactions ?? socialPlannedReactions,
+        },
+      });
+    }
+    if (!isSocialActShadowChat(job.chatId, {
+      enabled: e.SOCIAL_ACT_SHADOW_ENABLED,
+      chatIds: e.SOCIAL_ACT_SHADOW_CHAT_IDS,
+    })) return;
+    try {
+      const recorded = recordLegacySocialActOutcome({
+        chatId: job.chatId,
+        messageId: formatted.messageId,
+        status,
+        ...(details.reason ? { reason: details.reason } : {}),
+        completedAt: Math.floor(Date.now() / 1000),
+        plannedBubbleCount: details.plannedBubbleCount ?? socialPlannedBubbleCount,
+        deliveredBubbleCount: details.deliveredBubbleCount ?? 0,
+        ...(details.targetMessageIds ? { targetMessageIds: details.targetMessageIds } : {}),
+        ...(details.deliveredMessageIds ? { deliveredMessageIds: details.deliveredMessageIds } : {}),
+        typingBeforeMs: details.typingBeforeMs ?? (socialTypingStartedAt
+          ? Math.max(0, Math.round(performance.now() - socialTypingStartedAt))
+          : 0),
+        media: {
+          stickers: details.stickers ?? socialDeliveredStickerCount,
+          voices: details.voices ?? socialDeliveredVoiceCount,
+          polls: details.polls ?? socialPollCount,
+          reactions: details.reactions ?? socialPlannedReactions,
+        },
+        ...(details.observedEffects ? { observedEffects: details.observedEffects } : {}),
+      });
+      if (recorded) {
+        logger.debug(
+          { chatId: job.chatId, messageId: formatted.messageId, status, eventId: recorded.eventId },
+          'SocialAct shadow outcome recorded',
+        );
+      }
+    } catch (err) {
+      logger.debug({ err, chatId: job.chatId, messageId: formatted.messageId }, 'SocialAct shadow outcome failed (non-critical)');
+    }
+  };
 
   // 指令服从层:点名/回复 bot/私聊语境下的自然语言指令 → prompt 强注入 +
   // 禁止沉默 + 关闭 humanizer 内容篡改(指令产物要保真)。
@@ -202,6 +303,7 @@ export async function generateAndSendReplies(args: {
             const ok = await executeControlActions([action], job.chatId, formatted.uid, formatted.messageId);
             if (ok) {
               logger.info({ chatId: job.chatId, action: action.action, target: action.controlTarget ?? "self" }, "Pipeline complete (control directive, silent)");
+              recordSocialActDeliveryOutcome('silent', { reason: 'control_directive' });
               return finishRouteObservation({ status: 'silent' });
             }
           }
@@ -213,6 +315,7 @@ export async function generateAndSendReplies(args: {
 
     // 6b. Send typing indicator
     await sendChatAction(job.chatId, "typing");
+    socialTypingStartedAt = performance.now();
 
     // Pre-load runtime override for segmenter config (needed before generateReply)
     const override = await loadOverrideCached(getRedis()).catch(() => null);
@@ -402,6 +505,8 @@ export async function generateAndSendReplies(args: {
       isMultiAgentChat(job.chatId),
     );
     const replies = replyResult.replies;
+    socialPlannedBubbleCount = replies.length;
+    socialPlannedReactions = replyResult.reactions?.length ?? 0;
     timings["reply"] = Math.round(performance.now() - t5);
 
     // H3 poll 执行器：与 host-api sendPoll 同约束（群聊/每群每天2次），失败静默不影响文本。
@@ -429,6 +534,7 @@ export async function generateAndSendReplies(args: {
         for (const p of result.polls.slice(0, 1)) {
           const messageId = await sendPoll(j.chatId, p.question, p.options, fmt.messageThreadId);
           if (messageId > 0) {
+            socialPollCount += 1;
             await addAssistant(j.chatId, {
               textContent: `[投票] ${p.question}（${p.options.join(' / ')}）`,
               messageId,
@@ -481,6 +587,12 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId, reacted: !!replyResult.reactions },
         "Pipeline complete (model chose silence)",
       );
+      recordSocialActDeliveryOutcome('silent', {
+        reason: hasPollOnly ? 'poll_only' : 'model_silent',
+        deliveredBubbleCount: 0,
+        targetMessageIds: replyResult.reactions?.map((reaction) => reaction.targetMessageId) ?? [],
+        reactions: replyResult.reactions?.length ?? 0,
+      });
       return finishRouteObservation({ status: 'silent', toolCalls: replyResult.toolsUsed.length, replyCount: 0 });
     }
 
@@ -496,6 +608,7 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId, rule: judgeResult.rule },
         "Concurrent reply suppressed after newer assistant turn",
       );
+      recordSocialActDeliveryOutcome('blocked', { reason: 'stale_reply_suppressed' });
       return finishRouteObservation({ status: 'blocked', toolCalls: replyResult.toolsUsed.length, replyCount: 0 });
     }
 
@@ -509,16 +622,18 @@ export async function generateAndSendReplies(args: {
       throw new AIError("Turn interrupted before send", "send", "send", "AI_ABORTED");
     }
 
-    // #7 typing ghost:~3% 概率"正在输入…"几秒然后什么都不发——
-    // 真人经常打了一半觉得算了。仅限:群聊、非指令、非 direct 交互、
-    // 人味预算还在、5 分钟冷却。对 bot 是浪费一次生成,对人味是真实感。
+    // #7 typing ghost — "打字打了一半觉得算了",改成**模型主权**。
+    //
+    // 旧实现:宿主掷 3% 骰子,把模型已经决定要发的回复随机丢掉。那是行为主权
+    // 错位——宿主不该替模型决定"这句话算了"。现在只有当模型自己在回复里声明
+    // typingGhost 时才走这条路径;宿主只负责呈现"输入中…然后没了"这个动作,
+    // 不再自行取消一次真实发表。冷却与安全条件保持不变。
     if (
+      replies.some((reply) => reply.typingGhost === true) &&
       job.chatId < 0 &&
       !agencyReplyTransport &&
       !instructionInfo &&
-      env().NODE_ENV !== 'test' && // 3% 骰子会让测试薛定谔
-      !(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule)) &&
-      Math.random() < 0.03
+      env().NODE_ENV !== 'test'
     ) {
       try {
         const ghostKey = `xxb:ghost:${job.chatId}`;
@@ -538,6 +653,7 @@ export async function generateAndSendReplies(args: {
           if (maxPlaceholderMsgId) {
             await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
           }
+          recordSocialActDeliveryOutcome('silent', { reason: 'typing_ghost' });
           return finishRouteObservation({ status: 'silent', toolCalls: replyResult.toolsUsed.length, replyCount: 0 }); // 打了一半,算了
         }
       } catch (err) {
@@ -676,6 +792,8 @@ export async function generateAndSendReplies(args: {
     const stickerPolicy = {
       enabled: !agencyReplyTransport && (override?.sticker_policy?.enabled ?? true),
       mode: override?.sticker_policy?.mode ?? "ai",
+      // Model-declared position wins; the override is only a default for bubbles
+      // that did not express a preference.
       sendPosition: override?.sticker_policy?.send_position ?? "after",
     };
     const replyQuoteEnabled = override?.reply_quote !== false;
@@ -753,18 +871,31 @@ export async function generateAndSendReplies(args: {
       // ── MaiBot-style typing delay between segmented messages ──
       // First message uses the placeholder or sends immediately;
       // subsequent messages simulate human typing rhythm.
+      //
+      // Model-owned timing: when the reply declares delayMs, that IS the pause.
+      // The host-drawn human distribution is only the fallback for bubbles that
+      // did not express a timing preference — a real person knows how long they
+      // want to pause, and an RNG must not overwrite that.
       if (replyIdx > 0) {
-        const prevText = replies[replyIdx - 1]!.replyContent;
-        // #1 段间打字延迟同样走人类分布(段间偶尔停顿想词,但尾巴收紧)
-        const delay = sampleHumanDelay(calculateTypingDelay(prevText, segmenterConfig), {
-          tailProb: 0.06,
-          capSec: 8,
-          floorSec: 0.2,
-        });
-        await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
-        // 关机可中止(多段 ×8s 会叠加):提前醒后本段照发,下一轮循环顶部
-        // 的 shutdown guard 负责收尾 —— 不在这里 break,保持"这句话发完"。
-        await sleepWithAbort(delay * 1000, getShutdownSignal());
+        const declaredDelayMs = reply.delayMs;
+        if (declaredDelayMs !== undefined) {
+          if (declaredDelayMs > 0) {
+            await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
+            await sleepWithAbort(declaredDelayMs, getShutdownSignal());
+          }
+        } else {
+          const prevText = replies[replyIdx - 1]!.replyContent;
+          // #1 段间打字延迟同样走人类分布(段间偶尔停顿想词,但尾巴收紧)
+          const delay = sampleHumanDelay(calculateTypingDelay(prevText, segmenterConfig), {
+            tailProb: 0.06,
+            capSec: 8,
+            floorSec: 0.2,
+          });
+          await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
+          // 关机可中止(多段 ×8s 会叠加):提前醒后本段照发,下一轮循环顶部
+          // 的 shutdown guard 负责收尾 —— 不在这里 break,保持"这句话发完"。
+          await sleepWithAbort(delay * 1000, getShutdownSignal());
+        }
       }
 
       // ── G10: model-owned hesitation — the model marked THIS line as one it
@@ -791,6 +922,9 @@ export async function generateAndSendReplies(args: {
             candidates.sort((a, b) => b.score - a.score);
             const fresh = candidates.filter((c) => !_stickerState(job.chatId).ids.has(c.fileUniqueId));
             const pool = (fresh.length > 0 ? fresh : candidates).slice(0, 10);
+            // The model chose the intent; resolving it to a concrete asset is a
+            // host service. Prefer a sticker this chat has not seen recently, but
+            // do not keep re-rolling until some heuristic is satisfied.
             const picked = pool[Math.floor(Math.random() * pool.length)]!;
             _trackRecentSticker(job.chatId, picked.fileUniqueId);
             stickerFileId = picked.fileId;
@@ -799,12 +933,16 @@ export async function generateAndSendReplies(args: {
           }
         }
 
-        if (stickerFileId && stickerPolicy.sendPosition === "before") {
+        // Model-declared media position wins over the override default.
+        const effectiveStickerPosition = reply.media?.position ?? stickerPolicy.sendPosition;
+
+        if (stickerFileId && effectiveStickerPosition === "before") {
           const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {
             logger.warn({ err, chatId: job.chatId }, "Sticker send (before) failed, continuing");
             return undefined;
           });
           if (stickerMsgId && stickerFileUniqueId) {
+            socialDeliveredStickerCount += 1;
             recordStickerSent(job.chatId, stickerMsgId, stickerFileUniqueId, stickerFileId, stickerIntent);
           }
         }
@@ -930,6 +1068,7 @@ export async function generateAndSendReplies(args: {
                 const ogg = await synthesizeVoice(effectiveText.slice(0, 500));
                 if (ogg) {
                   await sendVoice(job.chatId, ogg, { replyToId });
+                  socialDeliveredVoiceCount += 1;
                   sentMessages.push({ messageId: 0, text: `[voice] ${effectiveText}` });
                   logger.info({ chatId: job.chatId }, 'Voice reply sent');
                   continue;
@@ -1018,12 +1157,13 @@ export async function generateAndSendReplies(args: {
               }
             }
 
-            if (!agencyReplyTransport && stickerFileId && stickerPolicy.sendPosition === "after") {
+            if (!agencyReplyTransport && stickerFileId && effectiveStickerPosition === "after") {
               const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {
                 logger.warn({ err, chatId: job.chatId }, "Sticker send (after) failed, continuing");
                 return undefined;
               });
               if (stickerMsgId && stickerFileUniqueId) {
+                socialDeliveredStickerCount += 1;
                 recordStickerSent(job.chatId, stickerMsgId, stickerFileUniqueId, stickerFileId, stickerIntent);
               }
             }
@@ -1039,6 +1179,7 @@ export async function generateAndSendReplies(args: {
             return undefined;
           });
           if (stickerMsgId && stickerOnlyFileUniqueId) {
+            socialDeliveredStickerCount += 1;
             recordStickerSent(job.chatId, stickerMsgId, stickerOnlyFileUniqueId, stickerOnlyFileId, stickerOnlyResult.intent);
           }
           if (stickerMsgId) {
@@ -1050,6 +1191,7 @@ export async function generateAndSendReplies(args: {
             return undefined;
           });
           if (stickerMsgId && stickerFileUniqueId) {
+            socialDeliveredStickerCount += 1;
             recordStickerSent(job.chatId, stickerMsgId, stickerFileUniqueId, stickerFileId, stickerIntent);
           }
           // 审计 #39c:发送失败时不再 push messageId:0 幻影(messageId 0 会
@@ -1283,14 +1425,38 @@ export async function generateAndSendReplies(args: {
 
     // 11.5 Stage F: persist self-reply for self-history retrieval
     // Records every sent reply (not only first) so multi-message replies are captured.
+    // The bot message id is stored so the observed outcome can later be attached to
+    // this exact message (see tracking/self-history.ts closeSelfActOutcome).
     if (sentMessages.length > 0) {
       for (const sent of sentMessages) {
         try {
-          recordSelfReply(job.chatId, formatted.uid, formatted.messageId, sent.text);
+          recordSelfReply(job.chatId, formatted.uid, formatted.messageId, sent.text, sent.messageId);
         } catch (err) {
           logger.debug({ err, chatId: job.chatId }, "recordSelfReply failed (non-critical)");
         }
       }
+    }
+
+    // 11.6 NyatOS participation budget: spend one unit for ACTIVE speech only.
+    //
+    // The Phase 2.3 negative result (48 "speak" verdicts in 28 minutes, median
+    // gap 7s, unresponsive to being told about its own repetition) is why the
+    // host keeps a physical throttle. It is spent here — on a real delivery —
+    // so the model's Frame can show a truthful "you have N left".
+    //
+    // Addressed replies (@ / reply-to-bot / DM) are exempt: failing to answer a
+    // direct question is a different failure from over-participating, and the
+    // old gates treated direct interaction as exempt too.
+    if (e.NYATOS_BUDGET_ENABLED && sentMessages.length > 0 && !isDirectInteraction && job.chatId < 0) {
+      void import('../../nyatos/budget.js')
+        .then(({ spendParticipation, markActiveSpeech }) => {
+          spendParticipation(job.chatId);
+          // Also stamp the moment, so the next Frame can say "you just spoke".
+          // The count alone cannot stop a burst (6 messages in a minute still
+          // passes it) — this is the spacing half of the same throttle.
+          markActiveSpeech(job.chatId);
+        })
+        .catch((err) => logger.debug({ err, chatId: job.chatId }, 'budget spend failed (non-critical)'));
     }
 
     const totalMs = Math.round(performance.now() - start);
@@ -1323,6 +1489,12 @@ export async function generateAndSendReplies(args: {
         })
         .catch(() => { /* telemetry never breaks delivery */ });
     }
+    recordSocialActDeliveryOutcome('sent', {
+      deliveredBubbleCount: sentMessages.length,
+      targetMessageIds: Array.from(quotedTargets),
+      deliveredMessageIds: sentMessages.map((message) => message.messageId).filter((messageId) => messageId > 0),
+      reactions: replyResult.reactions?.length ?? 0,
+    });
     return finishRouteObservation({ status: 'sent', toolCalls: replyResult.toolsUsed.length, replyCount: sentMessages.length });
   } catch (err) {
     if (maxPlaceholderMsgId) {
@@ -1344,6 +1516,7 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId },
         "Reply generation interrupted by new message, propagating for replan",
       );
+      recordSocialActDeliveryOutcome('interrupted', { reason: 'turn_interrupted' });
       finishRouteObservation({ status: 'interrupted' });
       throw err;
     }
@@ -1365,6 +1538,10 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, triggerUid: formatted.uid },
         'Chat put into STOP due to missing send permission; short TTL (recovers on direct wakeup or 20min)',
       );
+      recordSocialActDeliveryOutcome('failed', {
+        reason: 'no_send_permission',
+        observedEffects: { canSendText: false },
+      });
       return finishRouteObservation({ status: 'failed' });
     }
 
@@ -1373,6 +1550,7 @@ export async function generateAndSendReplies(args: {
         { chatId: job.chatId, messageId: formatted.messageId },
         'Agency Reply authority transport failed; no legacy fallback',
       );
+      recordSocialActDeliveryOutcome('failed', { reason: 'agency_transport_failed' });
       return finishRouteObservation({ status: 'failed' });
     }
 
@@ -1381,6 +1559,7 @@ export async function generateAndSendReplies(args: {
     } catch {
       logger.warn({ chatId: job.chatId }, "Fallback message also failed");
     }
+    recordSocialActDeliveryOutcome('failed', { reason: 'reply_or_send_failed' });
     return finishRouteObservation({ status: 'failed' });
   }
 }
