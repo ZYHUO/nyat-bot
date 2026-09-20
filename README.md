@@ -792,6 +792,25 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### Error-level log lines that were not errors
+
+`unhandledRejection` and `uncaughtException` were producing **130 error-level lines a
+day**, of which 86 were `sendText_limit:6` and 44 were `echo_self_text`.
+
+Every one of those is something `host-api` **deliberately throws**: the per-task send
+budget ran out, the model was repeating itself, the model passed a non-string. When the
+model's CodeAct writes `telegram.sendText(...)` without `await`, those rejections surface
+as unhandled rejections.
+
+The cost was never the volume — it was the **cry-wolf effect**. 130 false alarms a day at
+`error` level trains you to read the log as background noise, and a real failure hides in
+it.
+
+Known sandbox control-flow shapes now log at `info` with a message that says
+`(expected)`; everything else stays at `error`. The patterns are anchored so a typo'd
+lookalike (`sendText_limitX`) still counts as an error rather than being silently
+swallowed.
+
 ### Long-term memory writes now survive a Qdrant hiccup
 
 `Memory write failed (non-critical)` was firing **700 times a day**:

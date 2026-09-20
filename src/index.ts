@@ -38,6 +38,19 @@ import { getSandboxCapability } from './sandbox/terminal.js';
 
 import { installGlobalFetchProxy } from './shared/fetch-proxy.js';
 
+/**
+ * host-api 故意抛出的控制流错误——模型没 await 时会以 unhandledRejection 的形式
+ * 冒到这里。它们不是 bug：发送预算用完 / 复读自己 / 传了非字符串 / 空文本。
+ * 见 unhandledRejection handler 里的实测记录。
+ */
+const SANDBOX_CONTROL_FLOW_RE: RegExp[] = [
+  /^sendText_limit:/,
+  /^sendText_non_string:/,
+  /^banned_word:/,
+  /^empty text$/,
+  /^echo_self_text/,
+];
+
 async function main(): Promise<void> {
   logger.info('xxb-ts starting…');
 
@@ -394,6 +407,20 @@ async function main(): Promise<void> {
   };
 
   process.on('unhandledRejection', (reason) => {
+    // 沙盒 API 的**控制流拒绝**不是 bug，不该占着 error 级。
+    //
+    // 2026-09-21 实测：这两个 handler 一天刷 130 条 error，其中 86 条是
+    // `sendText_limit:6`、44 条是 `echo_self_text`——全是 host-api **故意**抛的：
+    // 发送预算用完、模型复读自己、文本不是字符串。模型在 CodeAct 里写了
+    // `telegram.sendText(...)` 却没 await，这些拒绝就变成 unhandledRejection。
+    //
+    // 代价不是噪音本身，而是**狼来了**：error 级一天 130 条假警报，
+    // 真故障会被训化成背景音。所以已知的控制流形状降到 info，其余保持 error。
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    if (SANDBOX_CONTROL_FLOW_RE.some((re) => re.test(msg))) {
+      logger.info({ err: reason }, 'Unhandled rejection from sandbox control flow (expected)');
+      return;
+    }
     logger.error({ err: reason }, 'Unhandled promise rejection (non-fatal)');
   });
   process.on('uncaughtException', (err) => {

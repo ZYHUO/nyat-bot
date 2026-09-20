@@ -95,6 +95,8 @@ const CHECKS: Array<[string, string]> = [
   ['全冷却可诊断', 'nothing was attempted'],
   // Qdrant 写瞬断重试（2026-09-21）
   ['Qdrant 瞬断重试', 'withQdrantRetry'],
+  // 沙盒控制流拒绝降级（2026-09-21）
+  ['控制流拒绝降级', 'sandbox control flow (expected)'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）
