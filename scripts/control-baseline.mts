@@ -22,6 +22,8 @@ import { execSync } from 'node:child_process';
 
 const OUT = 'var/control-baseline.jsonl';
 const WINDOW_HOURS = 3;
+/** 进统计的最低入站条数：低于此的窗口，发送率是噪声。 */
+const MIN_INBOUND = 40;
 
 /** 与金丝雀同一套分母口径：近 N 天的 self_replies vs message_received。 */
 function sqlite(json: boolean, q: string): string {
@@ -63,7 +65,12 @@ function show(): void {
     console.log('BASELINE no data yet — run `record` first');
     return;
   }
-  const snaps = readFileSync(OUT, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const all = readFileSync(OUT, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // **按 (slot, day) 去重，保留当天最后一张**：同一天手动 record 两次会被当成两天，
+  // 虚增 n、把 σ 算低、把所需天数算少——那正是这套统计最不能出的错。
+  const seen = new Map<string, (typeof all)[number]>();
+  for (const s of all) seen.set(`${s.slotUtc}:${s.at.slice(0, 10)}`, s);
+  const snaps = [...seen.values()].sort((a, b) => a.at.localeCompare(b.at));
   // 按 UTC 小时聚成"同时段"组
   const bySlot = new Map<string, typeof snaps>();
   for (const s of snaps) {
@@ -75,20 +82,24 @@ function show(): void {
   for (const [slot, group] of [...bySlot.entries()].sort()) {
     console.log(`── UTC ${slot}:00 时段（${group.length} 天）──`);
     // 每个群在各天的发送率
-    const chats = new Map<number, Array<{ day: string; rate: number | null }>>();
+    const chats = new Map<number, Array<{ day: string; rate: number | null; inbound: number }>>();
     for (const g of group) {
       const day = g.at.slice(0, 10);
       for (const c of g.chats) {
         if (!chats.has(c.chat)) chats.set(c.chat, []);
-        chats.get(c.chat)!.push({ day, rate: c.rate });
+        chats.get(c.chat)!.push({ day, rate: c.rate, inbound: c.inbound });
       }
     }
     for (const [chat, days] of [...chats.entries()].sort()) {
-      const rates = days.map((d) => d.rate).filter((r): r is number => r !== null);
-      if (rates.length < 2) continue;
+      // **样本量过滤**：3 小时窗在小群里可能只有十几条入站，那种天的发送率
+      // 是噪声不是信号（实测候选群某窗 12 条入站算出 83%，而同期大样本是 24%）。
+      // 少于 MIN_INBOUND 的一天不进统计，否则会把 σ 算虚高、把需要的天数算错。
+      const usable = days.filter((d) => d.rate !== null && d.inbound >= MIN_INBOUND);
+      if (usable.length < 2) continue;
+      const rates = usable.map((d) => d.rate as number);
       const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
       const sd = Math.sqrt(rates.reduce((a, b) => a + (b - mean) ** 2, 0) / rates.length);
-      const detail = days.map((d) => `${d.day.slice(5)}=${d.rate === null ? '—' : (d.rate * 100).toFixed(0) + '%'}`).join(' ');
+      const detail = usable.map((d) => `${d.day.slice(5)}=${(d.rate as number * 100).toFixed(0)}%`).join(' ');
       console.log(
         `  ${String(chat).padStart(15)}  均值 ${(mean * 100).toFixed(0).padStart(3)}%  ` +
         `σ ${(sd * 100).toFixed(0).padStart(3)}%   ${detail}`,
