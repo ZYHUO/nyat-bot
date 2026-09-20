@@ -64,6 +64,38 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
     })();
   }
 
+  // 代发回执：这条 bot 消息是不是我们代发命令的结果？
+  //
+  // 2026-09-21 发现：`bots.command`（沙盒 API，跑在 Meta 主路径上的 subagent 才能调）
+  // 会写一个 pending key，而消费它的 `tryHandleDelegationReceipt` **只在 legacy 的
+  // pipeline/pipeline.ts:172 被调用**。Meta 路径上 grep "delegation" 零命中。
+  //
+  // 于是：subagent 借 nmbot 办了事 → nmbot 在群里回 → 那条回执走 Meta 路径 →
+  // **没人认领**，原问题永远等不到答案，pending key 只能等 TTL 过期。
+  //
+  // 和上一轮 peer-reaction / network-burst 是同一个病：功能接在了一条
+  // 生产不走的路上。日志证据：`Delegation: reply-command sent (bot 代罚)` 零次，
+  // `Pipeline complete (delegation receipt handled)` 零次——两头都没跑过。
+  //
+  // 放在 bookkeeping hooks 里（message.ts:212，早于心流裁决和 bot 分类降噪），
+  // 这样回执能在被当普通 bot 消息忽略之前被认领。
+  if (formatted.isBot && formatted.uid > 0 && chatId < 0 && env().BOT_DELEGATION_ENABLED) {
+    void (async () => {
+      try {
+        const [{ tryHandleDelegationReceipt }, { getBotUid }] = await Promise.all([
+          import('../pipeline/tools/bot-delegation.js'),
+          import('../bot/bot.js'),
+        ]);
+        const handled = await tryHandleDelegationReceipt(chatId, formatted, getBotUid());
+        if (handled) {
+          logger.info({ chatId, bot: formatted.username }, 'Meta: delegation receipt handled');
+        }
+      } catch (err) {
+        logger.debug({ err }, 'Meta: delegation receipt check failed (non-critical)');
+      }
+    })();
+  }
+
   // Reply-outcome observation. The legacy pipeline does this in
   // pipeline/stages/bookkeeping.ts; Meta skips that stage entirely, so without
   // this hook the outcomes of every conversation reply sent on the main path

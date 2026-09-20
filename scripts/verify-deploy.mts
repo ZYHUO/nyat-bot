@@ -85,6 +85,8 @@ const CHECKS: Array<[string, string]> = [
   ['Meta peer-reaction', 'Meta: peer-reaction'],
   // 图片描述写进 textContent（Meta 路径才看得见，2026-09-21）
   ['图片描述进正文', '[图片: '],
+  // Meta 路径认领代发回执（2026-09-21）
+  ['Meta 代发回执', 'Meta: delegation receipt handled'],
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）
