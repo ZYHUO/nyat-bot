@@ -541,6 +541,26 @@ The model-facing doc calls it a last resort and asks it to consider whether dele
 was already enough, because one wrong kick and a real person does not come back. Nothing
 kicks automatically — the Frame reports the behavioural facts, the model decides.
 
+### Running the Phase 1 experiment
+
+Everything about it is pre-registered in the paper — criteria (§九·补三), sample size
+(§九·补七/B: σ 23–26% ⇒ 5–13 days per arm), control group, and falsifiers. The runbook
+fixes the *order* so the flip day needs no improvised decisions:
+
+```bash
+bash scripts/phase1-runbook.sh pre      # gates: baseline ≥5 days, envelope enforce, no bypass in flight
+                                       # + records the pre-flip reading you will compare against
+bash scripts/phase1-runbook.sh grant    # timed bypass, 180 min, TTL restores by itself
+bash scripts/phase1-runbook.sh read     # experiment chat / whole-group curve / debt hit rate
+bash scripts/phase1-runbook.sh verdict  # prints the pre-registered criteria next to the readings
+```
+
+`pre` refuses to proceed when the baseline is short, because a single day's reading against
+σ≈23% is unattributable — the experiment chat has been observed at 19%, 28%, 59% and 71% on
+different days of the same slot.
+
+---
+
 ### Verifying the composition, not just the parts
 
 Every silent failure found while building this layer had the same shape: **each piece passed
