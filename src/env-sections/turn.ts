@@ -99,8 +99,7 @@ export const turnSection = {
   META_HEART_ENABLED: booleanFromEnv.default(true),  // 心流反思:仅在决定 reply 时,用**同一个** heart 模型把「念头」再磨一遍(更抓重点),
   // 不改决策(act/path)、不换模型;失败/超时保底用原念头。只在 reply 轮加一次调用。默认关。
   HEART_REFLECT_ENABLED: booleanFromEnv.default(false),
-  // (旧名,弃用,留着防 .env 报错)
-  TURN_UNIFIED_DECISION_ENABLED: booleanFromEnv.default(false),
+  // （TURN_UNIFIED_DECISION_ENABLED 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。注释说"留着防 .env 报错"，但 zod 对未知键是剥离不是报错，那个理由不成立）
   // gate no_action 冷却语义改向：冷却期内延后调度（MaiBot 拖时间），而非放行。
   TURN_GATE_DEFER_COOLDOWN: booleanFromEnv.default(false),
   // G13: 发送前反重复守卫（与自己最近消息相似度 > 阈值时带约束重生成一次）。

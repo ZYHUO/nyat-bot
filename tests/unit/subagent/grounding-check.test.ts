@@ -3,6 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const judgeMock = vi.fn();
 vi.mock('../../../src/ai/judge-substrate.js', () => ({ judge: (...a: unknown[]) => judgeMock(...a) }));
 
+// 2026-09-21：阈值改成读 env（原来是写死的 0.35）。默认与旧值一致，
+// 所以不改这两个键时全部既有断言照旧通过。
+const envValues: Record<string, unknown> = {
+  GROUNDING_PRESENT_MAX: 0.35,
+  GROUNDING_ASKED_MAX: 0.35,
+};
+vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
+
 const { checkUngroundedClaim, statesConcreteFact, ungroundedClaimError } = await import(
   '../../../src/subagent/grounding-check.js',
 );
@@ -105,6 +113,56 @@ describe('checkUngroundedClaim', () => {
     const call = judgeMock.mock.calls[0]?.[0];
     expect(Object.keys(call.questions)).toEqual(['topic_in_chat', 'user_asked']);
     expect(call.key).toBe('grounding_claim');
+  });
+});
+
+describe('grounding 阈值读 env（2026-09-21：原来是写死的 0.35）', () => {
+  beforeEach(() => {
+    envValues.GROUNDING_PRESENT_MAX = 0.35;
+    envValues.GROUNDING_ASKED_MAX = 0.35;
+  });
+
+  it('两个阈值都从 env 读，缺键退回 0.35', async () => {
+    // tp=0.5 ua=0.2：present 高于默认 0.35 → 不判 ungrounded
+    stubJudge(0.5, 0.2);
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(false);
+    // 把 present 阈值提到 0.6 → 同一个 0.5 现在低于阈值；asked 0.2 仍低于 0.35 → 判 ungrounded
+    envValues.GROUNDING_PRESENT_MAX = 0.6;
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(true);
+  });
+
+  it('asked 阈值同样可调', async () => {
+    stubJudge(0.2, 0.5);
+    // asked 0.5 高于 0.35 → 不判
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(false);
+    envValues.GROUNDING_ASKED_MAX = 0.8;
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(true);
+  });
+
+  it('越界值被钳到 [0,1]，不产生 NaN（NaN 会让每条消息都判 ungrounded）', async () => {
+    stubJudge(0.5, 0.5);
+    envValues.GROUNDING_PRESENT_MAX = 'abc';   // NaN
+    envValues.GROUNDING_ASKED_MAX = -3;        // 负 → 钳到 0
+    const r = await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION);
+    // askedMax 钳成 0 → 0.5 < 0 为 false → 不判。关键是没有 NaN 泄漏。
+    expect(r.ungrounded).toBe(false);
+    expect(Number.isNaN(r.topicPresent as number)).toBe(false);
+  });
+
+  it('配成 1 = 最严（一切低于 1 的都算没提过）——越界钳位与该语义一致', async () => {
+    stubJudge(0.5, 0.5);
+    envValues.GROUNDING_PRESENT_MAX = 5;   // 钳成 1
+    envValues.GROUNDING_ASKED_MAX = 5;     // 钳成 1
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(true);
+  });
+
+  it('缺键（env mock 成空对象）→ 退回 0.35，行为同改动前', async () => {
+    delete envValues.GROUNDING_PRESENT_MAX;
+    delete envValues.GROUNDING_ASKED_MAX;
+    stubJudge(0.2, 0.2);
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(true);
+    stubJudge(0.5, 0.2);
+    expect((await checkUngroundedClaim(INCIDENT_CANDIDATE, INCIDENT_CONTEXT, INCIDENT_DIRECTION)).ungrounded).toBe(false);
   });
 });
 

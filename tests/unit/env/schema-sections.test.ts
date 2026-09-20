@@ -45,11 +45,11 @@ describe('env schema 拆段', () => {
         all.push(k);
       }
     }
-    // 497 = 2026-09-21 拆分时逐键核对过的 495 + 当天新增的 2 个（ASI_USAGE /
-    // ASI_RUBRIC_MAX_TOKENS）。加旗标时这个数会变——
+    // 483 = 拆段时核对过的 495 + 2（ASI_*）+ 4 个"旗标在常量硬编码"接上线 − 14 个死键退役。
+    // 加旗标时这个数会变——
     // 那时该做的是重新核对，而不是把这个数字改大。
-    expect(all.length).toBe(497);
-    expect(new Set(all).size).toBe(497);
+    expect(all.length).toBe(483);
+    expect(new Set(all).size).toBe(483);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });

@@ -22,9 +22,7 @@ export const memorySection = {
   // H1.1 floor/addressee 三档（默认 OFF，OFF = 老路零变化）。
   // 开后：ambient/not_me 先记 floor_decisions 再按规则短路，to_me 才进 judge。
   FLOOR_ENABLED: booleanFromEnv.default(false),
-  JUDGE_PROACTIVE_RATE: z.coerce.number().min(0).max(1).default(0.25),
-  JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
-  JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),
+  // （JUDGE_PROACTIVE_RATE / MIN_INTERVAL_SEC / MIN_RECENT_MSGS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。judge 的随机主动插话机制已删除（rules.test.ts 自己的注释写着"全部删除"）；JUDGE_PROACTIVE_ENABLED 仍在用，但它只门控 lastBotReplyAt/recentHumanMsgCount 的预计算，与这三个参数无关）
 
   // （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标
   //   2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron

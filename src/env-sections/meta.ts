@@ -94,8 +94,7 @@ export const metaSection = {
   DREAMING_ENABLED: booleanFromEnv.default(false),
   // dreaming cron（UTC）。默认 19:17 UTC = 北京 03:17。
   DREAMING_CRON: z.string().default('17 19 * * *'),
-  // dreaming 长任务用的 AI usage 名。
-  DREAMING_USAGE: z.string().default('reply'),
+  // （DREAMING_USAGE 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。dreaming 长任务实际用的 usage 在 cron 里另取，这个键从未被读）
   /**
    * Grounding 并行事实核查（CGM 借鉴）：heart/meta 决策的同时并行跑脱敏搜索，
    * 结果注入 CodeAct executor 作 grounding 参考；无搜索证据则丢弃。默认关。
@@ -121,7 +120,7 @@ export const metaSection = {
   CODEACT_USAGE: z.string().default('reply'),
   // 画摊子（agent/artist.ts）的 AI usage 名：SVG 是代码活，默认跟 reply 主链。
   ARTIST_USAGE: z.string().default('reply'),
-  CODEACT_MAX_TURNS: z.coerce.number().int().positive().default(8),
+  // （CODEACT_MAX_TURNS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。每段轮数上限是 executor.ts 里写死的 30，不是这个 8）
   CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   // CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。
   CODEACT_CONCURRENCY: z.coerce.number().int().positive().default(4),
@@ -131,7 +130,7 @@ export const metaSection = {
   TASK_PROGRESS_ENABLED: booleanFromEnv.default(true),
   TASK_PROGRESS_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(30_000),
   TASK_PROGRESS_MAX_VISIBLE_UPDATES: z.coerce.number().int().positive().default(6),
-  TASK_PROGRESS_START_DELAY_MS: z.coerce.number().int().nonnegative().default(1_000),
+  // （TASK_PROGRESS_START_DELAY_MS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。task-progress.ts 的节流只读 KEEPALIVE/MIN_INTERVAL，没有起始延迟这个概念）
   TASK_PROGRESS_KEEPALIVE_MS: z.coerce.number().int().positive().default(35_000),
   // （TASK_PROGRESS_CODEACT_ENABLED / TASK_PROGRESS_RESEARCH_ENABLED 2026-09-21 删除：
   //   两个都默认 true 而全仓库无一处读取。task-progress.ts 只读 TASK_PROGRESS_ENABLED，

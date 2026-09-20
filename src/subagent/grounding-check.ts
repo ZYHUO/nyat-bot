@@ -16,6 +16,8 @@
 // 判断走定型判断基座，一次调用问两个问题（speculative fan-out）。
 // 与语义重复守卫互补：那个管"同一句话别说两遍"，这个管"别凭空断言"。
 
+import { env } from '../env.js';
+
 export interface GroundingResult {
   ungrounded: boolean;
   topicPresent: number | null;
@@ -69,7 +71,21 @@ export async function checkUngroundedClaim(
   const ua = r.answers.user_asked;
   if (!r.ok || tp === null || tp === undefined || ua === null || ua === undefined) return NEVER_FLAG;
 
-  const ungrounded = (tp.value as number) < 0.35 && (ua.value as number) < 0.35;
+  // 阈值从 env 读，不再硬编码 0.35。
+  //
+  // 2026-09-21：GROUNDING_PRESENT_MAX / GROUNDING_ASKED_MAX 两个旗标声明了、
+  // .env 里也配了（都是 0.35），而全仓库没有一处读它们——这里是个写死的 0.35。
+  // 值和 .env 恰好一样，所以接上不改变行为，只是让它们真的可调。
+  // 跟 GOAL_LONG_TERM_ENABLED 同一类：旗标的用途是真的，被常量绕过了。
+  let presentMax = 0.35;
+  let askedMax = 0.35;
+  try {
+    presentMax = Math.max(0, Math.min(1, Number(env().GROUNDING_PRESENT_MAX ?? 0.35)));
+    askedMax = Math.max(0, Math.min(1, Number(env().GROUNDING_ASKED_MAX ?? 0.35)));
+  } catch {
+    /* env 不可用时退回 0.35 —— 与改动前一致 */
+  }
+  const ungrounded = (tp.value as number) < presentMax && (ua.value as number) < askedMax;
   return {
     ungrounded,
     topicPresent: tp.value as number,

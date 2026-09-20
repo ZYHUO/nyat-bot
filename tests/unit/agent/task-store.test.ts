@@ -6,7 +6,9 @@ import { join } from 'node:path';
 let db: Database.Database;
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => db }));
-vi.mock('../../../src/env.js', () => ({ env: () => ({ TASK_EXECUTOR_ENABLED: true }) }));
+// 2026-09-21：maxRounds 未显式传入时读 env().TASK_MAX_ROUNDS（原来是写死的 6）。
+const envValues: Record<string, unknown> = { TASK_EXECUTOR_ENABLED: true, TASK_MAX_ROUNDS: 6 };
+vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
 const {
   createTask, getTask, listActiveTasks, listDueTasks, setTaskState,
@@ -17,6 +19,33 @@ const {
 beforeEach(() => {
   db = new Database(':memory:');
   db.exec(readFileSync(join(__dirname, '../../../migrations/0065_tasks.sql'), 'utf8'));
+  envValues.TASK_MAX_ROUNDS = 6;
+});
+
+describe('TASK_MAX_ROUNDS（2026-09-21：原来是写死的 6）', () => {
+  it('不传 maxRounds → 读 env', () => {
+    const id = createTask({ ownerUid: 42, chatId: -100, goal: 'g' });
+    expect(getTask(id)!.max_rounds).toBe(6);
+  });
+
+  it('env 改了就跟着改', () => {
+    envValues.TASK_MAX_ROUNDS = 11;
+    const id = createTask({ ownerUid: 42, chatId: -100, goal: 'g' });
+    expect(getTask(id)!.max_rounds).toBe(11);
+  });
+
+  it('显式传入的 maxRounds 仍然优先（调用方能覆盖）', () => {
+    envValues.TASK_MAX_ROUNDS = 11;
+    const id = createTask({ ownerUid: 42, chatId: -100, goal: 'g', maxRounds: 3 });
+    expect(getTask(id)!.max_rounds).toBe(3);
+  });
+
+  it('缺键 / 非法值 → 退回 6（与改动前一致）', () => {
+    delete envValues.TASK_MAX_ROUNDS;
+    expect(getTask(createTask({ ownerUid: 42, chatId: -100, goal: 'g' }))!.max_rounds).toBe(6);
+    envValues.TASK_MAX_ROUNDS = 'abc';
+    expect(getTask(createTask({ ownerUid: 42, chatId: -100, goal: 'g' }))!.max_rounds).toBe(6);
+  });
 });
 
 describe('task-store', () => {

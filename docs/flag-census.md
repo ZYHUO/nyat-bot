@@ -12,32 +12,32 @@
 
 | 段 | 文件 | 键数 | 布尔 | 生产开着 | 管什么 |
 |---|---|---|---|---|---|
-| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 83 | 21 | 14 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
-| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 34 | 16 | 13 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
-| `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 36 | 21 | 21 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
+| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 79 | 21 | 14 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
+| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 13 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
+| `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 35 | 21 | 21 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 22 | 3 | 3 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 32 | 19 | 19 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 18 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 25 | 10 | 7 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
-| `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 34 | 21 | 20 | Turn Actor + Agentic planner + 中期记忆 |
-| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 48 | 18 | 17 | Meta + Subagent 编排层 |
+| `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 20 | Turn Actor + Agentic planner + 中期记忆 |
+| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 45 | 18 | 17 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 51 | 21 | 18 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
 | `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 56 | 27 | 22 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
-| `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 38 | 14 | 13 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
+| `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 36 | 14 | 13 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
 ## 总量
 
 | | |
 |---|---|
-| total_keys | 497 |
-| bool_flags | 215 |
+| total_keys | 483 |
+| bool_flags | 214 |
 | on_in_prod | 185 |
-| set_in_env | 324 |
-| dead_no_reader | 20 |
+| set_in_env | 320 |
+| dead_no_reader | 2 |
 | dead_and_on | 0 |
-| phantom_only_in_tests | 3 |
+| phantom_only_in_tests | 0 |
 
-**215 个布尔旗标里，生产实际开着 185 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**214 个布尔旗标里，生产实际开着 185 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -48,7 +48,7 @@
 | flag | 段 | .env | 注释怎么说 | tests/ 里有吗 |
 |---|---|---|---|---|
 
-## 🟡 假开关：只被测试 mock，src/ 不读（3 个）
+## 🟡 假开关：只被测试 mock，src/ 不读（0 个）
 
 比死旗标更坏——测试把它们当闸门 mock，于是"关着它"的断言其实什么都没验证。
 
@@ -56,9 +56,6 @@
 
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
-| `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | memory | 60 | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
-| `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | memory | — | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
-| `JUDGE_PROACTIVE_RATE` | memory | 0.5 | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
 
 ## 生产开着的旗标（185 个）
 
@@ -213,7 +210,7 @@
 | timing | `AGENCY_CONTROL_ADAPTERS_ENABLED` | false | true | Agency 控制动作的宿主实现（observe/remember/correct/stop）。 agency-control-adapters 只提供"外壳"（scope/预算/回执契约），宿主实现从未提供， 所以 runtime 派发这些动作时没有可执行体。实现见 agency-host-ada | agent/agency-host-adapters.ts, agent/agency-proposals.ts |
 | timing | `BELIEF_VERIFY_ENABLED` | false | true | 信念验证：消费 stale_belief 债务（world_change 产生），把被世界变化证伪的 信念标为 contradicted（getActiveBeliefs 已排除，不再进 prompt）。 此前三件套都在、互不相识：world-facts 产生事件 → projector 建债务 → | agent/belief-verify.ts, cron/scheduler.ts |
 | timing | `ECHO_ENABLED` | false | true |  | agent/echo.ts, cron/scheduler.ts |
-| timing | `GROUNDING_CHECK_ENABLED` | false | true | 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字/事实（模型幻觉）。 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」。 先用确定性闸门（含具体数字才问）压调用量；JeV 不可达一律 fail-open。 | subagent/host-api.ts |
+| timing | `GROUNDING_CHECK_ENABLED` | false | true | （SEMANTIC_DUP_THRESHOLD 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。semantic-dup.ts 的判定阈值是写死的 0.7，没读这个键） 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字 | subagent/host-api.ts |
 | timing | `HEART_COOLDOWN_AS_FACT` | false | true | 冷却作为"事实"交给模型，而不是静默丢弃。 旧行为把决定权从模型拿走，且 dispatch gate 还会再拦一次—— 而 heart 的 LLM 调用已经烧掉了（实测 6h 内 68 次 cooldown 短路发生在 heart 决定 reply 之后）。开=模型自己掂量；关=旧的静默丢弃。 | meta/heart-adapter.ts, pipeline/heart/heart.ts |
 | timing | `HEART_DECIDES_TIMING` | false | true | heart 已经带事实做过时机判断（它自己就是 gate）→ 派发前不再重复过闸。 实测 6h 内 68 次 cooldown + 38 次 talk-value 短路发生在 heart 决定 reply 之后 = 那次 heart 调用白烧。开=模型自己控制；关=旧的双闸行为。 | meta/session.ts |
 | timing | `OPEN_THREADS_ENABLED` | false | true | 跨天的未了事：bot 答应过/在等的（"明天告诉你"），能像真人那样"对了，昨天你说那个…"。 与 scratchpad 的区别：那是 30 分钟工作记忆，这是跨天。只记**明确承诺**， 不做"记住所有对话"——那会变成让人出戏的机械回忆。 | tracking/open-threads.ts |
@@ -244,7 +241,7 @@
 | turn | `TURN_BURST_JUDGE_ENABLED` | false | true | G4: judge/gate/reply 以整个 burst 为决策单元（而非只看最后一条）。 | pipeline/pipeline.ts, pipeline/stages/deliver.ts |
 | turn | `TURN_EXEC_LOCK_ENABLED` | false | true | G12 执行期互斥:runChatTurn 入口 per-chat Redis 锁,堵死"多生产者并发 scheduleTurn 造出双回合 → registerGeneration supersede 互杀 → replan 预算白烧"的竞态(2026-07-04 诊断:毫秒级成对 replann | pipeline/turn/actor.ts |
 | turn | `TURN_FOCUS_ENABLED` | false | true | G9: per-chat focus/能量标量（调制判断门槛、防抖、打字节奏）。 | pipeline/heart/heart.ts, pipeline/pipeline.ts, pipeline/stages/deliver.ts, pipeline/stages/post-judge.ts |
-| turn | `TURN_GATE_DEFER_COOLDOWN` | false | true | gate no_action 冷却语义改向：冷却期内延后调度（MaiBot 拖时间），而非放行。 | pipeline/heart/heart.ts, pipeline/timing/gate.ts |
+| turn | `TURN_GATE_DEFER_COOLDOWN` | false | true | （TURN_UNIFIED_DECISION_ENABLED 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。注释说"留着防 .env 报错"，但 zod 对未知键是剥离不是报错，那个理由不成立） gate no_action 冷却语 | pipeline/heart/heart.ts, pipeline/timing/gate.ts |
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_PROACTIVE_ENABLED` | false | true | G11: idle/proactive cron 经 turn actor 走完整人格管线。 | cron/sleep-cycle.ts |
 | turn | `TURN_SELF_FOLLOWUP_ENABLED` | false | true | G6: 发完后自我接话（"对了…"/补贴纸），新用户消息立即终止。 | pipeline/stages/deliver.ts, pipeline/turn/self-continue.ts |
@@ -252,7 +249,7 @@
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | true | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 | pipeline/heart/heart.ts, pipeline/stages/post-judge.ts, pipeline/timing/chat-runtime.ts |
 
-## 关着的布尔旗标（30 个）
+## 关着的布尔旗标（29 个）
 
 | 段 | flag | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -285,9 +282,8 @@
 | social | `MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED` | false | — | Route-convergence experiment: for an explicit allowlist, direct/fast replies stop spawning chat specialists; deep/lookup keep only work justified by t |
 | social | `PROACTIVE_COORDINATOR_ENABLED` | false | — | ── P2-A: 主动搭话统一调度 ── 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限 |
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
-| turn | `TURN_UNIFIED_DECISION_ENABLED` | false | — | (旧名,弃用,留着防 .env 报错) |
 
-## 非布尔参数（282 个）
+## 非布尔参数（269 个）
 
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -395,12 +391,8 @@
 | infra | `SEARXNG_URL` |  | — |  |
 | infra | `SKILLS_DIR` | './data/skills' | — | Tool System |
 | infra | `SQLITE_PATH` | './data/xxb.db' | ./data/xxb.db | SQLite |
-| infra | `STREAMING_MIN_CHARS` | 50 | 50 |  |
-| infra | `STREAMING_MIN_INTERVAL` | 500 | 500 | Streaming |
 | infra | `TIMER_API_URL` |  | — |  |
 | infra | `TIMER_CALLBACK_URL` |  | — |  |
-| infra | `VERIFY_DEFAULT_TIMEOUT` | 300 | — |  |
-| infra | `VERIFY_MAX_ATTEMPTS` | 3 | — |  |
 | infra | `VIDEO_DESCRIBE_MAX_TOKENS` | 2000 | 2000 | reasoning 计入 completion:给小了会拿到空正文(实测 max_tokens=400 → 空)。 |
 | infra | `VIDEO_DESCRIBE_TIMEOUT_MS` | 120_000 | 120000 |  |
 | infra | `VIDEO_MAX_DURATION_SEC` | 300 | 300 | 视频时长硬上限（秒）。模型侧 5 分钟；Telegram 侧还有更紧的 20MB 下载上限 （代码里 MAX_MEDIA_BYTES=10MB），5 分钟视频几乎必然超——所以现实里能描述的 是短视频。超限的不下载，直接给带时长的中性占位。 |
@@ -450,13 +442,8 @@
 | life | `SELF_HISTORY_WINDOW_DAYS` | 30 | — |  |
 | life | `SELF_HISTORY_WINDOW_MIN` | 45 | — | 心流看到的"近况"窗口（分钟）。只影响行为史事实块，不影响对某人的一致性注入。 |
 | life | `TS_WEBHOOK_URL` |  | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |
-| life | `TTS_MAX_CHARS` | 100 | — | 仅对不超过此字符数的回复转语音(长消息发语音很烦)。 |
 | life | `TTS_VOICE` | 'zh-CN-XiaoxiaoNeural' | — | edge-tts 语音名(中文默认晓晓;也可换 zh-CN-XiaoyiNeural 等)。 |
-| life | `TTS_VOICE_PROBABILITY` | 0.15 | — | 每条满足条件的短回复转语音的概率(0..1)。 |
 | memory | `CACHE_WARMUP_INTERVAL_MIN` | 4 | — |  |
-| memory | `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | 120 | 60 |  |
-| memory | `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | 3 | — |  |
-| memory | `JUDGE_PROACTIVE_RATE` | 0.25 | 0.5 |  |
 | memory | `MEMORY_COLLECTION` | 'xxb_group_history' | xxb_group_history_v2 |  |
 | memory | `MEMORY_DEDUP_THRESHOLD` | 0.93 | — |  |
 | memory | `MEMORY_EMBED_MODEL` | 'Xenova/all-MiniLM-L6-v2' | Xenova/paraphrase-multilingual-MiniLM-L1 | ── 长期记忆嵌入模型 / collection / 相关性下限 ────────────── 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文 同义 0.7543 / 无关 0.6 |
@@ -477,8 +464,7 @@
 | meta | `AGENT_TASK_SEND_BUDGET` | 6 | 6 | 单个任务**一共**最多发几条消息（跨段累计）。 2026-09-21 之前这个预算实际是"每段 6 条 × 10 段 = 60 条"——每段重建 host api 就把 textSent 归零了。实测 1555 个任务/2965 次投递， |
 | meta | `ARTIST_USAGE` | 'reply' | artist | 画摊子（agent/artist.ts）的 AI usage 名：SVG 是代码活，默认跟 reply 主链。 |
 | meta | `CODEACT_CONCURRENCY` | 4 | — | CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。 |
-| meta | `CODEACT_MAX_TURNS` | 8 | — |  |
-| meta | `CODEACT_TIMEOUT_MS` | 30_000 | 45000 |  |
+| meta | `CODEACT_TIMEOUT_MS` | 30_000 | 45000 | （CODEACT_MAX_TURNS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。每段轮数上限是 executor.ts 里写死的 30，不是这个 8） |
 | meta | `CODEACT_USAGE` | 'reply' | reply |  |
 | meta | `DEBT_SEMANTIC_MATCH_MAX_CANDIDATES` | 4 | — |  |
 | meta | `DEBT_SEMANTIC_MATCH_MIN_SCORE` | 0.72 | — |  |
@@ -486,7 +472,6 @@
 | meta | `DEBT_SEMANTIC_MATCH_USAGE` | 'judge' | — |  |
 | meta | `DEBT_SWEEP_INTERVAL_MIN` | 30 | — |  |
 | meta | `DREAMING_CRON` | '17 19 * * *' | — | dreaming cron（UTC）。默认 19:17 UTC = 北京 03:17。 |
-| meta | `DREAMING_USAGE` | 'reply' | — | dreaming 长任务用的 AI usage 名。 |
 | meta | `GROUNDING_USAGE` | 'judge' | reflection | grounding 搜索综合用的 AI usage 名（便宜快模型）。 |
 | meta | `META_ATTENTION_TOP_N` | 8 | 8 | 单次 Meta flush 最多处理几个 attention 条目。 |
 | meta | `META_HEART_REFRACTORY_MS` | 45_000 | 30000 |  |
@@ -497,10 +482,9 @@
 | meta | `POST_TASK_FOLLOWUP_USAGE` | 'judge' | reflection | follow-up 判定用的 AI usage 名（便宜快模型）。 |
 | meta | `POST_TASK_WINDOW_MS` | 120_000 | — | 发酵窗口时长(ms)。默认 2 分钟。 |
 | meta | `PROMISE_CHECK_USAGE` | 'reflection' | reflection | 承诺兜底判定用的 AI usage 名（便宜快模型；LLM 判定非规则引擎）。 |
-| meta | `TASK_PROGRESS_KEEPALIVE_MS` | 35_000 | — |  |
+| meta | `TASK_PROGRESS_KEEPALIVE_MS` | 35_000 | — | （TASK_PROGRESS_START_DELAY_MS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。task-progress.ts 的节流只读 KEEPALIVE/ |
 | meta | `TASK_PROGRESS_MAX_VISIBLE_UPDATES` | 6 | — |  |
 | meta | `TASK_PROGRESS_MIN_INTERVAL_MS` | 30_000 | — |  |
-| meta | `TASK_PROGRESS_START_DELAY_MS` | 1_000 | — |  |
 | self | `GOAL_MAX_ACTIVE` | 20 | 20 | ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）─────────────────────────── 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。 |
 | self | `PROFILE_MERGE_MAX_UIDS` | 8 | 48 |  |
 | self | `PROFILE_MERGE_STALE_HOURS` | 72 | 4 | （SCRATCHPAD_ENABLED 已移除——工作记忆常驻） C:profile-merge 加频 —— 合并水位线间隔(小时)+ 每 tick 处理人数,调小/调大 直接影响全局画像刷新频率与 token 消耗。 |
@@ -547,7 +531,6 @@
 | social | `WRITER_SELECTOR_TIMEOUT_MS` | 6000 | — |  |
 | timing | `GROUNDING_ASKED_MAX` | 0.35 | 0.35 |  |
 | timing | `GROUNDING_PRESENT_MAX` | 0.35 | 0.35 | topic_present 低于此值算"聊天里没提过"，user_asked 低于此值算"用户没在问"；两者都低才拦。 |
-| timing | `SEMANTIC_DUP_THRESHOLD` | 0.7 | — |  |
 | timing | `TIMING_DEBOUNCE_MAX_BUFFER_MS` | 8000 | — |  |
 | timing | `TIMING_DEBOUNCE_MS` | 2000 | — | 阶段 1：消息去抖窗口（毫秒）。0 = 关闭去抖。 同一 chat 内，新消息会重置定时器；超过 MAX_BUFFER_MS 强制 flush 防止饥饿。 |
 | timing | `TIMING_GATE_USAGE` | 'judge' | reflection | 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。 |
@@ -591,33 +574,43 @@
 | `TASK_PROGRESS_CODEACT_ENABLED` | 删（task-progress.ts 只读 TASK_PROGRESS_ENABLED） |
 | `TASK_PROGRESS_RESEARCH_ENABLED` | 同上 |
 | `GOAL_LONG_TERM_ENABLED` | **保留并真接上**：goals.ts 现在读它，关时 long_term 目标按 7 天窗口 stale |
+| `CORE_BLACKBOARD_ENABLED` | **保留并真接上**：blackboard/store.ts 四个入口都读它 |
+| `GROUNDING_PRESENT_MAX` / `GROUNDING_ASKED_MAX` | **保留并真接上**：grounding-check.ts 原来写死 0.35 |
+| `EXPERIENCE_VERIFY_MIN_SUCCESS` | **保留并真接上**：experience-verify.ts 原来用硬编码默认 2 |
+| `TASK_MAX_ROUNDS` | **保留并真接上**：task-store.ts 原来写死 6 |
+
+### 2026-09-21 第二批退役（14 个，全仓核过无读者）
+
+| flag | 去向 |
+|---|---|
+| `DREAMING_USAGE` | 删（dreaming 实际 usage 在 cron 里另取） |
+| `CODEACT_MAX_TURNS` | 删（每段轮数上限是 executor.ts 写死的 30，不是这个 8） |
+| `TASK_PROGRESS_START_DELAY_MS` | 删（task-progress.ts 只读 KEEPALIVE/MIN_INTERVAL） |
+| `JUDGE_PROACTIVE_RATE` | 删（随机主动插话机制整个已删；ENABLED 仍在，但只门控上下文预计算） |
+| `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | 同上 |
+| `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | 同上 |
+| `SEMANTIC_DUP_THRESHOLD` | 删（semantic-dup.ts 阈值写死 0.7） |
+| `STREAMING_MIN_INTERVAL` | 删（流式节流归 TASK_PROGRESS_* 管） |
+| `STREAMING_MIN_CHARS` | 删（同上） |
+| `TTS_VOICE_PROBABILITY` | 删（TTS 概率在发送路径另有一处） |
+| `TTS_MAX_CHARS` | 删（同上） |
+| `TURN_UNIFIED_DECISION_ENABLED` | 删（注释说"防 .env 报错"，但 zod 对未知键是剥离不是报错） |
+| `VERIFY_DEFAULT_TIMEOUT` | 删（入群验证超时来自 per-chat 的 group_verify_settings） |
+| `VERIFY_MAX_ATTEMPTS` | 删（同上） |
+
+### 保留但 grep 不到读者的 2 个
+
+`TS_WEBHOOK_URL` / `PHP_WEBHOOK_URL` —— **不是死键**：`scripts/cutover.sh` 用 shell 读它们。census 只 grep .ts/.mts/.js，所以它们出现在"没人读"表里。删它们会弄坏 cutover 脚本。
+
 
 还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` 是唯一真的没人读的 CORE_* 旗标——blackboard 是 storage 层，被 agent/cognitive-workspace、agency-intent-adapter、core/promote、core/permission/gate 四个模块当存储用了，给它加闸门要同时管住读和写，接错会把在跑的东西关掉，所以留着单独一轮。（另两个 CORE_BELIEF_VIEW_ENABLED / CORE_PERMISSION_GATE_ENABLED 是**接好的**，见上面「假开关」一节的更正。）
 
 `CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
 
 
-## src/ 里没人读的键（20 个）
+## src/ 里没人读的键（2 个）
 
 | key | 段 | .env | 说明 |
 |---|---|---|---|
-| `CODEACT_MAX_TURNS` | meta | — |  |
-| `DREAMING_USAGE` | meta | — | dreaming 长任务用的 AI usage 名。 |
-| `EXPERIENCE_VERIFY_MIN_SUCCESS` | cognition | 2 |  |
-| `GROUNDING_ASKED_MAX` | timing | 0.35 |  |
-| `GROUNDING_PRESENT_MAX` | timing | 0.35 | topic_present 低于此值算"聊天里没提过"，user_asked 低于此值算"用户没在问"；两者都低才拦。 |
-| `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | memory | 60 |  |
-| `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | memory | — |  |
-| `JUDGE_PROACTIVE_RATE` | memory | 0.5 |  |
 | `PHP_WEBHOOK_URL` | life | — |  |
-| `SEMANTIC_DUP_THRESHOLD` | timing | — |  |
-| `STREAMING_MIN_CHARS` | infra | 50 |  |
-| `STREAMING_MIN_INTERVAL` | infra | 500 | Streaming |
-| `TASK_MAX_ROUNDS` | cognition | — |  |
-| `TASK_PROGRESS_START_DELAY_MS` | meta | — |  |
 | `TS_WEBHOOK_URL` | life | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |
-| `TTS_MAX_CHARS` | life | — | 仅对不超过此字符数的回复转语音(长消息发语音很烦)。 |
-| `TTS_VOICE_PROBABILITY` | life | — | 每条满足条件的短回复转语音的概率(0..1)。 |
-| `TURN_UNIFIED_DECISION_ENABLED` | turn | — | (旧名,弃用,留着防 .env 报错) |
-| `VERIFY_DEFAULT_TIMEOUT` | infra | — |  |
-| `VERIFY_MAX_ATTEMPTS` | infra | — |  |

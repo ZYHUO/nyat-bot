@@ -80,9 +80,7 @@ export const infraSection = {
   // Rate limiting
   RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(30),
 
-  // Streaming
-  STREAMING_MIN_INTERVAL: z.coerce.number().int().nonnegative().default(500),
-  STREAMING_MIN_CHARS: z.coerce.number().int().nonnegative().default(50),
+  // （STREAMING_MIN_INTERVAL / STREAMING_MIN_CHARS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。流式节流在 task-progress.ts 里由 TASK_PROGRESS_* 系列管，这两个键无人读）
 
   // Tool System
   SKILLS_DIR: z.string().default('./data/skills'),
@@ -166,8 +164,7 @@ export const infraSection = {
 
   // Join verification
   VERIFY_ENABLED: booleanFromEnv.default(false),
-  VERIFY_DEFAULT_TIMEOUT: z.coerce.number().int().default(300),
-  VERIFY_MAX_ATTEMPTS: z.coerce.number().int().default(3),
+  // （VERIFY_DEFAULT_TIMEOUT / VERIFY_MAX_ATTEMPTS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。入群验证的超时/次数来自 per-chat 的 group_verify_settings 表，getVerifySettings 没有任何 env 兜底）
 
   // Knowledge cron (cron_long_term.php parity)
   KNOWLEDGE_CRON_CHAT_IDS: z

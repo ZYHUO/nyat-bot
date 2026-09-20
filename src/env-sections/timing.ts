@@ -81,7 +81,7 @@ export const timingSection = {
   // 所以这里用 TypeSafe System One (Jev) 问一个 Noul。仅在第 2+ 次任务内发送时调用；
   // Je 不可达一律 fail-open 放行（不可因基础设施故障吞掉一句话）。
   SEMANTIC_DUP_ENABLED: booleanFromEnv.default(false),
-  SEMANTIC_DUP_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
+  // （SEMANTIC_DUP_THRESHOLD 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。semantic-dup.ts 的判定阈值是写死的 0.7，没读这个键）
   // 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字/事实（模型幻觉）。
   // 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」。
   // 先用确定性闸门（含具体数字才问）压调用量；JeV 不可达一律 fail-open。

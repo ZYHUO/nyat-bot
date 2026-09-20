@@ -142,8 +142,5 @@ export const lifeSection = {
   TTS_ENABLED: booleanFromEnv.default(false),
   // edge-tts 语音名(中文默认晓晓;也可换 zh-CN-XiaoyiNeural 等)。
   TTS_VOICE: z.string().default('zh-CN-XiaoxiaoNeural'),
-  // 每条满足条件的短回复转语音的概率(0..1)。
-  TTS_VOICE_PROBABILITY: z.coerce.number().min(0).max(1).default(0.15),
-  // 仅对不超过此字符数的回复转语音(长消息发语音很烦)。
-  TTS_MAX_CHARS: z.coerce.number().int().positive().default(100),
+  // （TTS_VOICE_PROBABILITY / TTS_MAX_CHARS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。TTS 的实际概率/长度上限在发送路径里另有一处，这两个键从未被读）
 };

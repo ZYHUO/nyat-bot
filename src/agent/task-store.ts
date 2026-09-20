@@ -64,6 +64,16 @@ function rowToTask(r: Record<string, unknown>): TaskRow {
 }
 
 /** 建任务(调用方已确认用户 @ 了 bot 且是直接请求)。返回 task id。 */
+/** TASK_MAX_ROUNDS；env 不可用时退回 6（与改动前一致）。 */
+function readMaxRounds(): number {
+  try {
+    const n = Number(env().TASK_MAX_ROUNDS ?? 6);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 6;
+  } catch {
+    return 6;
+  }
+}
+
 export function createTask(input: {
   ownerUid: number;
   chatId: number;
@@ -73,7 +83,12 @@ export function createTask(input: {
 }): number {
   const ts = nowSec();
   const kind = input.kind ?? 'research';
-  const maxRounds = input.maxRounds ?? 6;
+  // maxRounds 未显式传入时读 env（TASK_MAX_ROUNDS，默认 6）。
+  //
+  // 2026-09-21：这个旗标声明了而全仓库没有一处读它——唯一的调用方
+  // （pipeline/judge/task-trigger.ts 的 createTask）不传 maxRounds，
+  // 于是永远落在这里的硬编码 6。值恰好等于旗标默认值，接上不改变行为。
+  const maxRounds = input.maxRounds ?? readMaxRounds();
   const r = getDb()
     .prepare(
       `INSERT INTO tasks (owner_uid, chat_id, goal, kind, state, ledger, progress, search_round, max_rounds, created_at, updated_at)

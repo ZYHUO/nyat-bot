@@ -8,6 +8,10 @@ let db: Database.Database;
 vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => db,
 }));
+// 2026-09-21：minSuccess 未显式传入时读 env().EXPERIENCE_VERIFY_MIN_SUCCESS
+// （原来是 recordInjectOutcome 里的硬编码默认 2）。
+const envValues: Record<string, unknown> = { EXPERIENCE_VERIFY_MIN_SUCCESS: 2 };
+vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
 const { computePathQuality, isPathQualityGood, summarizeToolCalls } = await import('../../../src/agent/path-quality.js');
 const { recordInjectOutcome } = await import('../../../src/agent/experience-verify.js');
@@ -22,6 +26,7 @@ function loadMigrations(): void {
 
 beforeEach(() => {
   loadMigrations();
+  envValues.EXPERIENCE_VERIFY_MIN_SUCCESS = 2;
 });
 
 describe('computePathQuality', () => {
@@ -143,3 +148,43 @@ function saveOne(content: string): number | null {
     .run('trick', content, '["测试"]', null, 'episode', ts);
   return Number(r.lastInsertRowid);
 }
+
+describe('EXPERIENCE_VERIFY_MIN_SUCCESS（2026-09-21：原来是硬编码 2）', () => {
+  function seed(): number {
+    return saveOne('某个战术')!;
+  }
+
+  it('不传 minSuccess → 读 env（默认 2）', () => {
+    const id = seed();
+    // 1 次成功不够（要 2）→ 仍未 verified
+    recordInjectOutcome({ experienceIds: [id], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9 });
+    expect((db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(id) as { verified: number }).verified).toBe(0);
+    recordInjectOutcome({ experienceIds: [id], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9 });
+    expect((db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(id) as { verified: number }).verified).toBe(1);
+  });
+
+  it('env 改成 1 → 一次成功就 verified', () => {
+    envValues.EXPERIENCE_VERIFY_MIN_SUCCESS = 1;
+    const id = seed();
+    recordInjectOutcome({ experienceIds: [id], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9 });
+    expect((db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(id) as { verified: number }).verified).toBe(1);
+  });
+
+  it('显式传入的 minSuccess 仍然优先', () => {
+    envValues.EXPERIENCE_VERIFY_MIN_SUCCESS = 9;
+    const id = seed();
+    recordInjectOutcome({ experienceIds: [id], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9, minSuccess: 1 });
+    expect((db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(id) as { verified: number }).verified).toBe(1);
+  });
+
+  it('缺键 / 非法值 → 退回 2（与改动前一致）', () => {
+    delete envValues.EXPERIENCE_VERIFY_MIN_SUCCESS;
+    const a = seed();
+    recordInjectOutcome({ experienceIds: [a], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9 });
+    expect((db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(a) as { verified: number }).verified).toBe(0);
+    envValues.EXPERIENCE_VERIFY_MIN_SUCCESS = 'abc';
+    const b = seed();
+    recordInjectOutcome({ experienceIds: [b], taskOutcome: 'done', evidenceStatus: 'verified', pathQualityScore: 0.9 });
+    expect((db.prepare('SELECT verified FROM experience_entries WHERE id = ?').get(b) as { verified: number }).verified).toBe(0);
+  });
+});
