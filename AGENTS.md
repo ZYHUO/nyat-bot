@@ -40,7 +40,7 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 
 - **Everything new is `env`-flag-gated, default OFF, and graylisted per chat.** Flags live in `src/env.ts` (a zod schema; read via the cached `env()` getter, **never `process.env` directly**). Graylists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. `.env` is gitignored and secret — **never commit it**.
 - **`chatId` sign discriminates DM vs group**: `> 0` = DM/private, `< 0` = group. Use `isDM`/`isGroup` from `src/shared/chat.ts`.
-- **Migrations**: add a new `migrations/NNNN_name.sql` (4-digit, next after the highest — currently `0049`). Applied automatically on boot in **lexicographic filename order** (`src/db/sqlite.ts:runMigrations`), tracked in `_migrations`. Pure SQL, idempotent (`IF NOT EXISTS`/`ADD COLUMN`). **Never edit an already-applied migration.**
+- **Migrations**: add a new `migrations/NNNN_name.sql` (4-digit, next after the highest — currently `0114`). Applied automatically on boot in **lexicographic filename order** (`src/db/sqlite.ts:runMigrations`), tracked in `_migrations`. Pure SQL, idempotent (`IF NOT EXISTS`/`ADD COLUMN`). **Never edit an already-applied migration.**
 - **`src/memory/chroma.ts` is Qdrant, not ChromaDB** (renamed after migration; collection `xxb_group_history`). `src/memory/importance.ts` is the SQLite sidecar.
 - **AI routing**: `callWithFallback({ usage, messages, … })` in `src/ai/fallback.ts` resolves `usage` → a provider chain. The main reply model is **Claude via native `/v1/messages`** (`apiFormat: 'claude'`, `x-api-key`), **not** OpenAI format — see `src/ai/provider.ts`. Redis key `xxb:admin:model_routing:override` overrides `.env` at runtime.
 - **Two pipeline wrappers, both flag-gated**: **Turn Actor** (`src/pipeline/turn/`, `TURN_ACTOR_ENABLED`) = MaiBot-style per-chat cognition (burst merge, interrupt→replan, wait-resume); **Heart** (`src/pipeline/heart/`, `HEART_ENABLED`) = one persona-aware call replacing judge+gate for L0-miss group messages. In production the **Heart branch is the main path** — timing/gate changes must be wired into the heart branch in `pipeline.ts`, not just the standalone gate.
@@ -77,3 +77,42 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 - Run `export PATH=/opt/node22/bin:$PATH && npm run typecheck && npm run lint && npm run test` — all must be **completely** clean; there are no known-noise exceptions.
 - New feature → new `env` flag (default OFF) + graylist; new schema → new `migrations/00NN_*.sql` (idempotent, never edit old ones); new cron task → wrap in `safeRun`, flag-gate it.
 - Match surrounding code: comment density, naming, ESM `import type` discipline, no `process.env` reads outside `env.ts`.
+
+## Adding a feature — the path that actually works
+
+Four gates stand between "I wrote it" and "it runs". Each exists because a previous
+change passed the other three and still did nothing:
+
+| gate | what it catches | command |
+|---|---|---|
+| typecheck | wrong import path, wrong shape | `npm run typecheck` |
+| unit tests | the logic is wrong | `npm run test` |
+| **dead-switch guard** | **the flag nobody reads** — `tests/unit/env/no-dead-switches.test.ts` fails if a flag is ON (in `.env` or by default) with zero readers in `src/`+`scripts/`+`packages/` | `npx vitest run tests/unit/env/no-dead-switches.test.ts` |
+| **deploy verification** | **the change isn't in the bundle** — `scripts/verify-deploy.mts` greps `dist/index.js` for each mechanism (handles esbuild quote normalisation and `\uXXXX` CJK escaping) | `npx tsx scripts/verify-deploy.mts` |
+| **integration smoke** | **green alone, broken composed** — `scripts/verify-integration.mts` exercises real compositions (search, anti-ad authorise→measure→render→deauthorise, kick gates, body-signal self-registration) | `npx tsx scripts/verify-integration.mts` |
+
+The last three are the ones people skip. History in this repo: `canSpeakActively()` had
+exactly one reference — its own definition; `releasePressure` (the L0 integrator's main
+drain) was never called; the join-screen's `extractJoinerName` was imported from the wrong
+module so it threw on every call and was swallowed by a `catch`, while typecheck was red
+and 3,227 tests were green.
+
+**Checklist for a new flag-gated feature:**
+
+1. `src/env.ts` — add the flag with a comment saying *why it defaults where it does*.
+   If it defaults ON, the dead-switch guard will require a reader before you can commit.
+2. Wire it at the **production** path, not just the obvious one. The Meta path
+   (`META_SUBAGENT_ENABLED`) bypasses `processPipeline` entirely — anything added only to
+   `pipeline.ts` never runs in production.
+3. `migrations/NNNN_*.sql` for schema (idempotent; never edit an applied one).
+4. `tests/unit/…` mirroring `src/`, **plus a regression test that fails when the wiring is
+   removed** — verify it by temporarily reverting the wiring.
+5. Add a line to `scripts/verify-deploy.mts`'s `CHECKS` so the mechanism is pinned in the
+   bundle.
+6. Update `docs/flag-census.md` by re-running `python3 scripts/flag-census.py` (it lists
+   every flag, its default, its `.env` value, and its readers).
+
+**Retiring a flag:** delete it from `src/env.ts` and `.env`, leave a comment in place of it
+saying why (so nobody re-adds it), and note it in the census's 已退役 section. If a flag
+must exist before its wiring lands, add it to `ALLOWLIST` in the dead-switch test *with a
+reason* — that is an IOU, not an exemption.
