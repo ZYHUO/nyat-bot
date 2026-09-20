@@ -1054,6 +1054,10 @@ const envSchema = z.object({
   // 踢人（admin.kick）总闸。默认关。
   // 为什么单独一个 flag 而不跟 ANTIAD_ENABLED 绑：删消息/禁言可逆，踢人不可逆
   // （对方要自己加回来）。群主明确要"能踢"才开，且仍由模型按 Frame 里的事实决定。
+  // 同时段对照基线采集 cron。默认开；它纯只读（只拍快照），关掉只会让
+  // Phase 1 缺归判数据，不影响任何行为。=== false 关。
+  CONTROL_BASELINE_ENABLED: booleanFromEnv.default(true),
+
   ANTIAD_KICK_ENABLED: booleanFromEnv.default(false),
 
   ANTIAD_CHAT_IDS: z.string().default('').transform((s) => {

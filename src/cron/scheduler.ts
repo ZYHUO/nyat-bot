@@ -247,6 +247,26 @@ export function startCronJobs(deps?: CronDeps): void {
         logger.info({ settled: n }, 'trench cron: echo-backfill ran');
       },
     });
+
+  // 同时段对照基线采集（Phase 1 的归判前提）。每天 11:30 UTC = 19:30 北京拍一张
+  // 各群发送率快照，落 var/control-baseline.jsonl。**纯只读**：不翻开关、不改行为，
+  // 所以可以一直跑；论文 §九·补七 算出候选群同期 σ=19%，单日读数不可归因，
+  // 需要 ~5 天/组，这个 cron 就是让基线自己长出来而不用谁记得。
+  if (env().CONTROL_BASELINE_ENABLED !== false) {
+    reg({
+      name: 'control-baseline',
+      dailyAt: { hour: 11, minute: 30 },
+      run: async () => {
+        const { execSync } = await import('node:child_process');
+        execSync('npx tsx scripts/control-baseline.mts record', {
+          cwd: process.cwd(),
+          encoding: 'utf8',
+          timeout: 120_000,
+        });
+        logger.info({}, 'trench cron: control-baseline recorded');
+      },
+    });
+  }
   }
 
   // Event-backed mission/process continuity. This tick only claims due wake
