@@ -226,7 +226,19 @@ export class PostTaskWindowManager {
       const decision = await judgeFollowUpBatch(win, candidates);
       if (this.windows.get(chatId) !== win) return; // 判定期间窗口已关
       for (const m of candidates) win.judgedIds.add(m.messageId);
-      if (!decision?.hasFollowUp) return;
+      if (!decision?.hasFollowUp) {
+        // **这一笔必须记**。2026-09-21：session-report 的「任务后追话」产出率算出来
+        // 是 10.7%，那个数是假的——分母只数了"失败 + 派发续答"，
+        // 而"判过了、结论是不用接话"这一路（绝大多数情况）**一条日志都没有**。
+        // 于是失败率被放大成将近 10 倍，看起来像这个功能几乎全是坏的，
+        // 实际它只是在正确地大部份时间选择沉默。
+        // 判据同一个：**算比率的两个数必须覆盖全部出口**，否则分母是编的。
+        // info 不是 debug：LOG_LEVEL=info 时 debug 一律不可见，那这一笔又等于没记，
+        // 分母重新漏掉它。频率约每天百来次（post-task window opened 三天 345 次），
+        // 远不到刷屏的程度。
+        logger.info({ chatId, candidates: candidates.length }, 'post-task judge: no follow-up');
+        return;
+      }
       const trigger =
         candidates.find((m) => m.messageId === decision.triggerMessageId) ??
         candidates[candidates.length - 1];

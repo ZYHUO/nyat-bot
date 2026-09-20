@@ -310,7 +310,13 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
   const PAIRS: Array<[string, string | null, string]> = [
     ['dreaming output unparseable', 'dreaming consolidated', 'dreaming 整合'],
     ['distill output unparseable', 'episode distilled', 'episode 蒸馏'],
-    ['post-task follow-up batch failed', 'post-task continuation dispatched', '任务后追话'],
+    // 三个出口都要数：失败 / 判过不用接 / 派发了续答。
+    // 2026-09-21：原来只配了失败和派发，算出 10.7% 的假比率——
+    // "判过、结论是不用接话"这一路（绝大多数）没有日志，分母漏了它，
+    // 失败率被放大了近 10 倍，看起来这功能几乎全是坏的。
+    ['post-task follow-up batch failed', null, '任务后追话·失败'],
+    ['post-task judge: no follow-up', null, '任务后追话·判过不接'],
+    ['post-task continuation dispatched', null, '任务后追话·派发了'],
     ['deep-reflection: LLM failed', 'deep-reflection tick complete', '深度反思'],
     ['Memory write failed', null, '长期记忆写入'],
     ['heart LLM failed', 'Heart decision', '心流裁决'],
@@ -332,21 +338,40 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     }
   } catch { /* 读不到就全 0，配合上面的提示读作没有数据 */ }
   let any = false;
+  const THREE_WAY = '任务后追话';
+  const seen3 = new Set<string>();
   for (const [fail, ok, label] of PAIRS) {
+    if (label.startsWith(THREE_WAY)) { seen3.add(fail); continue; }
     const f = counts.get(fail) ?? 0;
     const o = ok ? (counts.get(ok) ?? 0) : 0;
     if (f === 0 && o === 0) continue;
     any = true;
     if (!ok) {
-      // 只报失败数：成功不写日志的那类
-      console.log(`  ${label.padEnd(14)} 失败 ${String(f).padStart(5)}   （成功不写日志，无产出率）`);
+      console.log(`  ${label.padEnd(16)} 失败 ${String(f).padStart(5)}   （成功不写日志，无产出率）`);
       continue;
     }
     const total = f + o;
     const rate = total > 0 ? o / total : 0;
     const bad = total >= 20 && rate < 0.5;
-    console.log(`  ${label.padEnd(14)} 成功 ${String(o).padStart(5)}｜失败 ${String(f).padStart(5)}  产出率 ${(rate * 100).toFixed(1).padStart(5)}%${bad ? '   ⚠️ 过低' : ''}`);
+    console.log(`  ${label.padEnd(16)} 成功 ${String(o).padStart(5)}｜失败 ${String(f).padStart(5)}  产出率 ${(rate * 100).toFixed(1).padStart(5)}%${bad ? '   ⚠️ 过低' : ''}`);
   }
+
+  // 三出口组：失败 / 判过不用接 / 派发了续答。三个都数才算得出真比率。
+  {
+    const bad = counts.get('post-task follow-up batch failed') ?? 0;
+    const noop = counts.get('post-task judge: no follow-up') ?? 0;
+    const sent = counts.get('post-task continuation dispatched') ?? 0;
+    const total = bad + noop + sent;
+    if (total > 0) {
+      any = true;
+      const failRate = (bad / total) * 100;
+      console.log(`  任务后追话        判过不接 ${String(noop).padStart(5)}｜派发 ${String(sent).padStart(5)}｜失败 ${String(bad).padStart(5)}  失败率 ${failRate.toFixed(1).padStart(5)}%`);
+      console.log('    （三个出口都数。2026-09-21 之前只数失败+派发，算出 10.7% 的假产出率——');
+      console.log('      「判过、结论是不用接话」那一路没有日志，分母漏了绝大多数情况。）');
+      if (total >= 20 && failRate > 50) console.log('    ⚠️ 失败率过高');
+    }
+  }
+  if (!any) console.log('  （窗口内这些 cron 都没有日志）');
   if (!any) console.log('  （窗口内这些 cron 都没有日志）');
   // topic-scan 单列：它的"产出"是 tick 日志里的 observed 字段，不是另一条消息
   console.log('  （topic-scan 的产出率见上一节）');

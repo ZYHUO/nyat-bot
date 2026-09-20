@@ -104,12 +104,18 @@ day does this fire, and is what it eats reasonable?* — so it is now a table in
 habit. Rows pair a failure message with its success message; the threshold for ⚠️ is
 ≥20 attempts under 50% yield.
 
-Two rules when adding a row:
+Three rules when adding a row:
 - If the success path writes **no** log line, pass `null` and report the failure count
   alone. Pairing it with an unrelated success message produces a fake ratio, and a fake
   ratio is worse than none.
 - Keep the pair in one place. The failure and success strings drift apart when someone
   rewords a log line, and then the row silently reads 0/0.
+- **The counted exits must cover every exit.** `post-task follow-up` paired "judge failed"
+  with "continuation dispatched" and reported 10.7% yield — fake. The third exit, "judged
+  and decided not to follow up", is the common case and logged nothing, so the failure rate
+  looked ~10× worse than reality. That exit now logs (at `info` — a `debug` line is
+  invisible at `LOG_LEVEL=info`, which puts the hole straight back), and the row reports
+  all three counts.
 
 ## Measuring how much of the old architecture is left
 
