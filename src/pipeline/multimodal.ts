@@ -323,9 +323,18 @@ async function describeVideo(
 
   const downloaded = await downloadTelegramFile(fileId);
   // 下不动（多半太大）≠ 内容不存在。中性占位，别误导成失败。
-  if (!downloaded) return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  if (!downloaded) {
+    // 2026-09-21：这个出口**一条日志都没有**。于是"下载失败"和"没收到过视频"
+    // 在日志里长得一模一样——视频功能上线后生产零样本，而我分不清是它坏了
+    // 还是压根没有视频消息进来。补一行 info，让"跑了但没成"变得可见。
+    logger.info({ fileId, durationSec }, 'Video description skipped: download unavailable');
+    return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  }
 
-  if (!env().VIDEO_DESCRIBE_ENABLED) return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  if (!env().VIDEO_DESCRIBE_ENABLED) {
+    logger.info({ fileId }, 'Video description skipped: flag off');
+    return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  }
 
   try {
     const base64 = Buffer.from(downloaded.buffer).toString('base64');
@@ -351,7 +360,15 @@ async function describeVideo(
     });
 
     const text = result.content.trim();
-    if (!text) return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+    if (!text) {
+      logger.info({ fileId, label: result.label }, 'Video description empty — placeholder used');
+      return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+    }
+    // 成功也记一笔：没有它，"这个功能到底跑过没有"只能靠翻 textContent。
+    logger.info(
+      { fileId, label: result.label, ms: result.latencyMs, chars: text.length },
+      'Video described',
+    );
     return `[${label}内容：${text}]`;
   } catch (err) {
     logger.warn({ fileId, err }, 'Video description failed');

@@ -14,7 +14,7 @@
 |---|---|---|---|---|---|
 | `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 79 | 21 | 14 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 13 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
-| `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 36 | 22 | 22 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
+| `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 23 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 22 | 3 | 3 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 32 | 19 | 19 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 18 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
@@ -29,15 +29,15 @@
 
 | | |
 |---|---|
-| total_keys | 484 |
-| bool_flags | 215 |
-| on_in_prod | 186 |
-| set_in_env | 321 |
+| total_keys | 485 |
+| bool_flags | 216 |
+| on_in_prod | 187 |
+| set_in_env | 322 |
 | dead_no_reader | 2 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
-**215 个布尔旗标里，生产实际开着 186 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**216 个布尔旗标里，生产实际开着 187 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -57,7 +57,7 @@
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
 
-## 生产开着的旗标（186 个）
+## 生产开着的旗标（187 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
@@ -226,6 +226,7 @@
 | timing | `TIMING_GATE_PRECHECK_ENABLED` | false | true | 确定性前置检查：烧 LLM 之前先判定"这条明显是群友之间在聊、与 bot 无关"。 依据 2026-09-18 实测：gate 的 LLM 分支 121/122 给出同一个 no_action， 理由全部命中 timing-gate.md 里那条显式规则（"群友彼此在聊 → 别硬挤"）。 保守设计 | pipeline/timing/gate.ts |
 | timing | `TRENCH_DEBT_ATTENTION_ENABLED` | false | true | 定向债 → 注意力权重（论文 §九·补六 实验 B）。默认关。 实测：债被 Frame 呈现但 0/28 进入选择。这一条把债接到**选择侧**：来自债主的消息 在注意力累加时获得 +DEBT_ATTENTION_BOOST 压力。宿主侧确定性加权，不改模型。 | bot/handlers/message.ts |
 | timing | `TRENCH_DEBT_ENABLED` | false | true | Nyat Trench 定向债：睡眠期按**发送者**记"欠谁一句"，醒来只准对那个人兑现。 评审 3 的反对意见：无方向的睡眠积压醒来后只被半衰期压平（时钟驱动=痉挛签名）， 有方向则被"还债"驱动（闭环驱动=活人）。速率上界仍由标量 P 决定，不改积分器。 | nyatos/debt.ts |
+| timing | `TRENCH_ENVELOPE_ACTIVITY_SCALED` | true | true | 突发上限按群活跃度缩放。对应用户原话："日常都有点过高频率，只有在群友 活跃度高的时候高活跃"。此前上限是扁平常量——冷清群和热聊群共用一个天花板， 于是 Quiet 群里 bot 照样能每小时主动插 20 次。  缩放用宿主**本来就在测**的 xxb:activity:{chatId}（每条入站 | nyatos/envelope.ts |
 | timing | `TRENCH_GATE_ENABLED` | false | true |  | cron/unified-tick.ts, subagent/host-api.ts |
 | timing | `TRENCH_PUMP_ENABLED` | false | true |  | cron/scheduler.ts |
 | timing | `TRENCH_SLEEP_PULSE_ENABLED` | false | true | Nyat Trench L0 × 睡眠：读到的但没法回的消息记成气压（0.5/条）。 此前这段积累完全不存在——睡眠时段消息进 pending 队列，醒来时 P=0， bot 像什么都没发生过。加上之后醒来后气压偏高 → 速率上限被 g(P) 抬高， 即"睡一觉错过一场对话，醒来头几句是密的"，之后 | bot/handlers/message.ts |
@@ -536,8 +537,8 @@
 | timing | `TIMING_DEBOUNCE_MS` | 2000 | — | 阶段 1：消息去抖窗口（毫秒）。0 = 关闭去抖。 同一 chat 内，新消息会重置定时器；超过 MAX_BUFFER_MS 强制 flush 防止饥饿。 |
 | timing | `TIMING_GATE_USAGE` | 'judge' | reflection | 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。 |
 | timing | `TIMING_STATE_TTL_SEC` | 86400 | — | 阶段 2：ChatRuntime 状态过期时间（秒）。超过则视作 STOP 默认状态。 |
-| timing | `TRENCH_BURST_MAX` | 150 | 30 | 默认值不是拍的，是回测出来的（scripts/envelope-backtest.mts，近 3 天 1841 条）： 实测小时窗峰值 107 / p99 64 / p95 37；5 分钟窗峰值 19 / p99 16。 设 150/100 |
-| timing | `TRENCH_BURST_MAX_ACTIVE` | 100 | 20 |  |
+| timing | `TRENCH_BURST_MAX` | 30 | 30 | 默认值不是拍的，是回测出来的（scripts/envelope-backtest.mts，近 3 天 1841 条）： 实测小时窗峰值 107 / p99 64 / p95 37；5 分钟窗峰值 19 / p99 16。 设 150/100 |
+| timing | `TRENCH_BURST_MAX_ACTIVE` | 20 | 20 |  |
 | timing | `TRENCH_BURST_WINDOW_SEC` | 3600 | 3600 |  |
 | timing | `TRENCH_DEBT_ATTENTION_BOOST` | 0.5 | 3.0 |  |
 | timing | `TRENCH_ENVELOPE_MODE` | 'off' | enforce | 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进 CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与—— 2026-09-19 真人对比分析定为此为"差一口气 |
