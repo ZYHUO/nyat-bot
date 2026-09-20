@@ -1,3 +1,4 @@
+import { getBotUid } from '../../bot/bot.js';
 import type { Bot, Context } from 'grammy';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
@@ -417,6 +418,43 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // 额外查时限旁路：TTL 到期自动恢复，实验因此不需要有人记得撤。
           const timedBypass = await hasTimedBypass(chatId).catch(() => false);
           const heartPath = timedBypass ? 'bypass' : heartRoute(env(), chatId);
+
+          // ── bot 消息分类 + 降噪：Meta 路径也要走 ──────────────────────
+          //
+          // **这是"搭配验证 bot"的真正缺口**：botClass 只在 processPipeline 里算，
+          // 而生产主路径（META_SUBAGENT_ENABLED 开着）从本函数下方直接分流到
+          // heart-adapter，根本不进 processPipeline——于是分类和降噪在主路径上
+          // 从未生效，nmnmfunbot（入群验证 bot）的消息照常拿到 heart 判定并被回复
+          // （实测 6 次，含 2026-09-20 04:55）。
+          //
+          // 修法不是加规则，是把宿主已经算出的那个事实（botClass）在本路径也算出来，
+          // 并按 BOT_DENOISE_ENABLED 尊重它。verify/ad/echo 三类是"非对话型 bot"，
+          // 宿主据此不烧心流；其余照旧。
+          if (fm.isBot && Number(fm.uid ?? 0) !== getBotUid() && chatId < 0) {
+            try {
+              const { env: envNow } = await import('../../env.js');
+              if (envNow().BOT_CLASSIFIER_ENABLED) {
+                const { classifyBotMessage } = await import('../../tracking/bot-classifier.js');
+                const bc = classifyBotMessage(fm, {});
+                if (bc !== 'unknown' && bc !== 'self') {
+                  logger.info(
+                    { chatId, bot: fm.username, botClass: bc },
+                    'Meta path: bot message classified',
+                  );
+                  if (envNow().BOT_DENOISE_ENABLED && (bc === 'ad' || bc === 'verify' || bc === 'echo')) {
+                    logger.info(
+                      { chatId, bot: fm.username, botClass: bc },
+                      'Meta path: denoise silenced a non-conversational bot',
+                    );
+                    noteLiveOutcome('silent');
+                    return 'done';
+                  }
+                }
+              }
+            } catch (err) {
+              logger.debug({ err, chatId }, 'Meta path bot classify failed (non-critical)');
+            }
+          }
           if (heartPath === 'heart') {
             void (async () => {
               try {
