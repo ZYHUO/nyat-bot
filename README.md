@@ -37,7 +37,18 @@ Most chat bots are **responding** systems: cue in, text out. Real group members 
 
 **Nyat Trench — the live body layer** ([`docs/plans/2026-09-19-nyat-trench.md`](docs/plans/2026-09-19-nyat-trench.md))
 
-The stance: *the model decides what to say and whether to say it; the host only reports the state of your throat.* Every mechanism below is a **measurement the host holds and the model reads** — never a verdict, never a quota the model is allowed.
+The stance: *the model decides what to say and whether to say it; the host only reports the state of your throat.* Every mechanism below is a **measurement the host holds and the model reads**.
+
+Honest correction, after an independent literature review (§九·补八): the earlier wording
+"never a verdict, never a quota" was **false**. The 6-hour pinned-pressure watchdog and the
+150/100 burst envelope *are* rules and a quota. What is actually true — and what the review
+confirmed as the genuinely unusual part — is that those rules live on the **host side,
+where the model can read them but not change them**, instead of being judgments written into
+the model's path. The review also found no publication or repo for this architecture and no
+baseline, so "best-performing" is unevidenced; the paper records what is genuinely new
+(obligation decay discharged by the replying act, the host-reports/model-decides position
+between rule-gating and RL) and what is a re-derivation (the integrator is a leaky bucket,
+the four-signal score is the same shape as AgentPulse's bot score).
 
 - 🩺 **L0 Bed** (`src/nyatos/trench.ts`) — a bounded integrator: speech pressure `P ∈ [0,12]`, shore `θ`, a time-based pump (halves every 60 min), sleep-phase accumulation, and a self-unlock watchdog that force-resets a group pinned at `P_MAX`. Bounded, observable, force-unlockable — the four properties a vetoer must have.
 - 🧱 **L1 Wall** (`src/nyatos/envelope.ts`) — burst envelope (150 addressed / 100 proactive per hour), send-time gate, anchor dedup, and the outbound text guards that stop internal bookkeeping, tool placeholders **and tool-call syntax** from ever reaching a chat.
