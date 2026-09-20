@@ -474,6 +474,21 @@ const envSchema = z.object({
   JUDGE_SUBSTRATE_BREAKER_FAILS: z.coerce.number().int().positive().default(3),
   JUDGE_SUBSTRATE_BREAKER_COOLDOWN_MS: z.coerce.number().int().positive().default(60000),
   TIMING_GATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  // gate LLM 的 max_tokens。
+  //
+  // 2026-09-21 修：这里原来是**调用点写死的 200**，而 gate 的 usage 现在是
+  // `reflection` → stepfun = step-3.7-flash，一个 **reasoning 模型**，
+  // reasoning_content 计入 completion。实测同一个 gate prompt：
+  //   maxTokens=200  → content 为空（completion=200，finish_reason=length）
+  //   maxTokens=800  → 合法 JSON
+  //   maxTokens=2000 → 合法 JSON
+  // 于是 324 次调用里 199 次（61%）"parse failed" —— 不是模型吐脏 JSON，
+  // 是它**根本没来得及吐**。失败走 fail-closed no_action，看起来像"gate 判了
+  // 不说话"，实际是"gate 被截断了于是闭嘴"。env.ts 上面那条注释把 61% 记成
+  // "实测依据"放了很久，没人去修。
+  //
+  // 1200 是按实测留的余量：合法 JSON 只要 ~260 completion token。
+  TIMING_GATE_MAX_TOKENS: z.coerce.number().int().positive().default(1200),
   // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
   TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),
   TIMING_WAIT_MIN_SEC: z.coerce.number().int().positive().default(5),

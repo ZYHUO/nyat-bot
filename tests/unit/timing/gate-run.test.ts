@@ -53,6 +53,7 @@ function baseEnv(): void {
     TIMING_GATE_ENABLED: true,
     TIMING_GATE_USAGE: 'judge',
     TIMING_GATE_TIMEOUT_MS: 8000,
+    TIMING_GATE_MAX_TOKENS: 1200,
     TIMING_WAIT_MIN_SEC: 5,
     TIMING_WAIT_MAX_SEC: 120,
     TIMING_GATE_COOLDOWN_SEC: 15,
@@ -93,6 +94,38 @@ beforeEach(() => {
   getChatStateMock.mockResolvedValue({ state: 'RUNNING' });
   cooldownRemainingMock.mockReset();
   cooldownRemainingMock.mockResolvedValue(0);
+});
+
+describe('runTimingGate — max_tokens 必须够 reasoning 模型用（2026-09-21）', () => {
+  // gate 的 usage 在生产是 `reflection` → stepfun = step-3.7-flash，reasoning 模型，
+  // reasoning_content 计入 completion。调用点原来写死 maxTokens=200，实测：
+  //   200  → content 为空（completion=200，finish_reason=length）
+  //   800  → 合法 JSON
+  // 于是 324 次调用里 199 次(61%)"parse failed"——不是模型吐脏 JSON，是它没来得及吐。
+  // 失败走 fail-closed no_action，看起来像"gate 判了不说话"，其实是"gate 被截断了"。
+
+  it('首判用 env 的 TIMING_GATE_MAX_TOKENS，不是写死的 200', async () => {
+    envValues.TIMING_GATE_MAX_TOKENS = 1234;
+    await runTimingGate(input());
+    const arg = callWithFallbackMock.mock.calls[0]![0] as { maxTokens: number };
+    expect(arg.maxTokens).toBe(1234);
+  });
+
+  it('纠正重试用同一个额度（首判已经因额度不够失败，重试再给小值只是把同一失败做两遍）', async () => {
+    envValues.TIMING_GATE_MAX_TOKENS = 1234;
+    callWithFallbackMock.mockResolvedValueOnce({ content: 'not json' } as never);
+    await runTimingGate(input());
+    expect(callWithFallbackMock.mock.calls.length).toBe(2);
+    const retryArg = callWithFallbackMock.mock.calls[1]![0] as { maxTokens: number };
+    expect(retryArg.maxTokens).toBe(1234);
+  });
+
+  it('没配这个 flag 时退回 1200（不是 200）', async () => {
+    delete envValues.TIMING_GATE_MAX_TOKENS;
+    await runTimingGate(input());
+    const arg = callWithFallbackMock.mock.calls[0]![0] as { maxTokens: number };
+    expect(arg.maxTokens).toBe(1200);
+  });
 });
 
 describe('runTimingGate — P2-E fail-closed', () => {

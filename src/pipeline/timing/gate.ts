@@ -432,7 +432,11 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ],
-      maxTokens: 200,
+      // 不能写死 200：gate 的 usage（reflection → step-3.7-flash）是 reasoning
+      // 模型，reasoning_content 计入 completion。200 会被思维链吃光，
+      // content 为空 → parse failed → fail-closed 沉默。实测见 env.ts 的
+      // TIMING_GATE_MAX_TOKENS 注释（61% 的"解析失败"全是这么来的）。
+      maxTokens: e.TIMING_GATE_MAX_TOKENS ?? 1200,
       temperature: 0,
       // H4.1: jsonMode（与 heart/decision.ts 同因——stepfun 类小模型吐脏 JSON
       // 是 parse_failed_closed 529 次的主因）。provider 层已支持，gate 两次
@@ -478,7 +482,9 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
           { role: 'assistant', content: raw.slice(0, 300) },
           { role: 'user', content: '上面的输出不是合法 JSON。只输出一个 JSON 对象,不要任何其他文字。' },
         ],
-        maxTokens: 200,
+        // 重试同样不能给 200——首判已经因为 200 被思维链吃光而失败，
+        // 重试再给 200 只是把同一个失败做两遍（还多烧一次 LLM）。
+        maxTokens: e.TIMING_GATE_MAX_TOKENS ?? 1200,
         temperature: 0,
         jsonMode: true,
         signal: input.signal,
