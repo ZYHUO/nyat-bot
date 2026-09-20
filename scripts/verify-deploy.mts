@@ -64,6 +64,8 @@ const CHECKS: Array<[string, string]> = [
   ['被叫间隔拦措辞', 'just_answered'],
   ['每任务发送预算', 'AGENT_TASK_SEND_BUDGET'],
   ['预算耗尽收尾', 'send_budget_exhausted'],
+  // 黑板总闸（2026-09-21）
+  ['blackboard 总闸', 'blackboardEnabled'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

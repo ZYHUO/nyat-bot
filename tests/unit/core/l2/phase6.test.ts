@@ -6,6 +6,7 @@ let db: Database.Database;
 const envStore: Record<string, unknown> = {
   MASTER_UID: 1001,
   CORE_PERMISSION_GATE_ENABLED: false,
+  CORE_BLACKBOARD_ENABLED: true, // store 边界总闸；不开则 intent 写不进，下面全断
   CORE_DRIVE_SATIATION_HALFLIFE_SEC: 21600,
 };
 vi.mock('../../../../src/db/sqlite.js', () => ({ getDb: () => db }));

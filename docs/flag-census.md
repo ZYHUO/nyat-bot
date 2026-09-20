@@ -33,23 +33,22 @@
 | bool_flags | 215 |
 | on_in_prod | 185 |
 | set_in_env | 323 |
-| dead_no_reader | 21 |
-| dead_and_on | 1 |
-| phantom_only_in_tests | 4 |
+| dead_no_reader | 20 |
+| dead_and_on | 0 |
+| phantom_only_in_tests | 3 |
 
 **215 个布尔旗标里，生产实际开着 185 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
-## 🔴 死旗标：.env 开着，但代码里一个字都没有（1 个）
+## 🔴 死旗标：.env 开着，但代码里一个字都没有（0 个）
 
 这些是"以为在跑"的开关。判定要求 src/ + scripts/ + packages/ 全无命中（`env().FLAG` / 解构 / `process.env.FLAG` 三种读法都算过）。
 
 | flag | 段 | .env | 注释怎么说 | tests/ 里有吗 |
 |---|---|---|---|---|
-| `CORE_BLACKBOARD_ENABLED` | core | true | （无注释） | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts, tests/unit/env/no-dead-switches.test.ts |
 
-## 🟡 假开关：只被测试 mock，src/ 不读（4 个）
+## 🟡 假开关：只被测试 mock，src/ 不读（3 个）
 
 比死旗标更坏——测试把它们当闸门 mock，于是"关着它"的断言其实什么都没验证。
 
@@ -57,7 +56,6 @@
 
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
-| `CORE_BLACKBOARD_ENABLED` | core | true | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts, tests/unit/env/no-dead-switches.test.ts |
 | `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | memory | 60 | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
 | `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | memory | — | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
 | `JUDGE_PROACTIVE_RATE` | memory | 0.5 | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
@@ -98,7 +96,7 @@
 | core | `COGNITIVE_ROUTING_ENABLED` | false | true | Deterministic fast/deep/background routing telemetry. It is shadow-only until a later rollout explicitly consumes the decision for behavior. | cron/unified-tick.ts, pipeline/stages/post-judge.ts |
 | core | `COGNITIVE_WORKSPACE_V2_ENABLED` | false | true | Assemble the scoped cognitive workspace for legacy reply/Heart/Meta paths. Keep it opt-in until latency and prompt-budget measurements are available. | cron/unified-tick.ts, meta/heart-adapter.ts, meta/session.ts, pipeline/heart/heart.ts |
 | core | `CORE_BELIEF_VIEW_ENABLED` | false | true | ── Core v2 Phase 0: Belief View + 黑板 ACL + L2 permission gate ── 全部默认 OFF。Phase 0 是纯地基（新表+纯函数），不接任何主路径， 开了也只影响 eval harness 和未来的 graylist 群。 | core/state.ts |
-| core | `CORE_BLACKBOARD_ENABLED` | false | true |  | **无人读** |
+| core | `CORE_BLACKBOARD_ENABLED` | false | true |  | core/blackboard/store.ts |
 | core | `CORE_DUAL_WRITE` | true | None | Phase 2 双写：旧表写入后同步 belief（读投影）。默认开（best-effort， 失败只打日志不拦路）。关掉则 core_beliefs 停更，读侧照常。 | core/migrate.ts |
 | core | `CORE_V2_ENABLED` | true | None | 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。 | core/loop.ts |
 | core | `SOCIAL_ACT_SHADOW_ENABLED` | false | true | Phase 1 SocialAct shadow: records the legacy judge's action contract only. It never sends, changes reply selection, or stores message text. Empty chat | pipeline/pipeline.ts, pipeline/stages/deliver.ts |
@@ -597,12 +595,11 @@
 `CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
 
 
-## src/ 里没人读的键（21 个）
+## src/ 里没人读的键（20 个）
 
 | key | 段 | .env | 说明 |
 |---|---|---|---|
 | `CODEACT_MAX_TURNS` | meta | — |  |
-| `CORE_BLACKBOARD_ENABLED` | core | true |  |
 | `DREAMING_USAGE` | meta | — | dreaming 长任务用的 AI usage 名。 |
 | `EXPERIENCE_VERIFY_MIN_SUCCESS` | cognition | 2 |  |
 | `GROUNDING_ASKED_MAX` | timing | 0.35 |  |

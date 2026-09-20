@@ -5,7 +5,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 let db: Database.Database;
 const envStore: Record<string, unknown> = {
   CORE_BELIEF_VIEW_ENABLED: false,
-  CORE_BLACKBOARD_ENABLED: false,
+  // 2026-09-21：外层总闸要开着才能测内层的 OBSERVATIONS 子旗标——这两个是
+  // 层层相扣的（store 边界 + observation 写入点）。此前外层旗标根本没接线，
+  // 所以"关着外层"这件事在测试里是假的；现在它真接了，必须显式打开。
+  CORE_BLACKBOARD_ENABLED: true,
   CORE_BLACKBOARD_OBSERVATIONS_ENABLED: false,
   CORE_PERMISSION_GATE_ENABLED: false,
   CORE_V2_ENABLED: true,

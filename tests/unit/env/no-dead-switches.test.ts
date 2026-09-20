@@ -21,11 +21,9 @@ import { describe, expect, it } from 'vitest';
 
 /** 已知例外。每条都要写原因——这是欠条，不是免责声明。 */
 const ALLOWLIST: Record<string, string> = {
-  // 假开关：src/core/blackboard/ 那一套**无条件跑着**（导入方是
-  // agent/cognitive-workspace、agency-intent-adapter、core/promote、
-  // core/permission/gate），这个旗标从未门控任何东西。接它要选收口，
-  // 接错会把在跑的东西关掉——比留着危险。留到单独一轮处理。
-  CORE_BLACKBOARD_ENABLED: 'src/core/blackboard 无条件跑，旗标是假开关；接线需单独一轮',
+  // （CORE_BLACKBOARD_ENABLED 2026-09-21 已接上并从本表删除：
+  //  src/core/blackboard/store.ts 的四个入口现在都读它。见
+  //  tests/unit/core/blackboard/enabled-flag.test.ts。）
   // 只被测试 mock、src 不读（judge 的主动插话概率三件套）。
   // 真机制在别处（heart / unified-tick），这三个名字从未被代码读过。
   JUDGE_PROACTIVE_RATE: '只被 tests/unit/judge/rules.test.ts mock；真机制不读它',

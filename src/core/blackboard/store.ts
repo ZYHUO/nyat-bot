@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../../db/sqlite.js';
+import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { canWrite } from './acl.js';
 import type {
@@ -18,6 +19,29 @@ import type {
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+/**
+ * 黑板总闸。
+ *
+ * 2026-09-21：`CORE_BLACKBOARD_ENABLED` 这个旗标此前是**死的**——env.ts 里声明了、
+ * .env 里开着，而全仓库没有一处读它。黑板被四个模块（agent/cognitive-workspace、
+ * agency-intent-adapter、core/promote、core/loop）当存储层无条件用着，
+ * 测试把它设成 false 以为关掉了黑板，其实什么都没验证。
+ *
+ * 现在它在 store 边界上门控全部四个入口。关掉时语义是自洽的：
+ *   写不进（writeEntry → {ok:false}）、读不出（null / []）、状态不迁（false）。
+ * 三个"空"都是这些函数的既有正常返回，调用方本来就要处理，不需要额外分支。
+ *
+ * 生产 .env 是 true，所以行为不变——这条修的是"关不掉"，不是"关一下"。
+ */
+function blackboardEnabled(): boolean {
+  try {
+    return env().CORE_BLACKBOARD_ENABLED === true;
+  } catch {
+    // env() 抛（配置坏）时按关处理：黑板是可选层，不该拦住启动。
+    return false;
+  }
 }
 
 function rowToEntry(row: Record<string, unknown>): BlackboardEntry {
@@ -37,6 +61,7 @@ const VALID_STATUS: EntryStatus[] = ['open', 'approved', 'rejected', 'consumed',
 
 /** 写一条。ACL 越权 → {ok:false, reason}，不写库。 */
 export function writeEntry(input: BlackboardEntryInput): { ok: boolean; id?: string; reason?: string } {
+  if (!blackboardEnabled()) return { ok: false, reason: 'blackboard disabled' };
   if (!canWrite(input.kind, input.author)) {
     return { ok: false, reason: `ACL denied: ${input.author} cannot write ${input.kind}` };
   }
@@ -58,6 +83,7 @@ export function writeEntry(input: BlackboardEntryInput): { ok: boolean; id?: str
 }
 
 export function readEntry(id: string): BlackboardEntry | null {
+  if (!blackboardEnabled()) return null;
   try {
     const row = getDb().prepare(`SELECT * FROM core_blackboard WHERE id = ?`).get(id) as
       | Record<string, unknown>
@@ -70,6 +96,7 @@ export function readEntry(id: string): BlackboardEntry | null {
 
 /** 按 kind+status 列条目（L2 取 authorized_intent 用）。 */
 export function listEntries(kind: EntryKind, status?: EntryStatus, limit = 50): BlackboardEntry[] {
+  if (!blackboardEnabled()) return [];
   try {
     const rows = (
       status
@@ -91,6 +118,7 @@ export function listEntries(kind: EntryKind, status?: EntryStatus, limit = 50): 
 
 /** 状态机推进（gate 审批 / L2 消费 /  supersede 旧 proposal 用）。 */
 export function setEntryStatus(id: string, status: EntryStatus): boolean {
+  if (!blackboardEnabled()) return false;
   if (!VALID_STATUS.includes(status)) return false;
   try {
     const r = getDb()
