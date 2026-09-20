@@ -6,6 +6,8 @@
 
 Not a bot that responds when poked — an agent that hangs out, reads the room, and only speaks when it has something worth saying.
 
+**v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — 498 env keys, 221 boolean flags, 191 live in production, plus the 9 dead switches and 4 test-only phantoms the audit turned up.
+
 [![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![grammy](https://img.shields.io/badge/grammy-Bot_Framework-009DC4)](https://grammy.dev/)
@@ -77,7 +79,7 @@ the four-signal score is the same shape as AgentPulse's bot score).
 **Taste & curiosity (H3/H4)**
 - 👅 **Taste scoring** — deterministic 0ms scoring of "worth forwarding" (funny / useful / resonant); LLM only *chooses* among candidates, never judges taste; 7-day cross-group dedup, ≤2 per chat
 - 🎰 **Topic bandit** — ε-greedy topic recommendation driven by reaction reward (👍❤️😂 positive / 👎💩 negative / quoted follow-ups strongly positive); deterministic, no LLM on the hot path
-- 🔭 **Proactive life** — RSS topics, missed-thread pickup, newcomer welcomes, dream journal (`data/dream-journal/`), nightly dreaming over the day's events, holiday/solar-term + weather awareness, school-day schedule driving chattiness
+- 🔭 **Proactive life** — RSS topics, missed-thread pickup, newcomer welcomes, dream journal (`data/dream-journal/` — morning diary / midday 随手 note / bedtime diary, three slots with three different voices), nightly dreaming over the day's events, holiday/solar-term + weather awareness, school-day schedule driving chattiness
 
 **Memory · learning · self-evolution**
 - 🧲 **Long-term semantic memory** — local multilingual embeddings + Qdrant recall, optional FTS5 BM25 lexical bypass with RRF fusion, importance scoring + forgetting, protected/permanent tiers
@@ -421,6 +423,7 @@ Everything is env-driven, see [`.env.example`](.env.example). Core knobs:
 | `CODEACT_USAGE` / `CODEACT_MAX_TURNS` | Subagent CodeAct model + turns | `reply` / `6` |
 | `CONTEXT_ENGINE_ENABLED` | Context Engine segmented assembly | `true` |
 | `DREAM_JOURNAL_ENABLED` | Dream-journal cron (can post to a channel) | `false` |
+| `DREAM_JOURNAL_CRON` | Comma-separated UTC crons; slot (morning/随手/bedtime) is inferred from Shanghai time | `0 23 * * *,0 4 * * *,0 15 * * *` |
 | `DREAM_JOURNAL_CHAT_ID` | Journal target (channel/group; positive numbers auto-converted to `-100…`) | `0` |
 | `NYATDB_ENABLED` | Embedded [NyatDB](https://github.com/ZYHUO/nyatdb) ChatLog | `false` |
 | `NYATDB_DUAL_WRITE` | Write ChatLog (legacy name; sole writer when `REDIS_MIRROR=false`) | `false` |
@@ -602,6 +605,40 @@ bots.command 回复那条消息发 /spam@nmnmfunbot（举报群内违规用户�
 ```
 
 No grant, no line — and no card.
+
+### How much the bot talks, and what actually bounds it
+
+Frequency is not one knob, it is three rulers of different sizes, and each one was
+added because the one above it turned out not to bite.
+
+**Measured before any of this (3 days, 3,008 group sends):** hourly window
+p50 = 6 / p90 = 26 / p99 = 63 / max = 107; 5-minute window p50 = 2 / p90 = 8 / max = 20;
+the four busiest groups averaged 14.7–19.4 sends/hour. The single worst hour was 106.
+
+| ruler | value | applies to | why it exists |
+|---|---|---|---|
+| Participation budget | 6/hour | **proactive** only | Phase 2.3's negative result: told as a plain fact "you sent 4 in 2 minutes and 3 got no reply", the model still chose to speak |
+| Min gap — proactive | 90 s | proactive only | the count budget cannot stop 6 messages inside one minute |
+| Min gap — addressed | 30 s | **everyone**, including replies | added 2026-09-21 — this path had *no* gap at all, and it carries nearly all production traffic |
+| Envelope (L1 Wall) | 30/h addressed, 20/h proactive | everyone | the physical ceiling. Was 150/100, which `envelope-backtest` showed blocked **0.0%** of real traffic — decorative |
+| Per-task send budget | 6 total | one agent task, **across segments** | was 6 *per segment* × up to 10 segments = 60 |
+
+Two of those rows were bugs, not design:
+
+- **The per-task budget reset every segment.** Each segment rebuilds the host API, so
+  `textSent` went back to zero and the "6" was really 60. The delivery-count distribution
+  jumps exactly at 6 (31 tasks at 5 sends → 51 at 6), and the worst task sent 12 messages
+  in 46 seconds. `sendsUsed` now lives on the task and is saved into *and* restored from the
+  checkpoint — plugging only the save side would have been a no-op.
+- **The addressed path had no spacing at all.** The min-gap only guarded proactive speech,
+  but 2,702 `host sendText` calls in three days split 1,356 explicit `replyTo` / 1,340
+  task-default anchor — i.e. essentially all traffic was exempt. That is where "three
+  replies inside five seconds" came from.
+
+When a ruler fires it does not silently drop the message: the reason is thrown back into
+the model's turn as a fact ("你 12 秒前才在这个群回过话，连得太密了"), so it can merge the
+answers into one message or wait. Silent dropping was the old gate's shape and is exactly
+what the budget module was written to replace.
 
 ### Running the Phase 1 experiment
 

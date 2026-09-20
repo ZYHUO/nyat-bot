@@ -3,6 +3,12 @@
 // Model decides WRITE/SKIP; multiple entries per day OK (append).
 // Preferred slots: morning wake / bedtime (also hooked from sleep-cycle).
 // Grounded in real Redis chat ctx — no fabrication.
+//
+// 2026-09-21：第三档 `free`（随手）从"代码里有、配置上走不到"变成真能用。
+// 之前默认两个 cron 槽都落在 morning/bedtime 窗口里，free 从未触发，而且它的
+// 语气指引是空的——所以用户看到的只有早晚两篇日记，没有随笔记。现在：
+//   · slotGuidance() 给三档各自的样子（随手档明确"不是日记、可以只有两三句"）
+//   · .env 的 DREAM_JOURNAL_CRON 加了 04:00 UTC（上海 12:00）那个 free 槽
 // ────────────────────────────────────────
 
 import { mkdir, writeFile, readFile, appendFile } from 'node:fs/promises';
@@ -187,7 +193,32 @@ const DIARY_SYSTEM = `你是啾咪囝，决定要不要写一段日记，以及�
 function slotLabel(slot: DreamSlot): string {
   if (slot === 'morning') return '起床/早上';
   if (slot === 'bedtime') return '睡前';
-  return '随时';
+  return '随手';
+}
+
+/**
+ * 时段专属的语气指引。
+ *
+ * 2026-09-21 之前只有 morning/bedtime 有指引，`free` 那一档是空的——而生产里
+ * `free` **一次都没触发过**：DREAM_JOURNAL_CRON 默认两个槽（23:00/15:00 UTC）
+ * 落在上海 07:00 和 23:00，按 inferDreamSlot() 分别算 morning 和 bedtime。
+ * 代码里有"随手记一段"的能力，配置上却永远走不到，用户看到的就只有早晚两篇日记。
+ *
+ * 所以这里给 free 补上它自己的样子：不是"收一天"，是**当下这一下**——
+ * 刷群刷到的一个梗、被怼了一句、蹲到某个更新、突然想起某个人。可以只有两三句。
+ */
+function slotGuidance(slot: DreamSlot): string {
+  if (slot === 'morning') {
+    return '这是早上那一篇：醒来碎碎念、昨晚余温、眼皮还沉着的那种语气。';
+  }
+  if (slot === 'bedtime') {
+    return '这是睡前那一篇：收一天、困了、跟群友告别的语气。';
+  }
+  return (
+    '这是**随手**那一篇，不是日记：写当下这一下的事——刚刷到的一个梗、被怼了一句、' +
+    '蹲到某个更新、突然想起某个人、听到一首歌。可以只有两三句，不用开头不用收尾，' +
+    '别写成"今天总体来说"。没素材就 SKIP，别为了凑一段把早/晚写过的再概括一遍。'
+  );
 }
 
 function stripDiaryFences(raw: string): string {
@@ -381,7 +412,9 @@ async function runDreamJournalInner(opts?: { slot?: DreamSlot }): Promise<DreamJ
         {
           role: 'user',
           content: `日期: ${day}（上海）现在 ${clock}
-时段暗示: ${slotLabel(slot)}（${slot}）—— 偏好此时写，但你可以 SKIP。
+时段: ${slotLabel(slot)}（${slot}）
+${slotGuidance(slot)}
+偏好此时写，但你可以 SKIP。
 活跃群 id: ${activeGroups || '(未知)'}
 今日已有日记段落数: ${(existing.match(/^## /gm) ?? []).length}
 

@@ -1,6 +1,6 @@
 {
   "name": "nyat-bot",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "description": "NyatBot — a Telegram group-chat agent on the path from chatLLM to AGI",
   "type": "module",
   "private": true,

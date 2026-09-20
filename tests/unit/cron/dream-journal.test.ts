@@ -16,7 +16,7 @@ vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: vi.fn(async (opts: { messages: Array<{ role: string; content: string }> }) => {
     const user = opts.messages.find((m) => m.role === 'user');
     expect(user?.content).toContain('签到');
-    expect(user?.content).toMatch(/WRITE|SKIP|时段暗示/);
+    expect(user?.content).toMatch(/WRITE|SKIP|时段:/);
     return {
       content:
         'WRITE\n\n今天本喵在群里划水，顺便嫌弃了两句笨蛋。明天继续上课偷瞄手机。',
@@ -108,6 +108,59 @@ describe('dream-journal', () => {
     expect(r.path).toBeTruthy();
     expect(r.slot).toBe('free');
     expect(r.reason).toBe('wrote');
+  });
+
+  // 2026-09-21：`free`（随手）那一档以前**配置上永远走不到** —— 默认两个 cron 槽
+  // 落在上海 07:00/23:00，按 inferDreamSlot() 分别算 morning/bedtime。而它的语气
+  // 指引也是空的，模型拿不到"这不是日记"的提示。这里锁住两件事。
+  describe('随手（free）那一档', () => {
+    it('inferDreamSlot 把白天判成 free', async () => {
+      const { inferDreamSlot } = await import('../../../src/cron/dream-journal.js');
+      // 2026-09-21 12:00 上海 = 04:00 UTC
+      expect(inferDreamSlot(new Date('2026-09-21T04:00:00Z'))).toBe('free');
+      // 07:00 上海 = 23:00 UTC(前一天)
+      expect(inferDreamSlot(new Date('2026-09-20T23:00:00Z'))).toBe('morning');
+      // 23:00 上海 = 15:00 UTC
+      expect(inferDreamSlot(new Date('2026-09-21T15:00:00Z'))).toBe('bedtime');
+    });
+
+    it('free 档的提示里写明"不是日记"和"可以只有两三句"', async () => {
+      const { callWithFallback } = await import('../../../src/ai/fallback.js');
+      vi.mocked(callWithFallback).mockResolvedValueOnce({
+        content: 'WRITE\n\n刚刷到一个梗，本喵笑到打滚。',
+        label: 'mock',
+      } as never);
+      const { runDreamJournal } = await import('../../../src/cron/dream-journal.js');
+      await runDreamJournal({ slot: 'free' });
+      const user = vi.mocked(callWithFallback).mock.calls.at(-1)![0].messages.find(
+        (m) => m.role === 'user',
+      );
+      const content = String(user?.content ?? '');
+      expect(content).toContain('随手');
+      expect(content).toContain('不是日记');
+      expect(content).toContain('两三句');
+      // 不能把早/晚的日记语气带给随手档
+      expect(content).not.toContain('醒来碎碎念');
+      expect(content).not.toContain('收一天');
+    });
+
+    it('morning/bedtime 档各自带自己的语气指引', async () => {
+      const { callWithFallback } = await import('../../../src/ai/fallback.js');
+      const { runDreamJournal } = await import('../../../src/cron/dream-journal.js');
+      vi.mocked(callWithFallback).mockResolvedValueOnce({
+        content: 'WRITE\n\n早啊，本喵还没睡够。', label: 'mock',
+      } as never);
+      await runDreamJournal({ slot: 'morning' });
+      let user = vi.mocked(callWithFallback).mock.calls.at(-1)![0].messages.find((m) => m.role === 'user');
+      expect(String(user?.content)).toContain('醒来碎碎念');
+
+      vi.mocked(callWithFallback).mockResolvedValueOnce({
+        content: 'WRITE\n\n困死了，本喵先去睡。', label: 'mock',
+      } as never);
+      await runDreamJournal({ slot: 'bedtime' });
+      user = vi.mocked(callWithFallback).mock.calls.at(-1)![0].messages.find((m) => m.role === 'user');
+      expect(String(user?.content)).toContain('收一天');
+    });
   });
 
   it('parseDiaryDecision tolerates fences, chatter, and Chinese skip', async () => {
