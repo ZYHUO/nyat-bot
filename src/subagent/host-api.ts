@@ -156,11 +156,37 @@ const TOOL_PLACEHOLDERS: readonly string[] = [
   '(谈资库读取失败)',
 ];
 
+/**
+ * 工具**调用**语法的泄漏形态。
+ *
+ * 2026-09-20 生产事故：bot 把
+ *   <web.search><args><query>…</query></args></web.search>
+ * 原样发进了群。上面的 TOOL_PLACEHOLDERS 全是**结果**占位符（(invalid chatId) 等），
+ * 兜底正则也只认 `(invalid …)` / `(… unavailable)`——调用语法整类漏掉。
+ *
+ * 而且它当时在日志里不可见：sendText 的 preview 只截 60 字符，调用标签在后面
+ * 就被截掉了。所以守卫没触发 + 日志没痕迹 = 一个完全静默的泄漏类。
+ *
+ * 匹配要保守：要求「开标签 + 同名闭标签」且标签名形状像工具名（小写/点/数字），
+ * 或者出现 `<args>`。避免把正常聊天里的 HTML 引用误杀。
+ */
+// 标签名必须含点：本系统所有工具名都是 `xxx.yyy`（web.search / chats.find /
+// admin.mute / meta.request，见 logs 的 "host <tool>" 行）。要求点号后，
+// `<b>粗体</b>` 这类合法 HTML 不会再被误杀。
+const TOOL_CALL_TAG = /<([a-z][a-z0-9_]*\.[a-z0-9_.]+)\b[^>]*>[\s\S]*?<\/\1>/;
+
 /** First tool-result placeholder found in `text`, or null. */
 export function findToolPlaceholder(text: string): string | null {
   for (const ph of TOOL_PLACEHOLDERS) {
     if (text.includes(ph)) return ph;
   }
+  // 工具**调用**语法（上面那类事故）。返回一个稳定标签便于日志定位。
+  const call = TOOL_CALL_TAG.exec(text);
+  // 必须返回**真实匹配串**：调用方用 `clean.split(leak).join('')` 按字面剥离，
+  // 返回合成标签会让嵌入句子里的调用原样留在文本里（等于没修）。
+  if (call) return call[0];
+  if (text.includes('<args>')) return '<args>';
+  if (text.includes('</args>')) return '</args>';
   // A bare parenthesised `invalid …` / `… unavailable` is the same class even if
   // a new tool invents one we have not listed yet.
   const generic = text.match(/\((?:invalid [^()]{1,40}|[^()]{1,40} unavailable|no [a-z ]{1,30} found)\)/i);
@@ -776,7 +802,13 @@ export function createHostApi(
               if (leak) {
                 const withoutPlaceholder = clean.split(leak).join('').trim();
                 if (!withoutPlaceholder) {
-                  logger.warn({ chatId, leak }, 'host sendText rejected: payload was a tool-result placeholder');
+                  // **必须打文本尾部**：sendText 的 preview 只截 60 字符，而工具调用标签
+                  // 通常出现在模型输出的后半段。2026-09-20 那次事故里「守卫没这条模式
+                  // + preview 截断」两者叠加，成一个完全静默的泄漏类。
+                  logger.warn(
+                    { chatId, leak, textLen: clean.length, textTail: clean.slice(-400) },
+                    'host sendText rejected: payload was a tool-result placeholder',
+                  );
                   throw new Error('sendText_tool_leak: the text is a tool result placeholder, not something to say; call the tool with a valid argument, or say something in your own words');
                 }
                 logger.warn({ chatId, leak, kept: withoutPlaceholder.length }, 'host sendText: stripped tool-result placeholder from model text');
