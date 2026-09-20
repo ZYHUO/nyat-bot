@@ -1051,6 +1051,11 @@ const envSchema = z.object({
   // 语料依据：本群生态里经典人类广告信号近乎为零（手机号 0 / 加密货币 0 /
   // 色情 0），真实噪声是其他 bot——所以按内容正则抓不到东西，按行为才抓得到。
   ANTIAD_ENABLED: booleanFromEnv.default(false),
+  // 踢人（admin.kick）总闸。默认关。
+  // 为什么单独一个 flag 而不跟 ANTIAD_ENABLED 绑：删消息/禁言可逆，踢人不可逆
+  // （对方要自己加回来）。群主明确要"能踢"才开，且仍由模型按 Frame 里的事实决定。
+  ANTIAD_KICK_ENABLED: booleanFromEnv.default(false),
+
   ANTIAD_CHAT_IDS: z.string().default('').transform((s) => {
     const t = s.trim();
     if (!t) return [] as number[];

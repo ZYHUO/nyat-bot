@@ -1821,6 +1821,29 @@ export function createHostApi(
           logger.info({ chatId, uid: target, ok }, 'host admin.unmute');
           return { ok };
         },
+        async kick(uid: number, opts?: { deleteMessages?: boolean }) {
+          assertOpen();
+          assertGroup();
+          // 踢人总闸：默认关。这是不可逆动作，群主明确开才可用；
+          // 开了也仍由模型按 Frame 的行为事实决定踢不踢，不是自动执行。
+          if (env().ANTIAD_KICK_ENABLED !== true) {
+            throw new Error('admin_kick_disabled: 群主没开踢人权限（ANTIAD_KICK_ENABLED）');
+          }
+          const target = Math.floor(Number(uid));
+          if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
+          if (target === env().MASTER_UID) throw new Error('admin_no_master: 不许对主人下手');
+          const { getBotUid } = await import('../bot/bot.js');
+          if (target === getBotUid()) throw new Error('admin_no_self: 不能踢我自己');
+          await assertAdminPerm('can_restrict_members');
+          await rateGate();
+          const { kickMember } = await import('../bot/sender/telegram.js');
+          const ok = await kickMember(chatId, target, opts?.deleteMessages === true);
+          logger.info(
+            { chatId, uid: target, deleteMessages: opts?.deleteMessages === true, ok },
+            'host admin.kick',
+          );
+          return { ok };
+        },
         async pin(messageId: number) {
           assertOpen();
           assertGroup();

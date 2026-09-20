@@ -107,6 +107,40 @@ export async function muteMember(chatId: number, uid: number, minutes: number): 
   }
 }
 
+/**
+ * 踢人（ban 后立即 unban，这样对方能被重新加回来，不是永久封杀）。
+ *
+ * 为什么是 ban+unban 而不是 banChatMember 单飞：TG 的"踢出群"就是这个语义——
+ * 移出当前成员但不禁言，对方还能自己回来。deleteMessages=true 时连对方的
+ * 历史消息一起清（TG 只对 48h 内的消息有效）。
+ */
+export async function kickMember(
+  chatId: number,
+  uid: number,
+  deleteMessages = false,
+): Promise<boolean> {
+  try {
+    const bot = getBot();
+    const id = Math.floor(uid);
+    await bot.api.banChatMember(chatId, id);
+    await bot.api.unbanChatMember(chatId, id, { only_if_banned: true });
+    if (deleteMessages) {
+      // 失败不影响踢人本身（TG 对老消息会拒绝），故单独 try。
+      try {
+        // 该 API 在部分 grammY 版本的类型里缺失（运行时有），用窄转换调用。
+        const api = bot.api as unknown as {
+          deleteChatMemberMessages?: (c: number, u: number) => Promise<unknown>;
+        };
+        await api.deleteChatMemberMessages?.(chatId, id);
+      } catch { /* 老消息/无权限时静默 */ }
+    }
+    return true;
+  } catch (err) {
+    logger.debug({ err, chatId, uid, deleteMessages }, 'kickMember failed');
+    return false;
+  }
+}
+
 /** 解除禁言（恢复全权限）。失败 false。 */
 export async function unmuteMember(chatId: number, uid: number): Promise<boolean> {
   try {
