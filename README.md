@@ -541,6 +541,25 @@ The model-facing doc calls it a last resort and asks it to consider whether dele
 was already enough, because one wrong kick and a real person does not come back. Nothing
 kicks automatically — the Frame reports the behavioural facts, the model decides.
 
+### Verifying the composition, not just the parts
+
+Every silent failure found while building this layer had the same shape: **each piece passed
+its own unit test and the composition was wrong.**
+
+```
+npx tsx scripts/verify-integration.mts     # 9 checks, exit 0 on success
+```
+
+It exercises the joins rather than the units — StepFun search through the production path,
+anti-ad authorise → measure → render → de-authorise (proving an unauthorised group pays
+nothing), the three self-registered body signals, and the kick gate's four guards plus its
+shared authorisation with anti-ad.
+
+Run it after touching `src/nyatos/` or `src/subagent/host-api.ts`. The unit suite being
+green (414 files) has never implied these nine hold; that gap is exactly what this closes.
+
+---
+
 ### Pairing with the verification bot (`nmnmfunbot`)
 
 This ecosystem's groups run a join-verification bot (2,363 messages across 8 groups). The
