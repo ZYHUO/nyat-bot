@@ -97,6 +97,20 @@ The per-task send distribution is the real frequency metric: before the send-bud
 79 tasks sent more than 6 messages (worst case 12 in 46 seconds). That tail should be
 zero after it.
 
+Section **2c, cron 产出率**, exists because of a run of six bugs found the same way: a cron
+that ran for days at 0–13% yield while logging nothing that looked like a failure. The
+method that found them was one question asked of every warning line — *how many times a
+day does this fire, and is what it eats reasonable?* — so it is now a table instead of a
+habit. Rows pair a failure message with its success message; the threshold for ⚠️ is
+≥20 attempts under 50% yield.
+
+Two rules when adding a row:
+- If the success path writes **no** log line, pass `null` and report the failure count
+  alone. Pairing it with an unrelated success message produces a fake ratio, and a fake
+  ratio is worse than none.
+- Keep the pair in one place. The failure and success strings drift apart when someone
+  rewords a log line, and then the row silently reads 0/0.
+
 ## Measuring how much of the old architecture is left
 
 `npx tsx scripts/arch-split.mts [days]` prints the Meta-vs-legacy split from the log:

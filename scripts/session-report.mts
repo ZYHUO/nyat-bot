@@ -298,6 +298,65 @@ console.log('── 2b. topic-scan 抽取率（低产 = LLM 在空转）──')
 }
 console.log('');
 
+console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失败）──');
+{
+  // 每一行是 (失败 的日志串, 成功 的日志串 | null, 说明)。
+  // 2026-09-21 这一轮靠手工数这些对，找出六个"跑了但零产出"的 cron。
+  // 固化成报告，下次不用再靠人想起来看。
+  //
+  // 成功串为 null 的行只报失败计数——那种调用成功时**不写日志**（长期记忆写入
+  // 就是：成了静默默，只有失败那一句）。给它配一个假的成功串会算出假的产出率，
+  // 而假比率比没有比率更糟。
+  const PAIRS: Array<[string, string | null, string]> = [
+    ['dreaming output unparseable', 'dreaming consolidated', 'dreaming 整合'],
+    ['distill output unparseable', 'episode distilled', 'episode 蒸馏'],
+    ['post-task follow-up batch failed', 'post-task continuation dispatched', '任务后追话'],
+    ['deep-reflection: LLM failed', 'deep-reflection tick complete', '深度反思'],
+    ['Memory write failed', null, '长期记忆写入'],
+    ['heart LLM failed', 'Heart decision', '心流裁决'],
+  ];
+  const counts = new Map<string, number>();
+  try {
+    const fd = readFileSync(LOG, 'utf8');
+    for (const line of fd.split('\n')) {
+      if (!line.startsWith('{')) continue;
+      const m = /"time":(\d{13})/.exec(line.slice(0, 80));
+      if (!m || Number(m[1]) < sinceMs) continue;
+      let d: Record<string, unknown>;
+      try { d = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      const msg = String(d['msg'] ?? '');
+      for (const [fail, ok] of PAIRS) {
+        if (msg.includes(fail)) counts.set(fail, (counts.get(fail) ?? 0) + 1);
+        if (ok && msg.includes(ok)) counts.set(ok, (counts.get(ok) ?? 0) + 1);
+      }
+    }
+  } catch { /* 读不到就全 0，配合上面的提示读作没有数据 */ }
+  let any = false;
+  for (const [fail, ok, label] of PAIRS) {
+    const f = counts.get(fail) ?? 0;
+    const o = ok ? (counts.get(ok) ?? 0) : 0;
+    if (f === 0 && o === 0) continue;
+    any = true;
+    if (!ok) {
+      // 只报失败数：成功不写日志的那类
+      console.log(`  ${label.padEnd(14)} 失败 ${String(f).padStart(5)}   （成功不写日志，无产出率）`);
+      continue;
+    }
+    const total = f + o;
+    const rate = total > 0 ? o / total : 0;
+    const bad = total >= 20 && rate < 0.5;
+    console.log(`  ${label.padEnd(14)} 成功 ${String(o).padStart(5)}｜失败 ${String(f).padStart(5)}  产出率 ${(rate * 100).toFixed(1).padStart(5)}%${bad ? '   ⚠️ 过低' : ''}`);
+  }
+  if (!any) console.log('  （窗口内这些 cron 都没有日志）');
+  // topic-scan 单列：它的"产出"是 tick 日志里的 observed 字段，不是另一条消息
+  console.log('  （topic-scan 的产出率见上一节）');
+  console.log('');
+  console.log('  ⚠️ 的判据：≥20 次尝试而产出率 <50%。2026-09-21 实测修之前的形状：');
+  console.log('     dreaming 805 次 0%、distiller 473/73=13%、post-task 失败 2104 次、');
+  console.log('     topic-scan 2040 次调用只抽 91 个标签（4.5%）。全是"跑了但什么都没产出"。');
+}
+console.log('');
+
 console.log('── 3. 架构占比 ──');
 console.log(`  入站                          ${st.inbound}`);
 console.log(`  Meta 路径事件                 ${st.metaEvents}`);
