@@ -23,6 +23,14 @@ import { execSync } from 'node:child_process';
 const OUT = 'var/control-baseline.jsonl';
 const WINDOW_HOURS = 3;
 /**
+ * 窗口结束的锚点 UTC 小时。
+ *
+ * **record 与 backfill 必须用同一个锚点**，否则 cron 每天拍的快照落在 slot 11
+ * （cron 11:30 触发），而 backfill 按 `now - d天` 落在 slot 12 —— 两个时段的水永远
+ * 合不到一起，cron 攒的那份数据对统计毫无贡献。这是本轮发现的静默 bug。
+ */
+const ANCHOR_HOUR = 12;
+/**
  * 进统计的最低入站条数，**按该群自己的中位数动态定**。
  *
  * 第一版用全局常数 40，结果把实验目标群整体排除了——它同时段 3 小时窗的入站
@@ -44,9 +52,17 @@ function sqlite(json: boolean, q: string): string {
   );
 }
 
+/** 窗口结束时刻：当天 ANCHOR_HOUR；若此刻还没到锚点，就用昨天的（保证窗口已闭合）。 */
+function anchorEnd(now: number): number {
+  const d = new Date(now * 1000);
+  const cand = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), ANCHOR_HOUR, 0, 0) / 1000;
+  return cand <= now ? cand : cand - 86400;
+}
+
 function record(): void {
   const now = Math.floor(Date.now() / 1000);
-  const from = now - WINDOW_HOURS * 3600;
+  const end = anchorEnd(now);
+  const from = end - WINDOW_HOURS * 3600;
   const rows: Array<{ chat_id: number; s: number; i: number }> = JSON.parse(
     sqlite(true, `
       SELECT s.chat_id AS chat_id,
@@ -146,8 +162,9 @@ function backfill(days = 8): void {
   );
   // 上面的 end_ts 是同一个 now，退回按天重算：一天一条，窗口为该天的同一时刻往前 WINDOW_HOURS
   let wrote = 0;
+  const todayAnchor = anchorEnd(now);
   for (let d = 1; d <= days; d++) {
-    const end = now - d * 86400;
+    const end = todayAnchor - d * 86400;
     const start = end - WINDOW_HOURS * 3600;
     const dayRows: Array<{ chat_id: number; s: number; i: number }> = JSON.parse(
       sqlite(true, `
@@ -166,7 +183,7 @@ function backfill(days = 8): void {
     if (chats.length === 0) continue;
     const snap = {
       at: new Date(end * 1000).toISOString(),
-      slotUtc: new Date(end * 1000).toISOString().slice(11, 13),
+      slotUtc: String(ANCHOR_HOUR).padStart(2, '0'),
       windowHours: WINDOW_HOURS,
       backfilled: true,
       chats,
