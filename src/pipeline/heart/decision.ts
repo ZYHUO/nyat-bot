@@ -22,6 +22,8 @@ import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { incrCounter } from '../../metrics/registry.js';
 import { getReflection } from '../../tracking/outcome.js';
+import { isMentioningSelf } from '../judge/rules.js';
+import { getBotIdentity } from '../../bot/bot.js';
 import type { SelfState } from './self-state.js';
 
 export type HeartAct = 'reply' | 'wait' | 'pass';
@@ -57,6 +59,63 @@ export interface HeartInput {
    */
   selfHistory?: string;
   signal?: AbortSignal;
+}
+
+/**
+ * 这条消息是不是**直接叫 bot**（@username / 昵称 / 回复 bot / 私聊）。
+ *
+ * 与 precheck.ts 的 isClearlyHumanToHuman 同一套判据，但反过来用：
+ * 那个问"是不是 clearly 人与人之间聊"，这个问"是不是 clearly 在叫我"。
+ */
+export function isAddressedToBot(
+  message: FormattedMessage,
+  botUid: number,
+): boolean {
+  if (botUid > 0 && message.replyTo?.uid === botUid) return true;
+  const text = (message.textContent || message.captionContent || '').trim();
+  if (!text) return false;
+  try {
+    const id = getBotIdentity();
+    if (isMentioningSelf(text, id.username, id.nicknames)) return true;
+  } catch {
+    // bot 未初始化（测试/探针）时退回 botName 包含匹配
+  }
+  return false;
+}
+
+/**
+ * 心流 LLM 失败时的**保句闸**（2026-09-21 新增的前置功能）。
+ *
+ * 实测：`heart LLM failed, fail-closed pass` 在日志里出现 1867 次，
+ * 占全部心流裁决（7443 次）的 **25%**。失败原因 64% 是 "All labels exhausted"
+ * （整条 fallback 链死透），其余是超时/限流/内容审查。
+ *
+ * 旧行为一律 `pass` —— **消息被永久丢弃**。对没人叫 bot 的群聊消息这没毛病
+ * （本来就不一定该接），但对**直接叫到 bot** 的那句是另一回事：
+ * 有人 @ 了本喵问一件事，因为基础设施故障，这句话就此消失，对方永远等不到回复。
+ * 这和"无视直接提问是另一种失败"是同一条原则——只是失败方从模型变成了线路。
+ *
+ * 所以：LLM 判不了时，**被直接叫到的消息转 wait（稍后重评），不转 pass（丢弃）**。
+ * 没被叫到的仍旧 pass，避免线路故障时把整群闲聊都排成重试。
+ *
+ * `HEART_LLM_FAIL_KEEP_ADDRESSED` 门控，默认开。关则完全回到旧行为。
+ */
+function llmFailedDecision(
+  input: HeartInput,
+  latencyMs: number,
+): HeartDecision {
+  let act: HeartAct = 'pass';
+  let why = 'llm_failed';
+  if (env().HEART_LLM_FAIL_KEEP_ADDRESSED && isAddressedToBot(input.message, input.botUid)) {
+    act = 'wait';
+    why = 'llm_failed_keep_addressed';
+    incrCounter('heart_llm_fail_keep_addressed_total', { chat: input.chatId });
+    logger.warn(
+      { chatId: input.chatId, messageId: input.message.messageId },
+      'heart LLM failed — 被直接叫到，转 wait 保句（不丢弃）',
+    );
+  }
+  return { act, path: 'chat', why, latencyMs, judgeResult: toJudgeResult(act, 'chat', latencyMs) };
 }
 
 function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why: string } | null {
@@ -215,7 +274,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     }
     const latencyMs = Math.round(performance.now() - start);
     logger.warn({ err, chatId: input.chatId }, 'heart LLM failed, fail-closed pass');
-    return { act: 'pass', path: 'chat', why: 'llm_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
+    return llmFailedDecision(input, latencyMs);
   }
 
   let parsed = parseHeart(raw);

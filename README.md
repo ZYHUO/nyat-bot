@@ -748,6 +748,28 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### A pre-gate for when the decision layer itself is down
+
+The heart's LLM call is the single highest-frequency LLM call in the system, and it
+fails often. Measured from the log: **1,867 `heart LLM failed` events against 7,443
+heart decisions — 25%.** The causes: 64% `All labels exhausted` (the whole fallback
+chain dead), the rest timeouts, rate limits, and content rejections.
+
+Every one of those used to end in `pass` — the message was **dropped permanently**.
+For an unaddressed group message that is fine. For a message that directly asked the
+bot something it is not: someone @'d it, the infrastructure fell over, and the
+question evaporated. That is the same principle as "ignoring a direct question is a
+different failure" — only here the failing party is the wire, not the model.
+
+So `HEART_LLM_FAIL_KEEP_ADDRESSED` (default on) adds a deterministic pre-gate on that
+path: when the LLM cannot decide, a message that **is** addressed to the bot becomes
+`wait` (re-evaluated shortly, via the existing wait-anchor machinery) instead of
+`pass`. Unaddressed messages still `pass`, so an outage does not queue the whole
+group's chatter for retry.
+
+Addressing is detected the same way `precheck.ts` detects its complement: reply-to-bot,
+`@username`, or a nickname. It never guesses — an empty message is not addressed.
+
 ### Sleep, schedule, and holidays
 
 The bot has a body clock, and it was already running before this round — verified, not

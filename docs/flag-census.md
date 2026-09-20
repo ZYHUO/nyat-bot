@@ -14,7 +14,7 @@
 |---|---|---|---|---|---|
 | `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 79 | 21 | 14 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 13 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
-| `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 35 | 21 | 21 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
+| `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 36 | 22 | 22 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 22 | 3 | 3 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 32 | 19 | 19 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 18 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
@@ -29,15 +29,15 @@
 
 | | |
 |---|---|
-| total_keys | 483 |
-| bool_flags | 214 |
-| on_in_prod | 185 |
-| set_in_env | 320 |
+| total_keys | 484 |
+| bool_flags | 215 |
+| on_in_prod | 186 |
+| set_in_env | 321 |
 | dead_no_reader | 2 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
-**214 个布尔旗标里，生产实际开着 185 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**215 个布尔旗标里，生产实际开着 186 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -57,7 +57,7 @@
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
 
-## 生产开着的旗标（185 个）
+## 生产开着的旗标（186 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
@@ -213,6 +213,7 @@
 | timing | `GROUNDING_CHECK_ENABLED` | false | true | （SEMANTIC_DUP_THRESHOLD 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。semantic-dup.ts 的判定阈值是写死的 0.7，没读这个键） 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字 | subagent/host-api.ts |
 | timing | `HEART_COOLDOWN_AS_FACT` | false | true | 冷却作为"事实"交给模型，而不是静默丢弃。 旧行为把决定权从模型拿走，且 dispatch gate 还会再拦一次—— 而 heart 的 LLM 调用已经烧掉了（实测 6h 内 68 次 cooldown 短路发生在 heart 决定 reply 之后）。开=模型自己掂量；关=旧的静默丢弃。 | meta/heart-adapter.ts, pipeline/heart/heart.ts |
 | timing | `HEART_DECIDES_TIMING` | false | true | heart 已经带事实做过时机判断（它自己就是 gate）→ 派发前不再重复过闸。 实测 6h 内 68 次 cooldown + 38 次 talk-value 短路发生在 heart 决定 reply 之后 = 那次 heart 调用白烧。开=模型自己控制；关=旧的双闸行为。 | meta/session.ts |
+| timing | `HEART_LLM_FAIL_KEEP_ADDRESSED` | true | true | 心流 LLM 失败时的**保句闸**（2026-09-21 新增的前置功能）。  实测：`heart LLM failed, fail-closed pass` 在日志里 1867 次，占全部心流 裁决（7443 次）的 25%；失败原因 64% 是 "All labels exhausted"（整 | pipeline/heart/decision.ts |
 | timing | `OPEN_THREADS_ENABLED` | false | true | 跨天的未了事：bot 答应过/在等的（"明天告诉你"），能像真人那样"对了，昨天你说那个…"。 与 scratchpad 的区别：那是 30 分钟工作记忆，这是跨天。只记**明确承诺**， 不做"记住所有对话"——那会变成让人出戏的机械回忆。 | tracking/open-threads.ts |
 | timing | `REPAIR_ENABLED` | false | true | 关系修复：把"我说了句没讨好的话、之后没再提"作为事实交给模型， 由它决定要不要回去说点什么。宿主只呈现，不代发、不自动道歉。 触发信号已存在（outcome.ts 的 explicit_negative / repair_loop → 'corrected'）， 但此前没有消费方（action-b | tracking/repair.ts |
 | timing | `REWARD_GATE_ENABLED` | false | true | 主动发言意愿闸（reward model）：主动开口前用一次便宜的 judge 判断 "现在发这句话合不合适"。原作者注释：取代扁平概率、针对主动 bot 的 头号失败模式（不合时宜地打断）。fail-OPEN：闸门故障绝不让 bot 变哑。 此前硬编码 true 但零调用方；2026-09-19  | pipeline/reward/reward-model.ts |

@@ -47,6 +47,21 @@ export const timingSection = {
   // 实测 6h 内 68 次 cooldown + 38 次 talk-value 短路发生在 heart 决定 reply
   // 之后 = 那次 heart 调用白烧。开=模型自己控制；关=旧的双闸行为。
   HEART_DECIDES_TIMING: booleanFromEnv.default(false),
+  // 心流 LLM 失败时的**保句闸**（2026-09-21 新增的前置功能）。
+  //
+  // 实测：`heart LLM failed, fail-closed pass` 在日志里 1867 次，占全部心流
+  // 裁决（7443 次）的 25%；失败原因 64% 是 "All labels exhausted"（整条
+  // fallback 链死透），其余是超时/限流/内容审查。
+  //
+  // 旧行为一律 pass = **消息被永久丢弃**。对没人叫 bot 的群聊消息没毛病，
+  // 但对直接叫到 bot 的那句是另一回事：有人 @ 了本喵问一件事，因为线路故障，
+  // 这句话就此消失，对方永远等不到回复。这和"无视直接提问是另一种失败"
+  // 是同一条原则——只是失败方从模型变成了线路。
+  //
+  // 开 = 被直接叫到的消息转 wait（稍后重评）而不是 pass（丢弃）；
+  //       没被叫到的仍旧 pass，避免线路故障时把整群闲聊都排成重试。
+  // 关 = 完全回到旧行为（一律 pass）。
+  HEART_LLM_FAIL_KEEP_ADDRESSED: booleanFromEnv.default(true),
   // 关系修复：把"我说了句没讨好的话、之后没再提"作为事实交给模型，
   // 由它决定要不要回去说点什么。宿主只呈现，不代发、不自动道歉。
   // 触发信号已存在（outcome.ts 的 explicit_negative / repair_loop → 'corrected'），
