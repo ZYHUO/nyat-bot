@@ -70,6 +70,77 @@ function parseEnvFlags(): Array<{ name: string; isBool: boolean; defaultTrue: bo
   return out;
 }
 
+/**
+ * 每个文件里 env() 的别名。
+ *
+ * 为什么需要它：主断言用 `\bNAME\b` 兜底，太松——旗标名出现在任何非注释地方
+ * （日志文案、别的标识符、文档字符串）都算"有读者"。实测 188 个开着的布尔旗标里
+ * 有 72 个只能靠这个兜底认出来，而其中绝大多数其实是 `const e = env(); … e.FLAG`
+ * 这种**解构/别名读法**——是真读者，但守卫说不上来它是怎么读的。
+ *
+ * 把别名读法显式认下来之后，剩下的"只靠裸词匹配"从 72 降到 6。那 6 个逐个查过，
+ * 全是把 env 子集当参数传进来的真读法（如 heart-route.ts 的 `if (f.META_HEART_ENABLED)`）。
+ * 所以它们不是死开关，但守卫**证明不了**——于是把这份名单钉在下面，
+ * 多出一个就要求人来看。这比"永远绿灯"强。
+ */
+const WEAK_ONLY_READERS: ReadonlySet<string> = new Set([
+  // deliver.ts 里 e.X（e 是从参数/别处拿到的 env 子集，不是本文件 const e = env()）
+  'CONTROL_DIRECTIVE_ENABLED',
+  'REPLY_HUMANIZER_SAFE_MODE',
+  'TIMING_WAIT_HINT_ENABLED',
+  'MOOD_TUNE_ENABLED',
+  'TURN_UNANSWERED_REVISIT_ENABLED',
+  // heart-route.ts:72 `if (f.META_HEART_ENABLED) return 'heart'`（f 是参数）
+  'META_HEART_ENABLED',
+]);
+
+function aliasesIn(src: string): string[] {
+  const out = new Set<string>();
+  for (const m of src.matchAll(/\b(?:const|let)\s+([a-zA-Z_$][\w$]*)\s*=\s*env\(\s*\)/g)) out.add(m[1]!);
+  for (const m of src.matchAll(/\b(?:const|let)\s*\{\s*([^}]*?)\s*\}\s*=\s*env\(\s*\)/g)) {
+    for (const part of m[1]!.split(',')) {
+      const n = part.split(':')[0]!.trim();
+      if (n) out.add(n);
+    }
+  }
+  return [...out];
+}
+
+/** 读者强度：strong = 能确定在读 env；alias = 经别名读；weak = 只剩裸词匹配。 */
+type ReaderKind = 'strong' | 'alias' | 'weak' | 'none';
+
+interface Prepped { noComment: string; noStr: string; aliases: string[] }
+
+/** 预处理一次，别为每个旗标重读 514 个文件（第一版这么写，直接超时 5s）。 */
+function prepBlobs(blobs: Array<{ s: string }>): Prepped[] {
+  return blobs.map(({ s }) => {
+    const noComment = s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\/\/.*$/gm, '');
+    const noStr = noComment.replace(/"[^"\n]*"/g, '""').replace(/'[^'\n]*'/g, "''");
+    return { noComment, noStr, aliases: aliasesIn(noComment) };
+  });
+}
+
+function classifyReader(name: string, prepped: Prepped[]): ReaderKind {
+  // 三遍扫描，**不能合成一遍**：第一版把 strong 和 alias 放进同一个 for，
+  // 于是"第 3 个文件里能确定是 env().X"会被"第 1 个文件里的别名匹配"抢先返回，
+  // 分类结果取决于文件遍历顺序。
+  for (const f of prepped) {
+    if (new RegExp(`env\\(\\)[\\.\\s]+${name}\\b`).test(f.noComment)) return 'strong';
+    if (new RegExp(`envShim\\(\\)\\.${name}\\b`).test(f.noComment)) return 'strong';
+    if (new RegExp(`process\\.env\\.${name}\\b`).test(f.noComment)) return 'strong';
+    if (new RegExp(`\\[\\s*['"\`]${name}['"\`]\\s*\\]`).test(f.noComment)) return 'strong';
+  }
+  for (const f of prepped) {
+    for (const a of f.aliases) {
+      if (new RegExp(`\\b${a}\\.${name}\\b`).test(f.noStr)) return 'alias';
+    }
+  }
+  for (const f of prepped) {
+    if (new RegExp(`\\b${name}\\b`).test(f.noStr)) return 'weak';
+  }
+  return 'none';
+}
+
 /** .env 里显式设成 true 的键。 */
 function envTrueKeys(): Set<string> {
   const out = new Set<string>();
@@ -142,6 +213,40 @@ describe('no dead switches', () => {
       `这些 ALLOWLIST 条目对应的旗标已经不在 schema 里了——清掉它们，\n` +
         `否则将来有人再用这些名字加旗标，会自动免检：\n  ${stale.join('\n  ')}`,
     ).toEqual([]);
+  });
+
+  // 读者强度分级：把"只靠裸词匹配"的名单钉住。
+  //
+  // 主断言用 `\bNAME\b` 兜底，太松——旗标名出现在日志文案里都算有读者。
+  // 这个测试不替代主断言（主断言语义上更安全），它只是让**松的那部分可见**：
+  // 188 个开着的布尔旗标里，72 个只能靠兜底认出，显式认下别名读法之后剩 6 个。
+  // 那 6 个逐个查过都是真读法，但守卫证明不了——所以钉住名单，多一个就停下来看。
+  it('只靠裸词匹配的旗标名单没有变长（松的那部分要可见）', () => {
+    const files = [...walk('src'), ...walk('scripts'), ...walk('packages')]
+      .filter((p) => !p.endsWith('env.ts') && !p.startsWith('src/env-sections/'));
+    const prepped = prepBlobs(files.map((p) => ({ s: readFileSync(p, 'utf8') })));
+    const trueInEnv = envTrueKeys();
+    const on = parseEnvFlags().filter((f) => f.isBool && (trueInEnv.has(f.name) || f.defaultTrue));
+
+    const weak: string[] = [];
+    const none: string[] = [];
+    for (const f of on) {
+      const kind = classifyReader(f.name, prepped);
+      if (kind === 'weak') weak.push(f.name);
+      if (kind === 'none') none.push(f.name);
+    }
+    // none 比 weak 更糟：连裸词都匹配不到。那一定是漏了某种读法（本会话见过：
+    // `current['FLAG']` 方括号读法），要么补进 classifyReader，要么它真是死开关。
+    expect(none, `这些开着的旗标一种读法都认不出来——先查是不是漏了读法：\n  ${none.join('\n  ')}`).toEqual([]);
+    const extra = weak.filter((n) => !WEAK_ONLY_READERS.has(n));
+    expect(
+      extra,
+      `这些旗标只剩裸词匹配、证明不了是读者。要么把它加进 WEAK_ONLY_READERS 并注明读法，\n` +
+        `要么它真是死开关（接上线或退役）：\n  ${extra.join('\n  ')}`,
+    ).toEqual([]);
+    // 反向：名单里的如果已经能显式认出，就从名单里删掉（欠条到期要清）
+    const stale = [...WEAK_ONLY_READERS].filter((n) => classifyReader(n, prepped) !== 'weak');
+    expect(stale, `这些已经能显式认出读法了，从 WEAK_ONLY_READERS 删掉：${stale.join(', ')}`).toEqual([]);
   });
 
   it('ALLOWLIST 里的每一项都还真的没有读者（欠条到期要清）', () => {
