@@ -945,6 +945,26 @@ and `debug` thereafter. The first one says "this model thinks too much, noted"; 
 192 were noise. The retry count in the report is therefore "how many labels were found to
 truncate", not "how many retries happened".
 
+#### Reading a yield ratio without fooling yourself
+
+`session-report.mts` has a **cron 产出率** section that pairs a failure log line with its
+success line. Three rules, each bought with a mistake:
+
+1. **If the success path writes no log line, report the failure count alone.** Pairing it
+   with an unrelated success message produces a fake ratio, and a fake ratio is worse than
+   none — `Memory write failed` was first paired with `memory near-duplicate merged`, which
+   is a different code path, and reported 0% when successful memory writes simply log
+   nothing.
+2. **Keep the pair in one place.** The two strings drift apart when someone rewords a log
+   line, and then the row silently reads 0/0.
+3. **The counted exits must cover every exit.** `post-task follow-up` paired "judge failed"
+   with "continuation dispatched" and reported 10.7% yield — fake. The third exit, "judged
+   and decided not to follow up", is the common case and logged nothing, so the failure rate
+   looked roughly ten times worse than reality. The feature was not broken; it was correctly
+   staying quiet most of the time. That exit now logs — at `info`, because a `debug` line is
+   invisible at `LOG_LEVEL=info`, which would put the hole straight back — and the row
+   reports all three counts.
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead
