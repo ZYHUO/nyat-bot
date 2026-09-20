@@ -41,6 +41,8 @@ interface ClaudeMessage {
 interface ClaudeResponse {
   content: Array<{ type: string; text: string }>;
   model: string;
+  /** 'end_turn' | 'max_tokens' | … —— 空正文时区分"截断"和"模型没话说"就靠它。 */
+  stop_reason?: string;
   usage: {
     input_tokens: number;
     output_tokens: number;
@@ -55,6 +57,42 @@ async function callClaude(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
 ): Promise<AICallResult> {
+  const budget = opts.maxTokens ?? 4096;
+  const first = await callClaudeOnce(label, messages, { ...opts, maxTokens: budget });
+
+  // 截断重试：`stop_reason === 'max_tokens'` 且正文为空 = 思维链把额度吃光，
+  // 模型还没轮到输出就结束了。这在 StepFun reasoning 模型上是**最高频的失败模式**——
+  // 日志里 `Empty response` 2882 次（stepfunthink 1481 / stepfunvision 685 /
+  // stepfun 583 / stepfunjudge 133），是心流 "All labels exhausted"（占心流失败
+  // 64%）的主要来源。旧行为把它当普通空响应交给 fallback 链，而 fallback 往往是
+  // 同一个账号的另一个 label，撞的是同一个限额，于是一次性全灭。
+  //
+  // 只在这一种形状下重试（截断且空），加一倍额度、最多一次。别的情况不重试——
+  // 内容审查/超时/限流重试没有意义，只会把延迟翻倍。
+  if (first.truncated) {
+    const retryBudget = Math.min(budget * 2, 32_000);
+    logger.debug(
+      { label: label.name, model: label.model, budget, retryBudget },
+      'claude: 思维链吃光额度导致空正文 → 加额重试一次',
+    );
+    try {
+      const second = await callClaudeOnce(label, messages, { ...opts, maxTokens: retryBudget });
+      if (!second.truncated) return second.result;
+    } catch {
+      // 重试失败就交回第一次的错误形状，别吞。
+      // 只区分"调用方打断"（要上抛给 actor 重规划）和"重试也挂了"（用第一次的结果）。
+      throwIfExternallyAborted(label, opts.signal);
+    }
+  }
+  return first.result;
+}
+
+/** callClaude 的一次尝试。`truncated` = stop_reason 是 max_tokens 且正文为空。 */
+async function callClaudeOnce(
+  label: AILabel,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+): Promise<{ result: AICallResult; truncated: boolean }> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
   if (!apiKey) throw new AIError('No API key configured', label.name, label.model, 'AI_NO_KEY');
@@ -70,6 +108,7 @@ async function callClaude(
     messages: chatMessages,
     max_tokens: opts.maxTokens ?? 4096,
   };
+
 
   // Wrap system prompt as a content block with cache_control. The 5-layer
   // system prompt (persona + guardrails + schema + tone + task) is reused
@@ -134,7 +173,27 @@ async function callClaude(
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
     .trim();
 
+  // 空正文时把**为什么空**记下来。此前这里只有一个结论性的注释，没有任何观测——
+  // 2882 次 Empty response 到底是"思维链吃光额度"还是"模型真的不回话"，
+  // 从日志里看不出来。现在能看出来，下一次就不用猜。
   const usage = data.usage;
+  if (!text) {
+    logger.warn(
+      {
+        label: label.name,
+        model: label.model,
+        stopReason: data.stop_reason,
+        blocks: data.content.map((c) => c.type),
+        outputTokens: usage.output_tokens,
+        maxTokens: body['max_tokens'],
+      },
+      data.stop_reason === 'max_tokens'
+        ? 'claude: 空正文 —— 思维链吃光 max_tokens（截断）'
+        : 'claude: 空正文 —— 模型未产出 text block',
+    );
+  }
+  const truncated = !text && data.stop_reason === 'max_tokens';
+
   const cacheRead = usage.cache_read_input_tokens ?? 0;
   const cacheWrite = usage.cache_creation_input_tokens ?? 0;
   if (cacheRead > 0 || cacheWrite > 0) {
@@ -145,16 +204,19 @@ async function callClaude(
   }
 
   return {
-    content: text,
-    tokenUsage: {
-      prompt: usage.input_tokens + cacheRead + cacheWrite,
-      completion: usage.output_tokens,
-      total: usage.input_tokens + cacheRead + cacheWrite + usage.output_tokens,
-      cached: cacheRead,
+    result: {
+      content: text,
+      tokenUsage: {
+        prompt: usage.input_tokens + cacheRead + cacheWrite,
+        completion: usage.output_tokens,
+        total: usage.input_tokens + cacheRead + cacheWrite + usage.output_tokens,
+        cached: cacheRead,
+      },
+      model: label.model,
+      label: label.name,
+      latencyMs,
     },
-    model: label.model,
-    label: label.name,
-    latencyMs,
+    truncated,
   };
 }
 

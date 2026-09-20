@@ -72,6 +72,8 @@ const CHECKS: Array<[string, string]> = [
   // 心流 LLM 失败保句闸（2026-09-21）
   ['失败保句闸', 'llmFailedDecision'],
   ['保句闸寻址判定', 'isAddressedToBot'],
+  // 思维链截断加额重试（2026-09-21）
+  ['截断加额重试', 'claude: 空正文'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

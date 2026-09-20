@@ -748,6 +748,32 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### When a reasoning model spends its whole budget thinking
+
+The single most frequent LLM failure in this system is not a timeout or a rate limit —
+it is `Empty response`, **2,882 occurrences** in the log (stepfunthink 1,481 ·
+stepfunvision 685 · stepfun 583 · stepfunjudge 133). It is the main feed for the
+heart's `All labels exhausted` (64% of heart failures, and heart failures are 25% of all
+heart decisions).
+
+The cause: StepFun's models are reasoning models, and `reasoning_content` counts toward
+`max_tokens`. When the thinking consumes the whole budget the response arrives with
+`stop_reason: 'max_tokens'` and **no text block at all**. The old code noticed this and
+wrote a comment about it, then deliberately returned the empty string and let the fallback
+chain cope — which usually meant trying another label **on the same upstream account**,
+hitting the same ceiling, and dying together.
+
+`callClaude` now distinguishes the two shapes that both used to look like "empty":
+
+- `stop_reason: 'max_tokens'` + no text → **truncated**. Retry once with double the budget
+  (capped at 32k). Only this shape retries — content rejections, timeouts and rate limits
+  gain nothing from a second attempt and would just double the latency.
+- `stop_reason: 'end_turn'` + no text → the model genuinely said nothing. No retry.
+
+Either way, an empty response now logs *why* it is empty (stop reason, block types, output
+tokens, budget). Before this, 2,882 failures carried no diagnosable information at all —
+just a comment asserting a cause nobody had measured.
+
 ### A pre-gate for when the decision layer itself is down
 
 The heart's LLM call is the single highest-frequency LLM call in the system, and it

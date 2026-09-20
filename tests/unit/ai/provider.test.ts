@@ -130,6 +130,89 @@ describe('callModel', () => {
       });
     });
 
+    // ─── 2026-09-21：思维链吃光 max_tokens → 空正文 ────────────────────────
+    //
+    // 日志实测：`Empty response` 2882 次（stepfunthink 1481 / stepfunvision 685 /
+    // stepfun 583 / stepfunjudge 133），是心流 "All labels exhausted"（占心流失败
+    // 64%）的主要来源。旧行为把它当普通空响应交给 fallback 链，而 backup 常常是
+    // 同一个账号的另一个 label，撞同一个限额，于是一次性全灭。
+    describe('claude 分支：截断导致空正文时加额重试', () => {
+      const anthropicOk = (text: string, stopReason = 'end_turn') => new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text }],
+          stop_reason: stopReason,
+          usage: { input_tokens: 10, output_tokens: 20 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+      const anthropicThinkingOnly = (stopReason = 'max_tokens') => new Response(
+        JSON.stringify({
+          content: [{ type: 'thinking', thinking: '想了很多但没来得及说' }],
+          stop_reason: stopReason,
+          usage: { input_tokens: 10, output_tokens: 4096 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+
+      it('stop_reason=max_tokens 且只有 thinking → 加额重试，第二次成功', async () => {
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          const b = JSON.parse(init.body as string) as { max_tokens: number };
+          calls.push(b.max_tokens);
+          return Promise.resolve(calls.length === 1 ? anthropicThinkingOnly('max_tokens') : anthropicOk('{"act":"pass"}'));
+        }));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 4096, temperature: 0 });
+        expect(r.content).toBe('{"act":"pass"}');
+        expect(calls).toEqual([4096, 8192]); // 第一次原额度，第二次翻倍
+      });
+
+      it('stop_reason=end_turn 但只有 thinking → 不重试（不是截断，重试没意义）', async () => {
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(anthropicThinkingOnly('end_turn'));
+        }));
+        // callModel 自己不抛空（rejectEmpty 是 callWithFallback 那层的事），
+        // 这里验的是"不重试"。
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 4096 });
+        expect(r.content).toBe('');
+        expect(calls).toEqual([4096]); // 只调一次
+      });
+
+      it('重试也截断 → 仍报 Empty response（交回 fallback 链，不假装成功）', async () => {
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(anthropicThinkingOnly('max_tokens'));
+        }));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 4096 });
+        expect(r.content).toBe('');
+        expect(calls).toEqual([4096, 8192]); // 试过了，两次
+      });
+
+      it('正常有正文 → 一次成功，不重试', async () => {
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(anthropicOk('{"act":"reply"}'));
+        }));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 4096 });
+        expect(r.content).toBe('{"act":"reply"}');
+        expect(calls).toEqual([4096]);
+      });
+
+      it('额度翻倍有上界（32k），不会无限涨', async () => {
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(anthropicThinkingOnly('max_tokens'));
+        }));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 20000 });
+        expect(r.content).toBe('');
+        expect(calls).toEqual([20000, 32000]); // 20000*2=40000 → 钳到 32000
+      });
+    });
+
     it('纯文本仍走 claude 分支（不为带媒体改掉正常路径）', async () => {
       // 纯文本 + claude label → callClaude：打 /messages 且请求体是 Anthropic 形状
       // （messages[].content 是字符串，不是 parts 数组）。
