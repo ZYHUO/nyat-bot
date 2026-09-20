@@ -69,6 +69,16 @@ describe('admin.kick 的安全边界', () => {
     expect(body).toContain('catch');
   });
 
+  it('群主自助授权有管理员校验（fail-closed）', () => {
+    const t = readFileSync('src/subagent/host-api.ts', 'utf8');
+    const i = t.indexOf('async setAntiAd(');
+    const body = t.slice(i, i + 900);
+    expect(body).toContain('isGroupAdmin');
+    expect(body).toContain('admin_not_group_admin');
+    // 发起人 uid 缺失或 <=0 时也要拒绝
+    expect(body).toContain('asker > 0');
+  });
+
   it('模型侧工具说明里写了"最后手段"', () => {
     const ex = readFileSync('src/subagent/executor.ts', 'utf8');
     expect(ex).toContain('admin.kick(uid');

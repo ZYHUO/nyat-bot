@@ -65,3 +65,21 @@ export async function getBotPermissions(
     return null;
   }
 }
+
+/**
+ * 查**某个用户**在该群是不是管理员/群主。
+ *
+ * 为什么需要它：反广告/踢人的授权是"根据群主需要"——群主应该能在群里直接跟 bot 说
+ * "开反广告"，而不是先去找 bot 的主人配 Redis。但自助授权必须校验发起人真的是管理员，
+ * 否则任何一个群成员都能打开一个会删消息/踢人的开关。这就是那道校验。
+ */
+export async function isGroupAdmin(bot: Bot, chatId: number, userId: number): Promise<boolean> {
+  try {
+    const m = (await bot.api.getChatMember(chatId, Math.floor(userId))) as unknown as Record<string, unknown>;
+    const status = String(m['status'] ?? '');
+    return status === 'administrator' || status === 'creator';
+  } catch (err) {
+    logger.debug({ err, chatId, userId }, 'isGroupAdmin failed (fail-closed)');
+    return false; // 读失败按非管理员处理——宁可拒绝，不误授权
+  }
+}

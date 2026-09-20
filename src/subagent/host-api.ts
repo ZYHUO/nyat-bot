@@ -1821,6 +1821,27 @@ export function createHostApi(
           logger.info({ chatId, uid: target, ok }, 'host admin.unmute');
           return { ok };
         },
+        async setAntiAd(on: boolean, opts?: { minutes?: number; requesterUid?: number }) {
+          assertOpen();
+          assertGroup();
+          // **群主自助授权**（objective: "作为 asi 怎么最好启用，根据群主需要"）。
+          // 群主在群里直接说"开/关反广告"即可，不必先去找 bot 的主人配 Redis。
+          // 但必须校验**发起这条命令的人**真的是本群管理员/群主——否则任何一个群成员
+          // 都能打开一个会删消息、会踢人的开关。fail-closed：查失败按非管理员处理。
+          const { getBot } = await import('../bot/bot.js');
+          const { isGroupAdmin } = await import('../admin/bot-permission.js');
+          const asker = Number(opts?.requesterUid ?? 0);
+          if (!(asker > 0) || !(await isGroupAdmin(getBot(), chatId, asker))) {
+            throw new Error('admin_not_group_admin: 只有本群管理员/群主能开关反广告');
+          }
+          const { setAntiAd } = await import('../nyatos/ad-pressure.js');
+          await setAntiAd(chatId, on, opts?.minutes);
+          logger.info(
+            { chatId, on, minutes: opts?.minutes, by: asker },
+            'host admin.setAntiAd (group-owner self-service)',
+          );
+          return { ok: true, chatId, on, minutes };
+        },
         async kick(uid: number, opts?: { deleteMessages?: boolean }) {
           assertOpen();
           assertGroup();
