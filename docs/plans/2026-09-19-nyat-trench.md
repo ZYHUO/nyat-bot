@@ -1231,6 +1231,55 @@ return graylist.length === 0 || graylist.includes(chatId);   // 空 = 全群生�
 **候选状态：已识别，未解耦，不可删。** 与 §九·补十二 的 gate LLM 并列成第二/第三个
 删除候选，两者都需要工程 + 授权，不是我能单独推完的。
 
+## 九·补十四、我如何读函数的后半截来否证自己的前半截（round 69）
+
+§九·补十三 的结论是错的，错法很干净，值得单独记。
+
+### 我写了什么
+
+"`MULTI_AGENT_CHAT_IDS` 为空意味着所有群都走 multiagent，而它依赖 `TURN_ACTOR_ENABLED`
+提供打断信号。**关掉那个 flag 会连带关掉 multiagent** —— 不是零行为变化。"
+
+### 实际
+
+```
+MULTI_AGENT_ENABLED = false     （进程环境直读，非默认）
+```
+
+而 `isMultiAgentChat` 的**第一行**就是：
+
+```js
+if (!e.MULTI_AGENT_ENABLED) return false;    // ← 我读的是第三行
+if (!e.TURN_ACTOR_ENABLED) return false;     // ← 和第二行
+return graylist.length === 0 || graylist.includes(chatId);
+```
+
+**multiagent 从来没开过。** 我基于一个第一行就已否证的条件，做了一个错误的保守决定。
+
+### 失败模式（比原发现更值得记）
+
+> 我读了一个函数的**后半部分**，据此推论了一个**前半部分已经否证**的结论。
+
+这次它让我做了个过度保守的决定（不关一个本可关的 flag）。方向上和前几轮"差点做错误变更"相反，**但根因完全相同：没有从函数入口开始读**。
+
+而这次会话里同类的事：
+
+| 轮次 | 形态 |
+|---|---|
+| 6 / 58 | 文件级结论当路径级结论 |
+| 67 / 69 | 读函数后半截，跳过入口的前置判断 |
+| 12 | `MIN_INBOUND` 全局常数排除目标群 |
+| 79(早) | 写死的叙述挨着计算值 |
+
+### 因此这条给"完全剔除"的实际影响
+
+`TURN_ACTOR_ENABLED` 关掉**确实接近零行为变化**（multiagent 本来就没开，
+turn 灰名单也为空）。§九·补十三 说的"删除前置条件"里，第 1 条（解耦 multiagent）
+**不成立** —— 只剩第 2 条（defer.ts 的 scheduleTurn 耦合）是真的。
+
+**但我不基于一次刚出错的推论再去动它。** 正确的做法是：把 flag 关掉列为第三步候选，
+等 Phase 1 有结论后，用同一个 runbook 模式（预注册判据 + 对照）来执行，而不是现在。
+
 ## 附录 A：证据索引
 
 | 论断 | 证据位置 |
