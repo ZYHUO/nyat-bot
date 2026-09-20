@@ -995,6 +995,12 @@ unchanged rather than throwing — a prompt refactor must not fail every task �
 `terminalEnabled: false` and `isolationRequired: false` are *different* states from "on but
 broken", so neither triggers the rewrite.
 
+The rewrite covers every terminal-dependent line, not just the obvious one: the section
+header (`## 电脑使用（SANDBOX_ENABLED 时可用）` — true but misleading, since the section's
+command-based advice is all dead), the `python3.10` + PIL image-processing suggestion, and
+the "写完 grep charset" verification step. `grep` is a command too. What survives is what
+genuinely works: `computer.writeFile/readFile/listFiles` and the browser tools.
+
 Separately, the boot-time line about this was `error` and fired **205 times**. It is a
 static environmental fact, not a regression, so it is now `warn` and says so. The capability
 really is unavailable; it just should not be shouting.

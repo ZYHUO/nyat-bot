@@ -15,13 +15,22 @@
 import { describe, it, expect } from 'vitest';
 import { applySandboxAvailabilityNotes } from '../../../src/subagent/sandbox-prompt.js';
 
-/** 与 EXECUTOR_SYSTEM 里那两行同文的 minimal prompt。 */
+/**
+ * 与 EXECUTOR_SYSTEM 里那几行同文的 minimal prompt。
+ * 2026-09-21 补了另外三处：小节标题、python3.10/PIL 建议、grep 检查办法——
+ * 它们同样依赖终端，第一版只改了前两处，剩下的仍在向模型推荐死路。
+ */
 const PROMPT = [
   '可用全局对象:',
   '- computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}',
   '- browser.open(url)',
   '',
+  '## 电脑使用（SANDBOX_ENABLED 时可用）',
+  '- computer.writeFile(path, content) — 写文件到沙盒目录',
+  '- **图像处理（改尺寸/裁剪/转格式/处理真实照片）用 python3.10（有 PIL），不是 python3（没有 PIL）**。例：python3.10 -c "from PIL import Image; ..."。注意：**画图创作（画券/画头像/画海报）不走这里，用 art.draw**',
+  '',
   '8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。',
+  '   - **写 HTML 必须带头 `<meta charset="UTF-8">`**。检查办法：写完 grep charset，没有就补。CSS/JS 不需要。',
 ].join('\n');
 
 const DEAD = { terminalEnabled: true, isolationRequired: true, bwrapAvailable: false };
@@ -80,5 +89,40 @@ describe('applySandboxAvailabilityNotes', () => {
 
   it('⑤ 空 prompt 不炸', () => {
     expect(applySandboxAvailabilityNotes('', DEAD)).toBe('');
+  });
+
+  // ─── 2026-09-21 补：另外三处依赖终端的建议 ─────────────────────────
+  describe('其余依赖终端的建议', () => {
+    it('⑥ 小节标题改写成"终端命令本机不可用"', () => {
+      const out = applySandboxAvailabilityNotes(PROMPT, DEAD);
+      expect(out).not.toContain('## 电脑使用（SANDBOX_ENABLED 时可用）');
+      expect(out).toContain('终端命令本机不可用');
+    });
+
+    it('⑥b 不依赖终端的部分仍在（文件读写/浏览器没坏）', () => {
+      const out = applySandboxAvailabilityNotes(PROMPT, DEAD);
+      expect(out).toContain('computer.writeFile(path, content) — 写文件到沙盒目录');
+      expect(out).toContain('browser.open(url)');
+    });
+
+    it('⑦ python3.10/PIL 建议改成本机做不了', () => {
+      const out = applySandboxAvailabilityNotes(PROMPT, DEAD);
+      expect(out).not.toContain('用 python3.10（有 PIL）');
+      expect(out).toContain('图像处理（改尺寸/裁剪/转格式）本机做不了');
+      // art.draw 的指引必须留下——那是替代路径
+      expect(out).toContain('art.draw');
+    });
+
+    it('⑧ grep charset 的检查办法改写成人工核对', () => {
+      const out = applySandboxAvailabilityNotes(PROMPT, DEAD);
+      expect(out).not.toContain('检查办法：写完 grep charset');
+      expect(out).toContain('grep 跑不了');
+      // charset 要求本身不能丢——那是真需求
+      expect(out).toContain('<meta charset="UTF-8">');
+    });
+
+    it('⑨ 隔离可用时这些一处都不改', () => {
+      expect(applySandboxAvailabilityNotes(PROMPT, ALIVE)).toBe(PROMPT);
+    });
   });
 });

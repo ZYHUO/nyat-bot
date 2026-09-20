@@ -25,10 +25,16 @@ export interface SandboxCapabilityLike {
   bwrapAvailable: boolean;
 }
 
-/** EXECUTOR_SYSTEM 里被改写的两处原文。改 prompt 时这里必须同步，否则替换静默失效。 */
+/** EXECUTOR_SYSTEM 里被改写的几处原文。改 prompt 时这里必须同步，否则替换静默失效。 */
 const RUN_DOC_LINE =
   '- computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}';
 const VERIFY_STEP_RE = /写文件后建议用 computer\.run 验证内容正确[^。]*。/g;
+/** 「电脑使用」小节标题：它说"SANDBOX_ENABLED 时可用"，可那一节里依赖终端的建议一句句都死了。 */
+const SECTION_HEADER = '## 电脑使用（SANDBOX_ENABLED 时可用）';
+/** 依赖终端的图像处理建议（python3.10 + PIL 走 computer.run）。 */
+const PIL_LINE_RE = /- \*\*图像处理（改尺寸\/裁剪\/转格式\/处理真实照片）用 python3\.10[^\n]*/;
+/** 依赖终端的检查办法（grep 也是命令）。 */
+const GREP_ADVICE_RE = /检查办法：写完 grep charset，没有就补。/;
 
 /**
  * 终端隔离不可用 → 把"推荐用 computer.run"改写成"本机没有，别试"。
@@ -58,5 +64,28 @@ export function applySandboxAvailabilityNotes(
     VERIFY_STEP_RE,
     '写文件后没法用终端验证（本机没有 bwrap），必要时用 browser 打开看效果。',
   );
+  // 小节标题：SANDBOX_ENABLED 确实开着，可这一节里凡是要跑命令的都死了。
+  // 不改标题，模型读到这里会以为整节都能用，然后一头撞在 computer.run 上。
+  if (out.includes(SECTION_HEADER)) {
+    out = out.replace(
+      SECTION_HEADER,
+      '## 电脑使用（文件读写/浏览器可用；**终端命令本机不可用**——见下）',
+    );
+  }
+  // 依赖终端的图像处理建议。
+  if (PIL_LINE_RE.test(out)) {
+    out = out.replace(
+      PIL_LINE_RE,
+      '- **图像处理（改尺寸/裁剪/转格式）本机做不了**：那需要终端跑 python3.10，而终端不可用。' +
+        '要处理图片就跟用户说做不了，或用 art.draw 重新画。**画图创作不走这里，用 art.draw**',
+    );
+  }
+  // 依赖终端的检查办法：grep 也是命令。
+  if (GREP_ADVICE_RE.test(out)) {
+    out = out.replace(
+      GREP_ADVICE_RE,
+      '检查办法：本机没有终端可用（grep 跑不了），写完在正文里自己核对一遍 <head> 开头有没有那行。',
+    );
+  }
   return out;
 }
