@@ -175,5 +175,5 @@ for (const cs of cases) {
   console.log(`  倍数 ${ratio === Infinity ? '∞' : ratio.toFixed(1)}x → ${verdict}\n`);
 }
 
-console.log('提示：anchor_ok 用"有引用锚点"作代理（self_replies 不存被引用 uid）。');
-console.log('      要精确判据需要 trigger 侧的 uid 映射，属于下一轮可加的埋点。\n');
+console.log('提示：anchor_ok 用 self_replies.trigger_uid 真值（host 记录的回复目标 uid）；');
+console.log('      判别力在 noAnchor（发送时无引用锚点）上；onTarget 的集合太宽会饱和到 100%。');
