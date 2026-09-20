@@ -510,6 +510,42 @@ Drop a JSON file into `data/skills/` to add a custom tool, no code changes:
 Supports `type: "http"` (SSRF-guarded). See `data/skills/README.md`.
 ---
 
+### Enforcement, when the owner asks for it
+
+The measurement is deliberately toothless on its own. `admin.kick(uid, {deleteMessages?})`
+exists for the cases where deleting and muting are not enough — it is `ban` + immediate
+`unban`, which is Telegram's actual "remove from group" semantics, so the person can
+rejoin and it is not a permanent ban.
+
+Four gates run in order, and the first one is the point:
+
+```
+ANTIAD_KICK_ENABLED !== true   -> admin_kick_disabled   (default OFF — kicking is not reversible the way deleting is)
+target === MASTER_UID           -> admin_no_master
+target === getBotUid()          -> admin_no_self
+assertAdminPerm + the same per-chat hourly rate gate as mute
+```
+
+The model-facing doc calls it a last resort and asks it to consider whether delete + mute
+was already enough, because one wrong kick and a real person does not come back. Nothing
+kicks automatically — the Frame reports the behavioural facts, the model decides.
+
+### Pairing with the verification bot (`nmnmfunbot`)
+
+This ecosystem's groups run a join-verification bot (2,363 messages across 8 groups). The
+gap was not that it was unclassified — it was that **classification only ran inside
+`processPipeline`**, and the production main path (`META_SUBAGENT_ENABLED`) diverts to the
+heart-adapter *without entering the queue or `processPipeline`*. So on the main path
+`botClass` was never computed, denoise never applied, and the verification bot's prompts
+received heart verdicts and replies — six of them, including after denoise was already
+enabled and logging 930 events.
+
+The Meta path now classifies before the heart and honours `BOT_DENOISE_ENABLED` for
+`verify` / `ad` / `echo`. No new rule was added: the host already computed that fact, the
+main path just was not asking for it.
+
+---
+
 ## 🛡️ Anti-ad: how a group owner turns it on
 
 Anti-ad is **off everywhere by default** and is never a content filter. It measures four
