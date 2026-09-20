@@ -83,6 +83,8 @@ const CHECKS: Array<[string, string]> = [
   ['视频描述遥测', 'Video described'],
   // Meta 主路径接上 peer-reaction / network-burst（2026-09-21）
   ['Meta peer-reaction', 'Meta: peer-reaction'],
+  // 图片描述写进 textContent（Meta 路径才看得见，2026-09-21）
+  ['图片描述进正文', '[图片: '],
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）

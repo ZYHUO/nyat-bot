@@ -22,7 +22,25 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
     await Promise.all([
       formatted.imageFileId
         ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId, formatted.textContent?.trim() || undefined)
-            .then((d) => { if (d) formatted.imageDescriptions = [d]; })
+            .then((d) => {
+              if (!d) return;
+              formatted.imageDescriptions = [d];
+              // **也要写进 textContent**。2026-09-21 发现：生产主路径是 Meta，
+              // 而 Meta 链上没有任何地方读 `imageDescriptions`——只有 legacy 的
+              // `reply/prompt-builder.ts` 渲染它。于是每条图片消息都老老实实
+              // 花一次 vision 调用算出描述，然后**扔掉了**：心流、Meta LLM、
+              // subagent 全都看不到图里是什么。
+              //
+              // 与本会话反复出现的"算了没人读"同形，只是这次被扔的是 LLM 输出。
+              // video/audio/document 早就走 textContent（见下面 describeMultimodal
+              // 那一支），图片这一支漏了。
+              //
+              // 占位符 `[图片]` 不写进去——那等于告诉模型"有图但看不出什么"，
+              // 而真实情况是"没算出来"，两回事。
+              if (d !== '[图片]') {
+                formatted.textContent = (formatted.textContent ? `${formatted.textContent}\n[图片: ${d}]` : `[图片: ${d}]`).trim();
+              }
+            })
             .catch((err) => logger.warn({ err }, "Vision failed, continuing"))
         : Promise.resolve(),
       formatted.sticker
