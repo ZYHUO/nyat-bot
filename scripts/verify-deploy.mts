@@ -99,6 +99,8 @@ const CHECKS: Array<[string, string]> = [
   ['控制流拒绝降级', 'sandbox control flow (expected)'],
   // 选路：零成功 demote + vision 严格过滤（2026-09-21）
   ['零成功 demote', 'slowest + newcomerLatency'],
+  // 沙盒不可用时改写 prompt（2026-09-21）
+  ['沙盒 prompt 改写', 'applySandboxAvailabilityNotes'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

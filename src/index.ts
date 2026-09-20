@@ -80,7 +80,15 @@ async function main(): Promise<void> {
   if (config.SANDBOX_ENABLED && config.SANDBOX_TERMINAL_ENABLED) {
     const capability = getSandboxCapability();
     if (capability.isolationRequired && !capability.bwrapAvailable) {
-      logger.error({ capability }, 'Sandbox isolation unavailable; autonomous terminal execution is blocked');
+      // warn 不是 error：这是**静态环境条件**（这台机器没装 bwrap，apt 源里也没有
+      // 这个包），不是某个本来能用的东西坏了。每次启动都报 error 的代价是
+      // 205 条假警报把真故障淹掉——和 unhandledRejection 那 130 条同一个病。
+      // 能力本身仍然是真的不可用（executeCommand 会拒绝），只是不该用 error 级。
+      logger.warn(
+        { capability },
+        'Sandbox isolation unavailable; autonomous terminal execution is blocked ' +
+          '(static: bwrap not installed — not a regression)',
+      );
     } else {
       logger.info({ capability }, 'Sandbox capability verified');
     }

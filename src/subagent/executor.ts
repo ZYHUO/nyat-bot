@@ -5,6 +5,8 @@ import { logger } from '../shared/logger.js';
 import { getGlobalState } from '../meta/global-state.js';
 import type { DispatchTask } from '../meta/types.js';
 import { createHostApi, type HostApi } from './host-api.js';
+import { applySandboxAvailabilityNotes } from './sandbox-prompt.js';
+import { getSandboxCapability } from '../sandbox/terminal.js';
 import { sendChatAction } from '../bot/sender/telegram.js';
 import { isDM } from '../shared/chat.js';
 import { randomUUID } from 'node:crypto';
@@ -634,6 +636,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
   let systemPrompt = EXECUTOR_SYSTEM;
+
+  // 终端隔离不可用时，别把 computer.run 当验证手段推荐给模型。
+  // 理由与实现见 subagent/sandbox-prompt.ts。
+  systemPrompt = applySandboxAvailabilityNotes(systemPrompt, getSandboxCapability());
+
   // AGI Level 5 Phase 1: 本次任务注入的经验 id(终态时验证打分)。
   let injectedExperienceIds: number[] = [];
   // AGI Level 5 Phase 4: 本次任务注入的 loop 策略 id(终态时计数进化)。

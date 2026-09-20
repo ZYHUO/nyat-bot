@@ -969,6 +969,36 @@ out (ignoring a direct question is a different failure). And if activity can't b
 the factor is 1.0, i.e. exactly the previous flat behaviour — an infrastructure hiccup
 must not change behaviour.
 
+### The system prompt was recommending a capability this machine doesn't have
+
+`computer.run` needs bwrap userns isolation. This machine's apt sources have **no bwrap
+package** (`apt-get install bwrap` → `Unable to locate package`), so every
+`executeCommand` returns `sandbox isolation unavailable`.
+
+Meanwhile `EXECUTOR_SYSTEM` said, in two places:
+
+- `computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}`
+- `写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。`
+
+**The prompt was recommending something permanently broken.** The model would follow it,
+fail, and possibly burn turns retrying. Same disease as everything else in this session: a
+thing that reads as usable, with a dead path underneath.
+
+The fix rewrites both lines *at prompt-assembly time* based on
+`getSandboxCapability()` — unavailable becomes "本机不可用…别用它验证任何东西", and when
+bwrap comes back the original text returns untouched. It is a separate module
+(`src/subagent/sandbox-prompt.ts`) precisely so it can be unit-tested without running the
+whole CodeAct loop.
+
+Two details worth keeping: if neither source line is found the function returns the prompt
+unchanged rather than throwing — a prompt refactor must not fail every task — and
+`terminalEnabled: false` and `isolationRequired: false` are *different* states from "on but
+broken", so neither triggers the rewrite.
+
+Separately, the boot-time line about this was `error` and fired **205 times**. It is a
+static environmental fact, not a regression, so it is now `warn` and says so. The capability
+really is unavailable; it just should not be shouting.
+
 ### Two selection bugs that put dead providers in live chains
 
 **A label with zero successes was ranked as if it worked.** `healthy` in the health ledger
