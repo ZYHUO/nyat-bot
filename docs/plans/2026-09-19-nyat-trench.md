@@ -1130,8 +1130,18 @@ SA verdict=PASS（拒绝且未改状态）
   asker > 0 门槛、fail-closed 注释）
 - ❌ **未验证**：`isGroupAdmin` 在真实群上对"真管理员返回 true、非管理员返回 false"
 
-最后这条要靠一次真实调用（群主在群里说"开反广告"）才能验。**在那之前，
-这个开关的安全性是"代码写了 + 状态不被误改"，不是"校验确认有效"。**
+**round 35 已补验**：探针进程里 `getBot()` 不可用，但用 BOT_TOKEN 直接打 Telegram
+`getChatMember`（只读）验了判定逻辑本身，对真实数据全部正确：
+
+```
+uid 8392759490（bot 自己）→ administrator → isGroupAdmin=true   ✓
+uid 6251541967（主人）    → left          → isGroupAdmin=false  ✓
+uid 8560347478（普通成员）→ left          → isGroupAdmin=false  ✓
+```
+
+所以判定逻辑已验证。**仍未验证的只剩"这条路径在生产里被走到"** —— 即群主真的在群里
+说一句"开反广告"、bot 调 `admin.setAntiAd` 并成功授权。那需要一次真实调用，
+而它是这个 objective 最后一个待真实数据的部分。
 
 ## 附录 A：证据索引
 
