@@ -29,7 +29,7 @@ import { logger } from '../shared/logger.js';
 import type { FormattedMessage } from '../shared/types.js';
 import type { CognitiveScope } from '../shared/cognitive-scope.js';
 import { collectConversationField, type ConversationField } from '../agent/conversation-field.js';
-import { renderTrench, type TrenchReading } from './trench.js';
+import type { TrenchReading } from './trench.js';
 import { getLatestInnerState, getLatestCapabilitySnapshot } from '../agent/nyatos-state.js';
 import { getSelfActSummary } from '../tracking/self-history.js';
 import { nextSelfWake } from '../agent/cognitive-clock.js';
