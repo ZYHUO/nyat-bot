@@ -1085,6 +1085,32 @@ So the provider layer now keeps a floor instead of a multiplier:
 - `topic-scan` now passes 1200 directly, with a comment saying why — the floor is a
   backstop, not a licence to keep writing 24.
 
+### A silent fallthrough in media serialisation, closed with `never`
+
+`serializeContent` handled `text`, `audio` and `video_url` explicitly and then had a bare
+`return` for images — i.e. **image was the fallthrough**. Anything not matched by the
+earlier branches became `{type:'image_url', image_url:{url: <undefined>}}`.
+
+With today's four part types that is correct. It is also a trap: the moment someone adds a
+fifth part type, it silently degrades into a malformed `image_url` and you get either an
+incomprehensible upstream 400 or — worse — an empty payload.
+
+This session already ate that exact shape once: the Claude branch mapped every non-text
+part to `''`, so the model received only text and answered "I don't see the image", with
+prompt token counts that looked perfectly consistent.
+
+So `image` is now an explicit branch and the function ends with
+`const _exhaustive: never = p` plus a throw. Verified by temporarily adding a fifth part
+type to `ContentPart`: typecheck fails at exactly that line with
+`Type '{ type: "document"; … }' is not assignable to type 'never'`. Adding a media kind
+without deciding how it serialises is now a compile error rather than a production
+surprise.
+
+The runtime throw stays because a caller can still construct a part through `as` or JSON,
+where the type system cannot see it. The test for that has to pair the unknown part with a
+known media part — `hasMediaContent` does not recognise an unknown type, so a lone
+`document` part takes the Claude path and never reaches `serializeContent` at all.
+
 ### When a reasoning model spends its whole budget thinking
 
 The single most frequent LLM failure in this system is not a timeout or a rate limit —

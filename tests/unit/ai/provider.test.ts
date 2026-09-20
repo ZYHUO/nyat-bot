@@ -409,6 +409,67 @@ describe('callModel', () => {
       });
     });
 
+    // ─── 2026-09-21：serializeContent 穷尽性 ─────────────────────────────
+    //
+    // 旧写法把 image 当成兜底 `return`：任何没被前面分支命中的 part 都会变成
+    // `{type:'image_url', image_url:{url: undefined}}`。本会话已经吃过一次这个
+    // 形状的亏（claude 分支把图片/音频/视频映射成空字符串，模型回"我没看到
+    // 图片呀"，而 prompt token 数还对得上）。
+    //
+    // typecheck 现在用 `never` 收口（加第五种 part 不改这里就编译失败，已实测），
+    // 运行时也要响亮——调用方可能用 `as` 或 JSON 构造出类型系统看不到的 part。
+    describe('serializeContent：未知 part 类型响亮报错，不静默降级', () => {
+      it('未知类型 → throw，且错误里带上是哪种', async () => {
+        // 必须**同时带一个已知媒体 part**：hasMediaContent 不认识 'document'，
+        // 单独一条 document 会被判成"无媒体"而走 claude 分支——那条路正是本会话
+        // 出过事的路（parts 被映射成空字符串）。带上图片才会进 raw 路径，
+        // 也就才会走到 serializeContent 的穷尽性检查。
+        const r = await callModel(claudeLabel, [{
+          role: 'user',
+          content: [
+            { type: 'image', image: 'data:image/png;base64,QUJD' },
+            // 类型系统会拦，这里用 as 绕过来模拟"将来的第五种 part"
+            { type: 'document', document: 'data:application/pdf;base64,QUJD' } as never,
+          ],
+        }], { maxTokens: 100 }).catch((e: unknown) => e);
+        expect(r).toBeInstanceOf(Error);
+        expect((r as Error).message).toContain('document');
+        expect((r as Error).message).toContain('未处理的 content part');
+      });
+
+      it('降级前必须先经过 text/audio/video_url 三条显式分支（不能吞掉它们）', async () => {
+        // 已知三种仍然正常序列化——穷尽性检查不该把已有行为改坏。
+        // 先清掉 __body：上一条用例（未知类型）在 fetch 之前就抛了，
+        // 不清的话这里读到的是更早某次调用的残留，断言会假失败。
+        (globalThis as { __body?: unknown }).__body = undefined;
+        const r = await callModel(claudeLabel, [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'a' },
+            { type: 'audio', audio: 'QUJD', format: 'wav' },
+            { type: 'video_url', video_url: { url: 'data:video/mp4;base64,QUJD' } },
+          ],
+        }], { maxTokens: 100 });
+        const body = (globalThis as { __body?: { messages: Array<{ content: Array<Record<string, unknown>> }> } }).__body!;
+        expect(r.content).toBe('看到了');
+        const parts = body.messages[0]!.content;
+        expect(parts[1]).toEqual({ type: 'input_audio', input_audio: { data: 'QUJD', format: 'wav' } });
+        expect(parts[2]).toEqual({ type: 'video_url', video_url: { url: 'data:video/mp4;base64,QUJD' } });
+      });
+
+      it('图片仍然是显式分支（detail 默认 high）', async () => {
+        (globalThis as { __body?: unknown }).__body = undefined;
+        await callModel(claudeLabel, [{
+          role: 'user',
+          content: [{ type: 'image', image: 'data:image/png;base64,QUJD' }],
+        }], { maxTokens: 100 });
+        const body = (globalThis as { __body?: { messages: Array<{ content: Array<Record<string, unknown>> }> } }).__body!;
+        expect(body.messages[0]!.content[0]).toEqual({
+          type: 'image_url', image_url: { url: 'data:image/png;base64,QUJD', detail: 'high' },
+        });
+      });
+    });
+
     it('纯文本仍走 claude 分支（不为带媒体改掉正常路径）', async () => {
       // 纯文本 + claude label → callClaude：打 /messages 且请求体是 Anthropic 形状
       // （messages[].content 是字符串，不是 parts 数组）。

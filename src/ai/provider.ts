@@ -305,9 +305,27 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
     if (p.type === 'audio') return { type: 'input_audio', input_audio: { data: p.audio, format: p.format } };
     // 视频：OpenAI 兼容口的 video_url part（2026-09-21，step-5-preview 实测可用）。
     if (p.type === 'video_url') return { type: 'video_url', video_url: { url: p.video_url.url } };
-    // detail 默认 high:stepfun step-3.7-flash 识图必须带 detail=high(否则返回空);
-    // OpenAI 系(sub2gpt54mini 等)也兼容 detail 字段,无副作用。
-    return { type: 'image_url', image_url: { url: p.image, detail: p.detail ?? 'high' } };
+    // 图片必须是**最后一条显式分支**，不是兜底。
+    //
+    // 2026-09-21 改。旧写法把 image 当成 `return` 兜底：任何没被前面分支命中的
+    // part 都会变成 `{type:'image_url', image_url:{url: undefined}}`。本会话已经
+    // 吃过一次这个形状的亏——claude 分支把图片/音频/视频一律映射成空字符串，
+    // 模型只收到文字，于是回"我没看到图片呀"，而 prompt token 数还对得上。
+    //
+    // 兜底的问题是**静默**：现在四种 part 都显式处理，看起来没问题；但只要有人
+    // 给 ContentPart 加第五种（比如 document / sticker），它就会静默降级成
+    // image_url 且 url 是 undefined，上游报一个看不懂的 400，或者更糟——当成
+    // 空内容发出去。所以这里用 `never` 收口：加新 part 而没改这个函数，
+    // **typecheck 直接红**，逼你到这里来做决定，而不是留到线上。
+    if (p.type === 'image') {
+      // detail 默认 high:stepfun step-3.7-flash 识图必须带 detail=high(否则返回空);
+      // OpenAI 系(sub2gpt54mini 等)也兼容 detail 字段,无副作用。
+      return { type: 'image_url', image_url: { url: p.image, detail: p.detail ?? 'high' } };
+    }
+    // 穷尽性检查：p 在此处应是 never。若 ContentPart 新增类型而此处未分支，
+    // 这行会因 `Type 'X' is not assignable to type 'never'` 而编译失败。
+    const _exhaustive: never = p;
+    throw new Error(`serializeContent: 未处理的 content part 类型 ${JSON.stringify(_exhaustive)}`);
   });
 }
 
