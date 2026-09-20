@@ -118,6 +118,8 @@ export interface Frame {
     debt?: string;
     /** 反广告事实（宿主只报行为，不给裁决）。未授权群不出现。 */
     adPressure?: string;
+    /** 入群筛查事实（头像/名字形态/首次见到）。只报事实，不判定。 */
+    joinScreen?: string;
     /** 注册表收集到的全部身体事实（按 order 排序）。 */
     bodyFacts?: string[];
     /** 回声的一行身体感受（"你最近说什么都没什么动静——但这不代表不该说"）。 */
@@ -285,6 +287,26 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
       import('./debt.js'),
       import('./ad-pressure.js'),
     ]);
+    // 入群筛查：nmnmfunbot 的"通过验证"消息带新成员名，按账号属性报三件事实
+    // （有没有头像 / 名字形态 / 我们是否第一次见到它）。**只报事实，不判定。**
+    // 用户明确排除机场/代理类——那个区分交给模型，宿主不写关键词表。
+    try {
+      const { extractJoinerName, readJoinSignals, renderJoinSignals }
+        = await import('./join-signals.js');
+      const { getBot } = await import('../bot/bot.js');
+      for (const m of (input.recent ?? []).slice(-3)) {
+        const joiner = extractJoinerName(String(m.textContent ?? ''));
+        if (!joiner) continue;
+        const uid = Number(m.uid ?? 0);
+        if (!(uid > 0)) continue;
+        const sig = await readJoinSignals(getBot(), uid, joiner);
+        const line = renderJoinSignals(sig, joiner);
+        if (line) self.joinScreen = line;
+        break;   // 一回合只报一个新成员，别刷屏
+      }
+    } catch (err) {
+      logger.debug({ err }, 'join screen frame render failed (non-critical)');
+    }
     const { collectBodyFacts } = await import('./body-signal.js');
     // 本回合的发送者：per-(chat,sender) 类信号（反广告）需要它，群级信号忽略。
     const senders = (input.recent ?? [])
@@ -524,6 +546,7 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
   if (budgetLine) lines.push(budgetLine);
   // Nyat Trench L0：把宿主持有的有界积分器渲染成身体感受（不是配额）。
   if (frame.self.adPressure) lines.push(frame.self.adPressure);
+  if (frame.self.joinScreen) lines.push(frame.self.joinScreen);
   // 身体信号统一来自注册表（trench / debt / ad-pressure / 未来新增的都在这里）。
   //
   // **self.debt / self.adPressure 仍要单独渲染**：它们是对外契约（测试与既有消费方
