@@ -32,7 +32,13 @@ export function getLabels(): Map<string, AILabel> {
       timeout: p.timeout,
       maxTokens: p.maxTokens,
       temperature: p.temperature,
-      capabilities: p.vision !== undefined ? { vision: p.vision } : undefined,
+      capabilities:
+        p.vision !== undefined || p.video !== undefined
+          ? {
+              ...(p.vision !== undefined ? { vision: p.vision } : {}),
+              ...(p.video !== undefined ? { video: p.video } : {}),
+            }
+          : undefined,
       tier: p.tier,
     });
   }
@@ -81,6 +87,11 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   reply:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
   vision:    { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
   audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
+  // 视频理解（2026-09-21）：独立 usage，不蹭 vision 链——见 env.ts 的
+  // VIDEO_DESCRIBE_ENABLED 注释。step5（step-5-preview）是实测唯一稳定出正文的，
+  // backup 给 stepfunvision（step-3.7-flash，同厂、支持 vision，但 reasoning
+  // 会吃 token，所以 maxTokens 给得比图片大得多）。
+  video:     { label: 'step5',         backups: ['stepfunvision'], timeout: 120_000, maxTokens: 2_000 },
   // judge/heart（step-3.7-flash reasoning）：maxTokens 不设上限——reasoning_content 计入
   // completion，卡 800 会把 JSON 截成半截；实测 low 档自然输出 300-1000 token。
   // timeout 45s：开了 reasoning 后 P99 偶到 35s，30s 会无谓触发同模型 backup 重试。

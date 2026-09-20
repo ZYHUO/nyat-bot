@@ -140,6 +140,22 @@ const envSchema = z.object({
   // PDF 识别:同理默认关。当前 vision 路由实际落到 GPT(sub2gpt54mini),
   // 读不了 PDF base64,这通调用必败。gemini/PDF-capable vision 恢复后置 true。
   PDF_VISION_ENABLED: booleanFromEnv.default(false),
+  // 视频理解（2026-09-21）。默认开——它跟 audio/PDF 那俩不一样:那两个是"供应商
+  // 读不了所以必败"，这个是**真的能跑**。实测 step-5-preview 吃 base64 video_url，
+  // 6 秒测试视频准确描述了内容。关掉只退回中性占位（[视频]），不会报错。
+  //
+  // 为什么不蹭 vision 链：同一个 video_url part 发给 vision 链现在的候选，
+  // 要么连不上（dsv4* 那一批 23 个 provider 的端口整个是死的），要么 200 但
+  // content 为空（step-3.7-flash 把 token 全烧在 reasoning 上，finish=length）。
+  // 所以视频走独立的 `video` usage，路由自己配。
+  VIDEO_DESCRIBE_ENABLED: booleanFromEnv.default(true),
+  // 视频时长硬上限（秒）。模型侧 5 分钟；Telegram 侧还有更紧的 20MB 下载上限
+  // （代码里 MAX_MEDIA_BYTES=10MB），5 分钟视频几乎必然超——所以现实里能描述的
+  // 是短视频。超限的不下载，直接给带时长的中性占位。
+  VIDEO_MAX_DURATION_SEC: z.coerce.number().int().positive().default(300),
+  // reasoning 计入 completion:给小了会拿到空正文(实测 max_tokens=400 → 空)。
+  VIDEO_DESCRIBE_MAX_TOKENS: z.coerce.number().int().positive().default(2000),
+  VIDEO_DESCRIBE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
   // Join verification
   VERIFY_ENABLED: booleanFromEnv.default(false),
@@ -1477,6 +1493,11 @@ export interface EnvProvider {
   /** 声明是否支持图片输入(P2 多模态回复)。undefined=未知(照发,provider 自己拒);
    *  false=明确不支持(带图调用直接跳过该 label,不白烧一跳)。 */
   vision?: boolean;
+  /** 声明是否支持 `video_url` content part(2026-09-21 视频理解)。
+   *  **必须显式 true 才进 video usage 的候选池**——"返回 200"不等于"看得懂":
+   *  实测 step-3.7-flash 收下 video_url 但 content 为空(token 全烧 reasoning 上)。
+   *  没声明的一律不当视频供应商用,宁可按手动链走 step5。 */
+  video?: boolean;
   /** Smart Group auto-assign 质量分层: high=主力回复模型, medium=中等(judge/summarize),
    *  low=廉价快模型(gate/cheap batch)。未声明默认 medium。 */
   tier?: 'high' | 'medium' | 'low';
@@ -1670,7 +1691,7 @@ export function getProviders(): Map<string, EnvProvider> {
   for (const [key, value] of Object.entries(source)) {
     if (!key.startsWith('AI_PROVIDER_') || !value) continue;
     const rest = key.slice('AI_PROVIDER_'.length);
-    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE', 'RAW', 'VISION', 'TIER'] as const;
+    const fields = ['ENDPOINT', 'KEY', 'MODEL', 'FORMAT', 'STREAM', 'REASONING', 'THINKING', 'INSECURE', 'TIMEOUT', 'MAX_TOKENS', 'TEMPERATURE', 'RAW', 'VISION', 'VIDEO', 'TIER'] as const;
     let matchedField: string | undefined;
     let providerName: string | undefined;
     for (const f of fields) {
@@ -1704,6 +1725,7 @@ export function getProviders(): Map<string, EnvProvider> {
       maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
       temperature: (() => { const n = fields['TEMPERATURE'] ? parseFloat(fields['TEMPERATURE']) : NaN; return Number.isFinite(n) ? n : undefined; })(),
       vision: readBool(fields['VISION']),
+      video: readBool(fields['VIDEO']),
       tier: (fields['TIER'] === 'high' || fields['TIER'] === 'low') ? fields['TIER'] : (fields['TIER'] === 'medium' ? 'medium' : undefined),
     });
   }

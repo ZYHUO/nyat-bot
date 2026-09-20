@@ -66,6 +66,12 @@ const CHECKS: Array<[string, string]> = [
   ['预算耗尽收尾', 'send_budget_exhausted'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
+  // 视频理解（2026-09-21）
+  ['视频描述接线', 'describeVideo'],
+  ['视频 MIME 兜底', 'videoMimeFromPath'],
+  ['video_url 序列化', 'video_url'],
+  ['claude 分支不再吞媒体', 'carriesMedia'],
+  ['provider 健康播报', 'neverSucceeded'],
   // 仪器
   ['醒来检测', 'detectWakeTransition'],
   ['压力轨迹日志', 'trench pump tick'],

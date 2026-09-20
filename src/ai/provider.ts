@@ -163,7 +163,9 @@ async function callClaude(
 /** Check if any message carries non-text media (image/audio) — forces the raw fetch path */
 function hasMediaContent(messages: Array<{ content: string | ContentPart[] }>): boolean {
   return messages.some(
-    m => Array.isArray(m.content) && m.content.some(p => p.type === 'image' || p.type === 'audio'),
+    m =>
+      Array.isArray(m.content) &&
+      m.content.some(p => p.type === 'image' || p.type === 'audio' || p.type === 'video_url'),
   );
 }
 
@@ -173,6 +175,8 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
   return content.map(p => {
     if (p.type === 'text') return { type: 'text', text: p.text };
     if (p.type === 'audio') return { type: 'input_audio', input_audio: { data: p.audio, format: p.format } };
+    // 视频：OpenAI 兼容口的 video_url part（2026-09-21，step-5-preview 实测可用）。
+    if (p.type === 'video_url') return { type: 'video_url', video_url: { url: p.video_url.url } };
     // detail 默认 high:stepfun step-3.7-flash 识图必须带 detail=high(否则返回空);
     // OpenAI 系(sub2gpt54mini 等)也兼容 detail 字段,无副作用。
     return { type: 'image_url', image_url: { url: p.image, detail: p.detail ?? 'high' } };
@@ -426,7 +430,19 @@ export async function callModel(
       return keep;
     });
 
-  if (label.apiFormat === 'claude') {
+  // 带媒体（图片/音频/视频）时**不走 claude 分支**，哪怕 label 声明了 FORMAT=claude。
+  //
+  // 2026-09-21 发现的静默 bug：下面那个 claude 分支把 content parts 映射成
+  // `p.type === 'text' ? p.text : ''` —— 图片、音频、视频**全被换成空字符串**。
+  // 调用方以为发了图，模型只收到文字，于是回"我没看到图片/视频呀"，
+  // 而 prompt token 数也对得上（只有文字那部分）。没有任何报错。
+  //
+  // 而 StepFun 的 /step_plan/v1 同时提供 /messages（Anthropic 格式）和
+  // /chat/completions（OpenAI 兼容），后者**收 video_url**（实测 step-5-preview
+  // 可以；Anthropic 原生 video block 在那个端点上回 400 input_invalid）。
+  // 所以带媒体就统一走 OpenAI 兼容的裸路径，让 serializeContent 去映射。
+  const carriesMedia = hasMediaContent(messages);
+  if (label.apiFormat === 'claude' && !carriesMedia) {
     const textMessages = messages.map(m => ({
       role: m.role,
       content: typeof m.content === 'string' ? m.content : m.content.map(p => p.type === 'text' ? p.text : '').join(''),

@@ -246,6 +246,33 @@ describe('smartGroupAutoAssign', () => {
     expect(result.indexOf('newcomer')).toBeLessThan(result.indexOf('slow'));
   });
 
+  it('video usage 只收显式声明 video=true 的 label', async () => {
+    // 方向与 vision 相反：vision 没声明就照发，video 没声明就不要。
+    // 因为"返回 200"不等于"看得懂"——step-3.7-flash 收下 video_url、回 200、
+    // content 为空（token 全烧 reasoning，finish=length）。
+    setLabels([
+      makeLabel('vidcap', { tier: 'high', capabilities: { video: true } }),
+      makeLabel('vidcap2', { tier: 'medium', capabilities: { video: true } }),
+      makeLabel('novid', { tier: 'high' }),                              // 没声明 → 排除
+      makeLabel('vidfalse', { tier: 'high', capabilities: { video: false } }), // 明确 false → 排除
+      makeLabel('visonly', { tier: 'high', capabilities: { vision: true } }),  // 只有 vision → 排除
+    ]);
+    const result = await smartGroupAutoAssign('video');
+    expect(result).toContain('vidcap');
+    expect(result).toContain('vidcap2');
+    expect(result).not.toContain('novid');
+    expect(result).not.toContain('vidfalse');
+    expect(result).not.toContain('visonly');
+  });
+
+  it('没有任何 video-capable label 时返回空链（调用方回退手动链）', async () => {
+    setLabels([
+      makeLabel('a', { tier: 'high' }),
+      makeLabel('b', { tier: 'high', capabilities: { vision: true } }),
+    ]);
+    expect(await smartGroupAutoAssign('video')).toEqual([]);
+  });
+
   it('no latency data anywhere still yields a chain (fresh deploy)', async () => {
     setLabels([
       makeLabel('a', { tier: 'high' }),

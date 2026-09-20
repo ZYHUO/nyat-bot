@@ -72,6 +72,86 @@ describe('callModel', () => {
     expect(part).toEqual({ type: 'input_audio', input_audio: { data: 'QkFTRTY0', format: 'ogg' } });
   });
 
+  // 2026-09-21 回归：claude 分支原来把 content parts 映射成
+  // `p.type === 'text' ? p.text : ''` —— 图片/音频/视频全被换成空字符串。
+  // 调用方以为发了媒体，模型只收到文字，于是回"我没看到视频呀"，而 prompt token
+  // 数也对得上（只有文字）。**没有任何报错**，是最难发现的那类静默 bug。
+  describe('FORMAT=claude 的 label 不再静默丢弃媒体', () => {
+    beforeEach(() => {
+      vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        (globalThis as { __body?: unknown }).__body = JSON.parse(init.body as string);
+        return Promise.resolve(new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '看到了' } }],
+            usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+      }));
+    });
+
+    const claudeLabel: AILabel = {
+      name: 'step5',
+      endpoint: 'https://api.stepfun.com/step_plan/v1',
+      apiKeys: ['k'],
+      model: 'step-5-preview',
+      apiFormat: 'claude',
+    };
+
+    it('video_url part 真的进请求体（不变成空字符串）', async () => {
+      const r = await callModel(claudeLabel, [{
+        role: 'user',
+        content: [
+          { type: 'text', text: '这视频里有什么' },
+          { type: 'video_url', video_url: { url: 'data:video/mp4;base64,QUJD' } },
+        ],
+      }], { maxTokens: 100 });
+      expect(r.content).toBe('看到了');
+      const body = (globalThis as { __body?: { messages: Array<{ content: Array<Record<string, unknown>> }> } }).__body!;
+      const parts = body.messages[0]!.content;
+      // 文本必须在，视频 part 必须原样序列化——不能是 ''
+      expect(parts[0]).toEqual({ type: 'text', text: '这视频里有什么' });
+      expect(parts[1]).toEqual({ type: 'video_url', video_url: { url: 'data:video/mp4;base64,QUJD' } });
+      expect(parts.filter((p) => JSON.stringify(p) === '""' || p.type === undefined)).toHaveLength(0);
+    });
+
+    it('image part 同样不再被丢弃（同一条路径，顺带修好）', async () => {
+      await callModel(claudeLabel, [{
+        role: 'user',
+        content: [
+          { type: 'text', text: '图里有什么' },
+          { type: 'image', image: 'data:image/png;base64,QUJD' },
+        ],
+      }], { maxTokens: 100 });
+      const body = (globalThis as { __body?: { messages: Array<{ content: Array<Record<string, unknown>> }> } }).__body!;
+      expect(body.messages[0]!.content[1]).toEqual({
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,QUJD', detail: 'high' },
+      });
+    });
+
+    it('纯文本仍走 claude 分支（不为带媒体改掉正常路径）', async () => {
+      // 纯文本 + claude label → callClaude：打 /messages 且请求体是 Anthropic 形状
+      // （messages[].content 是字符串，不是 parts 数组）。
+      vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, init: RequestInit) => {
+        (globalThis as { __claudeBody?: unknown }).__claudeBody = JSON.parse(init.body as string);
+        return Promise.resolve(new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: '喵' }],
+            usage: { input_tokens: 3, output_tokens: 1 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+      }));
+      const r = await callModel(claudeLabel, [{ role: 'user', content: '你好' }], { maxTokens: 50 });
+      expect(r.content).toBe('喵');
+      const url = vi.mocked(fetch).mock.calls[0]![0] as string;
+      expect(String(url)).toContain('/messages');
+      const body = (globalThis as { __claudeBody?: { messages: Array<{ content: unknown }> } }).__claudeBody!;
+      expect(body.messages[0]!.content).toBe('你好'); // 纯文本仍是字符串，没被拆成 parts
+    });
+  });
+
   it('forceRaw + 空 choices → 走 raw fetch、抛 AI_EMPTY(不崩 reading message)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 0 } }),

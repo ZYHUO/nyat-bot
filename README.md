@@ -642,6 +642,45 @@ the model's turn as a fact ("你 12 秒前才在这个群回过话，连得太�
 answers into one message or wait. Silent dropping was the old gate's shape and is exactly
 what the budget module was written to replace.
 
+### Video understanding — and the silent bug that blocked it
+
+The bot reads images. It did not read video: `multimodal.ts` had a single line,
+`[视频：用户发送了一段视频]`, plus a comment saying "description not supported yet".
+That comment was **true when written and false now**.
+
+Measured against the live API: `step-5-preview` (the 1M-context model wired into
+smart-group this round) accepts a base64 `video_url` part and described a 6-second test
+clip accurately — colour bars, the rainbow diagonal, the moving blocks, the timer in the
+corner. So video is now described, in the same shape as images and audio.
+
+Four things had to be right, and three of them were traps:
+
+1. **A dedicated `video` usage, not the `vision` chain.** The same `video_url` part sent
+   to `step-3.7-flash` returns HTTP 200 with **empty content** — it burns the whole token
+   budget on reasoning and hits `finish_reason: length`. A 200 is not a yes. So
+   `AI_PROVIDER_STEP5_VIDEO=true` is an explicit capability declaration, and smart-group's
+   video profile only accepts labels that declare it. Note the deliberate asymmetry with
+   `vision`: an undeclared *vision* label is still tried (most providers never declared),
+   an undeclared *video* label never is.
+2. **`max_tokens` must be generous.** Reasoning counts toward completion; 400 tokens
+   yields an empty answer.
+3. **A hard duration cap (300 s) checked *before* download.** Telegram's own 20 MB bot
+   download limit (10 MB in code) means a 5-minute video almost never fits anyway — so in
+   practice this describes *short* clips, and longer ones get a neutral placeholder that
+   states the duration rather than "无法识别" (which would read as the bot malfunctioning).
+4. **Never hand the provider a Telegram file URL.** That URL is
+   `https://api.telegram.org/file/bot<TOKEN>/<path>` — passing it to a third party leaks
+   the bot token. Base64 inline, at 1.33× the size.
+
+**The trap worth naming:** wiring all of that up still produced *"我没看到你说的视频呀"*
+with a plausible token count. Cause: for `FORMAT=claude` labels, `callModel` mapped content
+parts with `p.type === 'text' ? p.text : ''` — **images, audio and video were all replaced
+with empty strings.** No error, no warning, and the prompt-token count matched (only the
+text survived). Media-bearing calls now bypass the claude branch and use the
+OpenAI-compatible raw path, which StepFun's `/step_plan/v1` also serves. Regression tests
+pin both the video part and the image part actually reaching the request body, plus that
+pure text still goes to `/messages`.
+
 ### Self-cognition: the input was a dry well
 
 The bot writes self-model notes (`self_model_notes` → world-projection → injected into the
@@ -679,6 +718,35 @@ Two guards, because the old shape had both failure modes:
   update is as useless as one that only repeats).
 - **Minimum sample of 20.** Below that it writes nothing rather than drawing a portrait from
   noise.
+
+### The provider pool: 5 of 33 labels have ever succeeded
+
+Not a code bug, but it changes how the bot should be read, so it belongs here.
+
+`.env` declares **23 providers whose endpoint is `http://127.0.0.1:3000/v1`. Nothing
+listens on that port.** The relay that *is* running (`cliproxyapi`) serves port **8317**
+with a different key — and its 217-model catalog does not contain a single one of the model
+names those 23 providers ask for (`deepseek-v4-flash`, `grok-4.6`, `gpt-5.6-luna`,
+`claude-opus-5`, `kimi-k3`, `glm-5.3`, `qwen3.8-max`, `MiniMax-M3` … all absent). So this
+is not a stale port that can be repointed; it is 23 labels aimed at an upstream that no
+longer exists in this form.
+
+The measured consequence, from smart-group's own health ledger:
+
+```
+healthy:            5    stepfunthink (53,922 ok) · stepfunvision (6,539) · spark13 (636)
+                         · stepfun (2) · step5 (1)
+zero successes:    28
+```
+
+The bot keeps working because auto-assign *deprioritises* rather than removes failed
+labels — but that is also why the outage could sit quietly for days. `initSmartGroup()` now
+logs a startup line naming the never-succeeded labels, so "configured but unreachable" is
+loud instead of silent.
+
+Two follow-ups this deliberately does **not** do: repoint those endpoints (that would mean
+inventing model mappings), or delete the labels (they may come back with the upstream).
+Both need a decision about what should serve them.
 
 ### Sleep, schedule, and holidays
 

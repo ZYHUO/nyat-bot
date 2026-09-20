@@ -15,6 +15,7 @@
 
 import type { AILabel } from './types.js';
 import { getRedis } from '../db/redis.js';
+import { logger } from '../shared/logger.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -246,6 +247,16 @@ interface UsageProfile {
   minTier: Tier;
   /** vision=true 时只保留 capabilities.vision !== false 的 label。 */
   vision: boolean;
+  /**
+   * video=true 时**只保留 capabilities.video === true 的 label**。
+   *
+   * 和 vision 的判定方向相反，是故意的：vision 是"没声明就照发"（多数 provider
+   * 没声明过，一刀切排除会把池子清空）；video 是"没声明就不要"——因为
+   * "返回 200"不等于"看得懂视频"。实测 step-3.7-flash 收下 video_url part、
+   * 回 200、content 为空（token 全烧在 reasoning 上，finish_reason=length）。
+   * 不显式声明 true 的供应商进 video 链，结果是静默拿到空正文。
+   */
+  video: boolean;
   /** 链长度(主+备)。 */
   count: number;
 }
@@ -255,18 +266,21 @@ interface UsageProfile {
  * 池子小时自动降级;池子大时多给几个 backup 无成本(只在前面挂时才会往后走)。
  */
 const USAGE_PROFILES: Record<string, UsageProfile> = {
-  reply:       { minTier: 'high',   vision: false, count: 5 },
-  reply_pro:   { minTier: 'high',   vision: false, count: 5 },
-  judge:       { minTier: 'medium', vision: false, count: 4 },
-  summarize:   { minTier: 'medium', vision: false, count: 4 },
-  vision:      { minTier: 'medium', vision: true,  count: 3 },
-  audio:       { minTier: 'medium', vision: false, count: 2 },
-  deep_think:  { minTier: 'high',   vision: false, count: 3 },
-  reflection:  { minTier: 'medium', vision: false, count: 3 },
-  mundo:       { minTier: 'high',   vision: false, count: 2 },
+  reply:       { minTier: 'high',   vision: false, video: false, count: 5 },
+  reply_pro:   { minTier: 'high',   vision: false, video: false, count: 5 },
+  judge:       { minTier: 'medium', vision: false, video: false, count: 4 },
+  summarize:   { minTier: 'medium', vision: false, video: false, count: 4 },
+  vision:      { minTier: 'medium', vision: true,  video: false, count: 3 },
+  audio:       { minTier: 'medium', vision: false, video: false, count: 2 },
+  deep_think:  { minTier: 'high',   vision: false, video: false, count: 3 },
+  reflection:  { minTier: 'medium', vision: false, video: false, count: 3 },
+  mundo:       { minTier: 'high',   vision: false, video: false, count: 2 },
+  // 视频理解（2026-09-21）：count=2 就够——真能看的供应商本来就少，
+  // 凑长度只会把不能看的塞进来。
+  video:       { minTier: 'medium', vision: false, video: true,  count: 2 },
 };
 
-const DEFAULT_PROFILE: UsageProfile = { minTier: 'medium', vision: false, count: 3 };
+const DEFAULT_PROFILE: UsageProfile = { minTier: 'medium', vision: false, video: false, count: 3 };
 
 const TIER_RANK: Record<Tier, number> = { high: 2, medium: 1, low: 0 };
 
@@ -296,6 +310,8 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
     const tier: Tier = label.tier ?? 'medium';
     if (TIER_RANK[tier] < TIER_RANK[profile.minTier]) continue;
     if (profile.vision && label.capabilities?.vision === false) continue;
+    // video 与 vision 方向相反：没声明 true 的一律排除（理由见 UsageProfile.video）。
+    if (profile.video && label.capabilities?.video !== true) continue;
     candidates.push({ name, label, tier });
   }
   if (candidates.length === 0) return [];
@@ -349,4 +365,47 @@ export async function initSmartGroup(): Promise<void> {
   const cfg = getConfig();
   if (!cfg.enabled) return;
   await loadFromRedis();
+  logProviderHealthSummary();
+}
+
+/**
+ * 启动时把 provider 池的健康状况打成一行为。
+ *
+ * 为什么需要：2026-09-21 发现 `.env` 里 **23 个 provider 指向
+ * `http://127.0.0.1:3000/v1`，而那个端口上什么都没有**（真正的 relay 在 8317，
+ * key 也不一样）。这些 label 在 Redis 里的健康记录全是 `healthy=0 / succ=0`——
+ * **一个都没成功过**。而 auto-assign 只是把它们压到链尾，bot 照常靠剩下的
+ * provider 干活，于是这个故障可以静默存在很久。
+ *
+ * "开了但没跑"和"配了但连不上"是同一类问题：都需要有人喊一声。这行日志就是那一声。
+ */
+function logProviderHealthSummary(): void {
+  try {
+    const healthy: string[] = [];
+    const neverSucceeded: string[] = [];
+    const recovering: string[] = [];
+    for (const [name, h] of memoryHealth.entries()) {
+      if (h.successCount === 0) neverSucceeded.push(name);
+      else if (!h.healthy) recovering.push(name);
+      else healthy.push(name);
+    }
+    if (neverSucceeded.length === 0 && recovering.length === 0) {
+      logger.info({ healthy: healthy.length }, 'Smart group: all known providers healthy');
+      return;
+    }
+    logger.warn(
+      {
+        healthy: healthy.length,
+        neverSucceeded: neverSucceeded.length,
+        neverSucceededList: neverSucceeded.slice(0, 30),
+        recovering: recovering.length,
+      },
+      neverSucceeded.length > 0
+        ? 'Smart group: providers with ZERO successful calls — check endpoint/key in .env ' +
+          '(they still get deprioritized, not removed, so the bot keeps working via the rest)'
+        : 'Smart group: some providers are in cooldown after errors',
+    );
+  } catch {
+    /* 日志永不拦启动 */
+  }
 }

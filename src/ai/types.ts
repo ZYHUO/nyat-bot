@@ -22,7 +22,16 @@ export interface AILabel {
   /** per-label temperature 强制覆盖(调用方显式值也让位):只接受固定温度的模型用
    *  (如 kimi-k3 只允许 temperature=1)。 */
   temperature?: number;
-  capabilities?: { vision?: boolean; functionCalling?: boolean };
+  /**
+   * 能力声明。undefined = 未知（**保留**，不因此排除——本仓库多数 provider
+   * 没声明过，一律按"没声明"处理，只有显式 false 才排除）。
+   *
+   * video（2026-09-21）：能不能吃 `video_url` content part。**必须显式 true 才能
+   * 进 video usage 的候选池**——因为"返回 200"不等于"看得懂"：实测 step-3.7-flash
+   * 收下 video_url 但 content 为空（token 全烧在 reasoning 上）。不声明的一律
+   * 不当视频供应商用。
+   */
+  capabilities?: { vision?: boolean; functionCalling?: boolean; video?: boolean };
   /** Smart Group auto-assign 质量分层: high=主力回复, medium=中等, low=廉价快。 */
   tier?: 'high' | 'medium' | 'low';
 }
@@ -59,7 +68,11 @@ export interface HedgeConfig {
 export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image'; image: string; detail?: 'low' | 'high' | 'auto' } // data URL or URL; detail 默认 high(stepfun 识图需要)
-  | { type: 'audio'; audio: string; format: string }; // raw base64 (no data: prefix) + container format (wav/mp3/ogg/m4a)
+  | { type: 'audio'; audio: string; format: string } // raw base64 (no data: prefix) + container format (wav/mp3/ogg/m4a)
+  // 视频（2026-09-21）。data URL（含 base64）——**不要**用 Telegram 的 file URL，
+  // 那个 URL 里带着 bot token，交给第三方等于泄密。
+  // 只有部分供应商认这个 part（实测 step-5-preview 可以），所以走独立 `video` usage。
+  | { type: 'video_url'; video_url: { url: string } };
 
 export interface AICallOptions {
   usage: string;

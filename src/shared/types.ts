@@ -34,6 +34,11 @@ export interface FormattedMessage {
   documentFileName?: string;
   videoFileId?: string;
   videoNoteFileId?: string;
+  /**
+   * 视频时长（秒）。Telegram 的 Video/VideoNote 都带 duration，这里接住它——
+   * 视频理解有硬时长上限（模型侧），没这个数就只能下载完再判，白下一次。
+   */
+  videoDurationSec?: number;
   /** inline keyboard 按钮(主要用于"看见"其他 bot 回执的按钮:命令档案学习 + 代发可达性) */
   inlineKeyboard?: Array<{ text: string; callbackData?: string; url?: string; switchInline?: string }>;
   /** 经某 bot inline 模式发出(Telegram "via @xxx");代发回执认领用 */
