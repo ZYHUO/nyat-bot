@@ -22,8 +22,19 @@ import { execSync } from 'node:child_process';
 
 const OUT = 'var/control-baseline.jsonl';
 const WINDOW_HOURS = 3;
-/** 进统计的最低入站条数：低于此的窗口，发送率是噪声。 */
-const MIN_INBOUND = 40;
+/**
+ * 进统计的最低入站条数，**按该群自己的中位数动态定**。
+ *
+ * 第一版用全局常数 40，结果把实验目标群整体排除了——它同时段 3 小时窗的入站
+ * 从未达到 40（最高 33）。统计器把要测的对象筛掉了，这正是最坏的一类 bug。
+ * 现在改为：低于该群历史入站中位数的 1/3 的一天不进统计（小样本相对自身才是噪声）。
+ */
+function minInboundFor(chat: number, all: Array<{ chat: number; inbound: number }>): number {
+  const xs = all.filter((x) => x.chat === chat).map((x) => x.inbound).sort((a, b) => a - b);
+  if (xs.length === 0) return 0;
+  const median = xs[Math.floor(xs.length / 2)]!;
+  return Math.max(5, Math.floor(median / 3));
+}
 
 /** 与金丝雀同一套分母口径：近 N 天的 self_replies vs message_received。 */
 function sqlite(json: boolean, q: string): string {
@@ -83,6 +94,8 @@ function show(): void {
     console.log(`── UTC ${slot}:00 时段（${group.length} 天）──`);
     // 每个群在各天的发送率
     const chats = new Map<number, Array<{ day: string; rate: number | null; inbound: number }>>();
+    const flat: Array<{ chat: number; inbound: number }> = [];
+    for (const g of group) for (const c of g.chats) flat.push({ chat: c.chat, inbound: c.inbound });
     for (const g of group) {
       const day = g.at.slice(0, 10);
       for (const c of g.chats) {
@@ -94,7 +107,8 @@ function show(): void {
       // **样本量过滤**：3 小时窗在小群里可能只有十几条入站，那种天的发送率
       // 是噪声不是信号（实测候选群某窗 12 条入站算出 83%，而同期大样本是 24%）。
       // 少于 MIN_INBOUND 的一天不进统计，否则会把 σ 算虚高、把需要的天数算错。
-      const usable = days.filter((d) => d.rate !== null && d.inbound >= MIN_INBOUND);
+      const floorIn = minInboundFor(chat, flat);
+      const usable = days.filter((d) => d.rate !== null && d.inbound >= floorIn);
       if (usable.length < 2) continue;
       const rates = usable.map((d) => d.rate as number);
       const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
@@ -110,7 +124,61 @@ function show(): void {
   console.log('判据：σ 大的群，任何单日读数都不可归因——必须先攒够同期天数。\n');
 }
 
+/**
+ * 回填历史同时段快照：cron 是今天才挂上的，而 §九·补七 需要 6 天同期数据。
+ * 历史都在 SQLite 里，直接按"今天的同一 UTC 时刻回溯 N 天"算出来，
+ * 写进同一个 jsonl（与 cron 产出的格式一致，去重逻辑天然兼容）。
+ */
+function backfill(days = 8): void {
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - days * 86400;
+  const rows: Array<{ chat_id: number; s: number; i: number; end: number }> = JSON.parse(
+    sqlite(true, `
+      SELECT s.chat_id AS chat_id,
+             (SELECT COUNT(*) FROM self_replies r WHERE r.chat_id = s.chat_id
+                AND r.ts >= ${from - WINDOW_HOURS * 3600} AND r.ts < s.end_ts) AS s,
+             (SELECT COUNT(*) FROM cognitive_events e WHERE e.type='message_received'
+                AND e.chat_id = s.chat_id
+                AND e.occurred_at >= ${from - WINDOW_HOURS * 3600} AND e.occurred_at < s.end_ts) AS i,
+             s.end_ts AS end
+      FROM (SELECT DISTINCT chat_id, ${now} AS end_ts FROM self_replies) s
+    `) || '[]',
+  );
+  // 上面的 end_ts 是同一个 now，退回按天重算：一天一条，窗口为该天的同一时刻往前 WINDOW_HOURS
+  let wrote = 0;
+  for (let d = 1; d <= days; d++) {
+    const end = now - d * 86400;
+    const start = end - WINDOW_HOURS * 3600;
+    const dayRows: Array<{ chat_id: number; s: number; i: number }> = JSON.parse(
+      sqlite(true, `
+        SELECT s.chat_id AS chat_id,
+               (SELECT COUNT(*) FROM self_replies r WHERE r.chat_id = s.chat_id
+                  AND r.ts >= ${start} AND r.ts < ${end}) AS s,
+               (SELECT COUNT(*) FROM cognitive_events e WHERE e.type='message_received'
+                  AND e.chat_id = s.chat_id
+                  AND e.occurred_at >= ${start} AND e.occurred_at < ${end}) AS i
+        FROM (SELECT DISTINCT chat_id FROM self_replies) s
+      `) || '[]',
+    );
+    const chats = dayRows
+      .filter((r) => r.i > 0)
+      .map((r) => ({ chat: r.chat_id, sends: r.s, inbound: r.i, rate: Number((r.s / r.i).toFixed(4)) }));
+    if (chats.length === 0) continue;
+    const snap = {
+      at: new Date(end * 1000).toISOString(),
+      slotUtc: new Date(end * 1000).toISOString().slice(11, 13),
+      windowHours: WINDOW_HOURS,
+      backfilled: true,
+      chats,
+    };
+    appendFileSync(OUT, JSON.stringify(snap) + '\n');
+    wrote += 1;
+  }
+  console.log(`BASELINE backfilled ${wrote} days`);
+}
+
 const cmd = process.argv[2] ?? 'record';
 if (cmd === 'record') record();
 else if (cmd === 'show') show();
+else if (cmd === 'backfill') backfill(Number(process.argv[3] ?? 8));
 else console.log(`unknown command: ${cmd} (record|show)`);
