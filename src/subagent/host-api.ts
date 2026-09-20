@@ -1826,8 +1826,15 @@ export function createHostApi(
           assertGroup();
           // 踢人总闸：默认关。这是不可逆动作，群主明确开才可用；
           // 开了也仍由模型按 Frame 的行为事实决定踢不踢，不是自动执行。
-          if (env().ANTIAD_KICK_ENABLED !== true) {
-            throw new Error('admin_kick_disabled: 群主没开踢人权限（ANTIAD_KICK_ENABLED）');
+          //
+          // **授权与反广告测量共用同一把钥匙**：如果这个群已经在 ANTIAD_CHAT_IDS
+          // 里（= 群主要了反广告），就认为群主也已授权踢人——否则群主开了反广告，
+          // bot 报了"此人在刷屏"却不能处理，是最差的一种半开状态。
+          // 反过来，全局 ANTIAD_KICK_ENABLED 仍可单独开（不必先开反广告）。
+          const { antiAdEnabled } = await import('../nyatos/ad-pressure.js');
+          const ownerGranted = env().ANTIAD_KICK_ENABLED === true || (await antiAdEnabled(chatId));
+          if (!ownerGranted) {
+            throw new Error('admin_kick_disabled: 群主没开踢人权限（ANTIAD_KICK_ENABLED，或该群未授权反广告）');
           }
           const target = Math.floor(Number(uid));
           if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');

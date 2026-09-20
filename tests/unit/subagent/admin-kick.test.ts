@@ -23,9 +23,13 @@ import { readFileSync } from 'node:fs';
 const SRC = readFileSync('src/subagent/host-api.ts', 'utf8');
 
 describe('admin.kick 的安全边界', () => {
-  it('总闸默认关（ANTIAD_KICK_ENABLED !== true 就抛）', () => {
-    expect(SRC).toContain("if (env().ANTIAD_KICK_ENABLED !== true) {");
+  it('总闸默认关，且与反广告授权共用一把钥匙', () => {
+    // 全局开关关着 → 抛
     expect(SRC).toContain('admin_kick_disabled');
+    // 但该群若已授权反广告（= 群主要了反广告），也视为授权踢人——
+    // 否则群主开了反广告却不能让 bot 处理，是最差的半开状态。
+    expect(SRC).toContain('antiAdEnabled(chatId)');
+    expect(SRC).toContain('ANTIAD_KICK_ENABLED === true ||');
   });
 
   it('不许对主人下手', () => {
