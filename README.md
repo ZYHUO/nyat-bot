@@ -586,14 +586,19 @@ never acts on its own.
 **Per-group, three equivalent ways:**
 
 ```bash
-# 1. .env graylist (persistent, comma-separated chatIds)
+# 1. 群主自助（推荐）—— 在群里直接跟 bot 说"开反广告"
+#    bot 用 getChatMember 校验**发起人**真的是本群管理员/群主，fail-closed：
+#    权限读失败按非管理员处理。非管理员会拿到 admin_not_group_admin。
+#    对应工具 admin.setAntiAd(开/关, {minutes?, requesterUid})
+
+# 2. .env graylist (persistent, comma-separated chatIds)
 ANTIAD_ENABLED=true
 ANTIAD_CHAT_IDS=-1002750574953,-1003184176508
 
-# 2. runtime, this group only, with a TTL (hours) — no restart needed
+# 3. runtime, this group only, with a TTL (hours) — no restart needed
 redis-cli -n 5 set xxb:trench:antiad:-1002750574953 "$(date +%s)" EX 21600
 
-# 3. turn it back off
+# turn it back off
 redis-cli -n 5 del xxb:trench:antiad:-1002750574953
 ```
 
