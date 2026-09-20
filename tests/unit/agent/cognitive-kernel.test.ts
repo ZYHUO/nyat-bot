@@ -183,3 +183,50 @@ describe("NyatOS cognitive kernel", () => {
   });
 });
 
+
+// ─── 2026-09-21：reducer 的 default 分支 ─────────────────────────────────
+//
+// `reduceKernelEvent` 的 switch 此前没有 default。往 KERNEL_EVENT_TYPES 加了类型
+// 而没写 case 的话，那个事件会：通过顶部守卫 → 被记进 eventIds（从此不再重放）
+// → switch 静默落空。**看起来处理过了，其实什么都没做**，而且因为 eventIds 已记，
+// 永远不会再试。
+describe('kernel reducer 的 default 分支', () => {
+  const scope = { visibility: 'chat' as const, chatId: -100 };
+
+  it('① 已知类型照常归约（不受 default 影响）', () => {
+    ingestKernelTrigger({ scope, kind: 'telegram_message', source: 'telegram', anchorEventId: 't-1' });
+    const r = reduceKernelEvents({ scope, events: listCognitiveEvents(db, scope), asOfEventId: 't-1' });
+    expect(r.triggerCount).toBe(1);
+    expect(r.unknowns).not.toContain('unreduced_kernel_event:cognitive_trigger');
+  });
+
+  it('② switch 的 case 与 KERNEL_EVENT_TYPES 目前完全对齐（default 是防将来的）', async () => {
+    // 说明白：今天 default 走不到——5 个类型 5 个 case，一一对应。
+    // 它的作用是**将来**有人往 KERNEL_EVENT_TYPES 加第 6 个而忘了写 case 时，
+    // 那个事件不会无声消失。所以这条用例不断言"能触发 default"，
+    // 而是断言"两者当前对齐"——一旦哪天不对齐，说明 default 真的在兜底，值得回头看。
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/agent/cognitive-kernel.ts', 'utf8');
+    const setBlock = src.slice(src.indexOf('KERNEL_EVENT_TYPES'), src.indexOf('MAX_METADATA_BYTES'));
+    const inSet = new Set([...setBlock.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]));
+    const switchBlock = src.slice(src.indexOf('switch (event.type)'), src.indexOf('default: {', src.indexOf('switch (event.type)')));
+    const inSwitch = new Set([...switchBlock.matchAll(/case "([a-z_]+)"/g)].map((m) => m[1]));
+    expect([...inSet].sort()).toEqual([...inSwitch].sort());
+  });
+
+  it('③ reducer 对任何输入都不 throw（default 不能把异常放出去）', () => {
+    ingestKernelTrigger({ scope, kind: 'telegram_message', source: 'telegram', anchorEventId: 't-3' });
+    const events = listCognitiveEvents(db, scope);
+    expect(() => reduceKernelEvents({ scope, events, asOfEventId: 't-3' })).not.toThrow();
+  });
+
+  it('④ 源码里 default 分支存在且用的是本文件的 addUnknown 习惯', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/agent/cognitive-kernel.ts', 'utf8');
+    expect(src).toContain('unreduced_kernel_event:');
+    // default 必须在 reduceKernelEvent 里面，不能跑到别的函数去
+    const fnStart = src.indexOf('export function reduceKernelEvent(');
+    const fnEnd = src.indexOf('\n}', src.indexOf('default: {', fnStart));
+    expect(src.slice(fnStart, fnEnd)).toContain('unreduced_kernel_event:');
+  });
+});

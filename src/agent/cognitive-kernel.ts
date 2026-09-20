@@ -433,6 +433,16 @@ export function reduceKernelEvent(frame: KernelFrame, event: CognitiveEvent): Ke
       }
       break;
     }
+    default: {
+      // 没有 default 的话，往 KERNEL_EVENT_TYPES 加了类型而没在下面写 case，
+      // 这个事件会：通过顶部守卫 → 被记进 eventIds（从此不再重放）→ switch 静默落空。
+      // **看起来处理过了，其实什么都没做**，而且因为 eventIds 已记，永远不会再试。
+      //
+      // 2026-09-21 加。用这个文件自己的 addUnknown 习惯记一笔——
+      // unknowns 会出现在 frame 里，观测侧看得见，比无声吞掉好。
+      addUnknown(frame, `unreduced_kernel_event:${event.type}`);
+      break;
+    }
   }
   return frame;
 }
