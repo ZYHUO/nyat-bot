@@ -1284,6 +1284,16 @@ const envSchema = z.object({
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),
   // 每群代发限速(秒):两次代发最小间隔
   BOT_DELEGATION_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(60),
+  // 回复式代发(bots.command 带 replyToMessageId):让别的 bot 代罚。
+  // 默认开——它比 admin.kick 更窄:只能发"必须回复某条消息才生效"且学熟
+  // (needs_reply=1 / needs_admin=0 / status=ready)的命令,且与 admin.kick
+  // **共用同一把钥匙**(ANTIAD_KICK_ENABLED 或该群已授权反广告)。群主没要反广告
+  // 时这个开关开着也一条都发不出去。当前档案里合法的那条就是 nmnmfunbot /spam。
+  BOT_REPLY_DELEGATION_ENABLED: booleanFromEnv.default(true),
+  // 两次回复式代发最小间隔(秒)。群管动作连着来就像机器在干活。
+  BOT_REPLY_DELEGATION_COOLDOWN_SEC: z.coerce.number().int().nonnegative().default(60),
+  // 每群每小时回复式代发上限。超过就只观察不动手。
+  BOT_REPLY_DELEGATION_MAX_PER_HOUR: z.coerce.number().int().nonnegative().default(3),
   // 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、
   // 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关;
   // 依赖 BOT_DELEGATION_ENABLED。

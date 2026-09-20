@@ -275,6 +275,40 @@ export interface HostApi {
     /** 置顶/取消置顶。pin 返回 pinnedPreview（实际被 pin 消息的前 80 字）——立刻核对，错了 unpin 重 pin。 */
     pin: (messageId: number) => Promise<{ ok: boolean; pinnedPreview: string }>;
     unpin: (messageId: number) => Promise<{ ok: boolean }>;
+    /**
+     * 踢人（ban + 立即 unban = Telegram 真正的"请出群"）。**默认不可用**：
+     * 要 ANTIAD_KICK_ENABLED，或该群已授权反广告（群主在群里说"开反广告"即可）。
+     * 与 bots.command 共用同一把钥匙。不可逆——对方要自己加回来，所以是最后手段。
+     */
+    kick: (uid: number, opts?: { deleteMessages?: boolean }) => Promise<{ ok: boolean }>;
+    /**
+     * 群主**自助**开关本群反广告。requesterUid 必须是本群管理员/群主，
+     * 否则抛 admin_not_group_admin。开了之后 Frame 才出现 [噪声] 行和 [授权] 行。
+     */
+    setAntiAd: (
+      on: boolean,
+      opts?: { minutes?: number; requesterUid?: number },
+    ) => Promise<{ ok: boolean; chatId: number; on: boolean; minutes?: number }>;
+  };
+  /**
+   * 借力别的 bot（bots.command）—— 尤其是**回复式代发**。
+   *
+   * 为什么需要它：别的 bot 回执上的 inline 按钮（nmbot 的「通过 / 拒绝 /
+   * 拒绝并举报骚扰」）我们点不了——Telegram 的 callback_query 只能由真人点击
+   * 产生，没有 API 能合成一次点击。但那些 bot 同时认命令，其中几条"必须回复
+   * 某条消息才生效"。回复那条消息把命令发出去，效果就等于有人按了那个按钮。
+   *
+   * 不传 replyToMessageId = 普通代发（查股价/IP/歌那类，闸在 tryDelegateCommand）；
+   * 传了 = 回复式代罚（闸更严：与 admin.kick 同一把群主授权 + 每群每小时上限）。
+   */
+  bots: {
+    command: (opts: {
+      bot: string;
+      command: string;
+      args?: string;
+      /** 必填才会走回复式代罚；必须是最近 60 条里真实存在的 messageId。 */
+      replyToMessageId?: number;
+    }) => Promise<{ ok: boolean; text: string }>;
   };
   /** 群目录（承诺闭环配套）：按**群名片段**找群。空命中返回指路字符串（找错对象的自救提示）。 */
   chats: {
@@ -1907,6 +1941,41 @@ export function createHostApi(
         },
       };
     })(),
+    bots: {
+      async command(opts: {
+        bot: string;
+        command: string;
+        args?: string;
+        replyToMessageId?: number;
+      }) {
+        assertOpen();
+        // assertGroup 是 admin 那个 IIFE 里的局部量，这里够不到——本地再判一次。
+        if (chatId > 0) throw new Error('admin_groups_only: 借别的 bot 办事只在群里');
+        const { tryDelegateReplyCommand, tryDelegateCommand } = await import(
+          '../pipeline/tools/bot-delegation.js'
+        );
+        const replyTo = Number(opts.replyToMessageId ?? 0);
+        // 回复式代罚（= 替群成员按下别的 bot 键盘上那个我们点不动的按钮）
+        if (Number.isFinite(replyTo) && replyTo > 0) {
+          const r = await tryDelegateReplyCommand(
+            chatId,
+            String(opts.bot ?? ''),
+            String(opts.command ?? ''),
+            String(opts.args ?? ''),
+            replyTo,
+          );
+          return { ok: r.sent, text: r.text };
+        }
+        // 普通代发（查类命令）。闸全在 tryDelegateCommand 里。
+        const r = await tryDelegateCommand(
+          chatId,
+          String(opts.bot ?? ''),
+          String(opts.command ?? ''),
+          String(opts.args ?? ''),
+        );
+        return { ok: r.sent, text: r.text };
+      },
+    },
     chats: {
       async find(query: string) {
         const q = String(query ?? '').trim().slice(0, 50);

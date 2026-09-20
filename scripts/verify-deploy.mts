@@ -53,6 +53,12 @@ const CHECKS: Array<[string, string]> = [
   ['heart 灰度名单', 'META_HEART_BYPASS_CHAT_IDS'],
   ['时限旁路', 'hasTimedBypass'],
   ['gate LLM 开关', 'TIMING_GATE_LLM_ENABLED'],
+  // 反广告 · 第二张牌（回复式代发：让别的 bot 代罚）
+  ['回复式代发闸', 'tryDelegateReplyCommand'],
+  ['可回复命令清单', 'listReplyInvocableCommands'],
+  ['回复式代发限流键', 'xxb:delegation:reply:cd:'],
+  ['可用手段渲染', '[授权]'],
+  ['bot 工具进沙盒', 'BOT_REPLY_DELEGATION_MAX_PER_HOUR'],
   // 仪器
   ['醒来检测', 'detectWakeTransition'],
   ['压力轨迹日志', 'trench pump tick'],

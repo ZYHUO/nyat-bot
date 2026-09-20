@@ -64,6 +64,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - admin.setAntiAd(开/关, {minutes?, requesterUid}) — 群主**自助**开关本群反广告。requesterUid 必须是本群管理员/群主，否则报 admin_not_group_admin。群主在群里直接说"开反广告"就用这个，不用先去找 bot 主人。开了之后 Frame 才会出现 [噪声] 行（行为事实），你才管得了刷屏。
 - admin.deleteMessage(messageId) / admin.mute(uid, 分钟) / admin.unmute(uid) / admin.kick(uid, {deleteMessages?}) / admin.pin(messageId) / admin.unpin(messageId) — 群管理动作（仅群聊；每群每小时合计 10 次）。场景：群里让删广告/刷屏消息、捣蛋鬼临时禁言、重要内容置顶。没权限会报 admin_no_permission——让群主给我开权限再喊我，别装做了。不许对主人和本喵自己下手。管理是重活，被明确要求或真有垃圾才动。**pin 完必须看返回的 pinnedPreview 核对 pin 的是不是目标那条——pin 错了立刻 unpin 错的再 pin 对的，别留着错的**
 - **踢人是最后手段，且默认不可用**（ANTIAD_KICK_ENABLED 关着时会报 admin_kick_disabled）。只有群主明确开过、且对方是**反复刷屏/发广告的机器行为**（Frame 的 [噪声] 行给的就是这种行为事实）时才考虑；一次失误就够伤人。踢之前先想：删消息 + 禁言是不是已经够了？真人被误踢一次就不会再回来了。deleteMessages 会清对方 48 小时内的消息，别顺手开。
+- bots.command({bot, command, args?, replyToMessageId?}) — 借群里别的 bot 办事。**不传 replyToMessageId = 普通代发**（查股价/IP/歌那类；没学熟/需管理员/结果藏在按钮后都会被拒，届时改成把命令告诉用户）。**传了 replyToMessageId = 回复式代罚**：只有"必须回复某条消息才生效"且学熟的命令能这么用（当前 = /spam@nmnmfunbot，回复那条广告发出去，nmBot 会封禁它并向 nmBot 举报）。这事的由来：别的 bot 回执上的 inline 按钮（nmbot 键盘上的「通过 / 拒绝 / 拒绝并举报骚扰」）**我们点不了**——Telegram 的 callback_query 只能由真人点击产生，没有 API 能合成一次点击，所以回复着发命令是唯一够得到的代罚通道。**它和 admin.kick 用同一把钥匙**：该群没授权反广告时直接返回 not granted（Frame 里没有 [授权] 行就是这个意思）。每群每小时最多 3 次、两次之间至少 60 秒。用了它就别再 admin.kick 同一个号——二选一，别既举报又踢。
 - goals.add(事项, chatId?, 几分钟后查?) — 把「等下/回头要做的事」立成关注目标，到点自动去办
 - allowlist.apply(群ID或@username, 备注?) — 群白名单申请（**仅私聊**）：本喵自动审核，通过直接开通并通知主人；没把握或申请人不是群管理会转主人评判。有人私聊想给群开通就调它，结果必须 return 出来看
 - allowlist.approve(群ID/@username/requestId) / allowlist.reject(目标, 理由?) — **仅主人私聊**：放行/拒掉待评判的白名单申请
@@ -201,6 +202,7 @@ async function runHostCode(
       'members',
       'allowlist',
       'admin',
+      'bots',
       'art',
       'pixiv',
       'linuxsb',
@@ -222,6 +224,7 @@ async function runHostCode(
         host.members,
         host.allowlist,
         host.admin,
+        host.bots,
         host.art,
         host.pixiv,
         host.linuxsb,

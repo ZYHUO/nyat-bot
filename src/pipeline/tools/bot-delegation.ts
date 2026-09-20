@@ -9,7 +9,7 @@
 import { getRedis } from '../../db/redis.js';
 import { getBotUsername } from '../../bot/bot.js';
 import { sendMessage } from '../../bot/sender/telegram.js';
-import { getCommandProfile, whyNotInvocable } from '../../learners/bot-command-store.js';
+import { getCommandProfile, whyNotInvocable, listReplyInvocableCommands, whyNotReplyInvocable } from '../../learners/bot-command-store.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import type { FormattedMessage } from '../../shared/types.js';
@@ -107,6 +107,143 @@ export async function tryDelegateCommand(
   } catch (err) {
     logger.warn({ err, chatId }, 'tryDelegateCommand failed');
     return { sent: false, text: '代发出了点问题,改成把命令告诉用户让 TA 自己发吧。' };
+  }
+}
+
+// ────────────────────────────────────────
+// 回复式代发（bots.command 带 replyToMessageId）—— 让别的 bot 代罚
+// ────────────────────────────────────────
+//
+// 为什么需要这条独立路径
+// ────────────────────
+// nmbot 的入群验证消息带 5 个按钮（在 App 中验证 / 打开浏览器验证 /
+// 通过 / 拒绝 / 拒绝并举报骚扰），封禁回执带 2 个（解除封禁 / 举报骚扰）。
+// **这些按钮我们点不了**：Telegram 的 callback_query 只能由真人点击产生，
+// 没有 API 能让 bot 合成一次点击。pipeline/context/slim.ts 早就把它们渲染成
+// "通过(需点击)" 告诉模型"这数据你够不到"。
+//
+// 但 nmbot 同时认命令，且其中几条**必须回复某条消息才生效**——档案里
+// `/spam` 是 needs_reply=1、18 次观察、confidence 0.95、status=ready。
+// 回复那条广告发 `/spam@nmnmfunbot`，效果就等于有人按了「拒绝并举报骚扰」：
+// nmBot 封禁该用户并向 nmBot 举报。这就是 bot 唯一够得到的代罚通道。
+//
+// 与 admin.kick 的关系：**共用同一把钥匙**（ANTIAD_KICK_ENABLED 或该群已授权
+// 反广告）。踢人是把号请出群（不可逆），/spam 是让群管 bot 记档封禁——
+// 两者都是重手，都只在该群群主要过反广告之后才可用，且都由模型决定用不用。
+
+const REPLY_PENDING_KEY = (chatId: number): string => `xxb:delegation:reply:${chatId}`;
+const REPLY_COOLDOWN_KEY = (chatId: number): string => `xxb:delegation:reply:cd:${chatId}`;
+const REPLY_COUNT_KEY = (chatId: number): string => `xxb:delegation:reply:n:${chatId}`;
+const REPLY_PENDING_TTL_SEC = 30;
+
+const REPLY_WHY_TEXT: Record<string, string> = {
+  unknown_command: '还没学过这个 bot 的这条命令',
+  blocked_by_safety: '这是管理/敏感类命令,硬禁,不能代发',
+  needs_admin: '这条命令需要管理员权限,不能代发',
+  not_reply_command: '这条命令不需要回复某条消息——那种走普通代发(USE_BOT_COMMAND),不走回复式',
+  not_mature_count: '这条命令还没观察够次数,不敢乱发',
+  not_mature_confidence: '对这条命令还没把握,不敢乱发',
+  output_unreachable: '这条命令的结果藏在按钮后面,拿不到',
+  peer_ignores_bots: '那个 bot 不理会其他 bot 发的命令',
+};
+
+/** 合法清单的一行说明（给模型指路用）。 */
+function replyMenuLine(): string {
+  const list = listReplyInvocableCommands();
+  if (list.length === 0) return '（当前一条都没有）';
+  return list.map((c) => `${c.command}@${c.bot}（${c.useScenario || c.usageSyntax || '用途未知'}）`).join('；');
+}
+
+/**
+ * 回复式代发。replyToMessageId 必填——它就是"按按钮"的替代物。
+ * 永不抛：失败返回 { sent:false, text:原因+指路 }。
+ */
+export async function tryDelegateReplyCommand(
+  chatId: number,
+  botUsername: string,
+  command: string,
+  args: string,
+  replyToMessageId: number,
+): Promise<DelegateResult> {
+  try {
+    const e = env();
+    if (!e.BOT_REPLY_DELEGATION_ENABLED) {
+      return { sent: false, text: '回复式代发没开(BOT_REPLY_DELEGATION_ENABLED)。' };
+    }
+    if (chatId >= 0) return { sent: false, text: '私聊里没有别的 bot 可借力。' };
+
+    const bot = botUsername.replace(/^@/, '');
+    const cmd = command.trim().toLowerCase().split('@')[0]!;
+    if (!/^\/[a-z0-9_]+$/.test(cmd) || !bot) {
+      return { sent: false, text: '命令格式不对(应是 /xxx 形式 + bot 用户名)。' };
+    }
+    const mid = Math.floor(Number(replyToMessageId));
+    if (!Number.isFinite(mid) || mid <= 0) {
+      return { sent: false, text: 'replyToMessageId 必填——回复式代发必须挂在某条真实消息上。' };
+    }
+
+    // **授权与 admin.kick 同一把钥匙**：群主没要反广告，就一张牌都不能打。
+    const { antiAdEnabled } = await import('../../nyatos/ad-pressure.js');
+    const ownerGranted = e.ANTIAD_KICK_ENABLED === true || (await antiAdEnabled(chatId));
+    if (!ownerGranted) {
+      return {
+        sent: false,
+        text: '这个群没授权反广告(ANTIAD_KICK_ENABLED 关着,也没有 xxb:trench:antiad 授权键)。让群主先说"开反广告"。',
+      };
+    }
+
+    const profile = getCommandProfile(bot, cmd);
+    const why = whyNotReplyInvocable(profile);
+    if (why) {
+      const reason = REPLY_WHY_TEXT[why] ?? '暂时不能回复式代发';
+      return {
+        sent: false,
+        text: `${reason}。当前可回复式代发的只有:${replyMenuLine()}`,
+      };
+    }
+
+    // 回复目标必须是我们**真的见过**的那条消息——防模型拿一个臆想的 messageId
+    // 去回复（回复到不存在的消息上，Telegram 直接 400，白烧一次配额）。
+    const { getRecent } = await import('../../pipeline/context/manager.js');
+    const recent = await getRecent(chatId, 60);
+    const target = recent.find((m) => m.messageId === mid);
+    if (!target) {
+      return { sent: false, text: `最近 60 条里没有 messageId=${mid} 这条消息——换个真存在的 id。` };
+    }
+
+    const redis = getRedis();
+    if (await redis.get(REPLY_COOLDOWN_KEY(chatId))) {
+      return { sent: false, text: '刚代罚过一次,缓一下——群管动作连着来就像机器。' };
+    }
+    const n = Number((await redis.get(REPLY_COUNT_KEY(chatId))) ?? 0);
+    if (n >= e.BOT_REPLY_DELEGATION_MAX_PER_HOUR) {
+      return { sent: false, text: `这个群这一小时已经代罚 ${n} 次了(上限 ${e.BOT_REPLY_DELEGATION_MAX_PER_HOUR})。先观察,真要继续找群主。` };
+    }
+
+    const cleanArgs = (args || '').trim().slice(0, 120);
+    const text = `${cmd}@${bot}${cleanArgs ? ' ' + cleanArgs : ''}`;
+    const sentMid = await sendMessage(chatId, text, mid);
+    if (!sentMid) return { sent: false, text: '代罚没发出去,稍后再试。' };
+
+    // 只登记一个短命"正在等回执"标记，**不登记 pendingDelegation**——
+    // nmbot 的封禁回执不是"用户问题的答案"，不该被 tryHandleDelegationReceipt
+    // 抓去另起一条回复。它会自然进上下文，模型自己看得见。
+    await redis.set(REPLY_PENDING_KEY(chatId), String(sentMid), 'EX', REPLY_PENDING_TTL_SEC).catch(() => {});
+    await redis.set(REPLY_COOLDOWN_KEY(chatId), '1', 'EX', Math.max(1, e.BOT_REPLY_DELEGATION_COOLDOWN_SEC)).catch(() => {});
+    await redis.incr(REPLY_COUNT_KEY(chatId)).catch(() => {});
+    await redis.expire(REPLY_COUNT_KEY(chatId), 3600).catch(() => {});
+    logger.info(
+      { chatId, bot, cmd, replyTo: mid, targetUid: target.uid, targetText: (target.textContent ?? '').slice(0, 40) },
+      'Delegation: reply-command sent (bot 代罚)',
+    );
+
+    return {
+      sent: true,
+      text: `已经回复那条消息向 @${bot} 发了 ${text}。它会自己封禁并举报,回执随后会出现在上下文里——**别急着跟群友宣布结果**,等真回执到了再说。`,
+    };
+  } catch (err) {
+    logger.warn({ err, chatId }, 'tryDelegateReplyCommand failed');
+    return { sent: false, text: '代罚除了点问题,这次先别用了。' };
   }
 }
 

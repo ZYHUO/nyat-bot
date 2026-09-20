@@ -118,6 +118,8 @@ export interface Frame {
     debt?: string;
     /** 反广告事实（宿主只报行为，不给裁决）。未授权群不出现。 */
     adPressure?: string;
+    /** 本群可用手段（群主授过权才出现；否则整行不渲染）。 */
+    remedy?: string;
     /** 入群筛查事实（头像/名字形态/首次见到）。只报事实，不判定。 */
     joinScreen?: string;
     /** 注册表收集到的全部身体事实（按 order 排序）。 */
@@ -291,8 +293,11 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
     // （有没有头像 / 名字形态 / 我们是否第一次见到它）。**只报事实，不判定。**
     // 用户明确排除机场/代理类——那个区分交给模型，宿主不写关键词表。
     try {
-      const { extractJoinerName, readJoinSignals, renderJoinSignals }
-        = await import('./join-signals.js');
+      // extractJoinerName 住在 ad-pressure.ts（它认得 nmbot 的验证消息格式），
+      // **不在** join-signals.ts。第一版从 join-signals 取，运行时拿到 undefined，
+      // 一调用就抛、被下面 catch 吞掉——入群筛查从此静默失效，而 typecheck 一直红着。
+      const { extractJoinerName } = await import('./ad-pressure.js');
+      const { readJoinSignals, renderJoinSignals } = await import('./join-signals.js');
       const { getBot } = await import('../bot/bot.js');
       for (const m of (input.recent ?? []).slice(-3)) {
         const joiner = extractJoinerName(String(m.textContent ?? ''));
@@ -322,6 +327,10 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
     for (const f of facts) {
       if (f.startsWith('[欠话]')) self.debt = f;
     }
+    // 本群可用手段：群主授过反广告的权才出现。没有它，模型看见 [噪声] 也无从下手。
+    const { readRemedies, renderRemedies } = await import('./remedy.js');
+    const remedy = renderRemedies(await readRemedies(chatId ?? 0).catch(() => ({ granted: false, replyCommands: [] })));
+    if (remedy) self.remedy = remedy;
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: debt unavailable');
   }
@@ -546,6 +555,7 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
   if (budgetLine) lines.push(budgetLine);
   // Nyat Trench L0：把宿主持有的有界积分器渲染成身体感受（不是配额）。
   if (frame.self.adPressure) lines.push(frame.self.adPressure);
+  if (frame.self.remedy) lines.push(frame.self.remedy);
   if (frame.self.joinScreen) lines.push(frame.self.joinScreen);
   // 身体信号统一来自注册表（trench / debt / ad-pressure / 未来新增的都在这里）。
   //

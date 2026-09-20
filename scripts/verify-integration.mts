@@ -66,6 +66,43 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
       .every((k) => src.includes(k)));
 }
 
+// 5) 反广告第二张牌：回复式代发（bots.command 带 replyToMessageId）
+//    **刻意不真发**：它会给真实群里的真人招来 nmBot 封禁。所以这里测
+//    "闸 + 清单 + 接线"，发送路径由 tests/unit/pipeline/bot-reply-delegation.test.ts 覆盖。
+{
+  const { readFileSync } = await import('node:fs');
+  const C = -1 * Math.floor(Date.now() / 1000) - 2000000000;
+  const { setAntiAd } = await import('../src/nyatos/ad-pressure.js');
+  const { readRemedies, renderRemedies } = await import('../src/nyatos/remedy.js');
+  const { listReplyInvocableCommands, getCommandProfile, whyNotReplyInvocable }
+    = await import('../src/learners/bot-command-store.js');
+
+  await setAntiAd(C, true, 30);
+  const line = renderRemedies(await readRemedies(C));
+  ok('授权群 Frame 出现 [授权] 行且两张牌都在',
+    line.includes('[授权]') && line.includes('admin.kick') && line.includes('bots.command'));
+
+  // 清单必须来自**生产命令档案**（长期观察学出来的），不是宿主硬编码的一张表
+  const menu = listReplyInvocableCommands();
+  ok('生产档案里 /spam@nmnmfunbot 可回复式代发',
+    menu.some((c) => c.command === '/spam' && c.bot === 'nmnmfunbot'));
+  ok('清单里每一条都真过得去闸（不是假菜单）',
+    menu.length > 0 && menu.every((c) => whyNotReplyInvocable(getCommandProfile(c.bot, c.command)) === null));
+  ok('硬禁的 /ban /kick 不在清单里',
+    !menu.some((c) => ['/ban', '/kick', '/mute', '/unban'].includes(c.command)));
+
+  await setAntiAd(C, false);
+  ok('关授权后 [授权] 行消失', renderRemedies(await readRemedies(C)) === '');
+
+  // host 面是闭包，测不了行为，改测接线：bots.command 必须真的接到回复式代发，
+  // 而且沙盒的参数表里得有 bots（第一版就漏了后者——工具存在但模型够不到）。
+  const api = readFileSync('src/subagent/host-api.ts', 'utf8');
+  const exec = readFileSync('src/subagent/executor.ts', 'utf8');
+  ok('bots.command 接到 tryDelegateReplyCommand', api.includes('tryDelegateReplyCommand'));
+  ok('沙盒参数表里有 bots', exec.includes("      'bots',"));
+  ok('模型可见文档里有 bots.command', exec.includes('bots.command('));
+}
+
 console.log(`\n═══ 合龙验证 · ${out.length} 项 ═══\n`);
 for (const l of out) console.log(`  ${l}`);
 const bad = out.filter((l) => l.startsWith('✗')).length;

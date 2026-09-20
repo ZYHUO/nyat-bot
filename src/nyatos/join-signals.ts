@@ -36,6 +36,17 @@ export interface JoinSignals {
 const FIRST_SEEN_KEY = (uid: number): string => `xxb:join:firstseen:${uid}`;
 
 /**
+ * grammY 的 `api.getUserProfilePhotos` 泛型太宽（第二个参数是
+ * `Other<RawApi, "getUserProfilePhotos">`），直接照抄它的形状写在这里会让
+ * 真正的 `Bot` 实例赋值不进来（参数逆变）。所以只声明用到的窄形状：
+ * `...rest: never[]` 接受任何额外参数而不丢掉类型安全。
+ */
+type ProfilePhotosApi = {
+  getUserProfilePhotos: (user_id: number, ...rest: never[]) => Promise<{ total_count: number }>;
+};
+type ProfilePhotosBot = { api: ProfilePhotosApi };
+
+/**
  * 记录/读取"首次见到该 uid"。TTL 90 天——够覆盖"新号"的判定窗口，
  * 又不至于让键无限增长。已存在则**不改写**（首次才是首次）。
  */
@@ -72,9 +83,9 @@ export function nameShapeNote(name: string): string {
 }
 
 /** 查头像。Telegram Bot API：getUserProfilePhotos。失败返回 null（未知，不猜）。 */
-export async function checkHasPhoto(bot: { api: { getUserProfilePhotos: (u: number, o?: unknown) => Promise<{ total_count: number }> } }, uid: number): Promise<boolean | null> {
+export async function checkHasPhoto(bot: ProfilePhotosBot, uid: number): Promise<boolean | null> {
   try {
-    const r = await bot.api.getUserProfilePhotos(uid, { limit: 1 });
+    const r = await bot.api.getUserProfilePhotos(uid, { limit: 1 } as never);
     return r.total_count > 0;
   } catch (err) {
     logger.debug({ err, uid }, 'checkHasPhoto failed (non-critical)');
@@ -84,7 +95,7 @@ export async function checkHasPhoto(bot: { api: { getUserProfilePhotos: (u: numb
 
 /** 采集一个入群者的三个信号。 */
 export async function readJoinSignals(
-  bot: { api: { getUserProfilePhotos: (u: number, o?: unknown) => Promise<{ total_count: number }> } },
+  bot: ProfilePhotosBot,
   uid: number,
   displayName: string,
   now = Math.floor(Date.now() / 1000),

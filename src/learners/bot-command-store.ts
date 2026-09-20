@@ -152,6 +152,67 @@ export function listAllProfiles(limit = 100): BotCommandProfile[] {
 }
 
 /**
+ * 能不能**回复着**代发这条命令（回复式代发闸）。
+ *
+ * 和 whyNotInvocable 的差别只有一处：needs_reply 从"一票否决"变成"必须满足"。
+ * 理由——bot 点不了别人消息上的 inline 按钮（Telegram 硬限制：callback_query
+ * 只能由真人点击产生），所以"必须回复某条消息才生效"的命令原本永远走不通。
+ * 但我们**自己就是那条被回复消息的回复者**时路就通了：回复广告消息发 /spam，
+ * 等于替群成员按下 nmbot 键盘上的「拒绝并举报骚扰」。
+ *
+ * 仍然是纯闸口，不判断"这条命令该不该用"——那交给模型。
+ */
+export function whyNotReplyInvocable(profile: BotCommandProfile | undefined): string | null {
+  if (!profile) return 'unknown_command';
+  if (profile.status === 'blocked') return 'blocked_by_safety';
+  if (profile.needs_admin === 1) return 'needs_admin';
+  // 回复式代发的全部意义就是"有可回复的目标"；不需要回复的命令走普通代发。
+  if (profile.needs_reply !== 1) return 'not_reply_command';
+  if (profile.observation_count < MATURITY_MIN_OBSERVATIONS) return 'not_mature_count';
+  if (profile.confidence < MATURITY_MIN_CONFIDENCE) return 'not_mature_confidence';
+  if (!USABLE_OUTPUT_TYPES.has(profile.output_type)) return 'output_unreachable';
+  if (profile.peer_accepts_bot === 0) return 'peer_ignores_bots';
+  return null;
+}
+
+/**
+ * 全部"回复式可代发"的命令（needs_reply=1 且过闸）。用于给模型指路——
+ * 它选错命令时把合法清单回给它，而不是只说"不行"。
+ */
+export function listReplyInvocableCommands(): Array<{
+  bot: string;
+  command: string;
+  usageSyntax: string;
+  useScenario: string;
+}> {
+  const rows = getDb()
+    .prepare(
+      `SELECT bot_username, command_name, usage_syntax, use_scenario
+       FROM bot_command_profiles
+       WHERE needs_reply = 1 AND status = 'ready'
+       ORDER BY observation_count DESC`,
+    )
+    .all() as Array<{
+    bot_username: string;
+    command_name: string;
+    usage_syntax: string;
+    use_scenario: string;
+  }>;
+  const out: Array<{ bot: string; command: string; usageSyntax: string; useScenario: string }> = [];
+  for (const r of rows) {
+    const profile = getCommandProfile(r.bot_username, r.command_name);
+    if (whyNotReplyInvocable(profile)) continue;
+    out.push({
+      bot: r.bot_username,
+      command: r.command_name,
+      usageSyntax: r.usage_syntax,
+      useScenario: r.use_scenario,
+    });
+  }
+  return out;
+}
+
+/**
  * 能不能现在就代发这条命令(P2 闸):非 blocked + 成熟 + 回执可达 +
  * 不需要 admin(我们不是管理员)。返回拒绝原因或 null(可用)。
  */

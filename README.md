@@ -541,6 +541,68 @@ The model-facing doc calls it a last resort and asks it to consider whether dele
 was already enough, because one wrong kick and a real person does not come back. Nothing
 kicks automatically — the Frame reports the behavioural facts, the model decides.
 
+#### The second card: letting another bot do the punishing
+
+`admin.kick` is one card. There is a second one, and it exists because of a hard Telegram
+limit: **a bot cannot press another bot's inline keyboard button.** `callback_query` is only
+ever produced by a human tapping a button — there is no API to synthesise a click. So when
+`nmnmfunbot` posts a join-verification message, the buttons on it are unreachable:
+
+```
+入群验证 · 5 buttons
+  在 App 中验证      -> url   telegram.me/nmnmfunbot/panel?startapp=…
+  打开浏览器验证     -> url   nmbot.nmnm.fun/#/web-verify/{chat}/{uid}
+  通过               -> jv_{"admin":"approve"}
+  拒绝               -> jv_{"admin":"reject"}
+  拒绝并举报骚扰     -> jv_{"admin":"spam"}
+
+验证失败被封禁 · 2 buttons         Anti-Spam 识别骚扰 · 2 buttons
+  解除封禁  ban_{"isUnban":true}    解除封禁 / 添加到白名单 spam_whitelist
+  举报骚扰  ban_{"isUnban":false}
+```
+
+Those counts are measured, not guessed: `formatter.ts` captures other bots' inline keyboards
+into `inlineKeyboard`, NyatDB persists that field, and a scan of 1,578 `nmnmfunbot` messages
+across 21 groups found 1,251 carrying a keyboard (arithmetic-challenge variants run 8
+buttons: six numbers plus 通过/拒绝).
+
+What *is* reachable is a command. `/spam` is `needs_reply=1`, 18 observations,
+confidence 0.95, `status=ready` in `bot_command_profiles` — and it must be a **reply**. So:
+
+```js
+// host.bots.command — 回复那条广告发命令，效果 = 有人按了「拒绝并举报骚扰」
+bots.command({ bot: 'nmnmfunbot', command: '/spam', replyToMessageId: 265999 })
+```
+
+`nmBot` then bans the account and files a report to itself. This is the only channel a bot
+has to that outcome, and it is gated exactly as hard as kicking:
+
+```
+BOT_REPLY_DELEGATION_ENABLED !== true        -> not sent
+!ANTIAD_KICK_ENABLED && !antiAdEnabled(chat) -> not sent   (same owner grant as admin.kick)
+replyToMessageId not in the last 60 messages -> not sent   (no hallucinated ids)
+whyNotReplyInvocable(profile) !== null       -> not sent   (blocked / needs_admin /
+                                                              not a reply command /
+                                                              immature / unreachable receipt)
+per-chat hourly cap (3) + 60s spacing        -> not sent
+```
+
+The allowlist is not a hardcoded list in the host — it is **the learned command archive
+itself**. Only commands that were observed `needs_reply=1`, `needs_admin=0`, mature, and with
+a reachable text receipt may be sent that way; today that is `/spam@nmnmfunbot` and
+`/pickbottle@kmuav2bot`. Pick the wrong one and the tool answers with the legal menu instead
+of a bare refusal.
+
+The Frame tells the model the card exists, per group, only when the owner granted it:
+
+```
+[授权] 本群群主已开反广告，你可用的手段：admin.kick(uid) 把号请出群（不可逆）；
+bots.command 回复那条消息发 /spam@nmnmfunbot（举报群内违规用户并触发封禁）。
+管不管、用哪张牌，你按 [噪声] 的事实自己定——先想删消息+禁言是不是已经够了。
+```
+
+No grant, no line — and no card.
+
 ### Running the Phase 1 experiment
 
 Everything about it is pre-registered in the paper — criteria (§九·补三), sample size
@@ -594,6 +656,15 @@ The Meta path now classifies before the heart and honours `BOT_DENOISE_ENABLED` 
 `verify` / `ad` / `echo`. No new rule was added: the host already computed that fact, the
 main path just was not asking for it.
 
+**Two things the pairing actually buys you.** First, join screening: `nmnmfunbot`'s
+"X has passed the group verification." line carries the new member's *unmasked* name, so the
+Frame reports three account facts per joiner — no profile photo, name shape, and "we have
+never seen this uid before" as a proxy for a fresh account (the Bot API does not expose
+registration date, and the comment says so). Facts only; whether it is a black-industry
+account is the model's call, and airport/proxy sellers are explicitly out of scope per the
+owner. Second, the buttons on its messages — which the bot cannot press, but can work around;
+see [the second card](#the-second-card-letting-another-bot-do-the-punishing).
+
 ---
 
 ## 🛡️ Anti-ad: how a group owner turns it on
@@ -628,7 +699,14 @@ Without one of those the module is inert: no measurement, no Frame line, no cost
 
 ```
 [噪声] 8560347478 在刷屏：8 条/5分钟，0 人接，4 条重复。管不管、怎么管，你定。
+[入群] xK9mQ2pLwR7v：没有头像｜名字：12 字符，纯字母数字无空格，长串字母数字混合｜
+      我们第一次见到它（12 秒前）。是不是黑产广告号，你判；机场/代理那类不用管。
+[授权] 本群群主已开反广告，你可用的手段：admin.kick(uid) 把号请出群（不可逆）；
+      bots.command 回复那条消息发 /spam@nmnmfunbot（举报群内违规用户并触发封禁）。
 ```
+
+Three lines, three different jobs: what the behaviour is, who just arrived, and what you are
+allowed to do about it. The third one only appears when the owner granted anti-ad.
 
 **What it deliberately does not do:** match keywords. In this ecosystem's corpus the
 classic human-ad signals were *zero* (phone numbers, crypto, porn links, QQ groups) while
