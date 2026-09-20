@@ -642,6 +642,44 @@ the model's turn as a fact ("你 12 秒前才在这个群回过话，连得太�
 answers into one message or wait. Silent dropping was the old gate's shape and is exactly
 what the budget module was written to replace.
 
+### Self-cognition: the input was a dry well
+
+The bot writes self-model notes (`self_model_notes` → world-projection → injected into the
+prompt as hypotheses about itself). The hourly cron that feeds it, `runFeedbackAggregate`,
+read exactly one table: `feedback_events`.
+
+**That table has 4 rows. Ever.** Two in the last week, both positive. Meanwhile
+`reply_outcomes` — *did what I said land?* — has **12,752 rows** with a `signal` column, and
+it was never read by anything in the self-cognition path.
+
+The consequence was measurable: the newest self-model note was dated **2026-09-11**. For ten
+days the model saw nothing new about itself, because the only pipe in was dry.
+
+The cron now aggregates `reply_outcomes` too. With the real numbers, the state of the bot is
+not subtle:
+
+```
+近 3 天 1208 条回复结果
+  ignored_5_msgs      738   ← "I sent 5 messages and nobody answered"
+  user_replied         85
+  user_mentioned_bot   68
+  explicit_positive    58
+```
+
+So it writes a note that says what the data says — `我说的话大部分没人接：近 3天 95 条里
+90 条（95%）发出去之后群里没人接` — with the counts in `evidence`, and lets the model decide
+what to do about it. The host measures; it does not issue the verdict, same as everywhere else.
+
+Two guards, because the old shape had both failure modes:
+
+- **Dedup.** `saveSelfNotes` is a bare `INSERT` with no unique constraint, and the two
+  original note strings were literals — sustained negative sentiment would have inserted the
+  *same sentence* every hour, and `getActiveSelfNotes` takes the latest 5 for the prompt.
+  Same note now won't repeat inside 6 hours, but will after (a self-model that can never
+  update is as useless as one that only repeats).
+- **Minimum sample of 20.** Below that it writes nothing rather than drawing a portrait from
+  noise.
+
 ### Sleep, schedule, and holidays
 
 The bot has a body clock, and it was already running before this round — verified, not
