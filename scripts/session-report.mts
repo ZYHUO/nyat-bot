@@ -159,6 +159,10 @@ interface DbStats {
   failed?: string;
   /** 最近一条 asi_final 非密的时间（ISO），用来看新代码有没有产出实测 */
   asiLatestMeasured?: string;
+  /** asi_final 非空的行数（含修复前写进去的假测量） */
+  asiNonNull?: number;
+  /** 最近一条真测到（rubric 不全等于中性默认）的时间 */
+  asiLatestReal?: string;
 }
 
 function readDb(): DbStats {
@@ -170,14 +174,28 @@ function readDb(): DbStats {
     const sinceSec = nowSec - DAYS * 86_400;
     out.sends = (db.prepare('SELECT COUNT(*) n FROM self_replies WHERE ts >= ?').get(sinceSec) as { n: number }).n;
     out.sendsPrev = (db.prepare('SELECT COUNT(*) n FROM self_replies WHERE ts >= ? AND ts < ?').get(sinceSec - DAYS * 86_400, sinceSec) as { n: number }).n;
+    // **COUNT(asi_final) 不是"真测到"**：旧代码把中性默认值当测量结果写进去，
+    // 于是 `asi_final IS NOT NULL` 里混着 2242 行一模一样的 77.0 / warmth 0.5。
+    // 2026-09-21 修完之后未测到的写 NULL，但**历史行救不回来**——
+    // 拿 COUNT(asi_final) 当实测率，会把修复前的假测量算成真的。
+    //
+    // 判据改成"rubric 五列不全等于中性默认值"：那才是模型真吐了分的样子。
+    const NEUTRAL = 'rubric_social_presence = 0.5 AND rubric_warmth = 0.5 AND rubric_competence = 0.5 AND rubric_appropriateness = 0.5 AND rubric_uncanny_risk = 0.2';
     const r = db.prepare(
-      `SELECT COUNT(*) n, COUNT(asi_final) measured FROM reply_outcomes WHERE ts >= ?`,
-    ).get(sinceSec) as { n: number; measured: number };
+      `SELECT COUNT(*) n,
+              COUNT(asi_final) nonNull,
+              SUM(CASE WHEN asi_final IS NOT NULL AND NOT (${NEUTRAL}) THEN 1 ELSE 0 END) measured
+         FROM reply_outcomes WHERE ts >= ?`,
+    ).get(sinceSec) as { n: number; nonNull: number; measured: number };
     out.asiRows = r.n;
     out.asiMeasured = r.measured;
+    out.asiNonNull = r.nonNull;
     out.outcomes = r.n;
     const lm = db.prepare('SELECT MAX(ts) t FROM reply_outcomes WHERE asi_final IS NOT NULL').get() as { t: number | null };
     if (lm?.t) out.asiLatestMeasured = new Date(lm.t * 1000).toISOString().replace('T', ' ').slice(0, 16);
+    // 最近一条**真测到**的时间
+    const lm2 = db.prepare(`SELECT MAX(ts) t FROM reply_outcomes WHERE asi_final IS NOT NULL AND NOT (${NEUTRAL})`).get() as { t: number | null };
+    if (lm2?.t) out.asiLatestReal = new Date(lm2.t * 1000).toISOString().replace('T', ' ').slice(0, 16);
     db.close();
   } catch (err) {
     // 读不到必须留痕：静默的 0 会被读成"效果为 0"，那是这个会话吃亏最多的坑。
@@ -394,15 +412,15 @@ console.log('');
 
 console.log('── 4. ASI 自评（假度量修复）──');
 console.log(`  窗口内 reply_outcomes         ${db.asiRows}`);
-console.log(`  其中真测到（asi_final 非空） ${db.asiMeasured}  ${pct(db.asiMeasured, db.asiRows)}`);
-console.log(`  未测到（写 NULL，不写假值）   ${db.asiRows - db.asiMeasured}`);
-if (db.asiLatestMeasured) {
-  console.log(`  最近一条实测: ${db.asiLatestMeasured}` +
-    (deployMs > 0 && new Date(db.asiLatestMeasured).getTime() < deployMs
-      ? '   ← 在部署前，新代码还没产出实测' : ''));
+console.log(`  asi_final 非空                ${db.asiNonNull ?? 0}   ← **不是**实测率：修复前把中性默认值当测量写了进去`);
+console.log(`  其中真测到（rubric 有真分）   ${db.asiMeasured}  ${pct(db.asiMeasured, db.asiRows)}`);
+console.log(`  未测到                        ${db.asiRows - (db.asiNonNull ?? 0)}`);
+if (db.asiLatestReal) console.log(`  最近一条真测到: ${db.asiLatestReal}`);
+if (db.asiLatestMeasured && !db.asiLatestReal) {
+  console.log(`  （最近一条 asi_final 非空是 ${db.asiLatestMeasured}，但那是中性默认值，不是真测量）`);
 }
 if (db.asiRows > 0 && db.asiMeasured === 0) {
-  console.log('  ⚠️  全 NULL —— 要么没采样到，要么 rubric 调用仍在失败。看日志里的');
+  console.log('  ⚠️  一条真测量都没有 —— 要么没采样到，要么 rubric 调用仍在失败。看日志里的');
   console.log('      "claude: 空正文" 与 "ASI: rubric 解析失败"。');
 }
 console.log('');
