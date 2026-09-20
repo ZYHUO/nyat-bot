@@ -1029,6 +1029,20 @@ const envSchema = z.object({
   // 上下文压缩用的 AI usage 名（便宜模型即可）。
   AGENT_COMPACT_USAGE: z.string().default('judge'),
   // Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。
+  // ── StepFun 全网搜索（2026-09-20 起作为**主路由**）────────────────
+  // 原 4 条 fallback 链（Gemini grounding / new-api grok / SearxNG / DDG）整体保留为
+  // 后备，但默认走 stepfun 的 POST /v1/search：一次请求拿 title/snippet/content/time，
+  // 不需要模型中转，比"让 Gemini 联网再总结"少一跳、也少一类工具标签泄漏面。
+  // key 从 DSH 的 stepfun provider 取（HERMES_CUSTOM_API_STEPFUN_COM_API_KEY），
+  // 不进任何日志。默认开；用 === false 关。
+  STEPFUN_SEARCH_ENABLED: booleanFromEnv.default(true),
+  STEPFUN_SEARCH_API_KEY: z.string().default(''),
+  STEPFUN_SEARCH_BASE_URL: z.string().url().default('https://api.stepfun.com'),
+  // stepfun 不认 max_results（恒返回 10 条），所以在客户端切。
+  STEPFUN_SEARCH_MAX_RESULTS: z.coerce.number().int().positive().max(10).default(5),
+  // 可选分类过滤：programming / research / gov / business。空 = 全网。
+  STEPFUN_SEARCH_CATEGORY: z.string().default(''),
+
   CODEACT_WEB_SEARCH_ENABLED: booleanFromEnv.default(true),
   // Subagent host pixiv/linux.sb 只读工具。默认关，按灰度开。
   CODEACT_PIXIV_ENABLED: booleanFromEnv.default(false),

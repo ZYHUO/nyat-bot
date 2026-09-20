@@ -1,5 +1,5 @@
 // ────────────────────────────────────────
-// Web search tool — Gemini grounding (primary) + new-api grok + SearxNG + DDG Lite fallback
+// Web search tool — StepFun /v1/search (primary) + Gemini grounding + new-api grok + SearxNG + DDG fallback
 // ────────────────────────────────────────
 
 import { ProxyAgent } from 'undici';
@@ -20,7 +20,29 @@ const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Geck
 export async function executeSearch(query: string): Promise<string> {
   const e = env();
 
-  // Route 1: Gemini Google-Search grounding (primary)
+  // Route 0: StepFun 全网搜索（2026-09-20 起的主路由）。
+  //
+  // 为什么它是主路由而不是又一条 fallback：原来的 4 条链都要"让一个模型联网再
+  // 总结一遍"，多一跳、多一类把工具标签拼进正文的泄漏面（2026-09-20 刚出过
+  // <web.search><args>… 被原样发出去的事故）。stepfun 的 /v1/search 直接返回
+  // title/snippet/content/time，没有模型中转，也就没有那个泄漏面。
+  //
+  // 默认开；STEPFUN_SEARCH_ENABLED === false 时整条跳过（repo 惯例：默认真用 === false 关）。
+  if (e.STEPFUN_SEARCH_ENABLED !== false && e.STEPFUN_SEARCH_API_KEY) {
+    try {
+      return await stepfunSearch(
+        query,
+        e.STEPFUN_SEARCH_API_KEY,
+        e.STEPFUN_SEARCH_BASE_URL,
+        e.STEPFUN_SEARCH_MAX_RESULTS,
+        e.STEPFUN_SEARCH_CATEGORY,
+      );
+    } catch (err) {
+      logger.warn({ err, query }, 'StepFun search failed, falling back');
+    }
+  }
+
+  // Route 1: Gemini Google-Search grounding (fallback)
   if (e.GEMINI_API_KEY) {
     try {
       return await geminiSearch(query, e.GEMINI_API_KEY, e.GEMINI_SEARCH_MODEL, e.GEMINI_SEARCH_PROXY);
@@ -45,6 +67,55 @@ export async function executeSearch(query: string): Promise<string> {
 
   // Route 4: DDG Lite (always available)
   return ddgLiteSearch(query);
+}
+
+// ── StepFun 全网搜索 ──
+// POST {base}/v1/search  →  { query, category, results:[{url,position,title,time,snippet,content}] }
+// 注意：服务端不认 max_results（实测恒返回 10 条），所以在客户端切。
+interface StepfunSearchResponse {
+  query?: string;
+  category?: string;
+  results?: Array<{
+    url?: string;
+    position?: number;
+    title?: string;
+    time?: string;
+    snippet?: string;
+    content?: string;
+  }>;
+}
+
+async function stepfunSearch(
+  query: string,
+  apiKey: string,
+  baseUrl: string,
+  maxResults: number,
+  category: string,
+): Promise<string> {
+  const body: Record<string, unknown> = { query };
+  if (category) body.category = category;
+  const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/v1/search`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`stepfun search HTTP ${res.status}`);
+  const data = (await res.json()) as StepfunSearchResponse;
+  const rows = (data.results ?? []).slice(0, maxResults);
+  if (rows.length === 0) return '(no results)';
+  const lines = rows.map((r, i) => {
+    const head = `[${r.position ?? i + 1}] ${r.title ?? '(无标题)'}`;
+    const when = r.time ? ` (${String(r.time).slice(0, 10)})` : '';
+    const src = r.url ? `\n    源: ${r.url}` : '';
+    // 优先 snippet（短、已是给人看的摘要）；没有就退回 content 并截断。
+    const text = (r.snippet ?? r.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    return `${head}${when}${src}${text ? `\n    ${text}` : ''}`;
+  });
+  return lines.join('\n');
 }
 
 // ── Gemini Google-Search grounding ──
