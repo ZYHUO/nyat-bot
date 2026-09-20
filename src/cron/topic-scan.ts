@@ -77,4 +77,42 @@ export async function runTopicScan(): Promise<void> {
   }
   pruneDeadTopics(); // global sweep:清掉已沉寂群里的 dead 话题(tick 只覆盖活跃群)
   if (chats.length) logger.info({ chats: chats.length, observed }, 'Topic scan tick');
+
+  // ── 抽取率告警 ────────────────────────────────────────────────────────
+  //
+  // 2026-09-21 加。起因是一次读数：102 次 tick、扫了 2040 个群，只抽出 91 个标签
+  // （4.5%）。而 `observed` 这个字段**一直都在日志里**，只是没人看——于是一次
+  // 每 4 分钟烧 20 次 LLM 调用的 cron，长期以 4.5% 的效率空转，没有任何告警。
+  //
+  // 病因是 `maxTokens: 24`：topic-scan 只要 4-12 个汉字的标签，听上去 24 够用，
+  // 但 judge usage 落到 step-3.7-flash 这种 reasoning 模型，思维链先烧 token，
+  // content 恒为空 → extractTopic 返回 null → observed=0。
+  //
+  // 修复（provider 层的 reasoning token 下限）上线后的同一 cron：20:48:25 那次 tick
+  // observed=10、零截断；而之前三次是 1 / 1 / 0，每次都伴随 21 次截断。
+  //
+  // 阈值取 0.15 而不是 0：群真的没话题时模型会正确返回 NONE，那也是 0。
+  // 所以这里不报"本次失败"，报的是**连续**低抽取——单次 0 是正常，
+  // 一直 0 说明链路坏了。用进程内计数，不落盘（重启后重新累计，代价小）。
+  if (chats.length > 0) {
+    const rate = observed / chats.length;
+    if (rate < LOW_YIELD_RATE) {
+      lowYieldRuns++;
+      if (lowYieldRuns === LOW_YIELD_ALERT_AFTER) {
+        logger.warn(
+          { chats: chats.length, observed, rate: Number(rate.toFixed(3)), consecutive: lowYieldRuns },
+          'topic-scan: 连续低抽取——要么群真的没话题，要么 LLM 调用在空转（看 claude: 空正文）',
+        );
+      }
+    } else {
+      lowYieldRuns = 0;
+    }
+  }
 }
+
+/** 抽取率低于此值算一次"低产"。 */
+const LOW_YIELD_RATE = 0.15;
+/** 连续这么多次低产才告警——避免把"群真的冷清"刷成告警。 */
+const LOW_YIELD_ALERT_AFTER = 5;
+/** 连续低产计数（进程内）。 */
+let lowYieldRuns = 0;

@@ -85,6 +85,8 @@ const CHECKS: Array<[string, string]> = [
   ['沙盒 bots 命名空间', "'bots',"],
   // reasoning token 下限（2026-09-21）
   ['reasoning token 下限', 'REASONING_TOKEN_FLOOR'],
+  // topic-scan 低抽取告警（2026-09-21）
+  ['topic-scan 低产告警', 'topic-scan: 连续低抽取'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

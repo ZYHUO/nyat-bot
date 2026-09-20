@@ -792,6 +792,40 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### A cron that had been running at 1% for days, because nobody read one field
+
+`runTopicScan` logs `{ chats, observed }` every tick. `observed` is how many topic labels
+it actually extracted. Nobody looked at it — so a cron that burns 20 LLM calls every four
+minutes had been running for days at **1.0%** (533 ticks, 10,660 chats scanned, 108
+labels) with no alarm anywhere.
+
+The cause was the 24-token budget described above. The fix was the provider floor, and the
+production evidence is unusually clean because it is the *same* job on both sides of a
+restart:
+
+| | before | after |
+|---|---|---|
+| tick at 20:31 | observed **1**, 21 truncations in the batch | — |
+| tick at 20:40 | observed **0**, 21 truncations | — |
+| tick at 20:48 | — | observed **10**, **0** truncations |
+
+So the floor is not just unit-tested — the same cron went from extracting 0–1 labels out of
+20 chats to 10, with the truncations gone entirely.
+
+Two things were added so this cannot hide again:
+
+- **A low-yield alert** in `topic-scan`: five consecutive ticks below 15% extraction raise a
+  warning. The threshold is deliberately not zero — when a group genuinely has no topic the
+  model correctly answers `NONE`, and a single zero tick is normal. What is not normal is
+  *sustained* zero.
+- **A `topic-scan 抽取率` section in `scripts/session-report.mts`**, which is where the
+  1.0% number above came from.
+
+And one logging change: the truncation retry now logs at `info` the **first** time per label
+and `debug` thereafter. The first one says "this model thinks too much, noted"; the other
+192 were noise. The retry count in the report is therefore "how many labels were found to
+truncate", not "how many retries happened".
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead

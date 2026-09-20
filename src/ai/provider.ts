@@ -102,12 +102,17 @@ async function callClaude(
   // 内容审查/超时/限流重试没有意义，只会把延迟翻倍。
   if (first.truncated) {
     // 记住这个 label 会截断——之后它的每次调用都直接拿下限，不再先撞一次。
+    const firstTime = !truncatingLabels.has(label.name);
     truncatingLabels.add(label.name);
     // 重试额度用**下限**而不是 2×：调用方写 24 时 2× 只有 48，照样不够
     // （诊断里 48 出现 73 次，就是重试也失败了）。下限是实测够用的值。
     const retryBudget = Math.min(Math.max(budget * 2, REASONING_TOKEN_FLOOR), 32_000);
-    logger.debug(
-      { label: label.name, model: label.model, budget, retryBudget, floor: REASONING_TOKEN_FLOOR },
+    // 每个 label 只 info 一次：第一次截断是"这个模型想多了，我记下了"，
+    // 值得看见；之后每次截断都 info 就是刷屏（实测 50 分钟 193 次）。
+    // 后续的走 debug，靠上面的空正文 warn 诊断兜底。
+    const log = firstTime ? logger.info : logger.debug;
+    log(
+      { label: label.name, model: label.model, budget, retryBudget, floor: REASONING_TOKEN_FLOOR, firstTime },
       'claude: 思维链吃光额度导致空正文 → 抬到下限重试一次',
     );
     try {

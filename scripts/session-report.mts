@@ -118,6 +118,8 @@ function readLog(): LogStats {
     else if (msg === 'heart LLM failed, fail-closed pass') { st.heartFailed++; if (t >= deployMs) st.afterHeartFailed++; }
     else if (errMsg.includes('All labels exhausted')) st.allExhausted++;
     else if (errMsg.includes('Empty response')) st.emptyResponse++;
+    // 每个 label 只在第一次截断时打 info（不刷屏），后续走 debug。
+    // 所以这个数是"有几个 label 被发现会截断"，不是"重试了几次"。
     else if (msg.includes('思维链吃光额度')) { st.truncRetry++; if (t >= deployMs) st.afterTruncRetry++; }
     else if (msg.startsWith('Meta ')) st.metaEvents++;
     else if (msg.startsWith('Pipeline complete')) {
@@ -261,8 +263,39 @@ console.log(`  心流裁决                      ${st.heartDecision}`);
 console.log(`  LLM 失败 (fail-closed)        ${st.heartFailed}  ${pct(st.heartFailed, st.heartDecision)}   部署后 ${st.afterHeartFailed}`);
 console.log(`    ├─ All labels exhausted     ${st.allExhausted}  ${pct(st.allExhausted, Math.max(1, st.heartFailed))} of failures`);
 console.log(`    └─ 空正文                   ${st.emptyResponse}`);
-console.log(`  截断加额重试                  ${st.truncRetry}   部署后 ${st.afterTruncRetry}   （思维链吃光 max_tokens 的那类）`);
+console.log(`  发现会截断的 label             ${st.truncRetry}   部署后 ${st.afterTruncRetry}   （每个只记第一次，不刷屏）`);
 console.log(`  保句闸 (被叫到 → wait)        ${st.keepAddressed}   部署后 ${st.afterKeepAddressed}`);
+console.log('');
+
+console.log('── 2b. topic-scan 抽取率（低产 = LLM 在空转）──');
+{
+  let ticks = 0; let chats = 0; let observed = 0;
+  try {
+    const fd = readFileSync(LOG, 'utf8');
+    for (const line of fd.split('\n')) {
+      if (!line.includes('Topic scan tick')) continue;
+      const m = /"time":(\d{13})/.exec(line.slice(0, 80));
+      if (!m || Number(m[1]) < sinceMs) continue;
+      let d: Record<string, unknown>;
+      try { d = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      ticks++;
+      chats += Number(d['chats'] ?? 0);
+      observed += Number(d['observed'] ?? 0);
+    }
+  } catch { /* 读不到就留 0，配合上面的提示读作没有数据 */ }
+  if (ticks === 0) {
+    console.log('  窗口内没有 Topic scan tick');
+  } else {
+    const rate = chats > 0 ? observed / chats : 0;
+    console.log(`  tick ${ticks} 次｜扫群 ${chats}｜抽出标签 ${observed}  ${pct(observed, chats)}`);
+    if (chats > 0 && rate < 0.15) {
+      console.log('  ⚠️  低于 15% —— 要么群真的冷清，要么 LLM 在空转。看日志里的');
+      console.log('      "claude: 空正文"（思维链吃光 max_tokens）与 topic-scan 的低产告警。');
+      console.log('      2026-09-21 实测：修 maxTokens 之前 4.5%（2040 扫 / 91 抽），');
+      console.log('      修之后同一次 tick observed 0 → 10、零截断。');
+    }
+  }
+}
 console.log('');
 
 console.log('── 3. 架构占比 ──');
