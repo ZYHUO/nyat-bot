@@ -41,7 +41,11 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 - **Everything new is `env`-flag-gated, default OFF, and graylisted per chat.** Flags live in **`src/env-sections/*.ts`** (a zod schema split by subsystem; `src/env.ts` only composes them with spread). Read via the cached `env()` getter, **never `process.env` directly**. Graylists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. `.env` is gitignored and secret — **never commit it**.
   - The 12 sections: `infra` `memory` `timing` `judge` `cognition` `core` `self` `turn` `meta` `features` `social` `life`. Shared `booleanFromEnv` lives in `src/env-sections/_shared.ts` (one copy, not twelve).
   - Directory is `env-sections/`, **not** `env/sections/` — `src/env.ts` is a file, and a same-named directory makes relative imports resolve to the wrong place.
-  - `tests/unit/env/schema-sections.test.ts` pins the key set (495, no losses, no cross-section duplicates) and that every section file is actually imported **and** spread. Adding a file without wiring it makes that whole section silently vanish — the test catches it.
+  - `tests/unit/env/schema-sections.test.ts` pins the key set (**484** as of 2026-09-21; the
+    number moves as flags are added/retired — re-count, don't guess), plus no losses and no
+    cross-section duplicates, and that every section file is actually imported **and**
+    spread. Adding a file without wiring it makes that whole section silently vanish — the
+    test catches it.
   - Split was done by `scripts/split-env-schema.py`; it asserts the line ranges tile the schema exactly before writing anything.
 - **`chatId` sign discriminates DM vs group**: `> 0` = DM/private, `< 0` = group. Use `isDM`/`isGroup` from `src/shared/chat.ts`.
 - **Migrations**: add a new `migrations/NNNN_name.sql` (4-digit, next after the highest — currently `0114`). Applied automatically on boot in **lexicographic filename order** (`src/db/sqlite.ts:runMigrations`), tracked in `_migrations`. Pure SQL, idempotent (`IF NOT EXISTS`/`ADD COLUMN`). **Never edit an already-applied migration.**
