@@ -8,6 +8,7 @@
 // ────────────────────────────────────────
 
 import { getDb } from '../db/sqlite.js';
+import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 
 export type GoalStatus = 'active' | 'achieved' | 'stale' | 'dropped';
@@ -55,6 +56,24 @@ export interface CreateGoalInput {
 export const GOAL_STALE_AFTER_SEC = 7 * 86400;
 /** 长期目标的 stale 窗口(30 天,跨周持续关注不轻易放弃)。 */
 export const GOAL_LONG_TERM_STALE_AFTER_SEC = 30 * 86400;
+
+/**
+ * 长期目标语义（AGI Level 5 Phase 3）开不开。
+ *
+ * 2026-09-21：`GOAL_LONG_TERM_ENABLED` 这个旗标此前是**死的**——env.ts 里声明了、
+ * .env 里开着，而全仓库没有一个地方读它。长期目标的 30 天 stale 窗口是写死的常量，
+ * 也就是说"可以关掉长期目标语义"这件事是假的：设 false 没有任何效果。
+ *
+ * 现在它真的门控这一步：关时 long_term=1 的目标按普通 7 天窗口 stale
+ * （= 长期目标退化成普通目标，不是报错、不是消失）。
+ */
+export function longTermEnabled(): boolean {
+  try {
+    return env().GOAL_LONG_TERM_ENABLED === true;
+  } catch {
+    return false;
+  }
+}
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -197,12 +216,14 @@ export function recordCheck(id: number, finding: string | null): void {
     } else {
       db.prepare(`UPDATE goals SET last_check_at = ?, check_count = check_count + 1, updated_at = ? WHERE id = ?`).run(ts, ts, id);
       // 零发现且活够久了 → stale(保留可复活,不再轮询)。
-      // 长期目标(long_term=1)的 stale 窗口放宽到 30 天(跨周持续关注不轻易放弃)。
+      // 长期目标(long_term=1)的 stale 窗口放宽到 30 天——但只在旗标开着时。
+      // 关掉长期目标语义 → long_term 目标按普通 7 天窗口 stale（退化，不报错）。
+      const ltWindow = longTermEnabled() ? GOAL_LONG_TERM_STALE_AFTER_SEC : GOAL_STALE_AFTER_SEC;
       db.prepare(
         `UPDATE goals SET status = 'stale', updated_at = ?
          WHERE id = ? AND status = 'active' AND findings_count = 0
            AND created_at + CASE long_term WHEN 1 THEN ? ELSE ? END <= ?`,
-      ).run(ts, id, GOAL_LONG_TERM_STALE_AFTER_SEC, GOAL_STALE_AFTER_SEC, ts);
+      ).run(ts, id, ltWindow, GOAL_STALE_AFTER_SEC, ts);
     }
   } catch (err) {
     logger.warn({ err, id }, 'recordCheck failed');

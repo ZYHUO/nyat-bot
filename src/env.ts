@@ -240,11 +240,9 @@ const envSchema = z.object({
   JUDGE_PROACTIVE_MIN_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
   JUDGE_PROACTIVE_MIN_RECENT_MSGS: z.coerce.number().int().positive().default(3),
 
-  // （原 PROACTIVE_SCAN_* 灰度已移除——独立 scan cron 被 unified-tick 取代）
-  // Attention pressure(借鉴 CGM):主动扫群按 pressure 排序挑 Top-N,而非随机。默认关。
-  PROACTIVE_PRESSURE_ENABLED: booleanFromEnv.default(false),
-  // 到点提醒唤醒 LLM(用群里上下文、自己的语气说),而非念稿「⏰定时提醒:X」。默认关。
-  SCHEDULE_LLM_WAKE: booleanFromEnv.default(false),
+  // （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标
+  //   2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron
+  //   已被 unified-tick 取代，后两者描述的机制从未落地。留着只会让人以为能调。）
   // Prometheus /metrics(借鉴 CGM:LLM 事件总线 → token/缓存/延迟按用途可见)。默认关。
   METRICS_ENABLED: booleanFromEnv.default(false),
   // 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。
@@ -1007,8 +1005,9 @@ const envSchema = z.object({
   TASK_PROGRESS_MAX_VISIBLE_UPDATES: z.coerce.number().int().positive().default(6),
   TASK_PROGRESS_START_DELAY_MS: z.coerce.number().int().nonnegative().default(1_000),
   TASK_PROGRESS_KEEPALIVE_MS: z.coerce.number().int().positive().default(35_000),
-  TASK_PROGRESS_CODEACT_ENABLED: booleanFromEnv.default(true),
-  TASK_PROGRESS_RESEARCH_ENABLED: booleanFromEnv.default(true),
+  // （TASK_PROGRESS_CODEACT_ENABLED / TASK_PROGRESS_RESEARCH_ENABLED 2026-09-21 删除：
+  //   两个都默认 true 而全仓库无一处读取。task-progress.ts 只读 TASK_PROGRESS_ENABLED，
+  //   这两个"按任务类型分开控制"的旋钮从未接上。）
   // 认知债务后台扫描（CSR）：过期清理 + 到期债务记录 + 预测误差摘要。默认关，灰度开。
   DEBT_SWEEP_ENABLED: booleanFromEnv.default(false),
   DEBT_SWEEP_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
@@ -1027,11 +1026,10 @@ const envSchema = z.object({
   GROUP_NORMS_AUTO_UPDATE_ENABLED: booleanFromEnv.default(false),
 
   // 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。
-  REPLY_MODE_ENABLED: booleanFromEnv.default(true),
-  REPLY_ACK_THEN_EXPAND_ENABLED: booleanFromEnv.default(true),
-  REPLY_MICRO_REACTION_MAX_CHARS: z.coerce.number().int().positive().default(12),
-  REPLY_ACK_MAX_CHARS: z.coerce.number().int().positive().default(12),
-  REPLY_MAX_EXPANSION_SEGMENTS: z.coerce.number().int().positive().default(2),
+  // （REPLY_MODE_ENABLED / REPLY_ACK_THEN_EXPAND_ENABLED / REPLY_MICRO_REACTION_MAX_CHARS /
+  //   REPLY_ACK_MAX_CHARS / REPLY_MAX_EXPANSION_SEGMENTS 2026-09-21 删除：
+  //   "回复形态与安全分段"这一整个特性既没接也没实现，五个旗标全是无人读的摆设，
+  //   其中两个还默认 true——看着像在跑。要做就当真功能做，别翻旧开关。）
   REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED: booleanFromEnv.default(true),
   REPLY_HUMANIZER_SAFE_MODE: booleanFromEnv.default(true),
 
@@ -1044,9 +1042,8 @@ const envSchema = z.object({
   AGENT_TASK_SEND_BUDGET: z.coerce.number().int().nonnegative().default(6),
   // history 超过多少轮触发 LLM 压缩早期轮次。
   AGENT_COMPACT_AFTER_TURNS: z.coerce.number().int().positive().default(50),
-  // 长任务进度可见性(P1):跨段续跑且从未发言时,每 10min 发一条"还在做"的
-  // 确定性进度 ping(模型里程碑汇报不可靠 —— 能续跑的任务按定义从没 sendText 过)。
-  AGENT_PROGRESS_PING_ENABLED: booleanFromEnv.default(false),
+  // （AGENT_PROGRESS_PING_ENABLED 2026-09-21 删除：全仓库无一处读取，.env 里开着。
+  //   它描述的"确定性进度 ping"从未实现——真要做是个新功能，不是翻一个旧开关。）
   // 上下文压缩用的 AI usage 名（便宜模型即可）。
   AGENT_COMPACT_USAGE: z.string().default('judge'),
   // Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。

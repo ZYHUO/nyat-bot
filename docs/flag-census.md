@@ -1,38 +1,30 @@
 # Flag census — env.ts 全量旗标清单
 
-生成方式：`python3 scripts/flag-census.py`（纯静态：env.ts 注释 + .env 实际值 + `grep env().<FLAG> src/`）。不打数据库、不改任何东西。
+生成方式：`python3 scripts/flag-census.py`（纯静态：env.ts 注释 + .env 实际值 + 三种读法 grep `src/`）。不打数据库、不改任何东西。2026-09-21 起带「已退役」一节——删掉的旗标在这里留名，免得下一个人再加回来。
 
 ## 总量
 
 | | |
 |---|---|
-| total_keys | 498 |
-| bool_flags | 221 |
-| on_in_prod | 191 |
-| set_in_env | 316 |
-| dead_no_reader | 32 |
-| dead_and_on | 9 |
+| total_keys | 494 |
+| bool_flags | 215 |
+| on_in_prod | 185 |
+| set_in_env | 322 |
+| dead_no_reader | 21 |
+| dead_and_on | 1 |
 | phantom_only_in_tests | 4 |
 
-**221 个布尔旗标里，生产实际开着 191 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**215 个布尔旗标里，生产实际开着 185 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
-## 🔴 死旗标：.env 开着，但代码里一个字都没有（9 个）
+## 🔴 死旗标：.env 开着，但代码里一个字都没有（1 个）
 
 这些是"以为在跑"的开关。判定要求 src/ + scripts/ + packages/ 全无命中（`env().FLAG` / 解构 / `process.env.FLAG` 三种读法都算过）。
 
 | flag | .env | 注释怎么说 | tests/ 里有吗 |
 |---|---|---|---|
-| `AGENT_PROGRESS_PING_ENABLED` | true | 长任务进度可见性(P1):跨段续跑且从未发言时,每 10min 发一条"还在做"的 确定性进度 ping(模型里程碑汇报不可靠 —— 能续跑的任务按定义从没 sendText 过)。 | — |
 | `CORE_BLACKBOARD_ENABLED` | true | （无注释） | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts |
-| `GOAL_LONG_TERM_ENABLED` | true | ── AGI Level 5 Phase 3: 长期任务语义 ──────────────────────────────── goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。 long_term goal 的 stale 窗口放宽到 30 天。 | — |
-| `PROACTIVE_PRESSURE_ENABLED` | true | （原 PROACTIVE_SCAN_* 灰度已移除——独立 scan cron 被 unified-tick 取代） Attention pressure(借鉴 CGM):主动扫群按 pressure 排序挑 Top-N,而非随机。默认关。 | — |
-| `REPLY_ACK_THEN_EXPAND_ENABLED` | None | （无注释） | — |
-| `REPLY_MODE_ENABLED` | None | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 | — |
-| `SCHEDULE_LLM_WAKE` | true | 到点提醒唤醒 LLM(用群里上下文、自己的语气说),而非念稿「⏰定时提醒:X」。默认关。 | — |
-| `TASK_PROGRESS_CODEACT_ENABLED` | None | （无注释） | — |
-| `TASK_PROGRESS_RESEARCH_ENABLED` | None | （无注释） | — |
 
 ## 🟡 假开关：只被测试 mock，src/ 不读（4 个）
 
@@ -45,14 +37,13 @@
 | `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | — | tests/unit/judge/rules.test.ts |
 | `JUDGE_PROACTIVE_RATE` | 0.5 | tests/unit/judge/rules.test.ts |
 
-## 生产开着的旗标（191 个）
+## 生产开着的旗标（185 个）
 
 | flag | 默认 | .env | 是什么（注释摘要） | 读者 |
 |---|---|---|---|---|
 | `AGENCY_CONTROL_ADAPTERS_ENABLED` | false | true | Agency 控制动作的宿主实现（observe/remember/correct/stop）。 agency-control-adapters 只提供"外壳"（scope/预算/回执契约），宿主实现从未提供， 所以 runtime 派发这些动作时没有可执行体。实现见 agency-host-ada | agent/agency-host-adapters.ts, agent/agency-proposals.ts |
 | `AGENCY_FAIL_CLOSED` | true | None |  | 解构: agent/agency-policy.ts |
 | `AGENT_LOOP_ENABLED` | false | true | 长时间 Agent 循环：分段续跑 + checkpoint + 上下文压缩。默认关，灰度开。 | subagent/executor.ts |
-| `AGENT_PROGRESS_PING_ENABLED` | false | true | 长任务进度可见性(P1):跨段续跑且从未发言时,每 10min 发一条"还在做"的 确定性进度 ping(模型里程碑汇报不可靠 —— 能续跑的任务按定义从没 sendText 过)。 | **无人读** |
 | `ALLOWLIST_AUTO_AI_REVIEW` | true | true |  | 解构: allowlist/bot-flow.ts, cron/sleep-cycle.ts |
 | `ALLOWLIST_BOT_FLOW_ENABLED` | false | true | Bot 对话流申请（2026-08-20 起替代 miniapp 提交）：申请人私聊 bot 报群 ID/@username， bot 调 allowlist.apply 自动审核——申请人须为目标群 creator/administrator 才允许 AI 通过即启用（身份经 getChatMem | subagent/host-api.ts |
 | `ALLOWLIST_ENABLED` | false | true | Allowlist | 解构: allowlist/bot-flow.ts, cron/sleep-cycle.ts |
@@ -89,7 +80,7 @@
 | `CORE_V2_ENABLED` | true | None | 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。 | core/loop.ts |
 | `CRON_ENABLED` | true | None | Cron master switch — read via env() like every other flag (kilo review). | cron/scheduler.ts |
 | `DEBT_AUTO_MATCH_ENABLED` | false | true | Durable cognitive event projection is safe to run without authority; debt creation remains a separate opt-in until its false-positive rate is known. | cron/scheduler.ts |
-| `DEBT_SWEEP_ENABLED` | false | true | 认知债务后台扫描（CSR）：过期清理 + 到期债务记录 + 预测误差摘要。默认关，灰度开。 | cron/scheduler.ts |
+| `DEBT_SWEEP_ENABLED` | false | true | （TASK_PROGRESS_CODEACT_ENABLED / TASK_PROGRESS_RESEARCH_ENABLED 2026-09-21 删除： 两个都默认 true 而全仓库无一处读取。task-progress.ts 只读 TASK_PROGRESS_ENABLED， 这两个"按任务 | cron/scheduler.ts |
 | `DIGEST_PERSIST_ENABLED` | false | true |  | meta/session-digest.ts, meta/session.ts, subagent/host-api.ts |
 | `DM_AUTO_PRIVATE` | true | true | DM 是否自动判为私密会话(CGM dmAutoPrivate)。默认 true。 | 解构: memory/visibility.ts |
 | `DREAMING_ENABLED` | false | true |  | cron/dreaming.ts, cron/scheduler.ts |
@@ -102,7 +93,7 @@
 | `EXPRESSION_INJECT_ENABLED` | false | true |  | pipeline/reply/prompt-builder.ts |
 | `FLOOR_ENABLED` | false | 1 | H1.1 floor/addressee 三档（默认 OFF，OFF = 老路零变化）。 开后：ambient/not_me 先记 floor_decisions 再按规则短路，to_me 才进 judge。 | 解构: pipeline/stages/deliver.ts, pipeline/stages/post-judge.ts, pipeline/pipeline.ts |
 | `GOAL_EVIDENCE_GATE_ENABLED` | false | 1 | ── Phase 2: 证据门学习 ────────────────────────────────────────── 默认 OFF:OFF 时行为与 Phase-2 之前一致(legacy 直写路径)。 开启后:goal achieved 必须 host verified;skill verif | subagent/executor.ts |
-| `GOAL_LONG_TERM_ENABLED` | false | true | ── AGI Level 5 Phase 3: 长期任务语义 ──────────────────────────────── goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。 long_term goal 的 stale 窗口放宽到 30  | **无人读** |
+| `GOAL_LONG_TERM_ENABLED` | false | true | ── AGI Level 5 Phase 3: 长期任务语义 ──────────────────────────────── goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。 long_term goal 的 stale 窗口放宽到 30  | agent/goals.ts |
 | `GROUNDING_CHECK_ENABLED` | false | true | 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字/事实（模型幻觉）。 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」。 先用确定性闸门（含具体数字才问）压调用量；JeV 不可达一律 fail-open。 | subagent/host-api.ts |
 | `GROUNDING_ENABLED` | false | true |  | meta/grounding.ts, meta/session.ts, subagent/executor.ts |
 | `GROUP_NORMS_AUTO_UPDATE_ENABLED` | false | true | LLM group-norm proposals do not mutate the durable hypothesis by default; verified host evidence uses the separate evidence-gated updater. | agent/group-norms.ts |
@@ -126,7 +117,7 @@
 | `META_DISPATCH_GATE_ENABLED` | false | true |  | 解构: meta/dispatch-gate.ts |
 | `META_HEART_ENABLED` | true | None | Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。 false = 旁路它的 allow/silence，消息按既有 layer 分 | 解构: bot/handlers/message.ts, meta/heart-route.ts |
 | `META_SUBAGENT_ENABLED` | false | true | ── Meta + Subagent (CyberGroupmate-shaped orchestration inside nyatbot) ── 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback, 不再走 BullMQ  | cron/dream-journal.ts, meta/loop.ts, meta/timing-adapter.ts, pipeline/timing/chat-runtime.ts |
-| `METRICS_ENABLED` | false | true | Prometheus /metrics(借鉴 CGM:LLM 事件总线 → token/缓存/延迟按用途可见)。默认关。 | 解构: index.ts |
+| `METRICS_ENABLED` | false | true | （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标 2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron 已被 unified-tick 取代，后两者描述的机制从未落地 | 解构: index.ts |
 | `MOOD_ENABLED` | false | true | ── Mood drift (Stage E) ── Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。 | tracking/mood.ts |
 | `MOOD_INJECT_ENABLED` | false | true | 是否把 mood hint 注入 reply prompt | tracking/mood.ts |
 | `MOOD_TUNE_ENABLED` | false | true | 心情/精力 → humanizer 参数调制 (Opus 评审: 随机性不该是 IID; 累/被怼时回复更短更敷衍, 心情好时更活泼)。合并序: 群风格 < mood-tune < 运营 override < ASI self-tune。 | 解构: pipeline/stages/deliver.ts |
@@ -153,7 +144,6 @@
 | `PERSON_IDENTITY_ENABLED` | false | true | 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。 | tracking/person-identity.ts |
 | `PLANNER_AGENTIC_ENABLED` | false | true | ── Agentic planner（MaiBot 1.0.0 Maisaka 多轮 plan→act 借鉴）── 开了之后 planned 路径用 generateText({tools,maxSteps}) 原生工具循环, 工具结果回写 LLM 历史,可自适应换工具/重查;失败自动回退旧 JSO | pipeline/reply/reply.ts |
 | `POST_TASK_WINDOW_ENABLED` | false | true |  | subagent/post-task-window.ts |
-| `PROACTIVE_PRESSURE_ENABLED` | false | true | （原 PROACTIVE_SCAN_* 灰度已移除——独立 scan cron 被 unified-tick 取代） Attention pressure(借鉴 CGM):主动扫群按 pressure 排序挑 Top-N,而非随机。默认关。 | **无人读** |
 | `PROFILE_MERGE_ENABLED` | false | true | 机制5 LLM 全局画像合并 cron:低频把某人各上下文(群+DM)画像喂便宜模型提炼成 全局 traits/interests/relation,写回 person_identity 全局列。默认关。 | cron/scheduler.ts, tracking/person-identity.ts |
 | `PROMISE_LOOP_ENABLED` | false | true |  | subagent/host-api.ts |
 | `REALTIME_LEARN_ENABLED` | true | true | 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。 | 解构: tracking/realtime-learn.ts |
@@ -164,12 +154,10 @@
 | `RELATIONSHIP_PROFILE_TRIM_ENABLED` | false | true |  | tracking/relationship-quant.ts |
 | `RELATIONSHIP_QUANT_ENABLED` | false | true |  | cron/dreaming.ts, cron/relationship-summarize.ts, tracking/relationship-quant.ts |
 | `REPAIR_ENABLED` | false | true | 关系修复：把"我说了句没讨好的话、之后没再提"作为事实交给模型， 由它决定要不要回去说点什么。宿主只呈现，不代发、不自动道歉。 触发信号已存在（outcome.ts 的 explicit_negative / repair_loop → 'corrected'）， 但此前没有消费方（action-b | tracking/repair.ts |
-| `REPLY_ACK_THEN_EXPAND_ENABLED` | true | None |  | **无人读** |
 | `REPLY_DIRECT_TOOLS_ENABLED` | false | true | P3:direct(普通闲聊)路径也挂工具 —— 现状是 judge 判 direct 后写手完全无工具, 群里随口问"这链接是啥/现在油价多少"只能瞎编。开启后 direct 也走合并写手, 但只给只读子集(搜索/抓页/记忆/画像/历史/bot知识/黑话),不给 ADD_TIMER/ CREATE | pipeline/reply/reply.ts |
 | `REPLY_HUMANIZER_SAFE_MODE` | true | None |  | 解构: pipeline/stages/deliver.ts |
-| `REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED` | true | None |  | pipeline/reply/reply.ts |
+| `REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED` | true | None | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 （REPLY_MODE_ENABLED / REPLY_ACK_THEN_EXPAND_ENABLED / REPLY_MICRO_REACTION_MAX_CHARS / REPLY_ACK_MAX_CHARS / REPLY_MAX_EXP | pipeline/reply/reply.ts |
 | `REPLY_MERGED_TOOLS_ENABLED` | false | true | 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段 (默认关,灰度;失败自动回退老两段路径) | pipeline/reply/reply.ts |
-| `REPLY_MODE_ENABLED` | true | None | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 | **无人读** |
 | `REPLY_VISION_ENABLED` | false | true | P2 多模态直读:回复写手调用直接带原图(默认关 = 只用文本描述)。 开前确保回复链主 label 声明 AI_PROVIDER_<NAME>_VISION=true, 纯文本 label 声明 VISION=false 让 fallback 跳过(不白烧 400)。 | pipeline/reply/reply.ts |
 | `REVERSE_VALVE_ENABLED` | false | 1 | Phase 14.1 接线: DM 风险 → 写手提示 + humanizer 衰减。默认 OFF,OFF 时 currentRiskLevel 恒 low(提示/衰减全是 undefined,行为与改造前逐字节一致)。 只在 DM(chatId > 0)生效,群聊零变化。 | agent/reverse-valve.ts, pipeline/reply/prompt-builder.ts |
 | `REWARD_GATE_ENABLED` | false | true | 主动发言意愿闸（reward model）：主动开口前用一次便宜的 judge 判断 "现在发这句话合不合适"。原作者注释：取代扁平概率、针对主动 bot 的 头号失败模式（不合时宜地打断）。fail-OPEN：闸门故障绝不让 bot 变哑。 此前硬编码 true 但零调用方；2026-09-19  | pipeline/reward/reward-model.ts |
@@ -180,7 +168,6 @@
 | `SANDBOX_ENABLED` | false | true | ── Computer-use sandbox (Playwright + terminal) ── ⚠️ 安全边界说明(2026-08-22 审查): computer.run 走宿主 /bin/sh -c 执行, 危险命令 模式集(sandbox/terminal.ts)只是纵深防御——**不是 | sandbox/paths.ts, subagent/host-api.ts |
 | `SANDBOX_REQUIRE_ISOLATION` | true | None | 隔离能力不可用时默认拒绝执行；仅在明确应急配置为 false 时允许宿主回退。 | sandbox/terminal.ts |
 | `SANDBOX_TERMINAL_ENABLED` | true | None |  | sandbox/terminal.ts |
-| `SCHEDULE_LLM_WAKE` | false | true | 到点提醒唤醒 LLM(用群里上下文、自己的语气说),而非念稿「⏰定时提醒:X」。默认关。 | **无人读** |
 | `SCHOOL_SCHEDULE_ENABLED` | false | true | ── Daily life / school schedule ── 16 岁人设的「每日安排」：school=周课表，summer=暑假日计划，auto=7–8 月暑假否则上学。 SCHOOL_SCHEDULE_ENABLED 关 → 不注入。睡眠硬门仍优先于本模块。 | cron/scheduler.ts, cron/school-day-plan.ts, pipeline/heart/self-state.ts, tracking/school-state.ts |
 | `SELF_EDIT_GUARDRAILS_ENABLED` | false | 1 |  | agent/self-improve.ts, subagent/host-api.ts |
 | `SELF_HISTORY_ENABLED` | false | true | ── Self-narrative (Stage F): bot 记得自己对每个用户说过什么 ── 同一开关也驱动"我最近在这个群的整体表现"（含每条消息的真实结果）， 心流决策会看到这个事实块 —— 模型据此自己判断要不要收着点。 | tracking/self-history.ts |
@@ -203,9 +190,7 @@
 | `SUBAGENT_MEMORY_ENABLED` | false | true | ── CodeAct 自动注入长期记忆 ────────────────────────────── 接在 subagent/executor.ts(真正生成话语的那层),**不是** Meta 编排器 —— Meta 的引擎跨所有会话,其输出经 digest/梦境日记扩散到每个群的 prompt, | 解构: subagent/memory-context.ts |
 | `SYCOPHANCY_AUDIT_ENABLED` | false | true | 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。 | cron/scheduler.ts, cron/self-reflect.ts, cron/sycophancy-audit.ts |
 | `TASK_EXECUTOR_ENABLED` | false | true | ── AGI Level 6 Phase 13: Task 对象架构 ───────────────────────────── 补 harness 的「执行+状态」:BullMQ 独立队列跑任务,与消息处理隔离。 | agent/task-store.ts, cron/scheduler.ts, pipeline/judge/task-trigger.ts |
-| `TASK_PROGRESS_CODEACT_ENABLED` | true | None |  | **无人读** |
 | `TASK_PROGRESS_ENABLED` | true | None | 长任务用户可见阶段通知：运行时负责短确认/保活，失败不影响任务执行。 | 解构: agent/task-progress.ts, scripts/eval-long-horizon-live.ts |
-| `TASK_PROGRESS_RESEARCH_ENABLED` | true | None |  | **无人读** |
 | `TIC_PENALTY_ENABLED` | false | true | 口头禅自动惩罚闭环:盯 bot 自己发言,句首/句尾短语复读超阈值 → 自动降权 + 带 TTL 动态拉黑(注入不喂回 + prompt 提示"少说")+ 到期自愈。默认关。 | cron/scheduler.ts, cron/tic-penalty.ts, pipeline/reply/reply.ts |
 | `TIMING_GATE_ENABLED` | false | true | ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ── 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。 | meta/timing-adapter.ts, pipeline/timing/chat-runtime.ts |
 | `TIMING_GATE_FAIL_CLOSED` | false | true | P2-E 解析失败方向:true = fail-closed 按 no_action 处理(MaiBot 语义:宁可 沉默不插嘴;direct 已在上游 bypass;强债务转保护性 wait)。llm_call_failed (网络)仍 fail-open。与仓库约定一致:行为变化默认关,.env | 解构: pipeline/timing/gate.ts |
@@ -236,6 +221,7 @@
 | `TURN_WAIT_RESUME_ENABLED` | false | true | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 | pipeline/timing/chat-runtime.ts |
 | `UNIFIED_TICK_ABSENT_USERS_ENABLED` | false | true | unified-tick 熟面孔缺席检测(Opus 评审: 主动消息要有理由—— "想起某人三天没出现")。开启后世界状态会带 absentUsers, 决策模型可选 remember_user 动作。 | 解构: cron/unified-tick.ts |
 | `VERIFY_ENABLED` | false | true | Join verification | cron/scheduler.ts |
+| `VIDEO_DESCRIBE_ENABLED` | true | true | 视频理解（2026-09-21）。默认开——它跟 audio/PDF 那俩不一样:那两个是"供应商 读不了所以必败"，这个是**真的能跑**。实测 step-5-preview 吃 base64 video_url， 6 秒测试视频准确描述了内容。关掉只退回中性占位（[视频]），不会报错。  为什么 | pipeline/multimodal.ts |
 | `WEATHER_ENABLED` | false | true | ── 天气环境感知（真人感）── wttr.in 免费源，30min 缓存；注入 self-state / tick WorldState，全 fail-soft。 | shared/weather.ts |
 | `WORLD_FACTS_ENABLED` | false | true | Record what Telegram reports about a chat (title/type/username/description) as host-observable world facts. This is the missing producer for `world_ch | meta/bookkeeping.ts |
 | `WORLD_STATE_ENABLED` | false | true | ── AGI Level 5 Phase 6: 轻量世界状态 ──────────────────────────────── 对象中心实体(person/project/topic)持续维护,goal check 开工前注入上下文。 | subagent/executor.ts |
@@ -276,7 +262,7 @@
 | `TTS_ENABLED` | false | — | ── TTS voice messages (edge-tts, free local Python) ── 把短回复概率性转成语音发送(适合短促亲昵/深夜私聊/情绪强烈的回复)。 edge-tts 生成 MP3 → ffmpeg 转 OGG/Opus(Telegram 语音消息要求 OggS+Op |
 | `TURN_UNIFIED_DECISION_ENABLED` | false | — | (旧名,弃用,留着防 .env 报错) |
 
-## 非布尔参数（277 个）
+## 非布尔参数（279 个）
 
 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|
@@ -286,8 +272,9 @@
 | `AGENCY_MAX_TOOL_CALLS` | 8 | — |  |
 | `AGENCY_RUNTIME_MODE` | 'shadow' | — | Host-owned Agency rollout mode. The default keeps Core proposals observable without allowing them to dispatch adapters o |
 | `AGENT_COMPACT_AFTER_TURNS` | 50 | — | history 超过多少轮触发 LLM 压缩早期轮次。 |
-| `AGENT_COMPACT_USAGE` | 'judge' | — | 上下文压缩用的 AI usage 名（便宜模型即可）。 |
+| `AGENT_COMPACT_USAGE` | 'judge' | — | （AGENT_PROGRESS_PING_ENABLED 2026-09-21 删除：全仓库无一处读取，.env 里开着。 它描述的"确定性进度 ping"从未实现——真要做是个新功能，不是翻一个旧开关。） 上下文压缩用的 AI usage |
 | `AGENT_MAX_SEGMENTS` | 10 | — | 单个任务最多跑几段（每段 CODEACT_MAX_TURNS 轮）。超限强制诚实收尾。 |
+| `AGENT_TASK_SEND_BUDGET` | 6 | 6 | 单个任务**一共**最多发几条消息（跨段累计）。 2026-09-21 之前这个预算实际是"每段 6 条 × 10 段 = 60 条"——每段重建 host api 就把 textSent 归零了。实测 1555 个任务/2965 次投递， |
 | `ALLOWLIST_AI_CONFIDENCE_THRESHOLD` | 0.85 | 0.85 |  |
 | `ALLOWLIST_AI_CONTEXT_MAX_CHARS` | 24000 | 24000 |  |
 | `ALLOWLIST_AI_MESSAGE_LIMIT` | 100 | 100 |  |
@@ -337,7 +324,7 @@
 | `DREAMING_USAGE` | 'reply' | — | dreaming 长任务用的 AI usage 名。 |
 | `DREAM_CONSOLIDATE_USAGE` | 'judge' | judge |  |
 | `DREAM_JOURNAL_CHAT_ID` | 0 | 3954993432 | 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。 |
-| `DREAM_JOURNAL_CRON` | '0 23 * * *,0 15 * * *' | 0 23 * * *,0 15 * * * | 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。 |
+| `DREAM_JOURNAL_CRON` | '0 23 * * *,0 15 * * *' | 0 23 * * *,0 4 * * *,0 15 * * * | 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。 |
 | `DREAM_JOURNAL_DIR` | './data/dream-journal' | ./data/dream-journal |  |
 | `DREAM_JOURNAL_USAGE` | 'reply' | reply |  |
 | `EXPERIENCE_VERIFY_MIN_SUCCESS` | 2 | 2 |  |
@@ -422,6 +409,7 @@
 | `NYATDB_POOL_FRAMES` | 64 | 128 |  |
 | `NYATDB_SYNC_EVERY` | 8 | 8 |  |
 | `NYATOS_BUDGET_MAX_ACTS` | 6 | 6 |  |
+| `NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC` | 30 | 30 | 两次**被叫到**的回复之间的最小间隔（秒）。  2026-09-21 补上这条的原因：原来最小间隔只拦主动发言，而被叫到的那条路 （生产流量几乎全带引用锚点）**一点间隔都没有**。实测近 3 天 3008 次群发送： 小时窗 p50=6 |
 | `NYATOS_BUDGET_MIN_GAP_SEC` | 90 | 90 | 两次主动发言之间的最小间隔（秒）。计数额度挡不住"1 分钟连发 6 条"—— Phase 2.3 实测的 48 次/28 分钟、中位间隔 7 秒正是这个形状。 这是"我刚说过，让别人说"的那一半，与计数额度互补。0 = 关闭。 |
 | `NYATOS_BUDGET_WINDOW_SEC` | 3600 | 3600 |  |
 | `NYATOS_SHADOW_CHAT_IDS` |  | -1002750574953,-1003184176508,-100382109 | 影子判断的灰度群（空 = 开启后全量）。影子每次会多一次 LLM 调用， 先限定内部群可以把成本与干扰都控制住。 |
@@ -453,10 +441,7 @@
 | `RELATIONSHIP_ASYMMETRY_DOWN` | 1.5 | — |  |
 | `RELATIONSHIP_ASYMMETRY_UP` | 0.5 | — |  |
 | `RELATIONSHIP_INJECT_THRESHOLD` | 20 | 20 | \|affinity\| < 该值时不注入 prompt（默认 一般 关系不打扰） |
-| `REPLY_ACK_MAX_CHARS` | 12 | — |  |
 | `REPLY_DIRECT_RECENT_WINDOW` | 30 | — | 优化:direct 模式只取最近 N 条(原 50)——砍掉不可缓存的上下文体积,降 token/延迟。 |
-| `REPLY_MAX_EXPANSION_SEGMENTS` | 2 | — |  |
-| `REPLY_MICRO_REACTION_MAX_CHARS` | 12 | — |  |
 | `REPLY_TOOLS_MAX_STEPS` | 4 | 4 |  |
 | `RESIDENT_STICKER_PACKS` |  | kawaiikipfel_by_moe_sticker_bot,NekoBia | 常驻贴纸包(逗号分隔的贴纸包 set_name):作为 bot 主力贴纸,选择时占多数候选槽。 |
 | `RSS_FEEDS_JSON` | '[]' | [{"url":"https://www.geekpark.net/rss"," | JSON 数组: [{url, chatId, autoPost?, sourceName?}] |
@@ -522,9 +507,9 @@
 | `TIMING_WAIT_MAX_SEC` | 120 | — | 阶段 4：wait 工具最大允许秒数；超过会被裁剪。 |
 | `TIMING_WAIT_MIN_SEC` | 5 | — |  |
 | `TOPIC_SCAN_INTERVAL_MIN` | 8 | — |  |
-| `TRENCH_BURST_MAX` | 150 | — | 默认值不是拍的，是回测出来的（scripts/envelope-backtest.mts，近 3 天 1841 条）： 实测小时窗峰值 107 / p99 64 / p95 37；5 分钟窗峰值 19 / p99 16。 设 150/100 |
-| `TRENCH_BURST_MAX_ACTIVE` | 100 | — |  |
-| `TRENCH_BURST_WINDOW_SEC` | 3600 | — |  |
+| `TRENCH_BURST_MAX` | 150 | 30 | 默认值不是拍的，是回测出来的（scripts/envelope-backtest.mts，近 3 天 1841 条）： 实测小时窗峰值 107 / p99 64 / p95 37；5 分钟窗峰值 19 / p99 16。 设 150/100 |
+| `TRENCH_BURST_MAX_ACTIVE` | 100 | 20 |  |
+| `TRENCH_BURST_WINDOW_SEC` | 3600 | 3600 |  |
 | `TRENCH_DEBT_ATTENTION_BOOST` | 0.5 | 3.0 |  |
 | `TRENCH_ENVELOPE_MODE` | 'off' | enforce | 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进 CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与—— 2026-09-19 真人对比分析定为此为"差一口气 |
 | `TS_WEBHOOK_URL` |  | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |
@@ -548,6 +533,9 @@
 | `UNIFIED_TICK_USAGE` | 'judge' | — |  |
 | `VERIFY_DEFAULT_TIMEOUT` | 300 | — |  |
 | `VERIFY_MAX_ATTEMPTS` | 3 | — |  |
+| `VIDEO_DESCRIBE_MAX_TOKENS` | 2000 | 2000 | reasoning 计入 completion:给小了会拿到空正文(实测 max_tokens=400 → 空)。 |
+| `VIDEO_DESCRIBE_TIMEOUT_MS` | 120_000 | 120000 |  |
+| `VIDEO_MAX_DURATION_SEC` | 300 | 300 | 视频时长硬上限（秒）。模型侧 5 分钟；Telegram 侧还有更紧的 20MB 下载上限 （代码里 MAX_MEDIA_BYTES=10MB），5 分钟视频几乎必然超——所以现实里能描述的 是短视频。超限的不下载，直接给带时长的中性占位。 |
 | `WEATHER_CITY` | 'Beijing' | Beijing |  |
 | `WEBHOOK_SECRET` |  | 2a6242aa7e21c38b6982a7fe8e7a0159c678c4e2 |  |
 | `WEBHOOK_URL` |  | — | Webhook (optional — use polling if not set) |
@@ -558,35 +546,45 @@
 | `XAI_SEARCH_BASE_URL` | 'https://new-api-zhcm.onrender.com/v1' | — |  |
 | `XAI_SEARCH_MODEL` | 'grok-4.3-fast' | — |  |
 
-## src/ 里没人读的键（32 个）
+## ✅ 已退役（2026-09-21）
+
+这些旗标曾出现在上面的死旗标表里，已经删掉——删的时候在 src/env.ts 原位留了注释说明为什么，避免下一个人再把它们加回来。
+
+| flag | 去向 |
+|---|---|
+| `PROACTIVE_PRESSURE_ENABLED` | 删（对应的独立 scan cron 已被 unified-tick 取代） |
+| `SCHEDULE_LLM_WAKE` | 删（机制从未落地） |
+| `AGENT_PROGRESS_PING_ENABLED` | 删（"确定性进度 ping"从未实现） |
+| `REPLY_MODE_ENABLED` | 删（"回复形态与安全分段"整个特性没接也没实现） |
+| `REPLY_ACK_THEN_EXPAND_ENABLED` | 同上 |
+| `REPLY_MICRO_REACTION_MAX_CHARS` | 同上 |
+| `REPLY_ACK_MAX_CHARS` | 同上 |
+| `REPLY_MAX_EXPANSION_SEGMENTS` | 同上 |
+| `TASK_PROGRESS_CODEACT_ENABLED` | 删（task-progress.ts 只读 TASK_PROGRESS_ENABLED） |
+| `TASK_PROGRESS_RESEARCH_ENABLED` | 同上 |
+| `GOAL_LONG_TERM_ENABLED` | **保留并真接上**：goals.ts 现在读它，关时 long_term 目标按 7 天窗口 stale |
+
+还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` / `CORE_BELIEF_VIEW_ENABLED` / `CORE_PERMISSION_GATE_ENABLED` 是**假开关**——src/core/ 那一套无条件跑着，接它们要选对收口，接错会把在跑的东西关掉。`CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
+
+
+## src/ 里没人读的键（21 个）
 
 | key | .env | 说明 |
 |---|---|---|
-| `AGENT_PROGRESS_PING_ENABLED` | true | 长任务进度可见性(P1):跨段续跑且从未发言时,每 10min 发一条"还在做"的 确定性进度 ping(模型里程碑汇报不可靠 —— 能续跑的任务按定义从没 sendText 过)。 |
 | `CODEACT_MAX_TURNS` | — |  |
 | `CORE_BLACKBOARD_ENABLED` | true |  |
 | `DREAMING_USAGE` | — | dreaming 长任务用的 AI usage 名。 |
 | `EXPERIENCE_VERIFY_MIN_SUCCESS` | 2 |  |
-| `GOAL_LONG_TERM_ENABLED` | true | ── AGI Level 5 Phase 3: 长期任务语义 ──────────────────────────────── goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变 |
 | `GROUNDING_ASKED_MAX` | 0.35 |  |
 | `GROUNDING_PRESENT_MAX` | 0.35 | topic_present 低于此值算"聊天里没提过"，user_asked 低于此值算"用户没在问"；两者都低才拦。 |
 | `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | 60 |  |
 | `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | — |  |
 | `JUDGE_PROACTIVE_RATE` | 0.5 |  |
 | `PHP_WEBHOOK_URL` | — |  |
-| `PROACTIVE_PRESSURE_ENABLED` | true | （原 PROACTIVE_SCAN_* 灰度已移除——独立 scan cron 被 unified-tick 取代） Attention pressure(借鉴 CGM):主动扫群按 pressure |
-| `REPLY_ACK_MAX_CHARS` | — |  |
-| `REPLY_ACK_THEN_EXPAND_ENABLED` | — |  |
-| `REPLY_MAX_EXPANSION_SEGMENTS` | — |  |
-| `REPLY_MICRO_REACTION_MAX_CHARS` | — |  |
-| `REPLY_MODE_ENABLED` | — | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 |
-| `SCHEDULE_LLM_WAKE` | true | 到点提醒唤醒 LLM(用群里上下文、自己的语气说),而非念稿「⏰定时提醒:X」。默认关。 |
 | `SEMANTIC_DUP_THRESHOLD` | — |  |
 | `STREAMING_MIN_CHARS` | 50 |  |
 | `STREAMING_MIN_INTERVAL` | 500 | Streaming |
 | `TASK_MAX_ROUNDS` | — |  |
-| `TASK_PROGRESS_CODEACT_ENABLED` | — |  |
-| `TASK_PROGRESS_RESEARCH_ENABLED` | — |  |
 | `TASK_PROGRESS_START_DELAY_MS` | — |  |
 | `TS_WEBHOOK_URL` | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |
 | `TTS_MAX_CHARS` | — | 仅对不超过此字符数的回复转语音(长消息发语音很烦)。 |

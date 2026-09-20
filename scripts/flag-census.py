@@ -193,6 +193,31 @@ for r in sorted([r for r in rows if not r['is_bool']], key=lambda x: x['name']):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:120]
     out.append(f"| `{r['name']}` | {r['default']} | {(r['envval'] or '—')[:40]} | {c} |")
 
+out.append('\n## ✅ 已退役（2026-09-21）\n')
+out.append('这些旗标曾出现在上面的死旗标表里，已经删掉——删的时候在 src/env.ts 原位'
+           '留了注释说明为什么，避免下一个人再把它们加回来。\n')
+out.append('| flag | 去向 |')
+out.append('|---|---|')
+out.append('| `PROACTIVE_PRESSURE_ENABLED` | 删（对应的独立 scan cron 已被 unified-tick 取代） |')
+out.append('| `SCHEDULE_LLM_WAKE` | 删（机制从未落地） |')
+out.append('| `AGENT_PROGRESS_PING_ENABLED` | 删（"确定性进度 ping"从未实现） |')
+out.append('| `REPLY_MODE_ENABLED` | 删（"回复形态与安全分段"整个特性没接也没实现） |')
+out.append('| `REPLY_ACK_THEN_EXPAND_ENABLED` | 同上 |')
+out.append('| `REPLY_MICRO_REACTION_MAX_CHARS` | 同上 |')
+out.append('| `REPLY_ACK_MAX_CHARS` | 同上 |')
+out.append('| `REPLY_MAX_EXPANSION_SEGMENTS` | 同上 |')
+out.append('| `TASK_PROGRESS_CODEACT_ENABLED` | 删（task-progress.ts 只读 TASK_PROGRESS_ENABLED） |')
+out.append('| `TASK_PROGRESS_RESEARCH_ENABLED` | 同上 |')
+out.append('| `GOAL_LONG_TERM_ENABLED` | **保留并真接上**：goals.ts 现在读它，关时 long_term 目标按 7 天窗口 stale |')
+out.append('')
+out.append('还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` / '
+           '`CORE_BELIEF_VIEW_ENABLED` / `CORE_PERMISSION_GATE_ENABLED` 是**假开关**——'
+           'src/core/ 那一套无条件跑着，接它们要选对收口，接错会把在跑的东西关掉。'
+           '`CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / '
+           '`STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / '
+           '`JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` '
+           '是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。\n')
+
 out.append('\n## src/ 里没人读的键（%d 个）\n' % len(dead))
 out.append('| key | .env | 说明 |')
 out.append('|---|---|---|')
