@@ -1840,7 +1840,7 @@ export function createHostApi(
             { chatId, on, minutes: opts?.minutes, by: asker },
             'host admin.setAntiAd (group-owner self-service)',
           );
-          return { ok: true, chatId, on, minutes };
+          return { ok: true, chatId, on, minutes: opts?.minutes };
         },
         async kick(uid: number, opts?: { deleteMessages?: boolean }) {
           assertOpen();
