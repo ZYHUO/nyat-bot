@@ -400,6 +400,51 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
 }
 console.log('');
 
+// 2d) 实时 LLM 调用计数——给上面的失败数一个分母。
+//
+// 为什么需要它：日志里 `Label failed, trying next` 一天 3499 条，听着像世界末日，
+// 但没有分母就不知道那是 3499/4000 还是 3499/40000。此前这个报告只报绝对数，
+// 而**没有分母的绝对数没法判断严重程度**——这是"痕迹不是事实"的又一例。
+//
+// 计数器是进程内的（重启归零），所以它量的正好是"部署后"那段窗口，
+// 和上面的 after-deploy 列同一个时间范围。
+{
+  try {
+    const res = await fetch('http://127.0.0.1:3001/metrics', { signal: AbortSignal.timeout(5000) });
+    const text = await res.text();
+    const byOutcome = new Map<string, number>();
+    for (const line of text.split('\n')) {
+      const m = /^llm_requests_total\{[^}]*outcome="([^"]+)"\}\s+(\d+)/.exec(line);
+      if (m) byOutcome.set(m[1]!, (byOutcome.get(m[1]!) ?? 0) + Number(m[2]));
+    }
+    const ok = byOutcome.get('ok') ?? 0;
+    const err = [...byOutcome.entries()].filter(([k]) => k !== 'ok').reduce((a, [, v]) => a + v, 0);
+    const total = ok + err;
+    if (total === 0) {
+      console.log('── 2d. 实时 LLM 调用（部署后）──');
+      console.log('  计数器还是 0——进程刚起，或者还没打过 LLM。');
+      console.log('');
+    } else {
+      const rate = (err / total) * 100;
+      console.log('── 2d. 实时 LLM 调用（部署后，进程内计数）──');
+      console.log(`  总调用 ${total}｜成功 ${ok}｜失败 ${err}  失败率 ${rate.toFixed(1)}%`);
+      if (byOutcome.size > 1) {
+        const parts = [...byOutcome.entries()].map(([k, v]) => `${k}=${v}`).join('  ');
+        console.log(`  按 outcome: ${parts}`);
+      }
+      if (total >= 20 && rate > 25) {
+        console.log('  ⚠️ 失败率偏高——但注意这是"每次尝试"的口径，一次 callWithFallback 可能试多跳。');
+        console.log('     看上面 2. 节的心流失败率（那是"最终有没有拿到结果"的口径）判断实际影响。');
+      }
+      console.log('');
+    }
+  } catch {
+    console.log('── 2d. 实时 LLM 调用（部署后）──');
+    console.log('  读不到 http://127.0.0.1:3001/metrics（METRICS_ENABLED 或端口不对）——跳过。');
+    console.log('');
+  }
+}
+
 console.log('── 3. 架构占比 ──');
 console.log(`  入站                          ${st.inbound}`);
 console.log(`  Meta 路径事件                 ${st.metaEvents}`);

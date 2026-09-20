@@ -89,7 +89,15 @@ keep-addressed gate), the Meta/legacy split, and the ASI rubric's measured-vs-NU
 
 It also finds the **last `Bot started (polling)`** and reports a separate "after deploy"
 column, because every change here takes effect on restart and a mixed window hides the
-effect. When the bot is asleep the after-deploy column is empty — the script says so
+effect.
+
+Section **2d** pulls `http://127.0.0.1:3001/metrics` for `llm_requests_total` split by
+outcome — that is the denominator the log cannot give you. `Label failed, trying next`
+firing 3,499 times a day means nothing on its own; against a total it becomes a rate. The
+counters are in-process, so they reset on restart and measure exactly the after-deploy
+window. Note the two rates answer different questions: this one is per *attempt* (one
+`callWithFallback` may try several hops), the heart rate in section 2 is per *outcome*
+(did we get a result at all). When the bot is asleep the after-deploy column is empty — the script says so
 rather than printing 0, because "no data" and "effect is zero" are different things and
 confusing them is the mistake this repo keeps making.
 
