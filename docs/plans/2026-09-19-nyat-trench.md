@@ -1178,6 +1178,59 @@ timing gate 整体   29 条（在跑）
 这比我现在就删更慢，但**比我此前说的"没有可删的"更诚实也更有利** —— 它给出了一个
 具体的、有判据的删除路径，而不是一个否定的结论。
 
+## 九·补十三、第二个删除候选：Turn Actor，以及它为什么不能直接关（round 67）
+
+§九·补十二 用路径级方法找到 gate LLM。同方法扫其它 flag 门控路径，发现第二个候选，
+而它比第一个更曲折。
+
+### 现象
+
+```
+TURN_ACTOR_ENABLED  = true     （进程环境直读）
+TURN_ACTOR_CHAT_IDS =          （空）
+'Turn:' 日志串      0 条       （5 天日志，用正确串重查过）
+chat_turn 任务      0 条
+```
+
+`src/pipeline/turn/` 是 2,408 行。**开着，但一次都没执行。**
+
+### 我第一反应的错误
+
+我提议"把 `TURN_ACTOR_ENABLED` 关掉，零风险、行为不变"—— 理由是查到两个读取点
+（`turn/flags.ts`、`multiagent/flags.ts`）都先查 flag 再查灰名单，而灰名单为空，
+所以两者都已返回 false。
+
+**错了。** 继续查第三个读取点的语义才发现：
+
+```js
+// src/pipeline/multiagent/flags.ts
+if (!e.TURN_ACTOR_ENABLED) return false;      // turn-actor 是 multiagent 的前置
+const graylist = e.MULTI_AGENT_CHAT_IDS;
+return graylist.length === 0 || graylist.includes(chatId);   // 空 = 全群生效
+```
+
+`MULTI_AGENT_CHAT_IDS` 为空意味着**所有群都走 multiagent**，而它依赖
+`TURN_ACTOR_ENABLED` 提供打断信号。**关掉那个 flag 会连带关掉 multiagent** ——
+不是零行为变化，是一次真实的生产变更。
+
+### 这与本会话反复出现的是同一形状
+
+我查到两个读取点、确认它们都需灰名单命中，就下了"零风险"的结论。
+**孤立看正确的部分（两个读取点），和它在系统里的含义（第三个读取点语义完全不同）
+是两件事。** 而拦下我的只是多查了一个文件 —— 这不是可靠的安全边际。
+
+### 因此这个候选的删除前置条件
+
+删 `src/pipeline/turn/` 之前必须先解耦：
+
+1. multiagent 的打断信号改由别的东西提供（或让 multiagent 自己带超时）
+2. `defer.ts` 与 `scheduleTurn` 的耦合解开（注释自认"会覆写 meta.scheduledJobId
+   留下孤儿延迟回合"）
+3. 然后才是 flag → 灰名单 → 删码三步
+
+**候选状态：已识别，未解耦，不可删。** 与 §九·补十二 的 gate LLM 并列成第二/第三个
+删除候选，两者都需要工程 + 授权，不是我能单独推完的。
+
 ## 附录 A：证据索引
 
 | 论断 | 证据位置 |
