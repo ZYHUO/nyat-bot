@@ -19,17 +19,18 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-/** 已知例外。每条都要写原因——这是欠条，不是免责声明。 */
-const ALLOWLIST: Record<string, string> = {
-  // （CORE_BLACKBOARD_ENABLED 2026-09-21 已接上并从本表删除：
-  //  src/core/blackboard/store.ts 的四个入口现在都读它。见
-  //  tests/unit/core/blackboard/enabled-flag.test.ts。）
-  // 只被测试 mock、src 不读（judge 的主动插话概率三件套）。
-  // 真机制在别处（heart / unified-tick），这三个名字从未被代码读过。
-  JUDGE_PROACTIVE_RATE: '只被 tests/unit/judge/rules.test.ts mock；真机制不读它',
-  JUDGE_PROACTIVE_MIN_INTERVAL_SEC: '同上',
-  JUDGE_PROACTIVE_MIN_RECENT_MSGS: '同上',
-};
+/**
+ * 已知例外。每条都要写原因——这是欠条，不是免责声明。
+ *
+ * 2026-09-21 清空过一次：这里原来躺着三个已退役旗标的过期豁免
+ * （JUDGE_PROACTIVE_RATE / MIN_INTERVAL_SEC / MIN_RECENT_MSGS，第四轮就删了，
+ * 连 rules.test.ts 里对它们的 mock 都清了），但 ALLOWLIST 没跟着清。
+ *
+ * 死豁免比没有豁免更危险：它不报错，只是安静地等着——将来谁再用其中一个名字
+ * 加旗标，那个旗标**自动免检**，而旁边挂着的理由是三个月前针对另一个东西写的。
+ * 所以下面有一条 self-check 盯着"ALLOWLIST 的每个键都还在 schema 里"。
+ */
+const ALLOWLIST: Record<string, string> = {};
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -127,6 +128,19 @@ describe('no dead switches', () => {
       dead,
       `这些旗标开着但代码里没有读者（"写了没接"）：\n  ${dead.join('\n  ')}\n` +
         '要么接线，要么加进 ALLOWLIST 并写原因。',
+    ).toEqual([]);
+  });
+
+  // 守卫自己的守卫·二：ALLOWLIST 里的键必须还在 schema 里。
+  // 2026-09-21 加。此前这里躺着三个已退役旗标的条目——旗标删了、mock 清了，
+  // 豁免没清，于是一个静默的地雷放了很久。死豁免不报错，只是安静地等着。
+  it('self-check：ALLOWLIST 里没有死豁免（键必须还在 schema 里）', () => {
+    const names = new Set(parseEnvFlags().map((f) => f.name));
+    const stale = Object.keys(ALLOWLIST).filter((k) => !names.has(k));
+    expect(
+      stale,
+      `这些 ALLOWLIST 条目对应的旗标已经不在 schema 里了——清掉它们，\n` +
+        `否则将来有人再用这些名字加旗标，会自动免检：\n  ${stale.join('\n  ')}`,
     ).toEqual([]);
   });
 
