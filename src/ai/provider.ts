@@ -85,7 +85,7 @@ export function __resetTruncatingLabelsForTest(): void {
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean },
 ): Promise<AICallResult> {
   const asked = opts.maxTokens ?? 4096;
   const budget = truncatingLabels.has(label.name) ? Math.max(asked, REASONING_TOKEN_FLOOR) : asked;
@@ -131,7 +131,7 @@ async function callClaude(
 async function callClaudeOnce(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean },
 ): Promise<{ result: AICallResult; truncated: boolean }> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
@@ -139,9 +139,33 @@ async function callClaudeOnce(
 
   // Extract system prompt — wrap in array with cache_control to enable prompt caching
   const systemMsg = messages.find(m => m.role === 'system');
-  const chatMessages: ClaudeMessage[] = messages
+  let chatMessages: ClaudeMessage[] = messages
     .filter(m => m.role !== 'system')
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }));
+
+  // ── jsonMode：Anthropic 没有 response_format，用 assistant 预填实现 ──────
+  //
+  // 2026-09-21 加。起因是一次读数：`dreaming output unparseable — skipped`
+  // **805 次，而 `dreaming consolidated` 一次都没出现过**（0% 产出）；
+  // `distill output unparseable` 473 次 vs `episode distilled` 73 次（13.4%）。
+  //
+  // 病因：这两个 usage（judge / summarize）默认 `jsonMode: true`，而它们的 label
+  // 是 `stepfun`，`FORMAT=claude`。**`jsonMode` 此前只对裸 fetch 的 OpenAI 路径
+  // 生效**（那里设 `response_format`）；claude 分支根本不看这个参数——于是模型
+  // 收到一个"请输出 JSON"的 prompt，却没有任何机制逼它，回中文散文，
+  // 解析器 `JSON.parse` 失败，整次调用被丢弃。
+  //
+  // 这和 round 3 修的 ASI 假度量是同一个病根（那次靠换一个 OpenAI 格式的 label
+  // 绕开）；这次在 provider 层修，所有 claude 格式 label 的 jsonMode 调用一起受益。
+  //
+  // 做法是 Anthropic 官方推荐的 prefill：末尾追加一条 assistant 消息，内容只有
+  // "{"。模型只能接着这个括号往下写，输出必然是 JSON 的剩余部分。
+  // 拿回来的正文要**把 "{" 拼回去**，否则调用方拿到的是 "{...}" 少了头。
+  let jsonPrefill = false;
+  if (opts.jsonMode && chatMessages.length > 0 && chatMessages[chatMessages.length - 1]!.role === 'user') {
+    chatMessages = [...chatMessages, { role: 'assistant', content: '{' }];
+    jsonPrefill = true;
+  }
 
   const body: Record<string, unknown> = {
     model: label.model,
@@ -212,12 +236,14 @@ async function callClaudeOnce(
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
     .trim();
+  // 预填的 "{" 要拼回去——调用方的解析器期待一个完整 JSON 对象。
+  const finalText = jsonPrefill && text && !text.startsWith('{') ? `{${text}` : text;
 
   // 空正文时把**为什么空**记下来。此前这里只有一个结论性的注释，没有任何观测——
   // 2882 次 Empty response 到底是"思维链吃光额度"还是"模型真的不回话"，
   // 从日志里看不出来。现在能看出来，下一次就不用猜。
   const usage = data.usage;
-  if (!text) {
+  if (!finalText) {
     logger.warn(
       {
         label: label.name,
@@ -232,7 +258,7 @@ async function callClaudeOnce(
         : 'claude: 空正文 —— 模型未产出 text block',
     );
   }
-  const truncated = !text && data.stop_reason === 'max_tokens';
+  const truncated = !finalText && data.stop_reason === 'max_tokens';
 
   const cacheRead = usage.cache_read_input_tokens ?? 0;
   const cacheWrite = usage.cache_creation_input_tokens ?? 0;
@@ -245,7 +271,7 @@ async function callClaudeOnce(
 
   return {
     result: {
-      content: text,
+      content: finalText,
       tokenUsage: {
         prompt: usage.input_tokens + cacheRead + cacheWrite,
         completion: usage.output_tokens,

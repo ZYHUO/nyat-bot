@@ -792,6 +792,38 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### `jsonMode` was silently ignored on every Claude-format label
+
+Reading the cron log counts turned up two more jobs that were running at almost nothing:
+
+- **dreaming**: `dreaming output unparseable — skipped` **805 times**, and
+  `dreaming consolidated` — the success line — **had never appeared once**. 0% yield.
+- **distiller**: 473 unparseable vs 73 parsed = 13.4%.
+
+Both call an LLM with `jsonMode: true`, and both parse the result with `JSON.parse`.
+Neither logged *what* came back, so 1,278 discarded outputs carried no information at all.
+
+The cause is the same disease as the ASI rubric bug fixed earlier, but at a different
+layer: `jsonMode` was only ever honoured on the raw-fetch OpenAI path, where it sets
+`response_format`. Claude-format labels (`FORMAT=claude` — which includes `stepfun`, the
+default label for `judge` and `summarize`) go through `callClaude`, the Anthropic
+`/messages` endpoint, which **has no `response_format` and was not looking at the flag at
+all**. So the model received a prompt asking for JSON and nothing forcing it, and answered
+in Chinese prose. `JSON.parse` failed, the call was thrown away.
+
+Earlier this was worked around by giving ASI a dedicated OpenAI-format label. Now it is
+fixed where it lives: when `jsonMode` is set and the label is Claude-format, `callClaude`
+appends an assistant message containing only `{` — Anthropic's documented prefill
+technique. The model can only continue from that brace, so the output is JSON by
+construction. The brace is stitched back onto the returned text, because callers' parsers
+expect a complete object.
+
+Callers that don't ask for `jsonMode` are untouched, and a conversation that already ends
+with an assistant message is left alone rather than getting a second prefill.
+
+Both parse-failure sites now log the raw output (truncated to 300 chars). Before this, the
+failure mode was diagnosable only by guessing — which is how 805 of them accumulated.
+
 ### A cron that had been running at 1% for days, because nobody read one field
 
 `runTopicScan` logs `{ chats, observed }` every tick. `observed` is how many topic labels

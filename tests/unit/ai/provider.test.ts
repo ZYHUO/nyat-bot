@@ -317,6 +317,98 @@ describe('callModel', () => {
       });
     });
 
+    // ─── 2026-09-21：jsonMode 在 claude 路径上也要生效 ──────────────────
+    //
+    // 实测起因：`dreaming output unparseable — skipped` **805 次，
+    // 而 `dreaming consolidated` 一次都没出现过**（0% 产出）；
+    // `distill output unparseable` 473 vs `episode distilled` 73（13.4%）。
+    //
+    // 病因：这两个 usage 默认 jsonMode: true，label 是 stepfun（FORMAT=claude）。
+    // jsonMode 此前只对裸 fetch 的 OpenAI 路径设 response_format，claude 分支
+    // 根本不看它——模型收到"请输出 JSON"的 prompt 却没有任何机制逼它，
+    // 回中文散文，JSON.parse 失败，整次调用被丢弃。
+    describe('claude 分支的 jsonMode（assistant 预填 {）', () => {
+      const okJson = (text: string) => new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 20 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+
+      it('请求体末尾多一条 assistant "{"（prefill）', async () => {
+        let body: { messages: Array<{ role: string; content: string }> } | undefined;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          body = JSON.parse(init.body as string);
+          return Promise.resolve(okJson('"act":"pass"}'));
+        }));
+        await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 1200, jsonMode: true });
+        expect(body!.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+        expect(body!.messages[1]!.content).toBe('{');
+      });
+
+      it('正文把 "{" 拼回去（调用方拿到完整 JSON）', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(okJson('"act":"pass","why":"q"}'))));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 1200, jsonMode: true });
+        expect(r.content).toBe('{"act":"pass","why":"q"}');
+        expect(() => JSON.parse(r.content)).not.toThrow();
+      });
+
+      it('模型自己吐了完整 "{" 开头 → 不重复拼', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(okJson('{"act":"pass"}'))));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 1200, jsonMode: true });
+        expect(r.content).toBe('{"act":"pass"}');
+        expect(r.content.startsWith('{{')).toBe(false);
+      });
+
+      it('jsonMode 不开 → 不加 prefill（纯文本调用不受影响）', async () => {
+        let body: { messages: Array<{ role: string }> } | undefined;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          body = JSON.parse(init.body as string);
+          return Promise.resolve(okJson('随便'));
+        }));
+        await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 1200 });
+        expect(body!.messages.map((m) => m.role)).toEqual(['user']);
+      });
+
+      it('最后一条本来就是 assistant → 不重复加 prefill', async () => {
+        let body: { messages: Array<{ role: string; content: string }> } | undefined;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          body = JSON.parse(init.body as string);
+          return Promise.resolve(okJson('"ok":1}'));
+        }));
+        await callModel(claudeLabel, [
+          { role: 'user', content: '判断' },
+          { role: 'assistant', content: '{"a"' },
+        ], { maxTokens: 1200, jsonMode: true });
+        expect(body!.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+        expect(body!.messages[1]!.content).toBe('{"a"'); // 原样，不覆盖
+      });
+
+      it('system 消息不参与 prefill 位置判断', async () => {
+        let body: { messages: Array<{ role: string }> } | undefined;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          body = JSON.parse(init.body as string);
+          return Promise.resolve(okJson('"ok":1}'));
+        }));
+        await callModel(claudeLabel, [
+          { role: 'system', content: '你是判断器' },
+          { role: 'user', content: '判断' },
+        ], { maxTokens: 1200, jsonMode: true });
+        expect(body!.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      });
+
+      it('空正文 + jsonMode → 仍然是空（prefill 不伪造内容）', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(
+          JSON.stringify({ content: [{ type: 'thinking', thinking: '想' }], stop_reason: 'max_tokens', usage: { input_tokens: 1, output_tokens: 1200 } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ))));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 1200, jsonMode: true });
+        expect(r.content).toBe('');
+      });
+    });
+
     it('纯文本仍走 claude 分支（不为带媒体改掉正常路径）', async () => {
       // 纯文本 + claude label → callClaude：打 /messages 且请求体是 Anthropic 形状
       // （messages[].content 是字符串，不是 parts 数组）。

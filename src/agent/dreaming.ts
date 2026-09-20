@@ -174,7 +174,13 @@ export async function runDreamOnce(db: Database.Database = getDb()): Promise<Dre
     });
     const parsed = parseDreamOutput(res.content ?? '');
     if (!parsed) {
-      logger.warn('dreaming output unparseable — skipped');
+      // 带原始输出。2026-09-21 之前这里只有一句结论性的 warn，于是 805 次失败
+      // 全是同一形状却查不出原因（最后发现是 jsonMode 在 claude 格式 label 上
+      // 被静默忽略，模型回的是中文散文）。截断到 300 字够看形状，不会炸日志。
+      logger.warn(
+        { len: (res.content ?? '').length, head: (res.content ?? '').slice(0, 300) },
+        'dreaming output unparseable — skipped',
+      );
       return null;
     }
     const ops = applyDream(db, parsed);

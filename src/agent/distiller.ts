@@ -123,7 +123,11 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
 
     const parsed = parseDistillOutput(res.content ?? '');
     if (!parsed) {
-      logger.warn({ taskId: task.id }, 'distill output unparseable — skipping episode');
+      // 同上：2026-09-21 之前不带原始输出，473 次失败查不出形状。
+      logger.warn(
+        { taskId: task.id, len: (res.content ?? '').length, head: (res.content ?? '').slice(0, 300) },
+        'distill output unparseable — skipping episode',
+      );
       return null;
     }
 
