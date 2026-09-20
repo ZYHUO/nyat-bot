@@ -121,9 +121,12 @@ export async function readDebt(chatId: number, topN = 5): Promise<Debt[]> {
 export async function owedTo(chatId: number, uid: number): Promise<number> {
   if (!Number.isSafeInteger(uid) || uid <= 0) return 0;
   try {
-    const raw = await getRedis().hget(hashKey(chatId), String(uid));
-    return raw === null ? 0 : clamp(Number(raw), 0, MAX_OWED);
-  } catch {
+    const raw = await getRedis().hget(key(chatId), String(uid));
+    return raw === null ? 0 : Math.min(MAX_OWED, Math.max(0, Number(raw)));
+  } catch (err) {
+    // 不要再空 catch：第一版这里吞掉了 clamp 未定义的 ReferenceError，
+    // 于是 owedTo 对**所有** uid 返回 0 —— 静默、测试全绿、生产不可用。
+    logger.debug({ err, chatId, uid }, 'owedTo failed (non-critical)');
     return 0;
   }
 }
