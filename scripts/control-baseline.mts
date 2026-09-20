@@ -73,7 +73,9 @@ function record(): void {
     `) || '[]',
   );
   const snap = {
-    at: new Date(now * 1000).toISOString(),
+    // **at 必须是窗口结束时刻，不是触发时刻**：否则跨午夜跑的 cron 会
+    // 把昨天的窗口盖成今天的日期，造出一个幽灵日（去重键取自 at 的日期）。
+    at: new Date(end * 1000).toISOString(),
     slotUtc: new Date(now * 1000).toISOString().slice(11, 13),
     windowHours: WINDOW_HOURS,
     chats: rows.map((r) => ({
