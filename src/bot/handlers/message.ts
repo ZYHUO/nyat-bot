@@ -13,6 +13,8 @@ import { interruptGeneration } from '../../pipeline/turn/abort-registry.js';
 import { bumpFocus } from '../../pipeline/turn/focus.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { getBotIdentity } from '../bot.js';
+import * as botClassifierModule from '../../tracking/bot-classifier.js';
+import type { FormattedMessage } from '../../shared/types.js';
 import { formatMessage } from '../../pipeline/formatter.js';
 import { detectReplyObligation, isObligationCancelMessage } from '../../pipeline/turn/obligation-detect.js';
 import { saveObligation, setActiveObligation, supersedeActiveObligation, getActiveObligationId, getObligation, updateObligationState } from '../../pipeline/turn/obligation-store.js';
@@ -431,30 +433,54 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // 并按 BOT_DENOISE_ENABLED 尊重它。verify/ad/echo 三类是"非对话型 bot"，
           // 宿主据此不烧心流；其余照旧。
           if (fm.isBot && Number(fm.uid ?? 0) !== getBotUid() && chatId < 0) {
-            try {
-              const { env: envNow } = await import('../../env.js');
-              if (envNow().BOT_CLASSIFIER_ENABLED) {
-                const { classifyBotMessage } = await import('../../tracking/bot-classifier.js');
-                const bc = classifyBotMessage(fm, {});
-                if (bc !== 'unknown' && bc !== 'self') {
-                  logger.info(
-                    { chatId, bot: fm.username, botClass: bc },
-                    'Meta path: bot message classified',
-                  );
-                  if (envNow().BOT_DENOISE_ENABLED && (bc === 'ad' || bc === 'verify' || bc === 'echo')) {
-                    logger.info(
-                      { chatId, bot: fm.username, botClass: bc },
-                      'Meta path: denoise silenced a non-conversational bot',
-                    );
-                    noteLiveOutcome('silent');
-                    return 'done';
+            // bot 消息的两道闸（结构 + 语义）抽在 meta-bot-gate.ts —— 单一来源、可单测。
+            // 内联在闭包里那段没有任何测试能碰到，round 1 的"验证 bot 被回复 6 次"
+            // 就是这个缺口的结果。详细理由见那个文件顶部。
+            const gateVerdict = await (async (): Promise<'ignore-structural' | 'denoise-semantic' | 'pass'> => {
+              try {
+                const { decideBotMessage } = await import('./meta-bot-gate.js');
+                const envNow = env();
+                const cls = (m: FormattedMessage): string => {
+                  try {
+                    const { classifyBotMessage } = botClassifierModule;
+                    return classifyBotMessage(m, {});
+                  } catch {
+                    return 'unknown';
                   }
-                }
+                };
+                return decideBotMessage(
+                  fm,
+                  { uid: botIdentity.uid, username: botIdentity.username, nicknames: botIdentity.nicknames },
+                  cls,
+                  {
+                    classifierEnabled: envNow.BOT_CLASSIFIER_ENABLED === true,
+                    denoiseEnabled: envNow.BOT_DENOISE_ENABLED === true,
+                  },
+                );
+              } catch (err) {
+                logger.debug({ err, chatId }, 'Meta path bot gate failed (non-critical)');
+                return 'pass';
               }
-            } catch (err) {
-              logger.debug({ err, chatId }, 'Meta path bot classify failed (non-critical)');
+            })();
+
+            if (gateVerdict === 'ignore-structural') {
+              logger.info(
+                { chatId, bot: fm.username },
+                'Meta path: bot 未称呼本喵，结构性忽略（不烧心流）',
+              );
+              noteLiveOutcome('silent');
+              return 'done';
+            }
+            if (gateVerdict === 'denoise-semantic') {
+              logger.info(
+                { chatId, bot: fm.username },
+                'Meta path: denoise silenced a non-conversational bot',
+              );
+              noteLiveOutcome('silent');
+              return 'done';
             }
           }
+
           if (heartPath === 'heart') {
             void (async () => {
               try {

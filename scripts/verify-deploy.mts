@@ -76,6 +76,9 @@ const CHECKS: Array<[string, string]> = [
   ['截断加额重试', 'claude: 空正文'],
   // 链的上游去重（2026-09-21）
   ['链上游去重', 'diversifyByUpstream'],
+  // Meta 路径 bot 两道闸（2026-09-21）
+  ['bot 结构闸', 'decideBotMessage'],
+  ['bot 结构闸判据', 'ignore-structural'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）
