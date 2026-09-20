@@ -52,12 +52,43 @@ interface ClaudeResponse {
   error?: { type: string; message: string };
 }
 
+/**
+ * reasoning 模型的 max_tokens 下限。
+ *
+ * 2026-09-21 加。起因是一次读数：`claude: 空正文` 诊断上线后 50 分钟内出现 193 次，
+ * 全部是 `label: stepfun` + `stop_reason: max_tokens` + `blocks: ['thinking']`，
+ * 而 maxTokens 的值是 **24 / 48 / 1200 / 4000 / 800 / 400 / 120 / 60**。
+ *
+ * 24 是哪来的：`src/cron/topic-scan.ts` 让模型"用 4-12 个汉字给当前主话题起个短标签"，
+ * 于是写了 `maxTokens: 24`。听上去很合理——输出就那么点长。但 step-3.7-flash 是
+ * reasoning 模型，思维链先烧 token：24 个 token 连一句"让我想想"都不够，
+ * content 自然是空的。topic-scan 因此**静默地什么都没产出**，每 4 分钟 × 21 个群。
+ *
+ * 上一轮加的"截断就翻倍重试"在这里也不够：24 → 48 还是不够（诊断里 48 出现 73 次）。
+ *
+ * 所以改成**下限**而不是倍数：已知会截断的 label，max_tokens 一律抬到这个下限。
+ * 1200 是实测值——step-3.7-flash 在短 prompt 上 reasoning + 正文合计约 840 token。
+ *
+ * 进程内记忆（不落盘）：重启后第一次截断会重新教会它，而截断本身就会打 warn，
+ * 所以"学不会"是不可能的。不落盘是为了不给每条 LLM 调用加一次 Redis 读。
+ */
+const REASONING_TOKEN_FLOOR = 1200;
+
+/** 观测到过"思维链吃光额度"的 label —— 之后给它下限而不是调用方写的小值。 */
+const truncatingLabels = new Set<string>();
+
+/** 测试用：清空记忆。 */
+export function __resetTruncatingLabelsForTest(): void {
+  truncatingLabels.clear();
+}
+
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
 ): Promise<AICallResult> {
-  const budget = opts.maxTokens ?? 4096;
+  const asked = opts.maxTokens ?? 4096;
+  const budget = truncatingLabels.has(label.name) ? Math.max(asked, REASONING_TOKEN_FLOOR) : asked;
   const first = await callClaudeOnce(label, messages, { ...opts, maxTokens: budget });
 
   // 截断重试：`stop_reason === 'max_tokens'` 且正文为空 = 思维链把额度吃光，
@@ -70,10 +101,14 @@ async function callClaude(
   // 只在这一种形状下重试（截断且空），加一倍额度、最多一次。别的情况不重试——
   // 内容审查/超时/限流重试没有意义，只会把延迟翻倍。
   if (first.truncated) {
-    const retryBudget = Math.min(budget * 2, 32_000);
+    // 记住这个 label 会截断——之后它的每次调用都直接拿下限，不再先撞一次。
+    truncatingLabels.add(label.name);
+    // 重试额度用**下限**而不是 2×：调用方写 24 时 2× 只有 48，照样不够
+    // （诊断里 48 出现 73 次，就是重试也失败了）。下限是实测够用的值。
+    const retryBudget = Math.min(Math.max(budget * 2, REASONING_TOKEN_FLOOR), 32_000);
     logger.debug(
-      { label: label.name, model: label.model, budget, retryBudget },
-      'claude: 思维链吃光额度导致空正文 → 加额重试一次',
+      { label: label.name, model: label.model, budget, retryBudget, floor: REASONING_TOKEN_FLOOR },
+      'claude: 思维链吃光额度导致空正文 → 抬到下限重试一次',
     );
     try {
       const second = await callClaudeOnce(label, messages, { ...opts, maxTokens: retryBudget });

@@ -213,6 +213,110 @@ describe('callModel', () => {
       });
     });
 
+    // ─── 2026-09-21：reasoning 下限 ────────────────────────────────────
+    //
+    // 实测起因：`claude: 空正文` 诊断上线后 50 分钟 193 次，全部
+    // stop_reason=max_tokens + blocks=['thinking']，maxTokens 是 24/48/1200/4000/…
+    // 24 来自 topic-scan（"用 4-12 个汉字起个标签"于是写 maxTokens: 24）。
+    // reasoning 模型思维链先烧 token，24 连一句"让我想想"都不够。
+    // 上一轮的"翻倍重试"在这里也不够：24→48 照样空（诊断里 48 出现 73 次）。
+    describe('reasoning 下限（观测到截断的 label 自动抬到 1200）', () => {
+      const truncOnce = (stopReason = 'max_tokens') => new Response(
+        JSON.stringify({
+          content: [{ type: 'thinking', thinking: '想了很多但没来得及说' }],
+          stop_reason: stopReason,
+          usage: { input_tokens: 10, output_tokens: 24 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+      const okOnce = (text = '{"ok":1}') => new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 20 },
+        }),
+        { status: 200, headers: { 'ContentType': 'application/json' } },
+      );
+
+      it('重试用下限（1200）而不是 2×——24 翻倍成 48 照样不够', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const calls: number[] = [];
+        let n = 0;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          const b = JSON.parse(init.body as string) as { max_tokens: number };
+          calls.push(b.max_tokens);
+          n++;
+          return Promise.resolve(n === 1 ? truncOnce() : okOnce());
+        }));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 24 });
+        expect(r.content).toBe('{"ok":1}');
+        expect(calls).toEqual([24, 1200]); // 第一次照调用方的 24，重试直接抬到下限
+      });
+
+      it('记住之后，同一个 label 的后续调用直接拿下限（不再先撞一次）', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const calls: number[] = [];
+        let n = 0;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          const b = JSON.parse(init.body as string) as { max_tokens: number };
+          calls.push(b.max_tokens);
+          n++;
+          return Promise.resolve(n === 1 ? truncOnce() : okOnce());
+        }));
+        await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
+        await callModel(claudeLabel, [{ role: 'user', content: 'b' }], { maxTokens: 24 });
+        // 第三次应该直接用 1200，不再先发 24 撞一次
+        await callModel(claudeLabel, [{ role: 'user', content: 'c' }], { maxTokens: 24 });
+        expect(calls).toEqual([24, 1200, 1200, 1200]);
+      });
+
+      it('调用方已经给了大于下限的值 → 不压（尊重显式配置）', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const calls: number[] = [];
+        let n = 0;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          n++;
+          return Promise.resolve(n === 1 ? truncOnce() : okOnce());
+        }));
+        await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 8000 });
+        // 8000 > 1200：第一次照 8000 发（不被压成下限），重试按 2× 抬到 16000。
+        // 下限只托底，不封顶。
+        expect(calls).toEqual([8000, 16000]);
+      });
+
+      it('没截断过的 label 完全不受影响（零额外成本）', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(okOnce());
+        }));
+        await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
+        expect(calls).toEqual([24]); // 原样，不抬
+      });
+
+      it('重试也截断 → 仍报空，且 label 已被记住', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(truncOnce());
+        }));
+        const r = await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
+        expect(r.content).toBe('');
+        expect(calls).toEqual([24, 1200]);
+        // 第三次直接 1200（记住了，不再先发 24 撞一次）；1200 也截断 → 重试 2× = 2400
+        await callModel(claudeLabel, [{ role: 'user', content: 'b' }], { maxTokens: 24 });
+        expect(calls).toEqual([24, 1200, 1200, 2400]);
+      });
+    });
+
     it('纯文本仍走 claude 分支（不为带媒体改掉正常路径）', async () => {
       // 纯文本 + claude label → callClaude：打 /messages 且请求体是 Anthropic 形状
       // （messages[].content 是字符串，不是 parts 数组）。

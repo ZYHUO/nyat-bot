@@ -36,7 +36,12 @@ async function extractTopic(chatId: number): Promise<string | null> {
     const res = await callWithFallback({
       usage: 'judge',
       messages: [{ role: 'system', content: sys }, { role: 'user', content: ctx }],
-      maxTokens: 24,
+      // 别写 24。这个 prompt 只要 4-12 个汉字，听上去 24 够用——但 judge usage
+      // 会落到 step-3.7-flash 这种 reasoning 模型，思维链先烧 token，24 连一句
+      // "让我想想"都不够，content 恒为空，topic-scan 于是静默地什么都产不出
+      // （2026-09-21 实测：50 分钟内 193 次空正文，maxTokens 24/48 各 79/73 次）。
+      // provider 层已有下限兜底，这里仍写够，别依赖兜底。
+      maxTokens: 1200,
       temperature: 0,
       // 纯文本标签输出 —— 关掉 usage 级 jsonMode（response_format 会强制 JSON，坏事）
       jsonMode: false,

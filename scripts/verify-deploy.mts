@@ -83,6 +83,8 @@ const CHECKS: Array<[string, string]> = [
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）
   ['沙盒 bots 命名空间', "'bots',"],
+  // reasoning token 下限（2026-09-21）
+  ['reasoning token 下限', 'REASONING_TOKEN_FLOOR'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

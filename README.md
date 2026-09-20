@@ -835,6 +835,33 @@ different ordering.
 Labels are not removed from the pool — this only changes *who travels together in one
 chain*.
 
+### A token floor for reasoning models, learned from the truncations
+
+The previous section described the retry. It was not enough, and the diagnostic proved it
+within an hour of shipping: **193 empty-content events in 50 minutes**, all
+`label: stepfun`, all `stop_reason: max_tokens`, all `blocks: ['thinking']` — and the
+`max_tokens` values were **24, 48, 1200, 4000, 800, 400, 120, 60**.
+
+The 24 came from `src/cron/topic-scan.ts`, which asks the model for a 4–12 character topic
+label and therefore passes `maxTokens: 24`. That reads as sensible right up until you
+notice the model is a reasoning one: the thinking chain burns the budget before a single
+character of label exists. So topic-scan had been producing **nothing**, silently, every
+four minutes across 21 groups. And the retry could not save it — 24 doubled to 48 is still
+not enough (48 appears 73 times in the diagnostic, i.e. the retries failed too).
+
+So the provider layer now keeps a floor instead of a multiplier:
+
+- `REASONING_TOKEN_FLOOR = 1200` — measured: step-3.7-flash uses ~840 tokens of
+  reasoning + text on a short prompt.
+- A label observed to truncate is remembered **in-process**, and every later call to it
+  starts at the floor rather than at whatever small number the caller wrote. The first
+  truncation re-teaches it after a restart, and truncations log a warning, so "fails to
+  learn" is not a reachable state.
+- The floor is a floor, not a ceiling: a caller who explicitly asks for 8,000 still gets
+  8,000, and the retry still doubles on top of it.
+- `topic-scan` now passes 1200 directly, with a comment saying why — the floor is a
+  backstop, not a licence to keep writing 24.
+
 ### When a reasoning model spends its whole budget thinking
 
 The single most frequent LLM failure in this system is not a timeout or a rate limit —
