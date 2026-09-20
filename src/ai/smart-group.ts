@@ -65,6 +65,38 @@ function getConfig(): SmartGroupConfig {
 
 // ─── Cost Inference ─────────────────────────────────────────────────────────
 
+/**
+ * best-latency 下"从没被调用过"的 provider 该排哪儿。
+ *
+ * 2026-09-21 接入 step-5-preview 时发现的真问题：原实现给无数据者一个写死的
+ * 5_000ms，注释说"让新 provider 有机会被试"——但当时在跑的 provider 平均延迟
+ * 已经降到 2.8s，于是新来的永远排在第 5 名之后，而链长只有 5，**它一次都不会
+ * 被调用，也就永远拿不到数据，永远排不上去**。新 provider 成了死代码，而
+ * "加一个 provider 就能用"这条扩展性承诺是假的。
+ *
+ * 改成：无数据者的分数 = 当前已知延迟的中位数。语义是"当成普通水平的一员"——
+ * 排得比快的低、比慢的高，链一长它就在里面；真被调一次之后按自己的实测延迟归位。
+ * 一个已知延迟都没有时（全新部署）才退回 5_000。
+ */
+function medianOf(values: number[]): number {
+  if (values.length === 0) return 5_000;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** 候选里所有"有实测延迟"的平均延迟集合（best-latency 的基准线）。 */
+function knownLatencies(candidates: Array<{ name: string }>): number[] {
+  const out: number[] = [];
+  for (const c of candidates) {
+    const h = memoryHealth.get(c.name);
+    if (h && h.latencies.length > 0) {
+      out.push(h.latencies.reduce((a, b) => a + b, 0) / h.latencies.length);
+    }
+  }
+  return out;
+}
+
 function inferCost(endpoint: string): 'free' | 'grouped' | 'paid' {
   const ep = endpoint.toLowerCase();
   if (ep.includes('127.0.0.1') || ep.includes('localhost')) return 'grouped';
@@ -130,7 +162,7 @@ export async function smartGroupReorder(labelNames: string[]): Promise<string[]>
         if (h && !h.healthy) return { name, score: -Infinity };
         const avgLat = h && h.latencies.length > 0
           ? h.latencies.reduce((a, b) => a + b, 0) / h.latencies.length
-          : 9999;
+          : medianOf(knownLatencies(available)); // 没见过 → 按池子中位数归位
         return { name, score: -avgLat };
       }
       case 'cost-first': {
@@ -268,6 +300,9 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
   }
   if (candidates.length === 0) return [];
 
+  const known = knownLatencies(candidates);
+  const newcomerLatency = medianOf(known);
+
   const scored = candidates.map(({ name, label }) => {
     const h = memoryHealth.get(name);
     const unhealthy = h !== undefined && !h.healthy;
@@ -282,7 +317,7 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
         }
         const avgLat = h && h.latencies.length > 0
           ? h.latencies.reduce((a, b) => a + b, 0) / h.latencies.length
-          : 5_000; // 无数据给中间值,让新 provider 有机会被试
+          : newcomerLatency; // 无数据 → 池子中位数,否则新 provider 永远排不上
         return { name, score: -avgLat };
       }
       case 'cost-first': {

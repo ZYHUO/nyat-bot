@@ -203,4 +203,56 @@ describe('smartGroupAutoAssign', () => {
     setLabels([makeLabel('low1', { tier: 'low' })]);
     expect(await smartGroupAutoAssign('reply')).toEqual([]); // wants high
   });
+
+  // ─── 回归：新 provider 永远排不上（2026-09-21 接 step-5-preview 时发现）──────
+  //
+  // 原实现给"没有延迟数据"的 provider 一个写死的 5_000ms。当时在跑的 provider
+  // 平均延迟已经降到 2.8-3.2s，于是新来的永远排在链长之外 → 一次都不被调用 →
+  // 永远拿不到数据 → 永远排不上去。"加一个 provider 就能用"是假的。
+  //
+  // 修法：无数据者按**池内已知延迟的中位数**归位，而不是一个拍死的常数。
+  it('a brand-new provider is reachable even when every incumbent is fast', async () => {
+    setLabels([
+      makeLabel('inc1', { tier: 'high' }),
+      makeLabel('inc2', { tier: 'high' }),
+      makeLabel('inc3', { tier: 'high' }),
+      makeLabel('inc4', { tier: 'high' }),
+      makeLabel('inc5', { tier: 'high' }),
+      makeLabel('newcomer', { tier: 'high' }), // 从未被调用 → 无延迟数据
+    ]);
+    // 5 个在跑的都明显快于旧的写死值 5000ms
+    recordSmartGroupResult('inc1', 2800, true);
+    recordSmartGroupResult('inc2', 2900, true);
+    recordSmartGroupResult('inc3', 3000, true);
+    recordSmartGroupResult('inc4', 3100, true);
+    recordSmartGroupResult('inc5', 3200, true);
+
+    const result = await smartGroupAutoAssign('reply'); // count = 5
+    expect(result.length).toBe(5);
+    expect(result).toContain('newcomer');
+  });
+
+  it('newcomer lands mid-pack, not first and not last', async () => {
+    setLabels([
+      makeLabel('fast', { tier: 'high' }),
+      makeLabel('slow', { tier: 'high' }),
+      makeLabel('newcomer', { tier: 'high' }),
+    ]);
+    recordSmartGroupResult('fast', 1_000, true);
+    recordSmartGroupResult('slow', 9_000, true);
+    const result = await smartGroupAutoAssign('reply');
+    // 中位数 = 5000 → newcomer 排在 fast 之后、slow 之前
+    expect(result.indexOf('newcomer')).toBeGreaterThan(result.indexOf('fast'));
+    expect(result.indexOf('newcomer')).toBeLessThan(result.indexOf('slow'));
+  });
+
+  it('no latency data anywhere still yields a chain (fresh deploy)', async () => {
+    setLabels([
+      makeLabel('a', { tier: 'high' }),
+      makeLabel('b', { tier: 'high' }),
+      makeLabel('c', { tier: 'high' }),
+    ]);
+    const result = await smartGroupAutoAssign('reply');
+    expect(result).toEqual(['a', 'b', 'c']);
+  });
 });
