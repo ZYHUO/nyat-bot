@@ -969,6 +969,40 @@ out (ignoring a direct question is a different failure). And if activity can't b
 the factor is 1.0, i.e. exactly the previous flat behaviour — an infrastructure hiccup
 must not change behaviour.
 
+### Two selection bugs that put dead providers in live chains
+
+**A label with zero successes was ranked as if it worked.** `healthy` in the health ledger
+means "the circuit breaker hasn't tripped" (`errorCount < 5`) — not "this provider can do
+the job". A label starts at `healthy: true, successCount: 0`, and one or two failures don't
+change that. So it collected the same newcomer-median score as a provider with 522
+successes, and because its (non-existent) latency was assumed to be the median, it could
+rank *above* a proven-but-slow one.
+
+Measured: `dsv4flash` — which points at `127.0.0.1:3000`, where nothing listens — sat in
+the health ledger as `healthy=1 succ=0 err=3` and took **second place in the judge chain**.
+`grok45` was the same shape.
+
+The fix doesn't touch `healthy` (it really is only about the breaker). Instead, a
+zero-success label is scored below every label with measured latency — specifically
+`-(slowest measured + median)`, so it is strictly last among the healthy. One success
+promotes it back into normal ordering, so a genuinely new provider still gets in; it just
+has to prove itself once first.
+
+**The vision chain accepted text-only labels.** The filter excluded only labels that
+*explicitly* declared `vision: false`; undeclared ones passed. The chain came out as
+`spark13(undeclared) / stepfunthink(undeclared) / step5(vision=true)` — the first two
+cannot read images at all, so every image call burned two doomed attempts before reaching
+the one that could. `Vision failed, returning placeholder` fired **434 times a day**, and
+the bot saw `[图片]` instead of the picture.
+
+The loose rule made sense when vision-capable providers were scarce. They aren't any more —
+seven labels declare `vision: true`, two of them healthy — so vision is now strict, same
+direction as video: **undeclared means excluded**.
+
+Both fixes were verified by reverting each one and watching the corresponding test fail.
+One existing test (`filters vision profile by capability`) had been pinning the bug with
+the comment `undefined = 未知,保留` — that expectation is now the bug's epitaph.
+
 ### The fallback chain is diversified by upstream
 
 Smart-group picks a usage's chain from the whole provider pool, ordered by measured

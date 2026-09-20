@@ -313,8 +313,21 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
   for (const [name, label] of labels.entries()) {
     const tier: Tier = label.tier ?? 'medium';
     if (TIER_RANK[tier] < TIER_RANK[profile.minTier]) continue;
-    if (profile.vision && label.capabilities?.vision === false) continue;
-    // video 与 vision 方向相反：没声明 true 的一律排除（理由见 UsageProfile.video）。
+    // vision 现在和 video 同向：**没声明 true 的一律排除**。
+    //
+    // 2026-09-21 改。旧写法是 `=== false`（只排除显式声明不支持 vision 的），
+    // 理由是"未声明的也许还能用，别一棍子打死"。实测这个宽松策略的代价：
+    // `Vision failed, returning placeholder` 一天 434 次，图片只拿到占位符
+    // `[图片]`——bot 知道有图，不知道图里是什么。
+    //
+    // 病因是链里塞进了文本 label：vision 链实测排出来是
+    // `spark13(未声明) / stepfunthink(未声明) / step5(vision=true)`，
+    // 前两个根本不能读图，每次图片调用都先白烧两跳。
+    // 宽松策略只在"能看图的 provider 很少"时才划得来；现在池子里有 7 个
+    // 声明 vision=true 的 label（含 stepfunvision / step5 两个健康的），
+    // 没有短缺，宽松就只剩成本。
+    if (profile.vision && label.capabilities?.vision !== true) continue;
+    // video：没声明 true 的一律排除（理由见 UsageProfile.video）。
     if (profile.video && label.capabilities?.video !== true) continue;
     candidates.push({ name, label, tier });
   }
@@ -338,6 +351,24 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
         const avgLat = h && h.latencies.length > 0
           ? h.latencies.reduce((a, b) => a + b, 0) / h.latencies.length
           : newcomerLatency; // 无数据 → 池子中位数,否则新 provider 永远排不上
+        // 从未成功过的 label 排到所有**有实测**的之后。
+        //
+        // 2026-09-21 加。病因：`healthy` 的语义是"熔断器没跳"（errorCount < 5），
+        // 不是"这东西能用"。一个 label 初始就是 healthy=true / successCount=0，
+        // 试过一两次失败也还是 healthy —— 于是它和真能用的 label 拿同一个
+        // 新来者中位数分，平起平坐，甚至因为延迟低而排到前面。
+        //
+        // 实测：`dsv4flash`（指向 127.0.0.1:3000，那个端口上什么都没有）在
+        // health ledger 里是 `healthy=1 succ=0 err=3`，照样进 judge 链第二位。
+        // `grok45` 同样 `healthy=1 succ=0`。
+        //
+        // 做法不是改 healthy（它确实只管熔断），而是给"零成功"一个明确的低分：
+        // 比池子里最慢的实测 label 还慢。第一次成功之后就自动归位——
+        // 新 provider 仍然进得来，只是要先用一次成功证明自己。
+        if (h && h.successCount === 0 && known.length > 0) {
+          const slowest = Math.max(...known);
+          return { name, score: -(slowest + newcomerLatency) };
+        }
         return { name, score: -avgLat };
       }
       case 'cost-first': {

@@ -100,14 +100,19 @@ describe('smartGroupAutoAssign', () => {
   });
 
   it('filters vision profile by capability', async () => {
+    // 2026-09-21：这条断言**曾经钉着 bug 本身**。旧写法只排除显式
+    // `vision: false`，未声明的文本 label 照样进 vision 链 —— 实测链是
+    // `spark13(未声明) / stepfunthink(未声明) / step5(vision=true)`，
+    // 前两个不能读图，`Vision failed, returning placeholder` 一天 434 次。
+    // 现在和 video 同向：没声明 true 的一律排除。
     setLabels([
       makeLabel('vis1', { tier: 'medium', capabilities: { vision: true } }),
-      makeLabel('vis2', { tier: 'medium' }), // undefined = 未知,保留
+      makeLabel('vis2', { tier: 'medium' }), // undefined = 未知，**排除**
       makeLabel('novis', { tier: 'medium', capabilities: { vision: false } }),
     ]);
     const result = await smartGroupAutoAssign('vision');
     expect(result).toContain('vis1');
-    expect(result).toContain('vis2');
+    expect(result).not.toContain('vis2');
     expect(result).not.toContain('novis');
   });
 
@@ -371,5 +376,101 @@ describe('smartGroupAutoAssign', () => {
     ]);
     const result = await smartGroupAutoAssign('reply');
     expect(result).toEqual(['a', 'b', 'c']);
+  });
+});
+
+// ─── 2026-09-21：两个选路缺陷 ────────────────────────────────────────────
+//
+// ① `healthy` 的语义是"熔断器没跳"（errorCount < 5），不是"这东西能用"。
+//    一个 label 初始就是 healthy=true / successCount=0，试一两次失败也还是
+//    healthy —— 于是它和真能用的 label 拿同一个新来者中位数分，平起平坐。
+//    实测：`dsv4flash`（指向 127.0.0.1:3000，那端口上什么都没有）在 health
+//    ledger 里是 `healthy=1 succ=0 err=3`，照样进 judge 链第二位。
+//
+// ② vision profile 的过滤旧写法是 `=== false`（只排除显式声明不支持的），
+//    未声明的文本 label 照样进 vision 链。实测 vision 链排出来是
+//    `spark13(未声明) / stepfunthink(未声明) / step5(vision=true)`，
+//    前两个根本不能读图 —— `Vision failed, returning placeholder` 一天 434 次。
+describe('选路：零成功 demote + vision 严格过滤', () => {
+  beforeEach(() => {
+    mockLabels.clear();
+    process.env.SMART_GROUP_ENABLED = 'true';
+    process.env.SMART_GROUP_AUTO_ASSIGN = 'true';
+    process.env.SMART_GROUP_STRATEGY = 'best-latency';
+    delete process.env.SMART_GROUP_DIVERSIFY_UPSTREAM;
+  });
+
+  it('① 从未成功的 label 排到所有有实测的之后', async () => {
+    // 两个有实测的：1000 和 5000 → 新来者中位数 = 3000。
+    // `slow` 实测 5000 → 得分 -5000；`never` 零成功 → 新来者分 -3000。
+    // **没有 demote 的话 -3000 > -5000，never 会排到 slow 前面。**
+    // 加了 demote 之后 never = -(5000+3000) = -8000，落到最后。
+    setLabels([
+      makeLabel('slow', { tier: 'high' }),
+      makeLabel('never', { tier: 'high' }),
+      makeLabel('fast', { tier: 'high' }),
+    ]);
+    recordSmartGroupResult('fast', 1000, true);
+    recordSmartGroupResult('slow', 5000, true);
+    recordSmartGroupResult('never', 100, false);   // 只失败过，没成功过
+    const chain = await smartGroupAutoAssign('judge');
+    expect(chain.indexOf('never')).toBe(chain.length - 1);
+    expect(chain[0]).toBe('fast');
+  });
+
+  it('①b 一次成功就归位（新 provider 仍进得来，只是要先证明自己）', async () => {
+    setLabels([makeLabel('proven', { tier: 'high' }), makeLabel('newbie', { tier: 'high' })]);
+    recordSmartGroupResult('proven', 5000, true);
+    recordSmartGroupResult('newbie', 1000, true);   // 成功了
+    const chain = await smartGroupAutoAssign('judge');
+    expect(chain[0]).toBe('newbie');                // 1000 < 5000，正常按延迟排
+  });
+
+  it('①c 全部零成功时仍能排出链（不返回空）', async () => {
+    setLabels([makeLabel('a', { tier: 'high' }), makeLabel('b', { tier: 'high' })]);
+    recordSmartGroupResult('a', 100, false);
+    recordSmartGroupResult('b', 200, false);
+    const chain = await smartGroupAutoAssign('judge');
+    expect(chain.length).toBe(2);
+  });
+
+  it('② vision 链只收声明 vision=true 的（未声明的一律排除）', async () => {
+    setLabels([
+      makeLabel('sees', { tier: 'high', capabilities: { vision: true } }),
+      makeLabel('undeclared', { tier: 'high' }),
+      makeLabel('textonly', { tier: 'high', capabilities: { vision: false } }),
+    ]);
+    const chain = await smartGroupAutoAssign('vision');
+    expect(chain).toEqual(['sees']);
+  });
+
+  it('②b vision=false 与未声明同样被排除（两者都不能读图）', async () => {
+    setLabels([
+      makeLabel('sees', { tier: 'medium', capabilities: { vision: true } }),
+      makeLabel('nope', { tier: 'medium', capabilities: { vision: false } }),
+    ]);
+    expect(await smartGroupAutoAssign('vision')).toEqual(['sees']);
+  });
+
+  it('②c 没有 vision-capable 候选 → 返回空（调用方回退手动链），不硬塞文本 label', async () => {
+    setLabels([makeLabel('textonly', { tier: 'high', capabilities: { vision: false } })]);
+    expect(await smartGroupAutoAssign('vision')).toEqual([]);
+  });
+
+  it('②d 非 vision usage 不受影响（judge 照旧收文本 label）', async () => {
+    setLabels([
+      makeLabel('sees', { tier: 'high', capabilities: { vision: true } }),
+      makeLabel('textonly', { tier: 'high', capabilities: { vision: false } }),
+    ]);
+    const chain = await smartGroupAutoAssign('judge');
+    expect(chain).toContain('textonly');
+  });
+
+  it('②e video 仍然是严格的（这次改动没动它）', async () => {
+    setLabels([
+      makeLabel('vids', { tier: 'high', capabilities: { video: true } }),
+      makeLabel('sees', { tier: 'high', capabilities: { vision: true } }),
+    ]);
+    expect(await smartGroupAutoAssign('video')).toEqual(['vids']);
   });
 });
