@@ -155,6 +155,10 @@ interface DbStats {
   asiRows: number;
   asiMeasured: number;
   outcomes: number;
+  /** 主动发言（cron/unified-tick，trigger_uid=0） */
+  sendsProactive?: number;
+  /** 有触发对象的回复 */
+  sendsTriggered?: number;
   /** 非空 = SQLite 没读到，上面的 0 一律读作"没有数据" */
   failed?: string;
   /** 最近一条 asi_final 非密的时间（ISO），用来看新代码有没有产出实测 */
@@ -174,6 +178,15 @@ function readDb(): DbStats {
     const sinceSec = nowSec - DAYS * 86_400;
     out.sends = (db.prepare('SELECT COUNT(*) n FROM self_replies WHERE ts >= ?').get(sinceSec) as { n: number }).n;
     out.sendsPrev = (db.prepare('SELECT COUNT(*) n FROM self_replies WHERE ts >= ? AND ts < ?').get(sinceSec - DAYS * 86_400, sinceSec) as { n: number }).n;
+    // 主动（无触发）与被动（有触发）分开：self_replies 有三个写入方
+    // （deliver / host-api / unified-tick），第三个是 cron 主动发言，trigger_uid=0。
+    // 混在一起数，"回复频率"就不是回复频率了。
+    const split = db.prepare(
+      `SELECT CASE WHEN trigger_uid = 0 THEN 'proactive' ELSE 'triggered' END kind, COUNT(*) n
+         FROM self_replies WHERE ts >= ? GROUP BY kind`,
+    ).all(sinceSec) as Array<{ kind: string; n: number }>;
+    out.sendsProactive = split.find((r) => r.kind === 'proactive')?.n ?? 0;
+    out.sendsTriggered = split.find((r) => r.kind === 'triggered')?.n ?? 0;
     // **COUNT(asi_final) 不是"真测到"**：旧代码把中性默认值当测量结果写进去，
     // 于是 `asi_final IS NOT NULL` 里混着 2242 行一模一样的 77.0 / warmth 0.5。
     // 2026-09-21 修完之后未测到的写 NULL，但**历史行救不回来**——
@@ -265,10 +278,24 @@ if (deployMs > 0) {
 }
 
 console.log('── 1. 发言频率 ──');
-console.log(`  本群发送 (self_replies)      ${db.sends}`);
-console.log(`  上一个等长窗口                ${db.sendsPrev}` +
-  (db.sendsPrev > 0 ? `   ${db.sends <= db.sendsPrev ? '↓' : '↑'} ${pct(Math.abs(db.sends - db.sendsPrev), db.sendsPrev)}` : ''));
-console.log('    （注：这个对比跨了库清理/重启，只作参考；真正的频率看下面"每任务发送分布"）');
+console.log(`  发言总数 (self_replies)      ${db.sends}`);
+console.log(`    其中有触发（真回复）        ${db.sendsTriggered ?? 0}`);
+console.log(`    其中主动（cron 冒泡）       ${db.sendsProactive ?? 0}`);
+// 真正的"频率"是**比率**：每 100 条入站消息里 bot 说几句。
+// 绝对数随群活跃度浮动，比率才是用户说的"日常都有点过高频率"那个东西。
+if (st.inbound > 0 && db.sends > 0) {
+  const per100 = (db.sends / st.inbound) * 100;
+  console.log(`  每 100 条入站发言            ${per100.toFixed(1)} 句   ← 这才是"频率"`);
+  if (per100 > 20) {
+    console.log('    ⚠️ 高于 20% —— bot 说的话接近群里每五条就有一条是它。');
+    console.log('       （判据是经验值：正常群聊里真人互答占比也就在这个量级。）');
+  }
+}
+if (db.sendsPrev > 0) {
+  console.log(`  上一个等长窗口                ${db.sendsPrev}` +
+    `   ${db.sends <= db.sendsPrev ? '↓' : '↑'} ${pct(Math.abs(db.sends - db.sendsPrev), db.sendsPrev)}`);
+  console.log('    （注：这个对比跨过库清理/重启时会虚高，只作参考；看上面那个比率。）');
+}
 console.log(`  包络拦截 (L1 Wall)           ${st.envelopeBlock}`);
 console.log(`  计数额度拦截 (6/h)           ${st.budgetBlock}`);
 console.log(`  最小间隔拦截                 ${st.gapBlock}`);
