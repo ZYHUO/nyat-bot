@@ -81,6 +81,8 @@ const CHECKS: Array<[string, string]> = [
   ['bot 结构闸判据', 'ignore-structural'],
   // 视频描述可观测性（2026-09-21）
   ['视频描述遥测', 'Video described'],
+  // Meta 主路径接上 peer-reaction / network-burst（2026-09-21）
+  ['Meta peer-reaction', 'Meta: peer-reaction'],
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）

@@ -30,6 +30,40 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
       .catch(() => {});
   }
 
+  // 多 bot 共存：peer reaction + network burst。
+  //
+  // 2026-09-21 发现这两个功能**在生产里从未运行过**：它们的唯一调用方在
+  // `pipeline/pipeline.ts`（legacy 路径），而生产主路径是 Meta，根本不进
+  // processPipeline。旗标 PEER_REACTION_ENABLED / NETWORK_BURST_ENABLED 都是
+  // true，日志里 `Peer reaction sent` / `Network burst: chimed in` **零次**。
+  //
+  // 死开关守卫没抓到这件事：它查"有没有人读这个旗标"，而 pipeline.ts:210 确实读
+  // 了——但那条路在生产不跑。**"有读者"和"读者在主路径上"是两件事。**
+  //
+  // 两个 hook 都自带 chat-lock / fatigue / 作息 / 概率门（见各自实现），
+  // 且 fire-and-forget，挂在这里不阻塞 ingest。
+  if (chatId < 0 && formatted.uid > 0) {
+    void (async () => {
+      try {
+        const { getBotUid } = await import('../bot/bot.js');
+        const botUid = getBotUid();
+        if (formatted.isBot && formatted.uid !== botUid) {
+          const bc = formatted.botClass;
+          if (env().PEER_REACTION_ENABLED && (bc === 'chat' || bc === 'cmd_result')) {
+            const { maybePeerReaction } = await import('../pipeline/games/peer-reaction.js');
+            await maybePeerReaction(chatId, formatted, botUid);
+          }
+        }
+        if (!formatted.isBot && env().NETWORK_BURST_ENABLED) {
+          const { maybeNetworkBurst } = await import('../pipeline/games/network-burst.js');
+          await maybeNetworkBurst(chatId, formatted, botUid);
+        }
+      } catch (err) {
+        logger.debug({ err }, 'Meta: peer-reaction / network-burst failed');
+      }
+    })();
+  }
+
   // Reply-outcome observation. The legacy pipeline does this in
   // pipeline/stages/bookkeeping.ts; Meta skips that stage entirely, so without
   // this hook the outcomes of every conversation reply sent on the main path
