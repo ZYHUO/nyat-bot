@@ -1421,6 +1421,53 @@ SELF_HISTORY_ENABLED → 日志 0 次
 同一句话，说了两次，第二次才变成动作。这个差距就是本次会话
 最顽固的那个失效：**写下来的结论不随新证据更新，除非有人真的去查。**
 
+## 九·补十八、"老架构替换掉了多少"—— 用数字回答，不用态度（2026-09-21）
+
+这条一直是本论文最含糊的一句。补十七把 flag 级删除候选清零之后，剩下的问题变成：
+**替换这件事到底完成了多少？** 没有数字的话它只是个态度。
+
+`scripts/arch-split.mts` 给它一个可复现的判据（全量日志，34.6 MB）：
+
+```
+入站消息 (message in):              25,951
+Meta 路径事件                       32,462     ← 新架构
+legacy processPipeline 出口           1,057     4.07%
+  ├─ denoise: bot ad/verify/echo     1,002    3.86%
+  ├─ floor: not addressed              27    0.10%
+  ├─ heart=pass                        24    0.09%
+  └─ asleep, queued                     4    0.02%
+
+legacy 回复引擎（judge→gate→reply）走到出口的: 55 条  0.21%
+```
+
+**结论分两层，必须分开说：**
+
+1. **legacy 的回复引擎已经替换完了。** 25,951 条入站里，走到
+   `judge→gate→reply→send` 这条老路并产生出口的只有 55 条（0.21%），
+   而且没有一条对人类消息生成回复——全是 floor 短路 / heart=pass / 睡眠排队。
+   换记忆这条路在生产已经不干活了。
+
+2. **legacy 还剩下三件活儿，都不是"回复"**：
+   - 斜杠命令与 NL 命令分发（`Meta path: slash/checkin-stats → legacy pipeline`，
+     本窗口 811 次交接）
+   - bot 消息降噪（1,002 次，0ms 短路）
+   - 代发回执认领（`tryHandleDelegationReceipt` 只在 legacy 里被调用）
+
+所以"完全剔除 pipeline"这句话现在的准确形式是：**回复决策与生成已经全在 Meta
+路径上；legacy 退化成了一个命令分发器 + bot 降噪器。** 这不是半开状态，是一个
+分工。但它确实还是两份代码，且 bot 降噪在两条路上各有一份（Meta 路径的分类降噪
+是 round 1 补的，legacy 的 L0 `bot_message` 规则是原来的）。
+
+**没有继续合并的原因（记下来，免得下轮重复决定）**：把 bot 消息全部改走 Meta
+路径听着是纯简化，其实有回归风险——legacy 的 L0 对非对话型 bot 是 0ms IGNORE，
+而 Meta 路径的分类器只对 `ad`/`verify`/`echo` 三类降噪，其余会继续烧心流。
+那正是 round 1 修过的"验证 bot 被回复 6 次"的成因。要合并就得先把两条降噪口径
+统一（同一套 classify + 同一份降噪集合），那是独立一轮的工作，不是顺手改。
+
+判定的一个坑也记在这里：Meta 与 legacy 的数字**不严格互补**——命令走
+Meta→legacy 交接，两边都留痕迹。所以 Meta 的数字是"经过 Meta 层"，
+不是"只经过 Meta"。
+
 ## 附录 A：证据索引
 
 | 论断 | 证据位置 |

@@ -76,6 +76,22 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 - **Test-vs-production isolation is enforced, not optional**: under `VITEST`, `getRedis()` rewrites the URL to **db 0** and `getDb()` forces **`:memory:`** — `env.ts` loads the real `.env` via dotenv, so without this an unmocked dynamic import writes production (2026-08-21: a test fixture landed in the master's DM context and the bot repeated it as fact). **Mock the direct behavior module** (e.g. `weather.js`), not just its deps — `vi.mock(env.js)` does not reliably propagate through deep dynamic-import chains (observed: real env leaked through, a live fetch fired). If a test fails on `:memory:` "no such table", that test was secretly touching prod — mock it properly.
 - A flaky pattern exists: the **first full `vitest run` right after editing src** occasionally reports one spurious failure that never reproduces on immediate rerun (suspected transform-cache timing). Rerun before believing it; three green runs = clean.
 
+## Measuring how much of the old architecture is left
+
+`npx tsx scripts/arch-split.mts [days]` prints the Meta-vs-legacy split from the log:
+inbound messages, legacy `Pipeline complete` exits broken down by reason, and Meta events
+by class. The number that matters is the **legacy reply engine** line — how many messages
+traversed `judge→gate→reply` and produced an exit. It was 55/25,951 (0.21%) on 2026-09-21.
+
+Two things to know when reading it:
+- Meta and legacy are **not strictly complementary** — commands hand off Meta→legacy and
+  leave traces on both sides, so the Meta figure means "passed through the Meta layer".
+- Legacy's remaining work is command dispatch, bot denoise, and delegation receipts. Do
+  not "finish the replacement" by routing bot messages to the Meta path without first
+  unifying the two denoise criteria — legacy's L0 IGNOREs non-conversational bots at zero
+  cost while the Meta classifier only denoises ad/verify/echo, so the rest would start
+  burning heart calls. That is the "verify bot got 6 replies" bug.
+
 ## Before you commit
 
 - Run `export PATH=/opt/node22/bin:$PATH && npm run typecheck && npm run lint && npm run test` — all must be **completely** clean; there are no known-noise exceptions.

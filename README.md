@@ -608,6 +608,50 @@ bots.command 回复那条消息发 /spam@nmnmfunbot（举报群内违规用户�
 
 No grant, no line — and no card.
 
+### How much of the old architecture is left — measured, not asserted
+
+`scripts/arch-split.mts` answers this from the log with a reproducible criterion
+(full log, 34.6 MB):
+
+```
+inbound messages (message in):           25,951
+Meta path events                         32,462    ← the new architecture
+legacy processPipeline exits               1,057    4.07%
+  ├─ denoise: bot ad/verify/echo           1,002    3.86%
+  ├─ floor: not addressed                    27    0.10%
+  ├─ heart=pass                              24    0.09%
+  └─ asleep, queued                           4    0.02%
+
+legacy reply engine (judge→gate→reply) reaching an exit: 55  0.21%
+```
+
+Two conclusions, and they must be stated separately:
+
+1. **The legacy reply engine is replaced.** Of 25,951 inbound messages, only 55 (0.21%)
+   traversed `judge→gate→reply→send` and produced an exit — and none of them generated a
+   reply to a human. That path no longer does work in production.
+2. **Legacy still does three things, none of them "replying":** slash/NL command dispatch
+   (811 handoffs in this window), bot-message denoise (1,002 zero-millisecond
+   short-circuits), and delegation-receipt claiming (`tryHandleDelegationReceipt` is only
+   called from there).
+
+So "remove the pipeline entirely" now has an exact form: **reply deciding and generating
+are entirely on the Meta path; legacy has degenerated into a command dispatcher plus a bot
+denoiser.** That is a division of labour, not a half-open state — but it is still two
+code paths, and bot denoise exists twice (the Meta path's classifier was added in round 1;
+legacy's L0 `bot_message` rule is the original).
+
+Why they were *not* merged here: routing all bot messages to the Meta path sounds like a
+pure simplification but carries a regression risk — legacy's L0 IGNOREs non-conversational
+bots at zero cost, while the Meta path's classifier only denoises `ad`/`verify`/`echo` and
+would let the rest burn heart calls. That is exactly the cause of the "verify bot got 6
+replies" bug fixed earlier. Merging requires unifying the two denoise criteria first,
+which is its own round of work.
+
+One caveat on the numbers: Meta and legacy are **not strictly complementary** — commands
+hand off Meta→legacy and leave traces on both sides. So the Meta figure means "passed
+through the Meta layer", not "only through Meta".
+
 ### How much the bot talks, and what actually bounds it
 
 Frequency is not one knob, it is three rulers of different sizes, and each one was
