@@ -35,14 +35,20 @@ Most chat bots are **responding** systems: cue in, text out. Real group members 
 - 🧠 **3-level judge pipeline** — L0 local rules → L1 micro AI → L2 full AI (fallback path when Heart is off; Meta graylist chats skip it to avoid double replies)
 - 🎯 **Multi-model routing + Smart Group** — per-usage provider chains (reply / judge / vision / summarize / deep_think) with auto-assign from a live health/latency pool, hedged requests, circuit breakers, Redis runtime overrides
 
-**NyatOS layer (in progress, shadow-only)**
-- 🧾 **Frame** (`src/nyatos/frame.ts`) — one bounded, factual view per turn: conversation field (topics / floor / pace / who-talks-to-whom), inner state, Telegram capabilities, the bot's own recent acts *with outcomes*, wall-clock facts, and its own identity (so it can tell an `@mention` of itself from a stranger's name). Fail-soft per register: an unreadable register becomes a visible unknown, never a crash.
-- 👥 **Single decision point** (`src/nyatos/shadow.ts`) — a second judgement run in parallel on live traffic that **records but never sends**, so the rewrite can be measured against the shipping path before it is trusted.
-- 🗣️ **Participation self-awareness** (`src/nyatos/budget.ts`) — reports what the bot has *done* ("you've said 6 things this hour", "you just spoke"), never a quota it is allowed. Restraint comes from the persona; the host only reports.
-- ⏱️ **Cognitive clock** (`src/agent/cognitive-clock.ts`) — `own_action_result` (the bot seeing what it just did, and how it landed) and `self_scheduled_wake` (deciding when to think again) as first-class events.
-- 🌍 **Host-observable world facts** (`src/agent/world-facts.ts`) — group title / type / username / description recorded as `world_change` events, the missing producer for the World projection.
+**Nyat Trench — the live body layer** ([`docs/plans/2026-09-19-nyat-trench.md`](docs/plans/2026-09-19-nyat-trench.md))
 
-> Honest status: the Frame + shadow are live and measured; the single decision point is **not** the production path. A 54-sample comparison found it wants to speak far more often than the shipping gates allow (48 times in 28 minutes, median gap 7s), and it did not restrain itself even when told it had just sent four unanswered messages. The gates therefore stay, and the self-awareness facts above were added so the model can regulate itself instead of being silently overridden. See `docs/plans/2026-09-18-dispatch-gate-review.md`.
+The stance: *the model decides what to say and whether to say it; the host only reports the state of your throat.* Every mechanism below is a **measurement the host holds and the model reads** — never a verdict, never a quota the model is allowed.
+
+- 🩺 **L0 Bed** (`src/nyatos/trench.ts`) — a bounded integrator: speech pressure `P ∈ [0,12]`, shore `θ`, a time-based pump (halves every 60 min), sleep-phase accumulation, and a self-unlock watchdog that force-resets a group pinned at `P_MAX`. Bounded, observable, force-unlockable — the four properties a vetoer must have.
+- 🧱 **L1 Wall** (`src/nyatos/envelope.ts`) — burst envelope (150 addressed / 100 proactive per hour), send-time gate, anchor dedup, and the outbound text guards that stop internal bookkeeping, tool placeholders **and tool-call syntax** from ever reaching a chat.
+- 🪞 **L2 Reflex** (`src/agent/echo.ts`) — `Echo`, the only learner: whether what the bot said was picked up. Settles on every live outcome, so E actually moves.
+- 💸 **Directed debt** (`src/nyatos/debt.ts`) — a per-`(chat, sender)` "you owe them a line" ledger. Decay is driven by *replying*, not by the clock — which is the difference between a living loop and a spasm.
+- 🛡️ **Anti-ad, by behaviour not keywords** (`src/nyatos/ad-pressure.ts`) — four behavioural signals (burst / echo / repeat / cross-chat spread) composed into one bounded `adP`. **No content keywords anywhere.** Corpus analysis showed this ecosystem's noise is other bots, not human ad copy — phone numbers, crypto and porn links were all *zero* in the sample — so content matching would raise false positives and still miss the target. The Frame reports *"8560347478 在刷屏：8 条/5 分钟，0 人接，4 条重复。管不管、怎么管，你定。"* and the model decides, using the admin tools that already exist. Group-owner opt-in only (`ANTIAD_CHAT_IDS` or the per-chat Redis key); unauthorised groups pay nothing.
+- 🔌 **Body-signal registry** (`src/nyatos/body-signal.ts`) — adding a body signal is *one file plus one `registerBodySignal` call*; `frame.ts` never changes. Measured before the refactor: adding directed debt had touched 10+ files, eight under `src/agent/`.
+- 🔍 **StepFun web search** (`src/pipeline/tools/search.ts`) — `POST /v1/search` is the primary route, returning title/snippet/content/time directly with no model in the loop. Gemini grounding / grok / SearxNG / DDG remain as fallbacks. No model in the path also means one fewer surface for tool tags to leak into reply text.
+
+> Honest status, from the first real wake-up after the layer went live: the **physics works** — pressure carried correctly into the first minutes (12 / 5 / 4.5 / 3 / 2.5 / 1.125 across groups, none pinned that shouldn't be), the watchdog created *and* cleared its timer on a genuinely pinned group, E moved on live settlements, and the debt-discharge call site fired with both guards satisfied. Two **transmissions are not established**: `P=12` did not produce speech (that group was silent 19 hours while the heart kept routing "reply" to Attention), and directed debt is seen but rarely chosen (0/13 in the wake window, 18% over a day). Both gaps have pre-registered, revertible experiments with criteria written down before running them. Net code change so far is **+12,102 lines, not −21,000** — the architecture added a body on top of the old system rather than replacing it, and the paper's 13 retracted claims are listed in its Appendix C.
+
 
 **Being a group member**
 - 🗣️ **Addressee & floor awareness** — explicit (mention/reply/quote) + implicit scoring for *who* is being talked to; thread disentangling; never interrupts a 1-on-1 streak
@@ -502,6 +508,42 @@ Drop a JSON file into `data/skills/` to add a custom tool, no code changes:
 ```
 
 Supports `type: "http"` (SSRF-guarded). See `data/skills/README.md`.
+---
+
+## 🛡️ Anti-ad: how a group owner turns it on
+
+Anti-ad is **off everywhere by default** and is never a content filter. It measures four
+behavioural signals per `(chat, sender)` — burst, echo, repeat, cross-chat spread — and
+reports them as facts. The model decides whether to delete, mute, or ask you; the host
+never acts on its own.
+
+**Per-group, three equivalent ways:**
+
+```bash
+# 1. .env graylist (persistent, comma-separated chatIds)
+ANTIAD_ENABLED=true
+ANTIAD_CHAT_IDS=-1002750574953,-1003184176508
+
+# 2. runtime, this group only, with a TTL (hours) — no restart needed
+redis-cli -n 5 set xxb:trench:antiad:-1002750574953 "$(date +%s)" EX 21600
+
+# 3. turn it back off
+redis-cli -n 5 del xxb:trench:antiad:-1002750574953
+```
+
+Without one of those the module is inert: no measurement, no Frame line, no cost.
+
+**What the model sees** (a fact, not an instruction):
+
+```
+[噪声] 8560347478 在刷屏：8 条/5分钟，0 人接，4 条重复。管不管、怎么管，你定。
+```
+
+**What it deliberately does not do:** match keywords. In this ecosystem's corpus the
+classic human-ad signals were *zero* (phone numbers, crypto, porn links, QQ groups) while
+the actual noise was other bots — parser errors, network-test progress bars, game bots.
+Those are behavioural, so that is what gets measured.
+
 ---
 
 ## 📄 License
