@@ -77,6 +77,13 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
         const description = await describeImage(formatted.replyTo.imageFileId, formatted.textContent?.trim() || undefined);
         if (description) {
           formatted.imageDescriptions = [description];
+          // **也要进 textContent**。round 34 只修了上面的直接发图那一支，
+          // 漏了这一支——用户**回复一张图**问"这个多少钱"时，描述同样只进了
+          // imageDescriptions，Meta 路径读不到，模型瞎答。
+          // 同一条规则：Meta 只读 textContent，凡是算了给模型看的东西都得在那儿。
+          if (description !== '[图片]') {
+            formatted.textContent = (formatted.textContent ? `${formatted.textContent}\n[图片: ${description}]` : `[图片: ${description}]`).trim();
+          }
         }
       } catch (err) {
         logger.warn({ err }, "ReplyTo image processing failed, continuing");
