@@ -80,6 +80,23 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 - **Test-vs-production isolation is enforced, not optional**: under `VITEST`, `getRedis()` rewrites the URL to **db 0** and `getDb()` forces **`:memory:`** — `env.ts` loads the real `.env` via dotenv, so without this an unmocked dynamic import writes production (2026-08-21: a test fixture landed in the master's DM context and the bot repeated it as fact). **Mock the direct behavior module** (e.g. `weather.js`), not just its deps — `vi.mock(env.js)` does not reliably propagate through deep dynamic-import chains (observed: real env leaked through, a live fetch fired). If a test fails on `:memory:` "no such table", that test was secretly touching prod — mock it properly.
 - A flaky pattern exists: the **first full `vitest run` right after editing src** occasionally reports one spurious failure that never reproduces on immediate rerun (suspected transform-cache timing). Rerun before believing it; three green runs = clean.
 
+## Reading the production effect of a change
+
+`npx tsx scripts/session-report.mts [days]` prints one table covering the things this
+project changed most recently: send volume and per-task send distribution, heart health
+(failure rate, `All labels exhausted`, empty responses, truncation retries, the
+keep-addressed gate), the Meta/legacy split, and the ASI rubric's measured-vs-NULL ratio.
+
+It also finds the **last `Bot started (polling)`** and reports a separate "after deploy"
+column, because every change here takes effect on restart and a mixed window hides the
+effect. When the bot is asleep the after-deploy column is empty — the script says so
+rather than printing 0, because "no data" and "effect is zero" are different things and
+confusing them is the mistake this repo keeps making.
+
+The per-task send distribution is the real frequency metric: before the send-budget fix,
+79 tasks sent more than 6 messages (worst case 12 in 46 seconds). That tail should be
+zero after it.
+
 ## Measuring how much of the old architecture is left
 
 `npx tsx scripts/arch-split.mts [days]` prints the Meta-vs-legacy split from the log:
