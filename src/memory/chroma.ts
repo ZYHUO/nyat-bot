@@ -255,36 +255,66 @@ export async function memorizeMessage(
     // 机制1:无条件写 visibility + sourceChatId(前向兼容,让数据先积累;
     // scrub 由 MEMORY_VISIBILITY_ENABLED 门控,不影响默认锁 chatId 的检索)。
     const visibility: MemoryVisibility = visibilityOverride ?? defaultVisibilityForChat(chatId);
-    await store.upsert(collectionName(), {
-      wait: false,
-      points: [{
-        id: midToPointId(mid),
-        vector,
-        payload: {
-          mid,
-          chatId,
-          messageId: msg.messageId,
-          uid: msg.uid,
-          username: msg.username,
-          fullName: msg.fullName,
-          timestamp: msg.timestamp,
-          role: msg.role,
-          text,
-          visibility,
-          sourceChatId: chatId,
-        },
-      }],
-    });
     // Importance sidecar — track creation for later scoring / forgetting
     try {
       const { recordMemoryCreated } = await import('./importance.js');
       recordMemoryCreated(mid, chatId, msg.timestamp);
     } catch { /* non-critical */ }
+    // 向量写入套重试。2026-09-21 实测这条 catch 一天吃掉 700 次：
+    //   terminated 431 / connect timeout 181 / socket disconnected 50 / ECONNRESET 38
+    // 全是**连接级瞬断**——本地 Qdrant 抖一下，这条消息的长期记忆就永久少了。
+    // 这类错误重试一次基本就成，而调用方是 fire-and-forget（bookkeeping.ts 里
+    // `.catch()` 挂着），多重试两次不阻塞回复链路。
+    //
+    // 只包向量这一路：词法索引走 SQLite，且 writeLexical 内部已经自己吞异常
+    // （它的失败本来就是 non-fatal），再套一层重试是死代码。
+    // 向量写成功了才写词法 —— 反过来会让 BM25 看见一条向量库没有的记忆。
+    await withQdrantRetry(() => store.upsert(collectionName(), {
+      wait: false,
+      points: [{
+        id: midToPointId(mid),
+        vector,
+        payload: {
+          mid, chatId, messageId: msg.messageId, uid: msg.uid,
+          username: msg.username, fullName: msg.fullName, timestamp: msg.timestamp,
+          role: msg.role, text, visibility, sourceChatId: chatId,
+        },
+      }],
+    }));
     // 词法索引与向量库必须同生同灭 —— 只写一边会让 BM25 与向量两路看到不同的库。
     await writeLexical(mid, chatId, text);
   } catch (err) {
     logger.warn({ err, chatId, messageId: msg.messageId }, 'Memory write failed (non-critical)');
   }
+}
+
+/**
+ * Qdrant 写的短重试。只对**连接级瞬断**重试，别的一律立刻抛——
+ * 内容是自己的问题（payload 非法/维度不对），重试只是翻倍同样的错。
+ *
+ * 三次尝试、退避 150/400ms。再失败就上抛给 memorizeMessage 的 catch
+ * （那条 warn 仍然会打，所以失败不会变安静，只是不再一抖就丢）。
+ */
+async function withQdrantRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const delays = [0, 150, 400];
+  let lastErr: unknown;
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i]! > 0) await new Promise((r) => setTimeout(r, delays[i]));
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientNetworkError(err)) throw err;
+      logger.debug({ attempt: i + 1, err: err instanceof Error ? err.message : String(err) }, 'qdrant write transient — retrying');
+    }
+  }
+  throw lastErr;
+}
+
+/** 连接级瞬断：值得重试的那一类。 */
+function isTransientNetworkError(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return /terminated|other side closed|ECONNRESET|ECONNREFUSED|Connect Timeout|socket disconnected|fetch failed|UND_ERR/i.test(m);
 }
 
 /**

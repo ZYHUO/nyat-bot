@@ -93,6 +93,8 @@ const CHECKS: Array<[string, string]> = [
   ['follow-up judge jsonMode', 'parseJudgeResult'],
   // 全候选被冷却跳过的可诊断失败（2026-09-21）
   ['全冷却可诊断', 'nothing was attempted'],
+  // Qdrant 写瞬断重试（2026-09-21）
+  ['Qdrant 瞬断重试', 'withQdrantRetry'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

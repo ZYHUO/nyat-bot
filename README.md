@@ -792,6 +792,30 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### Long-term memory writes now survive a Qdrant hiccup
+
+`Memory write failed (non-critical)` was firing **700 times a day**:
+
+```
+terminated: other side closed   431
+Connect Timeout Error           181
+socket disconnected              50
+read ECONNRESET                  38
+```
+
+Every one of those is a connection-level transient — the local Qdrant server blinked —
+and every one of them permanently lost that message's long-term memory, because
+`memorizeMessage` had no retry and its caller is fire-and-forget.
+
+The vector write now retries three times (0 / 150 / 400 ms backoff) and **only** for
+transient network errors. A malformed payload or a dimension mismatch throws immediately:
+retrying that just doubles the same mistake. If all three attempts fail the warning still
+fires — the failure does not become quieter, it just stops being thrown away by a blink.
+
+The retry wraps the vector write only. The lexical index goes through SQLite and already
+swallows its own errors, so wrapping it would be dead code; and it is written *after* the
+vector write succeeds, so BM25 can never see a memory the vector store doesn't have.
+
 ### "All labels exhausted" that never tried anything
 
 `callWithFallback` has two very different ways to end in `All labels exhausted`, and until
