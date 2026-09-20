@@ -91,6 +91,8 @@ const CHECKS: Array<[string, string]> = [
   ['claude jsonMode 预填', 'jsonPrefill'],
   // follow-up judge / 代发回执的 jsonMode（2026-09-21）
   ['follow-up judge jsonMode', 'parseJudgeResult'],
+  // 全候选被冷却跳过的可诊断失败（2026-09-21）
+  ['全冷却可诊断', 'nothing was attempted'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

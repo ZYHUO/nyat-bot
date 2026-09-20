@@ -164,7 +164,33 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   }
 
   const lastErr = errors.at(-1);
-  throw lastErr ?? new AIError('All labels exhausted', 'unknown', 'unknown', 'AI_ALL_FAILED');
+  if (lastErr) throw lastErr;
+
+  // 一次都没尝试过就"全灭"——所有候选都被熔断/429 冷却跳过。
+  //
+  // 2026-09-21 加。这个分支此前抛的错和"每个 label 都真失败了"完全一样
+  // （都是 `All labels exhausted`，label/model 都是 'unknown'），但两者的病因
+  // 和处置相反：
+  //   · 真失败 → 该看 provider 的 key/endpoint/额度
+  //   · 全跳过 → 该等冷却过去，或者链里全是同一个模型（stepfun/stepfunjudge/
+  //     stepfunvision/stepfunthink/stepfunasi 五个 label 共用 step-3.7-flash，
+  //     一个熔断全死）
+  // 不区分的时候，后者看起来像前者，于是一次"等 45 秒就好"的故障会被当成
+  // "provider 全挂了"去查。实测触发路径：连跑几个探针把 step-3.7-flash 的
+  // 熔断打满，之后 dreaming 的 4 个候选（stepfun/dsv4flash/grok43vision/grok45）
+  // 全部在冷却中 → 25ms 内失败，零条 per-label 日志。
+  const skipped = await Promise.all(
+    smartOrderedNames.map(async (n) => {
+      const l = getLabel(n);
+      const remaining = await cooldown.getRemainingSeconds(l.model);
+      return { label: n, model: l.model, coolingForSec: remaining };
+    }),
+  );
+  logger.warn(
+    { usage: options.usage, candidates: smartOrderedNames, skipped },
+    'all candidates skipped by cooldown/breaker — nothing was attempted',
+  );
+  throw new AIError('All labels exhausted (all candidates cooling down)', 'unknown', 'unknown', 'AI_ALL_FAILED');
 }
 
 /** 单跳尝试参数:给有 per-label timeout/maxTokens 覆盖的 label 套上(顺序 fallback 与

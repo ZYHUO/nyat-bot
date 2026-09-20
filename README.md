@@ -792,6 +792,29 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### "All labels exhausted" that never tried anything
+
+`callWithFallback` has two very different ways to end in `All labels exhausted`, and until
+now they were indistinguishable:
+
+- **every label really failed** → look at the provider's key, endpoint, quota
+- **every label was skipped** because its model is cooling down or circuit-broken → wait
+  ~45 seconds; or notice that the chain is full of aliases for one model
+
+`stepfun`, `stepfunjudge`, `stepfunvision`, `stepfunthink` and `stepfunasi` are five
+labels on **one** model (`step-3.7-flash`), so a single breaker trip kills all five at
+once. Treating that as "the providers are down" sends you hunting for a problem that is
+about to fix itself.
+
+The second branch now logs a warning naming every skipped label and its remaining cooldown,
+and throws a message that says `all candidates cooling down` instead of the bare
+`All labels exhausted`. Verified by reverting the branch: three of the five new tests fail.
+
+The path that exposed it was self-inflicted — repeated probe runs tripped the
+`step-3.7-flash` breaker, after which dreaming's four candidates were all cooling and the
+call failed in 25 ms with zero per-label log lines. Which is the point: a failure that
+leaves no evidence is a failure you will misdiagnose.
+
 ### Two call sites that asked for JSON and never said so
 
 Fixing `jsonMode` at the provider layer only helps callers that actually pass it. A scan of
