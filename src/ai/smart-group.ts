@@ -29,6 +29,8 @@ interface SmartGroupConfig {
   /** true 时 fallback 不再用 .env AI_USAGE_*_LABEL/BACKUPS 手动链,
    *  而是按 usage profile 从全量 provider 池自动选 top-N(见 smartGroupAutoAssign)。 */
   autoAssign: boolean;
+  /** 链的上游去重：同一 (endpoint, key) 只先取一个。见 diversifyByUpstream。 */
+  diversifyUpstream: boolean;
 }
 
 const DEFAULT_CONFIG: SmartGroupConfig = {
@@ -37,6 +39,7 @@ const DEFAULT_CONFIG: SmartGroupConfig = {
   windowSize: 10,
   rrIntervalSec: 300,
   autoAssign: false,
+  diversifyUpstream: true,
 };
 
 interface LabelHealth {
@@ -61,6 +64,7 @@ function getConfig(): SmartGroupConfig {
     windowSize: parseInt(process.env.SMART_GROUP_WINDOW ?? '10', 10),
     rrIntervalSec: parseInt(process.env.SMART_GROUP_RR_INTERVAL ?? '300', 10),
     autoAssign: process.env.SMART_GROUP_AUTO_ASSIGN === 'true',
+    diversifyUpstream: process.env.SMART_GROUP_DIVERSIFY_UPSTREAM !== 'false',
   };
 }
 
@@ -356,7 +360,50 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
   });
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, profile.count).map((s) => s.name);
+  const ranked = scored.map((s) => s.name);
+  if (!cfg.diversifyUpstream) return ranked.slice(0, profile.count);
+  return diversifyByUpstream(ranked, profile.count, labels);
+}
+
+/**
+ * 链的**上游去重**：同一个 (endpoint, apiKey) 只先取一个，剩下的名额再按分数补。
+ *
+ * 2026-09-21 加。起因是一次故障归因：心流失败 64% 是 "All labels exhausted"，
+ * 而健康 label 里 **stepfun / stepfunjudge / stepfunthink / stepfunvision 四个
+ * 共用同一个 endpoint + 同一个 key**（都是 StepFun 的 step_plan/v1 + 4QeT2Y7…）。
+ * 按延迟排序时这四个会连排在一起，于是：
+ *   · 账号级限流/维护 → 四个 label 同时死 → 链上瞬间一个不剩
+ *   · 而真正独立的 step5（另一个 key）和 spark13（另一个 endpoint）排在后面，
+ *     常常被挤出 count 名额
+ * 日志实测stepfun 系四个 label 的失败是成片出现的（Empty response 1481/685/583/133）。
+ *
+ * 去重后同样名额拿到的是**不同上游**：这个账号挂了，剩下的还在。
+ * 全健康时代价只是排序不同，没有额外成本。
+ *
+ * 上游 key 相同的 label 仍然全部保留在池子里（轮询/比较时还能用），
+ * 这里只影响"同一条链里带谁"。
+ */
+function diversifyByUpstream(
+  ranked: string[],
+  count: number,
+  labels: Map<string, AILabel>,
+): string[] {
+  if (count <= 0 || ranked.length <= 1) return ranked.slice(0, Math.max(0, count));
+  const seen = new Set<string>();
+  const firstPass: string[] = [];
+  const rest: string[] = [];
+  for (const name of ranked) {
+    const l = labels.get(name);
+    const upstream = l ? `${l.endpoint}|${(l.apiKeys[0] ?? '').slice(-8)}` : `name:${name}`;
+    if (seen.has(upstream)) {
+      rest.push(name);
+      continue;
+    }
+    seen.add(upstream);
+    firstPass.push(name);
+  }
+  const out = [...firstPass, ...rest];
+  return out.slice(0, count);
 }
 
 // ─── Init ───────────────────────────────────────────────────────────────────

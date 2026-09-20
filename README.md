@@ -748,6 +748,25 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### The fallback chain is diversified by upstream
+
+Smart-group picks a usage's chain from the whole provider pool, ordered by measured
+latency. That ordering has a failure mode: four of the five healthy labels —
+`stepfun`, `stepfunjudge`, `stepfunthink`, `stepfunvision` — share **the same endpoint and
+the same API key**. Sorted by latency they line up consecutively, so an account-level rate
+limit or maintenance window kills all four at once and the chain is left with nothing. The
+log shows exactly that shape: their `Empty response` counts are 1,481 / 133 / 1,481 / 685 —
+they fail in batches.
+
+`SMART_GROUP_DIVERSIFY_UPSTREAM` (default on) changes the ordering to *distinct upstreams
+first*: the best label from each `(endpoint, apiKey)` pair fills the leading slots, and only
+then are the remaining slots backfilled from the same upstreams. A chain of five now starts
+with three different accounts instead of two. When everything is healthy the only cost is a
+different ordering.
+
+Labels are not removed from the pool — this only changes *who travels together in one
+chain*.
+
 ### When a reasoning model spends its whole budget thinking
 
 The single most frequent LLM failure in this system is not a timeout or a rate limit —

@@ -48,6 +48,7 @@ describe('smartGroupAutoAssign', () => {
     process.env.SMART_GROUP_ENABLED = 'true';
     process.env.SMART_GROUP_AUTO_ASSIGN = 'true';
     process.env.SMART_GROUP_STRATEGY = 'best-latency';
+    delete process.env.SMART_GROUP_DIVERSIFY_UPSTREAM;
   });
 
   it('returns empty when disabled', async () => {
@@ -271,6 +272,95 @@ describe('smartGroupAutoAssign', () => {
       makeLabel('b', { tier: 'high', capabilities: { vision: true } }),
     ]);
     expect(await smartGroupAutoAssign('video')).toEqual([]);
+  });
+
+  // ─── 2026-09-21：链的上游去重 ────────────────────────────────────────
+  //
+  // 健康 label 里 stepfun/stepfunjudge/stepfunthink/stepfunvision 四个共用同一个
+  // endpoint + 同一个 key。按延迟排序它们连排，账号级限流一来四个同时死，
+  // 链上瞬间一个不剩——而真正独立的 step5 / spark13 被挤出名額。
+  // 日志实测那四个的失败是成片的（Empty response 1481/685/583/133）。
+  describe('上游去重（同一 endpoint+key 只先取一个）', () => {
+    const EP = 'https://api.stepfun.com/step_plan/v1';
+    const upstream = (name: string, key: string, tier: 'high' | 'medium' = 'high') =>
+      makeLabel(name, { endpoint: EP, apiKeys: [key], tier });
+
+    it('四个同账号 label 只取最快那个，名額让给不同上游', async () => {
+      setLabels([
+        upstream('a1', 'sk-AAAAAAAAAAAAAAAA', 'high'),
+        upstream('a2', 'sk-AAAAAAAAAAAAAAAA', 'high'),
+        upstream('a3', 'sk-AAAAAAAAAAAAAAAA', 'high'),
+        upstream('a4', 'sk-AAAAAAAAAAAAAAAA', 'high'),
+        upstream('b1', 'sk-BBBBBBBBBBBBBBBB', 'high'),
+        upstream('c1', 'sk-CCCCCCCCCCCCCCCC', 'high'),
+      ]);
+      // 延迟：a1 最快，a2/a3/a4 次之，b1/c1 慢
+      recordSmartGroupResult('a1', 100, true);
+      recordSmartGroupResult('a2', 200, true);
+      recordSmartGroupResult('a3', 300, true);
+      recordSmartGroupResult('a4', 400, true);
+      recordSmartGroupResult('b1', 900, true);
+      recordSmartGroupResult('c1', 950, true);
+
+      const chain = await smartGroupAutoAssign('reply'); // count=5
+      // 关键性质：**前几个是不同上游**。a 账号只出一个（最快的 a1），
+      // 名額先给 b/c，然后才用同账号的 a2/a3 补满。
+      expect(chain.slice(0, 3)).toEqual(['a1', 'b1', 'c1']);
+      expect(chain.length).toBe(5);
+      // 补位的才是同账号的
+      expect(chain.slice(3).every((n) => n.startsWith('a'))).toBe(true);
+    });
+
+    it('不同 endpoint 同 key 也算不同上游（key 相同但服务不同）', async () => {
+      setLabels([
+        makeLabel('x1', { endpoint: 'https://a.example/v1', apiKeys: ['sk-SAMEKEY123456'], tier: 'high' }),
+        makeLabel('y1', { endpoint: 'https://b.example/v1', apiKeys: ['sk-SAMEKEY123456'], tier: 'high' }),
+      ]);
+      const chain = await smartGroupAutoAssign('reply');
+      expect(chain).toContain('x1');
+      expect(chain).toContain('y1');
+    });
+
+    it('关掉开关 → 回到纯延迟排序（不去重）', async () => {
+      process.env.SMART_GROUP_DIVERSIFY_UPSTREAM = 'false';
+      setLabels([
+        upstream('a1', 'sk-AAAAAAAAAAAAAAAA'),
+        upstream('a2', 'sk-AAAAAAAAAAAAAAAA'),
+        upstream('b1', 'sk-BBBBBBBBBBBBBBBB'),
+      ]);
+      recordSmartGroupResult('a1', 100, true);
+      recordSmartGroupResult('a2', 200, true);
+      recordSmartGroupResult('b1', 900, true);
+      const chain = await smartGroupAutoAssign('reply');
+      expect(chain.slice(0, 2)).toEqual(['a1', 'a2']); // 纯延迟，同账号连排
+    });
+
+    it('去重不减少链长（名額照满）', async () => {
+      setLabels([
+        upstream('a1', 'sk-AAAAAAAAAAAAAAAA'),
+        upstream('a2', 'sk-AAAAAAAAAAAAAAAA'),
+        upstream('a3', 'sk-AAAAAAAAAAAAAAAA'),
+        upstream('b1', 'sk-BBBBBBBBBBBBBBBB'),
+        upstream('b2', 'sk-BBBBBBBBBBBBBBBB'),
+        upstream('c1', 'sk-CCCCCCCCCCCCCCCC'),
+      ]);
+      for (const n of ['a1', 'a2', 'a3', 'b1', 'b2', 'c1']) recordSmartGroupResult(n, 100, true);
+      const chain = await smartGroupAutoAssign('reply');
+      expect(chain.length).toBe(5); // count=5，去重后仍补满
+      expect(new Set(chain).size).toBe(5);
+    });
+
+    it('不健康的 label 仍然垫底（去重不改变健康优先）', async () => {
+      setLabels([
+        upstream('sick', 'sk-AAAAAAAAAAAAAAAA'),
+        upstream('good', 'sk-BBBBBBBBBBBBBBBB'),
+      ]);
+      recordSmartGroupResult('good', 500, true);
+      for (let i = 0; i < 5; i++) recordSmartGroupResult('sick', 10, false);
+      const chain = await smartGroupAutoAssign('reply');
+      expect(chain[0]).toBe('good');
+      expect(chain).toContain('sick');
+    });
   });
 
   it('no latency data anywhere still yields a chain (fresh deploy)', async () => {
