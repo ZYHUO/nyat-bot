@@ -792,6 +792,27 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### Two call sites that asked for JSON and never said so
+
+Fixing `jsonMode` at the provider layer only helps callers that actually pass it. A scan of
+every `callWithFallback` site whose result is fed to a JSON parser found two that ask for
+JSON **in the prompt** but never set the flag:
+
+- **`post-task-window.ts`** — the follow-up judge. `POST_TASK_FOLLOWUP_USAGE=reflection`,
+  and the `reflection` usage carries no `jsonMode`, so the model was free to answer in
+  prose into `parseJudgeResult`. Measured: 2,104 batch failures, of which 1,407 were
+  `Empty response` (the 200-token budget being eaten by reasoning — now caught by the
+  provider floor) and the rest largely this.
+- **`bot-delegation.ts`** — the delegation-receipt answer. It uses `usage: 'reply'`, whose
+  `REPLY_JSON_MODE=false` is deliberate: the reply writer wants natural prose, not JSON.
+  But this one call says "输出 JSON" and then calls `parseReplyResponse`, so it must not
+  follow the global setting.
+
+Both now pass `jsonMode: true` explicitly. The lesson written into the option's doc comment:
+**if the prompt asks for JSON and the caller parses it, pass the flag — do not rely on
+usage-level configuration**, because a usage can easily be shared between a structured
+caller and a prose one.
+
 ### `jsonMode` was silently ignored on every Claude-format label
 
 Reading the cron log counts turned up two more jobs that were running at almost nothing:

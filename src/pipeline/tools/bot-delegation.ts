@@ -373,6 +373,12 @@ async function answerFromDelegation(
     ],
     maxTokens: 400,
     temperature: 0.8,
+    // prompt 明写"输出 JSON"，下面也确实走 parseReplyResponse——所以这里要
+    // jsonMode。reply usage 全局是 REPLY_JSON_MODE=false（写手要的是自然散文，
+    // 不是 JSON），但**这一处**是结构化调用，不能跟着全局设置走。
+    // 2026-09-21：jsonMode 现在在 claude 格式 label 上也生效（assistant 预填 {），
+    // 而 reply 的主 label 正是 claude 格式的 stepfun。
+    jsonMode: true,
   });
   const parsed = parseReplyResponse(result.content, current.messageId);
   if (parsed.some((p) => p.action === 'silent')) return;

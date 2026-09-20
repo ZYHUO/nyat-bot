@@ -105,9 +105,20 @@ export interface AICallOptions {
    */
   suppressMetrics?: boolean;
   /**
-   * Request strict JSON output (OpenAI/DeepSeek response_format json_object). Only takes effect
-   * on the openai-format raw path AND when the prompt contains "json" (DeepSeek requirement);
-   * ignored otherwise. Used by the reply writer to eliminate malformed/single-quoted output.
+   * Request strict JSON output. Two mechanisms, depending on the label's API format:
+   *   · OpenAI-format raw path → `response_format: json_object` (needs "json" in the
+   *     prompt for DeepSeek)
+   *   · Claude-format (`/messages`) → an assistant message prefilled with `{`
+   *     (Anthropic's documented prefill technique; the returned text has the brace
+   *     stitched back on)
+   *
+   * 2026-09-21 之前这里只写了"openai-format raw path"，而 claude 分支根本不看这个
+   * 参数——于是 `FORMAT=claude` 的 label（含 stepfun，judge/summarize 的默认主标签）
+   * 上所有 jsonMode 调用都是静默无效：模型收到"请输出 JSON"的 prompt 却没有任何机制
+   * 逼它，回散文，调用方 JSON.parse 失败。实测 dreaming 805 次 0% 产出就是这个病。
+   *
+   * 用法：**prompt 要求 JSON 且调用方会 parse 它，就该传 true。** 别依赖 usage 级
+   * 配置——`reflection` usage 就没配，而 post-task-window 的 judge 要 parse JSON。
    */
   jsonMode?: boolean;
   /**

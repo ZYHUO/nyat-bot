@@ -343,6 +343,12 @@ async function judgeFollowUpBatch(
     maxTimeoutMs: 10_000,
     allowHedge: false,
     rejectEmpty: true,
+    // 这个调用要 JSON（parseJudgeResult 只认 JSON），但 reflection usage 没配
+    // jsonMode——2026-09-21 实测：post-task follow-up 批次失败 2104 次，其中
+    // "Empty response" 1407 次（maxTokens 200 被 reasoning 模型吃光，
+    // 已由 provider 层的 token 下限接住），剩下的栽在"模型回的是散文"。
+    // prompt 里写"输出 JSON"不够——得有机制逼它。显式传，不依赖 usage 配置。
+    jsonMode: true,
     chatId: win.chatId,
   });
   return parseJudgeResult(res.content);

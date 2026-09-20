@@ -89,6 +89,8 @@ const CHECKS: Array<[string, string]> = [
   ['topic-scan 低产告警', 'topic-scan: 连续低抽取'],
   // claude 路径的 jsonMode 预填（2026-09-21）
   ['claude jsonMode 预填', 'jsonPrefill'],
+  // follow-up judge / 代发回执的 jsonMode（2026-09-21）
+  ['follow-up judge jsonMode', 'parseJudgeResult'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）
