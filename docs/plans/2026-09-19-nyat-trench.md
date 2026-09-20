@@ -1106,6 +1106,33 @@ bot → y=0` 会在忙群里恒真，使 E 在最忙的群里崩到最低（方�
   映射没有为它设负值 —— 也就是说"被怼"和"没人理"在 Echo 里同权。这是一个真实的
   粗糙点，但它需要先有"被怼"的样本量才能标定，而现在样本不足。
 
+## 九·补十一、群主自助授权：运行时只验到一半，另一半没验（round 34）
+
+`admin.setAntiAd` 加了一道"发起人必须是本群管理员/群主"的校验（fail-closed）。
+第一次运行时验证的结果看起来是 PASS：
+
+```
+SA before=false rejected=true after=false
+SA msg=Bot not initialized. Call createBot() first.
+SA verdict=PASS（拒绝且未改状态）
+```
+
+**但它是被错误的原因拦住的。** 拦住它的是"探针进程里 bot 没初始化"，不是我写的
+`isGroupAdmin` 校验 —— 生产里 bot 是初始化了的，那条路径根本走不到。
+也就是说这次运行**没有验证到我打算验证的东西**。
+
+再试一次直接调 `isGroupAdmin`，仍然 `botReady=false` —— 探针进程不建 bot，
+所以这条守卫在单机探针里**不可验**。
+
+**因此如实记：**
+- ✅ 已验证：拒绝时**不改授权状态**（before === after === false）
+- ✅ 已验证：源码层四道断言（isGroupAdmin 被调、admin_not_group_admin 被抛、
+  asker > 0 门槛、fail-closed 注释）
+- ❌ **未验证**：`isGroupAdmin` 在真实群上对"真管理员返回 true、非管理员返回 false"
+
+最后这条要靠一次真实调用（群主在群里说"开反广告"）才能验。**在那之前，
+这个开关的安全性是"代码写了 + 状态不被误改"，不是"校验确认有效"。**
+
 ## 附录 A：证据索引
 
 | 论断 | 证据位置 |
