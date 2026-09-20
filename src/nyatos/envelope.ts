@@ -80,7 +80,7 @@ export async function checkEnvelope(
     const winSec = clampInt(e.TRENCH_BURST_WINDOW_SEC, 30, 1800);
     // 被叫到的放宽，主动的收紧：连回 8 个问题是尽职，主动插 8 次话是刷屏。
     // 这正是原 budget "direct 豁免"语义的延续，只是把豁免做成了**程度**而不是**全免**。
-    const maxBurst = clampInt(addressed ? e.TRENCH_BURST_MAX : e.TRENCH_BURST_MAX_ACTIVE, 1, 60);
+    const maxBurst = await scaledBurst(addressed ? e.TRENCH_BURST_MAX : e.TRENCH_BURST_MAX_ACTIVE, chatId);
     // 滑动窗口：桶式（窗口整除），足够防爆且零清理成本。
     const bucket = Math.floor(now / winSec);
     const k = `${KEY_BURST}${chatId}:${bucket}`;
@@ -97,6 +97,45 @@ export async function checkEnvelope(
     logger.debug({ err, chatId }, 'envelope check failed (fail-open)');
     return { ok: true, mode: 'off' };
   }
+}
+
+/**
+ * 按群活跃度缩放突发上限。
+ *
+ * 2026-09-21 加，对应用户的原话："日常都有点过高频率，只有在群友都活跃度高的
+ * 时候高活跃"。在那之前 TRENCH_BURST_MAX / _ACTIVE 是**扁平常量**——冷清群和
+ * 热聊群共用同一个天花板，于是 Quiet 群里 bot 照样能每小时主动插 20 次。
+ *
+ * 缩放依据是宿主**本来就在测**的群活跃度（xxb:activity:{chatId} 这个 ZSET，
+ * recordMessage 每条入站都写），不新增任何测量：
+ *
+ *   messages5min ≥ 20  热聊   ×1.5
+ *   ≥ 10               活跃   ×1.25
+ *   ≥ 3                正常   ×1.0
+ *   ≥ 1                冷清   ×0.5
+ *   0                  沉寂   ×0.25
+ *
+ * 下限 1：再冷清也不许把上限压到 0——那会让包络从"护栏"变成"静音"，
+ * 而被叫到的消息仍然必须能出去（无视直接提问是另一种失败）。
+ *
+ * 读不到活跃度（Redis 抖了）→ 按 1.0 处理，即退回改动前的扁平常量。
+ */
+async function scaledBurst(base: number, chatId: number): Promise<number> {
+  const clamped = clampInt(base, 1, 60);
+  if (!env().TRENCH_ENVELOPE_ACTIVITY_SCALED) return clamped;
+  let factor = 1;
+  try {
+    const { getActivitySummary } = await import('../tracking/activity.js');
+    const s = await getActivitySummary(chatId);
+    factor = s.messages5min >= 20 ? 1.5
+      : s.messages5min >= 10 ? 1.25
+      : s.messages5min >= 3 ? 1
+      : s.messages5min >= 1 ? 0.5
+      : 0.25;
+  } catch {
+    // 读失败按 1.0 —— 与改动前一致，不因基础设施故障改变行为
+  }
+  return Math.max(1, Math.min(60, Math.round(clamped * factor)));
 }
 
 /** 记一次发言进突发窗口。由发送成功方调用（发送**之后**）。 */

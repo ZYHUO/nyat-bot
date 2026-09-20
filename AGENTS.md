@@ -41,7 +41,7 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 - **Everything new is `env`-flag-gated, default OFF, and graylisted per chat.** Flags live in **`src/env-sections/*.ts`** (a zod schema split by subsystem; `src/env.ts` only composes them with spread). Read via the cached `env()` getter, **never `process.env` directly**. Graylists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. `.env` is gitignored and secret — **never commit it**.
   - The 12 sections: `infra` `memory` `timing` `judge` `cognition` `core` `self` `turn` `meta` `features` `social` `life`. Shared `booleanFromEnv` lives in `src/env-sections/_shared.ts` (one copy, not twelve).
   - Directory is `env-sections/`, **not** `env/sections/` — `src/env.ts` is a file, and a same-named directory makes relative imports resolve to the wrong place.
-  - `tests/unit/env/schema-sections.test.ts` pins the key set (**484** as of 2026-09-21; the
+  - `tests/unit/env/schema-sections.test.ts` pins the key set (**485** as of 2026-09-21; the
     number moves as flags are added/retired — re-count, don't guess), plus no losses and no
     cross-section duplicates, and that every section file is actually imported **and**
     spread. Adding a file without wiring it makes that whole section silently vanish — the

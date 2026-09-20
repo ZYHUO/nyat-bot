@@ -131,9 +131,18 @@ export const timingSection = {
   //   而判定点投影要把最忙群从 266 条/天推到 ~1048 条/天（峰值小时 107 → ~172），
   //   这个上界正好落在那段空白里：现在看不见，放大后接得住。
   // 第一版用 5 分钟窗 + 8/3，回测会拦 23%——因为 bot 本来就突到 19 条/5 分钟。
-  TRENCH_BURST_MAX: z.coerce.number().int().positive().default(150),
-  TRENCH_BURST_MAX_ACTIVE: z.coerce.number().int().positive().default(100),
+  TRENCH_BURST_MAX: z.coerce.number().int().positive().default(30),
+  TRENCH_BURST_MAX_ACTIVE: z.coerce.number().int().positive().default(20),
   TRENCH_BURST_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
+  // 突发上限按群活跃度缩放。对应用户原话："日常都有点过高频率，只有在群友
+  // 活跃度高的时候高活跃"。此前上限是扁平常量——冷清群和热聊群共用一个天花板，
+  // 于是 Quiet 群里 bot 照样能每小时主动插 20 次。
+  //
+  // 缩放用宿主**本来就在测**的 xxb:activity:{chatId}（每条入站都写），不新增测量：
+  //   5 分钟 ≥20 条 热聊 ×1.5｜≥10 活跃 ×1.25｜≥3 正常 ×1.0｜≥1 冷清 ×0.5｜0 沉寂 ×0.25
+  // 下限 1——再冷清也不压到 0，否则包络从护栏变静音，被叫到的消息照样得出。
+  // 读不到活跃度按 1.0（退回扁平常量）。关掉 = 完全回到旧行为。
+  TRENCH_ENVELOPE_ACTIVITY_SCALED: booleanFromEnv.default(true),
   // Nyat Trench L0 × 睡眠：读到的但没法回的消息记成气压（0.5/条）。
   // 此前这段积累完全不存在——睡眠时段消息进 pending 队列，醒来时 P=0，
   // bot 像什么都没发生过。加上之后醒来后气压偏高 → 速率上限被 g(P) 抬高，

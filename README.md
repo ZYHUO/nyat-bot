@@ -792,6 +792,30 @@ Two follow-ups this deliberately does **not** do: repoint those endpoints (that 
 inventing model mappings), or delete the labels (they may come back with the upstream).
 Both need a decision about what should serve them.
 
+### The send ceiling scales with how lively the group is
+
+Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead
+group and a roaring one shared the same ceiling, so in a quiet room the bot could still
+insert itself 20 times an hour. The user's requirement was the opposite shape: *"daily
+frequency is too high; only be highly active when everyone else is."*
+
+The envelope now scales its ceiling by the group activity the host **already measures**
+(`xxb:activity:{chatId}`, written on every inbound message — no new instrumentation):
+
+| messages in last 5 min | factor |
+|---|---|
+| ≥ 20 (热聊) | ×1.5 |
+| ≥ 10 (活跃) | ×1.25 |
+| ≥ 3 (正常) | ×1.0 |
+| ≥ 1 (冷清) | ×0.5 |
+| 0 (沉寂) | ×0.25 |
+
+Two deliberate bounds: the floor is **1**, never 0 — a ceiling of zero would turn the
+envelope from a guardrail into a mute, and a directly-addressed message still has to get
+out (ignoring a direct question is a different failure). And if activity can't be read,
+the factor is 1.0, i.e. exactly the previous flat behaviour — an infrastructure hiccup
+must not change behaviour.
+
 ### The fallback chain is diversified by upstream
 
 Smart-group picks a usage's chain from the whole provider pool, ordered by measured

@@ -79,6 +79,8 @@ const CHECKS: Array<[string, string]> = [
   // Meta 路径 bot 两道闸（2026-09-21）
   ['bot 结构闸', 'decideBotMessage'],
   ['bot 结构闸判据', 'ignore-structural'],
+  // 包络按群活跃度缩放（2026-09-21）
+  ['包络活跃度缩放', 'scaledBurst'],
   // 随手日记（2026-09-21）
   ['日记分时段语气', 'slotGuidance'],
   // 视频理解（2026-09-21）

@@ -48,8 +48,8 @@ describe('env schema 拆段', () => {
     // 484 = 495 + 2（ASI_*）+ 4 个接线 − 14 个退役 + 1（HEART_LLM_FAIL_KEEP_ADDRESSED）。
     // 加旗标时这个数会变——
     // 那时该做的是重新核对，而不是把这个数字改大。
-    expect(all.length).toBe(484);
-    expect(new Set(all).size).toBe(484);
+    expect(all.length).toBe(485);
+    expect(new Set(all).size).toBe(485);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
