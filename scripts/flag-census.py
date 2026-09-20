@@ -71,15 +71,25 @@ def hits(pattern: str, paths: list[str]) -> list[str]:
     return [p for p in out if not p.endswith('src/env.ts')]
 
 
+# 读取形态。**五种都要算**——2026-09-21 我据这份清单写过"三个 CORE_* 旗标全是假开关"，
+# 其中两个其实是接好的（state.ts 用 `e.CORE_BELIEF_VIEW_ENABLED`，loop.ts 用
+# `envShim().CORE_PERMISSION_GATE_ENABLED`）。第一版只 grep `env().FLAG`，幸亏
+# bare_word 那一列把它们捞回来了；但叙述还是写错了。现在把 `e.FLAG` / `envShim().FLAG`
+# 显式列出来，不靠运气。
+def readers_of(name: str) -> dict[str, list[str]]:
+    return {
+        'env_getter': hits(rf'env\(\)\.{name}\b', ['src/']),
+        'destructured': hits(rf'\b(e|ev|env0|e0|cfg)\.{name}\b', ['src/']),
+        'env_shim': hits(rf'envShim\(\)\.{name}\b', ['src/']),
+        'bare_word': hits(rf'\b{name}\b', ['src/', 'scripts/', 'packages/']),
+        'process_env': hits(rf'process\.env\.{name}\b|process\.env\[.{{0,4}}{name}', ['src/', 'scripts/']),
+        'tests': hits(rf'\b{name}\b', ['tests/']),
+    }
+
+
 usage: dict[str, dict[str, list[str]]] = {}
 for f in flags:
-    n = f['name']
-    usage[n] = {
-        'env_getter': hits(rf'env\(\)\.{n}\b', ['src/']),
-        'bare_word': hits(rf'\b{n}\b', ['src/', 'scripts/', 'packages/']),
-        'process_env': hits(rf'process\.env\.{n}\b|process\.env\[.{0,4}{n}', ['src/', 'scripts/']),
-        'tests': hits(rf'\b{n}\b', ['tests/']),
-    }
+    usage[f['name']] = readers_of(f['name'])
 
 # ── 4. 汇总 ───────────────────────────────────────────────────────────────
 rows = []
@@ -99,11 +109,13 @@ for f in flags:
     else:
         state = f"={envval}" if envval is not None else f"默认 {f['default']}"
     u = usage[n]
-    readers = sorted(set(u['env_getter']))
-    # 死 = src/scripts/packages 里一个字都不出现（解构/process.env 都算过）
-    dead = not u['bare_word'] and not u['process_env']
+    # 活读者 = 四种读取形态的并集
+    readers = sorted(set(u['env_getter']) | set(u['destructured']) | set(u['env_shim']))
+    any_word = bool(u['bare_word']) or bool(u['process_env'])
+    # 死 = src/scripts/packages 里一个字都不出现（四种读法都算过）
+    dead = not any_word
     # 只被测试 mock、src 不读 = 假开关（测试以为关着它，其实什么都没发生）
-    phantom = (not u['bare_word'] and not u['process_env']) and bool(u['tests'])
+    phantom = (not any_word) and bool(u['tests'])
     rows.append({
         **f,
         'is_bool': is_bool,
@@ -114,7 +126,7 @@ for f in flags:
             or (envval is not None and envval.lower() in TRUE)
         ),
         'readers': [p.replace('src/', '') for p in readers],
-        'destructured': [p.replace('src/', '') for p in u['bare_word'] if p not in u['env_getter']],
+        'destructured': [p.replace('src/', '') for p in sorted(set(u['destructured']) | set(u['env_shim']))],
         'process_env': u['process_env'],
         'tests': u['tests'],
         'dead': dead,
@@ -166,6 +178,13 @@ for r in sorted(dead_on, key=lambda x: x['name']):
 
 out.append('\n## 🟡 假开关：只被测试 mock，src/ 不读（%d 个）\n' % len(phantom))
 out.append('比死旗标更坏——测试把它们当闸门 mock，于是"关着它"的断言其实什么都没验证。\n')
+out.append('⚠️ 2026-09-21 更正：我曾据这份清单写过"CORE_BELIEF_VIEW_ENABLED / '
+           'CORE_BLACKBOARD_ENABLED / CORE_PERMISSION_GATE_ENABLED 三个全是假开关，'
+           'src/core/ 那一套无条件跑着"。**前两个说法错了**——BELIEF_VIEW 在 '
+           'src/core/state.ts:49 被读（`e.CORE_BELIEF_VIEW_ENABLED`），PERMISSION_GATE 在 '
+           'src/core/loop.ts:292 被读（`envShim().CORE_PERMISSION_GATE_ENABLED`）。'
+           '只有 BLACKBOARD 是真的没人读。教训：读法不止 `env().FLAG` 一种，'
+           '而"某一列是空"不等于"没人读"。\n')
 out.append('| flag | .env | 测试里怎么用 |')
 out.append('|---|---|---|')
 for r in sorted(phantom, key=lambda x: x['name']):
@@ -176,7 +195,10 @@ out.append('| flag | 默认 | .env | 是什么（注释摘要） | 读者 |')
 out.append('|---|---|---|---|---|')
 for r in sorted(on_rows, key=lambda x: x['name']):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:150]
-    rd = ', '.join(r['readers'][:4]) or ('**无人读**' if not r['destructured'] else '解构: ' + ', '.join(r['destructured'][:3]))
+    rd = ', '.join(r['readers'][:4]) or (
+        '**无人读**' if not r['destructured']
+        else '解构/envShim: ' + ', '.join(r['destructured'][:3])
+    )
     out.append(f"| `{r['name']}` | {r['default']} | {r['envval']} | {c} | {rd} |")
 
 out.append('\n## 关着的布尔旗标（%d 个）\n' % (len(bools) - len(on_rows)))
@@ -210,9 +232,12 @@ out.append('| `TASK_PROGRESS_CODEACT_ENABLED` | 删（task-progress.ts 只读 TA
 out.append('| `TASK_PROGRESS_RESEARCH_ENABLED` | 同上 |')
 out.append('| `GOAL_LONG_TERM_ENABLED` | **保留并真接上**：goals.ts 现在读它，关时 long_term 目标按 7 天窗口 stale |')
 out.append('')
-out.append('还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` / '
-           '`CORE_BELIEF_VIEW_ENABLED` / `CORE_PERMISSION_GATE_ENABLED` 是**假开关**——'
-           'src/core/ 那一套无条件跑着，接它们要选对收口，接错会把在跑的东西关掉。'
+out.append('还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` 是唯一真的没人读的 '
+           'CORE_* 旗标——blackboard 是 storage 层，被 agent/cognitive-workspace、'
+           'agency-intent-adapter、core/promote、core/permission/gate 四个模块当存储用了，'
+           '给它加闸门要同时管住读和写，接错会把在跑的东西关掉，所以留着单独一轮。'
+           '（另两个 CORE_BELIEF_VIEW_ENABLED / CORE_PERMISSION_GATE_ENABLED 是**接好的**，'
+           '见上面「假开关」一节的更正。）\n\n'
            '`CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / '
            '`STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / '
            '`JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` '

@@ -1,15 +1,15 @@
 # Flag census — env.ts 全量旗标清单
 
-生成方式：`python3 scripts/flag-census.py`（纯静态：env.ts 注释 + .env 实际值 + 三种读法 grep `src/`）。不打数据库、不改任何东西。2026-09-21 起带「已退役」一节——删掉的旗标在这里留名，免得下一个人再加回来。
+生成方式：`python3 scripts/flag-census.py`（纯静态：env.ts 注释 + .env 实际值 + `grep env().<FLAG> src/`）。不打数据库、不改任何东西。
 
 ## 总量
 
 | | |
 |---|---|
-| total_keys | 494 |
+| total_keys | 495 |
 | bool_flags | 215 |
 | on_in_prod | 185 |
-| set_in_env | 322 |
+| set_in_env | 323 |
 | dead_no_reader | 21 |
 | dead_and_on | 1 |
 | phantom_only_in_tests | 4 |
@@ -24,38 +24,40 @@
 
 | flag | .env | 注释怎么说 | tests/ 里有吗 |
 |---|---|---|---|
-| `CORE_BLACKBOARD_ENABLED` | true | （无注释） | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts |
+| `CORE_BLACKBOARD_ENABLED` | true | （无注释） | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts, tests/unit/env/no-dead-switches.test.ts |
 
 ## 🟡 假开关：只被测试 mock，src/ 不读（4 个）
 
 比死旗标更坏——测试把它们当闸门 mock，于是"关着它"的断言其实什么都没验证。
 
+⚠️ 2026-09-21 更正：我曾据这份清单写过"CORE_BELIEF_VIEW_ENABLED / CORE_BLACKBOARD_ENABLED / CORE_PERMISSION_GATE_ENABLED 三个全是假开关，src/core/ 那一套无条件跑着"。**前两个说法错了**——BELIEF_VIEW 在 src/core/state.ts:49 被读（`e.CORE_BELIEF_VIEW_ENABLED`），PERMISSION_GATE 在 src/core/loop.ts:292 被读（`envShim().CORE_PERMISSION_GATE_ENABLED`）。只有 BLACKBOARD 是真的没人读。教训：读法不止 `env().FLAG` 一种，而"某一列是空"不等于"没人读"。
+
 | flag | .env | 测试里怎么用 |
 |---|---|---|
-| `CORE_BLACKBOARD_ENABLED` | true | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts |
-| `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | 60 | tests/unit/judge/rules.test.ts |
-| `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | — | tests/unit/judge/rules.test.ts |
-| `JUDGE_PROACTIVE_RATE` | 0.5 | tests/unit/judge/rules.test.ts |
+| `CORE_BLACKBOARD_ENABLED` | true | tests/unit/core/loop/migrate.test.ts, tests/unit/core/loop/loop.test.ts, tests/unit/env/no-dead-switches.test.ts |
+| `JUDGE_PROACTIVE_MIN_INTERVAL_SEC` | 60 | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
+| `JUDGE_PROACTIVE_MIN_RECENT_MSGS` | — | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
+| `JUDGE_PROACTIVE_RATE` | 0.5 | tests/unit/env/no-dead-switches.test.ts, tests/unit/judge/rules.test.ts |
 
 ## 生产开着的旗标（185 个）
 
 | flag | 默认 | .env | 是什么（注释摘要） | 读者 |
 |---|---|---|---|---|
 | `AGENCY_CONTROL_ADAPTERS_ENABLED` | false | true | Agency 控制动作的宿主实现（observe/remember/correct/stop）。 agency-control-adapters 只提供"外壳"（scope/预算/回执契约），宿主实现从未提供， 所以 runtime 派发这些动作时没有可执行体。实现见 agency-host-ada | agent/agency-host-adapters.ts, agent/agency-proposals.ts |
-| `AGENCY_FAIL_CLOSED` | true | None |  | 解构: agent/agency-policy.ts |
+| `AGENCY_FAIL_CLOSED` | true | None |  | **无人读** |
 | `AGENT_LOOP_ENABLED` | false | true | 长时间 Agent 循环：分段续跑 + checkpoint + 上下文压缩。默认关，灰度开。 | subagent/executor.ts |
-| `ALLOWLIST_AUTO_AI_REVIEW` | true | true |  | 解构: allowlist/bot-flow.ts, cron/sleep-cycle.ts |
+| `ALLOWLIST_AUTO_AI_REVIEW` | true | true |  | allowlist/bot-flow.ts, cron/sleep-cycle.ts |
 | `ALLOWLIST_BOT_FLOW_ENABLED` | false | true | Bot 对话流申请（2026-08-20 起替代 miniapp 提交）：申请人私聊 bot 报群 ID/@username， bot 调 allowlist.apply 自动审核——申请人须为目标群 creator/administrator 才允许 AI 通过即启用（身份经 getChatMem | subagent/host-api.ts |
-| `ALLOWLIST_ENABLED` | false | true | Allowlist | 解构: allowlist/bot-flow.ts, cron/sleep-cycle.ts |
+| `ALLOWLIST_ENABLED` | false | true | Allowlist | allowlist/bot-flow.ts, cron/sleep-cycle.ts |
 | `ALLOWLIST_REVIEW_ON_JOIN` | false | true | bot 被拉进群 → 立即自动跑一遍 AI 审核（不等申请）。拉群人是群管理才可自动启用。 | bot/handlers/member.ts |
-| `ANTI_REPEAT_ENABLED` | false | true | G13: 发送前反重复守卫（与自己最近消息相似度 > 阈值时带约束重生成一次）。 | pipeline/reply/reply.ts |
+| `ANTI_REPEAT_ENABLED` | false | true | G13: 发送前反重复守卫（与自己最近消息相似度 > 阈值时带约束重生成一次）。 | pipeline/reply/anti-repeat.ts, pipeline/reply/reply.ts |
 | `BELIEF_VERIFY_ENABLED` | false | true | 信念验证：消费 stale_belief 债务（world_change 产生），把被世界变化证伪的 信念标为 contradicted（getActiveBeliefs 已排除，不再进 prompt）。 此前三件套都在、互不相识：world-facts 产生事件 → projector 建债务 → | agent/belief-verify.ts, cron/scheduler.ts |
-| `BOT_CLASSIFIER_ENABLED` | false | true | 入站 bot 消息分类层(A 多bot共存 / D 降噪 / 命令学习 的共用地基)。 先 shadow:打标 + 日志,不改任何行为;精度够了再让 A/D 消费。 | 解构: pipeline/pipeline.ts, bot/handlers/message.ts |
+| `BOT_CLASSIFIER_ENABLED` | false | true | 入站 bot 消息分类层(A 多bot共存 / D 降噪 / 命令学习 的共用地基)。 先 shadow:打标 + 日志,不改任何行为;精度够了再让 A/D 消费。 | pipeline/pipeline.ts |
 | `BOT_COMMAND_LEARN_ENABLED` | false | true | ── 借力其他 bot(学其他 bot 的命令,需要时代发)── P1:观察学习每个 bot 的命令档案(怎么用/场景/needs_reply/needs_admin/output_type) | cron/bot-command-scan.ts, cron/scheduler.ts |
-| `BOT_COMMAND_ROUTER_ENABLED` | false | true | 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关; 依赖 BOT_DELEGATION_ENABLED。 | pipeline/stages/intercepts.ts |
-| `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | pipeline/stages/intercepts.ts, pipeline/tools/bot-delegation.ts |
-| `BOT_DENOISE_ENABLED` | false | true | D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习 (保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。 | 解构: pipeline/pipeline.ts, bot/handlers/message.ts |
-| `BOT_REPLY_DELEGATION_ENABLED` | true | true | 回复式代发(bots.command 带 replyToMessageId):让别的 bot 代罚。 默认开——它比 admin.kick 更窄:只能发"必须回复某条消息才生效"且学熟 (needs_reply=1 / needs_admin=0 / status=ready)的命令,且与 admi | 解构: pipeline/tools/bot-delegation.ts |
+| `BOT_COMMAND_ROUTER_ENABLED` | false | true | 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关; 依赖 BOT_DELEGATION_ENABLED。 | pipeline/command-router.ts, pipeline/stages/intercepts.ts |
+| `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | pipeline/command-router.ts, pipeline/stages/intercepts.ts, pipeline/tools/bot-delegation.ts, pipeline/tools/registry.ts |
+| `BOT_DENOISE_ENABLED` | false | true | D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习 (保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。 | pipeline/pipeline.ts |
+| `BOT_REPLY_DELEGATION_ENABLED` | true | true | 回复式代发(bots.command 带 replyToMessageId):让别的 bot 代罚。 默认开——它比 admin.kick 更窄:只能发"必须回复某条消息才生效"且学熟 (needs_reply=1 / needs_admin=0 / status=ready)的命令,且与 admi | pipeline/tools/bot-delegation.ts |
 | `CACHE_WARMUP_ENABLED` | false | true | 优化:缓存预热——定时拿静态 system 前缀 ping 回复模型,保持 DeepSeek 前缀缓存热(默认关)。 | cron/cache-warmup.ts, cron/scheduler.ts |
 | `CODEACT_LINUXSB_ENABLED` | false | true |  | subagent/host-api.ts |
 | `CODEACT_PIXIV_ENABLED` | false | true | Subagent host pixiv/linux.sb 只读工具。默认关，按灰度开。 | subagent/host-api.ts |
@@ -63,26 +65,26 @@
 | `COGNITIVE_CLOCK_ENABLED` | false | true | 认知时钟：把模型自己的行动结果写进事件账本（own_action_result）， 并允许它记录"下次什么时候再想"（self_scheduled_wake）。 没有前者，模型看不见自己刚做过什么（自激事故的根因）；没有后者， 注意力主权在宿主手里，系统永远是被动应答器。 | tracking/self-history.ts |
 | `COGNITIVE_CONTINUITY_ENABLED` | false | true | Event-backed mission/process continuity. It only emits durable wake and checkpoint records; tools and Telegram side effects still need a separate host | cron/scheduler.ts |
 | `COGNITIVE_EVENTS_ENABLED` | true | true | Durable perception/event log. Disable only for emergency rollback; callers remain fail-soft when the migration is not present yet. | agent/cognitive-events.ts |
-| `COGNITIVE_KERNEL_ENABLED` | false | true | Event-sourced NyatOS kernel shadow. It records one trigger/frame/action chain but does not replace the legacy sender until a canary opts in. | agent/cognitive-kernel.ts |
+| `COGNITIVE_KERNEL_ENABLED` | false | true | Event-sourced NyatOS kernel shadow. It records one trigger/frame/action chain but does not replace the legacy sender until a canary opts in. | agent/cognitive-kernel.ts, pipeline/pipeline.ts |
 | `COGNITIVE_KERNEL_RECOVERY_ENABLED` | false | true | Close kernel actions whose dispatch budget expired after a crash. It only writes terminal `interrupted` outcomes; it never re-sends a message. | agent/cognitive-recovery.ts, cron/scheduler.ts |
 | `COGNITIVE_OUTBOX_ENABLED` | true | true |  | agent/cognitive-events.ts, cron/scheduler.ts |
 | `COGNITIVE_PROCESS_RUNTIME_ENABLED` | false | true | Host-side process wake execution. It only projects recent metadata and checkpoints durable wakes; it does not grant authority or call an LLM. | cron/scheduler.ts |
-| `COGNITIVE_ROUTING_BEHAVIOR_ENABLED` | false | true | Optional behavior rollout: deep Reply routes and signal-bearing background ticks may opt into the scoped workspace. Empty chat list means all chats; k | 解构: pipeline/stages/post-judge.ts, cron/unified-tick.ts |
-| `COGNITIVE_ROUTING_ENABLED` | false | true | Deterministic fast/deep/background routing telemetry. It is shadow-only until a later rollout explicitly consumes the decision for behavior. | 解构: pipeline/stages/post-judge.ts, cron/unified-tick.ts |
-| `COGNITIVE_WORKSPACE_V2_ENABLED` | false | true | Assemble the scoped cognitive workspace for legacy reply/Heart/Meta paths. Keep it opt-in until latency and prompt-budget measurements are available. | meta/session.ts, pipeline/reply/reply.ts |
+| `COGNITIVE_ROUTING_BEHAVIOR_ENABLED` | false | true | Optional behavior rollout: deep Reply routes and signal-bearing background ticks may opt into the scoped workspace. Empty chat list means all chats; k | cron/unified-tick.ts, pipeline/stages/post-judge.ts |
+| `COGNITIVE_ROUTING_ENABLED` | false | true | Deterministic fast/deep/background routing telemetry. It is shadow-only until a later rollout explicitly consumes the decision for behavior. | cron/unified-tick.ts, pipeline/stages/post-judge.ts |
+| `COGNITIVE_WORKSPACE_V2_ENABLED` | false | true | Assemble the scoped cognitive workspace for legacy reply/Heart/Meta paths. Keep it opt-in until latency and prompt-budget measurements are available. | cron/unified-tick.ts, meta/heart-adapter.ts, meta/session.ts, pipeline/heart/heart.ts |
 | `CONNECTIVITY_TRACKING_ENABLED` | false | 1 | ── AGI Level 6 Phase 14: 反向阀门 L7 ─────────────────────────────── 连接率埋点(新核心指标)+ 私聊风险分档。初期只记录不改行为。 | agent/reverse-valve.ts, cron/scheduler.ts |
 | `CONTEXT_ENGINE_ENABLED` | true | true | Context Engine:组装 Meta/Subagent prompt 时打 Manifest(可观测+稳定前缀)。 | context-engine/index.ts |
 | `CONTROL_BASELINE_ENABLED` | true | None | 踢人（admin.kick）总闸。默认关。 为什么单独一个 flag 而不跟 ANTIAD_ENABLED 绑：删消息/禁言可逆，踢人不可逆 （对方要自己加回来）。群主明确要"能踢"才开，且仍由模型按 Frame 里的事实决定。 同时段对照基线采集 cron。默认开；它纯只读（只拍快照），关掉只会让 | cron/scheduler.ts |
-| `CONTROL_DIRECTIVE_ENABLED` | false | true | 控制指令(别理我/别理某人/可以说话了/记住X/忘掉X):typing 前用 LLM 听懂 → 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。 | 解构: pipeline/stages/deliver.ts, pipeline/directive.ts, pipeline/judge/rules.ts |
-| `CORE_BELIEF_VIEW_ENABLED` | false | true | ── Core v2 Phase 0: Belief View + 黑板 ACL + L2 permission gate ── 全部默认 OFF。Phase 0 是纯地基（新表+纯函数），不接任何主路径， 开了也只影响 eval harness 和未来的 graylist 群。 | 解构: core/state.ts |
+| `CONTROL_DIRECTIVE_ENABLED` | false | true | 控制指令(别理我/别理某人/可以说话了/记住X/忘掉X):typing 前用 LLM 听懂 → 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。 | pipeline/stages/deliver.ts |
+| `CORE_BELIEF_VIEW_ENABLED` | false | true | ── Core v2 Phase 0: Belief View + 黑板 ACL + L2 permission gate ── 全部默认 OFF。Phase 0 是纯地基（新表+纯函数），不接任何主路径， 开了也只影响 eval harness 和未来的 graylist 群。 | core/state.ts |
 | `CORE_BLACKBOARD_ENABLED` | false | true |  | **无人读** |
 | `CORE_DUAL_WRITE` | true | None | Phase 2 双写：旧表写入后同步 belief（读投影）。默认开（best-effort， 失败只打日志不拦路）。关掉则 core_beliefs 停更，读侧照常。 | core/migrate.ts |
 | `CORE_V2_ENABLED` | true | None | 总开关（默认开；关掉则 isCoreChat 全 false，shadow 零开销）。 | core/loop.ts |
 | `CRON_ENABLED` | true | None | Cron master switch — read via env() like every other flag (kilo review). | cron/scheduler.ts |
 | `DEBT_AUTO_MATCH_ENABLED` | false | true | Durable cognitive event projection is safe to run without authority; debt creation remains a separate opt-in until its false-positive rate is known. | cron/scheduler.ts |
 | `DEBT_SWEEP_ENABLED` | false | true | （TASK_PROGRESS_CODEACT_ENABLED / TASK_PROGRESS_RESEARCH_ENABLED 2026-09-21 删除： 两个都默认 true 而全仓库无一处读取。task-progress.ts 只读 TASK_PROGRESS_ENABLED， 这两个"按任务 | cron/scheduler.ts |
-| `DIGEST_PERSIST_ENABLED` | false | true |  | meta/session-digest.ts, meta/session.ts, subagent/host-api.ts |
-| `DM_AUTO_PRIVATE` | true | true | DM 是否自动判为私密会话(CGM dmAutoPrivate)。默认 true。 | 解构: memory/visibility.ts |
+| `DIGEST_PERSIST_ENABLED` | false | true |  | cron/unified-tick.ts, meta/session-digest.ts, meta/session.ts, subagent/host-api.ts |
+| `DM_AUTO_PRIVATE` | true | true | DM 是否自动判为私密会话(CGM dmAutoPrivate)。默认 true。 | memory/visibility.ts |
 | `DREAMING_ENABLED` | false | true |  | cron/dreaming.ts, cron/scheduler.ts |
 | `DREAM_CONSOLIDATE_ENABLED` | false | true | ── AGI Level 5 Phase 2: Dreaming 整合 ─────────────────────────────── 每周一次语义合并冗余/冲突经验(MindMemOS dreaming)。走 judge 链。 | cron/dream-consolidate.ts, cron/scheduler.ts |
 | `DREAM_JOURNAL_ENABLED` | false | true | 日记 dream-journal(独立 flag,可不启 Meta 单独开)。 | cron/dream-journal.ts, cron/scheduler.ts, cron/sleep-cycle.ts, meta/session.ts |
@@ -91,78 +93,78 @@
 | `EXPERIENCE_SHARE_ENABLED` | false | true | ── AGI Level 5 Phase 5: 多智能体安全共享 ───────────────────────────── 只有 verified=1(已证实)的经验可跨 bot 共享;未验证/可疑仅本 bot 用。 | subagent/executor.ts |
 | `EXPERIENCE_VERIFY_ENABLED` | false | true | ── AGI Level 5 Phase 1: 经验验证器（常驻）──────────────────────────── 注入的经验在任务终态打分：done+干净路径 → success_count；failed → failure_count。成功≥2 次 → verified=1(已证实)，失 | subagent/executor.ts |
 | `EXPRESSION_INJECT_ENABLED` | false | true |  | pipeline/reply/prompt-builder.ts |
-| `FLOOR_ENABLED` | false | 1 | H1.1 floor/addressee 三档（默认 OFF，OFF = 老路零变化）。 开后：ambient/not_me 先记 floor_decisions 再按规则短路，to_me 才进 judge。 | 解构: pipeline/stages/deliver.ts, pipeline/stages/post-judge.ts, pipeline/pipeline.ts |
+| `FLOOR_ENABLED` | false | 1 | H1.1 floor/addressee 三档（默认 OFF，OFF = 老路零变化）。 开后：ambient/not_me 先记 floor_decisions 再按规则短路，to_me 才进 judge。 | pipeline/pipeline.ts, pipeline/stages/deliver.ts, pipeline/stages/post-judge.ts |
 | `GOAL_EVIDENCE_GATE_ENABLED` | false | 1 | ── Phase 2: 证据门学习 ────────────────────────────────────────── 默认 OFF:OFF 时行为与 Phase-2 之前一致(legacy 直写路径)。 开启后:goal achieved 必须 host verified;skill verif | subagent/executor.ts |
 | `GOAL_LONG_TERM_ENABLED` | false | true | ── AGI Level 5 Phase 3: 长期任务语义 ──────────────────────────────── goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。 long_term goal 的 stale 窗口放宽到 30  | agent/goals.ts |
 | `GROUNDING_CHECK_ENABLED` | false | true | 接地性守卫：bot 断言一个聊天里没人提过、用户也没问的具体数字/事实（模型幻觉）。 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」。 先用确定性闸门（含具体数字才问）压调用量；JeV 不可达一律 fail-open。 | subagent/host-api.ts |
 | `GROUNDING_ENABLED` | false | true |  | meta/grounding.ts, meta/session.ts, subagent/executor.ts |
 | `GROUP_NORMS_AUTO_UPDATE_ENABLED` | false | true | LLM group-norm proposals do not mutate the durable hypothesis by default; verified host evidence uses the separate evidence-gated updater. | agent/group-norms.ts |
-| `GROUP_NORMS_ENABLED` | false | true | ── AGI Level 5 Phase 9: 群体风格画像 ──────────────────────────────── LoSoNA: 每个群有自己的隐性规范,观察消息 → 推断 → 注入 reply。 | pipeline/reply/prompt-builder.ts |
-| `HEART_COOLDOWN_AS_FACT` | false | true | 冷却作为"事实"交给模型，而不是静默丢弃。 旧行为把决定权从模型拿走，且 dispatch gate 还会再拦一次—— 而 heart 的 LLM 调用已经烧掉了（实测 6h 内 68 次 cooldown 短路发生在 heart 决定 reply 之后）。开=模型自己掂量；关=旧的静默丢弃。 | 解构: pipeline/heart/heart.ts, meta/heart-adapter.ts |
+| `GROUP_NORMS_ENABLED` | false | true | ── AGI Level 5 Phase 9: 群体风格画像 ──────────────────────────────── LoSoNA: 每个群有自己的隐性规范,观察消息 → 推断 → 注入 reply。 | cron/unified-tick.ts, pipeline/reply/prompt-builder.ts |
+| `HEART_COOLDOWN_AS_FACT` | false | true | 冷却作为"事实"交给模型，而不是静默丢弃。 旧行为把决定权从模型拿走，且 dispatch gate 还会再拦一次—— 而 heart 的 LLM 调用已经烧掉了（实测 6h 内 68 次 cooldown 短路发生在 heart 决定 reply 之后）。开=模型自己掂量；关=旧的静默丢弃。 | meta/heart-adapter.ts, pipeline/heart/heart.ts |
 | `HEART_DECIDES_TIMING` | false | true | heart 已经带事实做过时机判断（它自己就是 gate）→ 派发前不再重复过闸。 实测 6h 内 68 次 cooldown + 38 次 talk-value 短路发生在 heart 决定 reply 之后 = 那次 heart 调用白烧。开=模型自己控制；关=旧的双闸行为。 | meta/session.ts |
-| `HEART_ENABLED` | false | true | G8/S13 心流:L0 未命中的被动群消息,judge L1/L2 + gate 合并为一次 带人格+自我状态的"心流判断"(reply/wait/pass)。1 次调用替代 1-3 次。 | 解构: pipeline/stages/post-judge.ts, pipeline/pipeline.ts, pipeline/heart/heart.ts |
-| `HEART_REFLECT_ENABLED` | false | true | 不改决策(act/path)、不换模型;失败/超时保底用原念头。只在 reply 轮加一次调用。默认关。 | 解构: pipeline/heart/decision.ts |
+| `HEART_ENABLED` | false | true | G8/S13 心流:L0 未命中的被动群消息,judge L1/L2 + gate 合并为一次 带人格+自我状态的"心流判断"(reply/wait/pass)。1 次调用替代 1-3 次。 | meta/heart-adapter.ts, pipeline/heart/heart.ts, pipeline/pipeline.ts, pipeline/stages/post-judge.ts |
+| `HEART_REFLECT_ENABLED` | false | true | 不改决策(act/path)、不换模型;失败/超时保底用原念头。只在 reply 轮加一次调用。默认关。 | pipeline/heart/decision.ts |
 | `HOBBY_DISTILL_ENABLED` | false | true | ── 爱好系统（从群友爱好蒸馏 bot 自己的爱好）──────────────────────── 聚合群友常聊话题 → LLM 蒸馏成 bot 自己的爱好 → 注入 self-state。 慢变量(几天重蒸馏一次),区别于 obsessions 的 3h 短周期轮换。 | cron/scheduler.ts |
 | `JARGON_QUERY_ENABLED` | false | true |  | pipeline/tools/jargon-tool.ts |
-| `JUDGE_KNOWLEDGE_GROUP` | true | None |  | 解构: pipeline/judge/judge.ts, core/state.ts |
-| `JUDGE_KNOWLEDGE_PERMANENT` | true | None |  | 解构: pipeline/judge/judge.ts, core/state.ts |
-| `JUDGE_PROACTIVE_ENABLED` | false | true | ── Proactive Engagement (Stage B) ── | 解构: pipeline/judge/judge.ts |
+| `JUDGE_KNOWLEDGE_GROUP` | true | None |  | core/state.ts, pipeline/judge/judge.ts |
+| `JUDGE_KNOWLEDGE_PERMANENT` | true | None |  | core/state.ts, pipeline/judge/judge.ts |
+| `JUDGE_PROACTIVE_ENABLED` | false | true | ── Proactive Engagement (Stage B) ── | pipeline/judge/judge.ts |
 | `JUDGE_SUBSTRATE_ENABLED` | false | true | ── 定型判断基座 src/ai/judge-substrate.ts ─────────────────────── bot 每天 ~45M token 大多花在"换回一个小决定"（gate 三选一、heart 说/等/不说、 shadow、judge）。这里把这类判断收敛到一个可插拔基座：typ | ai/judge-substrate.ts |
-| `LEARNER_ENABLED` | false | true | ── Learner (Expression + Jargon, Stage D) ── | cron/scheduler.ts |
+| `LEARNER_ENABLED` | false | true | ── Learner (Expression + Jargon, Stage D) ── | cron/learner-scan.ts, cron/scheduler.ts |
 | `LOOP_POLICY_ENABLED` | false | true | ── AGI Level 5 Phase 4: Loop 策略资产化 ───────────────────────────── executor 循环策略(验证/重试/停止)从静态升级为可进化资产: 注入 prompt + 任务终态计数,成功率 <30% 自动 disable。 | subagent/executor.ts |
-| `MEMORY_CROSS_CONTEXT_ENABLED` | false | true | 机制4 跨上下文记忆召回:per-uid 旁路检索(不锁 chatId),返回强制过 visibility scrub(默认带 public + 非私密来源 contextual,private 一律剔除)。 **必须** MEMORY_VISIBILITY_ENABLED 也开才生效(fail-c | 解构: pipeline/context/retriever.ts, subagent/host-api.ts, memory/chroma.ts |
+| `MEMORY_CROSS_CONTEXT_ENABLED` | false | true | 机制4 跨上下文记忆召回:per-uid 旁路检索(不锁 chatId),返回强制过 visibility scrub(默认带 public + 非私密来源 contextual,private 一律剔除)。 **必须** MEMORY_VISIBILITY_ENABLED 也开才生效(fail-c | memory/chroma.ts, pipeline/context/retriever.ts, subagent/host-api.ts |
 | `MEMORY_FRESHNESS_ENABLED` | false | true | ── AGI Level 5 Phase 12: 记忆陈旧检测 ─────────────────────────────── 超期未确认 → stale 降权;变化词(换工作/分手) → 相关旧属性 stale。 只检测不自动删;检索到 stale 时注明可能过时。 | pipeline/reply/reply.ts, pipeline/stages/bookkeeping.ts |
-| `MEMORY_VISIBILITY_ENABLED` | false | true | ── DM↔群记忆连结(借鉴 CyberGroupmate 以人为中心统一记忆;docs/dm-group-memory-*.md)── 机制1 隐私 visibility 兜底:记忆/画像跨上下文返回前按 private/contextual/public 逐条 scrub(DM 默认 priva | memory/visibility.ts, tracking/person-identity.ts |
-| `META_DEFER_ENABLED` | false | true |  | bot/handlers/message.ts, meta/loop.ts |
-| `META_DISPATCH_GATE_ENABLED` | false | true |  | 解构: meta/dispatch-gate.ts |
-| `META_HEART_ENABLED` | true | None | Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。 false = 旁路它的 allow/silence，消息按既有 layer 分 | 解构: bot/handlers/message.ts, meta/heart-route.ts |
-| `META_SUBAGENT_ENABLED` | false | true | ── Meta + Subagent (CyberGroupmate-shaped orchestration inside nyatbot) ── 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback, 不再走 BullMQ  | cron/dream-journal.ts, meta/loop.ts, meta/timing-adapter.ts, pipeline/timing/chat-runtime.ts |
-| `METRICS_ENABLED` | false | true | （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标 2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron 已被 unified-tick 取代，后两者描述的机制从未落地 | 解构: index.ts |
+| `MEMORY_VISIBILITY_ENABLED` | false | true | ── DM↔群记忆连结(借鉴 CyberGroupmate 以人为中心统一记忆;docs/dm-group-memory-*.md)── 机制1 隐私 visibility 兜底:记忆/画像跨上下文返回前按 private/contextual/public 逐条 scrub(DM 默认 priva | memory/chroma.ts, memory/visibility.ts, pipeline/context/retriever.ts, subagent/host-api.ts |
+| `META_DEFER_ENABLED` | false | true |  | bot/handlers/message.ts, meta/dispatch-gate.ts, meta/loop.ts, meta/timing-adapter.ts |
+| `META_DISPATCH_GATE_ENABLED` | false | true |  | meta/dispatch-gate.ts |
+| `META_HEART_ENABLED` | true | None | Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。 false = 旁路它的 allow/silence，消息按既有 layer 分 | **无人读** |
+| `META_SUBAGENT_ENABLED` | false | true | ── Meta + Subagent (CyberGroupmate-shaped orchestration inside nyatbot) ── 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback, 不再走 BullMQ  | cron/dream-journal.ts, meta/flags.ts, meta/loop.ts, meta/timing-adapter.ts |
+| `METRICS_ENABLED` | false | true | （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标 2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron 已被 unified-tick 取代，后两者描述的机制从未落地 | **无人读** |
 | `MOOD_ENABLED` | false | true | ── Mood drift (Stage E) ── Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。 | tracking/mood.ts |
 | `MOOD_INJECT_ENABLED` | false | true | 是否把 mood hint 注入 reply prompt | tracking/mood.ts |
-| `MOOD_TUNE_ENABLED` | false | true | 心情/精力 → humanizer 参数调制 (Opus 评审: 随机性不该是 IID; 累/被怼时回复更短更敷衍, 心情好时更活泼)。合并序: 群风格 < mood-tune < 运营 override < ASI self-tune。 | 解构: pipeline/stages/deliver.ts |
+| `MOOD_TUNE_ENABLED` | false | true | 心情/精力 → humanizer 参数调制 (Opus 评审: 随机性不该是 IID; 累/被怼时回复更短更敷衍, 心情好时更活泼)。合并序: 群风格 < mood-tune < 运营 override < ASI self-tune。 | pipeline/stages/deliver.ts |
 | `MTM_ENABLED` | false | true | ── 中期记忆(MaiBot 1.0.0 借鉴):ctx 滚出窗口前压缩成可引用摘要 ── | pipeline/context/mid-term.ts |
-| `MULTI_AGENT_CHAT_SPECIALISTS` | true | true | chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token; 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_CHECKER_ENABLED` | true | true | Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_CONTEXT_DIGEST_ENABLED` | true | true | 上下文理解专家:忙群(最近消息数 ≥ 阈值)先把最近 N 条 digest 成"现在在聊啥" 给写手,降写手 prompt 噪音 + 多吃一次 token。全路由并行。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_CRITIC_ENABLED` | true | true | Phase 4 Critic:草稿二审,不行回炉(deep 总是跑;lookup 默认关)。回炉轮数上限。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_DIRECTOR_ENABLED` | true | true | 导演专家(写手前):读上下文+念头,产出"情绪/姿态/切入点"块喂写手。全路由并行。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_MEMORY_ENABLED` | true | true | Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_PERSONA_CRITIC_ENABLED` | true | true | 人设一致性 Critic:每条回复都查"有没有叫错主人/破人设/破关系",有问题回炉 1 次。 跟深度 Critic(查事实/跑题)分工:这个专攻人设/关系,全路由跑。 | 解构: pipeline/multiagent/orchestrator.ts |
-| `MULTI_AGENT_PERSONA_ENABLED` | true | true | Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。 | 解构: pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_CHAT_SPECIALISTS` | true | true | chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token; 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_CHECKER_ENABLED` | true | true | Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_CONTEXT_DIGEST_ENABLED` | true | true | 上下文理解专家:忙群(最近消息数 ≥ 阈值)先把最近 N 条 digest 成"现在在聊啥" 给写手,降写手 prompt 噪音 + 多吃一次 token。全路由并行。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_CRITIC_ENABLED` | true | true | Phase 4 Critic:草稿二审,不行回炉(deep 总是跑;lookup 默认关)。回炉轮数上限。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_DIRECTOR_ENABLED` | true | true | 导演专家(写手前):读上下文+念头,产出"情绪/姿态/切入点"块喂写手。全路由并行。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_MEMORY_ENABLED` | true | true | Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_PERSONA_CRITIC_ENABLED` | true | true | 人设一致性 Critic:每条回复都查"有没有叫错主人/破人设/破关系",有问题回炉 1 次。 跟深度 Critic(查事实/跑题)分工:这个专攻人设/关系,全路由跑。 | pipeline/multiagent/orchestrator.ts |
+| `MULTI_AGENT_PERSONA_ENABLED` | true | true | Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
 | `NETWORK_BURST_ENABLED` | false | true | C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。 | pipeline/games/network-burst.ts, pipeline/stages/bookkeeping.ts |
-| `NYATDB_DUAL_WRITE` | false | true |  | 解构: pipeline/context/mid-term.ts, pipeline/context/manager.ts |
-| `NYATDB_ENABLED` | false | true | NyatDB — NyatBot-only embedded engine (MemTable+WAL+zstd). Default off. | nyatdb/index.ts, pipeline/context/manager.ts |
+| `NYATDB_DUAL_WRITE` | false | true |  | pipeline/context/manager.ts, pipeline/context/mid-term.ts |
+| `NYATDB_ENABLED` | false | true | NyatDB — NyatBot-only embedded engine (MemTable+WAL+zstd). Default off. | nyatdb/index.ts, pipeline/context/manager.ts, pipeline/context/mid-term.ts |
 | `NYATDB_NATIVE` | false | true |  | nyatdb/index.ts |
 | `NYATDB_READ` | false | true |  | pipeline/context/manager.ts |
-| `NYATOS_BUDGET_ENABLED` | false | true | ── NyatOS 发言额度：宿主提供的物理节流，但模型可见 ── 2026-09-18 的 54 样本实测：单决策点在 28 分钟内想说 48 次（中位间隔 7 秒）， 即使明确告知"你刚发了 4 条没人回"仍然继续想说。所以旧 cooldown 的第二份 工作——防止自我重复失控——不能交给模型 | nyatos/budget.ts, subagent/host-api.ts |
+| `NYATOS_BUDGET_ENABLED` | false | true | ── NyatOS 发言额度：宿主提供的物理节流，但模型可见 ── 2026-09-18 的 54 样本实测：单决策点在 28 分钟内想说 48 次（中位间隔 7 秒）， 即使明确告知"你刚发了 4 条没人回"仍然继续想说。所以旧 cooldown 的第二份 工作——防止自我重复失控——不能交给模型 | nyatos/budget.ts, pipeline/stages/deliver.ts, subagent/host-api.ts |
 | `NYATOS_SHADOW_ENABLED` | false | true | ── NyatOS Phase 2: 单决策点并联影子 ── 用同一个 Frame 跑一次「说话/等待/不说」的判断，**只记录不发送**， 与现有 pipeline 的实际选择对比。目的是在信任新架构之前先量化它， 而不是直接上线然后观察。绝不产生任何外部副作用。 | bot/handlers/message.ts, subagent/post-task-window.ts |
 | `OPEN_THREADS_ENABLED` | false | true | 跨天的未了事：bot 答应过/在等的（"明天告诉你"），能像真人那样"对了，昨天你说那个…"。 与 scratchpad 的区别：那是 30 分钟工作记忆，这是跨天。只记**明确承诺**， 不做"记住所有对话"——那会变成让人出戏的机械回忆。 | tracking/open-threads.ts |
-| `OUTCOME_TRACKING_ENABLED` | false | true | Tracking | meta/bookkeeping.ts |
-| `OWN_HISTORY_RETRIEVAL_ENABLED` | false | true | 机制5: bot 自己的历史发言语义检索(Opus 评审: 翻旧账/自洽能力)。 检索本群与当前话题相关的自发言, 作为独立参考块注入(不进 merged)。 | 解构: pipeline/context/retriever.ts |
-| `PEER_REACTION_ENABLED` | false | true | A 多 bot 共存:对会话型 bot(千雪)/带媒体结果的工具 bot(解析姬)做反应。 reactive、不走 judge,自带 chat-lock + per-peer fatigue + 作息门。默认关。 | 解构: pipeline/pipeline.ts, pipeline/games/peer-reaction.ts |
-| `PERSON_IDENTITY_ENABLED` | false | true | 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。 | tracking/person-identity.ts |
+| `OUTCOME_TRACKING_ENABLED` | false | true | Tracking | meta/bookkeeping.ts, pipeline/heart/decision.ts, pipeline/stages/bookkeeping.ts, pipeline/stages/deliver.ts |
+| `OWN_HISTORY_RETRIEVAL_ENABLED` | false | true | 机制5: bot 自己的历史发言语义检索(Opus 评审: 翻旧账/自洽能力)。 检索本群与当前话题相关的自发言, 作为独立参考块注入(不进 merged)。 | pipeline/context/retriever.ts |
+| `PEER_REACTION_ENABLED` | false | true | A 多 bot 共存:对会话型 bot(千雪)/带媒体结果的工具 bot(解析姬)做反应。 reactive、不走 judge,自带 chat-lock + per-peer fatigue + 作息门。默认关。 | pipeline/games/peer-reaction.ts, pipeline/pipeline.ts |
+| `PERSON_IDENTITY_ENABLED` | false | true | 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。 | cron/profile-merge.ts, pipeline/reply/prompt-builder.ts, tracking/person-identity.ts |
 | `PLANNER_AGENTIC_ENABLED` | false | true | ── Agentic planner（MaiBot 1.0.0 Maisaka 多轮 plan→act 借鉴）── 开了之后 planned 路径用 generateText({tools,maxSteps}) 原生工具循环, 工具结果回写 LLM 历史,可自适应换工具/重查;失败自动回退旧 JSO | pipeline/reply/reply.ts |
 | `POST_TASK_WINDOW_ENABLED` | false | true |  | subagent/post-task-window.ts |
-| `PROFILE_MERGE_ENABLED` | false | true | 机制5 LLM 全局画像合并 cron:低频把某人各上下文(群+DM)画像喂便宜模型提炼成 全局 traits/interests/relation,写回 person_identity 全局列。默认关。 | cron/scheduler.ts, tracking/person-identity.ts |
+| `PROFILE_MERGE_ENABLED` | false | true | 机制5 LLM 全局画像合并 cron:低频把某人各上下文(群+DM)画像喂便宜模型提炼成 全局 traits/interests/relation,写回 person_identity 全局列。默认关。 | cron/profile-merge.ts, cron/scheduler.ts, tracking/person-identity.ts |
 | `PROMISE_LOOP_ENABLED` | false | true |  | subagent/host-api.ts |
-| `REALTIME_LEARN_ENABLED` | true | true | 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。 | 解构: tracking/realtime-learn.ts |
+| `REALTIME_LEARN_ENABLED` | true | true | 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。 | tracking/realtime-learn.ts |
 | `RECALL_BUDGET_ENABLED` | false | true | ── AGI Level 5 Phase 8: Context rot 防护 ───────────────────────────── 少召回+重排+最高信号放前(防「迷失在中间」/干扰项误导)。 | subagent/executor.ts |
-| `REFLECTION_ENABLED` | false | true | ── 深度反思(A:把 StepFun 配额花在"让 bot 记住群里发生过什么")── 后台 cron 对活跃群喂大窗口历史 → 产出每群"近况摘要"注入回复。吞吐可调: token/天 ≈ CHATS_PER_TICK × (WINDOW×~15) × (1440/INTERVAL_MIN)。默 | cron/scheduler.ts, pipeline/reply/reply.ts |
+| `REFLECTION_ENABLED` | false | true | ── 深度反思(A:把 StepFun 配额花在"让 bot 记住群里发生过什么")── 后台 cron 对活跃群喂大窗口历史 → 产出每群"近况摘要"注入回复。吞吐可调: token/天 ≈ CHATS_PER_TICK × (WINDOW×~15) × (1440/INTERVAL_MIN)。默 | cron/deep-reflection.ts, cron/scheduler.ts, pipeline/reply/reply.ts |
 | `RELATIONSHIP_ASYMMETRY_ENABLED` | false | true | 好感非对称动力学 (Opus 评审: 信任慢升快降 —— 伤害一次掉很多, 修复要几十次正交互)。开启后正 delta × UP(慢), 负 delta × DOWN(快)。 | tracking/relationship.ts |
-| `RELATIONSHIP_ENABLED` | false | true | ── Relationship narrative (Stage F): 每对 (chat,user) 累计 affinity ── | agent/hypothesis-updates.ts, tracking/relationship.ts, tracking/user-affinity.ts |
+| `RELATIONSHIP_ENABLED` | false | true | ── Relationship narrative (Stage F): 每对 (chat,user) 累计 affinity ── | agent/hypothesis-updates.ts, pipeline/reply/prompt-builder.ts, tracking/relationship.ts, tracking/user-affinity.ts |
 | `RELATIONSHIP_PROFILE_TRIM_ENABLED` | false | true |  | tracking/relationship-quant.ts |
 | `RELATIONSHIP_QUANT_ENABLED` | false | true |  | cron/dreaming.ts, cron/relationship-summarize.ts, tracking/relationship-quant.ts |
 | `REPAIR_ENABLED` | false | true | 关系修复：把"我说了句没讨好的话、之后没再提"作为事实交给模型， 由它决定要不要回去说点什么。宿主只呈现，不代发、不自动道歉。 触发信号已存在（outcome.ts 的 explicit_negative / repair_loop → 'corrected'）， 但此前没有消费方（action-b | tracking/repair.ts |
 | `REPLY_DIRECT_TOOLS_ENABLED` | false | true | P3:direct(普通闲聊)路径也挂工具 —— 现状是 judge 判 direct 后写手完全无工具, 群里随口问"这链接是啥/现在油价多少"只能瞎编。开启后 direct 也走合并写手, 但只给只读子集(搜索/抓页/记忆/画像/历史/bot知识/黑话),不给 ADD_TIMER/ CREATE | pipeline/reply/reply.ts |
-| `REPLY_HUMANIZER_SAFE_MODE` | true | None |  | 解构: pipeline/stages/deliver.ts |
+| `REPLY_HUMANIZER_SAFE_MODE` | true | None |  | pipeline/stages/deliver.ts |
 | `REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED` | true | None | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 （REPLY_MODE_ENABLED / REPLY_ACK_THEN_EXPAND_ENABLED / REPLY_MICRO_REACTION_MAX_CHARS / REPLY_ACK_MAX_CHARS / REPLY_MAX_EXP | pipeline/reply/reply.ts |
 | `REPLY_MERGED_TOOLS_ENABLED` | false | true | 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段 (默认关,灰度;失败自动回退老两段路径) | pipeline/reply/reply.ts |
 | `REPLY_VISION_ENABLED` | false | true | P2 多模态直读:回复写手调用直接带原图(默认关 = 只用文本描述)。 开前确保回复链主 label 声明 AI_PROVIDER_<NAME>_VISION=true, 纯文本 label 声明 VISION=false 让 fallback 跳过(不白烧 400)。 | pipeline/reply/reply.ts |
-| `REVERSE_VALVE_ENABLED` | false | 1 | Phase 14.1 接线: DM 风险 → 写手提示 + humanizer 衰减。默认 OFF,OFF 时 currentRiskLevel 恒 low(提示/衰减全是 undefined,行为与改造前逐字节一致)。 只在 DM(chatId > 0)生效,群聊零变化。 | agent/reverse-valve.ts, pipeline/reply/prompt-builder.ts |
+| `REVERSE_VALVE_ENABLED` | false | 1 | Phase 14.1 接线: DM 风险 → 写手提示 + humanizer 衰减。默认 OFF,OFF 时 currentRiskLevel 恒 low(提示/衰减全是 undefined,行为与改造前逐字节一致)。 只在 DM(chatId > 0)生效,群聊零变化。 | agent/reverse-valve.ts, pipeline/reply/prompt-builder.ts, pipeline/stages/bookkeeping.ts, pipeline/stages/deliver.ts |
 | `REWARD_GATE_ENABLED` | false | true | 主动发言意愿闸（reward model）：主动开口前用一次便宜的 judge 判断 "现在发这句话合不合适"。原作者注释：取代扁平概率、针对主动 bot 的 头号失败模式（不合时宜地打断）。fail-OPEN：闸门故障绝不让 bot 变哑。 此前硬编码 true 但零调用方；2026-09-19  | pipeline/reward/reward-model.ts |
 | `ROOM_AWARENESS_ENABLED` | false | true |  | subagent/room-awareness.ts |
-| `RSS_MONITOR_ENABLED` | false | true | ── P2-B: RSS 信息流监控 ── 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用 | cron/scheduler.ts, pipeline/turn/proactive-turn.ts |
+| `RSS_MONITOR_ENABLED` | false | true | ── P2-B: RSS 信息流监控 ── 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用 | cron/rss-monitor.ts, cron/scheduler.ts, cron/unified-tick.ts, pipeline/turn/proactive-turn.ts |
 | `SANDBOX_BROWSER_ENABLED` | true | None |  | sandbox/browser.ts |
 | `SANDBOX_BWRAP_ENABLED` | true | None | Phase 15 真隔离: bwrap userns 沙盒默认开。 | sandbox/terminal.ts |
 | `SANDBOX_ENABLED` | false | true | ── Computer-use sandbox (Playwright + terminal) ── ⚠️ 安全边界说明(2026-08-22 审查): computer.run 走宿主 /bin/sh -c 执行, 危险命令 模式集(sandbox/terminal.ts)只是纵深防御——**不是 | sandbox/paths.ts, subagent/host-api.ts |
@@ -170,62 +172,62 @@
 | `SANDBOX_TERMINAL_ENABLED` | true | None |  | sandbox/terminal.ts |
 | `SCHOOL_SCHEDULE_ENABLED` | false | true | ── Daily life / school schedule ── 16 岁人设的「每日安排」：school=周课表，summer=暑假日计划，auto=7–8 月暑假否则上学。 SCHOOL_SCHEDULE_ENABLED 关 → 不注入。睡眠硬门仍优先于本模块。 | cron/scheduler.ts, cron/school-day-plan.ts, pipeline/heart/self-state.ts, tracking/school-state.ts |
 | `SELF_EDIT_GUARDRAILS_ENABLED` | false | 1 |  | agent/self-improve.ts, subagent/host-api.ts |
-| `SELF_HISTORY_ENABLED` | false | true | ── Self-narrative (Stage F): bot 记得自己对每个用户说过什么 ── 同一开关也驱动"我最近在这个群的整体表现"（含每条消息的真实结果）， 心流决策会看到这个事实块 —— 模型据此自己判断要不要收着点。 | tracking/self-history.ts |
+| `SELF_HISTORY_ENABLED` | false | true | ── Self-narrative (Stage F): bot 记得自己对每个用户说过什么 ── 同一开关也驱动"我最近在这个群的整体表现"（含每条消息的真实结果）， 心流决策会看到这个事实块 —— 模型据此自己判断要不要收着点。 | meta/heart-adapter.ts, pipeline/heart/heart.ts, pipeline/reply/prompt-builder.ts, tracking/self-history.ts |
 | `SEMANTIC_DUP_ENABLED` | false | true | 语义重复守卫：bot 在同一任务里把同一个意思换个说法再发一遍（同义改写刷屏）。 字面 bigram Jaccard ≥0.85 的 anti-repeat 抓不到这种（实测相似度仅 0.13~0.27）， 所以这里用 TypeSafe System One (Jev) 问一个 Noul。仅在第 2 | subagent/host-api.ts |
-| `SEND_IMAGE_TOOL_ENABLED` | false | true | SEND_IMAGE 工具(把上下文里的图转发出去,唯一有出站副作用的 agent 工具)。 | 解构: pipeline/tools/registry.ts |
+| `SEND_IMAGE_TOOL_ENABLED` | false | true | SEND_IMAGE 工具(把上下文里的图转发出去,唯一有出站副作用的 agent 工具)。 | pipeline/tools/registry.ts |
 | `SEND_PACING_FACT_ENABLED` | false | true | sendText 回执带上"距上一条仅 N 秒"的事实注记，让模型自己意识到在连发/同义改写。 不拦截、不扣分——只给事实，改不改由 persona 决定（2026-09-19 困困问候连刷 6 条事件）。 | subagent/host-api.ts |
-| `SILENCE_ALERT_ENABLED` | false | true | ── Silence Alert —— bot 沉默检测(端到端回复健康)── 监控「最近有人类活跃但 bot 超阈值没回复」的 chat,告警到 owner DM。 默认关;开时需配 SILENCE_ALERT_CHAT_ID(owner DM chatId)才真正发送,否则只打日志。 | cron/scheduler.ts |
+| `SILENCE_ALERT_ENABLED` | false | true | ── Silence Alert —— bot 沉默检测(端到端回复健康)── 监控「最近有人类活跃但 bot 超阈值没回复」的 chat,告警到 owner DM。 默认关;开时需配 SILENCE_ALERT_CHAT_ID(owner DM chatId)才真正发送,否则只打日志。 | cron/scheduler.ts, cron/silence-alert.ts |
 | `SKILL_CONSOLIDATE_ENABLED` | false | true |  | cron/scheduler.ts |
 | `SKILL_DISTILL_ENABLED` | false | true | ── 自我技能沉淀（AGI 自我 skill 系统）──────────────────────────────── 每 6h 从 episodes + experience_entries 蒸馏「小 skill」,每周合并去重 成「大 skill」并归档小 skill 防爆。skill 是结构化能 | cron/scheduler.ts |
 | `SKILL_PRUNE_ENABLED` | false | true | 回收超期未验证的 skill 提案（proposed > 30d → rejected）。 prune.ts 自称"幂等，可定期跑"但零调用方；接在 skill-consolidate（写提案的地方）。 | cron/skill-consolidate.ts |
 | `SKILL_VERIFIED_USE_ENABLED` | false | 1 |  | subagent/executor.ts |
-| `SLEEP_ANNOUNCE_ENABLED` | false | true | 到点睡觉/起床时向最近活跃的群发晚安/早安(固定短句池,无 LLM) | 解构: cron/sleep-cycle.ts |
-| `SLEEP_BEDTIME_GUARD_ENABLED` | false | true | 晚安时机守卫:就寝边沿若 bot 5 分钟内在活跃群说过话(对话中),推迟 入睡相位 10 分钟,每晚最多 3 次 —— 治"自己刚回完话 50 秒就道晚安蒸发"。 | 解构: cron/sleep-cycle.ts |
-| `SLEEP_DM_ENABLED` | false | true | ── DM 好感主动私聊 (功能 B) ── B1:睡前/起床给「已私聊过 bot 的高好感用户」发悄悄话(带跨群外号)。默认关。 | 解构: pipeline/dm-proactive.ts, cron/sleep-cycle.ts |
-| `SLEEP_SCHEDULE_ENABLED` | false | true | ── Sleep schedule(硬作息门):到点真睡觉,睡觉不闲聊,指令照常 ── 直接交互(@/回 bot/私聊)走升级式吵醒,主人必醒;作息表沿用 life-state 的 date-seeded daySchedule(起床 07:00-08:30 / 入睡 23:30-01:00) | cron/scheduler.ts, tracking/sleep.ts |
-| `SLEEP_WAKE_ON_DM_ENABLED` | false | true | DM↔群联动:睡着时收到私聊 → 全局临时唤醒(群里也醒、正常处理消息),窗口内每条 DM 续期, 静默后到点自动继续睡。默认关。 | meta/bookkeeping.ts, tracking/sleep.ts |
-| `SOCIAL_ACT_SHADOW_ENABLED` | false | true | Phase 1 SocialAct shadow: records the legacy judge's action contract only. It never sends, changes reply selection, or stores message text. Empty chat | 解构: pipeline/stages/deliver.ts, pipeline/pipeline.ts, meta/meta-api.ts |
-| `SOCIAL_PREDICTION_ENABLED` | false | true | Metadata-only group interaction expectations and host-observed social prediction error. It never changes reply selection; keep rollout opt-in. | cron/scheduler.ts, subagent/host-api.ts |
-| `STEPFUN_SEARCH_ENABLED` | true | true | Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。 ── StepFun 全网搜索（2026-09-20 起作为**主路由**）──────────────── 原 4 条 fallback 链（Gemini grounding / | 解构: pipeline/tools/search.ts |
-| `SUBAGENT_MEMORY_ENABLED` | false | true | ── CodeAct 自动注入长期记忆 ────────────────────────────── 接在 subagent/executor.ts(真正生成话语的那层),**不是** Meta 编排器 —— Meta 的引擎跨所有会话,其输出经 digest/梦境日记扩散到每个群的 prompt, | 解构: subagent/memory-context.ts |
+| `SLEEP_ANNOUNCE_ENABLED` | false | true | 到点睡觉/起床时向最近活跃的群发晚安/早安(固定短句池,无 LLM) | cron/sleep-cycle.ts |
+| `SLEEP_BEDTIME_GUARD_ENABLED` | false | true | 晚安时机守卫:就寝边沿若 bot 5 分钟内在活跃群说过话(对话中),推迟 入睡相位 10 分钟,每晚最多 3 次 —— 治"自己刚回完话 50 秒就道晚安蒸发"。 | cron/sleep-cycle.ts |
+| `SLEEP_DM_ENABLED` | false | true | ── DM 好感主动私聊 (功能 B) ── B1:睡前/起床给「已私聊过 bot 的高好感用户」发悄悄话(带跨群外号)。默认关。 | cron/sleep-cycle.ts, pipeline/dm-proactive.ts |
+| `SLEEP_SCHEDULE_ENABLED` | false | true | ── Sleep schedule(硬作息门):到点真睡觉,睡觉不闲聊,指令照常 ── 直接交互(@/回 bot/私聊)走升级式吵醒,主人必醒;作息表沿用 life-state 的 date-seeded daySchedule(起床 07:00-08:30 / 入睡 23:30-01:00) | cron/scheduler.ts, cron/sleep-cycle.ts, tracking/sleep.ts |
+| `SLEEP_WAKE_ON_DM_ENABLED` | false | true | DM↔群联动:睡着时收到私聊 → 全局临时唤醒(群里也醒、正常处理消息),窗口内每条 DM 续期, 静默后到点自动继续睡。默认关。 | meta/bookkeeping.ts, pipeline/pipeline.ts, tracking/sleep.ts |
+| `SOCIAL_ACT_SHADOW_ENABLED` | false | true | Phase 1 SocialAct shadow: records the legacy judge's action contract only. It never sends, changes reply selection, or stores message text. Empty chat | pipeline/pipeline.ts, pipeline/stages/deliver.ts |
+| `SOCIAL_PREDICTION_ENABLED` | false | true | Metadata-only group interaction expectations and host-observed social prediction error. It never changes reply selection; keep rollout opt-in. | cron/scheduler.ts, pipeline/stages/deliver.ts, subagent/host-api.ts |
+| `STEPFUN_SEARCH_ENABLED` | true | true | Subagent host web.search（复用 pipeline executeSearch）。默认开；可关。 ── StepFun 全网搜索（2026-09-20 起作为**主路由**）──────────────── 原 4 条 fallback 链（Gemini grounding / | pipeline/tools/search.ts |
+| `SUBAGENT_MEMORY_ENABLED` | false | true | ── CodeAct 自动注入长期记忆 ────────────────────────────── 接在 subagent/executor.ts(真正生成话语的那层),**不是** Meta 编排器 —— Meta 的引擎跨所有会话,其输出经 digest/梦境日记扩散到每个群的 prompt, | subagent/memory-context.ts |
 | `SYCOPHANCY_AUDIT_ENABLED` | false | true | 谄媚审计: 每周抽 200 条回复按五维打分,纯离线。 | cron/scheduler.ts, cron/self-reflect.ts, cron/sycophancy-audit.ts |
-| `TASK_EXECUTOR_ENABLED` | false | true | ── AGI Level 6 Phase 13: Task 对象架构 ───────────────────────────── 补 harness 的「执行+状态」:BullMQ 独立队列跑任务,与消息处理隔离。 | agent/task-store.ts, cron/scheduler.ts, pipeline/judge/task-trigger.ts |
-| `TASK_PROGRESS_ENABLED` | true | None | 长任务用户可见阶段通知：运行时负责短确认/保活，失败不影响任务执行。 | 解构: agent/task-progress.ts, scripts/eval-long-horizon-live.ts |
+| `TASK_EXECUTOR_ENABLED` | false | true | ── AGI Level 6 Phase 13: Task 对象架构 ───────────────────────────── 补 harness 的「执行+状态」:BullMQ 独立队列跑任务,与消息处理隔离。 | agent/task-store.ts, cron/scheduler.ts, pipeline/judge/task-trigger.ts, pipeline/pipeline.ts |
+| `TASK_PROGRESS_ENABLED` | true | None | 长任务用户可见阶段通知：运行时负责短确认/保活，失败不影响任务执行。 | agent/task-progress.ts |
 | `TIC_PENALTY_ENABLED` | false | true | 口头禅自动惩罚闭环:盯 bot 自己发言,句首/句尾短语复读超阈值 → 自动降权 + 带 TTL 动态拉黑(注入不喂回 + prompt 提示"少说")+ 到期自愈。默认关。 | cron/scheduler.ts, cron/tic-penalty.ts, pipeline/reply/reply.ts |
-| `TIMING_GATE_ENABLED` | false | true | ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ── 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。 | meta/timing-adapter.ts, pipeline/timing/chat-runtime.ts |
-| `TIMING_GATE_FAIL_CLOSED` | false | true | P2-E 解析失败方向:true = fail-closed 按 no_action 处理(MaiBot 语义:宁可 沉默不插嘴;direct 已在上游 bypass;强债务转保护性 wait)。llm_call_failed (网络)仍 fail-open。与仓库约定一致:行为变化默认关,.env | 解构: pipeline/timing/gate.ts |
-| `TIMING_GATE_HISTORY_ENABLED` | false | true | P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot gate 与 planner 共享历史、看得到自己过往节奏判断)。 | 解构: pipeline/timing/gate.ts |
-| `TIMING_GATE_LLM_ENABLED` | true | None | gate 的 LLM 分支开关。false = 所有确定性层原样保留，走到 LLM 之前直接 continue。 实测依据：324 次调用 199 次解析失败(61%)，成功里 124/125 是 no_action （理由清一色同一条规则的改写）。token 占比仅 ~0.2%，省 token 不 | 解构: pipeline/timing/gate.ts, scripts/verify-deploy.mts |
-| `TIMING_GATE_PRECHECK_ENABLED` | false | true | 确定性前置检查：烧 LLM 之前先判定"这条明显是群友之间在聊、与 bot 无关"。 依据 2026-09-18 实测：gate 的 LLM 分支 121/122 给出同一个 no_action， 理由全部命中 timing-gate.md 里那条显式规则（"群友彼此在聊 → 别硬挤"）。 保守设计 | 解构: pipeline/timing/gate.ts |
-| `TIMING_WAIT_HINT_ENABLED` | false | true | P2-F wait 到点回访时注入 [等待结束] 提示(仅 TURN_WAIT_RESUME_ENABLED 路径)。 | 解构: pipeline/stages/deliver.ts |
+| `TIMING_GATE_ENABLED` | false | true | ── Timing Gate (MaiBot-style: debounce + state machine + LLM gate) ── 全局开关。关闭时所有 timing 模块退化为透传，行为等价于改造前。 | meta/dispatch-gate.ts, meta/timing-adapter.ts, pipeline/stages/bookkeeping.ts, pipeline/stages/post-judge.ts |
+| `TIMING_GATE_FAIL_CLOSED` | false | true | P2-E 解析失败方向:true = fail-closed 按 no_action 处理(MaiBot 语义:宁可 沉默不插嘴;direct 已在上游 bypass;强债务转保护性 wait)。llm_call_failed (网络)仍 fail-open。与仓库约定一致:行为变化默认关,.env | pipeline/timing/gate.ts |
+| `TIMING_GATE_HISTORY_ENABLED` | false | true | P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot gate 与 planner 共享历史、看得到自己过往节奏判断)。 | pipeline/timing/gate.ts |
+| `TIMING_GATE_LLM_ENABLED` | true | None | gate 的 LLM 分支开关。false = 所有确定性层原样保留，走到 LLM 之前直接 continue。 实测依据：324 次调用 199 次解析失败(61%)，成功里 124/125 是 no_action （理由清一色同一条规则的改写）。token 占比仅 ~0.2%，省 token 不 | pipeline/timing/gate.ts |
+| `TIMING_GATE_PRECHECK_ENABLED` | false | true | 确定性前置检查：烧 LLM 之前先判定"这条明显是群友之间在聊、与 bot 无关"。 依据 2026-09-18 实测：gate 的 LLM 分支 121/122 给出同一个 no_action， 理由全部命中 timing-gate.md 里那条显式规则（"群友彼此在聊 → 别硬挤"）。 保守设计 | pipeline/timing/gate.ts |
+| `TIMING_WAIT_HINT_ENABLED` | false | true | P2-F wait 到点回访时注入 [等待结束] 提示(仅 TURN_WAIT_RESUME_ENABLED 路径)。 | pipeline/stages/deliver.ts |
 | `TOM_STATE_ENABLED` | false | true | ── AGI Level 5 Phase 10: ToM 心智状态层 ───────────────────────────── 回复前先想「对方想要什么/什么情绪/期待什么反应」,白捡的策略性收益。 | pipeline/reply/reply.ts |
-| `TOPIC_REGISTRY_ENABLED` | false | true | 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。 | cron/scheduler.ts, pipeline/reply/prompt-builder.ts |
+| `TOPIC_REGISTRY_ENABLED` | false | true | 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。 | cron/scheduler.ts, cron/topic-scan.ts, pipeline/reply/prompt-builder.ts |
 | `TRENCH_DEBT_ATTENTION_ENABLED` | false | true | 定向债 → 注意力权重（论文 §九·补六 实验 B）。默认关。 实测：债被 Frame 呈现但 0/28 进入选择。这一条把债接到**选择侧**：来自债主的消息 在注意力累加时获得 +DEBT_ATTENTION_BOOST 压力。宿主侧确定性加权，不改模型。 | bot/handlers/message.ts |
 | `TRENCH_DEBT_ENABLED` | false | true | Nyat Trench 定向债：睡眠期按**发送者**记"欠谁一句"，醒来只准对那个人兑现。 评审 3 的反对意见：无方向的睡眠积压醒来后只被半衰期压平（时钟驱动=痉挛签名）， 有方向则被"还债"驱动（闭环驱动=活人）。速率上界仍由标量 P 决定，不改积分器。 | nyatos/debt.ts |
 | `TRENCH_GATE_ENABLED` | false | true |  | cron/unified-tick.ts, subagent/host-api.ts |
 | `TRENCH_PUMP_ENABLED` | false | true |  | cron/scheduler.ts |
 | `TRENCH_SLEEP_PULSE_ENABLED` | false | true | Nyat Trench L0 × 睡眠：读到的但没法回的消息记成气压（0.5/条）。 此前这段积累完全不存在——睡眠时段消息进 pending 队列，醒来时 P=0， bot 像什么都没发生过。加上之后醒来后气压偏高 → 速率上限被 g(P) 抬高， 即"睡一觉错过一场对话，醒来头几句是密的"，之后 | bot/handlers/message.ts |
-| `TURN_ABORT_ENABLED` | false | true | G3: 新消息打断在飞生成并带新上下文重规划。 | pipeline/turn/abort-registry.ts |
-| `TURN_ACTION_PLANNER_ENABLED` | false | true | G2: 统一动作空间 planner（reply/react/sticker/silent/wait）。 | pipeline/reply/prompt-builder.ts, pipeline/stages/bookkeeping.ts |
-| `TURN_ACTOR_ENABLED` | false | true | ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ── 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。 G1: per-chat 回合 actor。开启后消息进 xxb:pending:{ | 解构: pipeline/turn/flags.ts, pipeline/multiagent/flags.ts |
-| `TURN_BURST_JUDGE_ENABLED` | false | true | G4: judge/gate/reply 以整个 burst 为决策单元（而非只看最后一条）。 | 解构: pipeline/stages/deliver.ts, pipeline/pipeline.ts |
-| `TURN_EXEC_LOCK_ENABLED` | false | true | G12 执行期互斥:runChatTurn 入口 per-chat Redis 锁,堵死"多生产者并发 scheduleTurn 造出双回合 → registerGeneration supersede 互杀 → replan 预算白烧"的竞态(2026-07-04 诊断:毫秒级成对 replann | 解构: pipeline/turn/actor.ts |
-| `TURN_FOCUS_ENABLED` | false | true | G9: per-chat focus/能量标量（调制判断门槛、防抖、打字节奏）。 | pipeline/turn/focus.ts, queue/turn-scheduler.ts |
-| `TURN_GATE_CONTINUATION` | false | true | P0-A 连续对话免检:gate continue / bot 回复后 N 秒内的后续消息跳过 gate LLM (对齐 MaiBot 连续 Planner 状态)。更新的 wait/no_action 负向决策自动终止免检。 | 解构: pipeline/timing/chat-runtime.ts, pipeline/timing/gate.ts, pipeline/heart/heart.ts |
-| `TURN_GATE_DEFER_COOLDOWN` | false | true | gate no_action 冷却语义改向：冷却期内延后调度（MaiBot 拖时间），而非放行。 | 解构: pipeline/timing/gate.ts, pipeline/stages/post-judge.ts, pipeline/heart/heart.ts |
-| `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | 解构: pipeline/turn/actor.ts |
-| `TURN_PROACTIVE_ENABLED` | false | true | G11: idle/proactive cron 经 turn actor 走完整人格管线。 | 解构: cron/sleep-cycle.ts |
-| `TURN_SELF_FOLLOWUP_ENABLED` | false | true | G6: 发完后自我接话（"对了…"/补贴纸），新用户消息立即终止。 | 解构: pipeline/stages/deliver.ts, pipeline/turn/self-continue.ts |
-| `TURN_UNANSWERED_REVISIT_ENABLED` | false | true | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 | 解构: pipeline/stages/deliver.ts |
-| `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | 解构: pipeline/timing/state-store.ts, pipeline/turn/actor.ts |
-| `TURN_WAIT_RESUME_ENABLED` | false | true | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 | pipeline/timing/chat-runtime.ts |
-| `UNIFIED_TICK_ABSENT_USERS_ENABLED` | false | true | unified-tick 熟面孔缺席检测(Opus 评审: 主动消息要有理由—— "想起某人三天没出现")。开启后世界状态会带 absentUsers, 决策模型可选 remember_user 动作。 | 解构: cron/unified-tick.ts |
+| `TURN_ABORT_ENABLED` | false | true | G3: 新消息打断在飞生成并带新上下文重规划。 | pipeline/turn/abort-registry.ts, pipeline/turn/actor.ts |
+| `TURN_ACTION_PLANNER_ENABLED` | false | true | G2: 统一动作空间 planner（reply/react/sticker/silent/wait）。 | pipeline/reply/prompt-builder.ts, pipeline/stages/bookkeeping.ts, pipeline/stages/deliver.ts |
+| `TURN_ACTOR_ENABLED` | false | true | ── Turn Actor (MaiBot MaiSaka 式 per-chat 认知回合; docs/turn-actor/) ── 全部默认关闭。关闭时 ingress/pipeline 行为与改造前完全一致。 G1: per-chat 回合 actor。开启后消息进 xxb:pending:{ | pipeline/multiagent/flags.ts, pipeline/turn/flags.ts |
+| `TURN_BURST_JUDGE_ENABLED` | false | true | G4: judge/gate/reply 以整个 burst 为决策单元（而非只看最后一条）。 | pipeline/pipeline.ts, pipeline/stages/deliver.ts |
+| `TURN_EXEC_LOCK_ENABLED` | false | true | G12 执行期互斥:runChatTurn 入口 per-chat Redis 锁,堵死"多生产者并发 scheduleTurn 造出双回合 → registerGeneration supersede 互杀 → replan 预算白烧"的竞态(2026-07-04 诊断:毫秒级成对 replann | pipeline/turn/actor.ts |
+| `TURN_FOCUS_ENABLED` | false | true | G9: per-chat focus/能量标量（调制判断门槛、防抖、打字节奏）。 | pipeline/heart/heart.ts, pipeline/pipeline.ts, pipeline/stages/deliver.ts, pipeline/stages/post-judge.ts |
+| `TURN_GATE_CONTINUATION` | false | true | P0-A 连续对话免检:gate continue / bot 回复后 N 秒内的后续消息跳过 gate LLM (对齐 MaiBot 连续 Planner 状态)。更新的 wait/no_action 负向决策自动终止免检。 | pipeline/heart/heart.ts, pipeline/timing/chat-runtime.ts, pipeline/timing/gate.ts |
+| `TURN_GATE_DEFER_COOLDOWN` | false | true | gate no_action 冷却语义改向：冷却期内延后调度（MaiBot 拖时间），而非放行。 | pipeline/heart/heart.ts, pipeline/timing/gate.ts |
+| `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
+| `TURN_PROACTIVE_ENABLED` | false | true | G11: idle/proactive cron 经 turn actor 走完整人格管线。 | cron/sleep-cycle.ts |
+| `TURN_SELF_FOLLOWUP_ENABLED` | false | true | G6: 发完后自我接话（"对了…"/补贴纸），新用户消息立即终止。 | pipeline/stages/deliver.ts, pipeline/turn/self-continue.ts |
+| `TURN_UNANSWERED_REVISIT_ENABLED` | false | true | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 | pipeline/stages/deliver.ts |
+| `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
+| `TURN_WAIT_RESUME_ENABLED` | false | true | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 | pipeline/heart/heart.ts, pipeline/stages/post-judge.ts, pipeline/timing/chat-runtime.ts |
+| `UNIFIED_TICK_ABSENT_USERS_ENABLED` | false | true | unified-tick 熟面孔缺席检测(Opus 评审: 主动消息要有理由—— "想起某人三天没出现")。开启后世界状态会带 absentUsers, 决策模型可选 remember_user 动作。 | cron/unified-tick.ts |
 | `VERIFY_ENABLED` | false | true | Join verification | cron/scheduler.ts |
 | `VIDEO_DESCRIBE_ENABLED` | true | true | 视频理解（2026-09-21）。默认开——它跟 audio/PDF 那俩不一样:那两个是"供应商 读不了所以必败"，这个是**真的能跑**。实测 step-5-preview 吃 base64 video_url， 6 秒测试视频准确描述了内容。关掉只退回中性占位（[视频]），不会报错。  为什么 | pipeline/multimodal.ts |
 | `WEATHER_ENABLED` | false | true | ── 天气环境感知（真人感）── wttr.in 免费源，30min 缓存；注入 self-state / tick WorldState，全 fail-soft。 | shared/weather.ts |
 | `WORLD_FACTS_ENABLED` | false | true | Record what Telegram reports about a chat (title/type/username/description) as host-observable world facts. This is the missing producer for `world_ch | meta/bookkeeping.ts |
 | `WORLD_STATE_ENABLED` | false | true | ── AGI Level 5 Phase 6: 轻量世界状态 ──────────────────────────────── 对象中心实体(person/project/topic)持续维护,goal check 开工前注入上下文。 | subagent/executor.ts |
-| `WRITER_SELECTOR_ENABLED` | true | true |  | 解构: pipeline/multiagent/orchestrator.ts |
+| `WRITER_SELECTOR_ENABLED` | true | true |  | pipeline/multiagent/orchestrator.ts |
 
 ## 关着的布尔旗标（30 个）
 
@@ -262,7 +264,7 @@
 | `TTS_ENABLED` | false | — | ── TTS voice messages (edge-tts, free local Python) ── 把短回复概率性转成语音发送(适合短促亲昵/深夜私聊/情绪强烈的回复)。 edge-tts 生成 MP3 → ffmpeg 转 OGG/Opus(Telegram 语音消息要求 OggS+Op |
 | `TURN_UNIFIED_DECISION_ENABLED` | false | — | (旧名,弃用,留着防 .env 报错) |
 
-## 非布尔参数（279 个）
+## 非布尔参数（280 个）
 
 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|
@@ -500,6 +502,7 @@
 | `TIMING_DEBOUNCE_MAX_BUFFER_MS` | 8000 | — |  |
 | `TIMING_DEBOUNCE_MS` | 2000 | — | 阶段 1：消息去抖窗口（毫秒）。0 = 关闭去抖。 同一 chat 内，新消息会重置定时器；超过 MAX_BUFFER_MS 强制 flush 防止饥饿。 |
 | `TIMING_GATE_COOLDOWN_SEC` | 15 | — | 阶段 4：gate 选 wait/no_action 后，下次再调 gate 的冷却时间（秒）。 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。 |
+| `TIMING_GATE_MAX_TOKENS` | 1200 | 1200 | gate LLM 的 max_tokens。  2026-09-21 修：这里原来是**调用点写死的 200**，而 gate 的 usage 现在是 `reflection` → stepfun = step-3.7-flash，一个 * |
 | `TIMING_GATE_TIMEOUT_MS` | 8000 | 20000 |  |
 | `TIMING_GATE_USAGE` | 'judge' | reflection | 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。 |
 | `TIMING_STATE_TTL_SEC` | 86400 | — | 阶段 2：ChatRuntime 状态过期时间（秒）。超过则视作 STOP 默认状态。 |
@@ -564,7 +567,9 @@
 | `TASK_PROGRESS_RESEARCH_ENABLED` | 同上 |
 | `GOAL_LONG_TERM_ENABLED` | **保留并真接上**：goals.ts 现在读它，关时 long_term 目标按 7 天窗口 stale |
 
-还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` / `CORE_BELIEF_VIEW_ENABLED` / `CORE_PERMISSION_GATE_ENABLED` 是**假开关**——src/core/ 那一套无条件跑着，接它们要选对收口，接错会把在跑的东西关掉。`CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
+还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_ENABLED` 是唯一真的没人读的 CORE_* 旗标——blackboard 是 storage 层，被 agent/cognitive-workspace、agency-intent-adapter、core/promote、core/permission/gate 四个模块当存储用了，给它加闸门要同时管住读和写，接错会把在跑的东西关掉，所以留着单独一轮。（另两个 CORE_BELIEF_VIEW_ENABLED / CORE_PERMISSION_GATE_ENABLED 是**接好的**，见上面「假开关」一节的更正。）
+
+`CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
 
 
 ## src/ 里没人读的键（21 个）
