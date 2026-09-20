@@ -151,6 +151,21 @@ export const socialSection = {
   // 一次分,维度都是"贴人设/切题/自然度",是非设计意图的重复调用。两个 EMA 本来就是滚动
   // 平均,不需要全量样本。
   ASI_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.2),
+  // ASI rubric 走哪个 usage。
+  //
+  // 2026-09-21：原来硬编码 'judge'，而 judge 的 label 是 FORMAT=claude 的 stepfun
+  // → 走 callClaude（Anthropic /messages），**不吃 response_format**。模型于是回
+  // 中文 markdown 评语而不是 JSON，parseRubric 找不到 `{}` → 回落到中性默认值。
+  // 实测库里 2070 行一模一样 (0.5,0.5,0.5,0.5,0.2,77.0)——rubric 从来没测到过。
+  //
+  // StepFun 的同一个 /step_plan/v1 也提供 /chat/completions（OpenAI 兼容），
+  // 那条路吃 response_format：实测带 json_object + max_tokens=1200 直接返回
+  // {"social_presence":0.9,...}。所以这里配一个**同厂同模型、OpenAI 格式**的
+  // label（AI_PROVIDER_STEPFUNASI_*，不设 FORMAT），让这条调用走裸路径。
+  ASI_USAGE: z.string().default('asi'),
+  // rubric 的 max_tokens。step-3.7-flash 是 reasoning 模型，思维链计入 completion：
+  // 实测 120/600 都只拿到空 content，1200 才出正文。别改小。
+  ASI_RUBRIC_MAX_TOKENS: z.coerce.number().int().positive().default(1200),
 
   // P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户"
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),

@@ -22,17 +22,17 @@
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 34 | 21 | 20 | Turn Actor + Agentic planner + 中期记忆 |
 | `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 48 | 18 | 17 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 51 | 21 | 18 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
-| `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 54 | 27 | 22 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
+| `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 56 | 27 | 22 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 38 | 14 | 13 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
 ## 总量
 
 | | |
 |---|---|
-| total_keys | 495 |
+| total_keys | 497 |
 | bool_flags | 215 |
 | on_in_prod | 185 |
-| set_in_env | 323 |
+| set_in_env | 324 |
 | dead_no_reader | 20 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 3 |
@@ -287,7 +287,7 @@
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
 | turn | `TURN_UNIFIED_DECISION_ENABLED` | false | — | (旧名,弃用,留着防 .env 报错) |
 
-## 非布尔参数（280 个）
+## 非布尔参数（282 个）
 
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -516,7 +516,9 @@
 | self | `UNIFIED_TICK_HOUR_START` | 8 | — |  |
 | self | `UNIFIED_TICK_INTERVAL_MIN` | 5 | — | ── AGI Level 5 P5-A: 统一唤醒循环（常驻）─────────────────────────── 决策合并：一次 tick 一次 LLM 决定干什么（关心主人/群冒泡/自玩/查goal/安静）， 执行保留旧 cron 的 |
 | self | `UNIFIED_TICK_USAGE` | 'judge' | — |  |
+| social | `ASI_RUBRIC_MAX_TOKENS` | 1200 | 1200 | rubric 的 max_tokens。step-3.7-flash 是 reasoning 模型，思维链计入 completion： 实测 120/600 都只拿到空 content，1200 才出正文。别改小。 |
 | social | `ASI_SAMPLE_RATE` | 0.2 | 0.2 | ASI 回复自评抽样率:1.0 = 全量(每条回复都自评),0.5 = 抽一半。 默认 0.2。ASI rubric 与 realtime-learn 的回复自评对**同一对** (trigger, reply) 各打 一次分,维度都是"贴 |
+| social | `ASI_USAGE` | 'asi' | — | ASI rubric 走哪个 usage。  2026-09-21：原来硬编码 'judge'，而 judge 的 label 是 FORMAT=claude 的 stepfun → 走 callClaude（Anthropic /mess |
 | social | `BOT_COMMAND_LEARN_INTERVAL_MIN` | 30 | 30 | 学习扫描间隔(分钟) |
 | social | `BOT_COMMAND_LEARN_USAGE` | 'summarize' | summarize | 学习侧(把观察到的命令提炼成用法/场景)的 LLM 路由。离线 cron、不赶时间、是深 推理任务 → 正好交给 mundo(qwen3.6);设 'mundo' 需 MUNDO_ENABLED。默认走 summarize。 |
 | social | `BOT_DELEGATION_COOLDOWN_SEC` | 60 | 60 | 每群代发限速(秒):两次代发最小间隔 |
