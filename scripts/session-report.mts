@@ -474,7 +474,8 @@ console.log('');
 
 console.log('── 3. 架构占比 ──');
 console.log(`  入站                          ${st.inbound}`);
-console.log(`  Meta 路径事件                 ${st.metaEvents}`);
+console.log(`  Meta 路径事件                 ${st.metaEvents}` +
+  (st.inbound > 0 ? `   ${(st.metaEvents / st.inbound).toFixed(2)} 条/入站` : ''));
 console.log(`  legacy processPipeline 出口   ${st.legacyExits}  ${pct(st.legacyExits, st.inbound)}`);
 console.log(`    ├─ bot 降噪                 ${st.legacyDenoise}`);
 console.log(`    └─ 回复引擎走到出口         ${st.legacyReplyEngine}  ${pct(st.legacyReplyEngine, st.inbound)}   ← 这个数越低越好`);
@@ -497,7 +498,9 @@ if (db.asiRows > 0 && db.asiMeasured === 0) {
 }
 console.log('');
 console.log('── 判读 ──');
-console.log('  · 频率：发送数应低于上一个等长窗口；三道拦截的计数是"在干活"的证据。');
+console.log('  · 频率：看"每 100 条入站发言"那个比率，不是绝对数。三道拦截的计数是"在干活"的证据。');
+console.log('  · 架构：Meta 事件/入站 正常在 1.2-1.5（heart 裁决 + dispatch + attention 各一轮）。');
+console.log('    明显更高说明同一回合在 Meta 层反复转——那通常是 lost arm race / coalesce hold 在堆。');
 console.log('  · 心流：LLM 失败率应低于 25%（修复前的实测值）；截断重试数 > 0 说明那类故障真在发生。');
 console.log('  · 架构：legacy 回复引擎那一行是"老架构还剩多少"的唯一指标。');
 console.log('  · ASI：实测率 > 0 才说明 rubric 不再是常量；NULL 是诚实，不是故障。');
