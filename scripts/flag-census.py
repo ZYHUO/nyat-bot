@@ -4,7 +4,9 @@
 
 输出: docs/flag-census.md（人读）+ /tmp/flagcensus.json（后续用）
 """
+import glob
 import json
+import os
 import re
 import subprocess
 from collections import defaultdict
@@ -12,38 +14,67 @@ from collections import defaultdict
 SRC = 'src/env.ts'
 ENVF = '.env'
 
-src = open(SRC, encoding='utf8').read()
-lines = src.split('\n')
+# 2026-09-21：schema 体按子系统拆到 src/env-sections/*.ts 了，src/env.ts 只用
+# spread 组合。所以这里改成**逐段文件**解析——顺带把 section 名记进每一行，
+#  census 从"一坨清单"变成"按子系统可导航的清单"，这才是拆段的目的。
+import glob
 
-# ── 1. 抓每个 flag 的 key / 默认值 / 上方注释 ────────────────────────────
-flags = []
-i = 0
-while i < len(lines):
-    m = re.match(r'^  ([A-Z][A-Z0-9_]+):\s*(.+?),?\s*$', lines[i])
-    if m:
-        name, rhs = m.group(1), m.group(2)
-        j = i - 1
-        comment = []
-        while j >= 0:
-            s = lines[j].strip()
-            if s.startswith('//'):
-                comment.append(s[2:].strip())
-                j -= 1
-            elif s == '' and not comment:
-                j -= 1
-            else:
-                break
-        dm = re.search(r"booleanFromEnv\.default\((\w+)\)", rhs)
-        nm = re.search(r"\.default\(([^)]*)\)", rhs)
-        default = dm.group(1) if dm else (nm.group(1) if nm else '')
-        flags.append({
-            'name': name,
-            'line': i + 1,
-            'rhs': rhs[:120],
-            'default': default,
-            'comment': ' '.join(reversed(comment))[:400],
-        })
-    i += 1
+SECTION_ORDER = [
+    'infra', 'memory', 'timing', 'judge', 'cognition', 'core',
+    'self', 'turn', 'meta', 'features', 'social', 'life',
+]
+
+
+def parse_section(path: str, section: str) -> list[dict]:
+    lines = open(path, encoding='utf8').read().split('\n')
+    out: list[dict] = []
+    i = 0
+    while i < len(lines):
+        m = re.match(r'^  ([A-Z][A-Z0-9_]+):\s*(.+?),?\s*$', lines[i])
+        if m:
+            name, rhs = m.group(1), m.group(2)
+            j = i - 1
+            comment = []
+            while j >= 0:
+                s = lines[j].strip()
+                if s.startswith('//'):
+                    comment.append(s[2:].strip())
+                    j -= 1
+                elif s == '' and not comment:
+                    j -= 1
+                else:
+                    break
+            dm = re.search(r"booleanFromEnv\.default\((\w+)\)", rhs)
+            nm = re.search(r"\.default\(([^)]*)\)", rhs)
+            default = dm.group(1) if dm else (nm.group(1) if nm else '')
+            out.append({
+                'name': name,
+                'section': section,
+                'file': path.replace('src/', ''),
+                'line': i + 1,
+                'rhs': rhs[:120],
+                'default': default,
+                'comment': ' '.join(reversed(comment))[:400],
+            })
+        i += 1
+    return out
+
+
+flags: list[dict] = []
+for sec in SECTION_ORDER:
+    path = f'src/env-sections/{sec}.ts'
+    if not os.path.exists(path):
+        print(f'⚠️  缺段文件 {path}')
+        continue
+    flags.extend(parse_section(path, sec))
+
+# src/env.ts 本体若还有裸键（拆段后不该有）也抓一遍，别静默漏掉
+flags.extend(parse_section(SRC, '(env.ts 本体)'))
+
+seen = set()
+dups = [f['name'] for f in flags if f['name'] in seen or seen.add(f['name'])]
+if dups:
+    print(f'⚠️  跨段重复的键: {sorted(set(dups))}')
 
 # ── 2. .env 实际值 ────────────────────────────────────────────────────────
 envmap = {}
@@ -68,7 +99,13 @@ def hits(pattern: str, paths: list[str]) -> list[str]:
         ['grep', '-rlE', '--include=*.ts', '--include=*.mts', '--include=*.js', pattern, *paths],
         capture_output=True, text=True,
     ).stdout.split()
-    return [p for p in out if not p.endswith('src/env.ts')]
+    # **声明处不算读者**：src/env.ts 和 src/env-sections/*.ts 只是"这个键存在"，
+    # 不是"有人读它"。2026-09-21 拆段后漏了这条，结果 21 个死键一夜之间全变成
+    # "有读者"——因为它们的声明文件自己被当成了读者。
+    return [
+        p for p in out
+        if not p.endswith('src/env.ts') and not p.startswith('src/env-sections/')
+    ]
 
 
 # 读取形态。**五种都要算**——2026-09-21 我据这份清单写过"三个 CORE_* 旗标全是假开关"，
@@ -151,9 +188,43 @@ summary = {
 
 # ── 5. 写 markdown ────────────────────────────────────────────────────────
 out = []
-out.append('# Flag census — env.ts 全量旗标清单\n')
-out.append('生成方式：`python3 scripts/flag-census.py`（纯静态：env.ts 注释 + .env 实际值 + '
-           '`grep env().<FLAG> src/`）。不打数据库、不改任何东西。\n')
+out.append('# Flag census — 全量旗标清单\n')
+out.append('生成方式：`python3 scripts/flag-census.py`（纯静态：逐段读 `src/env-sections/*.ts` 的注释与默认值 '
+           '+ .env 实际值 + 五种读法 grep `src/`）。不打数据库、不改任何东西。\n')
+out.append('2026-09-21 起 schema 按子系统拆成 `src/env-sections/*.ts`（`src/env.ts` 只用 spread 组合），'
+           '所以这份清单**按段分组**、每行带「段」列——加旗标时先在这里找该进哪一段。'
+           '另带「已退役」一节：删掉的旗标留名，免得下一个人再加回来。\n')
+out.append('⚠️ 判定读者时**排除 `src/env.ts` 与 `src/env-sections/*`**——那两处只是"这个键存在"，'
+           '不是"有人读它"。拆段当晚漏了这条，21 个死键一夜之间全变成"有读者"。\n')
+
+SECTION_ORDER = ['infra', 'memory', 'timing', 'judge', 'cognition', 'core',
+                 'self', 'turn', 'meta', 'features', 'social', 'life']
+SECTION_DESC = {
+    'infra': 'Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关',
+    'memory': '主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入',
+    'timing': 'Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation）',
+    'judge': '定型判断基座 + 深度反思',
+    'cognition': 'AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门',
+    'core': 'Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强',
+    'self': '好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚',
+    'turn': 'Turn Actor + Agentic planner + 中期记忆',
+    'meta': 'Meta + Subagent 编排层',
+    'features': 'StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner',
+    'social': '主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调',
+    'life': '硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS',
+}
+out.append('## 段索引\n')
+out.append('拆段的主要收益就是这个：加旗标时知道该进哪个文件。\n')
+out.append('| 段 | 文件 | 键数 | 布尔 | 生产开着 | 管什么 |')
+out.append('|---|---|---|---|---|---|')
+for _sec in SECTION_ORDER:
+    _rs = [r for r in rows if r['section'] == _sec]
+    if not _rs:
+        continue
+    _b = [r for r in _rs if r['is_bool']]
+    out.append(f"| `{_sec}` | [`src/env-sections/{_sec}.ts`](../src/env-sections/{_sec}.ts) "
+               f"| {len(_rs)} | {len(_b)} | {len([r for r in _b if r['on']])} | {SECTION_DESC.get(_sec, '')} |")
+out.append('')
 out.append('## 总量\n')
 out.append('| | |')
 out.append('|---|---|')
@@ -169,12 +240,12 @@ out.append('`readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` �
 out.append('## 🔴 死旗标：.env 开着，但代码里一个字都没有（%d 个）\n' % len(dead_on))
 out.append('这些是"以为在跑"的开关。判定要求 src/ + scripts/ + packages/ 全无命中'
            '（`env().FLAG` / 解构 / `process.env.FLAG` 三种读法都算过）。\n')
-out.append('| flag | .env | 注释怎么说 | tests/ 里有吗 |')
-out.append('|---|---|---|---|')
+out.append('| flag | 段 | .env | 注释怎么说 | tests/ 里有吗 |')
+out.append('|---|---|---|---|---|')
 for r in sorted(dead_on, key=lambda x: x['name']):
     c = (r['comment'] or '（无注释）').replace('|', '\\|').replace('\n', ' ')[:180]
     t = ', '.join(r['tests'][:3]) or '—'
-    out.append(f"| `{r['name']}` | {r['envval']} | {c} | {t} |")
+    out.append(f"| `{r['name']}` | {r['section']} | {r['envval']} | {c} | {t} |")
 
 out.append('\n## 🟡 假开关：只被测试 mock，src/ 不读（%d 个）\n' % len(phantom))
 out.append('比死旗标更坏——测试把它们当闸门 mock，于是"关着它"的断言其实什么都没验证。\n')
@@ -185,38 +256,39 @@ out.append('⚠️ 2026-09-21 更正：我曾据这份清单写过"CORE_BELIEF_V
            'src/core/loop.ts:292 被读（`envShim().CORE_PERMISSION_GATE_ENABLED`）。'
            '只有 BLACKBOARD 是真的没人读。教训：读法不止 `env().FLAG` 一种，'
            '而"某一列是空"不等于"没人读"。\n')
-out.append('| flag | .env | 测试里怎么用 |')
-out.append('|---|---|---|')
+out.append('| flag | 段 | .env | 测试里怎么用 |')
+out.append('|---|---|---|---|')
 for r in sorted(phantom, key=lambda x: x['name']):
-    out.append(f"| `{r['name']}` | {r['envval'] or '—'} | {', '.join(r['tests'][:3])} |")
+    out.append(f"| `{r['name']}` | {r['section']} | {r['envval'] or '—'} | {', '.join(r['tests'][:3])} |")
 
 out.append('\n## 生产开着的旗标（%d 个）\n' % len(on_rows))
-out.append('| flag | 默认 | .env | 是什么（注释摘要） | 读者 |')
-out.append('|---|---|---|---|---|')
-for r in sorted(on_rows, key=lambda x: x['name']):
+out.append('按段分组、段内按名字排序——要加旗标时照这个找位置。\n')
+out.append('| 段 | flag | 默认 | .env | 是什么（注释摘要） | 读者 |')
+out.append('|---|---|---|---|---|---|')
+for r in sorted(on_rows, key=lambda x: (x['section'], x['name'])):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:150]
     rd = ', '.join(r['readers'][:4]) or (
         '**无人读**' if not r['destructured']
         else '解构/envShim: ' + ', '.join(r['destructured'][:3])
     )
-    out.append(f"| `{r['name']}` | {r['default']} | {r['envval']} | {c} | {rd} |")
+    out.append(f"| {r['section']} | `{r['name']}` | {r['default']} | {r['envval']} | {c} | {rd} |")
 
 out.append('\n## 关着的布尔旗标（%d 个）\n' % (len(bools) - len(on_rows)))
-out.append('| flag | 默认 | .env | 是什么（注释摘要） |')
-out.append('|---|---|---|---|')
-for r in sorted([r for r in bools if not r['on']], key=lambda x: x['name']):
+out.append('| 段 | flag | 默认 | .env | 是什么（注释摘要） |')
+out.append('|---|---|---|---|---|')
+for r in sorted([r for r in bools if not r['on']], key=lambda x: (x['section'], x['name'])):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:150]
-    out.append(f"| `{r['name']}` | {r['default']} | {r['envval'] or '—'} | {c} |")
+    out.append(f"| {r['section']} | `{r['name']}` | {r['default']} | {r['envval'] or '—'} | {c} |")
 
 out.append('\n## 非布尔参数（%d 个）\n' % (len(rows) - len(bools)))
-out.append('| key | 默认 | .env | 是什么（注释摘要） |')
-out.append('|---|---|---|---|')
-for r in sorted([r for r in rows if not r['is_bool']], key=lambda x: x['name']):
+out.append('| 段 | key | 默认 | .env | 是什么（注释摘要） |')
+out.append('|---|---|---|---|---|')
+for r in sorted([r for r in rows if not r['is_bool']], key=lambda x: (x['section'], x['name'])):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:120]
-    out.append(f"| `{r['name']}` | {r['default']} | {(r['envval'] or '—')[:40]} | {c} |")
+    out.append(f"| {r['section']} | `{r['name']}` | {r['default']} | {(r['envval'] or '—')[:40]} | {c} |")
 
 out.append('\n## ✅ 已退役（2026-09-21）\n')
-out.append('这些旗标曾出现在上面的死旗标表里，已经删掉——删的时候在 src/env.ts 原位'
+out.append('这些旗标曾出现在上面的死旗标表里，已经删掉——删的时候在段文件原位'
            '留了注释说明为什么，避免下一个人再把它们加回来。\n')
 out.append('| flag | 去向 |')
 out.append('|---|---|')
@@ -244,10 +316,10 @@ out.append('还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_
            '是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。\n')
 
 out.append('\n## src/ 里没人读的键（%d 个）\n' % len(dead))
-out.append('| key | .env | 说明 |')
-out.append('|---|---|---|')
+out.append('| key | 段 | .env | 说明 |')
+out.append('|---|---|---|---|')
 for r in sorted(dead, key=lambda x: x['name']):
-    out.append(f"| `{r['name']}` | {r['envval'] or '—'} | {(r['comment'] or '')[:100]} |")
+    out.append(f"| `{r['name']}` | {r['section']} | {r['envval'] or '—'} | {(r['comment'] or '')[:100]} |")
 
 open('docs/flag-census.md', 'w', encoding='utf8').write('\n'.join(out) + '\n')
 json.dump({'summary': summary, 'rows': rows}, open('/tmp/flagcensus.json', 'w'), ensure_ascii=False, indent=1)

@@ -44,20 +44,29 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** env.ts 里的旗标名 + 默认值 + 是否布尔。 */
+/**
+ * 旗标名 + 默认值 + 是否布尔。
+ *
+ * 2026-09-21 schema 按子系统拆到 `src/env-sections/*.ts` 之后，这里**必须**跟着改——
+ * 否则它读 src/env.ts 只会看到 12 行 `...xxxSection,`，一个键都解析不到，
+ * 于是"每个开着的旗标都有读者"变成**空集合上的恒真命题**：测试全绿，
+ * 而 21 个死键一个都没少。守卫自己也需要守卫，见下面那个 self-check。
+ */
 function parseEnvFlags(): Array<{ name: string; isBool: boolean; defaultTrue: boolean }> {
-  const src = readFileSync('src/env.ts', 'utf8');
   const out: Array<{ name: string; isBool: boolean; defaultTrue: boolean }> = [];
-  for (const line of src.split('\n')) {
-    const m = line.match(/^ {2}([A-Z][A-Z0-9_]+):\s*(.+?),\s*$/);
-    if (!m) continue;
-    const isBool = /booleanFromEnv/.test(m[2]);
-    const dm = m[2]!.match(/booleanFromEnv\.default\((\w+)\)/);
-    out.push({
-      name: m[1]!,
-      isBool,
-      defaultTrue: isBool && dm?.[1] === 'true',
-    });
+  for (const f of readdirSync('src/env-sections')) {
+    if (!f.endsWith('.ts') || f === '_shared.ts') continue;
+    for (const line of readFileSync(`src/env-sections/${f}`, 'utf8').split('\n')) {
+      const m = line.match(/^ {2}([A-Z][A-Z0-9_]+):\s*(.+?),\s*$/);
+      if (!m) continue;
+      const isBool = /booleanFromEnv/.test(m[2]);
+      const dm = m[2]!.match(/booleanFromEnv\.default\((\w+)\)/);
+      out.push({
+        name: m[1]!,
+        isBool,
+        defaultTrue: isBool && dm?.[1] === 'true',
+      });
+    }
   }
   return out;
 }
@@ -75,11 +84,27 @@ function envTrueKeys(): Set<string> {
 }
 
 describe('no dead switches', () => {
+  // 守卫自己的守卫：解析不到旗标 = 下面的断言是空集合上的恒真命题。
+  // 2026-09-21 拆段时就差点这么静默失效（schema 搬走了，这里还在读旧位置）。
+  it('self-check：真的解析到了旗标（否则后面全是空集合上的恒真）', () => {
+    const flags = parseEnvFlags();
+    expect(flags.length).toBeGreaterThan(400); // 拆段后是 495
+    expect(flags.filter((f) => f.isBool).length).toBeGreaterThan(150); // 215
+    // 抽几个不同段的键，确认不是只读到一个文件
+    const names = new Set(flags.map((f) => f.name));
+    for (const k of ['BOT_TOKEN', 'TIMING_GATE_ENABLED', 'CORE_V2_ENABLED', 'AGENT_TASK_SEND_BUDGET', 'VIDEO_DESCRIBE_ENABLED', 'NYATOS_BUDGET_MAX_ACTS']) {
+      expect(names.has(k), `没解析到 ${k}——段文件漏了？`).toBe(true);
+    }
+  });
+
   it('每个开着的布尔旗标都有读者（env().X / 解构 / process.env.X 三种读法都算）', () => {
     const flags = parseEnvFlags();
     const trueInEnv = envTrueKeys();
     const files = [...walk('src'), ...walk('scripts'), ...walk('packages')]
-      .filter((p) => !p.endsWith('env.ts'));
+      .filter((p) => !p.endsWith('env.ts') && !p.startsWith('src/env-sections/'));
+    // **声明处不算读者**：src/env.ts 与 src/env-sections/*.ts 只是"这个键存在"，
+    // 不是"有人读它"。2026-09-21 schema 按子系统拆段后漏了这条——段文件自己
+    // 被当成读者，守卫一夜之间全绿，而 21 个死键一个都没少。
 
     // 一次性读盘，别为每个旗标重读 600 个文件
     const blobs = files.map((p) => ({ p, s: readFileSync(p, 'utf8') }));
@@ -109,7 +134,7 @@ describe('no dead switches', () => {
 
   it('ALLOWLIST 里的每一项都还真的没有读者（欠条到期要清）', () => {
     const files = [...walk('src'), ...walk('scripts'), ...walk('packages')]
-      .filter((p) => !p.endsWith('env.ts'));
+      .filter((p) => !p.endsWith('env.ts') && !p.startsWith('src/env-sections/'));
     const blobs = files.map((p) => readFileSync(p, 'utf8'));
     const wired: string[] = [];
     for (const name of Object.keys(ALLOWLIST)) {

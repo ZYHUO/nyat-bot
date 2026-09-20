@@ -38,7 +38,11 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 
 ## Non-obvious conventions (these bite)
 
-- **Everything new is `env`-flag-gated, default OFF, and graylisted per chat.** Flags live in `src/env.ts` (a zod schema; read via the cached `env()` getter, **never `process.env` directly**). Graylists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. `.env` is gitignored and secret — **never commit it**.
+- **Everything new is `env`-flag-gated, default OFF, and graylisted per chat.** Flags live in **`src/env-sections/*.ts`** (a zod schema split by subsystem; `src/env.ts` only composes them with spread). Read via the cached `env()` getter, **never `process.env` directly**. Graylists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. `.env` is gitignored and secret — **never commit it**.
+  - The 12 sections: `infra` `memory` `timing` `judge` `cognition` `core` `self` `turn` `meta` `features` `social` `life`. Shared `booleanFromEnv` lives in `src/env-sections/_shared.ts` (one copy, not twelve).
+  - Directory is `env-sections/`, **not** `env/sections/` — `src/env.ts` is a file, and a same-named directory makes relative imports resolve to the wrong place.
+  - `tests/unit/env/schema-sections.test.ts` pins the key set (495, no losses, no cross-section duplicates) and that every section file is actually imported **and** spread. Adding a file without wiring it makes that whole section silently vanish — the test catches it.
+  - Split was done by `scripts/split-env-schema.py`; it asserts the line ranges tile the schema exactly before writing anything.
 - **`chatId` sign discriminates DM vs group**: `> 0` = DM/private, `< 0` = group. Use `isDM`/`isGroup` from `src/shared/chat.ts`.
 - **Migrations**: add a new `migrations/NNNN_name.sql` (4-digit, next after the highest — currently `0114`). Applied automatically on boot in **lexicographic filename order** (`src/db/sqlite.ts:runMigrations`), tracked in `_migrations`. Pure SQL, idempotent (`IF NOT EXISTS`/`ADD COLUMN`). **Never edit an already-applied migration.**
 - **`src/memory/chroma.ts` is Qdrant, not ChromaDB** (renamed after migration; collection `xxb_group_history`). `src/memory/importance.ts` is the SQLite sidecar.
@@ -99,7 +103,10 @@ and 3,227 tests were green.
 
 **Checklist for a new flag-gated feature:**
 
-1. `src/env.ts` — add the flag with a comment saying *why it defaults where it does*.
+1. **`src/env-sections/<subsystem>.ts`** — add the flag to the section it belongs to, with a
+   comment saying *why it defaults where it does*. (If it needs a new subsystem, add a section
+   file, import it in `src/env.ts`, spread it, and bump the key count in
+   `tests/unit/env/schema-sections.test.ts` after re-counting.)
    If it defaults ON, the dead-switch guard will require a reader before you can commit.
 2. Wire it at the **production** path, not just the obvious one. The Meta path
    (`META_SUBAGENT_ENABLED`) bypasses `processPipeline` entirely — anything added only to
@@ -112,7 +119,8 @@ and 3,227 tests were green.
 6. Update `docs/flag-census.md` by re-running `python3 scripts/flag-census.py` (it lists
    every flag, its default, its `.env` value, and its readers).
 
-**Retiring a flag:** delete it from `src/env.ts` and `.env`, leave a comment in place of it
-saying why (so nobody re-adds it), and note it in the census's 已退役 section. If a flag
+**Retiring a flag:** delete it from its `src/env-sections/<subsystem>.ts` and `.env`, leave a
+comment in place of it saying why (so nobody re-adds it), and note it in the census's 已退役
+section. Then re-run the census and bump the key count in `schema-sections.test.ts`. If a flag
 must exist before its wiring lands, add it to `ALLOWLIST` in the dead-switch test *with a
 reason* — that is an IOU, not an exemption.
