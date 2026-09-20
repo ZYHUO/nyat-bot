@@ -49,6 +49,8 @@ interface LogStats {
   windowEnd: number;
   /** 部署后的行数/入站/心流失败等，单独一列 */
   afterDeploy: number;
+  /** 最后一条 awake 处理证据的时间戳（0 = 没有） */
+  lastAwakeMs: number;
   afterInbound: number;
   afterHeartFailed: number;
   afterHeartDecision: number;
@@ -82,7 +84,7 @@ function readLog(): LogStats {
     legacyReplyEngine: 0, structuralIgnore: 0, semanticDenoise: 0, keepAddressed: 0,
     envelopeBlock: 0, budgetBlock: 0, gapBlock: 0, sendBudgetEnd: 0,
     lines: 0, windowStart: 0, windowEnd: 0,
-    afterDeploy: 0, afterInbound: 0, afterHeartFailed: 0, afterHeartDecision: 0,
+    afterDeploy: 0, afterInbound: 0, afterHeartFailed: 0, afterHeartDecision: 0, lastAwakeMs: 0,
     afterTruncRetry: 0, afterKeepAddressed: 0, afterStructuralIgnore: 0,
     taskSends: new Map(),
   };
@@ -114,6 +116,11 @@ function readLog(): LogStats {
     // 而 0 和"没有数据"是两件事。
     const errMsg = String((d['err'] as { message?: string } | undefined)?.message ?? d['error'] ?? '');
     if (msg === 'message in') { st.inbound++; if (t >= deployMs) st.afterInbound++; }
+    // 最后一条"醒着在处理"的证据。睡眠期消息走 `Meta path: asleep` 排队，
+    // 不算 awake 处理——拿它当证据会以为功能在跑，其实只是消息到了。
+    if (msg !== 'Meta path: asleep' && AWAKE_MARKERS.has(msg)) {
+      st.lastAwakeMs = Math.max(st.lastAwakeMs, t);
+    }
     else if (msg === 'Heart decision') { st.heartDecision++; if (t >= deployMs) st.afterHeartDecision++; }
     else if (msg === 'heart LLM failed, fail-closed pass') { st.heartFailed++; if (t >= deployMs) st.afterHeartFailed++; }
     else if (errMsg.includes('All labels exhausted')) st.allExhausted++;
@@ -246,6 +253,20 @@ function printTaskDistribution(taskSends: Map<string, number>): void {
   dump('部署后:  ', (k) => k.startsWith('@'));
 }
 
+/**
+ * 只在**醒着处理人类消息**时出现的痕迹。
+ *
+ * 刻意不含 `Pipeline complete (denoise: bot ...)` / `Bot message classified`：
+ * 这两条在睡眠期也照跑（bot 消息不走睡眠闸），拿它们当"功能在跑"的证据会误判。
+ * 也不含 cron 的 tick——cron 睡不睡都跑。
+ */
+const AWAKE_MARKERS: ReadonlySet<string> = new Set([
+  'Heart decision',
+  'Meta heart: pass',
+  'task delivery recorded',
+  'host sendText',
+]);
+
 const st = readLog();
 const db = readDb();
 const pct = (n: number, d: number): string => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : '—');
@@ -265,6 +286,18 @@ if (st.windowStart) {
   console.log(`日志窗口: ${fmt(st.windowStart)} → ${fmt(st.windowEnd)} UTC  (${st.lines.toLocaleString()} 行)`);
 }
 console.log('');
+
+if (st.lastAwakeMs > 0) {
+  const gapH = (Date.now() - st.lastAwakeMs) / 3_600_000;
+  const fmtAwake = new Date(st.lastAwakeMs).toISOString().replace('T', ' ').slice(0, 16);
+  console.log(`最后一条 awake 处理证据: ${fmtAwake} UTC（${gapH.toFixed(1)} 小时前）`);
+  if (gapH > 1) {
+    console.log(`  ⚠️  bot 已沉睡 ${gapH.toFixed(1)} 小时。这段时间里到的消息全部走`);
+    console.log('      `Meta path: asleep` 排队醒来再处理——**它们不是功能在跑的证据**。');
+    console.log('      下面"部署后"一列的 0 一律读作"还没有 awake 数据"。');
+  }
+  console.log('');
+}
 
 if (deployMs > 0) {
   const fmt = (t: number): string => new Date(t).toISOString().replace('T', ' ').slice(11, 16);
