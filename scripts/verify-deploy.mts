@@ -59,6 +59,11 @@ const CHECKS: Array<[string, string]> = [
   ['回复式代发限流键', 'xxb:delegation:reply:cd:'],
   ['可用手段渲染', '[授权]'],
   ['bot 工具进沙盒', 'BOT_REPLY_DELEGATION_MAX_PER_HOUR'],
+  // 频率治理（2026-09-21）
+  ['被叫回复也有间隔', 'addressedSpeechCooldownRemainingSec'],
+  ['被叫间隔拦措辞', 'just_answered'],
+  ['每任务发送预算', 'AGENT_TASK_SEND_BUDGET'],
+  ['预算耗尽收尾', 'send_budget_exhausted'],
   // 仪器
   ['醒来检测', 'detectWakeTransition'],
   ['压力轨迹日志', 'trench pump tick'],

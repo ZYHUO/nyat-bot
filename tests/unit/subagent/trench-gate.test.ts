@@ -12,10 +12,11 @@ vi.mock('../../../src/bot/sender/telegram.js', () => ({
   sendChatAction: vi.fn(async () => undefined),
 }));
 
-const budgetState = { allowed: true, cooldownLeft: 0 };
+const budgetState = { allowed: true, cooldownLeft: 0, addressedLeft: 0 };
 vi.mock('../../../src/nyatos/budget.js', () => ({
   canSpeakActively: async () => budgetState.allowed,
   activeSpeechCooldownRemainingSec: async () => budgetState.cooldownLeft,
+  addressedSpeechCooldownRemainingSec: async () => budgetState.addressedLeft,
   spendParticipation: async () => null,
   markActiveSpeech: async () => undefined,
   getParticipationBudget: async () => null,
@@ -40,6 +41,7 @@ beforeEach(() => {
   sendMessage.mockClear();
   budgetState.allowed = true;
   budgetState.cooldownLeft = 0;
+  budgetState.addressedLeft = 0;
   envMock.TRENCH_GATE_ENABLED = true;
 });
 
@@ -60,11 +62,28 @@ describe('L1 沟壁 · 发送前硬闸', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('被叫到的消息不受预算限制（无视直接提问是另一种失败）', async () => {
+  it('被叫到的消息不受**计数预算**限制（无视直接提问是另一种失败）', async () => {
     budgetState.allowed = false;
     budgetState.cooldownLeft = 999;
     // 有 replyTo 锚点 = 有人在叫我
     await host(-100, 321).telegram.sendText('在的喵', 321);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // 2026-09-21：但"被叫到"不再意味着"没有间隔"。生产流量几乎全在这条路上
+  // （近3天 2702 次 sendText：1356 显式 replyTo + 1340 只有任务默认锚点），
+  // 而最小间隔原来只拦主动发言 —— 那条路一点间隔都没有，5 分钟窗 max=20。
+  it('被叫到的回复也受最小间隔限制（只是尺子更松）', async () => {
+    budgetState.allowed = false;      // 计数额度照样豁免
+    budgetState.cooldownLeft = 999;   // 主动间隔照样豁免
+    budgetState.addressedLeft = 12;   // 但被叫间隔不豁免
+    await expect(host(-100, 321).telegram.sendText('在的喵，刚在忙别的', 321)).rejects.toThrow(/连得太密/);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('被叫间隔为 0 时照发（默认关闭或刚过间隔）', async () => {
+    budgetState.addressedLeft = 0;
+    await host(-100, 321).telegram.sendText('来啦来啦，刚才在翻记录', 321);
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 

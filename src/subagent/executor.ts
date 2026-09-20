@@ -406,6 +406,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // 普通 CodeAct 也承载闲聊回复。运行时不替模型播报任务阶段；模型
   // 自己判断何时有值得告诉用户的发现、阻塞、澄清或部分结果。
 
+  // ── 发送预算：每任务，不是每段 ────────────────────────────────────────
+  // 2026-09-21 实测：self_replies 里 1555 个任务共 2965 次投递，其中 5% 的任务
+  // （≥6 条）占了 20% 的量；最差的一个 46 秒发了 12 条。分布恰好在 6 条处跳变
+  // （31 → 51），而 6 正是 maxTextSends —— 说明它在拦，只是**每段归零**。
+  // AGENT_MAX_SEGMENTS 默认 10，所以真实上限是 60 条/任务。
+  //
+  // 修法：sendsUsed 记在 task 上跨段累计，每段只发"剩余的额度"。
+  const sendBudget = isSelfPlay || isGoalCheck ? 1 : env().AGENT_TASK_SEND_BUDGET;
+  const sendLeft = (): number => Math.max(0, sendBudget - (task.sendsUsed ?? 0));
+
   const host = createHostApi(task.chatId, {
     taskId: task.id,
     targetUserId: task.targetUserId,
@@ -419,7 +429,10 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ended = true;
       endSummary = summary;
     },
-    maxTextSends: isSelfPlay ? 1 : isGoalCheck ? 1 : 6,
+    maxTextSends: sendLeft(),
+    onSend: () => {
+      task.sendsUsed = (task.sendsUsed ?? 0) + 1;
+    },
     // 2026-08-19 自主性修复：self-play 不再禁言——做完有意思可以分享一句(+一个产物文件)，
     // 没意思仍安静 endTask（原 maxText/File=0「私下练习」让自玩完全不可见）。
     maxFileSends: isSelfPlay ? 1 : undefined,
@@ -851,6 +864,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         restoredHistory = restoreMessagesFromCompacted(cp);
         resumeSummary = cp.progressSummary;
         task.totalTurns = cp.totalTurns ?? task.totalTurns ?? 0;
+        // 发送预算也要恢复：不恢复的话续跑段又拿到满额预算，跨段累计就白做了
+        // —— 这正是这次要修的 bug 的另一半（只堵 save 不堵 restore 等于没堵）。
+        task.sendsUsed = Math.max(task.sendsUsed ?? 0, cp.sendsUsed ?? 0);
       }
     } catch (err) {
       logger.warn({ err, taskId: task.id }, 'agent checkpoint restore failed — starting fresh');
@@ -945,6 +961,19 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 5;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
       task.totalTurns++;
+
+      // 发送预算用完 → 收尾，别让模型在剩余轮里反复撞 sendText_limit。
+      // 不拦的代价是双份的：群里继续被刷屏 + 每一轮都在白烧一次 LLM 调用
+      // （2026-09-21 日志里同一个任务 60 秒内 5 次 "post-task follow-up batch
+      //  failed — Empty response"，就是这么来的）。
+      if (sendLeft() <= 0 && host.runtime.didProduce() && !isSelfPlay) {
+        logger.info(
+          { taskId: task.id, chatId: task.chatId, sendsUsed: task.sendsUsed, sendBudget, segment },
+          'agent task send budget exhausted — ending',
+        );
+        host.runtime.endTask('send_budget_exhausted');
+        break;
+      }
 
       // 实时干预(P1):每轮开头排一次用户 interrupt —— 原来只在续跑段开头排一次,
       // 段内 30 轮/120s 里用户喊停/问进度/补充需求全都到不了。硬停词立即终止。
@@ -1185,6 +1214,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           artifacts: [],
           segment: segment + 1,
           totalTurns: task.totalTurns ?? 0,
+          sendsUsed: task.sendsUsed ?? 0,
         });
 
         task.segment = segment + 1;
@@ -1225,6 +1255,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           artifacts: [],
           segment,
           totalTurns: task.totalTurns ?? 0,
+          sendsUsed: task.sendsUsed ?? 0,
         });
         task.checkpointKey = waitingCheckpoint;
         task.status = 'waiting_user';

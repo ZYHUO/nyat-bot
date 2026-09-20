@@ -194,6 +194,52 @@ describe('active speech spacing (the burst dimension)', () => {
   });
 });
 
+describe('addressed speech spacing (2026-09-21: the path that had no gap at all)', () => {
+  // 生产流量几乎全在"被叫到"那条路上（近3天 2702 次 host sendText：1356 次显式
+  // replyTo + 1340 次只有任务默认锚点），而最小间隔原来只拦主动发言 —— 那条路
+  // 一点间隔都没有。实测 5 分钟窗 p90=8 / max=20，最忙群 19.4 条/小时。
+  //
+  // 这里锁的是"被叫到的回复也有间隔，只是比主动发言松"。
+
+  beforeEach(() => {
+    envValues['NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC'] = 30;
+  });
+
+  it('没说过话时不拦', async () => {
+    const m = await load();
+    expect(await m.addressedSpeechCooldownRemainingSec(-100)).toBe(0);
+  });
+
+  it('说过话后按 addressed 的间隔拦（且比主动的 90s 松）', async () => {
+    const m = await load();
+    await m.markActiveSpeech(-100);
+    const addr = await m.addressedSpeechCooldownRemainingSec(-100);
+    const active = await m.activeSpeechCooldownRemainingSec(-100);
+    expect(addr).toBeGreaterThan(0);
+    expect(addr).toBeLessThanOrEqual(30);
+    expect(addr).toBeLessThan(active); // 被叫到的尺子更松
+  });
+
+  it('配 0 = 关闭（回到旧行为）', async () => {
+    envValues['NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC'] = 0;
+    const m = await load();
+    await m.markActiveSpeech(-100);
+    expect(await m.addressedSpeechCooldownRemainingSec(-100)).toBe(0);
+  });
+
+  it('redis 读失败 → 放行（节流不能把回复路径弄坏）', async () => {
+    const m = await load();
+    redis.get.mockRejectedValueOnce(new Error('redis down'));
+    expect(await m.addressedSpeechCooldownRemainingSec(-100)).toBe(0);
+  });
+
+  it('按群隔离', async () => {
+    const m = await load();
+    await m.markActiveSpeech(-100);
+    expect(await m.addressedSpeechCooldownRemainingSec(-200)).toBe(0);
+  });
+});
+
 describe('spend wiring covers the production main path', () => {
   // The first wiring landed only in pipeline/stages/deliver.ts, but the Meta
   // path (production main path) sends via subagent/host-api.ts and never reaches

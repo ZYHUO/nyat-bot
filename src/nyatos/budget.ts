@@ -203,6 +203,36 @@ export async function activeSpeechCooldownRemainingSec(chatId: number): Promise<
   }
 }
 
+/**
+ * 两次**被叫到**的回复之间的最小间隔。
+ *
+ * 与 activeSpeechCooldownRemainingSec 分开的两个数：主动插话 90s，被叫到 30s。
+ * 理由——生产流量几乎全在"被叫到"那条路上（近 3 天 2702 次 host sendText 里
+ * 1356 次显式带 replyTo、1340 次只有任务默认锚点），而原来那条路**一点间隔都
+ * 没有**：5 分钟窗 p90=8、max=20，最忙群 19.4 条/小时。
+ *
+ * 这不是"不许回"：被叫到仍然优先，只是不许 5 秒内连回三个人。
+ */
+export async function addressedSpeechCooldownRemainingSec(chatId: number): Promise<number> {
+  if (!budgetEnabled() || !Number.isSafeInteger(chatId) || chatId === 0) return 0;
+  let gapSec: number;
+  try {
+    gapSec = Math.max(0, env().NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC);
+  } catch {
+    return 0;
+  }
+  if (gapSec === 0) return 0;
+  try {
+    const last = Number((await getRedis().get(`${LAST_ACT_KEY_PREFIX}${chatId}`)) ?? 0);
+    if (!Number.isFinite(last) || last <= 0) return 0;
+    const elapsed = Math.floor(Date.now() / 1000) - last;
+    return Math.max(0, gapSec - elapsed);
+  } catch (err) {
+    logger.debug({ err, chatId }, 'addressed speech cooldown read failed');
+    return 0;
+  }
+}
+
 /** Mark that an active message just went out. */
 export async function markActiveSpeech(chatId: number): Promise<void> {
   if (!budgetEnabled() || !Number.isSafeInteger(chatId) || chatId === 0) return;

@@ -562,6 +562,12 @@ export function createHostApi(
     targetUserId?: number;
     /** Max sendText calls (default 2; work mode may pass 5). */
     maxTextSends?: number;
+    /**
+     * 每发成功一条就调一次 —— executor 用它把发送数累计到 task.sendsUsed，
+     * 让预算**跨段**生效（原来每段重建 host，textSent 归零，6 条/段的限额
+     * 乘上 10 段就是 60 条，等于没拦）。
+     */
+    onSend?: () => void;
     /** Max sendFile calls (default unlimited; self-play passes 1). */
     maxFileSends?: number;
     /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
@@ -1120,14 +1126,21 @@ export function createHostApi(
                   throw new Error(renderEnvelopeBlock(env0 as never, isAddressed));
                 }
               }
-              if (!isAddressed && chatId < 0 && env().TRENCH_GATE_ENABLED) {
-                const { canSpeakActively, activeSpeechCooldownRemainingSec } = await import('../nyatos/budget.js');
-                const [allowed, cooldownLeft] = await Promise.all([
-                  canSpeakActively(chatId),
-                  activeSpeechCooldownRemainingSec(chatId),
+              if (chatId < 0 && env().TRENCH_GATE_ENABLED) {
+                const { canSpeakActively, activeSpeechCooldownRemainingSec, addressedSpeechCooldownRemainingSec }
+                  = await import('../nyatos/budget.js');
+                // 三条尺寸不同的尺子：
+                //   计数额度 6/h   —— 只量主动发言（被叫到豁免，无视提问是另一种失败）
+                //   主动间隔 90s   —— 只量主动发言
+                //   被叫间隔 30s   —— **也量被叫到**。2026-09-21 之前这条路一点间隔都没有，
+                //                   实测 5 分钟窗 p90=8 / max=20，最忙群 19.4 条/小时。
+                const [allowed, cooldownLeft, addrLeft] = await Promise.all([
+                  isAddressed ? Promise.resolve(true) : canSpeakActively(chatId),
+                  isAddressed ? Promise.resolve(0) : activeSpeechCooldownRemainingSec(chatId),
+                  addressedSpeechCooldownRemainingSec(chatId),
                 ]);
-                if (!allowed || cooldownLeft > 0) {
-                  const why = !allowed ? 'budget_spent' : 'just_spoke';
+                if (!allowed || cooldownLeft > 0 || addrLeft > 0) {
+                  const why = !allowed ? 'budget_spent' : (cooldownLeft > 0 ? 'just_spoke' : 'just_answered');
                   logger.warn(
                     { chatId, why, part: i + 1, of: parts.length, preview: part.slice(0, 50) },
                     'host sendText: BLOCKED by trench gate (active speech)',
@@ -1140,8 +1153,11 @@ export function createHostApi(
                     why === 'budget_spent'
                       ? '未发送：这一个小时你主动说的话到额度了，嗓子有点哑（宿主硬闸，不是建议）。' +
                         '被叫到的消息不受这个限，但这条没人叫你——那就等下个时段，或者直接就这事收尾。'
-                      : `未发送：你 ${Math.ceil(cooldownLeft)} 秒前刚在这个群说过话，嗓子还没缓过来。` +
-                        '不是不让你说，是这条没人叫你，而你刚开口过。',
+                      : cooldownLeft > 0
+                        ? `未发送：你 ${Math.ceil(cooldownLeft)} 秒前刚在这个群说过话，嗓子还没缓过来。` +
+                          '不是不让你说，是这条没人叫你，而你刚开口过。'
+                        : `未发送：你 ${Math.ceil(addrLeft)} 秒前才在这个群回过话，连得太密了。` +
+                          '被叫到的该回，但不该 5 秒内连回三个人——等一下，或者把这几句合成一条说。',
                   );
                 }
               }
@@ -1326,6 +1342,8 @@ export function createHostApi(
             }
 
             textSent += 1;
+            // 跨段预算：立刻通报 executor，别等段末（段末可能永远不到）。
+            try { opts.onSend?.(); } catch { /* 记账失败不能挡住发送 */ }
             lastDeliveryKind = kind;
             if (kind === 'final') finalSent = true;
             else intermediateSent = true;

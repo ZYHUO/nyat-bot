@@ -53,6 +53,13 @@ export interface DispatchTask {
   checkpointKey?: string;
   /** 该任务累计已消耗的轮数（跨段）。 */
   totalTurns?: number;
+  /**
+   * 该任务累计已发出的消息数（跨段）。把发送预算做成**每任务**而不是**每段**：
+   * 2026-09-21 实测一个任务 46 秒发了 12 条，就是因为每段重建 host api、
+   * textSent 归零，6 条/段的限额乘 2 段 = 12，而注释里早就写着
+   * "maxTextSends 上限=6 —— 恰好就是 6，等于没拦"。
+   */
+  sendsUsed?: number;
   resultSummary?: string;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;

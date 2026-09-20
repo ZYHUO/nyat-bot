@@ -23,6 +23,11 @@ export interface AgentCheckpoint {
   artifacts: string[];
   segment: number;
   totalTurns: number;
+  /**
+   * 该任务累计已发出的消息数（跨段）。见 DispatchTask.sendsUsed —— 发送预算
+   * 必须跨段累计才算得准，否则每段重建 host 就归零，限额形同虚设。
+   */
+  sendsUsed?: number;
   updatedAt: number;
 }
 

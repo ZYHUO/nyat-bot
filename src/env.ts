@@ -1021,6 +1021,11 @@ const envSchema = z.object({
 
   // 单个任务最多跑几段（每段 CODEACT_MAX_TURNS 轮）。超限强制诚实收尾。
   AGENT_MAX_SEGMENTS: z.coerce.number().int().positive().default(10),
+  // 单个任务**一共**最多发几条消息（跨段累计）。
+  // 2026-09-21 之前这个预算实际是"每段 6 条 × 10 段 = 60 条"——每段重建 host api
+  // 就把 textSent 归零了。实测 1555 个任务/2965 次投递，最差一个 46 秒 12 条。
+  // 默认 6 = 与原来的单段上限一致：单段内行为不变，只把跨段累计那条口子堵上。
+  AGENT_TASK_SEND_BUDGET: z.coerce.number().int().nonnegative().default(6),
   // history 超过多少轮触发 LLM 压缩早期轮次。
   AGENT_COMPACT_AFTER_TURNS: z.coerce.number().int().positive().default(50),
   // 长任务进度可见性(P1):跨段续跑且从未发言时,每 10min 发一条"还在做"的
@@ -1387,6 +1392,17 @@ const envSchema = z.object({
   // Phase 2.3 实测的 48 次/28 分钟、中位间隔 7 秒正是这个形状。
   // 这是"我刚说过，让别人说"的那一半，与计数额度互补。0 = 关闭。
   NYATOS_BUDGET_MIN_GAP_SEC: z.coerce.number().int().min(0).max(3600).default(90),
+  // 两次**被叫到**的回复之间的最小间隔（秒）。
+  //
+  // 2026-09-21 补上这条的原因：原来最小间隔只拦主动发言，而被叫到的那条路
+  // （生产流量几乎全带引用锚点）**一点间隔都没有**。实测近 3 天 3008 次群发送：
+  //   小时窗 p50=6 / p90=26 / p99=63 / max=107
+  //   5 分钟窗 p50=2 / p90=8 / p99=15 / max=20
+  // 最忙群平均 19.4 条/小时。用户原话："日常都有点过高频率"。
+  //
+  // 比主动发言的 90s 松得多（默认 30s）：无视直接提问是另一种失败，这里只要
+  // 削掉"5 秒内连回三个人"那种机器形状，不是要 bot 装死。0 = 关闭。
+  NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC: z.coerce.number().int().min(0).max(3600).default(30),
 
   // ── Relationship narrative (Stage F): 每对 (chat,user) 累计 affinity ──
   RELATIONSHIP_ENABLED: booleanFromEnv.default(false),
