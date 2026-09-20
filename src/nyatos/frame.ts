@@ -116,6 +116,8 @@ export interface Frame {
     selfState?: string;
     /** 定向债的一行身体感受（"你睡着的时候 A（欠 2 句）——总共欠 3 句"）。 */
     debt?: string;
+    /** 反广告事实（宿主只报行为，不给裁决）。未授权群不出现。 */
+    adPressure?: string;
     /** 回声的一行身体感受（"你最近说什么都没什么动静——但这不代表不该说"）。 */
     echo?: string;
     /** Seconds until another ACTIVE message is appropriate (0 = free now). */
@@ -271,6 +273,22 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
     const { renderDebt } = await import('./debt.js');
     const line = await renderDebt(chatId ?? 0);
     if (line) self.debt = line;
+
+    // 反广告事实：宿主只报"谁在以机器的方式刷屏"，不给裁决。
+    // 没授权的群这里直接返回空串，零呈现。
+    try {
+      const { renderAdPressure } = await import('./ad-pressure.js');
+      // 候选取**本回合出现的发送者**（不是全群扫描）：burst/echo/repeat/spread
+      // 都是 per-(chat,sender) 的窗口信号，只需要看这回合谁在说话。
+      const cand = (input.recent ?? [])
+        .map((m) => ({ uid: Number(m.uid ?? 0), name: m.fullName ?? undefined }))
+        .filter((c) => c.uid > 0)
+        .slice(0, 3);
+      const noise = await renderAdPressure(chatId ?? 0, cand);
+      if (noise) self.adPressure = noise;
+    } catch (err) {
+      logger.debug({ err }, 'ad-pressure frame render failed (non-critical)');
+    }
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: debt unavailable');
   }
@@ -494,6 +512,7 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
   const budgetLine = renderParticipationBudget(frame.self.budget ?? null);
   if (budgetLine) lines.push(budgetLine);
   // Nyat Trench L0：把宿主持有的有界积分器渲染成身体感受（不是配额）。
+  if (frame.self.adPressure) lines.push(frame.self.adPressure);
   if (frame.self.trench) {
     const t = renderTrench(frame.self.trench);
     if (t) lines.push(t);

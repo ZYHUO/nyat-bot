@@ -1041,6 +1041,22 @@ const envSchema = z.object({
   // stepfun 不认 max_results（恒返回 10 条），所以在客户端切。
   STEPFUN_SEARCH_MAX_RESULTS: z.coerce.number().int().positive().max(10).default(5),
   // 可选分类过滤：programming / research / gov / business。空 = 全网。
+
+  // ── 反广告 · 行为气压（Ad Pressure）─────────────────────────────
+  // 不是规则引擎：不做内容关键词匹配。宿主只测量"谁在以机器的方式刷屏"
+  // （burst / echo / repeat / spread 四个行为信号，合成有界标量 adP），
+  // 模型在 Frame 里看到事实后自己决定忽略/删/禁言/上报群主。
+  // 默认全关；ANTIAD_CHAT_IDS 是群主白名单（= 群主授权），
+  // 运行时也可用 Redis 键 xxb:trench:antiad:<chatId> 单独开/带 TTL 开。
+  // 语料依据：本群生态里经典人类广告信号近乎为零（手机号 0 / 加密货币 0 /
+  // 色情 0），真实噪声是其他 bot——所以按内容正则抓不到东西，按行为才抓得到。
+  ANTIAD_ENABLED: booleanFromEnv.default(false),
+  ANTIAD_CHAT_IDS: z.string().default('').transform((s) => {
+    const t = s.trim();
+    if (!t) return [] as number[];
+    return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
+  }),
+
   STEPFUN_SEARCH_CATEGORY: z.string().default(''),
 
   CODEACT_WEB_SEARCH_ENABLED: booleanFromEnv.default(true),

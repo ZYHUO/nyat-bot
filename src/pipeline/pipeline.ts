@@ -117,6 +117,19 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     // D 降噪:ad/verify/echo 类其他 bot 消息 → 不进 digest/学习、不烧 judge
     //(但保留进 ctx)。在 bookkeeping 与 judge 前都要用,故在此作用域声明。
+    // 反广告授权：env 灰名单命中，或 Redis 的 per-chat 键存在（群主运行时开）。
+    const antiAdOn =
+      e.ANTIAD_ENABLED === true &&
+      ((e.ANTIAD_CHAT_IDS as number[]).includes(job.chatId) ||
+        (await (async () => {
+          try {
+            const { antiAdEnabled } = await import("../nyatos/ad-pressure.js");
+            return await antiAdEnabled(job.chatId);
+          } catch {
+            return false;
+          }
+        })()));
+
     const isDenoiseBot = e.BOT_DENOISE_ENABLED &&
       (formatted.botClass === "ad" || formatted.botClass === "verify" || formatted.botClass === "echo");
 
@@ -169,6 +182,18 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // 3.965 D 降噪:ad/verify/echo 类其他 bot 消息(已在 ctx,不删)→ tracking-only,
     // 不烧 judge/heart。顺序在代发回执(3.96)之后:cmd_result 先被回执认领,
     // 这里只拦广告/验证/复读。
+    // 反广告 · 行为气压：只在该群已被群主授权时记录行为样本。
+    // 记录的是计数与内容指纹，不存原文；四个信号全是行为化的（burst/echo/repeat/spread），
+    // 没有内容关键词——语料显示本生态的"广告"是行为问题不是内容问题。
+    if (antiAdOn) {
+      try {
+        const { noteInbound } = await import("../nyatos/ad-pressure.js");
+        await noteInbound(job.chatId, formatted.uid ?? 0, formatted.textContent ?? "", Math.floor(Date.now() / 1000));
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "antiad noteInbound failed (non-critical)");
+      }
+    }
+
     if (isDenoiseBot) {
       logger.info(
         { chatId: job.chatId, bot: formatted.username, botClass: formatted.botClass },
