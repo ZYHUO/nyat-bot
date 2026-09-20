@@ -260,3 +260,40 @@ export async function renderAdPressure(
   }
   return lines.join('\n');
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 入群筛查（join screening）—— 从 nmbot 的验证消息里提取新成员名
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 背景（2026-09-20 用户指出）：nmnmfunbot 是一些群的入群管理员，它的验证消息
+// **带当前入群的人名**。实测样本：
+//
+//   "Jeffrey Thompson has passed the group verification."
+//   "Tiara Agar ⭐️ 被管理员 Ranko Kanzaki ⭐️ 封禁并向 nmBot 举报。"
+//   "W***n failed to complete the group verification ... blocked for 2 minutes."
+//
+// 而 25 条真实人名里确有引流号，例如 `vip德州 （kuku玳）`（德州扑克 + 联系人名）、
+// `east_angelita_link`（link 后缀）。**但"这是黑产还是普通昵称"只有模型能判** ——
+// 所以这里只做**事实提取**，踢不踢由模型定（宿主测量、模型决定，与反广告同一条立场）。
+//
+// 群主明确要求：**机场/代理类不用管**（那是正常需求），要管的是黑产引流。
+// 这个区分同样交给模型，不在宿主写关键词表。
+
+/** 从 nmbot 消息里提取新成员名。非 nmbot 的入群类消息返回 null。 */
+export function extractJoinerName(text: string): string | null {
+  const t = String(text ?? '');
+  // 通过验证（最常见，也是唯一"人已进群"的信号）
+  const passed = t.match(/^(.{1,60}?)\s+has passed the group verification/i);
+  if (passed) return passed[1]!.trim();
+  // **不提取"被封禁并举报"那一类**，尽管它也有人名。实测那一类的名字是
+  //   皮卡丘IEPL / 飞云专线 / 果汁狐IEPL / 康师傅专线
+  // 全是机场/代理（IEPL = 国际专线，"专线" = 专线），而群主明确说这类不用管。
+  // 第一版我照单全收，是拿一个样例格式写了正则；拿 200 条真实数据一验就发现
+  // 漏了 17 条，而补上正则之后才发现漏的那类根本不该要。
+  return null;
+}
+
+/** 供 Frame 呈现用的一句话（事实，不是裁决）。 */
+export function renderJoinerFact(name: string): string {
+  return `[入群] 新成员 ${name} 刚通过入群验证。是不是来发黑产广告的，你看；机场/代理那类不用管。`;
+}
