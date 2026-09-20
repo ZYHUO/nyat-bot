@@ -103,6 +103,59 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
   ok('模型可见文档里有 bots.command', exec.includes('bots.command('));
 }
 
+// 9) 2026-09-21 新增机制的行为核验——**调用真函数看返回值**，不是 grep 源码。
+//
+// 为什么单独加这一段：`verify-deploy.mts` 是 grep 型守卫，它只能证明"字符串在
+// 产物里"，证明不了逻辑接对了。本轮真踩过一次——给 kernel reducer 的 default
+// 内部插一句 `if (true) break`，grep 型测试照样绿，因为字符串还在。
+// 所以能调函数的就调函数。
+{
+  // 9a) bot 两道闸：未称呼 → 结构性忽略；称呼了且是广告 bot → 语义降噪
+  {
+    const { decideBotMessage } = await import('../src/bot/handlers/meta-bot-gate.js');
+    const id = { uid: 999, username: 'hunhebi_bot', nicknames: ['啾咪囝', '本喵'] };
+    const mk = (text: string, replyTo?: number) => ({
+      role: 'user' as const, uid: 5304501737, username: 'nmnmfunbot', fullName: 'nmBot',
+      messageId: 1, timestamp: 0, isForwarded: false, isBot: true, textContent: text,
+      ...(replyTo ? { replyTo: { uid: replyTo, messageId: 8 } } : {}),
+    });
+    const bothOn = { classifierEnabled: true, denoiseEnabled: true };
+    ok('未称呼本喵的 bot → 结构性忽略（不烧心流）',
+      decideBotMessage(mk('Tiara Agar has passed the group verification.'), id, () => 'verify', bothOn) === 'ignore-structural');
+    ok('回复本喵的 bot 也算被叫到',
+      decideBotMessage(mk('嗯', 999), id, () => 'chat', bothOn) === 'pass');
+    ok('叫了我且是广告 bot → 语义降噪',
+      decideBotMessage(mk('@hunhebi_bot 看看这个'), id, () => 'ad', bothOn) === 'denoise-semantic');
+    ok('叫了我且是普通 bot → 放行',
+      decideBotMessage(mk('@hunhebi_bot 在吗'), id, () => 'chat', bothOn) === 'pass');
+  }
+
+  // 9b) vision 链只收声明 vision=true 的（未声明/显式 false 都排除）
+  {
+    const { initSmartGroup, smartGroupAutoAssign } = await import('../src/ai/smart-group.js');
+    const { getLabel } = await import('../src/ai/labels.js');
+    await initSmartGroup();
+    const chain = await smartGroupAutoAssign('vision');
+    ok('vision 链非空（有能看图的 provider）', chain.length > 0);
+    ok('vision 链里每个 label 都声明 vision=true',
+      chain.length > 0 && chain.every((n) => getLabel(n).capabilities?.vision === true));
+    // 顺带核 judge 链：健康 label 在前，且账号不重复堆叠
+    const judge = await smartGroupAutoAssign('judge');
+    const accounts = judge.slice(0, 3).map((n) => (getLabel(n).apiKeys[0] ?? '').slice(-6));
+    ok('judge 链前三个是不同上游账号', new Set(accounts).size === accounts.length);
+  }
+
+  // 9c) 沙盒不可用时 prompt 不再推荐 computer.run
+  {
+    const { applySandboxAvailabilityNotes } = await import('../src/subagent/sandbox-prompt.js');
+    const withRun = '- computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}\n8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。';
+    const dead = applySandboxAvailabilityNotes(withRun, { terminalEnabled: true, isolationRequired: true, bwrapAvailable: false });
+    ok('终端不可用 → prompt 不再推荐 computer.run', !/建议用 computer\.run/.test(dead) && dead.includes('本机不可用'));
+    const alive = applySandboxAvailabilityNotes(withRun, { terminalEnabled: true, isolationRequired: true, bwrapAvailable: true });
+    ok('终端可用 → prompt 一字不改', alive === withRun);
+  }
+}
+
 console.log(`\n═══ 合龙验证 · ${out.length} 项 ═══\n`);
 for (const l of out) console.log(`  ${l}`);
 const bad = out.filter((l) => l.startsWith('✗')).length;

@@ -1085,6 +1085,26 @@ So the provider layer now keeps a floor instead of a multiplier:
 - `topic-scan` now passes 1200 directly, with a comment saying why — the floor is a
   backstop, not a licence to keep writing 24.
 
+### Grep guards prove the string, not the logic
+
+`verify-deploy.mts` greps `dist/index.js` for each mechanism, which can only show that an
+identifier survived bundling. It cannot show that the branch it guards is reachable.
+
+That limit was demonstrated this session: a grep-style test kept passing after
+`if (true) break;` was inserted into the very branch the test claimed to cover — the
+string was still there. Deleting the block entirely is what caught it.
+
+So `verify-integration.mts` now has a block that **calls** the newest mechanisms and
+asserts on return values: `decideBotMessage` for the bot gates, `smartGroupAutoAssign`
+for the vision filter and upstream diversification, `applySandboxAvailabilityNotes` for
+the sandbox prompt. Each was verified by breaking its mechanism and watching the
+corresponding check go red.
+
+A trap found while verifying those: running the break-test from a script without
+prepending `PATH=/opt/node22/bin` gives the child Node 26, which crashes on
+`better-sqlite3` *before* reaching the new checks — exit code 1 with no ✗ lines. That
+reads exactly like "no failures found". A guard that cannot fail is not a guard.
+
 ### A silent fallthrough in media serialisation, closed with `never`
 
 `serializeContent` handled `text`, `audio` and `video_url` explicitly and then had a bare

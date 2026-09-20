@@ -144,7 +144,17 @@ change passed the other three and still did nothing:
 | unit tests | the logic is wrong | `npm run test` |
 | **dead-switch guard** | **the flag nobody reads** — `tests/unit/env/no-dead-switches.test.ts` fails if a flag is ON (in `.env` or by default) with zero readers in `src/`+`scripts/`+`packages/` | `npx vitest run tests/unit/env/no-dead-switches.test.ts` |
 | **deploy verification** | **the change isn't in the bundle** — `scripts/verify-deploy.mts` greps `dist/index.js` for each mechanism (handles esbuild quote normalisation and `\uXXXX` CJK escaping) | `npx tsx scripts/verify-deploy.mts` |
-| **integration smoke** | **green alone, broken composed** — `scripts/verify-integration.mts` exercises real compositions (search, anti-ad authorise→measure→render→deauthorise, kick gates, body-signal self-registration) | `npx tsx scripts/verify-integration.mts` |
+| **integration smoke** | **green alone, broken composed** — `scripts/verify-integration.mts` exercises real compositions (search, anti-ad authorise→measure→render→deauthorise, kick gates, body-signal self-registration, plus behaviour checks that *call* the newest mechanisms) | `npx tsx scripts/verify-integration.mts` |
+
+**A grep guard proves the string, not the logic.** `verify-deploy.mts` greps
+`dist/index.js`, so it can only show that an identifier survived bundling. When a
+mechanism is importable, add a check to `verify-integration.mts` that *calls* it and
+asserts on the return value — that block exists precisely because a grep-style test kept
+passing after `if (true) break;` was inserted into the very branch it claimed to cover.
+When you add such a check, verify it by breaking the mechanism and watching it fail; and
+run that from a script with `PATH=/opt/node22/bin` prepended, or the child process gets
+Node 26, crashes on `better-sqlite3` before reaching your check, and reports exit 1 with
+no ✗ lines — which reads exactly like "no failures found".
 
 The last three are the ones people skip. History in this repo: `canSpeakActively()` had
 exactly one reference — its own definition; `releasePressure` (the L0 integrator's main
