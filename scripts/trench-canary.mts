@@ -212,6 +212,43 @@ console.log(`        这个数越小，"删决策栈"越接近无行为变化—
 // 分群对照：按群灰度实验（META_HEART_BYPASS_CHAT_IDS）的唯一可读出口。
 // 没有它，"旁路了某个群"和"没旁路"在数字上分不开——而这个会话的教训是：
 // 一个读不出组间差异的实验等于没做。
+// ── 定向债读数（实验 B 的主判据，跑之前就已写死）─────────────────────
+// 醒来后回复里有多少瞄向债主。基线实测 0%（13 次回复 / 0 命中）。
+// 论文 §九·补六：实验 B（TRENCH_DEBT_ATTENTION_ENABLED）预测 ≥25%。
+console.log('\n【定向债】债主命中率（实验 B 的主判据）');
+try {
+  const { execSync } = await import('node:child_process');
+  const debtors: Record<string, Set<number>> = {};
+  const keys = execSync("redis-cli -n 5 --scan --pattern 'xxb:trench:owed:*'", { encoding: 'utf8' })
+    .split('\n').filter(Boolean);
+  for (const k of keys) {
+    const chat = k.replace('xxb:trench:owed:', '');
+    const uids = execSync(`redis-cli -n 5 hkeys ${k}`, { encoding: 'utf8' })
+      .split('\n').filter(Boolean).map(Number);
+    debtors[chat] = new Set(uids);
+  }
+  const since = SINCE ?? (Math.floor(Date.now() / 1000) - DAYS * 86400);
+  const rows = sql(`SELECT chat_id, trigger_uid FROM self_replies WHERE ts >= ${since}`) as unknown as
+    Array<{ chat_id: number; trigger_uid: number | null }>;
+  let total = 0, hit = 0, noAnchor = 0;
+  for (const r of rows) {
+    total += 1;
+    const uid = Number(r.trigger_uid);
+    if (!(uid > 0)) { noAnchor += 1; continue; }
+    if (debtors[String(r.chat_id)]?.has(uid)) hit += 1;
+  }
+  console.log(`  窗口内回复 ${total} 条｜命中债主 ${hit}（${total ? ((hit / total) * 100).toFixed(0) : 0}%）｜无锚点 ${noAnchor}`);
+  console.log(`  债主集合 ${Object.values(debtors).reduce((s, x) => s + x.size, 0)} 人 / ${Object.keys(debtors).length} 群`);
+  // **基线不能写死**：第一版这里印"基线 0%"，那个 0% 来自醒来后 30-60 分钟的
+  // 窄窗（13 次回复）；全天/三天窗口实测都是 18%。把窄窗读数当基线与第 79 轮
+  // 那个写死的醒来时间是同一类错误。真正的基线就是这个窗口自己。
+  const rate = total ? (hit / total) * 100 : 0;
+  console.log(`  【当前窗口基线 ${rate.toFixed(0)}%】实验 B 预测 ≥25%｜若命中率升但发言率翻倍且关系分降 → 回滚`);
+  console.log('  注意：醒来后 30-60 分钟的窄窗读数曾低到 0%，全天稳定在 18% —— 取基线要用同一个窗口');
+} catch (e) {
+  console.log('  （定向债读数失败）', String(e).slice(0, 120));
+}
+
 console.log('\n【分群对照】每群的发送率（旁路实验的读数）');
 let bypassList: number[] = [];
 try {
