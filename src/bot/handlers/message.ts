@@ -615,6 +615,19 @@ async function handleUpdate(ctx: Context): Promise<void> {
 
         const basePressure =
           layerDec.layer === 'L0' ? 100 : layerDec.layer === 'L1' ? 60 : 30;
+        // 定向债 → 注意力权重（论文 §九·补六 实验 B，TRENCH_DEBT_ATTENTION_ENABLED）。
+        //
+        // 实测：债在 Frame 里被呈现，而醒来后 28 个债主、10 个在场发言、0 次被选。
+        // 也就是"被看见但不进选择"。这一条把债接到**选择侧**——来自债主的人类消息
+        // 在累加时获得固定压力加成。它是宿主侧的确定性加权：不改模型、不删机制、
+        // 可单独 revert；关掉时行为与上一版完全一致。
+        let debtBoost = 0;
+        if (env().TRENCH_DEBT_ATTENTION_ENABLED === true && Number.isSafeInteger(userId ?? 0) && (userId ?? 0) > 0) {
+          const owed = await import('../../nyatos/debt.js')
+            .then((m) => m.owedTo(chatId, userId ?? 0))
+            .catch(() => 0);
+          if (owed > 0) debtBoost = env().TRENCH_DEBT_ATTENTION_BOOST;
+        }
         await getAttentionAccumulator().ingestAsync({
           chatId,
           layer: layerDec.layer,
@@ -622,7 +635,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
           messageId,
           userId,
           textPreview,
-          pressure: basePressure + (layerDec.pressureBoost ?? 0),
+          pressure: basePressure + (layerDec.pressureBoost ?? 0) + debtBoost,
           messageThreadId: fm.messageThreadId,
           cognitiveAnchorEventId,
           payload: {

@@ -111,6 +111,23 @@ export async function readDebt(chatId: number, topN = 5): Promise<Debt[]> {
  * 刻意用"欠"这个语义而不是"待回复队列"——后者是工单系统，前者是人的债。
  * 名字只在有 uid→昵称映射时给出；拿不到昵称就说"那个人"，不编名字。
  */
+/**
+ * 单向查询：这个 uid 在这群被欠几句。0 = 不欠。
+ *
+ * 给注意力累加器加权用（TRENCH_DEBT_ATTENTION_ENABLED，默认关）：
+ * 论文 §九·补六 实测"债被看见但不进选择"，这一条让债进入**选择侧**。
+ * 它是宿主侧的确定性加权，不改模型、不删机制、可单独 revert。
+ */
+export async function owedTo(chatId: number, uid: number): Promise<number> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) return 0;
+  try {
+    const raw = await getRedis().hget(hashKey(chatId), String(uid));
+    return raw === null ? 0 : clamp(Number(raw), 0, MAX_OWED);
+  } catch {
+    return 0;
+  }
+}
+
 export async function renderDebt(chatId: number, nameOf?: (uid: number) => string | null): Promise<string> {
   if (!enabled()) return '';
   const debts = await readDebt(chatId, 3);

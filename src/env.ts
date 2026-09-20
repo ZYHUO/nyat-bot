@@ -436,6 +436,11 @@ const envSchema = z.object({
   // 即"睡一觉错过一场对话，醒来头几句是密的"，之后被释放与泵浦压平。
   // 多不多说仍由模型在 Frame 里判断，宿主只提供事实。
   TRENCH_SLEEP_PULSE_ENABLED: booleanFromEnv.default(false),
+  // 定向债 → 注意力权重（论文 §九·补六 实验 B）。默认关。
+  // 实测：债被 Frame 呈现但 0/28 进入选择。这一条把债接到**选择侧**：来自债主的消息
+  // 在注意力累加时获得 +DEBT_ATTENTION_BOOST 压力。宿主侧确定性加权，不改模型。
+  TRENCH_DEBT_ATTENTION_ENABLED: booleanFromEnv.default(false),
+  TRENCH_DEBT_ATTENTION_BOOST: z.coerce.number().min(0).max(5).default(0.5),
   TRENCH_GATE_ENABLED: booleanFromEnv.default(false),
   // Nyat Trench 定向债：睡眠期按**发送者**记"欠谁一句"，醒来只准对那个人兑现。
   // 评审 3 的反对意见：无方向的睡眠积压醒来后只被半衰期压平（时钟驱动=痉挛签名），
