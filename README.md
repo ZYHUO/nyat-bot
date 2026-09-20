@@ -424,6 +424,8 @@ Everything is env-driven, see [`.env.example`](.env.example). Core knobs:
 | `CONTEXT_ENGINE_ENABLED` | Context Engine segmented assembly | `true` |
 | `DREAM_JOURNAL_ENABLED` | Dream-journal cron (can post to a channel) | `false` |
 | `DREAM_JOURNAL_CRON` | Comma-separated UTC crons; slot (morning/随手/bedtime) is inferred from Shanghai time | `0 23 * * *,0 4 * * *,0 15 * * *` |
+| `SCHOOL_SCHEDULE_ENABLED` | Daily schedule (school timetable / summer day-plan) driving tone | `true` |
+| `DAILY_LIFE_PROFILE` | `auto` (7–8 月 → summer) \| `school` \| `summer` | `auto` |
 | `DREAM_JOURNAL_CHAT_ID` | Journal target (channel/group; positive numbers auto-converted to `-100…`) | `0` |
 | `NYATDB_ENABLED` | Embedded [NyatDB](https://github.com/ZYHUO/nyatdb) ChatLog | `false` |
 | `NYATDB_DUAL_WRITE` | Write ChatLog (legacy name; sole writer when `REDIS_MIRROR=false`) | `false` |
@@ -639,6 +641,36 @@ When a ruler fires it does not silently drop the message: the reason is thrown b
 the model's turn as a fact ("你 12 秒前才在这个群回过话，连得太密了"), so it can merge the
 answers into one message or wait. Silent dropping was the old gate's shape and is exactly
 what the budget module was written to replace.
+
+### Sleep, schedule, and holidays
+
+The bot has a body clock, and it was already running before this round — verified, not
+assumed: `xxb:sleep:laststate = asleep`, `xxb:sleep:greeted:<chat>:goodnight:<date>` keys
+for 09-19 and 09-20, and the sleep-cycle cron ticking. Festival awareness is a lookup in
+`src/shared/beijing-time.ts` (solar festivals + lunar festivals + solar terms, data through
+2027) that lands in the prompt through `formatBeijingNowLine()`, so the bot knows it is 七夕
+without being told.
+
+What was missing was the *schedule* half. `school_overrides` — the table that says "today is
+a holiday" or "this Saturday is a makeup school day" — had **zero rows** since it was created,
+while `SCHOOL_SCHEDULE_ENABLED=true`. That does not degrade to "no holiday awareness"; it
+degrades the other way:
+
+- 2026-10-01…10-07 (National Day, 7 days) — 10/1 Thu, 10/2 Fri, 10/5 Mon, 10/6 Tue, 10/7 Wed
+  are all ordinary weekdays, so the bot played a high-school timetable *through the holiday*
+- 2026-10-10 (Saturday, a makeup workday) was treated as a free weekend
+
+`migrations/0114_seed_2026_holidays.sql` registers all seven 2026 holiday blocks and all six
+makeup days from the State Council notice (国办发明电〔2025〕7号, published 2025-11-04, on
+gov.cn) — 33 holiday rows + 6 makeup rows, `INSERT OR IGNORE` so it is idempotent and a
+re-run adds nothing. Chinese holiday shuffling cannot be derived algorithmically, which is
+why the data lives in a migration with its source URL rather than in code.
+
+One honest caveat, recorded in the migration itself: the notice says "work on 10/10" but not
+*which weekday's classes* that day makes up. `makeup_dow` is filled with the widely reported
+interpretation (9/20 and 10/10 make up 10/6–10/7, i.e. Tue/Wed) and `1` elsewhere as a
+truthy placeholder — it only selects the day's subject list, never the holiday/weekend
+decision. 2027's arrangement needs its own migration once the notice is out.
 
 ### Running the Phase 1 experiment
 
