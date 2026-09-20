@@ -34,6 +34,7 @@
 
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
+import { registerBodySignal } from './body-signal.js';
 
 /** 反广告总闸：没有群主授权就不测量、不呈现。 */
 const ENABLE_KEY = (chatId: number): string => `xxb:trench:antiad:${chatId}`;
@@ -224,6 +225,21 @@ export async function readAdSignals(
  * 例：「[噪声] 8560347478 在刷屏：5 条/5分钟，0 人接，4 条重复」
  * 删不删、禁不禁言，模型自己定；群主没开反广告时这里什么都不返回。
  */
+// 自注册：反广告是一个身体信号，和其它信号平级。
+// 注意 enabled 用群主授权——没有授权时 read 都不会被调（零开销、零呈现）。
+registerBodySignal({
+  id: 'adPressure',
+  order: 40,
+  enabled: (chatId) => antiAdEnabled(chatId),
+  // 呈现需要"本回合的发送者"，frame 侧传入；这里用空候选退化为
+  // "该群当前最吵的人"由 renderAdPressure 自己决定（暂用空 = 不呈现，
+  // 真正的候选由 frame 的 collectBodyFacts 之后单独补，见 frame.ts）。
+  read: (_chatId, ctx) => Promise.resolve(ctx?.senders ?? []),
+  // render 由 frame 侧单独调 renderAdPressure（它需要 chatId + senders 两个参数，
+  // 而注册表的 render 只拿得到 value）。这里返回 '' 表示"不由注册表渲染"。
+  render: () => '',
+});
+
 export async function renderAdPressure(
   chatId: number,
   candidates: Array<{ uid: number; name?: string }>,

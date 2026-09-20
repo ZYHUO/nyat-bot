@@ -118,6 +118,8 @@ export interface Frame {
     debt?: string;
     /** 反广告事实（宿主只报行为，不给裁决）。未授权群不出现。 */
     adPressure?: string;
+    /** 注册表收集到的全部身体事实（按 order 排序）。 */
+    bodyFacts?: string[];
     /** 回声的一行身体感受（"你最近说什么都没什么动静——但这不代表不该说"）。 */
     echo?: string;
     /** Seconds until another ACTIVE message is appropriate (0 = free now). */
@@ -270,24 +272,33 @@ export async function buildFrame(input: BuildFrameInput): Promise<Frame> {
   }
   // 定向债：睡眠期按发送者记的"欠谁一句"。衰减由还债驱动，不由时钟驱动。
   try {
-    const { renderDebt } = await import('./debt.js');
-    const line = await renderDebt(chatId ?? 0);
-    if (line) self.debt = line;
-
-    // 反广告事实：宿主只报"谁在以机器的方式刷屏"，不给裁决。
-    // 没授权的群这里直接返回空串，零呈现。
-    try {
-      const { renderAdPressure } = await import('./ad-pressure.js');
-      // 候选取**本回合出现的发送者**（不是全群扫描）：burst/echo/repeat/spread
-      // 都是 per-(chat,sender) 的窗口信号，只需要看这回合谁在说话。
-      const cand = (input.recent ?? [])
-        .map((m) => ({ uid: Number(m.uid ?? 0), name: m.fullName ?? undefined }))
-        .filter((c) => c.uid > 0)
-        .slice(0, 3);
-      const noise = await renderAdPressure(chatId ?? 0, cand);
-      if (noise) self.adPressure = noise;
-    } catch (err) {
-      logger.debug({ err }, 'ad-pressure frame render failed (non-critical)');
+    // ── 身体信号：全部走注册表，frame.ts 不再逐个 import ────────────
+    //
+    // 这一改是扩展性的核心：加一个新信号 = 一个模块文件 + 一行 registerBodySignal，
+    // frame.ts 零改动。在此之前加"定向债"要改 10+ 个文件，加"反广告"又要再改一遍
+    // frame 的类型/字段/渲染分支。
+    //
+    // 动态 import 各信号模块是为了触发它们的自注册（ESM 模块只执行一次，
+    // 注册天然幂等）。registry 内部对重复 id 也有告警兜底。
+    await Promise.all([
+      import('./trench.js'),
+      import('./debt.js'),
+      import('./ad-pressure.js'),
+    ]);
+    const { collectBodyFacts } = await import('./body-signal.js');
+    // 本回合的发送者：per-(chat,sender) 类信号（反广告）需要它，群级信号忽略。
+    const senders = (input.recent ?? [])
+      .map((m) => ({ uid: Number(m.uid ?? 0), name: m.fullName ?? undefined }))
+      .filter((c) => c.uid > 0)
+      .slice(0, 3);
+    const facts = await collectBodyFacts(chatId ?? 0, { senders });
+    if (facts.length) self.bodyFacts = facts;
+    // 兼容字段：debt/adPressure 仍写回 self，供既有消费方与测试读。
+    const { renderAdPressure } = await import('./ad-pressure.js');
+    const noise = await renderAdPressure(chatId ?? 0, senders).catch(() => '');
+    if (noise) self.adPressure = noise;
+    for (const f of facts) {
+      if (f.startsWith('[欠话]')) self.debt = f;
     }
   } catch (err) {
     logger.debug({ err, chatId }, 'frame: debt unavailable');
@@ -513,13 +524,18 @@ export function renderFrame(frame: Frame, budget?: Partial<FrameBudget>): string
   if (budgetLine) lines.push(budgetLine);
   // Nyat Trench L0：把宿主持有的有界积分器渲染成身体感受（不是配额）。
   if (frame.self.adPressure) lines.push(frame.self.adPressure);
-  if (frame.self.trench) {
-    const t = renderTrench(frame.self.trench);
-    if (t) lines.push(t);
+  // 身体信号统一来自注册表（trench / debt / ad-pressure / 未来新增的都在这里）。
+  //
+  // **self.debt / self.adPressure 仍要单独渲染**：它们是对外契约（测试与既有消费方
+  // 直接设这两个字段），而注册表的 bodyFacts 可能已经含同一行——所以按内容去重，
+  // 别把「欠话」印两遍。
+  const fromRegistry = new Set(frame.self.bodyFacts ?? []);
+  if (frame.self.adPressure && !fromRegistry.has(frame.self.adPressure)) {
+    lines.push(frame.self.adPressure);
   }
+  if (frame.self.bodyFacts?.length) lines.push(...frame.self.bodyFacts);
+  if (frame.self.debt && !fromRegistry.has(frame.self.debt)) lines.push(frame.self.debt);
   if (frame.self.selfState) lines.push(frame.self.selfState);
-  // 定向债：欠谁一句话。fail-soft——读不到就不加这一行。
-  if (frame.self.debt) lines.push(frame.self.debt);
   // 回声：E 标量的身体感受。**这一行原本漏了**——renderEcho 从写下起就没接进
   // Frame（2026-09-19 死代码扫描发现它是 TESTONLY），于是 E 在 Redis 里算、在学，
   // 模型却从未看见过它。一个观测不到自己的回声的人，学不到"我说的话有人接没人接"。

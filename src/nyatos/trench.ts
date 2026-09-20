@@ -32,6 +32,7 @@ import { getRedis } from '../db/redis.js';
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { logger } from '../shared/logger.js';
+import { registerBodySignal } from './body-signal.js';
 
 /** 气压上下界。超出即钳制，不是拒绝。 */
 export const P_MIN = 0;
@@ -248,6 +249,15 @@ export async function resetTrench(chatId: number): Promise<void> {
  *
  * @returns 是否检测到本次调用是新的一次醒来
  */
+// 自注册为身体信号：新增/修改一个信号不需要再改 frame.ts。
+registerBodySignal({
+  id: 'trench',
+  order: 10,
+  enabled: () => true,
+  read: (chatId) => readTrench(chatId),
+  render: (t) => renderTrench(t),
+});
+
 export async function detectWakeTransition(activeChatIds: number[]): Promise<boolean> {
   const KEY = 'xxb:trench:lastphase';
   try {

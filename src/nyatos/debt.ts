@@ -27,6 +27,7 @@
 
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
+import { registerBodySignal } from './body-signal.js';
 import { env } from '../env.js';
 
 /** 单笔债的硬上界：一条消息最多欠 1 句，不许一夜之间攒成巨债。 */
@@ -130,6 +131,15 @@ export async function owedTo(chatId: number, uid: number): Promise<number> {
     return 0;
   }
 }
+
+registerBodySignal({
+  id: 'debt',
+  order: 20,
+  // 定向债自己带开关（TRENCH_DEBT_ENABLED），未启用时不读。
+  enabled: () => enabled(),
+  read: (chatId) => renderDebt(chatId),
+  render: (line) => line,
+});
 
 export async function renderDebt(chatId: number, nameOf?: (uid: number) => string | null): Promise<string> {
   if (!enabled()) return '';
