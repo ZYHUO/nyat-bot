@@ -148,12 +148,23 @@ export async function runDeepReflection(): Promise<void> {
   }
   if (chatIds.length === 0) return;
 
+  // **整 tick 的截止时间。** 2026-09-21 实测：加上 waitIfCooling（round 55）和
+  // 把每跳超时从 12s 放到 20s（round 53）之后，单个 tick 最长跑到 **629 秒**——
+  // 而 tick 间隔只有 600 秒，等于这个 cron 变成了连续运转。
+  //
+  // 算式：15 群 × (最长 3 跳 × 20s + 等冷却 15s) ≈ 1125s 上限。
+  // 反思是后台批任务，但它不该把后台吃满： tick 超时就该收工，
+  // 剩下的群下一个 tick 自然补上（每群本来就有自己的失败冷却）。
+  const deadlineMs = Date.now() + Math.max(30_000, env().REFLECTION_TICK_BUDGET_SEC * 1000);
+  let skippedForBudget = 0;
+
   let reflected = 0;
   let approxInputTokens = 0;
   // 这一 tick 里每个群的落空原因（reflected=0 时才知道该看哪儿）。
   // reflectChat 直接把它返回，别再单独探测一遍——那会让每群多读一次 getRecent。
   const reasons: Record<ReflectReason, number> = { ok: 0, cooling: 0, too_few_msgs: 0, llm_failed: 0 };
   for (const chatId of chatIds) {
+    if (Date.now() >= deadlineMs) { skippedForBudget++; continue; }
     const r = await reflectChat(chatId).catch(() => ({ tokens: 0, reason: 'llm_failed' as ReflectReason }));
     if (r.tokens > 0) { reflected++; approxInputTokens += r.tokens; }
     else reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
@@ -161,7 +172,7 @@ export async function runDeepReflection(): Promise<void> {
   // 估算日 token,便于手调旋钮到目标(输入+输出粗算 ×1.15)。
   const ticksPerDay = Math.max(1, Math.round(1440 / e.REFLECTION_INTERVAL_MIN));
   const estPerDay = Math.round(approxInputTokens * 1.15 * ticksPerDay);
-  const summary = { reflected, chats: chatIds.length, approxInputTokens, estTokensPerDay: estPerDay, ticksPerDay };
+  const summary = { reflected, chats: chatIds.length, approxInputTokens, estTokensPerDay: estPerDay, ticksPerDay, skippedForBudget };
   // 全灭要亮红灯:蒸馏链静默断供是最难察觉的 AGI 退化(2026-08-07 两连 tick 12/12 全灭,
   // info 级日志没人看,直到排查才发现)。有产出时维持 info 不刷屏。
   if (reflected === 0) {

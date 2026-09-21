@@ -15,7 +15,7 @@
 | `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 79 | 21 | 14 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 13 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 23 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
-| `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 22 | 3 | 3 | 定型判断基座 + 深度反思 |
+| `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 23 | 3 | 3 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 32 | 19 | 19 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 18 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 25 | 10 | 7 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
@@ -29,10 +29,10 @@
 
 | | |
 |---|---|
-| total_keys | 486 |
+| total_keys | 487 |
 | bool_flags | 216 |
 | on_in_prod | 187 |
-| set_in_env | 322 |
+| set_in_env | 323 |
 | dead_no_reader | 2 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
@@ -285,7 +285,7 @@
 | social | `PROACTIVE_COORDINATOR_ENABLED` | false | — | ── P2-A: 主动搭话统一调度 ── 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限 |
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
 
-## 非布尔参数（270 个）
+## 非布尔参数（271 个）
 
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -408,11 +408,12 @@
 | judge | `JUDGE_SUBSTRATE_BREAKER_COOLDOWN_MS` | 60000 | — |  |
 | judge | `JUDGE_SUBSTRATE_BREAKER_FAILS` | 3 | — |  |
 | judge | `JUDGE_SUBSTRATE_CACHE_TTL_MS` | 120000 | — |  |
-| judge | `JUDGE_SUBSTRATE_TIMEOUT_MS` | 3000 | — |  |
+| judge | `JUDGE_SUBSTRATE_TIMEOUT_MS` | 9000 | 9000 | 3000 → 9000。2026-09-21 实测：typesafe（jev-latest，一个 reasoning 模型） 的延迟是 1.1 / 1.3 / 3.3 秒——**第 3 次就超了 3000ms**。 于是每三次里约一次超时  |
 | judge | `NO_ACTION_BACKOFF_CAP_SEC` | 300 | 60 |  |
 | judge | `NO_ACTION_BACKOFF_START_COUNT` | 2 | — | no_action 指数退避(MaiBot 借鉴):窗口 = base * 2^max(0, n-START), 即第 START_COUNT+1 次 no_action 起开始翻倍,封顶 CAP;continue/真实 回复清零计数。 |
 | judge | `REFLECTION_CHATS_PER_TICK` | 20 | 15 |  |
 | judge | `REFLECTION_INTERVAL_MIN` | 30 | 10 |  |
+| judge | `REFLECTION_TICK_BUDGET_SEC` | 180 | — | 单个反思 tick 的墙钟预算（秒）。超时的群跳过，下一个 tick 自然补上。 2026-09-21：没有它时，waitIfCooling（round 55）+ 每跳 20s（round 53） 能把一个 tick 拖到 629s，而 t |
 | judge | `REFLECTION_USAGE` | 'summarize' | reflection |  |
 | judge | `REFLECTION_WINDOW_MSGS` | 250 | 200 |  |
 | judge | `TIMING_CONTINUATION_WINDOW_SEC` | 180 | — |  |

@@ -77,6 +77,11 @@ export const judgeSection = {
   // 后台 cron 对活跃群喂大窗口历史 → 产出每群"近况摘要"注入回复。吞吐可调:
   // token/天 ≈ CHATS_PER_TICK × (WINDOW×~15) × (1440/INTERVAL_MIN)。默认关。
   REFLECTION_ENABLED: booleanFromEnv.default(false),
+  // 单个反思 tick 的墙钟预算（秒）。超时的群跳过，下一个 tick 自然补上。
+  // 2026-09-21：没有它时，waitIfCooling（round 55）+ 每跳 20s（round 53）
+  // 能把一个 tick 拖到 629s，而 tick 间隔只有 600s —— cron 变成连续运转。
+  // 15 群 × (3 跳 × 20s + 等冷却 15s) ≈ 1125s 是理论上限。
+  REFLECTION_TICK_BUDGET_SEC: z.coerce.number().int().positive().default(180),
   REFLECTION_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
   REFLECTION_CHATS_PER_TICK: z.coerce.number().int().positive().default(20),
   REFLECTION_WINDOW_MSGS: z.coerce.number().int().positive().default(250),
