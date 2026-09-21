@@ -40,7 +40,25 @@ export async function executeSearch(query: string): Promise<string> {
   // title/snippet/content/time，没有模型中转，也就没有那个泄漏面。
   //
   // 默认开；STEPFUN_SEARCH_ENABLED === false 时整条跳过（repo 惯例：默认真用 === false 关）。
+  //
+  // 2026-09-21 round 132：`/v1/search` 那个 REST 端点 **quota_exceeded 了**
+  // （round 124 实测 429），用户指了同一个账号下的 MCP 端点
+  // `/step_plan/v1/mcp/web_search/mcp`，探过是通的（tools/list 返回 web_search）。
+  // 所以主路由换成 MCP：JSON-RPC tools/call，参数 query/category/n/use_common_search。
+  // 旧 REST 端点留着当第二顺位——配额恢复它就能用，且它返回结构更干净。
   if (e.STEPFUN_SEARCH_ENABLED !== false && e.STEPFUN_SEARCH_API_KEY) {
+    try {
+      return await stepfunMcpSearch(
+        query,
+        e.STEPFUN_SEARCH_API_KEY,
+        e.STEPFUN_SEARCH_BASE_URL,
+        e.STEPFUN_SEARCH_MAX_RESULTS,
+        e.STEPFUN_SEARCH_CATEGORY,
+      );
+    } catch (err) {
+      logger.warn({ err, query }, 'StepFun MCP search failed, falling back to REST');
+      failedRoutes.push('StepFun-MCP');
+    }
     try {
       return await stepfunSearch(
         query,
@@ -50,8 +68,8 @@ export async function executeSearch(query: string): Promise<string> {
         e.STEPFUN_SEARCH_CATEGORY,
       );
     } catch (err) {
-      logger.warn({ err, query }, 'StepFun search failed, falling back');
-      failedRoutes.push('StepFun');
+      logger.warn({ err, query }, 'StepFun REST search failed, falling back');
+      failedRoutes.push('StepFun-REST');
     }
   }
 
@@ -105,6 +123,97 @@ interface StepfunSearchResponse {
     snippet?: string;
     content?: string;
   }>;
+}
+
+/**
+ * StepFun 全网搜索 —— **MCP 版**（2026-09-21 round 132 起的主路由）。
+ *
+ * 端点 `POST {base}/mcp/web_search/mcp`，JSON-RPC 2.0：
+ *   {"jsonrpc":"2.0","id":1,"method":"tools/call",
+ *    "params":{"name":"web_search","arguments":{"query":"…","n":5,"category":"…"}}}
+ *
+ * 为什么换成它：原来的 REST `/v1/search` 在 round 124 实测 `quota_exceeded`
+ * （429，整条搜索链因此全灭三天）。同一个 key 下的 MCP 端点探过是通的
+ * （tools/list 返回 web_search，参数 query/category/n/use_common_search）。
+ *
+ * 返回体和 REST 版同样处理：MCP 的 content 是 [{type:'text', text:'…'}]，
+ * 拼起来再走同一套"带来源"的格式化。
+ */
+async function stepfunMcpSearch(
+  query: string,
+  apiKey: string,
+  baseUrl: string,
+  maxResults: number,
+  category: string,
+): Promise<string> {
+  const base = baseUrl.replace(/\/+$/, '');
+  const args: Record<string, unknown> = { query, n: Math.min(Math.max(maxResults, 1), 20) };
+  if (category) args.category = category;
+  const res = await fetch(`${base}/mcp/web_search/mcp`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      // MCP over HTTP 要同时接受两种，否则服务端可能只回 SSE
+      Accept: 'application/json, text/event-stream',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'web_search', arguments: args },
+    }),
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!res.ok) throw new Error(`stepfun MCP search HTTP ${res.status}`);
+  const data = (await res.json()) as {
+    error?: { message?: string };
+    result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
+  };
+  if (data.error) throw new Error(`stepfun MCP search: ${data.error.message ?? 'unknown'}`);
+  if (data.result?.isError) throw new Error('stepfun MCP search: tool returned isError');
+  const text = (data.result?.content ?? [])
+    .filter((c) => c.type === 'text' || c.type === undefined)
+    .map((c) => c.text ?? '')
+    .join('\n')
+    .trim();
+  if (!text) return '(no results)';
+  // MCP 的 text 里裹着一层 JSON（{query, category, results:[{url,title,snippet,time}]}）。
+  // **要解析出来再排版**，不能把原串倒给模型：那样一次搜索烧 4000 token 的括号，
+  // 而模型真正要的是"标题 + 摘要 + 链接"。round 132 实测原样返回 4027 字，
+  // 解析后同样内容约 800 字。
+  const parsed = parseMcpResults(text);
+  if (parsed.length === 0) {
+    // 解析不出来（格式变了）就退回原串，但截短——别把整坨 JSON 倒出去。
+    return `关于"${query}"的搜索结果：\n${text.slice(0, 1500)}`;
+  }
+  let out = `关于"${query}"的搜索结果：\n`;
+  for (const r of parsed.slice(0, maxResults)) {
+    out += `- ${r.title || '无标题'}\n  ${stripTags(r.snippet || '')}\n  ${r.url || '#'}\n`;
+  }
+  out += `\n    源: ${parsed.slice(0, maxResults).map((r) => r.url).filter(Boolean).join(' ')}`;
+  return out;
+}
+
+interface McpResultRow { url?: string; title?: string; snippet?: string; time?: string }
+
+/** 从 MCP 的 text 里解析出结果数组；解析不了返回 []。 */
+function parseMcpResults(text: string): McpResultRow[] {
+  // 兼容两种裹法：整段就是 JSON，或 JSON 前面有别的字。
+  const start = text.indexOf('{');
+  if (start < 0) return [];
+  try {
+    const d = JSON.parse(text.slice(start)) as { results?: McpResultRow[] };
+    return Array.isArray(d.results) ? d.results : [];
+  } catch {
+    // 截断的 JSON（maxResults 太大被砍）——试着补一个 ]}
+    try {
+      const d = JSON.parse(`${text.slice(start).replace(/,\s*$/, '')}]}`) as { results?: McpResultRow[] };
+      return Array.isArray(d.results) ? d.results : [];
+    } catch {
+      return [];
+    }
+  }
 }
 
 async function stepfunSearch(
