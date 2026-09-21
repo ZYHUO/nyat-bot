@@ -176,6 +176,18 @@ export async function decideShadow(
       temperature: 0.8,
       ...(options.signal ? { signal: options.signal } : {}),
       maxTimeoutMs: env().NYATOS_SHADOW_TIMEOUT_MS,
+      // 全链冷却时等最短的那个醒来再试。
+      //
+      // 2026-09-21 实测：近 24h shadow compare 234 次、THREW 720 次——**失败率 75%**，
+      // 其中 598 次是 `All labels exhausted`（链上全在冷却，一条都没试）。
+      // 而 shadowCompare 在 pipeline.ts:612 是 `void shadowCompare(...)`——
+      // **fire-and-forget，不在热路径上**，等十几秒完全没有代价。
+      //
+      // 它设了 maxTimeoutMs（20000），所以默认被排除在这个重试之外（round 55 刚修过
+      // 同一个形状：后台任务因为设了 maxTimeoutMs 而拿不到等待重试）。
+      // 后果不只是统计难看：NyatOS 的评估数据有 3/4 是 `shadow_error` 计的沉默，
+      // 不是真判定——**用这份数据判断要不要替换 legacy  pipeline，本身就是不可信的**。
+      waitIfCooling: true,
     });
     const raw = result.content ?? '';
     const parsed = parseShadow(raw);
