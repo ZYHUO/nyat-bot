@@ -195,6 +195,27 @@ export async function tryPreMuteIntercepts(
         if (await routeLearnedCommand(chatId, formatted)) return true;
       }
     }
+
+    // ── 群主自助开关反广告（确定性路径，不经过模型）────────────────────
+    //
+    // 2026-09-21 round 135。用户实测：在 uzumaru 群说"开一下反广告"，
+    // **什么都没发生**。日志追踪：
+    //   message in → Meta dispatch.taskToGroup → CodeAct task start
+    //   → agent: message routed to running long task as interrupt
+    // 这条命令被当成 interrupt 吸进了一个正在跑的长任务里，而
+    // `admin.setAntiAd` 全库只有一个调用方（subagent 的 host api），
+    // 生产调用次数 **0**（round 125 清单）。
+    //
+    // 也就是说：一个会删消息、会禁言人的开关，只能靠模型自己决定调工具，
+    // 而模型在有长任务时连这句话都接不到。
+    //
+    // 所以这里加确定性路径：认得出"开/关反广告"就直接办，
+    // 校验发起者是本群管理员/群主（fail-closed），然后 setAntiAd。
+    // 模型那条路留着——它更灵活（能带 minutes），但不再是唯一的一条。
+    if (chatId < 0) {
+      const { tryAntiAdCommand } = await import("./antiad-command.js");
+      if (await tryAntiAdCommand(chatId, formatted)) return true;
+    }
   }
 
   return false;
