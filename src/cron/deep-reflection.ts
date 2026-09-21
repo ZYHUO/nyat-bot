@@ -29,16 +29,22 @@ const SYSTEM_PROMPT =
   '⑤ 有没有悬而未决、日后可以自然接回的话头。用自然中文,分点或短段都行,不要复述原话、不要 JSON、不要客套。';
 
 /** 反思单个群:大窗口历史 → 近况摘要,写回 chat_reflection。返回本次输入的近似 token。 */
-export async function reflectChat(chatId: number): Promise<number> {
+export async function reflectChat(chatId: number): Promise<{ tokens: number; reason: ReflectReason }> {
   const e = env();
   const redis = getRedis();
   if (await redis.get(FAIL_PREFIX + chatId).catch(() => null)) {
     incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'skip' });
-    return 0; // 失败冷却中
+    return { tokens: 0, reason: 'cooling' }; // 失败冷却中
   }
   const recent = await getRecent(chatId, Math.min(e.REFLECTION_WINDOW_MSGS, 80));
   const msgs = recent.filter((m) => !m.isBot && (m.textContent || m.captionContent || '').trim());
-  if (msgs.length < MIN_MSGS) return 0;
+  if (msgs.length < MIN_MSGS) {
+    // 记账：2026-09-21 `deep-reflection tick STARVED` 72 次，而 0 产出有三条
+    // 完全不同的路（冷却中 / 消息不够 / LLM 失败）。不分开记，STARVED 就看不出
+    // 该改哪儿——是群太冷，还是链挂了。
+    incrCounter('bgllm_cooldown_total', { task: 'reflect', event: 'too_few_msgs' });
+    return { tokens: 0, reason: 'too_few_msgs' };
+  }
 
   const lines = msgs
     .map((m) => `${m.fullName || m.username || '?'}: ${(m.textContent || m.captionContent || '').slice(0, 120)}`)
@@ -74,11 +80,11 @@ export async function reflectChat(chatId: number): Promise<number> {
     // warn 级:蒸馏失败 = AGI 记忆链断供,不能埋在 info 里无声烂掉(2026-08-07 12群全灭无人知)。
     const em = err instanceof Error ? err.message : String(err);
     logger.warn({ chatId, msgs: msgs.length, err: em.slice(0, 120) }, 'deep-reflection: LLM failed');
-    return 0;
+    return { tokens: 0, reason: 'llm_failed' };
   }
   if (digest.length < 10) {
     logger.info({ chatId, msgs: msgs.length, digestLen: digest.length }, 'deep-reflection: digest too short, skipped');
-    return 0;
+    return { tokens: 0, reason: 'llm_failed' };
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -88,10 +94,13 @@ export async function reflectChat(chatId: number): Promise<number> {
      ON CONFLICT(chat_id) DO UPDATE SET digest = excluded.digest, msg_count = excluded.msg_count, updated_at = excluded.updated_at`,
   ).run(chatId, digest, msgs.length, now);
 
-  return Math.ceil(lines.length / 3); // 近似输入 token(中文 ~3 字符/token)
+  return { tokens: Math.ceil(lines.length / 3), reason: 'ok' as const }; // 近似输入 token(中文 ~3 字符/token)
 }
 
 /** cron 入口:反思一批活跃群。 */
+/** reflectChat 没产出的原因。STARVED 日志按这个分，三种病因三个数。 */
+export type ReflectReason = 'ok' | 'cooling' | 'too_few_msgs' | 'llm_failed';
+
 export async function runDeepReflection(): Promise<void> {
   const e = env();
   if (!e.REFLECTION_ENABLED) return;
@@ -109,9 +118,13 @@ export async function runDeepReflection(): Promise<void> {
 
   let reflected = 0;
   let approxInputTokens = 0;
+  // 这一 tick 里每个群的落空原因（reflected=0 时才知道该看哪儿）。
+  // reflectChat 直接把它返回，别再单独探测一遍——那会让每群多读一次 getRecent。
+  const reasons: Record<ReflectReason, number> = { ok: 0, cooling: 0, too_few_msgs: 0, llm_failed: 0 };
   for (const chatId of chatIds) {
-    const t = await reflectChat(chatId).catch(() => 0);
-    if (t > 0) { reflected++; approxInputTokens += t; }
+    const r = await reflectChat(chatId).catch(() => ({ tokens: 0, reason: 'llm_failed' as ReflectReason }));
+    if (r.tokens > 0) { reflected++; approxInputTokens += r.tokens; }
+    else reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
   }
   // 估算日 token,便于手调旋钮到目标(输入+输出粗算 ×1.15)。
   const ticksPerDay = Math.max(1, Math.round(1440 / e.REFLECTION_INTERVAL_MIN));
@@ -120,7 +133,12 @@ export async function runDeepReflection(): Promise<void> {
   // 全灭要亮红灯:蒸馏链静默断供是最难察觉的 AGI 退化(2026-08-07 两连 tick 12/12 全灭,
   // info 级日志没人看,直到排查才发现)。有产出时维持 info 不刷屏。
   if (reflected === 0) {
-    logger.warn(summary, 'deep-reflection tick STARVED — 0 chats reflected');
+    // 把这一 tick 里各群为什么没产出也带上：冷却 / 消息不够 / LLM 失败分开数。
+    // 原来只有一句 `reflected=0, chats=N`，三种病因一个形状。
+    logger.warn(
+      { ...summary, ...reasons },
+      'deep-reflection tick STARVED — 0 chats reflected',
+    );
   } else {
     logger.info(summary, 'deep-reflection tick complete');
   }
