@@ -28,3 +28,4 @@ exports/
 var/
 
 # trench 的 VITEST 观测改道文件（生产日志 var/trench.jsonl 已由 var/ 覆盖）
+.probe/
