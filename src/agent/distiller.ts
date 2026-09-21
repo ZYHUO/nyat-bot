@@ -56,7 +56,34 @@ function repairTruncatedJson(raw: string): string {
 
 export function parseDistillOutput(raw: string): DistillResult | null {
   try {
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    // **先剥围栏，再找 JSON。** 2026-09-21 实测生产里最新一条失败（len=655）的
+    // 原文开头是 `{```json`——模型先吐了一个孤零零的 `{`，然后才开围栏写 JSON。
+    // 原来的 `/^```(?:json)?\s*/i` 只剥**行首**的围栏，前面多一个字符就整个失效，
+    // 于是这条既没剥掉围栏、也匹配不到完整的 `{...}`，直接判失败。
+    //
+    // 近 24h distill 失败 360 次，带 len/head 的 26 条里能看到这种形状。
+    // 剥离改成： anywhere 的 ```json / ``` 都去，然后再 trim。
+    const cleaned = raw
+      .replace(/```(?:json)?/gi, ' ')
+      .trim();
+    // 再丢掉 JSON 之前的散落字符。生产实测那条是 `{```json` → 剥完围栏变成
+    // `{ {  "summary": …`——**两个连续的花括号**。JSON.parse 不认这种：
+    // 外层对象的 key 不能是 `{`。截断自救也救不了它（补完括号还是 `{ {...}}`）。
+    // 所以从第一个 `{"` / `{ "` 开始切，前面的一律当模型的口头禅丢掉。
+    const objStart = cleaned.match(/\{\s*"/);
+    if (objStart && objStart.index !== undefined && objStart.index > 0) {
+      return parseFrom(objStart.index === 0 ? cleaned : cleaned.slice(objStart.index));
+    }
+    return parseFrom(cleaned);
+  } catch (err) {
+    logger.debug({ err }, 'parseDistillOutput threw');
+    return null;
+  }
+}
+
+/** 从一段（可能带前缀/围栏/截断的）文本里解析出 DistillResult。 */
+function parseFrom(cleaned: string): DistillResult | null {
+  try {
     const candidates = [
       cleaned,
       cleaned.replace(/,\s*([}\]])/g, '$1'),

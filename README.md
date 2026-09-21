@@ -1205,6 +1205,17 @@ Two fixes:
 The existing assertion `expect(callArg.maxTokens).toBeLessThanOrEqual(1200)` had been
 pinning the very budget that caused the failure.
 
+**A second shape, found the same way.** After the budget fix the distiller ran at 32.5%
+yield instead of 13%, and the raw-output logging showed a new failure head:
+`{```json\n{\n  "summary": …` — the model emits a stray `{`, *then* opens a fence. The
+fence stripper only matched at the start of the string, so nothing was stripped; and the
+leftover `{ {` is not parseable because an object's key cannot be `{`. Truncation repair
+could not save it either, since closing the braces still leaves `{ {...}}`.
+
+Now the fence is stripped anywhere and the parse starts at the first `{"`, so anything the
+model says before its JSON is discarded rather than fatal. 26 of the last 24h's 360
+failures carried a readable head; this shape is the one that was recoverable from them.
+
 ### Experience recall had the same bug — and the codebase already had the cure
 
 Round 60 fixed `skills_fts`. Asking "same cause elsewhere?" over the four FTS5 tables

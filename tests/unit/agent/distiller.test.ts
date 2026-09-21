@@ -281,4 +281,30 @@ describe('distillEpisode', () => {
       expect(r!.summary).toBe('s');
     });
   });
+
+  // 2026-09-21 生产实测形状：模型先吐一个孤零零的 `{`，然后才开 ```json 围栏。
+  // 剥完围栏变成 `{ { "summary": …` —— JSON.parse 不认（外层对象的 key 不能是 `{`），
+  // 截断自救也救不了（补完括号还是 `{ {...}}`）。近 24h distill 失败 360 次。
+  describe('围栏前面有散落字符', () => {
+    it('⑨ `{```json` 这种形状能解析出 summary', () => {
+      const r = parseDistillOutput('{```json\n{\n  "summary": "任务要求自然回应@wcnmb_69的消息#60584。助手连续发送触发限制，最终调整策略成功结束。过程中还出');
+      expect(r).not.toBeNull();
+      expect(r!.summary).toContain('wcnmb_69');
+    });
+
+    it('⑩ 模型先说话再给围栏 JSON，也认', () => {
+      const r = parseDistillOutput('好的，我来复盘一下。\n```json\n{"summary":"x","lessons":["a"]}\n```');
+      expect(r!.summary).toBe('x');
+    });
+
+    it('⑪ 纯围栏（无散落字符）不受影响', () => {
+      const r = parseDistillOutput('```json\n{"summary":"完成短回","lessons":["b"]}\n```');
+      expect(r!.summary).toBe('完成短回');
+    });
+
+    it('⑫ 完全不是 JSON 仍然 null（不硬造）', () => {
+      expect(parseDistillOutput('模型在说人话')).toBeNull();
+      expect(parseDistillOutput('')).toBeNull();
+    });
+  });
 });
