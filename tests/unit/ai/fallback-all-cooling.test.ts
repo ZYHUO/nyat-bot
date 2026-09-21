@@ -59,21 +59,83 @@ beforeEach(() => {
 describe('全候选被冷却跳过', () => {
   it('① 一次都没尝试 → 抛错，且错误信息说明是"全在冷却"而不是"全失败"', async () => {
     isCoolingDownMock.mockResolvedValue(true);
-    remainingMock.mockResolvedValue(45);
+    remainingMock.mockResolvedValue(0);   // 0 = 不知道还要多久 → 不等，直接抛
     await expect(callWithFallback(opts)).rejects.toThrow(/all candidates cooling down/i);
     expect(callModelMock).not.toHaveBeenCalled();
   });
 
   it('② 打一条 warn，点名每个被跳过的 label + 冷却剩余秒数', async () => {
     isCoolingDownMock.mockResolvedValue(true);
-    remainingMock.mockResolvedValue(45);
+    remainingMock.mockResolvedValue(0);
     await expect(callWithFallback(opts)).rejects.toThrow();
     const call = loggerMock.warn.mock.calls.find((c) => String(c[1]).includes('nothing was attempted'));
     expect(call).toBeDefined();
     const payload = call![0] as { candidates: string[]; skipped: Array<{ label: string; coolingForSec: number }> };
     expect(payload.candidates).toEqual(['primary', 'hedge', 'last']);
     expect(payload.skipped).toHaveLength(3);
-    expect(payload.skipped[0]).toMatchObject({ label: 'primary', coolingForSec: 45 });
+    expect(payload.skipped[0]).toMatchObject({ label: 'primary', coolingForSec: 0 });
+  });
+
+  // 2026-09-21：全被冷却时等最短的那个醒来再试一次（不等就立刻失败太亏——
+  // 实测剩余冷却多是 2-46 秒，等十几秒就有一条能用）。
+  describe('等最短冷却醒来再试一次', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('⑥ 两个候选都冷却、等完有一个就好了 → 返回结果，不抛', async () => {
+      // 注意：第一版写成 `mockResolvedValueOnce(true).mockResolvedValue(false)`，
+      // 于是第二个 label 本来就没冷却 → 正常循环直接用它 → **等待重试那段根本没跑，
+      // 测试却绿了**。必须让第一轮两个 label 全冷却，等待之后才恢复。
+      // 链里有 **3** 个 label（getUsage mock: primary + [hedge, last]），
+      // 所以前三轮调用都要冷却，等待之后才恢复。第一版写 n<=2，于是第三个
+      // label 本来就没冷却、主循环直接用它成功——等待那段一行没跑，测试却绿。
+      let n = 0;
+      isCoolingDownMock.mockImplementation(async () => { n++; return n <= 3; });
+      remainingMock.mockResolvedValue(5);
+      callModelMock.mockResolvedValue({ content: '{"ok":1}', label: 'primary', model: 'primary-model', latencyMs: 1, tokenUsage: { prompt: 1, completion: 1, total: 2 } });
+      const p = callWithFallback(opts);
+      await vi.advanceTimersByTimeAsync(6000);
+      const r = await p;
+      expect(r.content).toBe('{"ok":1}');
+      expect(callModelMock).toHaveBeenCalledTimes(1);
+      // **这条断言才是真正的守卫**：证明"等待重试"那段真的跑了。
+      // 没有它，第二个 label 只要没在冷却，正常循环就直接成功——测试绿了，
+      // 而等待那段一行都没执行（我就这么写过一版假绿）。
+      expect(loggerMock.debug.mock.calls.some((c) => String(c[1]).includes('all candidates cooling'))).toBe(true);
+    });
+
+    it('⑥b 等完还都在冷却 → 仍然抛（不假装成功）', async () => {
+      isCoolingDownMock.mockResolvedValue(true);
+      remainingMock.mockResolvedValue(5);
+      const p = callWithFallback(opts).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(20000);
+      const e = await p;
+      expect(e).toBeInstanceOf(Error);
+      expect((e as Error).message).toMatch(/cooling down/i);
+    });
+
+    it('⑥c 等多久有上界（15s），不会把调用方熬死', async () => {
+      isCoolingDownMock.mockResolvedValue(true);
+      remainingMock.mockResolvedValue(600);   // 剩余 10 分钟
+      const p = callWithFallback(opts).catch(() => 'threw');
+      await vi.advanceTimersByTimeAsync(16000);   // 上界 15s，所以 16s 时一定已抛
+      expect(await p).toBe('threw');              // 没傻等 600s
+    });
+
+    it('⑥d 延迟敏感路径（带 maxTimeoutMs）不等——直接抛', async () => {
+      isCoolingDownMock.mockResolvedValue(true);
+      remainingMock.mockResolvedValue(5);
+      await expect(callWithFallback({ ...opts, maxTimeoutMs: 8000 })).rejects.toThrow(/cooling down/i);
+      expect(callModelMock).not.toHaveBeenCalled();
+    });
+
+    it('⑥e 带外部 signal 的路径不等（调用方能取消，不该被 sleep 卡住）', async () => {
+      const ac = new AbortController();
+      isCoolingDownMock.mockResolvedValue(true);
+      remainingMock.mockResolvedValue(5);
+      await expect(callWithFallback({ ...opts, signal: ac.signal })).rejects.toThrow(/cooling down/i);
+      expect(callModelMock).not.toHaveBeenCalled();
+    });
   });
 
   it('③ 真失败时不走这个分支（错误信息保持原样，不带 cooling down）', async () => {
@@ -94,7 +156,7 @@ describe('全候选被冷却跳过', () => {
 
   it('⑤ 全跳过时也记 llm error 指标（监控看得见）', async () => {
     isCoolingDownMock.mockResolvedValue(true);
-    remainingMock.mockResolvedValue(10);
+    remainingMock.mockResolvedValue(0);   // 不等，直接走完
     await expect(callWithFallback(opts)).rejects.toThrow();
     // emitLlmError 在每次 attempt 失败时调用；全跳过时一次 attempt 都没有，
     // 所以这条指标为 0 —— 正是这个失败形状此前的盲点，warn 补上。

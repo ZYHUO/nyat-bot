@@ -53,6 +53,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
 
   const errors: Error[] = [];
   let hedgeTriedLabel: string | undefined;
+  /** 全链被冷却跳过时，最短的那个剩余冷却（秒）；0 表示没有候选被冷却跳过。 */
+  let shortestCooldownSec = 0;
 
   // P2 多模态:带图调用跳过明确声明 VISION=false 的 label(纯文本模型收到
   // image_url 必 400,白烧一跳还刷熔断)。undefined(未声明)照发,保持现状。
@@ -77,6 +79,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     // Skip if cooling down
     if (await cooldown.isCoolingDown(label.model)) {
       logger.debug({ label: labelName, model: label.model }, 'Skipping cooled-down model');
+      // 记下最短的剩余冷却——全被跳过时用它决定要不要等一下（见函数尾部）。
+      const rem = await cooldown.getRemainingSeconds(label.model).catch(() => 0);
+      if (rem > 0 && (shortestCooldownSec === 0 || rem < shortestCooldownSec)) shortestCooldownSec = rem;
       continue;
     }
 
@@ -165,6 +170,38 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
 
   const lastErr = errors.at(-1);
   if (lastErr) throw lastErr;
+
+  // 一条都没试成，且原因全是"在冷却"→ 等最短的那个醒来再试一次。
+  //
+  // 2026-09-21 加。实测 awake 窗口里 `all candidates skipped by cooldown/breaker`
+  // 出现 31 次（reflection 15 / vision 7 / judge 6 / summarize 3 / asi 1），
+  // 被跳过的剩余冷却是 2-46 秒——**等十几秒就有一条能用了**，而旧行为是立刻失败。
+  //
+  // 只等一次、只等最短剩余冷却（上界 15s，别把调用方熬死）；调用方带了
+  // maxTimeoutMs 的延迟敏感路径（heart/gate）不等——它们本来就该快速失败。
+  if (shortestCooldownSec > 0 && !options.maxTimeoutMs && !options.signal) {
+    const waitSec = Math.min(shortestCooldownSec + 1, 15);
+    logger.debug(
+      { usage: options.usage, waitSec, candidates: smartOrderedNames },
+      'all candidates cooling — waiting for the shortest to recover, then retrying once',
+    );
+    await new Promise((r) => setTimeout(r, waitSec * 1000));
+    for (const labelName of smartOrderedNames) {
+      const label = getLabel(labelName);
+      if (await cooldown.isCoolingDown(label.model)) continue;
+      try {
+        const result = await callModel(label, options.messages, attemptOptsFor(label, callOpts, options.maxTimeoutMs));
+        if (options.rejectEmpty && !result.content.trim()) continue;
+        await cooldown.recordSuccess(label.model);
+        if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
+        return result;
+      } catch (err) {
+        errors.push(err instanceof Error ? err : new Error(String(err)));
+        if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(label.model);
+        void cooldown.recordFailure(label.model, err instanceof AIError ? err.code : 'AI_UNKNOWN');
+      }
+    }
+  }
 
   // 一次都没尝试过就"全灭"——所有候选都被熔断/429 冷却跳过。
   //
