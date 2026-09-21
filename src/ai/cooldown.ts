@@ -77,8 +77,19 @@ export class CooldownTracker {
 
     const key = FAIL_PREFIX + model;
     const count = await this.redis.incr(key);
-    // 首次设 TTL（24h），让计数 eventual expire
-    if (count === 1) await this.redis.expire(key, 86400);
+    // 24h TTL 每次失败都刷新（原来是只在 count===1 时设一次）。
+    //
+    // 2026-09-21 round 103。原来的写法让 TTL 的含义变成"自第一次失败起 24h"，
+    // 于是：周一失败 2 次、之后一直没被调用、周五再失败 1 次 → count=3 → 立刻熔断。
+    // **周一的失败参与了周五的决策**，而中间隔了四天、四天里这个 model 没出过任何问题。
+    //
+    // 这和 round 102 修的是同一类病（累计值做实时判断，round 87 的熔断键也是）：
+    // 一个不会随时间过期的计数，会把旧状态押到新时段上。刷新 TTL 之后，
+    // 24h 的含义变成"24 小时没有活动就清零"——那本来就是这个 TTL 的安全网意图
+    // （注释写的是 eventual expire，不是"从第一次失败算起"）。
+    //
+    // 升级退避的语义不受影响：连续失败时每次都会刷新，计数照旧累积。
+    await this.redis.expire(key, 86400);
 
     if (count >= threshold) {
       // 指数退避：count=3 → base×1, count=6 → base×1.5, count=9 → base×2.25 ...
