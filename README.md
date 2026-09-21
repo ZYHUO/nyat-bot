@@ -1055,6 +1055,27 @@ the reasons cannot rot.
 
 Verified by removing one reason and watching the check fail.
 
+### A reachability probe — and why its output is a shortlist, not an answer
+
+Seven "wired only into legacy" bugs were found one at a time across rounds 33–75. Round 76
+finally computed the set instead of stumbling through it: `scripts/legacy-only-modules.mts`
+builds the module import graph and reports modules whose every importer sits inside
+`processPipeline`'s subtree. 411 modules with importers collapse to **26 candidates**.
+
+It is a shortlist, not an answer. At least three of the 26 are false positives —
+`tracking/obsessions.ts`, `pipeline/turn/turn-lock.ts`,
+`agent/agency-reply-observation.ts` are all reached by **dynamic** `await import(...)`,
+which the probe's path resolution misses, so they look importerless and get classified as
+legacy-only. The script says so at the bottom of its own output.
+
+The value is the compression: every one of the seven hand-found cases appears in the 26,
+and each candidate needs one `grep` for dynamic imports before it counts. Without the
+probe the same search costs 411 modules of reading; with it, 26 greps.
+
+The lesson generalises past this repo: **a reachability analysis over a dynamic-import
+codebase is a filter, never a verdict** — and a filter that does not label its own false
+positive rate will be believed as a verdict.
+
 ### Batch crons need a batch-level gate, not just per-call limits
 
 Round 65 found `deep-reflection` ticks running 629s against a 600s interval, caused by
