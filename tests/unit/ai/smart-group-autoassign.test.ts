@@ -473,4 +473,30 @@ describe('选路：零成功 demote + vision 严格过滤', () => {
     ]);
     expect(await smartGroupAutoAssign('video')).toEqual(['vids']);
   });
+
+  // round 98：中位延迟超纲的 label 不进链。
+  //
+  // 起因：spark13 中位 19.8s，而 judge/summarize 链上的调用方只肯等 12s
+  // （topic-scan maxTimeoutMs 12000）。`callModel` 取 min(usage.timeout,
+  // options.maxTimeoutMs)——调用方的 cap 赢，provider 配的 60s 不起作用。
+  // 于是链变长之后，第一位失败要退到第四位，每跳烧一个超时，三跳 36-60 秒。
+  // round 95 等长窗口五项全差，我先后归因给并发闸和"新 provider 不稳"，都错。
+  describe('中位延迟超纲剔除', () => {
+    it('① 中位延迟超过 profile 上限的 label 被剔除（judge 上限 8s）', async () => {
+      setLabels([
+        makeLabel('fast', { tier: 'medium' }),
+        makeLabel('slow', { tier: 'medium' }),
+      ]);
+      // 通过内部健康账把 slow 的滑窗中位推到 30s
+      const mod = await import('../../../src/ai/smart-group.js');
+      const rec = (mod as unknown as { __recordHealthForTest?: (n: string, lat: number[]) => void }).__recordHealthForTest;
+      if (rec) {
+        rec('fast', [1000, 1200]);
+        rec('slow', [28000, 30000, 32000]);
+      }
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('fast');
+      expect(chain).not.toContain('slow');
+    });
+  });
 });

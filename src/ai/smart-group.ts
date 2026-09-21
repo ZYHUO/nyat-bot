@@ -249,6 +249,23 @@ type Tier = 'high' | 'medium' | 'low';
 interface UsageProfile {
   /** 最低可接受 tier(含): high=只要 high, medium=medium+high, low=全部。 */
   minTier: Tier;
+  /**
+   * 实测中位延迟上限。**超过的 label 不进这条链**，不管它多健康。
+   *
+   * 2026-09-21 round 97 实测：`spark13` 中位 19.8s、`amdqwen` 中位 5.9s，
+   * 而这条链上的调用方只肯等 12-20s（topic-scan maxTimeoutMs 12000、
+   * reflection 20000、syco-audit 20000）。`callModel` 取
+   * `Math.min(usage.timeout, options.maxTimeoutMs)`——**调用方的 cap 赢**，
+   * 所以 provider 自己配的 60s 超时完全不起作用。
+   *
+   * 结果：链变长（round 84 加了两个慢 label）之后，第一位失败要一路退到第四位，
+   * 每跳烧一个 maxTimeoutMs，三跳就是 36-60 秒。等长窗口对比五项失败全差
+   * （round 95），我先后归因给并发闸和"新 provider 不稳"，两个都错。
+   *
+   * 真实病因：**一个 provider 对该调用方没有用处，就不该占链位**——
+   * 接住要花 20 秒等于没接住。这个字段让那条规则可执行，而不是靠人去记。
+   */
+  maxMedianLatencyMs?: number;
   /** vision=true 时只保留 capabilities.vision !== false 的 label。 */
   vision: boolean;
   /**
@@ -272,12 +289,12 @@ interface UsageProfile {
 const USAGE_PROFILES: Record<string, UsageProfile> = {
   reply:       { minTier: 'high',   vision: false, video: false, count: 5 },
   reply_pro:   { minTier: 'high',   vision: false, video: false, count: 5 },
-  judge:       { minTier: 'medium', vision: false, video: false, count: 4 },
-  summarize:   { minTier: 'medium', vision: false, video: false, count: 4 },
+  judge:       { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000 },
+  summarize:   { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000 },
   vision:      { minTier: 'medium', vision: true,  video: false, count: 3 },
   audio:       { minTier: 'medium', vision: false, video: false, count: 2 },
   deep_think:  { minTier: 'high',   vision: false, video: false, count: 3 },
-  reflection:  { minTier: 'medium', vision: false, video: false, count: 3 },
+  reflection:  { minTier: 'medium', vision: false, video: false, count: 3, maxMedianLatencyMs: 15_000 },
   mundo:       { minTier: 'high',   vision: false, video: false, count: 2 },
   // 视频理解（2026-09-21）：count=2 就够——真能看的供应商本来就少，
   // 凑长度只会把不能看的塞进来。
@@ -287,6 +304,26 @@ const USAGE_PROFILES: Record<string, UsageProfile> = {
 const DEFAULT_PROFILE: UsageProfile = { minTier: 'medium', vision: false, video: false, count: 3 };
 
 const TIER_RANK: Record<Tier, number> = { high: 2, medium: 1, low: 0 };
+
+/**
+ * 测试专用：直接往健康账里塞滑窗延迟。
+ *
+ * round 86 想写"零成功降权"的测试、round 98 想写"中位延迟超纲剔除"的测试，
+ * 都卡在没有播种健康数据的钩子上——只能靠真打 provider，那样的测试既慢又脆。
+ * 有了它，这两个规则都能用确定性数据验证。
+ */
+export function __recordHealthForTest(name: string, latencies: number[], extra: Partial<LabelHealth> = {}): void {
+  const prev = memoryHealth.get(name);
+  memoryHealth.set(name, {
+    name,
+    latencies: latencies.slice(-50),
+    errorCount: extra.errorCount ?? prev?.errorCount ?? 0,
+    successCount: extra.successCount ?? prev?.successCount ?? latencies.length,
+    healthy: extra.healthy ?? true,
+    lastUsed: extra.lastUsed ?? Date.now(),
+    ...extra,
+  } as LabelHealth);
+}
 
 export function isAutoAssignEnabled(): boolean {
   const cfg = getConfig();
@@ -326,6 +363,13 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
     // 宽松策略只在"能看图的 provider 很少"时才划得来；现在池子里有 7 个
     // 声明 vision=true 的 label（含 stepfunvision / step5 两个健康的），
     // 没有短缺，宽松就只剩成本。
+    // **中位延迟超纲的不进链。** 见 UsageProfile.maxMedianLatencyMs 的长注释。
+    // 判据用 memoryHealth 的滑窗中位（和排序同一个数），没有数据的 label 不拦——
+    // 新 provider 仍然进得来（它还没证明自己慢），只是排位照旧由延迟决定。
+    if (profile.maxMedianLatencyMs) {
+      const med = medianOf(memoryHealth.get(name)?.latencies ?? []);
+      if (med > profile.maxMedianLatencyMs) continue;
+    }
     if (profile.vision && label.capabilities?.vision !== true) continue;
     // video：没声明 true 的一律排除（理由见 UsageProfile.video）。
     if (profile.video && label.capabilities?.video !== true) continue;
