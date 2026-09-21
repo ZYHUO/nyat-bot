@@ -1083,6 +1083,33 @@ production, lives at `src/pipeline/heart/`. So `heart/self-state.ts`'s import of
 the candidate list from 26 to 19. **A directory named after the old architecture does not
 mean everything in it is old.**
 
+### Advertised tools vs. what actually runs — and one near-miss on my own fix
+
+Round 78's correction was "read the source, not a comparable-looking list". Applying that
+to the subagent's own tool advertisement: `src/subagent/executor.ts` documents 64 tools;
+24 of them leave no trace in the log. Most are false positives — tools that only log on
+failure, or whose log line uses a different word. Checking the ones that mattered:
+
+```
+sandbox file tools   sandboxWriteFile / sandboxReadFile / sandboxListFiles → all work
+                     (probed directly: write ok, read returns content, list finds it)
+sandbox capability   terminalEnabled: true  BUT  bwrapAvailable: false
+                     reason: "bwrap binary missing"
+```
+
+`terminalEnabled` means "the feature is switched on", not "it can run" — the real ability
+is `bwrapAvailable`. That distinction nearly made me file my own round-3 fix as broken:
+the prompt rewrite keys on `terminalEnabled && isolationRequired && !bwrapAvailable`,
+which with the live values is `true && true && true` = fires. Probed directly:
+rewrite applies, output contains 「本机不可用」. Neither string appears in the log because
+the system prompt is never logged — so "0 occurrences" meant nothing either way.
+
+The transferable rule: **a capability object with a field named after the feature is not a
+statement that the feature works.** `terminalEnabled`, `VISION=true`, `HEART_ENABLED` all
+answer "is this switched on", never "does this succeed". Round 45 hit the same wall from
+the other side — `stepfunvision` declared `vision: true` and was healthy, and the chain
+still could not use it.
+
 ### The tool sets differ — but not the way I first wrote it down
 
 **Correction.** The first version of this section claimed "the Meta path has no way to set
