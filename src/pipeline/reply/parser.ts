@@ -372,7 +372,10 @@ function parseSingleReply(trimmed: string, fallbackMessageId: number): ParsedRep
   }
 
   // 4. Plain text fallback — treat entire response as reply content
-  logger.debug('Using plain text fallback for AI response');
+  // 带 rawHead：这一处原来只有一个字符串，"为什么没解析成 reply JSON" 看不出来。
+  // 2026-09-21 起统一：解析类失败必须带原始输出（distiller / dreaming / 四处 cron 之后
+  // 的第五、六处）。
+  logger.debug({ rawHead: trimmed.slice(0, 200) }, 'Using plain text fallback for AI response');
   return {
     replyContent: normalizeWhitespace(trimmed),
     targetMessageId: fallbackMessageId,
@@ -521,7 +524,11 @@ function validateAndReturn(
   if (actionRaw === 'sticker') {
     const intents = normalizeStickerIntent(data['stickerIntent'] ?? data['sticker_intent']);
     if (!intents) {
-      logger.debug('Sticker action without valid intent, dropping');
+      // 同上：带上原始 intent 字段，别让它成为查不出原因的一句结论。
+      logger.debug(
+        { rawIntent: data['stickerIntent'] ?? data['sticker_intent'] },
+        'Sticker action without valid intent, dropping',
+      );
       return null;
     }
     let target = data['targetMessageId'] ?? data['target_message_id'] ?? fallbackMessageId;

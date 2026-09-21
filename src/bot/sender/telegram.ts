@@ -335,7 +335,14 @@ async function sendMarkdownOnce(
         }
       }
       if (msg.includes("can't parse entities") || msg.includes('parse')) {
-        logger.debug({ chatId }, 'MarkdownV2 parse failed, falling back to plain text');
+        // 带上 Telegram 的原话。2026-09-21：这一处原来只有 { chatId }，
+        // 于是"我们的 Markdown 转义哪里写错了"这类问题只能靠猜。
+        // Telegram 的报错会指出具体是哪个字符/实体不合法——那是修转义函数的唯一线索。
+        // 只截 200 字：它通常是一段带偏移量的 JSON。
+        logger.debug(
+          { chatId, tgErr: msg.slice(0, 200) },
+          'MarkdownV2 parse failed, falling back to plain text',
+        );
         const result = await bot.api.sendMessage(chatId, plainFallback, {
           reply_parameters: replyParams,
           ...legacyReply,
