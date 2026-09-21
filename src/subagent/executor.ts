@@ -661,6 +661,40 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // 理由与实现见 subagent/sandbox-prompt.ts。
   systemPrompt = applySandboxAvailabilityNotes(systemPrompt, getSandboxCapability());
 
+  // ── 把"当前能借力的 bot 命令"从**写死的散文**换成**实时渲染的清单** ──
+  //
+  // 2026-09-22 round 9。EXECUTOR_SYSTEM 第 69 行原来写死着一句
+  //   （当前 = /spam@nmnmfunbot，回复那条广告发出去…）
+  // 这只是 2026-09-20 那一刻的快照。subagent 审计指出：它会**静默过期**——
+  // 学会了新命令 / 某个命令被 block / 群没授权，prompt 都不会变，
+  // 而模型只会拿着那句过期的话行事。
+  //
+  // 这和本会话反复出现的是同一条：**广告出去的能力和实际能用的能力不是一套**。
+  // round 123 搜索全灭还在说"没找到"、round 79 terminalEnabled、round 45 vision…
+  //
+  // 换成实时渲染：`listReplyInvocableCommands()` 只返**真过得去闸**的
+  // （ready + needs_reply=1 + 不 blocked + needs_admin 不拦 + output 可达）。
+  // 顺带只在真的有回复式命令时才渲染那段——没有就不写，模型不会以为有。
+  // 没有清单时保留"普通代发"那半句（它和回复式无关，永远成立）。
+  try {
+    const { listReplyInvocableCommands } = await import('../learners/bot-command-store.js');
+    const replyCmds = listReplyInvocableCommands();
+    if (replyCmds.length > 0) {
+      const rendered = replyCmds
+        .map((c) => `/${c.command.replace(/^\//, '')}@${c.bot}${c.usageSyntax && c.usageSyntax !== c.command ? `（${c.usageSyntax}）` : ''}`)
+        .join('、');
+      systemPrompt = systemPrompt.replace(
+        /（当前 = [^）]*）/,
+        `（**当前真过得去闸的回复式命令：${rendered}**——以这份为准，别用记忆里的旧名单）`,
+      );
+    } else {
+      // 一条都没有：把"当前 = …"那截括号整个删掉，别说一个不存在的名字
+      systemPrompt = systemPrompt.replace(/（当前 = [^）]*）/,'');
+    }
+  } catch {
+    /* 读不到就保留原句——至少那是 09-20 的真实快照，比空白好 */
+  }
+
   // AGI Level 5 Phase 1: 本次任务注入的经验 id(终态时验证打分)。
   let injectedExperienceIds: number[] = [];
   // AGI Level 5 Phase 4: 本次任务注入的 loop 策略 id(终态时计数进化)。
