@@ -19,11 +19,23 @@
 /**
  * 每个账号同时在飞的调用上限。
  *
- * StepFun 的限额是 8、另一家 10。取 6 给 provider 自己的内部并发留余量。
+ * StepFun 的限额是 8、另一家 10。取 **7**：比 StepFun 的 8 少 1，
+ * 给 provider 自己的内部并发留一点余量，但不再像原来的 6 那样自缚。
+ *
+ * 2026-09-21 round 117 从 6 调到 7。理由（round 115 实测）：
+ * 上限 6 时排队 328 次、**均等 4385ms**，而调用方的 maxTimeoutMs 只有 10-20s
+ * ——为了不撞 8 的限额，我们自愿只跑 75% 的容量，然后每次多等 4.4 秒。
+ * 等完再跑大概率超时，**省下的限额全赔在超时里**。
+ *
+ * 配合 round 115 的排队上限（1500ms）一起看：那个改动已经把"等太久"换成
+ * "可观测的一次 429"，那么这个上限就该贴着 provider 的真实限额走，
+ * 而不是留一个我们付不起的余量。超发的代价（一次 429 + 60s 冷却）
+ * 现在明确小于等待的代价（半个超时预算 + 拖慢整批 tick）。
+ *
  * 导出是因为 `reply-with-tools.ts` 直接走 AI SDK 的 generateText、绕过了
  * callModel，得自己在那边 acquire。
  */
-export const AI_MAX_CONCURRENCY_PER_ACCOUNT = 6;
+export const AI_MAX_CONCURRENCY_PER_ACCOUNT = 7;
 /**
  * 排队上限。超过就放行（超发一次 429 好过等掉半个超时预算）。
  *
