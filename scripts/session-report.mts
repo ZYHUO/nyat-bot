@@ -628,7 +628,23 @@ console.log('');
         console.log('    （排队不久而失败仍多 → 是 provider 自己在坏，不是闸的问题。）');
       }
     }
-    // 等待重试的成败：等过一次之后是救回来了、还是仍然全冷却。
+    // 工具层调用计数（round 126 加）："广告了但从未成功调用过"从此是个数字，
+  // 不用 grep 一整天日志人肉比对。round 125 那份 79 广告 / 14 调用 / 3 坏的清单
+  // 就是这么数出来的，数了半小时。
+  const toolOk = [...text.matchAll(/^host_tool_calls_total\{[^}]*tool="([^"]+)"[^}]*outcome="ok"\}\s+(\d+)/gm)];
+  const toolErr = [...text.matchAll(/^host_tool_calls_total\{[^}]*tool="([^"]+)"[^}]*outcome="error"\}\s+(\d+)/gm)];
+  if (toolOk.length + toolErr.length > 0) {
+    const errMap = new Map(toolErr.map((m) => [m[1]!, Number(m[2])]));
+    console.log('  工具调用（host api，部署后）:');
+    for (const m of toolOk) {
+      const e = errMap.get(m[1]!) ?? 0;
+      const o = Number(m[2]);
+      console.log(`    ${m[1]!.padEnd(20)} ok=${String(o).padStart(4)} err=${String(e).padStart(4)}  成功率 ${((o / (o + e)) * 100).toFixed(0)}%`);
+      errMap.delete(m[1]!);
+    }
+    for (const [t, e] of errMap) console.log(`    ${t.padEnd(20)} ok=   0 err=${String(e).padStart(4)}  ← 全败`);
+  }
+  // 等待重试的成败：等过一次之后是救回来了、还是仍然全冷却。
     // 没这两个数，"我加了个重试"和"这个重试有用"看起来一模一样。
     const wrOk = [...text.matchAll(/^llm_wait_retry_total\{[^}]*outcome="ok"[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
     const wrCold = [...text.matchAll(/^llm_wait_retry_total\{[^}]*outcome="still_cooling"[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);

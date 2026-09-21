@@ -1,3 +1,4 @@
+import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { sendMessage, sendSticker, reactToMessage, sendChatAction } from '../bot/sender/telegram.js';
@@ -2839,5 +2840,42 @@ export function createHostApi(
     namespaces[key] = audit.wrap(key, namespaces[key]!);
   }
   attachExecutionAudit(api, audit);
-  return api;
+  return withToolCounters(api);
+}
+
+/**
+ * 给 host api 包一层**统一成败计数**。
+ *
+ * 2026-09-21 round 125 的发现：executor 广告了 79 个工具（剔掉 runtime.* 协议
+ * 内部件后是 60 个），而生产日志里只出现过 14 个，其中 3 个是坏的
+ * （web.search 237 次全灭、pixiv.search 失败、linuxsb.topic 失败）。
+ *
+ * 要查出这个事实，我得 grep 一整天的日志人肉比对——因为**没有任何计数器
+ * 记着"哪个工具被调过、成没成"**。这是 round 26（心流失败率要三个出口都数）
+ * 在工具层的同一次补课：量的东西缺了一个分母。
+ *
+ * 包在这里而不是每个工具里加一行，是因为 createHostApi 是所有子 api
+ * （telegram / memory / chats / web / admin / bots / …）唯一的汇合点。
+ * Proxy 对每个方法调用计一次数，不改任何业务逻辑。
+ */
+function withToolCounters<T extends object>(api: T): T {
+  return new Proxy(api, {
+    get(target, key) {
+      const v = (target as Record<string | symbol, unknown>)[key];
+      if (typeof v !== 'function') return v;
+      return async (...args: unknown[]) => {
+        const tool = String(key);
+        const t0 = Date.now();
+        try {
+          const r = await (v as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+          incrCounter('host_tool_calls_total', { tool, outcome: 'ok' });
+          incrCounter('host_tool_latency_ms_total', { tool }, Date.now() - t0);
+          return r;
+        } catch (err) {
+          incrCounter('host_tool_calls_total', { tool, outcome: 'error' });
+          throw err;
+        }
+      };
+    },
+  });
 }
