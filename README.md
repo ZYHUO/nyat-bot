@@ -1083,28 +1083,37 @@ production, lives at `src/pipeline/heart/`. So `heart/self-state.ts`'s import of
 the candidate list from 26 to 19. **A directory named after the old architecture does not
 mean everything in it is old.**
 
-### The two tool sets do not overlap
+### The tool sets differ — but not the way I first wrote it down
 
-The 19 candidates include ten `pipeline/tools/*` modules. Checking what each path can
-actually call:
+**Correction.** The first version of this section claimed "the Meta path has no way to set
+a reminder or run a poll". That was wrong, and it was wrong because I compared the
+*legacy registry's* tool names against the *permission tier list* instead of reading what
+the subagent actually advertises. `src/subagent/executor.ts` documents the real surface,
+and it has both:
 
 ```
-legacy reply writer  SEARCH FETCH RECALL QUERY_MEMORY QUERY_PERSON_PROFILE
-                     FETCH_HISTORY BOT_KNOWLEDGE QUERY_JARGON TIMER POLL
-                     IP_QUALITY SSRF SKILLS
-Meta subagent       memory.search chats.recentMessages web.search
-                     telegram.sendText telegram.sendToChat computer.run
-                     admin.deleteMessage admin.mute admin.pin
-                     self.editPrompt bots.command
+Meta subagent (executor.ts)   telegram.sendPoll(问题, [选项…])   ← polls, 1/task, 2/group/day
+                             goals.add(事项, chatId?, 几分钟后查?) ← reminders, "到点自动去办"
+                             telegram.forward · admin.{deleteMessage,mute,unmute,kick,pin,unpin}
+                             bots.command · art.draw · pixiv.* · linuxsb.* · web.feed
+                             stickers.pick · memory.* · chats.* · members.find · chats.find
+legacy reply writer          SEARCH FETCH RECALL QUERY_MEMORY QUERY_PERSON_PROFILE
+                             FETCH_HISTORY BOT_KNOWLEDGE QUERY_JARGON TIMER POLL
+                             IP_QUALITY SSRF SKILLS
 ```
 
-Timers, polls, recall, jargon lookup, bot-knowledge and IP-quality exist **only** on the
-legacy side. On the Meta path the model has no way to set a reminder or run a poll.
+So the overlap is real but the *names* differ, and the legacy-only set is narrower than I
+said: `QUERY_JARGON`, `BOT_KNOWLEDGE`, `IP_QUALITY`, `SSRF`, `FETCH_HISTORY` have no
+Meta-side equivalent. Reminders and polls both exist — `goals.add` and `sendPoll`,
+with `goal created` firing 9 times and `host sendPoll sent` implemented in `host-api.ts`.
 
-This round documents the gap rather than closing it. Porting ten tools into the sandbox
-protocol is its own piece of work — each needs a permission tier, a Zod schema, a
-host-api binding and a test — and doing it as a drive-by alongside a reachability audit
-would produce exactly the kind of unverified change this repo keeps getting burned by.
+The mistake is the round-62 one again: **I compared two lists that were not the same kind
+of list.** A registry of tool implementations and a permission-tier table are both "tool
+names", so they looked comparable. Reading the executor's own prompt — the thing the model
+actually sees — took one `sed` and would have prevented the whole claim.
+
+Porting the five genuinely-legacy-only capabilities is still its own piece of work; this
+round documents them rather than guessing at a mapping.
 
 ### Batch crons need a batch-level gate, not just per-call limits
 
