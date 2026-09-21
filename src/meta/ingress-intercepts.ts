@@ -15,6 +15,7 @@ import { detectCommandIntent } from '../pipeline/nl-commands.js';
 import { dispatchCommand } from '../pipeline/stages/intercepts.js';
 import { hasActiveGame, playGame } from '../pipeline/games/manager.js';
 import { getBotUid } from '../bot/bot.js';
+import { env } from '../env.js';
 
 
 export type MetaIngressResult = 'legacy' | 'handled' | 'continue';
@@ -56,6 +57,27 @@ export async function tryMetaIngressIntercepts(
 ): Promise<MetaIngressResult> {
   const text = (formatted.textContent || '').trim();
   const addressed = chatId > 0 || opts.isDirect;
+
+  // ── 学到别的 bot 的命令 → 借力代发 ──
+  //
+  // 2026-09-21：`routeLearnedCommand` 此前**只在 legacy 的
+  // `pipeline/stages/intercepts.ts:194`（tryPreMuteIntercepts）里被调**，
+  // 而那是 processPipeline 的路——生产主路径 Meta 上 grep 不到它。
+  // 结果：`BOT_COMMAND_ROUTER_ENABLED=true` + 26 条 ready 的已学命令，
+  // 而 `command-router: delegated learned command` 生产 **0 次**。
+  //
+  // 和 round 33/35 是同一种病：功能接在了一条生产不走的路上。
+  // 接在这儿（Meta 入口），群聊、非 bot、没被寻址时也试一次——
+  // 代发本身就是这次的响应，命中就短路。
+  if (chatId < 0 && !formatted.isBot && text.length >= 3
+      && env().BOT_COMMAND_ROUTER_ENABLED && env().BOT_DELEGATION_ENABLED) {
+    try {
+      const { routeLearnedCommand } = await import('../pipeline/command-router.js');
+      if (await routeLearnedCommand(chatId, formatted)) return 'handled';
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta: learned-command router failed (non-critical)');
+    }
+  }
 
   // ── DM verification lock ──
   if (chatId > 0) {

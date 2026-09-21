@@ -93,6 +93,9 @@ const CHECKS: Array<[string, string]> = [
   ['反思 tick 预算', 'REFLECTION_TICK_BUDGET_SEC'],
   ['topic-scan tick 预算', 'TOPIC_SCAN_TICK_BUDGET_SEC'],
   ['tick 预算跳过计数', 'skippedForBudget'],
+  // Meta 路径也接上学到的 bot 命令代发（2026-09-21，此前只在 legacy）
+  ['Meta 学命令代发', 'Meta: learned-command router failed'],
+  ['学命令代发入口', 'routeLearnedCommand'],
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）
