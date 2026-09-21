@@ -495,6 +495,7 @@ function buildComputerApi(
       const { executeCommand } = await import('../sandbox/terminal.js');
       const v = await executeCommand(String(command));
       noteUnviewed?.(`computer.run(${String(command).slice(0, 40)})`, v);
+      countTool('computer.run');
       return v;
     },
     async writeFile(path: never, content: never) {
@@ -529,6 +530,7 @@ function buildComputerApi(
       const { browserGetText } = await import('../sandbox/browser.js');
       const v = await browserGetText(selector ? String(selector) : undefined);
       noteUnviewed?.('computer.getText', v);
+      countTool('computer.getText');
       return v;
     },
     async eval(js: never) {
@@ -1096,11 +1098,13 @@ export function createHostApi(
                   },
                   'host sendText',
                 );
+                countTool('telegram.sendText');
               } else {
                 logger.info(
                   { chatId, part: i + 1, of: parts.length, replyTo: null, preview: part.slice(0, 60) },
                   'host sendText continuation',
                 );
+                countTool('telegram.sendText');
               }
               // Nyat Trench · L1 沟壁：发送前硬闸。
               //
@@ -1886,6 +1890,7 @@ export function createHostApi(
           const { deleteMessage } = await import('../bot/sender/telegram.js');
           await deleteMessage(chatId, mid); // 现有 sender 静默失败版；权限自检已在前面真验证
           logger.info({ chatId, messageId: mid }, 'host admin.deleteMessage');
+          countTool('admin.deleteMessage');
           return { ok: true };
         },
         async mute(uid: number, minutes: number) {
@@ -2082,6 +2087,7 @@ export function createHostApi(
           return `群名里没查到「${q}」。注意：chats.find 是按**群名**找群；如果你要找的是**某个人**（ta 在哪些群/能不能私聊），用 members.find(名字)。`;
         }
         noteUnviewed(`chats.find(${q.slice(0, 30)})`, out);
+        countTool('chats.find');
         return out;
       },
       async recentMessages(targetChatId: number, limit = 12) {
@@ -2476,10 +2482,12 @@ export function createHostApi(
           const raw = await executeSearch(q);
           const out = String(raw ?? '').trim().slice(0, 3500);
           logger.info({ chatId, q: q.slice(0, 80), chars: out.length }, 'host web.search');
+          countTool('web.search');
           noteUnviewed(`web.search(${q.slice(0, 40)})`, out || '(no results)');
           return out || '(no results)';
         } catch (err) {
           logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host web.search failed');
+          incrCounter('host_tool_calls_total', { tool: 'web.search', outcome: 'error' });
           return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
@@ -2858,6 +2866,21 @@ export function createHostApi(
  * （telegram / memory / chats / web / admin / bots / …）唯一的汇合点。
  * Proxy 对每个方法调用计一次数，不改任何业务逻辑。
  */
+/**
+ * 工具调用计数。**加在每个工具的实现里，不横跨 API 表面。**
+ *
+ * round 126/127 的教训：我试过用 Proxy 包住 createHostApi 的返回值，
+ * 结果 (a) 只包了顶层而工具在第二层，8 个任务跑完 0 条计数；
+ * (b) 改递归又炸了 7 个测试——unviewed-results 机制靠沙盒侧识别
+ * "模型调过哪个工具"，我横跨一层包装让那个识别失焦。
+ *
+ * 所以改成点式：和 noteUnviewed / logger.info 那些既有插入点并排。
+ * 难看，但它加在机制旁边。
+ */
+function countTool(tool: string): void {
+  incrCounter('host_tool_calls_total', { tool, outcome: 'ok' });
+}
+
 function withToolCounters<T extends object>(api: T): T {
   return new Proxy(api, {
     get(target, key) {
