@@ -502,9 +502,29 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         const who = hit.username ? `@${hit.username}` : hit.fullName || `uid:${hit.uid}`;
         const userText = (hit.textContent || '').slice(0, 240);
         const followUp = isShortFollowUpText(userText) || isBarePingText(userText);
+        // ── reply 链：本条回的是哪条 ──
+        //
+        // 2026-09-22 round 3（新 goal）。用户的原始需求：
+        // "如果一条消息的 replyto 带的是 ad bot 要辨认是哪条消息是 ad 哪些不是，
+        //  nmbot 的 /spam 是需要附带一个 replyto 的。"
+        //
+        // 病因：上面这个 targetBlock 只给**本条**的 #id。而群里举报广告的正常形状是
+        // 「某人回复那条广告说"举报"」——本条 #X 是那句"举报"，**广告是它回复的 #Y**。
+        // 模型要发 `/spam@nmnmfunbot` 必须带 #Y，但 prompt 里从来没出现过 #Y，
+        // 它只能猜，而 executor.ts:107 明令"禁止传上下文里其它旧 #id——传错会
+        // reply_to_mismatch"。于是它要么不办，要么办错。
+        //
+        // 修法：本条自己是 reply 时，把父消息的 #id / 是谁 / 说了什么一并写进 prompt。
+        // 数据本来就有（FormattedMessage.replyTo），只是从来没往这儿送。
+        const parent = hit.replyTo;
+        const parentLine = parent && parent.messageId > 0
+          ? `#${replyAnchor} 回复的是 #${parent.messageId} ${parent.fullName || `uid:${parent.uid}`}: ${(parent.textSnippet || '（无正文，可能是图片/文件/ sticker）').slice(0, 160)}\n`
+            + `   ↑ 要处理/举报**上面这条 #${parent.messageId}** 时（例如 bots.command 的 /spam 回复式代罚），用这个 id。\n`
+          : '';
         targetBlock =
           `## 本轮必须回的那一句\n` +
           `#${replyAnchor} ${who}: ${userText || '（几乎无正文，可能是 reply+@）'}\n` +
+          parentLine +
           (followUp
             ? `这是短接话/催问——必须结合下面「最近几句」继续同一话题，禁止当新开场（在听/怎么啦/想听什么）。禁止复读用户原话。`
             : `接住这一句的意思，并结合最近聊天；禁止复读用户原话，也别无故复读自己上一句。`);
