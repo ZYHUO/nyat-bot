@@ -7,6 +7,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { Agent } from 'undici';
 import type { AILabel, AICallResult, ContentPart } from './types.js';
 import { AIError } from '../shared/errors.js';
+import { acquireConcurrency } from './concurrency.js';
 import { mergeAbortSignals, isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
 
@@ -73,6 +74,8 @@ interface ClaudeResponse {
  * 所以"学不会"是不可能的。不落盘是为了不给每条 LLM 调用加一次 Redis 读。
  */
 const REASONING_TOKEN_FLOOR = 1200;
+/** 每个账号同时在飞的调用上限。StepFun 限额 8、另一家 10——取 6 留余量。 */
+const AI_MAX_CONCURRENCY_PER_ACCOUNT = 6;
 
 /** 观测到过"思维链吃光额度"的 label —— 之后给它下限而不是调用方写的小值。 */
 const truncatingLabels = new Set<string>();
@@ -573,6 +576,22 @@ function stripThinkingBlocks(s: string): string {
 }
 
 export async function callModel(
+  label: AILabel,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
+  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean } = {},
+): Promise<AICallResult> {
+  // 客户端并发闸：别把 provider 的限额撞爆（见 concurrency.ts 的实测数据）。
+  // 按 (endpoint, apiKey) 分组——同一账号共享额度，不同账号各算各的。
+  const cKey = `${label.endpoint}|${label.apiKeys[0] ?? ''}`;
+  const release = await acquireConcurrency(cKey, AI_MAX_CONCURRENCY_PER_ACCOUNT);
+  try {
+    return await callModelInner(label, messages, opts);
+  } finally {
+    release();
+  }
+}
+
+async function callModelInner(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean } = {},
