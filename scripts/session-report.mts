@@ -427,9 +427,16 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
       let d: Record<string, unknown>;
       try { d = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
       const msg = String(d['msg'] ?? '');
+      const post = Number(m[1]) >= deployMs;
       for (const [fail, ok] of PAIRS) {
-        if (msg.includes(fail)) counts.set(fail, (counts.get(fail) ?? 0) + 1);
-        if (ok && msg.includes(ok)) counts.set(ok, (counts.get(ok) ?? 0) + 1);
+        if (msg.includes(fail)) {
+          counts.set(fail, (counts.get(fail) ?? 0) + 1);
+          if (post) counts.set(`@${fail}`, (counts.get(`@${fail}`) ?? 0) + 1);
+        }
+        if (ok && msg.includes(ok)) {
+          counts.set(ok, (counts.get(ok) ?? 0) + 1);
+          if (post) counts.set(`@${ok}`, (counts.get(`@${ok}`) ?? 0) + 1);
+        }
       }
     }
   } catch { /* 读不到就全 0，配合上面的提示读作没有数据 */ }
@@ -450,6 +457,16 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     const rate = total > 0 ? o / total : 0;
     const bad = total >= 20 && rate < 0.5;
     console.log(`  ${label.padEnd(16)} 成功 ${String(o).padStart(5)}｜失败 ${String(f).padStart(5)}  产出率 ${(rate * 100).toFixed(1).padStart(5)}%${bad ? '   ⚠️ 过低' : ''}`);
+    // 部署后单独一行。**这一行是 round 71 加的，因为窗口混了修复前后的数据：**
+    // distiller 全窗口 32.5%（看着仍 ⚠️），而 round 47 部署之后实际是 **83.3%**
+    // （130 成 / 26 败）。修复明明生效了，全窗口比率却在说还没修好。
+    const pf = counts.get(`@${fail}`) ?? 0;
+    const po = ok ? (counts.get(`@${ok}`) ?? 0) : 0;
+    if (pf + po > 0) {
+      const prate = po / (pf + po);
+      console.log(`  ${' '.repeat(16)} 部署后 成功 ${String(po).padStart(3)}｜失败 ${String(pf).padStart(3)}  产出率 ${(prate * 100).toFixed(1).padStart(5)}%`
+        + `${pf + po < 20 ? '   （样本少，只作方向）' : ''}`);
+    }
   }
 
   // 三出口组：失败 / 判过不用接 / 派发了续答。三个都数才算得出真比率。
@@ -468,6 +485,12 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     }
   }
   if (!any) console.log('  （窗口内这些 cron 都没有日志）');
+  // 全窗口比率会**把修复前后的数据混在一起**，这是 round 71 抓到的一次误判：
+  // distiller 全窗口 33.7%（印着 ⚠️ 过低），而 round 47 那次部署之后实测是 83.3%
+  // （130 成 / 26 败）——修复明明生效了，全窗口比率却在说还没修好。
+  // 想知道某个修复的效果，要从**那次**部署算起，不是从最近一次。
+  console.log('  （全窗口比率混了修复前后的数据。要验某个修复，从那次的部署时刻算起——');
+  console.log('     上面"部署后"一行只覆盖最近一次重启。）');
   // topic-scan 单列：它的"产出"是 tick 日志里的 observed 字段，不是另一条消息
   console.log('  （topic-scan 的产出率见上一节）');
   console.log('');

@@ -1216,6 +1216,19 @@ Now the fence is stripped anywhere and the parse starts at the first `{"`, so an
 model says before its JSON is discarded rather than fatal. 26 of the last 24h's 360
 failures carried a readable head; this shape is the one that was recoverable from them.
 
+**And the yield was better than the report said.** The 2c table showed 33.7% with a ⚠️.
+Measuring from *round 47's* deploy instead of the last restart:
+
+```
+round-47 deploy onward:  130 distilled / 26 unparseable  = 83.3%
+last-24h window:         183 / 360                     = 33.7%  ← 10h of it is pre-fix
+```
+
+The fix had been working for ten hours while the table kept flagging it. Section 2c now
+prints a post-deploy line and says outright that the full window mixes pre- and post-fix
+data — because the question "did this fix work" is answered from *that* deploy, not from
+the most recent one.
+
 ### Experience recall had the same bug — and the codebase already had the cure
 
 Round 60 fixed `skills_fts`. Asking "same cause elsewhere?" over the four FTS5 tables
