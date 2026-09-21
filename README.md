@@ -999,6 +999,33 @@ The 15 labels whose vendors have no counterpart on 7864 (gpt-5.x, claude-opus,
 gemini, qwen, grok, mimo) were left alone. They cannot work anywhere local, and
 inventing a mapping for them would be guesswork dressed as a fix.
 
+### The typesafe judge substrate was timing out, not failing
+
+`judge substrate: typesafe breaker OPEN → chat fallback` fired 34 times. The breaker
+opens after `JUDGE_SUBSTRATE_BREAKER_FAILS` (3) consecutive failures and stays open for
+60s, so 34 openings means the typesafe backend was failing almost continuously.
+
+The API itself was fine — a direct call returned 200 with a valid answer. Measuring its
+latency showed why:
+
+```
+200 in 1.27s
+200 in 3.33s   ← over the limit
+200 in 1.11s
+```
+
+`JUDGE_SUBSTRATE_TIMEOUT_MS` was **3000ms**. The third call exceeded it, aborted, counted
+as a failure, and three of those tripped the breaker. So the substrate spent roughly a
+third of its life in cooldown, falling back to the chat LLM, and the log line said only
+"unavailable" — which reads like an outage.
+
+The timeout is now 9000ms, and the fallback log carries `status` and `err` so the next
+occurrence distinguishes timeout from auth from 5xx instead of requiring a curl session
+to find out.
+
+Verified by calling `judge()` four times in a row: `backend=typesafe, ok=true` on all
+four, where before the change both probe calls came back `backend=chat`.
+
 ### The merged tool-writer had never once succeeded
 
 `Merged tool-writer exhausted labels, fall back to legacy` appeared **195 times** in the

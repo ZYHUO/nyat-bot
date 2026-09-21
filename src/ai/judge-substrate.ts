@@ -105,9 +105,13 @@ function mustStayInternal(chatId?: number, visibility?: string): boolean {
 }
 
 // ── 后端 A：TypeSafe System One ─────────────────────────────────────
+/** 最近一次 typesafe 失败的原因，供 fallback 那句 debug 带上（进程内，只留最后一次）。 */
+let _lastTypesafeStatus: number | string | undefined;
+let _lastTypesafeErr: string | undefined;
+
 async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAnswer | null> | null> {
   const e = env();
-  if (!e.TYPESAFE_API_KEY) return null;
+  if (!e.TYPESAFE_API_KEY) { _lastTypesafeErr = 'no_api_key'; return null; }
   const questions: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(b.questions)) {
     if (spec.kind === 'choice') questions[name] = { type: 'choice', instructions: spec.question, ...(spec.options ? { criteria: spec.options } : {}) };
@@ -127,6 +131,8 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
     });
     if (!res.ok) {
       emitTokens('judgment', 'typesafe', started, 0, 0);
+      _lastTypesafeStatus = res.status;
+      _lastTypesafeErr = (await res.text().catch(() => '')).slice(0, 200);
       return null;
     }
     const data = (await res.json()) as {
@@ -138,7 +144,7 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
     };
     emitTokens('judgment', 'typesafe', started, data.usage?.input_tokens ?? 0, data.usage?.output_tokens ?? 0);
     const answers = data.answers;
-    if (!answers) return null;
+    if (!answers) { _lastTypesafeErr = 'no_answers_in_response'; return null; }
 
     const out: Record<string, JudgmentAnswer | null> = {};
     for (const [name, spec] of Object.entries(b.questions)) {
@@ -166,8 +172,11 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
       }
     }
     return out;
-  } catch {
+  } catch (err) {
     emitTokens('judgment', 'typesafe', started, 0, 0);
+    // 超时（AbortError）与网络错在这一层看不出区别，带上 message 才分得清。
+    _lastTypesafeStatus = 'exception';
+    _lastTypesafeErr = err instanceof Error ? err.message.slice(0, 200) : String(err);
     return null;
   } finally {
     clearTimeout(timer);
@@ -253,7 +262,15 @@ export async function judge(b: JudgmentBatch): Promise<JudgmentResult> {
       return { backend: 'typesafe', ok: true, answers };
     }
     noteFailure();
-    logger.debug({ key: b.key }, 'judge substrate: typesafe unavailable, falling back to chat');
+    // 带原因。2026-09-21：typesafe 连着 34 次熔断开路，而这里原来只有一句
+    // "unavailable"——分不清是超时、鉴权、还是 5xx。查下来是
+    // `JUDGE_SUBSTRATE_TIMEOUT_MS=3000` 小于 jev-latest 的真实延迟（实测 3.3s），
+    // 但查之前那一句日志给不出任何线索。和 distiller / dreaming 那一族同病：
+    // **失败日志不带原因，就等于没有日志**。
+    logger.debug(
+      { key: b.key, status: _lastTypesafeStatus, err: _lastTypesafeErr },
+      'judge substrate: typesafe unavailable, falling back to chat',
+    );
   }
 
   const chatAnswers = await askChat(b);

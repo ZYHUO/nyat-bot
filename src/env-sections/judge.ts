@@ -23,7 +23,16 @@ export const judgeSection = {
   // 既有 chat LLM+JSON 兜底。三条底线：fail-open、DM/private 不走外部服务、可整体关掉。
   JUDGE_SUBSTRATE_ENABLED: booleanFromEnv.default(false),
   JUDGE_SUBSTRATE_BACKEND: z.string().default('typesafe'), // typesafe | chat
-  JUDGE_SUBSTRATE_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
+  // 3000 → 9000。2026-09-21 实测：typesafe（jev-latest，一个 reasoning 模型）
+  // 的延迟是 1.1 / 1.3 / 3.3 秒——**第 3 次就超了 3000ms**。
+  // 于是每三次里约一次超时 → `noteFailure()` 累到 BREAKER_FAILS(3) → 熔断 60s →
+  // 走 chat 兜底。日志里 `judge substrate: typesafe breaker OPEN → chat fallback`
+  // 34 次，全是这么来的：**不是服务坏了，是等不起**。
+  //
+  // 这个基座只服务 semantic-dup 和 grounding-check 两个异步校验（都不在用户
+  // 等待路径上），9 秒是可接受的。旁边 TIMING_GATE_TIMEOUT_MS 是 8000 ——
+  // 同一个数量级，本来就是给 reasoning 模型留的。
+  JUDGE_SUBSTRATE_TIMEOUT_MS: z.coerce.number().int().positive().default(9000),
   JUDGE_SUBSTRATE_CACHE_TTL_MS: z.coerce.number().int().nonnegative().default(120000),
   JUDGE_SUBSTRATE_BREAKER_FAILS: z.coerce.number().int().positive().default(3),
   JUDGE_SUBSTRATE_BREAKER_COOLDOWN_MS: z.coerce.number().int().positive().default(60000),
