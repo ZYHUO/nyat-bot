@@ -698,11 +698,24 @@ export async function generateReply(
   // P3:direct 路径也可挂工具(REPLY_DIRECT_TOOLS_ENABLED,默认关)——只给只读子集,
   // 让普通闲聊能查实时信息/回忆,又不给闲聊写手建投票/定时器/指挥别的 bot 的副作用口子。
   const directToolsActive = effectiveReplyPath === 'direct' && env().REPLY_DIRECT_TOOLS_ENABLED;
+  // **只在 direct 路径挂合并写手，不在 planned 上挂。**
+  //
+  // 2026-09-21 实测：round 45 把 reply_tools 链修好之后，合并写手第一次真跑起来了
+  // （7 次成功，全部 label=spark13）。但它的延迟是 15103 / 28363 / 21503 / 32608 ms，
+  // 而从它完成到消息真正发出去还要再等 1942 / 19853 / 29782 / 43418 ms
+  // ——**端到端 19-43 秒**。而 7 次里 `toolsUsed` 全是 `[]`：一个工具都没用上。
+  //
+  // 修好之前它链全灭、立刻回退纯文本写手（3-9s），所以这个延迟一直被回退挡着。
+  // 修好之后挡没了，代价就露出来了：**为一个"可能用工具"的机会，让每条 planned
+  // 回复都多等 15-32 秒，而实际一个工具都没用。**
+  //
+  // direct 路径保留——那条本来就是"给闲聊开只读工具"的设计，用不用工具是它的目的；
+  // planned 路径回退纯文本写手，那儿要的是快。
   const mergedToolsActive =
     env().REPLY_MERGED_TOOLS_ENABLED &&
     !toolResultsBlock &&
     !orchestratorHandled &&
-    (effectiveReplyPath === 'planned' || directToolsActive);
+    directToolsActive;
   // direct 路径的只读工具白名单(副作用工具一律不给)
   const DIRECT_TOOL_SUBSET = [
     'SEARCH', 'FETCH', 'RECALL', 'QUERY_MEMORY', 'QUERY_PERSON_PROFILE',

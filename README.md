@@ -1026,6 +1026,34 @@ to find out.
 Verified by calling `judge()` four times in a row: `backend=typesafe, ok=true` on all
 four, where before the change both probe calls came back `backend=chat`.
 
+### Fixing the merged tool-writer exposed what its failure had been hiding
+
+Round 45 got it running for the first time — 7 successes, all through `spark13`, after 195
+exhaustions with zero finishes. That looked like the end of the story. Measuring what the
+successes actually cost:
+
+```
+TW latency      → next send
+15103ms         +43418ms
+28363ms         +29782ms
+21503ms         +19853ms
+32608ms         +1942ms
+```
+
+**19–43 seconds end to end**, and `toolsUsed` was `[]` on all seven — not one tool call.
+
+Before the fix the writer exhausted its chain instantly and fell back to the plain-text
+writer (3–9s). The failure had been acting as a latency guard: it was fast *because* it
+never worked. Once it worked, the cost appeared.
+
+So the writer is now restricted to the `direct` path, where opening read-only tools is the
+point. The `planned` path goes back to the plain-text writer, which is what it wants
+anyway. The `reply_tools` usage stays correct — it just is not on the hot path.
+
+The general shape: **a mechanism that has never run has never had its cost measured.** "It
+is broken" and "it is cheap" can be the same fact viewed from two sides, and fixing the
+first can silently bill you the second.
+
 ### The merged tool-writer had never once succeeded
 
 `Merged tool-writer exhausted labels, fall back to legacy` appeared **195 times** in the
