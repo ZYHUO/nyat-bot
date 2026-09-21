@@ -79,6 +79,29 @@ export async function tryMetaIngressIntercepts(
     }
   }
 
+  // ── 贴纸差评拦截 ──
+  //
+  // 2026-09-22 round 8。同 antiad-command 的病：原来只在 legacy 的
+  // `pipeline/stages/intercepts.ts:226`（tryPostMuteIntercepts ← post-judge
+  // ← processPipeline），而"回复本喵发的贴纸 + 说不喜欢"在 Meta 上是 L0，
+  // 永不进 legacy judge。实测 `sticker_dislike` rule 生产 **0 次**、
+  // `Sticker dislike recorded` **0 次**。
+  //
+  // 值得接的原因：模型能 conversational 回"好的不发了"，但它不会调
+  // `recordStickerDislike`——那是纯数据动作（贴纸评分下降）。不接的后果是
+  // bot 继续用被差评的贴纸，而它以为用户知道它改了。
+  //
+  // 判据刻意和 legacy 一致：必须**回复本喵发过的贴纸** + 文本命中
+  // `looksLikeStickerDislike`。别处不拦。
+  if (chatId < 0 && formatted.replyTo && formatted.replyTo.uid === getBotUid() && !formatted.isBot) {
+    try {
+      const { tryStickerDislikeCommand } = await import('../pipeline/stages/sticker-dislike-command.js');
+      if (await tryStickerDislikeCommand(chatId, formatted, getBotUid())) return 'handled';
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta: sticker-dislike intercept failed (non-critical)');
+    }
+  }
+
   // ── 群主自助开关反广告 ──
   //
   // 2026-09-22 round 3：我上一轮（5131460）把 `tryAntiAdCommand` 加进了

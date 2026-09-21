@@ -557,3 +557,52 @@ describe('选路：零成功 demote + vision 严格过滤', () => {
     });
   });
 });
+
+// ─── 画摊子：选路交还手动链（respectManualOrder）──────────────────────────
+//
+// 2026-09-21 事故的另一半：即使 getUsage('artist') 解析出来了，池子里
+// SMART_GROUP_AUTO_ASSIGN=true 会 bypass 手动链，按 best-latency 从全池选。
+// 而池子里最快的是 step-3.7-flash 五个同源 label（约 500ms）——reasoning 模型，
+// 长 SVG 下 4096 token 全烧思维链、正文必空。链头落在它身上 = 画图 100% 翻车。
+//
+// 所以 artist 声明 respectManualOrder：auto-assign 直接返回 []（调用方用手动链），
+// reorder 也不许翻它的顺序。
+
+describe('respectManualOrder（画摊子的选路交还）', () => {
+  beforeEach(() => {
+    mockLabels.clear();
+    process.env.SMART_GROUP_ENABLED = 'true';
+    process.env.SMART_GROUP_AUTO_ASSIGN = 'true';
+    process.env.SMART_GROUP_STRATEGY = 'best-latency';
+    delete process.env.SMART_GROUP_DIVERSIFY_UPSTREAM;
+  });
+
+  it('artist 不参与 auto-assign（哪怕它比手动链的 label 快得多）', async () => {
+    const { smartGroupAutoAssign } = await import('../../../src/ai/smart-group.js');
+    setLabels([
+      makeLabel('flashFast', { tier: 'high' }),   // 500ms，但不会画 SVG
+      makeLabel('kimiCode', { tier: 'high' }),    // 1300ms，代码模型
+      makeLabel('step5', { tier: 'high' }),
+    ]);
+    recordSmartGroupResult('flashFast', 500, true);
+    recordSmartGroupResult('kimiCode', 1300, true);
+    expect(await smartGroupAutoAssign('artist')).toEqual([]);
+    // 对照：reply 照旧自动选路（这个开关不是全局关停）
+    expect(await smartGroupAutoAssign('reply')).toContain('flashFast');
+  });
+
+  it('reorder 不翻 artist 手动链的顺序', async () => {
+    const { smartGroupReorder } = await import('../../../src/ai/smart-group.js');
+    setLabels([
+      makeLabel('flashFast', { tier: 'high' }),
+      makeLabel('kimiCode', { tier: 'high' }),
+    ]);
+    recordSmartGroupResult('flashFast', 500, true);
+    recordSmartGroupResult('kimiCode', 1300, true);
+    expect(await smartGroupReorder(['kimiCode', 'flashFast'], 'artist'))
+      .toEqual(['kimiCode', 'flashFast']);
+    // 对照：别的 usage 照旧按延迟重排
+    expect(await smartGroupReorder(['kimiCode', 'flashFast'], 'reply'))
+      .toEqual(['flashFast', 'kimiCode']);
+  });
+});

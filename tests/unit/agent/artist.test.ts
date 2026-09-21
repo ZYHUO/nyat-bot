@@ -53,6 +53,29 @@ describe('artist 画摊子', () => {
       const { extractSvg } = await importArtist();
       expect(extractSvg('我不会画画')).toBeNull();
     });
+    it('```xml / ```SVG 围栏也认（大小写与别名）', async () => {
+      const { extractSvg } = await importArtist();
+      expect(extractSvg(`\`\`\`xml\n${GOOD_SVG}\n\`\`\``)).toBe(GOOD_SVG);
+      expect(extractSvg(`\`\`\`SVG\n${GOOD_SVG}\n\`\`\``)).toBe(GOOD_SVG);
+      expect(extractSvg(`\`\`\`\n${GOOD_SVG}\n\`\`\``)).toBe(GOOD_SVG);
+    });
+    it('围栏里 </svg> 之后还有废话 → 仍取到完整 <svg>（回退首尾区间）', async () => {
+      const { extractSvg } = await importArtist();
+      const out = extractSvg(`\`\`\`svg\n${GOOD_SVG}\n\n// 背景用了渐变\n\`\`\``);
+      expect(out).toBe(GOOD_SVG);
+    });
+    it('空正文 / 模型自我介绍 → null', async () => {
+      const { extractSvg } = await importArtist();
+      expect(extractSvg('')).toBeNull();
+      expect(extractSvg('我是 step-3.7-flash，可以帮你写文案')).toBeNull();
+    });
+    it('回复里出现两份 SVG → 取第一份，不会把两份缝成一份交付', async () => {
+      const { extractSvg, sanitizeSvg } = await importArtist();
+      const out = extractSvg(`${GOOD_SVG}\n${GOOD_SVG}`);
+      expect(out).not.toBeNull();
+      // 两份拼在一起是非法 XML（两个根元素）→ 必须被拒，而不是硬交付一张坏图
+      expect(sanitizeSvg(out!)).toBeNull();
+    });
   });
 
   describe('sanitizeSvg', () => {
@@ -76,6 +99,15 @@ describe('artist 画摊子', () => {
     it('XML 不合法 → null', async () => {
       const { sanitizeSvg } = await importArtist();
       expect(sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>')).toBeNull();
+    });
+    it('注释里提到 href=/image 不冤杀好稿（注释不可执行）', async () => {
+      const { sanitizeSvg } = await importArtist();
+      // 教学 prompt 明令分层写注释，模型顺手在注释里交待"这里没用 image / href="很常见。
+      const withNote = GOOD_SVG.replace(
+        '<rect width="1024" height="1024" rx="48" fill="url(#bg)"/>',
+        '<!-- 背景层：渐变底，不用 image / href= 外链 -->\n  <rect width="1024" height="1024" rx="48" fill="url(#bg)"/>',
+      );
+      expect(sanitizeSvg(withNote)).not.toBeNull();
     });
   });
 
@@ -120,6 +152,38 @@ describe('artist 画摊子', () => {
       const r = await drawArtwork('画一张测试券');
       expect('error' in r).toBe(true);
       if ('error' in r) expect(r.error).toBe('no_svg_in_output');
+    });
+
+    // ─── 下面三条是 2026-09-21 那次"0% 成功率"的回归护栏 ───────────────
+    // 它们各自挡住一种让 art.draw 永远画不出的形状。没有它们，把 LLM mock
+    // 掉之后整条链路永远是绿的，而生产里一次都没成功过。
+
+    it('额度给够一张 ≤350 行的 SVG（4096 会被思维链吃光 → 空正文）', async () => {
+      callWithFallbackMock.mockResolvedValue({ content: `\`\`\`svg\n${GOOD_SVG}\n\`\`\`` });
+      const { drawArtwork } = await importArtist();
+      await drawArtwork('画一张测试券');
+      const opts = callWithFallbackMock.mock.calls[0]![0] as { maxTokens?: number };
+      // 实测：一张精心 SVG 4-6k token，reasoning 模型的思维链共用这一个额度。
+      expect(opts.maxTokens).toBeGreaterThanOrEqual(6000);
+    });
+
+    it('空正文算这一跳失败（rejectEmpty），不该当成功交回来', async () => {
+      callWithFallbackMock.mockResolvedValue({ content: '' });
+      const { drawArtwork } = await importArtist();
+      await drawArtwork('画一张测试券');
+      const opts = callWithFallbackMock.mock.calls[0]![0] as { rejectEmpty?: boolean };
+      expect(opts.rejectEmpty).toBe(true);
+    });
+
+    it('usage 解析不出来（AI usage not found）→ 立刻带原因收场，不空转修复轮', async () => {
+      // 生产事故的原样：.env 删了 AI_USAGE_ARTIST_LABEL，getUsage 每次都抛。
+      callWithFallbackMock.mockRejectedValue(new Error('AI usage not found: artist'));
+      const { drawArtwork } = await importArtist();
+      const r = await drawArtwork('画一张测试券');
+      expect('error' in r).toBe(true);
+      if ('error' in r) expect(r.error).toContain('llm_call_failed');
+      // 模型路由挂了，修复轮救不了——只该烧一次调用
+      expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
     });
 
     it('空描述直接拒', async () => {
