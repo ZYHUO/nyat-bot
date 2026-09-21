@@ -482,6 +482,16 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
       console.log('    （三个出口都数。2026-09-21 之前只数失败+派发，算出 10.7% 的假产出率——');
       console.log('      「判过、结论是不用接话」那一路没有日志，分母漏了绝大多数情况。）');
       if (total >= 20 && failRate > 50) console.log('    ⚠️ 失败率过高');
+      // 部署后单独算。round 71 的教训：全窗口把修复前后的数据混在一个比率里，
+      // 修复生效之后它继续报警——distiller 就这样被报了十个小时（实际 83.3%）。
+      // 任务后追话是同一形状：全窗口 71%，而 round 40 那次部署之后实测是 **0%**。
+      const pBad = counts.get('@post-task follow-up batch failed') ?? 0;
+      const pNoop = counts.get('@post-task judge: no follow-up') ?? 0;
+      const pSent = counts.get('@post-task continuation dispatched') ?? 0;
+      const pTotal = pBad + pNoop + pSent;
+      if (pTotal > 0) {
+        console.log(`    部署后 判过不接 ${String(pNoop).padStart(3)}｜派发 ${String(pSent).padStart(3)}｜失败 ${String(pBad).padStart(3)}  失败率 ${((pBad / pTotal) * 100).toFixed(1).padStart(5)}%`);
+      }
     }
   }
   if (!any) console.log('  （窗口内这些 cron 都没有日志）');
