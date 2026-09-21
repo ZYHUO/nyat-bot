@@ -118,10 +118,16 @@ function readLog(): LogStats {
     if (msg === 'message in') { st.inbound++; if (t >= deployMs) st.afterInbound++; }
     // 最后一条"醒着在处理"的证据。睡眠期消息走 `Meta path: asleep` 排队，
     // 不算 awake 处理——拿它当证据会以为功能在跑，其实只是消息到了。
+    //
+    // **必须独立成句，不能并进下面的 else-if 链**：2026-09-21 我把它写成
+    // `if (...) {...} else if (msg === 'Heart decision')`，于是 `Heart decision`
+    // 恰好也在 AWAKE_MARKERS 里 → 第二个 if 恒真 → 后面的 else if 永远不执行 →
+    // `心流裁决` 恒为 0，而 `LLM 失败` 照常计数（它不在 AWAKE_MARKERS 里）。
+    // 报告于是显示"0 次裁决、1253 次失败"——一个看着像数据、其实是断链的数字。
     if (msg !== 'Meta path: asleep' && AWAKE_MARKERS.has(msg)) {
       st.lastAwakeMs = Math.max(st.lastAwakeMs, t);
     }
-    else if (msg === 'Heart decision') { st.heartDecision++; if (t >= deployMs) st.afterHeartDecision++; }
+    if (msg === 'Heart decision') { st.heartDecision++; if (t >= deployMs) st.afterHeartDecision++; }
     else if (msg === 'heart LLM failed, fail-closed pass') { st.heartFailed++; if (t >= deployMs) st.afterHeartFailed++; }
     else if (errMsg.includes('All labels exhausted')) st.allExhausted++;
     else if (errMsg.includes('Empty response')) st.emptyResponse++;
