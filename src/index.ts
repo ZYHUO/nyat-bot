@@ -105,6 +105,11 @@ async function main(): Promise<void> {
   // 3.5 Initialize bot interaction tracker
   initBotTracker();
 
+  // 3.9 启动看门狗：卡在启动中（实测：外网断 → getMe() 永久挂起）就响亮地退，
+  // 让 systemd 重启，而不是 systemctl is-active 报 active 地装活。
+  const { startBootWatchdog } = await import('./ingress/failover.js');
+  startBootWatchdog(() => {});
+
   // 4. Create bot (fetches bot identity via getMe)
   const bot = await createBot();
 
@@ -179,6 +184,7 @@ async function main(): Promise<void> {
         await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
       }
       logger.info({ url: config.WEBHOOK_URL }, 'Webhook set (failover mode)');
+      (globalThis as { __markBootReady?: () => void }).__markBootReady?.();
       startIngressWatchdog(redis, 'webhook');
       // Smart Group: 同 polling 分支,webhook 模式也恢复历史健康数据
       await initSmartGroup();
@@ -216,7 +222,10 @@ async function main(): Promise<void> {
         logger.debug({ err }, 'breaker state reset failed (non-critical)');
       }
       void bot.start({
-        onStart: () => logger.info('Bot started (polling)'),
+        onStart: () => {
+          logger.info('Bot started (polling)');
+          (globalThis as { __markBootReady?: () => void }).__markBootReady?.();
+        },
         // message_reaction 默认不推送（grammY 文档），显式开——feedback 回流靠它收 reward。
         allowed_updates: [
           'message', 'edited_message', 'channel_post', 'edited_channel_post',
