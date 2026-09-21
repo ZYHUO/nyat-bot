@@ -1054,6 +1054,19 @@ Both now carry a wall-clock budget (`REFLECTION_TICK_BUDGET_SEC`,
 `TOPIC_SCAN_TICK_BUDGET_SEC`, default 180s) plus a per-hop cap, and the tick log reports
 `skippedForBudget` so a budget that starts biting is visible rather than silent.
 
+Measured after the deploy — this is the before/after the fix was waiting for:
+
+```
+deep-reflection   before: 629s / 603s / 600s per tick, reflecting 0–2 of 15 chats
+                  after:  14s per tick, reflecting 10 of 15, skippedForBudget 1–2
+topic-scan        before: gaps up to 993s against a 480s interval (~8min ticks)
+                  after:  14s per tick, 20 chats scanned, skippedForBudget 0
+```
+
+`skippedForBudget` being non-zero on reflection is the budget doing its job: those one or
+two chats would otherwise have pushed the tick back toward ten minutes, and they get
+picked up next tick anyway.
+
 The rule this leaves behind: **for anything that loops, the unit of measurement is the
 loop, not the iteration.** A per-call limit tells you one call is bounded; it says nothing
 about the batch, and "reasonable × N" is how a 12s fix becomes a two-hour tick.
