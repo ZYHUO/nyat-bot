@@ -855,7 +855,11 @@ export async function generateReply(
     if (mergedToolsActive) {
       const { generateReplyWithTools } = await import('./reply-with-tools.js');
       const merged = await generateReplyWithTools({
-        messages, usage, chatId, userId: message.uid, signal: interruptSignal,
+        messages, chatId, userId: message.uid, signal: interruptSignal,
+        // 合并写手走 AI SDK tools，只吃 OpenAI 兼容格式；reply 主链是 claude 原生。
+        // 用同一个 usage 会让链上每个 label 都被跳过（2026-09-21：195 次 exhausted、
+        // 0 次 finished）。REPLY_TOOLS_USAGE 可覆盖。
+        usage: env().REPLY_TOOLS_USAGE,
         toolsOnly: directToolsActive ? DIRECT_TOOL_SUBSET : undefined,
       });
       // strip <think> 后再判空:think-only 响应原始 content 非空但剥完是空,以前会漏过空兜底变静默

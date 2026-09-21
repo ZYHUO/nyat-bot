@@ -999,6 +999,32 @@ The 15 labels whose vendors have no counterpart on 7864 (gpt-5.x, claude-opus,
 gemini, qwen, grok, mimo) were left alone. They cannot work anywhere local, and
 inventing a mapping for them would be guesswork dressed as a fix.
 
+### The merged tool-writer had never once succeeded
+
+`Merged tool-writer exhausted labels, fall back to legacy` appeared **195 times** in the
+log. `Merged tool-writer finished` appeared **zero** times. `Merged tool-writer label
+failed` — zero.
+
+Zero per-label failures with 195 total failures is the tell: the loop never called
+anything. `generateReplyWithTools` builds its chain from `[usage.label,
+...usage.backups]`, and the `reply` usage defaults to `stepfun` + `stepfunjudge` — both
+`apiFormat: 'claude'`. The writer drives the AI SDK's tool calling, which needs an
+OpenAI-compatible endpoint, so every candidate hit `if (!apiKey || label.apiFormat ===
+'claude') continue;` and the loop fell straight through to the exhaustion warning.
+
+So the merged writer had been silently falling back to the plain-text writer on every
+single reply since it shipped, and the log made that indistinguishable from "the chain
+was tried and failed".
+
+The fix is a dedicated usage, `reply_tools`, pointing at `spark13` — the only label that
+is both healthy (800 successes) and not Claude-format. The skip paths now log and count
+`reply_merged_writer_skipped_total{label, reason}`, so a chain that cannot be used says
+so instead of just exhausting.
+
+Verified by calling the writer directly with the new usage:
+`failed=false, label=spark13, content: "去啊，明天一起去海边吹吹风多爽啊！"` — the
+first successful run it has ever had.
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead

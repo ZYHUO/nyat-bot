@@ -19,6 +19,7 @@ import { getRedis } from '../../db/redis.js';
 import { buildToolSet } from '../tools/registry.js';
 import { mergeAbortSignals, isCallerAbort } from '../../shared/abort.js';
 import { env } from '../../env.js';
+import { incrCounter } from '../../metrics/registry.js';
 import { logger } from '../../shared/logger.js';
 
 export interface ReplyWithToolsInput {
@@ -50,6 +51,7 @@ export interface ReplyWithToolsResult {
 export async function generateReplyWithTools(input: ReplyWithToolsInput): Promise<ReplyWithToolsResult> {
   const e = env();
   const usage = getUsage(input.usage);
+  // 见 labels.ts 的 reply_tools：这个写手只能走 OpenAI 兼容格式。
   const tools = buildToolSet(input.chatId, input.userId, input.toolsOnly);
   const maxSteps = Math.max(2, e.REPLY_TOOLS_MAX_STEPS);
   const start = performance.now();
@@ -61,8 +63,24 @@ export async function generateReplyWithTools(input: ReplyWithToolsInput): Promis
   for (const labelName of labelNames) {
     const label = getLabel(labelName);
     const apiKey = label.apiKeys[0];
-    if (!apiKey || label.apiFormat === 'claude') continue; // claude 原生格式跳过(AI SDK 工具走 openai 兼容)
-    if (await cooldown.isCoolingDown(label.model).catch(() => false)) continue;
+    if (!apiKey || label.apiFormat === 'claude') {
+      // 跳过要记账：2026-09-21 实测 `Merged tool-writer exhausted` 193 次而
+      // `label failed` **0 次**、`finished` **0 次**——即这个写手从来没成功过一次，
+      // 而每次失败都没有任何一条 per-label 日志。原因是链上的 label 全被上面两个
+      // 条件静默跳过（claude 格式 / 没 key / 在冷却），循环跑完直接落到 exhausted。
+      // 没有这行账，193 次失败和"链在正常失败"在日志里长得一模一样。
+      logger.debug(
+        { label: labelName, model: label.model, hasKey: !!apiKey, apiFormat: label.apiFormat },
+        !apiKey ? 'tool-writer: skip (no key)' : 'tool-writer: skip (claude format)',
+      );
+      incrCounter('reply_merged_writer_skipped_total', { label: labelName, reason: !apiKey ? 'no_key' : 'claude_format' });
+      continue;
+    }
+    if (await cooldown.isCoolingDown(label.model).catch(() => false)) {
+      logger.debug({ label: labelName, model: label.model }, 'tool-writer: skip (cooling)');
+      incrCounter('reply_merged_writer_skipped_total', { label: labelName, reason: 'cooling' });
+      continue;
+    }
 
     try {
       const provider = createOpenAI({ baseURL: label.endpoint, apiKey, compatibility: 'compatible' });

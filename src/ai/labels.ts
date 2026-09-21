@@ -85,6 +85,15 @@ export function resolveUsageName(name: string): string {
 // Fallback defaults — 仅核心 + 可选重活；别名不在此表
 const USAGE_DEFAULTS: Record<string, AIUsage> = {
   reply:     { label: 'stepfun',       backups: ['stepfunjudge'], timeout: 60_000 },
+  // 合并写手（reply-with-tools）专用：它走 AI SDK 的 tools，**只吃 OpenAI 兼容格式**，
+  // 而 reply 默认链的两个 label 都是 claude 原生格式 → 循环里被静默跳过 →
+  // 195 次 `Merged tool-writer exhausted` 而 `finished` **0 次**（2026-09-21 实测）。
+  // 也就是说这个写手从上线起一次都没成功过，只是每次都安静地退回纯文本写手。
+  //
+  // 这里给的是池子里**唯一健康且非 claude 格式**的 label（spark13，
+  // successCount 800）。它自己也不稳（newapi 侧偶发连接超时），所以失败仍会
+  // 退回 legacy——但至少给了它一次真跑的机会，且失败现在有日志。
+  reply_tools: { label: 'spark13',     backups: ['k26'],           timeout: 60_000 },
   vision:    { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
   audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
   // 视频理解（2026-09-21）：独立 usage，不蹭 vision 链——见 env.ts 的

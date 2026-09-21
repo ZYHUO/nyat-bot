@@ -75,6 +75,12 @@ export const socialSection = {
   // CREATE_POLL/USE_BOT_COMMAND 这类有副作用的,防闲聊途中误建投票定时器。
   // 前置依赖 REPLY_MERGED_TOOLS_ENABLED;不调工具时 ≈ 纯文本写手速度。
   REPLY_DIRECT_TOOLS_ENABLED: booleanFromEnv.default(false),
+  // 合并写手（reply-with-tools）用的 AI usage。它走 AI SDK 的 tools，**只吃 OpenAI
+  // 兼容格式**，而 reply 主链默认是 claude 原生格式——用同一个 usage 会让链上每个
+  // label 都被静默跳过。2026-09-21 实测：`Merged tool-writer exhausted` 195 次而
+  // `Merged tool-writer finished` **0 次**，即这个写手从上线起一次都没成功过，
+  // 只是每次都安静地退回纯文本写手。
+  REPLY_TOOLS_USAGE: z.string().default('reply_tools'),
   REPLY_TOOLS_MAX_STEPS: z.coerce.number().int().min(2).max(6).default(4),
 
   // ── Multi-Agent 协调(Orchestrator + 专家 + Writer)──

@@ -22,14 +22,14 @@
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 20 | Turn Actor + Agentic planner + 中期记忆 |
 | `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 45 | 18 | 17 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 51 | 21 | 18 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
-| `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 56 | 27 | 22 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
+| `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 22 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 36 | 14 | 13 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
 ## 总量
 
 | | |
 |---|---|
-| total_keys | 485 |
+| total_keys | 486 |
 | bool_flags | 216 |
 | on_in_prod | 187 |
 | set_in_env | 322 |
@@ -188,7 +188,7 @@
 | social | `BOT_CLASSIFIER_ENABLED` | false | true | 入站 bot 消息分类层(A 多bot共存 / D 降噪 / 命令学习 的共用地基)。 先 shadow:打标 + 日志,不改任何行为;精度够了再让 A/D 消费。 | pipeline/pipeline.ts |
 | social | `BOT_COMMAND_LEARN_ENABLED` | false | true | ── 借力其他 bot(学其他 bot 的命令,需要时代发)── P1:观察学习每个 bot 的命令档案(怎么用/场景/needs_reply/needs_admin/output_type) | cron/bot-command-scan.ts, cron/scheduler.ts |
 | social | `BOT_COMMAND_ROUTER_ENABLED` | false | true | 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关; 依赖 BOT_DELEGATION_ENABLED。 | pipeline/command-router.ts, pipeline/stages/intercepts.ts |
-| social | `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | pipeline/command-router.ts, pipeline/stages/intercepts.ts, pipeline/tools/bot-delegation.ts, pipeline/tools/registry.ts |
+| social | `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | meta/bookkeeping.ts, pipeline/command-router.ts, pipeline/stages/intercepts.ts, pipeline/tools/bot-delegation.ts |
 | social | `BOT_DENOISE_ENABLED` | false | true | D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习 (保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。 | pipeline/pipeline.ts |
 | social | `BOT_REPLY_DELEGATION_ENABLED` | true | true | 回复式代发(bots.command 带 replyToMessageId):让别的 bot 代罚。 默认开——它比 admin.kick 更窄:只能发"必须回复某条消息才生效"且学熟 (needs_reply=1 / needs_admin=0 / status=ready)的命令,且与 admi | pipeline/tools/bot-delegation.ts |
 | social | `MULTI_AGENT_CHAT_SPECIALISTS` | true | true | chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token; 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。 | pipeline/multiagent/orchestrator.ts |
@@ -199,9 +199,9 @@
 | social | `MULTI_AGENT_MEMORY_ENABLED` | true | true | Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
 | social | `MULTI_AGENT_PERSONA_CRITIC_ENABLED` | true | true | 人设一致性 Critic:每条回复都查"有没有叫错主人/破人设/破关系",有问题回炉 1 次。 跟深度 Critic(查事实/跑题)分工:这个专攻人设/关系,全路由跑。 | pipeline/multiagent/orchestrator.ts |
 | social | `MULTI_AGENT_PERSONA_ENABLED` | true | true | Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
-| social | `NETWORK_BURST_ENABLED` | false | true | C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。 | pipeline/games/network-burst.ts, pipeline/stages/bookkeeping.ts |
-| social | `PEER_REACTION_ENABLED` | false | true | A 多 bot 共存:对会话型 bot(千雪)/带媒体结果的工具 bot(解析姬)做反应。 reactive、不走 judge,自带 chat-lock + per-peer fatigue + 作息门。默认关。 | pipeline/games/peer-reaction.ts, pipeline/pipeline.ts |
-| social | `REALTIME_LEARN_ENABLED` | true | true | 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。 | tracking/realtime-learn.ts |
+| social | `NETWORK_BURST_ENABLED` | false | true | C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。 | meta/bookkeeping.ts, pipeline/games/network-burst.ts, pipeline/stages/bookkeeping.ts |
+| social | `PEER_REACTION_ENABLED` | false | true | A 多 bot 共存:对会话型 bot(千雪)/带媒体结果的工具 bot(解析姬)做反应。 reactive、不走 judge,自带 chat-lock + per-peer fatigue + 作息门。默认关。 | meta/bookkeeping.ts, pipeline/games/peer-reaction.ts, pipeline/pipeline.ts |
+| social | `REALTIME_LEARN_ENABLED` | true | true | 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。 | subagent/host-api.ts, tracking/realtime-learn.ts |
 | social | `REPLY_DIRECT_TOOLS_ENABLED` | false | true | P3:direct(普通闲聊)路径也挂工具 —— 现状是 judge 判 direct 后写手完全无工具, 群里随口问"这链接是啥/现在油价多少"只能瞎编。开启后 direct 也走合并写手, 但只给只读子集(搜索/抓页/记忆/画像/历史/bot知识/黑话),不给 ADD_TIMER/ CREATE | pipeline/reply/reply.ts |
 | social | `REPLY_MERGED_TOOLS_ENABLED` | false | true | 合并写手:planned 路径用"一次带工具的写手调用"替代"planner 轮+写手"两段 (默认关,灰度;失败自动回退老两段路径) | pipeline/reply/reply.ts |
 | social | `RSS_MONITOR_ENABLED` | false | true | ── P2-B: RSS 信息流监控 ── 周期轮询 RSS feeds，新条目存 Redis 供主动搭话引用 | cron/rss-monitor.ts, cron/scheduler.ts, cron/unified-tick.ts, pipeline/turn/proactive-turn.ts |
@@ -285,7 +285,7 @@
 | social | `PROACTIVE_COORDINATOR_ENABLED` | false | — | ── P2-A: 主动搭话统一调度 ── 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限 |
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
 
-## 非布尔参数（269 个）
+## 非布尔参数（270 个）
 
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -524,6 +524,7 @@
 | social | `PROACTIVE_HOURLY_MAX_PER_CHAT` | 3 | — |  |
 | social | `REALTIME_LEARN_TIMEOUT_MS` | 10000 | — |  |
 | social | `REPLY_TOOLS_MAX_STEPS` | 4 | 4 |  |
+| social | `REPLY_TOOLS_USAGE` | 'reply_tools' | — | 合并写手（reply-with-tools）用的 AI usage。它走 AI SDK 的 tools，**只吃 OpenAI 兼容格式**，而 reply 主链默认是 claude 原生格式——用同一个 usage 会让链上每个 labe |
 | social | `RSS_FEEDS_JSON` | '[]' | [{"url":"https://www.geekpark.net/rss"," | JSON 数组: [{url, chatId, autoPost?, sourceName?}] |
 | social | `RSS_MAX_ITEM_AGE_HOURS` | 72 | — | 新条目新鲜度闸（小时）：pubDate 比阈值老的直接丢（仍计 seen 防回潮）； 没日期/解析不了的放行（误杀比漏放糟）。2026-08-24：Opus 4.6 旧闻标题党被端上桌的教训。 |
 | social | `RSS_MONITOR_INTERVAL_MIN` | 30 | 30 |  |
