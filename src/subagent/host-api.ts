@@ -2848,7 +2848,20 @@ export function createHostApi(
     namespaces[key] = audit.wrap(key, namespaces[key]!);
   }
   attachExecutionAudit(api, audit);
-  return withToolCounters(api);
+  // ⚠️ **这里必须 return api 本身，不能包任何 Proxy。**
+  //
+  // round 126/130 的教训：`attachExecutionAudit(api, audit)` 用 **api 这个对象**
+  // 当 WeakMap 的键，而 executor.ts:445 `getExecutionAudit(host)!` 用的是**返回值**。
+  // round 126 我加了 `return withToolCounters(api)`（一个 Proxy），
+  // WeakMap 里存的是原 api、executor 拿到的是 Proxy——**键对不上**，
+  // getExecutionAudit 返回 undefined，`audit.hasContract()` 抛
+  // `Cannot read properties of undefined (reading 'hasContract')`。
+  //
+  // round 130 实测：部署后 8 个 CodeAct task **8 个全崩**，崩溃点全在这一行。
+  // round 127 我只回退了递归版，没回退这顶层一版，所以故障一直在。
+  //
+  // 计数器改用点式（countTool，加在各工具实现里），不横跨 API 表面。
+  return api;
 }
 
 /**
@@ -2879,26 +2892,4 @@ export function createHostApi(
  */
 function countTool(tool: string): void {
   incrCounter('host_tool_calls_total', { tool, outcome: 'ok' });
-}
-
-function withToolCounters<T extends object>(api: T): T {
-  return new Proxy(api, {
-    get(target, key) {
-      const v = (target as Record<string | symbol, unknown>)[key];
-      if (typeof v !== 'function') return v;
-      return async (...args: unknown[]) => {
-        const tool = String(key);
-        const t0 = Date.now();
-        try {
-          const r = await (v as (...a: unknown[]) => Promise<unknown>).apply(target, args);
-          incrCounter('host_tool_calls_total', { tool, outcome: 'ok' });
-          incrCounter('host_tool_latency_ms_total', { tool }, Date.now() - t0);
-          return r;
-        } catch (err) {
-          incrCounter('host_tool_calls_total', { tool, outcome: 'error' });
-          throw err;
-        }
-      };
-    },
-  });
 }
