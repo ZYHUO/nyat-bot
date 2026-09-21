@@ -41,7 +41,7 @@ Production is a systemd service: `sudo systemctl restart xxb-ts` (runs `node dis
 - **Everything new is `env`-flag-gated, default OFF, and graylisted per chat.** Flags live in **`src/env-sections/*.ts`** (a zod schema split by subsystem; `src/env.ts` only composes them with spread). Read via the cached `env()` getter, **never `process.env` directly**. Graylists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. `.env` is gitignored and secret — **never commit it**.
   - The 12 sections: `infra` `memory` `timing` `judge` `cognition` `core` `self` `turn` `meta` `features` `social` `life`. Shared `booleanFromEnv` lives in `src/env-sections/_shared.ts` (one copy, not twelve).
   - Directory is `env-sections/`, **not** `env/sections/` — `src/env.ts` is a file, and a same-named directory makes relative imports resolve to the wrong place.
-  - `tests/unit/env/schema-sections.test.ts` pins the key set (**485** as of 2026-09-21; the
+  - `tests/unit/env/schema-sections.test.ts` pins the key set (**488** as of 2026-09-21; the
     number moves as flags are added/retired — re-count, don't guess), plus no losses and no
     cross-section duplicates, and that every section file is actually imported **and**
     spread. Adding a file without wiring it makes that whole section silently vanish — the
@@ -130,7 +130,7 @@ Three rules when adding a row:
 `npx tsx scripts/arch-split.mts [days]` prints the Meta-vs-legacy split from the log:
 inbound messages, legacy `Pipeline complete` exits broken down by reason, and Meta events
 by class. The number that matters is the **legacy reply engine** line — how many messages
-traversed `judge→gate→reply` and produced an exit. It was 55/25,951 (0.21%) on 2026-09-21.
+traversed `judge→gate→reply` and produced an exit. It was 16/9,380 (0.17%) on 2026-09-21 — 205 of the 221 legacy exits are bot denoise, which is what legacy is still legitimately for.
 
 Two things to know when reading it:
 - Meta and legacy are **not strictly complementary** — commands hand off Meta→legacy and

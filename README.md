@@ -6,7 +6,15 @@
 
 Not a bot that responds when poked — an agent that hangs out, reads the room, and only speaks when it has something worth saying.
 
-**v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — 498 env keys, 221 boolean flags, 191 live in production, plus the 9 dead switches and 4 test-only phantoms the audit turned up.
+**v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — **488 env keys, 216
+boolean flags, 187 live in production**. The audit that produced it found 9 dead switches
+and 4 test-only phantoms; all of them are now gone — `dead_and_on` and
+`phantom_only_in_tests` are both **0**, and `tests/unit/env/no-dead-switches.test.ts`
+fails the build if either stops being true.
+
+(Numbers verified against `python3 scripts/flag-census.py` on 2026-09-21. The census is
+regenerated, not hand-edited — if you change a flag, re-run it rather than trusting the
+figure above.)
 
 [![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)

@@ -15,7 +15,7 @@
 | `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 79 | 21 | 14 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 13 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 23 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
-| `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 23 | 3 | 3 | 定型判断基座 + 深度反思 |
+| `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 3 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 32 | 19 | 19 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 18 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 25 | 10 | 7 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
@@ -29,7 +29,7 @@
 
 | | |
 |---|---|
-| total_keys | 487 |
+| total_keys | 488 |
 | bool_flags | 216 |
 | on_in_prod | 187 |
 | set_in_env | 323 |
@@ -285,7 +285,7 @@
 | social | `PROACTIVE_COORDINATOR_ENABLED` | false | — | ── P2-A: 主动搭话统一调度 ── 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限 |
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
 
-## 非布尔参数（271 个）
+## 非布尔参数（272 个）
 
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -423,6 +423,7 @@
 | judge | `TIMING_TALK_VALUE` | 1.0 | 0.3 | P1-C talk_value 频率阈值(0..1]:1.0 = 该层关闭(no-op)。<1 时非直接消息需攒 ceil(1/有效值) 条才评一次 gate,未达阈值 → defer 延迟重评;有空闲补偿兜底。 per-chat Redi |
 | judge | `TIMING_WAIT_MAX_SEC` | 120 | — | 阶段 4：wait 工具最大允许秒数；超过会被裁剪。 |
 | judge | `TIMING_WAIT_MIN_SEC` | 5 | — |  |
+| judge | `TOPIC_SCAN_TICK_BUDGET_SEC` | 180 | — | topic-scan 单个 tick 的墙钟预算（秒）。同 REFLECTION_TICK_BUDGET_SEC 的理由： extractTopic 原来没设每跳上限，用 judge usage 的 120s，20 群 × 3 跳 = 理论 |
 | judge | `TURN_GATE_DEFER_MAX_REPLAYS` | 1 | — | P0-B defer=延迟重评:同一条消息最多被 defer 重排几次(超限按旧语义静默丢弃)。 |
 | life | `ADMIN_CORS_ORIGINS` |  | https://miniapp.gomami.wiki | Admin |
 | life | `DAILY_LIFE_PROFILE` | 'auto' | auto |  |
