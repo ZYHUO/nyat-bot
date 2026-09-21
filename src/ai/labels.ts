@@ -94,13 +94,21 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // successCount 800）。它自己也不稳（newapi 侧偶发连接超时），所以失败仍会
   // 退回 legacy——但至少给了它一次真跑的机会，且失败现在有日志。
   reply_tools: { label: 'spark13',     backups: ['k26'],           timeout: 60_000 },
-  vision:    { label: 'sub2gpt54mini', backups: ['stepfunvision'], timeout: 30_000 },
+  // 2026-09-22 round 3：主 label 原为 sub2gpt54mini——**它在 round 133/134 清 7864
+  // label 时被删了**，而这里没跟着改。于是每次 vision 调用都直接 fallback 到
+  // stepfunvision（一个 reasoning 模型，思维链吃 max_tokens → 空正文）。
+  // 日志观测到 3 分钟 9 次 `claude: 空正文 —— 思维链吃光 max_tokens（截断）`。
+  // 现在直接拿 stepfunvision 当主（它声明 vision=true、实测能出正文），
+  // backup 给 dshkimi（kimi-for-coding 同样声明 supports_image_in）。
+  vision:    { label: 'stepfunvision', backups: ['dshkimi'],       timeout: 30_000 },
   audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
   // 视频理解（2026-09-21）：独立 usage，不蹭 vision 链——见 env.ts 的
   // VIDEO_DESCRIBE_ENABLED 注释。step5（step-5-preview）是实测唯一稳定出正文的，
   // backup 给 stepfunvision（step-3.7-flash，同厂、支持 vision，但 reasoning
   // 会吃 token，所以 maxTokens 给得比图片大得多）。
-  video:     { label: 'step5',         backups: ['stepfunvision'], timeout: 120_000, maxTokens: 2_000 },
+  // backup 现在有两个：stepfunvision（同厂，reasoning 吃 token，所以 maxTokens 给大）
+  // 和 dshkimi（kimi-for-coding，/v1/models 实测声明 supports_video_in）。
+  video:     { label: 'step5',         backups: ['stepfunvision', 'dshkimi'], timeout: 120_000, maxTokens: 2_000 },
   // judge/heart（step-3.7-flash reasoning）：maxTokens 不设上限——reasoning_content 计入
   // completion，卡 800 会把 JSON 截成半截；实测 low 档自然输出 300-1000 token。
   // timeout 45s：开了 reasoning 后 P99 偶到 35s，30s 会无谓触发同模型 backup 重试。
