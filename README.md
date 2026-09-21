@@ -965,6 +965,40 @@ success line. Three rules, each bought with a mistake:
    invisible at `LOG_LEVEL=info`, which would put the hole straight back — and the row
    reports all three counts.
 
+### Where the 23 "dead providers" were actually supposed to point
+
+For several rounds the provider pool had 23 labels pointing at
+`http://127.0.0.1:3000/v1`, where nothing listened, and the only other local relay
+(cliproxyapi on 8317) served none of the model names they asked for. The question
+"what should serve port 3000" had no answer from inside the repo.
+
+It does have one on the box. There are **three** local relays, not one:
+
+| port | service | key | state |
+|---|---|---|---|
+| 8317 | cliproxyapi | `sk-81686ee5…` | 217 models, none matching |
+| 8800 | tabbit2api | `sk-tabb2-66fd…` | 14 models, upstream 403 |
+| **7864** | **workbuddy2api-global** | **`wb2a-g-725a…`** | **10 models — the ones `.env` asks for** |
+
+Port 7864's catalog is exactly what the dead labels request: `glm-5.2`, `glm-5.1`,
+`kimi-k2.7`, `minimax-m3`, `hy3`, `hy3-preview`, `hy3-preview-agent`,
+`deepseek-v4-pro`, `deepseek-v4-flash`. Its `state.json` explains the outage precisely:
+
+```json
+"credits": 0,
+"reason": "429 rate limit",
+"last_success": "2026-09-19T02:59:09+08:00"
+```
+
+**All three accounts have zero credits.** So the pool did not have a routing bug — it
+had a billing one. The labels now point at 7864 with the right key and the right model
+names, so they recover on their own when credits come back; until then they fail
+cleanly and stay deprioritized rather than pretending to work.
+
+The 15 labels whose vendors have no counterpart on 7864 (gpt-5.x, claude-opus,
+gemini, qwen, grok, mimo) were left alone. They cannot work anywhere local, and
+inventing a mapping for them would be guesswork dressed as a fix.
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead
