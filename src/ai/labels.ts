@@ -93,7 +93,23 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // 这里给的是池子里**唯一健康且非 claude 格式**的 label（spark13，
   // successCount 800）。它自己也不稳（newapi 侧偶发连接超时），所以失败仍会
   // 退回 legacy——但至少给了它一次真跑的机会，且失败现在有日志。
-  reply_tools: { label: 'spark13',     backups: ['k26'],           timeout: 60_000 },
+  // ── round 1（新 goal）：两条 usage 链指着已删除的 label ──
+  //
+  // 用户报"/checkin 好像挂了"。追下来：
+  //   AI usage reply_tools references missing label(s): spark13, k26
+  // spark13 / k26 在 round 134 清 label 时被删，这里没跟着改
+  // → 每次调用抛 AIUsageError → 整条回复被带走 → 用户看不到回音。
+  // 09-21 六次 Pipeline reply/send failed 全是这个。
+  //
+  // 这是本会话"删了东西没删指向它的引用"的**第七次**（前六次见
+  // tests/unit/ai/usage-labels-exist.test.ts 的文件头）。前面六次都只有事后证据,
+  // 没有一道测试能在删除的当时拦住——那道测试就是为这个加的。
+  //
+  // 换成池子里真有的：reply_tools 走 AI SDK 的 createOpenAI（tools 只吃
+  // OpenAI 兼容格式），而清完 label 后唯一非 claude 原生格式的就是 dshkimi
+  // （kimi-for-coding，/v1/models 实测 supports_dynamic_tools: true、1M context）。
+  // deep_think 同理换成 stepfunthink 主、dshkimi 兜底。
+  reply_tools: { label: 'dshkimi',      backups: [],                 timeout: 90_000, maxTokens: 8_000 },
   // 2026-09-22 round 3：主 label 原为 sub2gpt54mini——**它在 round 133/134 清 7864
   // label 时被删了**，而这里没跟着改。于是每次 vision 调用都直接 fallback 到
   // stepfunvision（一个 reasoning 模型，思维链吃 max_tokens → 空正文）。
@@ -117,7 +133,7 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // Mundo「难题攻坚」部门(可选,默认关)
   mundo:     { label: 'mundo',         backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
   // 「深想」异步深答(可选)
-  deep_think:{ label: 'k27code',       backups: ['mundo', 'stepfunthink'], timeout: 120_000, maxTokens: 16_000 },
+  deep_think:{ label: 'stepfunthink',   backups: ['dshkimi'],               timeout: 120_000, maxTokens: 16_000 },
   // 画摊子（agent/artist.ts）——SVG 是**长代码活**，选路标准和聊天正相反。
   //
   // 2026-09-21 事故：.env 在清 label 时把 `AI_USAGE_ARTIST_LABEL=kimi` 整行删了
@@ -138,6 +154,20 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // timeout 120s：给最慢的 backup 一个真实机会，也覆盖 dshkimi 自己的 69s P50。
   artist:    { label: 'dshkimi',       backups: ['stepfun', 'step5'], timeout: 120_000, maxTokens: 8_000, temperature: 0.7 },
 };
+
+/**
+ * 所有**可路由**的 usage 名（别名已解析 + 有默认链的）。
+ *
+ * round 1（新 goal）加，给 `tests/unit/ai/usage-labels-exist.test.ts` 用：
+ * 那条测试断言"每个 usage 的整条链都在池子里"。
+ * 在此之前删一个 label 不会有任何测试响——
+ * `AI usage X references missing label(s)` 只在**运行时**抛，
+ * 而抛出来的样子像"模型挂了"而不是"配置引用了一个不存在的东西"。
+ */
+export const USAGE_NAMES: readonly string[] = [
+  ...Object.keys(USAGE_DEFAULTS),
+  ...Object.values(USAGE_ALIASES),
+].filter((n, i, a) => a.indexOf(n) === i);
 
 export function getUsage(name: string): AIUsage {
   const resolved = resolveUsageName(name);
