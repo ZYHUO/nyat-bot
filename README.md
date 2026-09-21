@@ -1025,6 +1025,31 @@ Verified by calling the writer directly with the new usage:
 `failed=false, label=spark13, content: "去啊，明天一起去海边吹吹风多爽啊！"` — the
 first successful run it has ever had.
 
+### `unified tick: shared` has never fired — and that is correct
+
+The cross-group `share` action has produced zero log lines since it shipped. The chain
+that would have to break is `shareCandidates → prompt line → LLM picks share → four
+hard gates`, and the first link is where it stops: `scoreTaste(m)` has to reach
+`SHARE_THRESHOLD = 0.5`.
+
+Measured over the five shadow groups' last 109 human messages: `0.00×103 / 0.35×4 /
+0.45×2`. Nothing reaches 0.5.
+
+The tempting fix is to lower the threshold. That would have been wrong: **0.5 is a
+deliberate design decision**, pinned by a test — one signal plus substance is only 0.45,
+and letting that through would forward any slightly-longer "哈哈哈" between groups.
+
+The actual defect was upstream in the scorer. `USEFUL_RE` contained `怎么|如何`, which
+are *question words*, not usefulness signals. They were handing 0.35 to ordinary
+questions like "kddi怎么没解锁claude吗？", which made the 0.35 tier look artificially
+close to the line. Remove them and the remaining 0.35s are genuine short jokes, which
+the design says should not be forwarded.
+
+So: the regex is fixed and pinned by a test, the threshold is unchanged, and `share`
+staying at zero is the scorer correctly refusing to forward command spam and
+speed-test bot output. **A feature that never fires because its input genuinely never
+qualifies is not a bug — it is the feature working.**
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead
