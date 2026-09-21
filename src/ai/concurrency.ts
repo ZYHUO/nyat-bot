@@ -35,6 +35,8 @@ function bucketOf(key: string): Bucket {
   return b;
 }
 
+import { incrCounter } from '../metrics/registry.js';
+
 /** 测试用：清空所有计数。 */
 export function __resetConcurrencyForTest(): void {
   buckets.clear();
@@ -59,8 +61,23 @@ export async function acquireConcurrency(
     b.active++;
     return () => release(b);
   }
+  // **排队时长要记账。** round 95 的教训：并发闸装了两个位置，等长窗口对比
+  // 五项失败全差，而三种解释（闸在帮倒忙 / provider 真坏了 / 对照组偏乐观）
+  // 分不清——因为没有"到底排了多久"这个数。
+  //
+  //   · 排队久 → 假设 ①：闸把调用堵死，撞的是 maxTimeoutMs 不是 429
+  //   · 排队短而失败多 → 假设 ②：没人在等，是 provider 自己坏
+  //
+  // 一个计数器就能分开，之前没有它，只能停在"原因未定"。
+  const queuedAt = Date.now();
   await new Promise<void>((resolve) => b.waiters.push(resolve));
   // 被唤醒时位置已经留给本调用者了（release 里直接转交，不再检查 limit）
+  const waitedMs = Date.now() - queuedAt;
+  incrCounter('llm_concurrency_wait_ms_total', { bucket: key.slice(0, 60) }, waitedMs);
+  incrCounter('llm_concurrency_waits_total', { bucket: key.slice(0, 60) });
+  if (waitedMs > 2000) {
+    incrCounter('llm_concurrency_slow_waits_total', { bucket: key.slice(0, 60) });
+  }
   return () => release(b);
 }
 

@@ -596,6 +596,20 @@ console.log('');
           + '2026-09-21 探针直接调 learnFromReply 传一段有内容的来回也返回 0，确认是这个原因。）');
       }
     }
+    // 并发闸的排队时长：分开"闸在帮倒忙"和"provider 真坏了"。
+    // round 95 等长窗口对比五项失败全差，三种解释分不清，就缺这个数。
+    const waitTotal = [...text.matchAll(/^llm_concurrency_wait_ms_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    const waits = [...text.matchAll(/^llm_concurrency_waits_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    const slow = [...text.matchAll(/^llm_concurrency_slow_waits_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    if (waits > 0) {
+      console.log(`  并发闸排队            等过 ${waits} 次｜总等 ${(waitTotal / 1000).toFixed(1)}s｜均 ${(waitTotal / waits).toFixed(0)}ms｜>2s 的 ${slow} 次`);
+      if (waits >= 10 && waitTotal / waits > 1500) {
+        console.log('    ⚠️  平均排队 >1.5s——并发闸可能正在把调用堵超时（撞的是 maxTimeoutMs 不是 429）。');
+        console.log('        考虑把 AI_MAX_CONCURRENCY_PER_ACCOUNT 调大，或给排队加超时。');
+      } else if (waits >= 10) {
+        console.log('    （排队不久而失败仍多 → 是 provider 自己在坏，不是闸的问题。）');
+      }
+    }
     // 等待重试的成败：等过一次之后是救回来了、还是仍然全冷却。
     // 没这两个数，"我加了个重试"和"这个重试有用"看起来一模一样。
     const wrOk = [...text.matchAll(/^llm_wait_retry_total\{[^}]*outcome="ok"[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
