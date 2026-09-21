@@ -106,4 +106,25 @@ describe('upsertCommandObservation + 成熟度', () => {
     upsertCommandObservation({ botUsername: 'b3', command: '/x' }); // 没带 needsAdmin
     expect(getCommandProfile('b3', '/x')!.needs_admin).toBe(0);
   });
+
+  // round 6：MATURITY_MIN_OBSERVATIONS 写着 3，但旧的置信度阶梯让实际门槛是 4。
+  // 这条测试锁住"恰好 3 次就 ready"——如果哪天又改劈了，它会红。
+  it('恰好 MATURITY_MIN_OBSERVATIONS 次就 ready（常数不是说谎的）', () => {
+    for (let i = 0; i < MATURITY_MIN_OBSERVATIONS; i++) {
+      upsertCommandObservation({ botUsername: 'exact', command: '/exact', usageSyntax: '/exact', useScenario: '测', needsAdmin: false, outputType: 'text' });
+    }
+    const p = getCommandProfile('exact', '/exact')!;
+    expect(p.observation_count).toBe(MATURITY_MIN_OBSERVATIONS);
+    expect(p.status).toBe('ready');          // ← 旧实现这里是 'learning'
+    expect(whyNotInvocable(p)).toBeNull();
+  });
+
+  it('差一次还不够（MIN_OBSERVATIONS - 1 → 仍 learning）', () => {
+    for (let i = 0; i < MATURITY_MIN_OBSERVATIONS - 1; i++) {
+      upsertCommandObservation({ botUsername: 'short', command: '/short', usageSyntax: '/short', useScenario: '测', needsAdmin: false, outputType: 'text' });
+    }
+    const p = getCommandProfile('short', '/short')!;
+    expect(p.status).toBe('learning');
+    expect(whyNotInvocable(p)).toBe('not_mature_count');
+  });
 });

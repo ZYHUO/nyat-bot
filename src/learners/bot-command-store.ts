@@ -35,8 +35,25 @@ const HARD_DENY_COMMANDS = new Set([
 const HARD_DENY_KEYWORDS = /(ban|kick|mute|admin|wallet|pay|transfer|withdraw|invite|lottery|抽奖|封禁|踢|禁言|转账|提现|管理员)/i;
 
 // 成熟度闸:观察够 N 次 + 置信度够,才允许首次真用
+/**
+ * 成熟门槛：观察次数 + 置信度**两个都要过**。
+ *
+ * ⚠️ 这两个数必须互相配着看，否则常数是说谎的。round 6（subagent 审计）实测：
+ * 初始置信度 0.35、每次观察 +0.15，于是 0.35 / 0.50 / **0.65** / 0.80——
+ * `MATURITY_MIN_OBSERVATIONS = 3` 写着 3，但 count=3 时置信度只有 0.65 < 0.7，
+ * **实际门槛是 4**。78 个 learning 行全部 count ≤ 3，一个都没被这道坎放过。
+ *
+ * 修法选"调初始置信度"而不是"把常数改成 4"：`MATURITY_MIN_OBSERVATIONS` 是
+ * 有意设的"至少看过三次"，那个意图是对的；错的是置信度阶梯没配上。
+ * 0.45 起步 → 0.45 / 0.60 / **0.75** / 0.90：count=2 时 0.60 不过，
+ * count=3 时 0.75 过 —— 常数 3 从此是真的 3。
+ */
 export const MATURITY_MIN_OBSERVATIONS = 3;
 export const MATURITY_MIN_CONFIDENCE = 0.7;
+/** 首次观察的置信度。必须让 `MIN_OBSERVATIONS` 次后刚好越过 `MIN_CONFIDENCE`。 */
+const CONFIDENCE_INITIAL = 0.45;
+const CONFIDENCE_STEP = 0.15;
+const CONFIDENCE_CAP = 0.95;
 // 可代发的回执形态(callback 按钮后的数据 bot 够不到)
 const USABLE_OUTPUT_TYPES = new Set(['text', 'url', 'media', 'mixed']);
 
@@ -101,7 +118,7 @@ export function upsertCommandObservation(p: {
         p.needsAdmin === undefined || p.needsAdmin === null ? null : (p.needsAdmin ? 1 : 0),
         p.outputType ?? 'unknown',
         p.peerAcceptsBot === undefined ? null : p.peerAcceptsBot ? 1 : 0,
-        0.35,
+        CONFIDENCE_INITIAL,
         blocked ? 'blocked' : 'learning',
         now,
       );
@@ -110,7 +127,7 @@ export function upsertCommandObservation(p: {
 
     // 已存在:观察 +1,置信度爬升(封顶 0.95),字段择新更新
     const newCount = existing.observation_count + 1;
-    const newConf = Math.min(0.95, existing.confidence + 0.15);
+    const newConf = Math.min(CONFIDENCE_CAP, existing.confidence + CONFIDENCE_STEP);
     // blocked 永远是 blocked;否则成熟后转 ready
     const newStatus =
       existing.status === 'blocked' || blocked

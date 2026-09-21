@@ -16,7 +16,24 @@ import type { FormattedMessage } from '../../shared/types.js';
 
 export const PENDING_KEY = (chatId: number): string => `xxb:delegation:${chatId}`;
 const COOLDOWN_KEY = (chatId: number): string => `xxb:delegation:cd:${chatId}`;
-const PENDING_TTL_SEC = 90;
+/**
+ * 未完成代发的回执等待窗口。
+ *
+ * 2026-09-22 round 6：90s → 180s。subagent 审计实测：生产里 4 次成功代发，
+ * **只有 1 次等到回执**（`Delegation: answered from receipt` ×1），
+ * 另外 3 次用户看到的是"我帮你问问~"然后**永远没有下文**——
+ * pending 到期静默消失，没有任何日志、没有任何补救。
+ *
+ * 翻日志那 3 次的形状：`/geo@uzumaru_geoip_bot` 发出去之后，
+ * 那个群此后再没有该 bot 的入站消息。是 peer 不理 bot 发的命令，
+ * 还是它回在 90s 之外——**分不清，因为过期时连一行日志都没有**。
+ *
+ * 所以两件事一起做：
+ *   ① 窗口翻倍到 180s（对查股价/IP 这类足够，又不至于让下一轮代发干等太久）
+ *   ② 下游 `claimPending`/回执匹配那边加"过期即 warn"，让"静默消失"变可观测
+ *      （见 tryClaimDelegationReceipt 的调用方 handleDelegationReceipt）
+ */
+const PENDING_TTL_SEC = 180;
 
 export interface PendingDelegation {
   bot: string;          // 目标 bot username(不含 @)
