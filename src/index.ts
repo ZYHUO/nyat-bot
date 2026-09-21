@@ -198,6 +198,23 @@ async function main(): Promise<void> {
       // Smart Group: 从 Redis 恢复历史健康数据(重启不丢,auto-assign 首日就有据可依)。
       // 内部 SMART_GROUP_ENABLED=false 时 no-op。
       await initSmartGroup();
+      // 清掉上一个进程留下的熔断账。
+      //
+      // round 87 实测：重启后前 5 分钟是全天最差的窗口——`all candidates skipped`
+      // 194 次（稳定期 36 次的 5 倍）、`Circuit breaker tripped` 62 次（稳定期
+      // 6 次的 10 倍）。原因不是零成功降权，是 `xxb:circuit:trip:*`（TTL 最长
+      // 1800s）和 `xxb:circuit:fail:*`（TTL 86400s、只有成功才重置）**活在
+      // Redis 里、跨重启不过期**——重启前被熔断的 label，重启后接着被熔断。
+      //
+      // 熔断器的语义是"这个 provider 此刻在失败，别锤它"。重启本身就是"此刻"
+      // 的天然边界：新进程该从干净状态开始，真还在失败的几十秒内会重新熔断。
+      try {
+        const { CooldownTracker } = await import('./ai/cooldown.js');
+        const cleared = await new CooldownTracker(redis).resetBreakerState();
+        if (cleared > 0) logger.info({ cleared }, 'Cleared stale breaker state from previous process');
+      } catch (err) {
+        logger.debug({ err }, 'breaker state reset failed (non-critical)');
+      }
       void bot.start({
         onStart: () => logger.info('Bot started (polling)'),
         // message_reaction 默认不推送（grammY 文档），显式开——feedback 回流靠它收 reward。
