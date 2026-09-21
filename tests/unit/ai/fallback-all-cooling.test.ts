@@ -129,6 +129,30 @@ describe('全候选被冷却跳过', () => {
       expect(callModelMock).not.toHaveBeenCalled();
     });
 
+    it('⑥f 后台批任务用 waitIfCooling 覆盖"带 maxTimeoutMs 就不等"', async () => {
+      // 2026-09-21：deep-reflection 一次 tick 15 群全灭，err 全是
+      // `All labels exhausted (all candidates cooling down)`，而最短冷却只有十几秒。
+      // 它设了 maxTimeoutMs（每跳封顶），于是拿不到等待重试。这个开关就是给它开的。
+      let n = 0;
+      isCoolingDownMock.mockImplementation(async () => { n++; return n <= 3; });
+      remainingMock.mockResolvedValue(5);
+      callModelMock.mockResolvedValue({ content: '{"ok":1}', label: 'primary', model: 'primary-model', latencyMs: 1, tokenUsage: { prompt: 1, completion: 1, total: 2 } });
+      const p = callWithFallback({ ...opts, maxTimeoutMs: 20000, waitIfCooling: true });
+      await vi.advanceTimersByTimeAsync(6000);
+      const r = await p;
+      expect(r.content).toBe('{"ok":1}');
+      expect(loggerMock.debug.mock.calls.some((c) => String(c[1]).includes('all candidates cooling'))).toBe(true);
+    });
+
+    it('⑥g waitIfCooling=false 时 maxTimeoutMs 仍然让它不等（显式关掉）', async () => {
+      isCoolingDownMock.mockResolvedValue(true);
+      remainingMock.mockResolvedValue(5);
+      await expect(
+        callWithFallback({ ...opts, maxTimeoutMs: 20000, waitIfCooling: false }),
+      ).rejects.toThrow(/cooling down/i);
+      expect(callModelMock).not.toHaveBeenCalled();
+    });
+
     it('⑥e 带外部 signal 的路径不等（调用方能取消，不该被 sleep 卡住）', async () => {
       const ac = new AbortController();
       isCoolingDownMock.mockResolvedValue(true);

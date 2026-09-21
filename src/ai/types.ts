@@ -100,6 +100,17 @@ export interface AICallOptions {
    */
   maxTimeoutMs?: number;
   /**
+   * 全链都在冷却时，等最短的那个醒来再试一次。
+   *
+   * 2026-09-21 加。`callWithFallback` 默认只在**没有** maxTimeoutMs / signal 时才等
+   * （那两条是延迟敏感路径的标志）。但后台批任务两者都设了——它们不怕等，
+   * 却因此拿不到这个重试。实测 deep-reflection 02:44 一次 tick 15 个群全灭，
+   * err 全是 `All labels exhausted (all candidates cooling down)`，而最短冷却只有十几秒。
+   *
+   * 后台任务显式传 true 覆盖那两条跳过条件。上界仍是 15s。
+   */
+  waitIfCooling?: boolean;
+  /**
    * Skip LLM metrics emission for this call (llmEvents). Used by synthetic/diagnostic
    * traffic (e.g. cache warmup) so it doesn't pollute the per-usage metrics it's meant to observe.
    */

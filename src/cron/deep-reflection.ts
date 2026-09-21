@@ -91,6 +91,10 @@ export async function reflectChat(chatId: number): Promise<{ tokens: number; rea
       // 每个都记一次失败，正是那次事故的形状。20s 下单跳正常 9s 完成，
       // 15 个群约 135s，仍在一个 tick 间隔（600s）内。
       maxTimeoutMs: 20000,
+      // 后台批任务：全链冷却时等最短的那个醒来再试。2026-09-21 实测一次 tick
+      // 15 个群全灭，err 全是 `All labels exhausted (all candidates cooling down)`，
+      // 而最短冷却只有十几秒——等一下就有一条能用。
+      waitIfCooling: true,
       allowHedge: false,
     });
     digest = result.content.trim().slice(0, 600);

@@ -179,7 +179,10 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   //
   // 只等一次、只等最短剩余冷却（上界 15s，别把调用方熬死）；调用方带了
   // maxTimeoutMs 的延迟敏感路径（heart/gate）不等——它们本来就该快速失败。
-  if (shortestCooldownSec > 0 && !options.maxTimeoutMs && !options.signal) {
+  // `waitIfCooling` 让后台批任务覆盖"有 maxTimeoutMs/signal 就不等"的默认——
+  // 它们不怕等，却因为设了那两条而被排除在这个重试之外。
+  const mayWait = options.waitIfCooling || (!options.maxTimeoutMs && !options.signal);
+  if (shortestCooldownSec > 0 && mayWait) {
     const waitSec = Math.min(shortestCooldownSec + 1, 15);
     logger.debug(
       { usage: options.usage, waitSec, candidates: smartOrderedNames },
