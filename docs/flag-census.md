@@ -136,7 +136,7 @@
 | judge | `REFLECTION_ENABLED` | false | true | ── 深度反思(A:把 StepFun 配额花在"让 bot 记住群里发生过什么")── 后台 cron 对活跃群喂大窗口历史 → 产出每群"近况摘要"注入回复。吞吐可调: token/天 ≈ CHATS_PER_TICK × (WINDOW×~15) × (1440/INTERVAL_MIN)。默 | cron/deep-reflection.ts, cron/scheduler.ts, pipeline/reply/reply.ts |
 | judge | `TURN_GATE_CONTINUATION` | false | true | P0-A 连续对话免检:gate continue / bot 回复后 N 秒内的后续消息跳过 gate LLM (对齐 MaiBot 连续 Planner 状态)。更新的 wait/no_action 负向决策自动终止免检。 | pipeline/heart/heart.ts, pipeline/timing/chat-runtime.ts, pipeline/timing/gate.ts |
 | life | `COGNITIVE_CLOCK_ENABLED` | false | true | 认知时钟：把模型自己的行动结果写进事件账本（own_action_result）， 并允许它记录"下次什么时候再想"（self_scheduled_wake）。 没有前者，模型看不见自己刚做过什么（自激事故的根因）；没有后者， 注意力主权在宿主手里，系统永远是被动应答器。 | tracking/self-history.ts |
-| life | `CONTROL_DIRECTIVE_ENABLED` | false | true | 控制指令(别理我/别理某人/可以说话了/记住X/忘掉X):typing 前用 LLM 听懂 → 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。 | pipeline/stages/deliver.ts |
+| life | `CONTROL_DIRECTIVE_ENABLED` | false | true | 控制指令(别理我/别理某人/可以说话了/记住X/忘掉X):typing 前用 LLM 听懂 → 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。 | meta/ingress-intercepts.ts, pipeline/stages/deliver.ts |
 | life | `MOOD_ENABLED` | false | true | ── Mood drift (Stage E) ── Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。 | tracking/mood.ts |
 | life | `MOOD_INJECT_ENABLED` | false | true | 是否把 mood hint 注入 reply prompt | tracking/mood.ts |
 | life | `NYATOS_BUDGET_ENABLED` | false | true | ── NyatOS 发言额度：宿主提供的物理节流，但模型可见 ── 2026-09-18 的 54 样本实测：单决策点在 28 分钟内想说 48 次（中位间隔 7 秒）， 即使明确告知"你刚发了 4 条没人回"仍然继续想说。所以旧 cooldown 的第二份 工作——防止自我重复失控——不能交给模型 | nyatos/budget.ts, pipeline/stages/deliver.ts, subagent/host-api.ts |
@@ -187,8 +187,8 @@
 | self | `UNIFIED_TICK_ABSENT_USERS_ENABLED` | false | true | unified-tick 熟面孔缺席检测(Opus 评审: 主动消息要有理由—— "想起某人三天没出现")。开启后世界状态会带 absentUsers, 决策模型可选 remember_user 动作。 | cron/unified-tick.ts |
 | social | `BOT_CLASSIFIER_ENABLED` | false | true | 入站 bot 消息分类层(A 多bot共存 / D 降噪 / 命令学习 的共用地基)。 先 shadow:打标 + 日志,不改任何行为;精度够了再让 A/D 消费。 | pipeline/pipeline.ts |
 | social | `BOT_COMMAND_LEARN_ENABLED` | false | true | ── 借力其他 bot(学其他 bot 的命令,需要时代发)── P1:观察学习每个 bot 的命令档案(怎么用/场景/needs_reply/needs_admin/output_type) | cron/bot-command-scan.ts, cron/scheduler.ts |
-| social | `BOT_COMMAND_ROUTER_ENABLED` | false | true | 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关; 依赖 BOT_DELEGATION_ENABLED。 | pipeline/command-router.ts, pipeline/stages/intercepts.ts |
-| social | `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | meta/bookkeeping.ts, pipeline/command-router.ts, pipeline/stages/intercepts.ts, pipeline/tools/bot-delegation.ts |
+| social | `BOT_COMMAND_ROUTER_ENABLED` | false | true | 「调用路由」:@bot/回复bot 且意图明确匹配某条 ready 已学命令 → 专职廉价 LLM 判一次、 命中就代发(脱离主回复模型的选工具)。保守触发、安全闸全在 tryDelegateCommand。默认关; 依赖 BOT_DELEGATION_ENABLED。 | meta/ingress-intercepts.ts, pipeline/command-router.ts, pipeline/stages/intercepts.ts |
+| social | `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | meta/bookkeeping.ts, meta/ingress-intercepts.ts, pipeline/command-router.ts, pipeline/stages/intercepts.ts |
 | social | `BOT_DENOISE_ENABLED` | false | true | D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习 (保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。 | pipeline/pipeline.ts |
 | social | `BOT_REPLY_DELEGATION_ENABLED` | true | true | 回复式代发(bots.command 带 replyToMessageId):让别的 bot 代罚。 默认开——它比 admin.kick 更窄:只能发"必须回复某条消息才生效"且学熟 (needs_reply=1 / needs_admin=0 / status=ready)的命令,且与 admi | pipeline/tools/bot-delegation.ts |
 | social | `MULTI_AGENT_CHAT_SPECIALISTS` | true | true | chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token; 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。 | pipeline/multiagent/orchestrator.ts |
