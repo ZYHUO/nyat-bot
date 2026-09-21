@@ -39,6 +39,15 @@ async function classify(text: string, ready: BotCommandProfile[]): Promise<Match
       usage: 'judge',
       maxTokens: 80,
       temperature: 0,
+      // round 4：原来没设 maxTimeoutMs，用 judge usage 自己的 45s。它 await 在
+      // `tryMetaIngressIntercepts` 的**同步路径**上——排在 sleep gate **之前**
+      // （message.ts:280 < :299）。provider 一慢，每一条入站消息都先在
+      // 分类这儿卡最多 45s，连"睡着了该静默"都排不到。
+      // 实测 2026-09-22 深夜：两条授权群消息进来后，日志停在 message in，
+      // 后面什么都不打，HTTP /health 20s 不响应。
+      // 分类只是"要不要借别的 bot 办事"的一个前置筛选，8s 足够；
+      // 超时就当不匹配，让消息正常走下去。
+      maxTimeoutMs: 8_000,
       messages: [
         { role: 'system', content: CLASSIFY_SYS.replace('{list}', buildList(ready)) },
         { role: 'user', content: text.slice(0, 500) },
