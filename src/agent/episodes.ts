@@ -8,6 +8,7 @@
 // ────────────────────────────────────────
 
 import { getDb } from '../db/sqlite.js';
+import { segment } from '../memory/lexical.js';
 import { logger } from '../shared/logger.js';
 
 export interface EpisodeInput {
@@ -148,27 +149,49 @@ export function findRelevantExperience(
   const { botId = 'self', allowShared = true } = opts ?? {};
   try {
     const db = getDb();
-    const tokens = query
-      .replace(/["'*():^]/g, ' ')
-      .split(/[\s，。、,.!?;；/\\-]+/)
-      .map((t) => t.trim())
+    // 用 Intl.Segmenter 分词，不用标点切。
+    //
+    // 2026-09-21：`findRelevantExperience` 和 skills 那个是同一种病——
+    // 按标点切中文等于把整句当一个 token，而 experience_fts 的写入侧是
+    // 触发器直接塞 raw content（没有预分词），FTS5 unicode61 把整段中文连续串
+    // 当一个 token，所以整句 token 一条都对不上。
+    // 实测：存的是「接话前未核对自身此前发言内容…禁止复读上一句…」，
+    // 查「接话前要注意不要复读上一句」返回 0 个。
+    //
+    // lexical.ts 里的 segment() 是这块代码里**已经验证过**的中文分词
+    // （memory_fts 两侧都用它，注释里记着 trigram 分词器查不到双字词的坑）。
+    // 这里复用它切查询侧，再用 LIKE 匹配 raw content——不依赖写入侧改造。
+    const tokens = segment(String(query ?? ''))
+      .split(' ')
       .filter((t) => t.length >= 2)
-      .slice(0, 6);
+      .slice(0, 8);
     if (!tokens.length) return [];
-    const ftsQuery = tokens.map((t) => `"${t}"`).join(' OR ');
     const whereShared = allowShared
       ? ` AND (e.origin_bot = ? OR (e.origin_bot != ? AND e.verified = 1))`
       : ` AND e.origin_bot = ?`;
-    const args = allowShared ? [ftsQuery, botId, botId, limit * 3] : [ftsQuery, botId, limit * 3];
-    const placeholders = allowShared ? 4 : 3;
+    // 命中多少个词就是相关度（比 BM25 rank 直白，这里也没有可借的索引）。
+    // scoreExpr 只在子查询里出现一次——在 SELECT 和 WHERE 各写一遍会让 `?`
+    // 的数量翻倍、参数静默错位（skills 那个修复里踩过）。
+    const scoreExpr = tokens
+      .map(() => `(CASE WHEN (e.content || ' ' || COALESCE(e.tags,'')) LIKE ? THEN 1 ELSE 0 END)`)
+      .join(' + ');
+    const likeParams = tokens.map((t) => `%${t}%`);
+    const args: Array<string | number> = allowShared
+      ? [...likeParams, botId, botId, limit * 3]
+      : [...likeParams, botId, limit * 3];
     const rows = db
       .prepare(
-        `SELECT e.id, e.content, e.kind, e.verified, e.origin_bot FROM experience_fts f
-         JOIN experience_entries e ON e.id = f.rowid
-         WHERE experience_fts MATCH ?${whereShared}
-         ORDER BY rank LIMIT ?`,
+        `SELECT * FROM (
+           SELECT e.id, e.content, e.kind, e.verified, e.origin_bot,
+                  (${scoreExpr}) AS score
+           FROM experience_entries e
+           WHERE 1 = 1${whereShared}
+         )
+         WHERE score > 0
+         ORDER BY score DESC, id ASC
+         LIMIT ?`,
       )
-      .all(...(args.slice(0, placeholders) as [string, string, number])) as { id: number; content: string; kind: string; verified: number; origin_bot: string }[];
+      .all(...args) as { id: number; content: string; kind: string; verified: number; origin_bot: string; score: number }[];
     if (!rows.length) return [];
     // FTS rank(相关性)优先,但 verified=2(可疑)降权排最后,verified=1(已证实)优先。
     const sorted = [...rows].sort((a, b) => {

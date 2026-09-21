@@ -1132,6 +1132,40 @@ Two fixes:
 The existing assertion `expect(callArg.maxTokens).toBeLessThanOrEqual(1200)` had been
 pinning the very budget that caused the failure.
 
+### Experience recall had the same bug — and the codebase already had the cure
+
+Round 60 fixed `skills_fts`. Asking "same cause elsewhere?" over the four FTS5 tables
+showed the write side differs per table:
+
+| table | write side | query side | |
+|---|---|---|---|
+| `memory_fts` | `segment()` | `segment()` | ok |
+| `session_digests_fts` | pre-segmented `seg` column | `segment()` | ok |
+| `skills_fts` | trigger, raw fields | punctuation split | **fixed r60** |
+| `experience_fts` | trigger, raw content | punctuation split | **broken** |
+
+`experience_fts` had exactly the round-60 bug: the trigger stores raw content, the query
+splits on punctuation, and Chinese has none — so every clause is one token that can never
+equal a field. Stored: 「接话前未核对自身此前发言内容…禁止复读上一句…」; queried
+「接话前要注意不要复读上一句」→ 0 hits.
+
+The fix reuses `segment()` from `src/memory/lexical.ts` — the segmenter the memory path
+already validated, whose header comment records that FTS5's `trigram` tokenizer cannot
+find two-character Chinese words at all. Query side segmented, matched with `LIKE` against
+the raw content so the write side needs no migration.
+
+Two things worth recording:
+
+- **The default `botId` is a footgun.** `findRelevantExperience` defaults to `'self'`,
+  but every stored row has `origin_bot = 'hunhebi_bot'` (from `BOT_USERNAME`). Querying
+  with the default returns nothing and looks exactly like the tokenizer bug. Production
+  passes `env().BOT_USERNAME` so it is fine, but a probe that forgets it will mislead you
+  — mine did, twice, before I checked the data.
+- `allowShared` defaults to **true**, meaning "also return other bots' *verified*
+  experiences". That is the production intent (`EXPERIENCE_SHARE_ENABLED`), but it means
+  a cross-bot query still returns hits — which reads like a leak until you read the
+  `verified = 1` guard.
+
 ### Skill recall had never worked — the FTS tokenizer eats Chinese
 
 `skill recall injected` appeared **zero** times in the whole log, while the skills table
