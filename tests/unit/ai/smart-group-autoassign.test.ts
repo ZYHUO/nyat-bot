@@ -499,4 +499,45 @@ describe('选路：零成功 demote + vision 严格过滤', () => {
       expect(chain).not.toContain('slow');
     });
   });
+
+  // round 102：成功率不达标的不进链（judge 门槛 60%、样本 20）。
+  //
+  // 起因：round 98 只加了"够快"（延迟上限），把两个慢但稳的（spark13 19.8s /
+  // amdqwen 5.9s，实测 19/20、20/20）挡掉，换进来三个快但错的。同窗口 22 次错误
+  // 全来自替补位。所以链位有两个条件：够快 + 够稳。
+  //
+  // 第一版用累计 successCount/(succ+err)，结果把 stepfunvision（同窗口 71 成 0 败）
+  // 也踢出去了——它的累计账里背着整段 7864 断额、整段外网中断、整段并发风暴。
+  // 和 round 87 的熔断键同病：旧状态押着新时段。改成窗口化 recentOutcomes。
+  describe('成功率不达标剔除', () => {
+    const seed = async (n: string, ring: number[]) => {
+      const mod = await import('../../../src/ai/smart-group.js');
+      (mod as unknown as { __recordHealthForTest: (n: string, lat: number[], extra: Record<string, unknown>) => void })
+        .__recordHealthForTest(n, [1000], { recentOutcomes: ring });
+    };
+
+    it('① 窗口成功率低于 60% 的被剔除', async () => {
+      setLabels([makeLabel('good', { tier: 'medium' }), makeLabel('bad', { tier: 'medium' })]);
+      await seed('good', Array(20).fill(1));
+      await seed('bad', [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // 10%
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('good');
+      expect(chain).not.toContain('bad');
+    });
+
+    it('② 样本不足 20 次时不判（新 provider 仍然进得来）', async () => {
+      setLabels([makeLabel('newcomer', { tier: 'medium' })]);
+      await seed('newcomer', [0, 0, 0]); // 全败，但只有 3 个样本
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('newcomer');
+    });
+
+    it('③ 窗口化而非累计：早期失败多、近期全成的 label 照样进', async () => {
+      setLabels([makeLabel('recovered', { tier: 'medium' })]);
+      // 累计看是 8/28 = 29%，但窗口（最近 20）是 20/20 = 100%
+      await seed('recovered', [...Array(8).fill(0), ...Array(20).fill(1)]);
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('recovered');
+    });
+  });
 });

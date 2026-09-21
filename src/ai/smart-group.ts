@@ -48,6 +48,18 @@ interface LabelHealth {
   errorCount: number;
   successCount: number;
   lastUsed: number;
+  /**
+   * 最近 N 次的结果（1=成 0=败），窗口化和 latencies 同样处理。
+   *
+   * 为什么不能直接用 successCount/(successCount+errorCount)：
+   * 那两个是**累计值**，会把几个月前的故障一直背在身上。round 102 实测——
+   * 加上成功率门槛后，`stepfunvision`（同窗口 71 成 0 败）反而被踢出链，
+   * 因为它的累计账里有整段 7864 断额、整段外网中断、整段并发风暴的失败。
+   *
+   * 这跟 round 87 的熔断键是同一个病：**旧状态押着新进程/新时段**。
+   * 窗口化之后，率反映"最近怎么样"，累计值只留作诊断。
+   */
+  recentOutcomes?: number[];
 }
 
 const memoryHealth = new Map<string, LabelHealth>();
@@ -135,6 +147,9 @@ export function recordSmartGroupResult(labelName: string, latencyMs: number, suc
     h.errorCount++;
     if (h.errorCount >= 5) h.healthy = false;
   }
+  h.recentOutcomes = h.recentOutcomes ?? [];
+  h.recentOutcomes.push(success ? 1 : 0);
+  if (h.recentOutcomes.length > cfg.windowSize) h.recentOutcomes.shift();
 
   persistToRedis(labelName, h).catch(() => {});
 }
@@ -266,6 +281,25 @@ interface UsageProfile {
    * 接住要花 20 秒等于没接住。这个字段让那条规则可执行，而不是靠人去记。
    */
   maxMedianLatencyMs?: number;
+  /**
+   * 成功率下限（0-1）。**样本够了而不达标的不进链**。
+   *
+   * 2026-09-21 round 101 实测：round 98 加了延迟上限之后，judge 链变成
+   * `stepfunvision grok45med glm53flash scnet`——两个"慢但稳"的
+   * （spark13 19.8s / amdqwen 5.9s，实测 19/20 和 20/20 成功）被挡掉，
+   * 换进来三个"快但错"的。同窗口 22 次错误**全来自替补位**
+   * （grok45med 6 / scnet 5 / kimi 4 / gemini37flash 3 / dsv4flash 2 /
+   * dsv4exp 2），第一位 stepfunvision 一次没错。
+   *
+   * 所以链位的条件有两个：**够快**（maxMedianLatencyMs）和**够稳**（这个）。
+   * round 98 只实现了前者，于是把稳的换成了快的。
+   *
+   * 样本不足（< minSamples）时不判——新 provider 仍然进得来，
+   * 和延迟上限一样：没数据不拦，有数据按数据办。
+   */
+  minSuccessRate?: number;
+  /** 判成功率所需的最少样本数，默认 20。 */
+  minSamples?: number;
   /** vision=true 时只保留 capabilities.vision !== false 的 label。 */
   vision: boolean;
   /**
@@ -289,12 +323,12 @@ interface UsageProfile {
 const USAGE_PROFILES: Record<string, UsageProfile> = {
   reply:       { minTier: 'high',   vision: false, video: false, count: 5 },
   reply_pro:   { minTier: 'high',   vision: false, video: false, count: 5 },
-  judge:       { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000 },
-  summarize:   { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000 },
+  judge:       { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000, minSuccessRate: 0.6, minSamples: 20 },
+  summarize:   { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000, minSuccessRate: 0.6, minSamples: 20 },
   vision:      { minTier: 'medium', vision: true,  video: false, count: 3 },
   audio:       { minTier: 'medium', vision: false, video: false, count: 2 },
   deep_think:  { minTier: 'high',   vision: false, video: false, count: 3 },
-  reflection:  { minTier: 'medium', vision: false, video: false, count: 3, maxMedianLatencyMs: 15_000 },
+  reflection:  { minTier: 'medium', vision: false, video: false, count: 3, maxMedianLatencyMs: 15_000, minSuccessRate: 0.6, minSamples: 20 },
   mundo:       { minTier: 'high',   vision: false, video: false, count: 2 },
   // 视频理解（2026-09-21）：count=2 就够——真能看的供应商本来就少，
   // 凑长度只会把不能看的塞进来。
@@ -369,6 +403,19 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
     if (profile.maxMedianLatencyMs) {
       const med = medianOf(memoryHealth.get(name)?.latencies ?? []);
       if (med > profile.maxMedianLatencyMs) continue;
+    }
+    // **成功率不达标的不进链。** 见 UsageProfile.minSuccessRate 的长注释。
+    // 样本不够（< minSamples）时不判——新 provider 仍然进得来。
+    if (profile.minSuccessRate) {
+      const h = memoryHealth.get(name);
+      // 用**窗口化**的最近结果，不用累计 successCount/errorCount——
+      // 累计值会把很久以前的故障一直背着（见 LabelHealth.recentOutcomes 的注释）。
+      const ring = h?.recentOutcomes ?? [];
+      const need = profile.minSamples ?? 20;
+      if (ring.length >= need) {
+        const okInWindow = ring.reduce((a, b) => a + b, 0);
+        if (okInWindow / ring.length < profile.minSuccessRate) continue;
+      }
     }
     if (profile.vision && label.capabilities?.vision !== true) continue;
     // video：没声明 true 的一律排除（理由见 UsageProfile.video）。
