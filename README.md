@@ -12,6 +12,55 @@ and 4 test-only phantoms; all of them are now gone — `dead_and_on` and
 `phantom_only_in_tests` are both **0**, and `tests/unit/env/no-dead-switches.test.ts`
 fails the build if either stops being true.
 
+## v1.1 — the second audit cycle (2026-09-22)
+
+A two-subagent audit of the whole project produced ~25 findings. The recurring
+disease: **something advertised or recorded that does not match what actually
+runs.** Seven instances, all now fixed:
+
+| round | the claim | the reality | fix |
+|---|---|---|---|
+| 3 | `tryAntiAdCommand` wired | only into the **legacy** pipeline — the round-135 fix for the previous wiring bug had the same bug | wired into `meta/ingress-intercepts.ts` |
+| 3 | granting anti-ad enables `[噪声]` | `noteInbound` gated by a global `ANTIAD_ENABLED` (default false, unset) → an empty panel forever | per-chat key is the authorisation; the global flag only batch-opens |
+| 3 | learning watermark advances safely | advanced past pairs the LLM silently dropped → 44 of 78 learning profiles frozen at count 1 | advance only to the highest `messageId` actually upserted |
+| 3 | `bots.command` is used | 0 model invocations, **and no telemetry on either path** | `countTool` + log both outcomes |
+| 5 | `needs_admin` conservative default | null/absent stored as `1` = permanently non-delegable; 30 profiles | `null` means "unknown", not "requires admin" |
+| 9 | "current = /spam@nmnmfunbot" | a 2026-09-20 snapshot, silently stale | rendered live from `listReplyInvocableCommands()` |
+| 10 | "use python3.10 (has PIL), not python3" | **exactly backwards** — python3.10 has no PIL, python3 has 12.3.0 | a criterion, not a hard-coded name |
+
+Plus the two biggest, both found by watching logs:
+
+- **`Memory write failed` 2280/day** — not Qdrant. Classified all 2280 by
+  `err.stack`: 10 had Qdrant frames, 1834 showed `TLSSocket` (the only TLS
+  fetch on that path is the HuggingFace weight download). The embedding's
+  `onnx/model_quantized.onnx` had **never been cached**, so every process
+  re-pulled 23 MB through a proxy that kills TLS at exactly 5.00 s. 2261 of
+  2280 points genuinely absent → real data loss. Fixed by fetching the
+  weights with `curl -C -` (46.5 MB) so `local_files_only` engages.
+- **`art.draw` 0% success** — two stacked causes: `AI_USAGE_ARTIST_LABEL` was
+  deleted along with its provider (another "deleted the thing, not the
+  reference"), and auto-assign put a reasoning model at the head with only
+  4096 tokens. Both fixed; two real smoke runs produced correct 2048×1536 PNGs.
+
+### The transferable rule from this cycle
+
+**Advertised ≠ reachable ≠ usable.** Three different properties, and this repo
+kept having only one of them:
+
+```
+terminalEnabled: true   → switched on, bwrap missing
+vision: true            → declared, request format wrong
+bots.command            → implemented, model never picks it
+a label answers         → 17 s median, every caller times out at 10-20 s
+python3.10 has PIL      → the opposite interpreter has it
+```
+
+The check that worked every time was the same: **go and make it run once, then
+read what it actually did** — and when that is impossible, write "unknown"
+rather than picking the plausible story. Subagents were used for the sweep;
+what they found that solo reading had missed for 100+ rounds was mostly
+*combinations* (a flag that is on, a reader that exists, a parent that is off).
+
 ### What v1.0 looks like in production (2026-09-22)
 
 | | |
