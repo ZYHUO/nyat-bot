@@ -300,6 +300,11 @@ interface UsageProfile {
   minSuccessRate?: number;
   /** 判成功率所需的最少样本数，默认 20。 */
   minSamples?: number;
+  /**
+   * "零成功"档的样本数：窗口里一个成功的都没有、且试过这么多次 → 不进链。
+   * 比 minSamples 小得多，因为**零成功是强信号**（见下面的实现注释）。
+   */
+  minZeroOkSamples?: number;
   /** vision=true 时只保留 capabilities.vision !== false 的 label。 */
   vision: boolean;
   /**
@@ -412,6 +417,16 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
       // 累计值会把很久以前的故障一直背着（见 LabelHealth.recentOutcomes 的注释）。
       const ring = h?.recentOutcomes ?? [];
       const need = profile.minSamples ?? 20;
+      // 两档判据。**零成功是强信号，不需要等满 20 个样本**：
+      // round 105 实测——round 102 上線后，替补位 dsv4exp / grok45med / scnet /
+      // grok43vision / wbdsv41free 各自 1-3 个样本、**全是败**，而门槛要 20 个样本
+      // 才动作。也就是说每一条坏替补还要再烧十几个超时才会被挡下。
+      //
+      // 一档：从没成功过且已试过 >= minZeroOkSamples 次 → 直接不进链。
+      // 二档：样本够了按窗口成功率判。
+      // 两条都不拦"没数据的"——新 provider 仍然进得来（和延迟上限同一条原则）。
+      const zeroOkNeed = profile.minZeroOkSamples ?? 5;
+      if (ring.length >= zeroOkNeed && ring.every((v) => v === 0)) continue;
       if (ring.length >= need) {
         const okInWindow = ring.reduce((a, b) => a + b, 0);
         if (okInWindow / ring.length < profile.minSuccessRate) continue;

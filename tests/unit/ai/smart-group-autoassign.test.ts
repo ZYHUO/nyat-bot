@@ -510,12 +510,12 @@ describe('选路：零成功 demote + vision 严格过滤', () => {
   // 也踢出去了——它的累计账里背着整段 7864 断额、整段外网中断、整段并发风暴。
   // 和 round 87 的熔断键同病：旧状态押着新时段。改成窗口化 recentOutcomes。
   describe('成功率不达标剔除', () => {
-    const seed = async (n: string, ring: number[]) => {
+    /** 往健康账里塞窗口化结果。 */
+    const seed = async (n: string, ring: number[]): Promise<void> => {
       const mod = await import('../../../src/ai/smart-group.js');
       (mod as unknown as { __recordHealthForTest: (n: string, lat: number[], extra: Record<string, unknown>) => void })
         .__recordHealthForTest(n, [1000], { recentOutcomes: ring });
     };
-
     it('① 窗口成功率低于 60% 的被剔除', async () => {
       setLabels([makeLabel('good', { tier: 'medium' }), makeLabel('bad', { tier: 'medium' })]);
       await seed('good', Array(20).fill(1));
@@ -538,6 +538,22 @@ describe('选路：零成功 demote + vision 严格过滤', () => {
       await seed('recovered', [...Array(8).fill(0), ...Array(20).fill(1)]);
       const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
       expect(chain).toContain('recovered');
+    });
+
+    it('④ 零成功是强信号：5 次全败就挡，不用等满 20 个样本', async () => {
+      setLabels([makeLabel('good', { tier: 'medium' }), makeLabel('neverworks', { tier: 'medium' })]);
+      await seed('good', Array(20).fill(1));
+      await seed('neverworks', [0, 0, 0, 0, 0]); // 只有 5 个样本，但一个都没成
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('good');
+      expect(chain).not.toContain('neverworks');
+    });
+
+    it('⑤ 但 4 次全败还不挡（样本不够，可能是新 provider 运气差）', async () => {
+      setLabels([makeLabel('newcomer', { tier: 'medium' })]);
+      await seed('newcomer', [0, 0, 0, 0]);
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('newcomer');
     });
   });
 });
