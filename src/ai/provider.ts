@@ -82,13 +82,33 @@ export function __resetTruncatingLabelsForTest(): void {
   truncatingLabels.clear();
 }
 
+/**
+ * 这个 label 是不是 reasoning 模型（思维链计入 completion）。
+ *
+ * 为什么要一个判断而不只靠"观测到截断"：下限原本是**反应式**的——撞了才学。
+ * 但 round 12 把 topic-scan 的 24 修掉之后，**唯一在触发的那个也不触发了**，
+ * 下限随之失效，于是 post-task 的 `maxTokens: 200` 又开始被吃光
+ * （24h 内 1480 次 `Empty response`）。
+ * 反应式下限的问题是：它依赖"有别人在撞"，而别人都被修好那天它就瞎了。
+ *
+ * StepFun 全系（step-3.5/3.7-flash、step-5-preview）都是 reasoning，
+ * 而 judge/summarize/reflection 的默认 label 正是它们。按模型名认，
+ * 不硬编码 label 名单——label 会增删，模型名不会。
+ */
+function isReasoningModel(label: AILabel): boolean {
+  return /^step-/i.test(label.model);
+}
+
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean },
 ): Promise<AICallResult> {
   const asked = opts.maxTokens ?? 4096;
-  const budget = truncatingLabels.has(label.name) ? Math.max(asked, REASONING_TOKEN_FLOOR) : asked;
+  // reasoning 模型一律托底下限：**不是**只对撞过的。
+  // 上面 isReasoningModel 的注释解释了为什么反应式不够。
+  const needsFloor = isReasoningModel(label) || truncatingLabels.has(label.name);
+  const budget = needsFloor ? Math.max(asked, REASONING_TOKEN_FLOOR) : asked;
   const first = await callClaudeOnce(label, messages, { ...opts, maxTokens: budget });
 
   // 截断重试：`stop_reason === 'max_tokens'` 且正文为空 = 思维链把额度吃光，

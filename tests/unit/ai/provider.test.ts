@@ -220,7 +220,7 @@ describe('callModel', () => {
     // 24 来自 topic-scan（"用 4-12 个汉字起个标签"于是写 maxTokens: 24）。
     // reasoning 模型思维链先烧 token，24 连一句"让我想想"都不够。
     // 上一轮的"翻倍重试"在这里也不够：24→48 照样空（诊断里 48 出现 73 次）。
-    describe('reasoning 下限（观测到截断的 label 自动抬到 1200）', () => {
+    describe('reasoning 下限（reasoning 模型一律托底，撞过的也记）', () => {
       const truncOnce = (stopReason = 'max_tokens') => new Response(
         JSON.stringify({
           content: [{ type: 'thinking', thinking: '想了很多但没来得及说' }],
@@ -238,6 +238,50 @@ describe('callModel', () => {
         { status: 200, headers: { 'ContentType': 'application/json' } },
       );
 
+      it('reasoning 模型的 label → 小额度直接被托底（不需要先撞一次）', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();   // 清空"撞过"的记忆
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(okOnce());
+        }));
+        // claudeLabel 的 model 是 step-5-preview → reasoning
+        await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 200 });
+        expect(calls).toEqual([1200]);   // 第一次就直接是下限，不是 200
+      });
+
+      it('非 reasoning 模型不受下限影响（尊重显式小额）', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const plain = { ...claudeLabel, name: 'plain', model: 'gpt-4o-mini' };
+        const calls: number[] = [];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          return Promise.resolve(okOnce());
+        }));
+        await callModel(plain, [{ role: 'user', content: '判断' }], { maxTokens: 200 });
+        expect(calls).toEqual([200]);   // 原样，不抬
+      });
+
+      it('撞过的非 reasoning label 也被托底（学习仍然有效）', async () => {
+        const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
+        __resetTruncatingLabelsForTest();
+        const plain = { ...claudeLabel, name: 'plain2', model: 'gpt-4o-mini' };
+        const calls: number[] = [];
+        let n = 0;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
+          calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
+          n++;
+          return Promise.resolve(n === 1 ? truncOnce() : okOnce());
+        }));
+        await callModel(plain, [{ role: 'user', content: '判断' }], { maxTokens: 200 });  // 撞一次 → 学会
+        calls.length = 0;
+        await callModel(plain, [{ role: 'user', content: '判断' }], { maxTokens: 200 });  // 第二次直接托底
+        expect(calls).toEqual([1200]);
+      });
+
+
       it('重试用下限（1200）而不是 2×——24 翻倍成 48 照样不够', async () => {
         const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
         __resetTruncatingLabelsForTest();
@@ -251,7 +295,7 @@ describe('callModel', () => {
         }));
         const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 24 });
         expect(r.content).toBe('{"ok":1}');
-        expect(calls).toEqual([24, 1200]); // 第一次照调用方的 24，重试直接抬到下限
+        expect(calls).toEqual([1200, 2400]); // reasoning 模型第一次就托底；仍截断则重试翻倍
       });
 
       it('记住之后，同一个 label 的后续调用直接拿下限（不再先撞一次）', async () => {
@@ -267,9 +311,9 @@ describe('callModel', () => {
         }));
         await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
         await callModel(claudeLabel, [{ role: 'user', content: 'b' }], { maxTokens: 24 });
-        // 第三次应该直接用 1200，不再先发 24 撞一次
+        // 每次都直接是下限——reasoning 模型不需要先撞一次
         await callModel(claudeLabel, [{ role: 'user', content: 'c' }], { maxTokens: 24 });
-        expect(calls).toEqual([24, 1200, 1200, 1200]);
+        expect(calls).toEqual([1200, 2400, 1200, 1200]);
       });
 
       it('调用方已经给了大于下限的值 → 不压（尊重显式配置）', async () => {
@@ -288,15 +332,16 @@ describe('callModel', () => {
         expect(calls).toEqual([8000, 16000]);
       });
 
-      it('没截断过的 label 完全不受影响（零额外成本）', async () => {
+      it('没截断过的**非 reasoning** label 完全不受影响（零额外成本）', async () => {
         const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
         __resetTruncatingLabelsForTest();
+        const plain = { ...claudeLabel, name: 'plain3', model: 'gpt-4o-mini' };
         const calls: number[] = [];
         vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init: RequestInit) => {
           calls.push((JSON.parse(init.body as string) as { max_tokens: number }).max_tokens);
           return Promise.resolve(okOnce());
         }));
-        await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
+        await callModel(plain, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
         expect(calls).toEqual([24]); // 原样，不抬
       });
 
@@ -310,10 +355,10 @@ describe('callModel', () => {
         }));
         const r = await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
         expect(r.content).toBe('');
-        expect(calls).toEqual([24, 1200]);
-        // 第三次直接 1200（记住了，不再先发 24 撞一次）；1200 也截断 → 重试 2× = 2400
+        expect(calls).toEqual([1200, 2400]);
+        // reasoning 模型本来就托底，"记住"对它无额外影响：第三次仍是 1200/2400
         await callModel(claudeLabel, [{ role: 'user', content: 'b' }], { maxTokens: 24 });
-        expect(calls).toEqual([24, 1200, 1200, 2400]);
+        expect(calls).toEqual([1200, 2400, 1200, 2400]);
       });
     });
 

@@ -492,7 +492,17 @@ console.log('');
         const parts = [...byOutcome.entries()].map(([k, v]) => `${k}=${v}`).join('  ');
         console.log(`  按 outcome: ${parts}`);
       }
-      if (total >= 20 && rate > 25) {
+      // realtime-learn：区分"没跑"和"跑了但没什么可记"
+    const rlRun = [...text.matchAll(/^realtime_learn_runs_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    const rlSaved = [...text.matchAll(/^realtime_learn_episodes_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    if (rlRun > 0 || rlSaved > 0) {
+      console.log(`  realtime-learn: 跑 ${rlRun} 次｜抽出 episode ${rlSaved} 条`);
+      if (rlRun > 0 && rlSaved === 0) {
+        console.log('    （跑了但一条都没抽出来 = 模型判定这些来回不值得记，不是没跑。'
+          + '2026-09-21 探针直接调 learnFromReply 传一段有内容的来回也返回 0，确认是这个原因。）');
+      }
+    }
+    if (total >= 20 && rate > 25) {
         console.log('  ⚠️ 失败率偏高——但注意这是"每次尝试"的口径，一次 callWithFallback 可能试多跳。');
         console.log('     看上面 2. 节的心流失败率（那是"最终有没有拿到结果"的口径）判断实际影响。');
       }
