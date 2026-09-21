@@ -317,6 +317,19 @@ if (st.lastAwakeMs > 0) {
   console.log('');
 }
 
+// **重启低谷提示。** round 87 实测：重启后前 5 分钟的 `all candidates skipped`
+// 是稳定期的 5 倍、`Circuit breaker tripped` 是 10 倍——因为熔断/冷却键活在
+// Redis 里跨重启不过期（已修，但重启后的几十秒内真失败的 provider 还会重新熔断）。
+// 所以"部署后"那一列在头几分钟里读到的不是稳态，是低谷。
+// 不写这一句，一段刚重启后的糟糕数字会被当成"修复没生效"。
+if (deployMs > 0 && Date.now() - deployMs < 10 * 60_000) {
+  const mins = ((Date.now() - deployMs) / 60_000).toFixed(0);
+  console.log(`⚠️  距上次重启才 ${mins} 分钟——"部署后"那一列现在是**重启低谷**，不是稳态`);
+  console.log('    （熔断键已改为启动时清理，但真在失败的 provider 几十秒内会重新熔断）。');
+  console.log('    想看稳态效果，等 10 分钟以上再跑，或看全窗口那一列。');
+  console.log('');
+}
+
 if (deployMs > 0) {
   const fmt = (t: number): string => new Date(t).toISOString().replace('T', ' ').slice(11, 16);
   console.log(`最近一次部署: ${new Date(deployMs).toISOString().replace('T', ' ').slice(0, 16)} UTC` +
