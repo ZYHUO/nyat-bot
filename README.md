@@ -7,10 +7,38 @@
 Not a bot that responds when poked — an agent that hangs out, reads the room, and only speaks when it has something worth saying.
 
 **v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — **488 env keys, 216
-boolean flags, 187 live in production**. The audit that produced it found 9 dead switches
+boolean flags, 188 live in production**. The audit that produced it found 9 dead switches
 and 4 test-only phantoms; all of them are now gone — `dead_and_on` and
 `phantom_only_in_tests` are both **0**, and `tests/unit/env/no-dead-switches.test.ts`
 fails the build if either stops being true.
+
+### What v1.0 looks like in production (2026-09-22)
+
+| | |
+|---|---|
+| **Architecture share** | legacy reply engine **16 / 9131 = 0.18%** of inbound; the other 2.3% of legacy exits are bot denoise, which is its job |
+| **Reply frequency** | **8.2 per 100 inbound** (session start: 14.5). Post-deploy, **0 tasks exceeded the 6-message budget** (was 79) |
+| **Cron yield** | episode distillation **~74%** (was 13%), heart verdicts ~62%, topic-scan extraction ~27% (was 4.5%) |
+| **Provider pool** | **8 labels**, all verified by direct probe. `step5` + `dshkimi` are the two that declare `supports_video_in`; `video → step5 → dshkimi`, `vision → stepfunvision → step5 → dshkimi` |
+| **Search** | StepFun **MCP** `web_search` is the primary route (`/step_plan/v1/mcp/web_search/mcp`), REST as second, then grok / SearxNG / DDG. All-routes-down now says so instead of returning "no results" |
+| **Tool telemetry** | `host_tool_calls_total{tool,outcome}` covers `sendText` / `web.search` / `admin.*` / `chats.find` / `computer.*` / `bots.command`; the session report prints a per-tool success table |
+| **Gates on chain membership** | three, all with deterministic tests: capability (tier/vision/video), **median-latency ceiling**, **windowed success-rate floor** — plus a zero-success fast path (5 straight failures) |
+
+### The one lesson that paid for itself most often
+
+**A field named after a feature does not declare that the feature works.**
+`terminalEnabled: true` while bwrap is missing (round 79). `vision: true` while the
+request format is wrong (round 45). A flag with a reader inside a branch its parent
+switched off (round 73). A tool that answers while its upstream is unreachable
+(round 123 — search reported "no results" for three days because all four routes were
+down). A deterministic command wired only into the legacy pipeline — twice, the second
+time by the fix for the first (rounds 74/75, then 135, caught by a subagent audit in
+round 3 of the v1.0 cycle).
+
+Every one of those was a *green* check, a *passing* test, or an honest-looking log line.
+The counter-measure that worked was always the same: **go and make the thing run, then
+read what it actually did** — and when that is impossible, say "unknown" rather than
+picking the plausible story.
 
 (Numbers verified against `python3 scripts/flag-census.py` on 2026-09-21. The census is
 regenerated, not hand-edited — if you change a flag, re-run it rather than trusting the

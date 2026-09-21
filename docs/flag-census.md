@@ -22,7 +22,7 @@
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 20 | Turn Actor + Agentic planner + 中期记忆 |
 | `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 45 | 18 | 17 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 51 | 21 | 18 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
-| `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 22 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
+| `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 23 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 36 | 14 | 13 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
 ## 总量
@@ -31,13 +31,13 @@
 |---|---|
 | total_keys | 488 |
 | bool_flags | 216 |
-| on_in_prod | 187 |
-| set_in_env | 324 |
+| on_in_prod | 188 |
+| set_in_env | 314 |
 | dead_no_reader | 5 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
-**216 个布尔旗标里，生产实际开着 187 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**216 个布尔旗标里，生产实际开着 188 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -57,7 +57,7 @@
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
 
-## 生产开着的旗标（187 个）
+## 生产开着的旗标（188 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
@@ -191,14 +191,15 @@
 | social | `BOT_DELEGATION_ENABLED` | false | true | P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户" | meta/bookkeeping.ts, meta/ingress-intercepts.ts, pipeline/command-router.ts, pipeline/stages/intercepts.ts |
 | social | `BOT_DENOISE_ENABLED` | false | true | D 选择性降噪:对 ad/verify/echo 类其他 bot 消息,跳过 judge/digest/学习 (保留进 ctx,不删)。依赖 BOT_CLASSIFIER_ENABLED 的 botClass。默认关。 | pipeline/pipeline.ts |
 | social | `BOT_REPLY_DELEGATION_ENABLED` | true | true | 回复式代发(bots.command 带 replyToMessageId):让别的 bot 代罚。 默认开——它比 admin.kick 更窄:只能发"必须回复某条消息才生效"且学熟 (needs_reply=1 / needs_admin=0 / status=ready)的命令,且与 admi | pipeline/tools/bot-delegation.ts |
-| social | `MULTI_AGENT_CHAT_SPECIALISTS` | true | true | chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token; 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。 | pipeline/multiagent/orchestrator.ts |
-| social | `MULTI_AGENT_CHECKER_ENABLED` | true | true | Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。 | pipeline/multiagent/orchestrator.ts |
-| social | `MULTI_AGENT_CONTEXT_DIGEST_ENABLED` | true | true | 上下文理解专家:忙群(最近消息数 ≥ 阈值)先把最近 N 条 digest 成"现在在聊啥" 给写手,降写手 prompt 噪音 + 多吃一次 token。全路由并行。 | pipeline/multiagent/orchestrator.ts |
-| social | `MULTI_AGENT_CRITIC_ENABLED` | true | true | Phase 4 Critic:草稿二审,不行回炉(deep 总是跑;lookup 默认关)。回炉轮数上限。 | pipeline/multiagent/orchestrator.ts |
-| social | `MULTI_AGENT_DIRECTOR_ENABLED` | true | true | 导演专家(写手前):读上下文+念头,产出"情绪/姿态/切入点"块喂写手。全路由并行。 | pipeline/multiagent/orchestrator.ts |
-| social | `MULTI_AGENT_MEMORY_ENABLED` | true | true | Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_CHAT_SPECIALISTS` | true | None | chat 路径也跑记忆员+人设员+导演(direct 闲聊也带 grounding,多走 agentic、多吃 token; 嫌延迟可关)。研究员/核查/Critic 仍只在 lookup/deep。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_CHECKER_ENABLED` | true | None | Phase 3 核查员:核查研究员产出(lookup + deep 路径跑,有研究员素材才跑)。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_CONTEXT_DIGEST_ENABLED` | true | None | 上下文理解专家:忙群(最近消息数 ≥ 阈值)先把最近 N 条 digest 成"现在在聊啥" 给写手,降写手 prompt 噪音 + 多吃一次 token。全路由并行。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_CRITIC_ENABLED` | true | None | Phase 4 Critic:草稿二审,不行回炉(deep 总是跑;lookup 默认关)。回炉轮数上限。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_DIRECTOR_ENABLED` | true | None | 导演专家(写手前):读上下文+念头,产出"情绪/姿态/切入点"块喂写手。全路由并行。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_ENABLED` | true | None | ── Multi-Agent 协调(Orchestrator + 专家 + Writer)── 把"一个 agent 拿所有工具"拆成"几个专职专家并行 + Writer 收口"。 Router 复用 judge.replyPath(direct→chat 跳过专家,planned→lookup/d | pipeline/multiagent/flags.ts |
+| social | `MULTI_AGENT_MEMORY_ENABLED` | true | None | Phase 2 记忆员:agentic RECALL(语义记忆检索)专家,与研究员并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
 | social | `MULTI_AGENT_PERSONA_CRITIC_ENABLED` | true | true | 人设一致性 Critic:每条回复都查"有没有叫错主人/破人设/破关系",有问题回炉 1 次。 跟深度 Critic(查事实/跑题)分工:这个专攻人设/关系,全路由跑。 | pipeline/multiagent/orchestrator.ts |
-| social | `MULTI_AGENT_PERSONA_ENABLED` | true | true | Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
+| social | `MULTI_AGENT_PERSONA_ENABLED` | true | None | Phase 5 人设/关系专家:QUERY_PERSON_PROFILE + FETCH_HISTORY,搞清"在跟谁说、 该用什么语气"。chat 路径也跑(默认),lookup/deep 并行 fan-out。 | pipeline/multiagent/orchestrator.ts |
 | social | `NETWORK_BURST_ENABLED` | false | true | C 网络事件 burst:群里集体喊"挂了/CF炸了/502"时冒一句。reactive,默认关。 | meta/bookkeeping.ts, pipeline/games/network-burst.ts, pipeline/stages/bookkeeping.ts |
 | social | `PEER_REACTION_ENABLED` | false | true | A 多 bot 共存:对会话型 bot(千雪)/带媒体结果的工具 bot(解析姬)做反应。 reactive、不走 judge,自带 chat-lock + per-peer fatigue + 作息门。默认关。 | meta/bookkeeping.ts, pipeline/games/peer-reaction.ts, pipeline/pipeline.ts |
 | social | `REALTIME_LEARN_ENABLED` | true | true | 实时学习:每条回复后异步抽"这轮聊了啥/跟此人关系有没有变化"写 episode + 关系。 替代部分批量 cron,记忆更鲜活。fire-and-forget,不阻塞回复。 | subagent/host-api.ts, tracking/realtime-learn.ts |
@@ -251,7 +252,7 @@
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | true | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 | pipeline/heart/heart.ts, pipeline/stages/post-judge.ts, pipeline/timing/chat-runtime.ts |
 
-## 关着的布尔旗标（29 个）
+## 关着的布尔旗标（28 个）
 
 | 段 | flag | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -279,8 +280,7 @@
 | self | `DEEP_THINK_ENABLED` | false | false | 「深想」:群里 @bot / 回复 bot 的**硬技术问题**,正常回复照常,同时后台丢给 mundo 深推理,想好了补发一条「我仔细想了下:…」。只对直接问 + 廉价判定为硬技术 的触发(低频),失败/回退/空则不补发(静默)。默认关;依赖 MUNDO_ENABLED。 |
 | self | `MUNDO_ENABLED` | false | false | ── Mundo「难题攻坚」部门(可选,默认关)──────────────────────────────── 第三方自建端点上的深推理模型(qwen3.6/映射 Mundo AI),擅长硬算法/并发/调试, 但延迟高、极耗 token、可能空转、端点自签证书不稳定 —— 只适合离线非关键任务且  |
 | self | `STEPFUN_CONSUMER_ENABLED` | false | false | ── StepFun 配额消费引擎(用户选:滚动深反思)────────────────────────── 专用后台引擎:持续对全量群做大窗口深反思 + 跨上下文画像合并,把 8000M/月订阅 用起来(冲 ~100M/天)。默认关。日调用数 ≈ CALLS_PER_TICK × 1440(每分钟 |
-| social | `MULTI_AGENT_CRITIC_ON_LOOKUP` | false | false |  |
-| social | `MULTI_AGENT_ENABLED` | true | false | ── Multi-Agent 协调(Orchestrator + 专家 + Writer)── 把"一个 agent 拿所有工具"拆成"几个专职专家并行 + Writer 收口"。 Router 复用 judge.replyPath(direct→chat 跳过专家,planned→lookup/d |
+| social | `MULTI_AGENT_CRITIC_ON_LOOKUP` | false | — |  |
 | social | `MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED` | false | — | Route-convergence experiment: for an explicit allowlist, direct/fast replies stop spawning chat specialists; deep/lookup keep only work justified by t |
 | social | `PROACTIVE_COORDINATOR_ENABLED` | false | — | ── P2-A: 主动搭话统一调度 ── 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限 |
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
