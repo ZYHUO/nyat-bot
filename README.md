@@ -1110,6 +1110,41 @@ The remaining two need someone else: top up the 7864 relay's credits, and renew 
 volces CodingPlan subscription. Both are now one-line config changes away from working,
 because the names are already right.
 
+### And the two recovered providers are not in any chain yet
+
+Round 84 fixed `amdqwen` and `lfree` and verified both answer in persona:
+
+```
+amdqwen  4636ms  "有喵，我刚才都卡成小毛球了，你们那边是不是也在掉线喵？"
+lfree    7796ms  "喵~人家这边也卡卡的，网速像蜗牛爬一样喵！"
+```
+
+But the auto-assigned chains are unchanged:
+
+```
+reply      stepfun  step5  spark13  grok45  kimi
+judge      stepfunvision  step5  spark13  wbglm53flash
+summarize  stepfunvision  step5  spark13  wbglm53flash
+reflection stepfunvision  step5  spark13
+vision     stepfunvision  step5  grok43vision
+asi        stepfunvision  step5  spark13
+```
+
+Neither appears. The reason is a deliberate design in `smart-group.ts`: a label with
+`successCount === 0` is scored `-(slowest + newcomerLatency)`, below everything that has
+ever succeeded — "新 provider 仍然进得来，只是要先用一次成功证明自己".
+
+That intent has a hole. With `profile.count = 5` and more than five candidate upstream
+groups, a never-succeeded label ranks below the cut and **never gets tried, so it never
+earns the success that would promote it**. `amdqwen` shows `successCount 0` with
+`errorCount 15` — the 15 errors are from when its model name was still wrong, and the
+successes it has had since came from direct probes, which do not record health.
+
+So the honest status is: two providers are fixed and verified but **not yet load-bearing**.
+Promoting them needs either a bump to the chain count or a probation slot — the last chain
+position reserved for the best never-succeeded label. That is a design change, not a config
+one, and it should be made deliberately rather than smuggled in at the end of an audit.
+
 ### Client-side concurrency gate — "has a reader" ≠ "reachable"
 
 `MULTI_AGENT_PERSONA_ENABLED`, `MULTI_AGENT_PERSONA_CRITIC_ENABLED`,
