@@ -1142,8 +1142,27 @@ successes it has had since came from direct probes, which do not record health.
 
 So the honest status is: two providers are fixed and verified but **not yet load-bearing**.
 Promoting them needs either a bump to the chain count or a probation slot — the last chain
-position reserved for the best never-succeeded label. That is a design change, not a config
-one, and it should be made deliberately rather than smuggled in at the end of an audit.
+position reserved for the best never-succeeded label.
+
+**Round 86 tried the probation slot and reverted it.** Three of four new tests failed, and
+two of the failures were not about the new behaviour at all:
+
+```
+② no-new-label case:  expected length 5, got 4
+④ count=1:            expected length 1, got 2   ← the count limit itself broke
+```
+
+The root cause is that "never succeeded" was computed as
+`memoryHealth.get(name) === undefined || successCount === 0`, and in a fresh process — or
+in the test, which has no health fixture — **every** label qualifies. So the probation
+branch fired on the ordinary path and rewrote chains that had nothing to do with new
+providers. The `count=1` case returning 2 is the clearest symptom: the guard was
+`count >= 2` while the array assembly appended past the slice.
+
+Reverted rather than patched, because a half-fixed chain selector is worse than a known
+gap — it would quietly change every chain. The gap is documented above with its exact
+symptom, which is more useful than a green test over a broken selector.
+`smart-group-autoassign.test.ts` is back to 31 passing tests and all gates are green.
 
 ### Client-side concurrency gate — "has a reader" ≠ "reachable"
 
