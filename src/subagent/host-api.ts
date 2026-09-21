@@ -2013,33 +2013,41 @@ export function createHostApi(
         command: string;
         args?: string;
         replyToMessageId?: number;
-      }) {
-        assertOpen();
-        // assertGroup 是 admin 那个 IIFE 里的局部量，这里够不到——本地再判一次。
-        if (chatId > 0) throw new Error('admin_groups_only: 借别的 bot 办事只在群里');
-        const { tryDelegateReplyCommand, tryDelegateCommand } = await import(
-          '../pipeline/tools/bot-delegation.js'
-        );
+      }): Promise<{ ok: boolean; text: string }> {
+        // round 3：`bots.command` 此前**两个出口都没有计数也没有日志**——
+        // 成功走 tryDelegateCommand 内部那句 info，失败/拒绝则静默 return。
+        // 于是"这个工具用过几次"永远答不上来（subagent 审计原话：
+        // "real usage is unmeasurable"），而这个会话已经为"量的东西缺分母"
+        // 交过五次学费（round 26/81/96/125/128）。这次不重复。
+        countTool('bots.command');
+        const bot = String(opts.bot ?? '');
+        const cmd = String(opts.command ?? '');
+        const args = String(opts.args ?? '');
         const replyTo = Number(opts.replyToMessageId ?? 0);
-        // 回复式代罚（= 替群成员按下别的 bot 键盘上那个我们点不动的按钮）
-        if (Number.isFinite(replyTo) && replyTo > 0) {
-          const r = await tryDelegateReplyCommand(
-            chatId,
-            String(opts.bot ?? ''),
-            String(opts.command ?? ''),
-            String(opts.args ?? ''),
-            replyTo,
+        try {
+          assertOpen();
+          // assertGroup 是 admin 那个 IIFE 里的局部量，这里够不到——本地再判一次。
+          if (chatId > 0) throw new Error('admin_groups_only: 借别的 bot 办事只在群里');
+          const { tryDelegateReplyCommand, tryDelegateCommand } = await import(
+            '../pipeline/tools/bot-delegation.js'
           );
+          // 回复式代罚（= 替群成员按下别的 bot 键盘上那个我们点不动的按钮）
+          if (Number.isFinite(replyTo) && replyTo > 0) {
+            const r = await tryDelegateReplyCommand(chatId, bot, cmd, args, replyTo);
+            logger.info({ chatId, bot, cmd, replyTo, sent: r.sent }, 'host bots.command (reply form)');
+            return { ok: r.sent, text: r.text };
+          }
+          // 普通代发（查类命令）。闸全在 tryDelegateCommand 里。
+          const r = await tryDelegateCommand(chatId, bot, cmd, args);
+          logger.info({ chatId, bot, cmd, sent: r.sent }, 'host bots.command');
           return { ok: r.sent, text: r.text };
+        } catch (err) {
+          // 两个出口都记账。subagent 审计原话："real usage is unmeasurable"——
+          // 而这个会话已经为"量的东西缺分母"交过五次学费。
+          incrCounter('host_tool_calls_total', { tool: 'bots.command', outcome: 'error' });
+          logger.warn({ err, chatId, bot, cmd, replyTo: replyTo || undefined }, 'host bots.command failed');
+          throw err;
         }
-        // 普通代发（查类命令）。闸全在 tryDelegateCommand 里。
-        const r = await tryDelegateCommand(
-          chatId,
-          String(opts.bot ?? ''),
-          String(opts.command ?? ''),
-          String(opts.args ?? ''),
-        );
-        return { ok: r.sent, text: r.text };
       },
     },
     chats: {

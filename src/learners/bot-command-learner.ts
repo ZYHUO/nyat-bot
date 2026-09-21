@@ -27,6 +27,8 @@ interface Pair {
   triggerByBot: boolean;
   outputType: string;
   responseText: string;
+  /** 那条命令消息的 id。round 3 加：水位要只推到"真的落库了"的地方。 */
+  messageId: number;
 }
 
 /** 从回执消息推回执形态 */
@@ -103,6 +105,7 @@ export function minePairs(msgs: FormattedMessage[], botUid: number, sinceMid: nu
       triggerByBot: !!m.isBot,
       outputType: deriveOutputType(responses),
       responseText: responses.map((r) => r.textContent || r.captionContent || '').filter(Boolean).join(' ⏎ ').slice(0, 300),
+      messageId: m.messageId,   // round 3：水位只推到"真的落库了"的地方要用
     });
   }
   return { pairs, safeMaxMid };
@@ -135,8 +138,15 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
   if (msgs.length === 0) return 0;
 
   const { pairs, safeMaxMid } = minePairs(msgs, botUid, sinceMid);
-  const advanceWatermark = async (): Promise<void> => {
-    if (safeMaxMid > sinceMid) await redis.set(WM_KEY(chatId), String(safeMaxMid), 'EX', 30 * 86400).catch(() => {});
+  /**
+   * 推进学习水位。`upToMid` 省略 = 推到本批已结清处（safeMaxMid）。
+   *
+   * round 3：加了 `upToMid` 参数。原来只有一个语义"全推进"，于是
+   * LLM 抽不出命令时也照样推进，把那批配对永久跳过——见下面调用处的长注释。
+   */
+  const advanceWatermark = async (upToMid?: number): Promise<void> => {
+    const target = upToMid ?? safeMaxMid;
+    if (target > sinceMid) await redis.set(WM_KEY(chatId), String(target), 'EX', 30 * 86400).catch(() => {});
   };
   // 没有配对:没有要 LLM 抽取的东西,直接把水位推进到已结清处(无损)
   if (pairs.length === 0) { await advanceWatermark(); return 0; }
@@ -197,7 +207,37 @@ export async function learnChatBotCommands(chatId: number, botUid: number): Prom
     learned++;
   }
   // 抽取+upsert 都成功了,这批配对已消化 → 现在才推进水位(review #1)
-  await advanceWatermark();
+  //
+  // 2026-09-22 round 3：这里有个**静默丢观测**的 bug（subagent 审计定位）。
+  // 原来是无条件 advanceWatermark()，而 parseExtraction 在 JSON 坏掉/被
+  // maxTokens 800 截断时返回 []（`:117-128` 吞掉错误返 []）。于是：
+  //   · 这批配对里真正见过的命令，水位已经推过它的 messageId
+  //   · 下个 tick 的 minePairs 从新水位起挖，再也看不到它
+  //   · 那个命令的 observation_count 永远停在 1，profile 永远 learning
+  //
+  // 实测：78 个 learning 行 **全部** count ≤ 3（gate 实际要 4），
+  // 44 个停在 count=1。注释说"下个 tick 重试"，但只有 **throw** 那条路
+  // 才不推进水位；解析成 [] 是正常返回，照样推进。
+  //
+  // 修法：**只推进到真正被 upsert 进 profile 的最高 messageId**。
+  // 没抽中的配对留在水位之前，下个 tick 会再挖到、再试一次。
+  // extracted 为空时完全不推进（等于旧代码 throw 那条路的行为）。
+  if (extracted.length === 0) {
+    logger.info(
+      { chatId, pairs: pairs.length },
+      'bot-command-learner: extraction returned 0 commands — watermark held for retry',
+    );
+    return 0;
+  }
+  // 只认这批次里真的落了库的命令（byCmd 的键就是 `${bot}|${command}`）
+  const consumedMids: number[] = [];
+  for (const e of extracted) {
+    const key = `${e.bot}|${e.command.toLowerCase().split('@')[0]}`;
+    const ev = byCmd.get(key);
+    if (ev && ev.length > 0) consumedMids.push(...ev.map((p) => p.messageId));
+  }
+  if (consumedMids.length > 0) await advanceWatermark(Math.max(...consumedMids));
+  else await advanceWatermark();
   if (learned > 0) logger.info({ chatId, learned }, 'bot-command-learner: profiles updated');
   return learned;
 }

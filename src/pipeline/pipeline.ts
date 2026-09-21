@@ -117,18 +117,29 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     // D 降噪:ad/verify/echo 类其他 bot 消息 → 不进 digest/学习、不烧 judge
     //(但保留进 ctx)。在 bookkeeping 与 judge 前都要用,故在此作用域声明。
-    // 反广告授权：env 灰名单命中，或 Redis 的 per-chat 键存在（群主运行时开）。
+    // 反广告授权：**per-chat 键存在即可**，不再要求全局 ANTIAD_ENABLED。
+    //
+    // 2026-09-22 round 3。subagent 审计定位的第二个洞：原来这里是
+    //   `ANTIAD_ENABLED === true && (chatIds.includes || redisKey)`
+    // 而 ANTIAD_ENABLED 默认 false 且 .env 里没配。于是：
+    //   · 群主在群里说"开反广告" → tryAntiAdCommand 写 Redis per-chat 键 ✓
+    //   · 但 noteInbound（唯一的数据写入方）被全局闸挡着 → 一条都不记
+    //   · renderAdPressure 的读者只看 per-chat 键 → 授权群永远渲染空 `[噪声]`
+    // **给了钥匙但门后面是空的。**
+    //
+    // per-chat 键本身就是授权动作（群主/管理员明确开的），全局 flag 再多设一道
+    // 没有任何安全收益——它只是让"按群授权"这个设计失效。
+    // 全局 flag 留着：它仍然能把**没配 per-chat 键的群**整批打开（env 灰名单那条路）。
     const antiAdOn =
-      e.ANTIAD_ENABLED === true &&
-      ((e.ANTIAD_CHAT_IDS as number[]).includes(job.chatId) ||
-        (await (async () => {
-          try {
-            const { antiAdEnabled } = await import("../nyatos/ad-pressure.js");
-            return await antiAdEnabled(job.chatId);
-          } catch {
-            return false;
-          }
-        })()));
+      (((e.ANTIAD_CHAT_IDS as number[] | undefined)?.includes(job.chatId)) ?? false) ||
+      (await (async () => {
+        try {
+          const { antiAdEnabled } = await import("../nyatos/ad-pressure.js");
+          return await antiAdEnabled(job.chatId);
+        } catch {
+          return false;
+        }
+      })());
 
     const isDenoiseBot = e.BOT_DENOISE_ENABLED &&
       (formatted.botClass === "ad" || formatted.botClass === "verify" || formatted.botClass === "echo");

@@ -79,6 +79,31 @@ export async function tryMetaIngressIntercepts(
     }
   }
 
+  // ── 群主自助开关反广告 ──
+  //
+  // 2026-09-22 round 3：我上一轮（5131460）把 `tryAntiAdCommand` 加进了
+  // **legacy** 的 `pipeline/stages/intercepts.ts:216`——而那正是我同一个 commit
+  // 里刚给 `routeLearnedCommand` 修掉的病："功能接在了一条生产不走的路上"。
+  // 生产人类消息在 `bot/handlers/message.ts:280` 就分去 Meta，永不进
+  // processPipeline。subagent 审计实测：`antiad command` 日志 0 次、
+  // `xxb:trench:antiad:*` 0 个群键。
+  //
+  // 为什么这一条比别的更要命：它是**唯一**能给 `/spam@nmnmfunbot` 授权的地方。
+  // `bot-delegation.ts:186-193` 要求 `ANTIAD_KICK_ENABLED || antiAdEnabled(chatId)`
+  // 才肯做回复式代罚，而 ANTIAD_KICK_ENABLED 没配（默认 false）。
+  // 所以授权键不开，`/spam` 那条链就是死代码——
+  // 而开授权键的唯一入口刚才在 legacy 上。
+  //
+  // 放在 routeLearnedCommand 之后：先处理"借别的 bot 办事"，再处理"改本群设置"。
+  if (chatId < 0 && !formatted.isBot) {
+    try {
+      const { tryAntiAdCommand } = await import('../pipeline/stages/antiad-command.js');
+      if (await tryAntiAdCommand(chatId, formatted)) return 'handled';
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta: antiad command failed (non-critical)');
+    }
+  }
+
   // ── 控制指令（别理我 / 可以说话了 / 记住X / 忘掉X）──
   //
   // 2026-09-21：这段逻辑此前**只在 legacy 的 `pipeline/stages/deliver.ts:293`**
