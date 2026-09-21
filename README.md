@@ -1717,6 +1717,48 @@ So the provider layer now keeps a floor instead of a multiplier:
 - `topic-scan` now passes 1200 directly, with a comment saying why — the floor is a
   backstop, not a licence to keep writing 24.
 
+### A restart costs 5-10× the failure rate for its first five minutes
+
+Bucketing failures by minutes-since-start showed the startup window was the worst window
+of the day:
+
+```
+  min      skipped  labelFailed  heartFailed  breaker
+   0- 5       194          175          100       62     ← 5-10× the stable rate
+   5-10       117           78           37       30
+  10-15        59           68           19       27
+  15-20        73           64           17       21
+  20-25        36           21           10        6     ← baseline
+  25-30        45           29           13       13
+```
+
+The cause was not the zero-success demotion (which is what I first guessed) but that
+`xxb:circuit:trip:*` (TTL up to 1800s) and `xxb:circuit:fail:*` (TTL 86400s, reset only by
+a success) **live in Redis and survive restarts**. A label tripped before the restart stays
+tripped after it — the new process starts owing the old one's debts. Measured at one
+restart: 5 trip keys (TTL 86-1392s) and 20 fail counters sitting in Redis.
+
+`CooldownTracker.resetBreakerState()` now clears trip and fail counters at boot, before
+`bot.start()`. Cooldown keys are deliberately left alone — a 429's `Retry-After` is the
+provider asking us to wait, which is external information rather than our judgement.
+
+After the fix, same bucketing:
+
+```
+                     skipped  labelFailed  heartFailed  breaker
+before, 0-5 min         194          175          100       62
+after,  0-10 min          0           10            0        1
+after,  10 min +          0            0            0        0
+```
+
+The trough is gone. The absolute numbers are small because it is early evening in Beijing
+and traffic is light, but the shape is unambiguous: `all candidates skipped` and
+`heart LLM failed` both went to zero where they used to be the dominant failure mode.
+
+`session-report.mts` also prints a restart-trough warning when the last deploy is under ten
+minutes old. That mistake — reading a trough as "the fix didn't work" — was available to
+every measurement taken across the twenty-odd restarts this session made.
+
 ### Grep guards prove the string, not the logic
 
 `verify-deploy.mts` greps `dist/index.js` for each mechanism, which can only show that an
