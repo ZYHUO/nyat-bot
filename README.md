@@ -1090,6 +1090,26 @@ from their endpoint's list and still work — so "not in the list" is a lead, ne
 Round 82's `amdqwen` was a real mismatch; round 83's `k26`/`dsv4pro` turned out to be a
 subscription problem that merely *looked* like one.
 
+Round 84 then did the three of those six that needed no external action:
+
+```
+k26      Kimi-K2.6        → kimi-k2-250905        (name was wrong; subscription also expired)
+dsv4pro  DeepSeek-V4-Pro  → deepseek-v4-pro-260425
+lfree    x-preview-f      → big-pickle            (403 → 200/3.4s, returns "2")
+```
+
+`lfree` was worth the probe: the alternatives on the same endpoint split three ways —
+`big-pickle` 200 in 3.4s with content, `ling-3.0-flash-fin` 200 in 3.0s but **empty**,
+`muse-spark-1.3-contributor` 200 in 12.2s, `nv/kimi-k3` timeout. Fastest was not best.
+
+Nine-label survey afterwards: **8 working**, only `spark13` down (`fetch failed` — an
+external outage on `newapi.gomami.wiki`, which has 800 successes on record, so its config
+is left alone).
+
+The remaining two need someone else: top up the 7864 relay's credits, and renew the
+volces CodingPlan subscription. Both are now one-line config changes away from working,
+because the names are already right.
+
 ### Client-side concurrency gate — "has a reader" ≠ "reachable"
 
 `MULTI_AGENT_PERSONA_ENABLED`, `MULTI_AGENT_PERSONA_CRITIC_ENABLED`,
