@@ -87,6 +87,8 @@ const CHECKS: Array<[string, string]> = [
   ['图片描述进正文', '[图片: '],
   // Meta 路径认领代发回执（2026-09-21）
   ['Meta 代发回执', 'Meta: delegation receipt handled'],
+  // Meta 主路径的实时学习 + ASI 自评（2026-09-21）
+  ['Meta 实时学习', 'learnFromReply'],
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）

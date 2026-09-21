@@ -1231,6 +1231,48 @@ export function createHostApi(
               } catch (err) {
                 logger.debug({ err, chatId }, 'host sendText outcome-pending failed (non-critical)');
               }
+              // 实时学习 + 发送时 ASI 自评：**Meta 主路径也必须跑**。
+              //
+              // 2026-09-21 发现这两个只在 legacy 的 `pipeline/stages/deliver.ts:1331/1341`
+              // 被调用，而生产主路径（98% 的发送）走的是这里。日志证据：
+              //   realtime-learn: episode saved     0 次
+              //   REALTIME_LEARN_ENABLED=true 却一条 episode 都没存过
+              // 后果不是统计难看：Echo 学不到东西、selfState 拿不到"我刚说的话
+              // 有人接没人接"、ASI 自评的 EMA 永远不更新——而 self-improve 的
+              // humanizer 调参正是靠它。
+              //
+              // triggerText 从上下文里按**生效的锚点**取（模型常常不显式给
+              // replyTo，锚点是 host 用 defaultReplyTo 兜底填的——只认 replyTo
+              // 会在大部份发送上取不到trigger，这一轮就白跑）。
+              void (async () => {
+                try {
+                  const [{ getRecent }, { learnFromReply }, { scoreReplyAtSend, ASI_ENABLED, ASI_SAMPLE_RATE }] =
+                    await Promise.all([
+                      import('../pipeline/context/manager.js'),
+                      import('../tracking/realtime-learn.js'),
+                      import('../tracking/asi-scoring.js'),
+                    ]);
+                  const recent = await getRecent(chatId, 80).catch(() => []);
+                  const anchorId = replyTo ?? opts.defaultReplyTo ?? null;
+                  const triggerMsg = (anchorId
+                    ? recent.find((m) => m.messageId === anchorId)
+                    : undefined)
+                    ?? recent.filter((m) => !m.isBot && m.role !== 'assistant').at(-1);
+                  const triggerText = (triggerMsg?.textContent || triggerMsg?.captionContent || '').trim();
+                  if (!triggerText) return;   // 取不到trigger就别跑——learnFromReply 也会因空trigger返回0
+                  const uid = opts.targetUserId ?? triggerMsg?.uid ?? 0;
+                  if (env().REALTIME_LEARN_ENABLED) {
+                    await learnFromReply({ chatId, userId: uid, triggerText, replyText: part }).catch(() => {});
+                  }
+                  if (ASI_ENABLED && ASI_SAMPLE_RATE > 0 && Math.random() <= ASI_SAMPLE_RATE) {
+                    // signal 用 'sent'（与 legacy deliver.ts:1346 一致）——
+                    // 下游 computeReplyScores 用它决定 explicitNegative/repairLoop 的初值。
+                    await scoreReplyAtSend({ chatId, triggerText, replyText: part, signal: 'sent' }).catch(() => {});
+                  }
+                } catch (err) {
+                  logger.debug({ err, chatId }, 'host sendText realtime-learn failed (non-critical)');
+                }
+              })();
               // NyatOS participation budget: this is where the Meta path — the
               // production main path — actually sends, so this is where the
               // throttle must be spent. Wiring it only into
