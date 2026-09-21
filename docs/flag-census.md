@@ -32,8 +32,8 @@
 | total_keys | 488 |
 | bool_flags | 216 |
 | on_in_prod | 187 |
-| set_in_env | 323 |
-| dead_no_reader | 2 |
+| set_in_env | 324 |
+| dead_no_reader | 5 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
@@ -338,7 +338,7 @@
 | features | `SILENCE_ALERT_MAX_PER_RUN` | 5 | 5 | 单轮最多告警几个 chat(防告警风暴)。 |
 | features | `SILENCE_ALERT_THRESHOLD_MIN` | 30 | 30 | bot 最后回复距今超过该分钟数 = 判定沉默。 |
 | features | `STEPFUN_SEARCH_API_KEY` | '' | mCv500Dxe2hrBrWoz4Zo2VivSn5llYY4lWzrMX7Q |  |
-| features | `STEPFUN_SEARCH_BASE_URL` | 'https://api.stepfun.com' | — |  |
+| features | `STEPFUN_SEARCH_BASE_URL` | 'https://api.stepfun.com' | https://api.stepfun.com/step_plan/v1 |  |
 | features | `STEPFUN_SEARCH_CATEGORY` | '' | — |  |
 | features | `STEPFUN_SEARCH_MAX_RESULTS` | 5 | — | stepfun 不认 max_results（恒返回 10 条），所以在客户端切。 |
 | features | `TIC_PENALTY_INTERVAL_MIN` | 30 | — |  |
@@ -613,9 +613,12 @@
 `CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
 
 
-## src/ 里没人读的键（2 个）
+## src/ 里没人读的键（5 个）
 
 | key | 段 | .env | 说明 |
 |---|---|---|---|
+| `GEMINI_API_KEY` | infra | AIzaSyDxs8XRVUzn2-HqA6x73L97qjxXc-qodJo | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 k |
+| `GEMINI_SEARCH_MODEL` | infra | gemini-2.5-flash-lite |  |
+| `GEMINI_SEARCH_PROXY` | infra | http://127.0.0.1:1081 | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/ |
 | `PHP_WEBHOOK_URL` | life | — |  |
 | `TS_WEBHOOK_URL` | life | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |

@@ -1,20 +1,14 @@
 // ────────────────────────────────────────
-// Web search tool — StepFun /v1/search (primary) + Gemini grounding + new-api grok + SearxNG + DDG fallback
+// Web search tool — StepFun MCP web_search (primary) + StepFun REST + new-api grok + SearxNG + DDG fallback
+// 2026-09-21 round 132/133：主路由换成 MCP；round 133 按用户要求删掉 Gemini grounding
+// （那个 key 被 Google 以「泄露」为由吊销，403 PERMISSION_DENIED）。
 // ────────────────────────────────────────
 
-import { ProxyAgent } from 'undici';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RESULTS = 5;
 
-// 仅 Gemini 搜索走代理(本机出口地区不被 grounding 支持)。懒构造、按 URL 缓存。
-let _geminiProxy: { url: string; agent: ProxyAgent } | undefined;
-function geminiProxyAgent(proxyUrl: string | undefined): ProxyAgent | undefined {
-  if (!proxyUrl) return undefined;
-  if (_geminiProxy?.url !== proxyUrl) _geminiProxy = { url: proxyUrl, agent: new ProxyAgent(proxyUrl) };
-  return _geminiProxy.agent;
-}
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 export async function executeSearch(query: string): Promise<string> {
@@ -73,17 +67,8 @@ export async function executeSearch(query: string): Promise<string> {
     }
   }
 
-  // Route 1: Gemini Google-Search grounding (fallback)
-  if (e.GEMINI_API_KEY) {
-    try {
-      return await geminiSearch(query, e.GEMINI_API_KEY, e.GEMINI_SEARCH_MODEL, e.GEMINI_SEARCH_PROXY);
-    } catch (err) {
-      logger.warn({ err, query }, 'Gemini search failed, falling back');
-      failedRoutes.push('Gemini');
-    }
-  }
 
-  // Route 2: new-api grok search via search_parameters (fallback)
+  // Route 1: new-api grok search via search_parameters (fallback)
   if (e.XAI_API_KEY) {
     try {
       return await xaiSearch(query, e.XAI_API_KEY, e.XAI_SEARCH_BASE_URL, e.XAI_SEARCH_MODEL);
@@ -93,12 +78,12 @@ export async function executeSearch(query: string): Promise<string> {
     }
   }
 
-  // Route 3: SearxNG if configured
+  // Route 2: SearxNG if configured
   if (e.SEARXNG_URL) {
     return searxngSearch(query, e.SEARXNG_URL);
   }
 
-  // Route 4: DDG Lite (always available)
+  // Route 3: DDG Lite (always available)
   const ddg = await ddgLiteSearch(query);
   // DDG 从这台机器出去是空的（round 123 curl 实测无响应体）。它返回"没有找到"
   // 而不是抛错，所以这里补一道判据：**前面有路由失败 + DDG 也没结果 = 全灭**。
@@ -254,56 +239,7 @@ async function stepfunSearch(
 // groundingMetadata.groundingChunks(来源)。key 走 query string(Gemini API 约定),
 // 不进任何日志。
 
-interface GeminiGroundResponse {
-  candidates?: Array<{
-    content?: { parts?: Array<{ text?: string }> };
-    groundingMetadata?: {
-      groundingChunks?: Array<{ web?: { title?: string; uri?: string } }>;
-      webSearchQueries?: string[];
-    };
-  }>;
-  error?: { message?: string };
-}
 
-async function geminiSearch(query: string, apiKey: string, model: string, proxyUrl?: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
-  const dispatcher = geminiProxyAgent(proxyUrl);
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: query }] }],
-      tools: [{ google_search: {} }],
-    }),
-    signal: AbortSignal.timeout(30_000),
-    // undici dispatcher(代理);DOM fetch 类型无此字段,故 cast
-    ...(dispatcher ? { dispatcher } : {}),
-  } as RequestInit & { dispatcher?: ProxyAgent });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Gemini search ${res.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const data = (await res.json()) as GeminiGroundResponse;
-  if (data.error) throw new Error(`Gemini search: ${data.error.message ?? 'unknown'}`);
-
-  const cand = data.candidates?.[0];
-  const text = (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('').trim();
-  if (!text) return `没有找到与"${query}"相关的结果。`;
-
-  const sources = [
-    ...new Set(
-      (cand?.groundingMetadata?.groundingChunks ?? [])
-        .map((c) => c.web?.title?.trim())
-        .filter((t): t is string => !!t),
-    ),
-  ].slice(0, MAX_RESULTS);
-
-  let out = `关于"${query}"的搜索结果：\n${text}`;
-  if (sources.length) out += `\n来源：${sources.join('、')}`;
-  return out;
-}
 
 // ── new-api grok search (OpenAI-compatible chat/completions + search_parameters) ──
 
