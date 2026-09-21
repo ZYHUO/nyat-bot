@@ -58,6 +58,45 @@ export async function tryMetaIngressIntercepts(
   const text = (formatted.textContent || '').trim();
   const addressed = chatId > 0 || opts.isDirect;
 
+  // ── 反广告数据采集（per-chat 授权后才记）────────────────────────────
+  //
+  // 2026-09-22 round 3（用户报「bot 的反 ad 实际并没有工作」）。
+  //
+  // 病因又是同一个：`noteInbound`（**唯一**的数据写入方）原来只在
+  // `pipeline/pipeline.ts:201`——legacy 的 `processPipeline`。而生产人类消息在
+  // `bot/handlers/message.ts:280` 就分来 Meta，永不进 processPipeline
+  // （`metaNeedsLegacyPipeline` 只对 `/slash` 和 checkin/stats 两类返 true）。
+  //
+  // 于是：群主说"开反广告" → `tryAntiAdCommand` 写 Redis 键 ✓（round 3 接过 Meta）
+  //       → 读者 `renderAdPressure` 在 Meta 侧、每回合都跑 ✓
+  //       → **但没有任何人往账本里写数据** → `[噪声]` 永远是空 → 模型看不到刷屏
+  //
+  // Redis 实测证据：两个授权群（-1004384664699 / -1003184176508）名下
+  // `xxb:trench:antiad:win:*` **一条都没有**；仅有的两条 win 键属于另外两个群
+  // （-2790030956 / -2790030690，匿名管理员 uid），是走 legacy 的那 2% 留下的。
+  //
+  // 所以不是"阈值太高"或"没人刷屏"，是**采集端根本没接上**。
+  //
+  // round 3 只拆了 `ANTIAD_ENABLED` 那道全局闸（它挡在 legacy 内部），
+  // 没解决"legacy 本身不走"——同一个病的两层，我只修了一层。
+  if (chatId < 0 && !formatted.isBot) {
+    try {
+      const e = env();
+      const granted = ((e.ANTIAD_CHAT_IDS as number[] | undefined)?.includes(chatId)) ?? false;
+      if (granted || await (async () => {
+        try {
+          const { antiAdEnabled } = await import('../nyatos/ad-pressure.js');
+          return await antiAdEnabled(chatId);
+        } catch { return false; }
+      })()) {
+        const { noteInbound } = await import('../nyatos/ad-pressure.js');
+        await noteInbound(chatId, formatted.uid ?? 0, text, Math.floor(Date.now() / 1000));
+      }
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta: antiad noteInbound failed (non-critical)');
+    }
+  }
+
   // ── 学到别的 bot 的命令 → 借力代发 ──
   //
   // 2026-09-21：`routeLearnedCommand` 此前**只在 legacy 的
