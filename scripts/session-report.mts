@@ -417,6 +417,13 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
   // 就是：成了静默默，只有失败那一句）。给它配一个假的成功串会算出假的产出率，
   // 而假比率比没有比率更糟。
   const PAIRS: Array<[string, string | null, string]> = [
+    // round 130 的教训：CodeAct 任务崩溃率必须有个出口。round 126 我让
+    // getExecutionAudit 取不到 audit，每个 CodeAct 任务必崩，而这个会话的报告
+    // 看了十几轮没印过这一项——我一直在看 judge 链成功率、频率、蒸馏产出率，
+    // 没有一个数字会告诉我"所有 subagent 任务都死了"。
+    // ok 那一路用 'CodeAct task start' 自己兜（没有单独的完成日志），
+    // 崩溃 = start - 未崩，用下面的 cNoFail 之外的算法算。
+    ['CodeAct job failed', 'CodeAct task start', 'CodeAct 任务'],
     ['dreaming output unparseable', 'dreaming consolidated', 'dreaming 整合'],
     ['distill output unparseable', 'episode distilled', 'episode 蒸馏'],
     // 三个出口都要数：失败 / 判过不用接 / 派发了续答。
@@ -509,7 +516,29 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
       console.log('    （三个出口都数。2026-09-21 之前只数失败+派发，算出 10.7% 的假产出率——');
       console.log('      「判过、结论是不用接话」那一路没有日志，分母漏了绝大多数情况。）');
       if (total >= 20 && failRate > 50) console.log('    ⚠️ 失败率过高');
-      // 部署后单独算。round 71 的教训：全窗口把修复前后的数据混在一个比率里，
+      // **CodeAct 任务成败**（round 130 的教训）。
+    //
+    // round 126 我在 createHostApi 的 return 上包了一层 Proxy 加计数器，
+    // 让 getExecutionAudit 取不到 audit，`audit.hasContract()` 抛
+    // `Cannot read properties of undefined`——**每个 CodeAct 任务必崩**。
+    // 而这个会话的报告看了十几轮，从没印过这一项：我一直在看 judge 链成功率
+    // （92%）、频率（9.8/100）、蒸馏产出率，没有一个数字会告诉我
+    // "所有 subagent 任务都死了"。
+    //
+    // 所以把它印出来，且 **100% 失败时直接喊**。这是 round 26（失败率要三个
+    // 出口都数）在任务层的同一次补课。
+    const cStart = counts.get('CodeAct task start') ?? 0;
+    const cFail = counts.get('@CodeAct job failed') ?? 0;
+    const cAllFail = counts.get('CodeAct job failed') ?? 0;
+    if (cStart > 0) {
+      const crashed = cFail / cStart;
+      console.log(`  CodeAct 任务            起 ${cStart}｜部署后崩 ${cFail}｜全窗口崩 ${cAllFail}  崩溃率 ${((cAllFail / cStart) * 100).toFixed(0)}%`);
+      if (cAllFail / cStart >= 0.5) {
+        console.log('    🚨 CodeAct 崩溃率 ≥50%——**所有需要 subagent 的回复都是坏的**。');
+        console.log('       优先查这个，别看别的指标。round 130 就是这样崩了四轮没人发现。');
+      }
+    }
+    // 部署后单独算。round 71 的教训：全窗口把修复前后的数据混在一个比率里，
       // 修复生效之后它继续报警——distiller 就这样被报了十个小时（实际 83.3%）。
       // 任务后追话是同一形状：全窗口 71%，而 round 40 那次部署之后实测是 **0%**。
       const pBad = counts.get('@post-task follow-up batch failed') ?? 0;
