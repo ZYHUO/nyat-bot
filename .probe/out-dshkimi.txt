@@ -1,0 +1,14 @@
+(node:3676372) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3676387) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3676399) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3676399) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+{"level":30,"time":1790006923773,"pid":3676399,"hostname":"C20260913000027","msg":"Redis connected"}
+{"level":40,"time":1790006946665,"pid":3676399,"hostname":"C20260913000027","label":"stepfunasi","model":"step-3.7-flash","latencyMs":22886,"err":"Empty response from SDK","msg":"AI call failed"}
+{"level":40,"time":1790006946669,"pid":3676399,"hostname":"C20260913000027","label":"stepfunasi","err":"Empty response from SDK","msg":"Label failed, trying next"}
+{"level":30,"time":1790007015514,"pid":3676399,"hostname":"C20260913000027","usage":"artist","label":"dshkimi","model":"kimi-for-coding","attempt":1,"latencyMs":68842,"msg":"Fallback label used"}
+{"level":30,"time":1790007016293,"pid":3676399,"hostname":"C20260913000027","description":"一只戴着樱桃发夹的橘猫，奶油色背景，图里写「喵」","attempt":0,"width":2048,"height":2048,"msg":"artist artwork done"}
+[dshkimi] 92823ms {"pngPath":"art/mubfylb0-eeoo.png","svgPath":"art/mubfylb0-eeoo.svg","width":2048,"height":2048}

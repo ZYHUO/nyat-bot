@@ -18,7 +18,7 @@ beforeEach(() => {
     CREATE TABLE bot_command_profiles (
       bot_username TEXT NOT NULL, command_name TEXT NOT NULL,
       usage_syntax TEXT NOT NULL DEFAULT '', use_scenario TEXT NOT NULL DEFAULT '',
-      needs_reply INTEGER NOT NULL DEFAULT 0, needs_admin INTEGER NOT NULL DEFAULT 1,
+      needs_reply INTEGER NOT NULL DEFAULT 0, needs_admin INTEGER DEFAULT 1,  -- round 5: NULL=不知道
       output_type TEXT NOT NULL DEFAULT 'unknown', peer_accepts_bot INTEGER,
       confidence REAL NOT NULL DEFAULT 0.3, observation_count INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'learning', last_learned_ts INTEGER NOT NULL DEFAULT 0,
@@ -49,12 +49,23 @@ describe('classifyCommandSafety', () => {
 });
 
 describe('upsertCommandObservation + 成熟度', () => {
-  it('首次插入只读命令 → learning,observation=1,needs_admin 保守=1', () => {
+  // round 5 改：LLM 没表态 needs_admin 时存 **null（不知道）**，不再默认 1。
+  // 旧行为让 30 个 profile 因为一次含糊的回答永久不可派发（subagent 审计实测），
+  // 其中 16 个 blocked 行的 needs_admin 其实是 0。一次没看懂就永久判刑，
+  // 比漏放行危险得多——漏放行只是少用一次，误判是这条命令永远学不来。
+  it('首次插入只读命令 → learning,observation=1,needs_admin 没表态=null', () => {
     upsertCommandObservation({ botUsername: 'uzumaru_geoip_bot', command: '/geo', usageSyntax: '/geo <IP>', useScenario: '查IP', outputType: 'text' });
     const p = getCommandProfile('uzumaru_geoip_bot', '/geo')!;
     expect(p.status).toBe('learning');
     expect(p.observation_count).toBe(1);
-    expect(p.needs_admin).toBe(1); // 默认保守(没学到不需要)
+    expect(p.needs_admin).toBeNull(); // 不知道 ≠ 需要
+    expect(whyNotInvocable(p)).not.toBe('needs_admin');
+  });
+
+  it('明确学到 needs_admin=true → 才禁（没表态不禁）', () => {
+    upsertCommandObservation({ botUsername: 'b1', command: '/op', usageSyntax: '/op', useScenario: '管理', needsAdmin: true, outputType: 'text' });
+    const p = getCommandProfile('b1', '/op')!;
+    expect(p.needs_admin).toBe(1);
     expect(whyNotInvocable(p)).toBe('needs_admin');
   });
 

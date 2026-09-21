@@ -85,8 +85,20 @@ export function upsertCommandObservation(p: {
         bot, cmd,
         p.usageSyntax ?? '', p.useScenario ?? '',
         p.needsReply ? 1 : 0,
-        // needs_admin 保守默认 1(需要→禁),只有明确学到不需要才 0
-        p.needsAdmin === false ? 0 : 1,
+        // needs_admin：**没表态就按"不知道"存，不要默认 1。**
+        //
+        // 2026-09-22 round 5。原来是 `p.needsAdmin === false ? 0 : 1`——
+        // LLM 返回 null/漏字段时存 1（需要管理员），而 1 是**永久不可派发**的
+        // （`whyNotInvocable` 直接返回 'needs_admin'）。subagent 审计实测：
+        // 30 个 profile（18 learning + 12 blocked）因为一次含糊的 LLM 回答
+        // 永远不能借力，其中 16 个 blocked 行的 needs_admin 其实是 0。
+        //
+        // 一次没看懂就永久判刑，比漏放行危险得多——漏放行只是少用一次，
+        // 误判是这条命令永远学不来。所以：
+        //   false → 0（明确不需要）
+        //   true  → 1（明确需要）
+        //   其它  → null（不知道，不参与 whyNot 的拒绝判据）
+        p.needsAdmin === undefined || p.needsAdmin === null ? null : (p.needsAdmin ? 1 : 0),
         p.outputType ?? 'unknown',
         p.peerAcceptsBot === undefined ? null : p.peerAcceptsBot ? 1 : 0,
         0.35,
@@ -116,8 +128,11 @@ export function upsertCommandObservation(p: {
       p.usageSyntax || existing.usage_syntax,
       p.useScenario || existing.use_scenario,
       p.needsReply === undefined ? existing.needs_reply : p.needsReply ? 1 : 0,
-      // needs_admin 只会从 1→0(学到不需要),不会无故收紧回 1
-      p.needsAdmin === false ? 0 : existing.needs_admin,
+      // needs_admin：明确不需要 → 0；**不明确就保持原值**（可能是 null=不知道）。
+      // round 5 修正：原来这里是 `=== false ? 0 : existing`，看着"只松不紧"，
+      // 但它和 insert 那条合起来的效果是"含糊一次就永久是 1"——
+      // insert 存 1，这条永远不把它改回 null。见 insert 处的长注释。
+      p.needsAdmin === false ? 0 : (p.needsAdmin === true ? 1 : existing.needs_admin),
       p.outputType && p.outputType !== 'unknown' ? p.outputType : existing.output_type,
       p.peerAcceptsBot === undefined ? null : p.peerAcceptsBot ? 1 : 0,
       newConf, newCount, newStatus, now,

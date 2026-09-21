@@ -1,0 +1,11 @@
+(node:3686087) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3686380) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3686500) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:3686500) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+{"level":30,"time":1790007373246,"pid":3686500,"hostname":"C20260913000027","msg":"Redis connected"}
+{"level":30,"time":1790007397233,"pid":3686500,"hostname":"C20260913000027","description":"一只戴着樱桃发夹的橘猫，奶油色背景，图里写「喵」","attempt":0,"width":2048,"height":2048,"msg":"artist artwork done"}
+[stepfunasi] 24441ms {"pngPath":"art/mubg6r8o-fsfl.png","svgPath":"art/mubg6r8o-fsfl.svg","width":2048,"height":2048}
