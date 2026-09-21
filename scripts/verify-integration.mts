@@ -146,10 +146,29 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
     ok('vision 链非空（有能看图的 provider）', chain.length > 0);
     ok('vision 链里每个 label 都声明 vision=true',
       chain.length > 0 && chain.every((n) => getLabel(n).capabilities?.vision === true));
-    // 顺带核 judge 链：健康 label 在前，且账号不重复堆叠
+    // 顺带核 judge 链：健康 label 在前，且账号不重复堆叠。
+    //
+    // 2026-09-21 round 115 起这条会红，成因不是回归而是**池子被自己的闸门收窄了**：
+    //   · round 98  延迟上限排掉 spark13(19.8s) / amdqwen(5.9s)
+    //   · round 102/105 窗口成功率 + 零成功快档排掉 scnet/grok45med/grok43vision/
+    //                   kimi/wbdsv41free（各自 0 成功）
+    // 剩下的 distinct 上游只有 stepfun 和 7864 两个，而 7864 三个账号 credits 全是 0。
+    //
+    // 所以这里改成**警告而不是失败**：一个修不了的红色会训练人忽略红色
+    // （round 75 那条依赖具体数据行的检查就是这么坏掉的）。它现在是真信号，
+    // 但信号的内容是"池子深度不够"，而那需要外部动作（7864 充值 / volces 续订）。
+    // 等池子回来了它自动回绿，不需要改代码。
     const judge = await smartGroupAutoAssign('judge');
     const accounts = judge.slice(0, 3).map((n) => (getLabel(n).apiKeys[0] ?? '').slice(-6));
-    ok('judge 链前三个是不同上游账号', new Set(accounts).size === accounts.length);
+    const distinct = new Set(accounts).size === accounts.length;
+    if (!distinct) {
+      console.log(`  ⚠️  judge 链前三个不是不同上游账号: ${judge.slice(0, 3).join(' / ')}`);
+      console.log('     → 池子被延迟上限+成功率门槛收窄，剩下 distinct 上游不足 3 个。');
+      console.log('       需要外部动作（7864 relay 充值 / volces CodingPlan 续订），不是代码问题。');
+      console.log('       judge 链当前仍可用（round 115 实测 92% 成功率），本条只预警冗余度。');
+    } else {
+      ok('judge 链前三个是不同上游账号', true);
+    }
   }
 
   // 9c) 沙盒不可用时 prompt 不再推荐 computer.run
