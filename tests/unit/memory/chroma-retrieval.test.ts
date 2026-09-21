@@ -64,6 +64,10 @@ vi.mock('@qdrant/js-client-rest', () => ({
 // ── 假的嵌入模型 ────────────────────────────────────────────
 const loadedModels: string[] = [];
 vi.mock('@xenova/transformers', () => ({
+  // chroma.ts 的 getEmbedder() 读 env.cacheDir 判断 onnx 权重是否已在本地
+  // （在就给它传 local_files_only 锁死离线）。指向一个空目录 = 本地没权重。
+  // 「权重在 ⇒ 离线」这条本身在 chroma-embed-weights.test.ts 里锁。
+  env: { cacheDir: '/nonexistent-embed-cache-dir-for-tests' },
   pipeline: async (_task: string, model: string) => {
     loadedModels.push(model);
     return async () => ({ data: new Float32Array(384).fill(0.1) });

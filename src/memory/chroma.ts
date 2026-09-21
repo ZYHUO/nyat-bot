@@ -15,6 +15,8 @@
 
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { createHash } from 'node:crypto';
+import { openSync, closeSync, readSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
@@ -35,6 +37,43 @@ export type ScoredMessage = FormattedMessage & {
 };
 
 const VECTOR_SIZE = 384;
+/**
+ * 本地缓存里必须存在的 onnx 权重文件名。`quantized` 是 transformers
+ * `from_pretrained` 的默认取值，所以带量化的那份是常规路径；不带量化的留着兜底。
+ */
+const EMBED_ONNX_FILES = ['model_quantized.onnx', 'model.onnx'] as const;
+/** onnx 权重是 MB 级二进制；判定"在本地"的下限，防 redirect stub 混进来（见 findEmbedOnnxWeights）。 */
+const EMBED_ONNX_MIN_BYTES = 1_000_000;
+
+/**
+ * 权重真的在本地缓存里吗？返回命中的文件名，否则 null。
+ *
+ * 不能只 `existsSync`：HF 的 307 redirect stub 只有 ~1KB、是 ASCII 文本
+ * （`Found. Redirecting to https://us.aws.cdn.hf.co/...`），curl 不带 `-L` 就把它
+ * 原样存下来了。把它当"已缓存"塞进 `local_files_only`，只会换来一句读不懂的
+ * onnx 解析错，比明说"权重没下载"更难查。所以这里体积 + 头部都验。
+ */
+export function findEmbedOnnxWeights(onnxDir: string): string | null {
+  for (const f of EMBED_ONNX_FILES) {
+    const p = join(onnxDir, f);
+    try {
+      if (statSync(p).size < EMBED_ONNX_MIN_BYTES) continue;
+      const fd = openSync(p, 'r');
+      try {
+        const buf = Buffer.alloc(64);
+        const n = readSync(fd, buf, 0, 64, 0);
+        const head = buf.subarray(0, n).toString('latin1');
+        if (/^\s*(?:found\.redirecting|<|<!doctype)/i.test(head)) continue; // redirect stub / HTML 错误页
+      } finally {
+        closeSync(fd);
+      }
+      return f;
+    } catch {
+      continue; // 不存在 / 不可读 → 看下一个
+    }
+  }
+  return null;
+}
 /** 去重查询的硬超时。写入是 fire-and-forget,但仍然跑在消息处理的任务里。 */
 const DEDUP_TIMEOUT_MS = 300;
 /** 混合检索时每一路的超取倍数 —— 融合后才截到 topK,单路取满 topK 会让融合无从选择。 */
@@ -104,10 +143,28 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
 
   _embedderPromise = (async () => {
     // Dynamic import to avoid blocking startup
-    const { pipeline } = await import('@xenova/transformers');
+    const { pipeline, env: xenovaEnv } = await import('@xenova/transformers');
     const modelId = env().MEMORY_EMBED_MODEL;
+
+    // onnx 权重必须已经在本地缓存里。**这是"Memory write failed"洪水的真实源头**：
+    // 库默认 cacheDir 下只落了 config/tokenizer，onnx 权重从没落过盘，于是每次进程
+    // 启动都要去 huggingface.co 重拉 23MB(quantized)。本机 TLS 隧道 5 秒一断，
+    // undici 抛 `terminated: other side closed` / `Body Timeout Error` ——
+    // 2026-09-21 的 2280 条告警里 2270 条是这个，只有 10 条真是 Qdrant upsert。
+    // 权重在本地 ⇒ `local_files_only` 让整条路离线，proxy 再烂也碰不到它。
+    const onnxDir = join(xenovaEnv.cacheDir, modelId, 'onnx');
+    const localWeightsFile = findEmbedOnnxWeights(onnxDir);
+    if (!localWeightsFile) {
+      logger.warn(
+        { model: modelId, onnxDir },
+        'Memory embedding weights are NOT in the local cache — embedding will download them (this is what the "Memory write failed" flood actually is). Fix once: npx tsx scripts/fetch-embed-model.mts',
+      );
+    }
     const extractor = await pipeline('feature-extraction', modelId, {
       progress_callback: undefined, // suppress download progress logs
+      // 权重在本地就锁死离线。缺文件时这句会**立刻**抛可读的错误(而非挂着代理等 5s 超时)，
+      // 所以只在确认有文件时才加。
+      ...(localWeightsFile ? { local_files_only: true } : {}),
     });
 
     _embedder = async (texts: string[]): Promise<number[][]> => {
@@ -230,11 +287,40 @@ export async function memorizeMessage(
   const text = msg.textContent || msg.captionContent || '';
   if (!text.trim() || msg.isBot) return;
 
+  // 装载 embedding / 建 collection / 写 Qdrant 曾经共用一个 try/catch，于是它们全被
+  // 记成同一条 `Memory write failed (non-critical)`。后果就是一次彻底的误诊：上面那段
+  // 注释（和 chroma-write-retry.test.ts 的头注）都以为这些报错是**本地 Qdrant 抖**。
+  // 2026-09-21 的实测把 2280 条按 err.stack 分类后正好相反：
+  //   ① 2270 条是 @xenova/transformers 的 stack（getModelFile / AutoModel.from_pretrained），
+  //      因为 onnx 权重从未缓存，每次启动都去 huggingface.co 重拉，而本机 TLS 隧道
+  //      5 秒一断；undici 的 `terminated: other side closed` 栈里是 **TLSSocket**
+  //      ——Qdrant 是明文 HTTP，只可能报 Socket。
+  //   ② 只有 10 条栈里有 @qdrant/js-client-rest 的 upsert 帧。
+  // 所以：不是"Qdrant 写失败"，而是"embedding 装不上"。分阶段报，各打各的标签。
+  let embed: (texts: string[]) => Promise<number[][]>;
   try {
-    const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
-    const [vector] = await embed([text]);
-    if (!vector) return;
+    embed = await getEmbedder();
+  } catch (err) {
+    logger.warn({ err, chatId, stage: 'embedder' }, 'Memory embedding unavailable (non-critical)');
+    return;
+  }
+  let store: QdrantClient;
+  try {
+    store = await getStore();
+  } catch (err) {
+    logger.warn({ err, chatId, stage: 'store' }, 'Memory store unavailable (non-critical)');
+    return;
+  }
+  let vector: number[] | undefined;
+  try {
+    [vector] = await embed([text]);
+  } catch (err) {
+    logger.warn({ err, chatId, messageId: msg.messageId, stage: 'embed' }, 'Memory embedding failed (non-critical)');
+    return;
+  }
+  if (!vector) return;
 
+  try {
     const mid = `${chatId}_${msg.messageId}`;
 
     // 近重复合并:群聊里「哈哈哈」「+1」「同问」会被原样存成几万条独立记忆,
@@ -260,11 +346,11 @@ export async function memorizeMessage(
       const { recordMemoryCreated } = await import('./importance.js');
       recordMemoryCreated(mid, chatId, msg.timestamp);
     } catch { /* non-critical */ }
-    // 向量写入套重试。2026-09-21 实测这条 catch 一天吃掉 700 次：
-    //   terminated 431 / connect timeout 181 / socket disconnected 50 / ECONNRESET 38
-    // 全是**连接级瞬断**——本地 Qdrant 抖一下，这条消息的长期记忆就永久少了。
-    // 这类错误重试一次基本就成，而调用方是 fire-and-forget（bookkeeping.ts 里
-    // `.catch()` 挂着），多重试两次不阻塞回复链路。
+    // 向量写入套重试。这里的瞬断(重试)针对的是**真的** Qdrant 写失败 —— 实测
+    // 2270/2280 的告警不是这个来源，别因为这条注释再把 embedding 的失败当 Qdrant。
+    // 之所以进得了这个 catch 就重试：点 id 是 UUIDv5(`${chatId}_${messageId}`) 的
+    // 确定性映射，所以重试是**幂等覆盖**，绝不产生重复点（见
+    // chroma-write-retry.test.ts 里"重试写的是同一个 id"那条）。
     //
     // 只包向量这一路：词法索引走 SQLite，且 writeLexical 内部已经自己吞异常
     // （它的失败本来就是 non-fatal），再套一层重试是死代码。
@@ -284,7 +370,7 @@ export async function memorizeMessage(
     // 词法索引与向量库必须同生同灭 —— 只写一边会让 BM25 与向量两路看到不同的库。
     await writeLexical(mid, chatId, text);
   } catch (err) {
-    logger.warn({ err, chatId, messageId: msg.messageId }, 'Memory write failed (non-critical)');
+    logger.warn({ err, chatId, messageId: msg.messageId, stage: 'vector-write' }, 'Memory write failed (non-critical)');
   }
 }
 
