@@ -124,7 +124,11 @@ export async function runSelfReflect(): Promise<void> {
 
     const notes = parseSelfReflectOutput(res.content ?? '');
     if (notes === null) {
-      logger.warn('self-reflect: output unparseable — skip');
+      // 带原始输出（同上）：没有它，19 次失败全是同一形状却查不出原因。
+    logger.warn(
+      { len: (res.content ?? '').length, head: (res.content ?? '').slice(0, 300) },
+      'self-reflect: output unparseable — skip',
+    );
       return;
     }
     if (notes.length === 0) {

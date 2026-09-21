@@ -603,7 +603,12 @@ ${tagLine}${existingBlock}最新发言(${pending.length}条):\n${messagesBlock}`
 
       const sections = parseProfileSections(result.content);
       if (!sections) {
-        logger.warn({ chatId: row.chat_id, uid: row.uid }, 'User profile: unparseable section JSON, skipping');
+        // 带原始输出（同上）。这一处现在是 0 次，但正因为没有日志，
+        // 它哪天真失败了也会是查不出形状的一句结论。
+        logger.warn(
+          { chatId: row.chat_id, uid: row.uid, len: (result.content ?? '').length, head: (result.content ?? '').slice(0, 300) },
+          'User profile: unparseable section JSON, skipping',
+        );
         continue;
       }
 

@@ -85,25 +85,31 @@ export async function auditChat(chatId: number, week: string): Promise<number | 
   }
   const lines = samples.map((s, i) => `${i + 1}. ${s}`).join('\n');
   let scores: SycoScores | null = null;
+  // 提到 try 外：解析失败那句 warn 要带原始输出，而它在 try 之后（2026-09-21）。
+  let res: Awaited<ReturnType<typeof callWithFallback>> | undefined;
   try {
-    const res = await callWithFallback({
+    res = await callWithFallback({
       usage: 'judge',
       messages: [
         { role: 'system', content: AUDIT_SYSTEM },
         { role: 'user', content: `本周该群 bot 回复样本(${samples.length}条):\n${lines}\n\n输出五维 JSON:` },
       ],
-      maxTokens: 200,
+      maxTokens: 1200,
       temperature: 0,
       maxTimeoutMs: 12000,
       allowHedge: false, // 后台批任务不双发
     });
-    scores = parseSycoOutput(res.content ?? '');
+    scores = parseSycoOutput(res?.content ?? '');
   } catch (err) {
     logger.warn({ err, chatId }, 'syco-audit: LLM failed');
     return null;
   }
   if (!scores) {
-    logger.warn({ chatId }, 'syco-audit: output unparseable — skip');
+    // 带原始输出（同上）。
+    logger.warn(
+      { chatId, len: (res?.content ?? '').length, head: (res?.content ?? '').slice(0, 300) },
+      'syco-audit: output unparseable — skip',
+    );
     return null;
   }
   try {
