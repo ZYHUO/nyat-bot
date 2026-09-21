@@ -1034,6 +1034,27 @@ to find out.
 Verified by calling `judge()` four times in a row: `backend=typesafe, ok=true` on all
 four, where before the change both probe calls came back `backend=chat`.
 
+### Four flags are ON and permanently unreachable — "has a reader" ≠ "reachable"
+
+`MULTI_AGENT_PERSONA_ENABLED`, `MULTI_AGENT_PERSONA_CRITIC_ENABLED`,
+`MULTI_AGENT_MEMORY_ENABLED` and `MULTI_AGENT_DIRECTOR_ENABLED` are all `true` in `.env`.
+Each has a reader in `src/pipeline/multiagent/orchestrator.ts`, so the dead-switch guard
+passes. Their parent, `MULTI_AGENT_ENABLED`, is `false` — so the whole orchestrator has
+never run, and `Multi-agent: persona-critic rewrite` has appeared zero times.
+
+**A reader inside a branch the parent flag switched off is not a reader.** The guard
+checked the wrong property.
+
+`tests/unit/env/no-dead-switches.test.ts` now also carries a `FAMILIES` /
+`PARENT_GATED` pair: any child that is ON while its parent is OFF must either be turned
+off or carry a written reason. The four above carry one — the persona specialist and
+persona critic are the mechanisms behind "strengthen identity awareness", and the parent
+being off is a production choice (parallel experts are expensive and have no production
+evidence), not an oversight. A second self-check fails when a parent gets switched on, so
+the reasons cannot rot.
+
+Verified by removing one reason and watching the check fail.
+
 ### Batch crons need a batch-level gate, not just per-call limits
 
 Round 65 found `deep-reflection` ticks running 629s against a 600s interval, caused by

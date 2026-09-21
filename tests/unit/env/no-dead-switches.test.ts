@@ -263,4 +263,52 @@ describe('no dead switches', () => {
       `这些旗标已经接上了，从 ALLOWLIST 里删掉：${wired.join(', ')}`,
     ).toEqual([]);
   });
+
+  // 守卫自己的守卫·三：**父旗标关着，子旗标开着**——子旗标有读者却永远不可达。
+  //
+  // 2026-09-21 发现：`MULTI_AGENT_PERSONA_ENABLED` / `_PERSONA_CRITIC_` /
+  // `_MEMORY_` / `_DIRECTOR_` 四个在 .env 里全是 true，读者也在
+  // （src/pipeline/multiagent/orchestrator.ts:185/404），所以"有读者"那条检查全过
+  // ——但它们的父 `MULTI_AGENT_ENABLED=false`，整条编排器从来没跑过。
+  // 生产日志里 `Multi-agent: persona-critic rewrite` 0 次。
+  //
+  // "有读者"和"可达"是两件事：读者在一条被父旗标关掉的分支里，等于没有。
+  //
+  // 处理方式和 ALLOWLIST 同款：**故意留着的要写理由**，没写理由的一律算漏配。
+  // 这样下一个"父关子开"出现时必须有人决定"是开父还是关子"，不会静默躺着。
+  const FAMILIES: Array<[parent: string, children: string[]]> = [
+    ['MULTI_AGENT_ENABLED', [
+      'MULTI_AGENT_MEMORY_ENABLED',
+      'MULTI_AGENT_PERSONA_ENABLED',
+      'MULTI_AGENT_PERSONA_CRITIC_ENABLED',
+      'MULTI_AGENT_DIRECTOR_ENABLED',
+    ]],
+  ];
+  /** 父关着但子旗标故意开着的，写理由。没在这里的一律算漏配。 */
+  const PARENT_GATED: Record<string, string> = {
+    MULTI_AGENT_PERSONA_ENABLED: '人设员是"身份认知加强"要用的机制；父 MULTI_AGENT_ENABLED=false 是生产选择（并行专家贵、无生产证据），不是忘了开。开父之前它就该是 true。',
+    MULTI_AGENT_PERSONA_CRITIC_ENABLED: '同上：人设批评员，等父旗标。',
+    MULTI_AGENT_MEMORY_ENABLED: '记忆专家，等父旗标。',
+    MULTI_AGENT_DIRECTOR_ENABLED: '导演，等父旗标。',
+  };
+  it('self-check：没有"父关子开"且没写理由的不可达旗标', () => {
+    const on = envTrueKeys();
+    const offenders: string[] = [];
+    for (const [parent, children] of FAMILIES) {
+      if (on.has(parent)) continue;             // 父开着 → 子旗标可达
+      for (const c of children) {
+        if (!on.has(c)) continue;               // 子也关着 → 一致
+        if (!PARENT_GATED[c]) {
+          offenders.push(`${c}=true 但父 ${parent}=false → 永远不可达，且没在 PARENT_GATED 里写理由`);
+        }
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+  });
+
+  it('self-check：PARENT_GATED 里没有过期条目（父开了就该清掉）', () => {
+    const on = envTrueKeys();
+    const stale = Object.keys(PARENT_GATED).filter((c) => on.has(c) && FAMILIES.some(([p]) => on.has(p)));
+    expect(stale, `父旗标已开，这些子旗标的理由该删了: ${stale.join(', ')}`).toEqual([]);
+  });
 });
