@@ -1050,6 +1050,29 @@ staying at zero is the scorer correctly refusing to forward command spam and
 speed-test bot output. **A feature that never fires because its input genuinely never
 qualifies is not a bug — it is the feature working.**
 
+### Video and image descriptions now demonstrably reach the model
+
+Both media features shipped without a single production sample to prove they worked.
+Both now have one.
+
+**Video** — two `Video described` info lines, both through `step5`:
+
+```
+fileId=BAACAgUAAyEFAATqUDGr…  label=step5  ms=6651   chars=74
+fileId=BAACAgUAAyEFAATqUDGr…  label=step5  ms=12860  chars=60
+```
+
+**Image** — the decisive check is not "was a description computed" but "is it in the
+context the model reads". Querying `getRecent()` for the live chats returns:
+
+```
+[图片: 《你的名字。》里的宫水三叶身着红白巫女服，站在神社场景前举着系有红绳的神乐铃，面带活泼笑意。]
+```
+
+That line is the round-34/38 fix landing: the description is in `textContent`, which is
+the only field the Meta path reads. Before it, the same sentence was computed, cached,
+and discarded.
+
 ### The distiller's JSON was being cut in half — 1287 times
 
 `distill output unparseable — skipping episode` fired 1287 times. Round 10 had already
