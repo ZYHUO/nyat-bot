@@ -94,9 +94,19 @@ export async function auditChat(chatId: number, week: string): Promise<number | 
         { role: 'system', content: AUDIT_SYSTEM },
         { role: 'user', content: `本周该群 bot 回复样本(${samples.length}条):\n${lines}\n\n输出五维 JSON:` },
       ],
-      maxTokens: 1200,
+      // 1200 → 2400，12000 → 20000。2026-09-21 实测（judge 链，reasoning 模型）：
+      //   9079ms ok len=487
+      //   9676ms FAIL Empty response from SDK      ← 1200 被思维链吃光
+      //   9615ms FAIL Empty response from SDK
+      //   8371ms ok len=662
+      // 两个病一起来：额度不够写完五维 JSON，同时 12s 的时限贴着 9.7s 的真实延迟。
+      // 生产日志里 `syco-audit: output unparseable — skip` 3 次，就是前者。
+      //
+      // 和 round 53 的 reflection（12000ms / 实测 8.7-9.9s）是同一条病：
+      // **给 reasoning 模型配了按非 reasoning 模型估的预算**。这是第六例。
+      maxTokens: 2400,
       temperature: 0,
-      maxTimeoutMs: 12000,
+      maxTimeoutMs: 20000,
       allowHedge: false, // 后台批任务不双发
     });
     scores = parseSycoOutput(res?.content ?? '');
