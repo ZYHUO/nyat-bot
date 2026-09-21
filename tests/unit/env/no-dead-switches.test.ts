@@ -152,6 +152,24 @@ function envTrueKeys(): Set<string> {
   return out;
 }
 
+/**
+ * 只认 `true` / `yes` / `on`——**不认 `1`**。
+ *
+ * `envTrueKeys()` 把 `1` 也算 true 是对的（很多旗标确实用 1/0），
+ * 但"父关子开"这条检查的对象是**布尔语义的开关**。数字旗标的 `1`
+ * 是"值为 1"（CONCURRENCY=1 / CALLS_PER_TICK=4），不是"开着"。
+ * 混在一起就会误报，而误报会训练人忽略这条检查。
+ */
+function isExplicitlyTrue(key: string): boolean {
+  for (const line of readFileSync('.env', 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#') || !t.includes('=')) continue;
+    const [k, v] = t.split('=', 2) as [string, string];
+    if (k.trim() === key) return ['true', 'yes', 'on'].includes((v ?? '').trim().toLowerCase());
+  }
+  return false;
+}
+
 describe('no dead switches', () => {
   // 守卫自己的守卫：解析不到旗标 = 下面的断言是空集合上的恒真命题。
   // 2026-09-21 拆段时就差点这么静默失效（schema 搬走了，这里还在读旧位置）。
@@ -285,6 +303,16 @@ describe('no dead switches', () => {
       // 上一轮列 FAMILIES 时漏了它——只看了 orchestrator 里 185/404 两个位置。
       'WRITER_SELECTOR_ENABLED',
     ]],
+    // round 4（v1.0 周期）：subagent 审计扫全库前缀找到的第二族。
+    // `STEPFUN_CONSUMER_*` 是那个"8000M/月订阅用起来"的后台引擎，父开关切在
+    // `cron/scheduler.ts:387`——**关时连 cron 都不注册**，四个子旗标
+    // （CALLS_PER_TICK / CONCURRENCY / REFLECT_WEIGHT）的值全是死值。
+    // .env 里现在父=false 而子旗标全有值（4 / 1 / 40），正是"父关子开"的形状。
+    ['STEPFUN_CONSUMER_ENABLED', [
+      'STEPFUN_CONSUMER_CALLS_PER_TICK',
+      'STEPFUN_CONSUMER_CONCURRENCY',
+      'STEPFUN_CONSUMER_REFLECT_WEIGHT',
+    ]],
   ];
   /** 父关着但子旗标故意开着的，写理由。没在这里的一律算漏配。 */
   const PARENT_GATED: Record<string, string> = {
@@ -301,6 +329,12 @@ describe('no dead switches', () => {
       if (on.has(parent)) continue;             // 父开着 → 子旗标可达
       for (const c of children) {
         if (!on.has(c)) continue;               // 子也关着 → 一致
+        // **只认显式布尔词。** `envTrueKeys()` 把 `1` 也算 true，而数字旗标
+        // （CONCURRENCY=1 / CALLS_PER_TICK=4）的 `1` 是"值为 1"不是"开着"。
+        // round 4 加 STEPFUN_CONSUMER 族时就撞上了：CONCURRENCY=1 被误判成
+        // "父关子开"。数字旗标该在这条检查之外——它们的"开/关"由父旗标决定，
+        // 自己的值只是参数。
+        if (!isExplicitlyTrue(c)) continue;
         if (!PARENT_GATED[c]) {
           offenders.push(`${c}=true 但父 ${parent}=false → 永远不可达，且没在 PARENT_GATED 里写理由`);
         }
