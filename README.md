@@ -1034,7 +1034,40 @@ to find out.
 Verified by calling `judge()` four times in a row: `backend=typesafe, ok=true` on all
 four, where before the change both probe calls came back `backend=chat`.
 
-### Four flags are ON and permanently unreachable — "has a reader" ≠ "reachable"
+### A provider label was 404ing on a model that does not exist
+
+The round-81 concurrency gate held (`concurrency reached` 90 → 2 in the windows either
+side), and the residual `Label failed` lines pointed somewhere new: `amdqwen` failing with
+`Not Found` on every call.
+
+`AI_PROVIDER_AMDQWEN_MODEL=Qwen3.6-35B-A3B`. The endpoint's own `/v1/models` returns 200
+and lists what it actually serves:
+
+```
+DeepSeek-V4.1-Flash  DeepSeek-V4-Flash  GLM-5.3-Flash
+MiniCPM5-2B  Qwen3.8-27B  Qwen3.8-Flash-Next
+```
+
+`Qwen3.6-35B-A3B` is not among them — so every call was a 404. Probing the real names:
+`Qwen3.8-27B` → 200, `DeepSeek-V4.1-Flash` → 429. Pointed the label at `Qwen3.8-27B`;
+it now answers in 3.1s (`"1+1等于2。"`).
+
+That is one more genuinely working upstream, which matters because the pool is thin. A
+ten-label survey of the non-Claude side right now:
+
+```
+OK    stepfunasi, amdqwen
+FAIL  dsv4flash / dsv4exp / grok43vision / newapiv4pro  → 7864 relay, credits = 0
+      grok45 / grok45med                                → connection failures
+      kimi                                              → invalid API key
+      k26 / dsv4pro                                     → account has no access
+```
+
+The rule this adds: **a provider label that has never worked looks exactly like one that
+is rate-limited** — both just fail. Asking the endpoint what it serves takes one `curl`
+and separates "wrong model name" from "no credits".
+
+### Client-side concurrency gate — "has a reader" ≠ "reachable"
 
 `MULTI_AGENT_PERSONA_ENABLED`, `MULTI_AGENT_PERSONA_CRITIC_ENABLED`,
 `MULTI_AGENT_MEMORY_ENABLED` and `MULTI_AGENT_DIRECTOR_ENABLED` are all `true` in `.env`.
