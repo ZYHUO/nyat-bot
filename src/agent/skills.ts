@@ -130,28 +130,77 @@ function parseTags(raw: string): string[] {
  * 按查询文本检索相关 skill(FTS)。命中即 use_count++ / last_used_at 更新。
  * 只返回未归档的 skill(归档 = 已被大 skill 回收,不再注入)。
  */
+/**
+ * 把查询切成匹配单元：CJK 取二元组，拉丁/数字取整词。
+ *
+ * 为什么是二元组：见下面 findRelevantSkills 的长注释。
+ */
+function bigramsOf(query: string): string[] {
+  const cleaned = query.replace(/["'*():^%]/g, ' ');
+  const out: string[] = [];
+  for (const w of cleaned.split(/[\s，。、,.!?;；/\\-]+/)) {
+    const t = w.trim();
+    if (/^[\w.-]{2,}$/.test(t)) out.push(t);
+  }
+  for (const run of cleaned.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    for (let i = 0; i + 2 <= run.length; i++) out.push(run.slice(i, i + 2));
+  }
+  return [...new Set(out)].slice(0, 24);
+}
+
 export function findRelevantSkills(query: string, limit = 2): SkillHit[] {
   try {
     const db = getDb();
-    const tokens = query
-      .replace(/["'*():^]/g, ' ')
-      .split(/[\s，。、,.!?;；/\\-]+/)
-      .map((t) => t.trim())
-      .filter((t) => t.length >= 2)
-      .slice(0, 6);
-    if (!tokens.length) return [];
-    const ftsQuery = tokens.map((t) => `"${t}"`).join(' OR ');
+    const units = bigramsOf(query);
+    if (!units.length) return [];
+
+    // **不用 FTS，用 LIKE。** 2026-09-21：`skill recall injected` 生产 0 次，
+    // 探针 6 条真实 task 方向全返回 0。病因不是切词，是 **skills_fts 的Tokenizer**。
+    //
+    // skills_fts 是 fts5 外部内容表（migrations/0071），用默认 unicode61。
+    // 实测它把**整段中文连续串当成一个 token**：
+    //   "人设群聊接梗"（skill 17 的 name 原样）      → 1 命中
+    //   "承诺跟踪"（skill 20 的 name 原样）          → 2 命中
+    //   "人设" → 7,8        "群聊" → 5,7,11,12      （这两个在别的字段里是完整串）
+    //   "承诺" / "交付" / "口吻" / "语气" / "跟踪"    → **全 0**
+    //   "人" / "设" / "承" / "诺"（单字）            → **全 0**
+    //
+    // 也就是说短语查询只有**恰好等于某个字段里的完整中文串**才命中。
+    // 而 task 的 contentDirection 是模型写的自由文本，永远不可能和
+    // trigger_when/summary 逐字相同——所以这个检索从上线起一次都没成功过。
+    //
+    // 按二元组 + LIKE：`name LIKE '%人设%'` 这种子串匹配不依赖分词，
+    // 20 行表全表扫也只要几十微秒。命中多少个二元组就作为相关度，
+    // 比 FTS 的 rank 更直白（这里也没有 BM25 可借）。
+    const hay = `(name || ' ' || COALESCE(trigger_when,'') || ' ' || COALESCE(summary,'') || ' ' || COALESCE(steps,'') || ' ' || COALESCE(tags,''))`;
+    const params: Array<string | number> = [];
+    const scoreExpr = units
+      .map((u) => {
+        params.push(`%${u}%`);
+        return `(CASE WHEN ${hay} LIKE ? THEN 1 ELSE 0 END)`;
+      })
+      .join(' + ');
+    params.push(limit * 3);
+    // scoreExpr 在 SELECT 和 WHERE 里各出现一次——所以必须套一层子查询，
+    // 让它在文本里只出现一次，否则 `?` 的数量是参数的两倍，绑定会错位。
     const rows = db
       .prepare(
-        `SELECT s.id, s.name, s.tier, s.trigger_when, s.steps, s.pitfalls, s.summary, s.tags
-         FROM skills_fts f JOIN skills s ON s.id = f.rowid
-         WHERE skills_fts MATCH ? AND s.archived = 0
-         ORDER BY rank LIMIT ?`,
+        `SELECT * FROM (
+           SELECT id, name, tier, trigger_when, steps, pitfalls, summary, tags,
+                  (${scoreExpr}) AS score
+           FROM skills
+           WHERE archived = 0
+         )
+         WHERE score > 0
+         ORDER BY score DESC, id ASC
+         LIMIT ?`,
       )
-      .all(ftsQuery, limit * 3) as (SkillHit & { tags: string })[];
+      .all(...params) as (SkillHit & { tags: string; score: number })[];
     if (!rows.length) return [];
-    // 大 skill 优先(更成熟),同 tier 按 rank 序。
-    const sorted = [...rows].sort((a, b) => (a.tier === b.tier ? 0 : a.tier === 'big' ? -1 : 1));
+    // 大 skill 优先(更成熟),同 tier 按相关度序。
+    const sorted = [...rows].sort((a, b) =>
+      a.tier === b.tier ? b.score - a.score : a.tier === 'big' ? -1 : 1,
+    );
     const picked = sorted.slice(0, limit);
     const bump = db.prepare(`UPDATE skills SET use_count = use_count + 1, last_used_at = ? WHERE id = ?`);
     const ts = nowSec();

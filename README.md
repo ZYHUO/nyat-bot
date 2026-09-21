@@ -1132,6 +1132,36 @@ Two fixes:
 The existing assertion `expect(callArg.maxTokens).toBeLessThanOrEqual(1200)` had been
 pinning the very budget that caused the failure.
 
+### Skill recall had never worked — the FTS tokenizer eats Chinese
+
+`skill recall injected` appeared **zero** times in the whole log, while the skills table
+holds 20 rows (4 `big`, not archived). Six realistic task directions all returned nothing.
+
+The cause was not the query parsing, which is where it looked. `skills_fts` is an FTS5
+external-content table with the default `unicode61` tokenizer, and measured directly:
+
+```
+"人设群聊接梗"  (skill 17's name, verbatim)   → 1 hit
+"承诺跟踪"      (skill 20's name, verbatim)   → 2 hits
+"人设" → 7,8      "群聊" → 5,7,11,12           (whole runs in other fields)
+"承诺" / "交付" / "口吻" / "语气" / "跟踪"     → 0
+"人" / "设" / "承" / "诺"                     → 0
+```
+
+So the tokenizer keeps each contiguous CJK run as **one** token, and a phrase query only
+matches when it equals a whole field. `findRelevantSkills` split the query on punctuation —
+which Chinese does not use — producing clauses like `回复群友关于节点延迟的调侃` that can
+never equal any field. The retrieval had never succeeded once.
+
+Replaced with bigram + `LIKE` over a concatenated haystack, scoring by how many bigrams
+hit. Twenty rows, so a full scan costs microseconds and the ranking is legible. Four of
+seven probe queries now return the right `big` skill; a genuinely unrelated query still
+returns none.
+
+One trap worth recording: the score expression appears in both `SELECT` and `WHERE`, so
+writing it twice doubles the `?` placeholders and silently misaligns every bound
+parameter. Wrapping it in a subquery keeps it in the text once.
+
 ### The diary writes notes now, not only diaries
 
 The ask was "日记功能，不一定只能写日记，还能随笔记". The `free` slot exists for exactly
