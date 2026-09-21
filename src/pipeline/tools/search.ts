@@ -19,6 +19,18 @@ const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Geck
 
 export async function executeSearch(query: string): Promise<string> {
   const e = env();
+  // **全灭时必须说"全灭"，不能说"没有找到"。**
+  //
+  // 2026-09-21 round 123 实测：StepFun 搜索 `quota_exceeded`（429）→ Gemini 也失败
+  // → 只剩 DDG Lite，而 DDG 从这台机器出去是空的。最终返回
+  // `没有找到与"X"相关的结果。`——**一个基础设施故障，长得和一个合法的否定答案
+  // 一模一样**。模型据此诚实地告诉用户"我没搜到"，而那是个谎：它不是没搜到，
+  // 是**一条都没搜成**。
+  //
+  // 合龙检查也被骗了（`✗ stepfun 搜索返回带来源的结果` 看了三遍才明白是全灭）。
+  // 这个会话里同类的事出过四次（round 79 terminalEnabled / round 85 打得通但不在链里 /
+  // round 110 保句闸零触发 / 这次），每一次都是"失败伪装成正常输出"。
+  const failedRoutes: string[] = [];
 
   // Route 0: StepFun 全网搜索（2026-09-20 起的主路由）。
   //
@@ -39,6 +51,7 @@ export async function executeSearch(query: string): Promise<string> {
       );
     } catch (err) {
       logger.warn({ err, query }, 'StepFun search failed, falling back');
+      failedRoutes.push('StepFun');
     }
   }
 
@@ -48,6 +61,7 @@ export async function executeSearch(query: string): Promise<string> {
       return await geminiSearch(query, e.GEMINI_API_KEY, e.GEMINI_SEARCH_MODEL, e.GEMINI_SEARCH_PROXY);
     } catch (err) {
       logger.warn({ err, query }, 'Gemini search failed, falling back');
+      failedRoutes.push('Gemini');
     }
   }
 
@@ -57,6 +71,7 @@ export async function executeSearch(query: string): Promise<string> {
       return await xaiSearch(query, e.XAI_API_KEY, e.XAI_SEARCH_BASE_URL, e.XAI_SEARCH_MODEL);
     } catch (err) {
       logger.warn({ err, query }, 'new-api search failed, falling back');
+      failedRoutes.push('new-api');
     }
   }
 
@@ -66,7 +81,14 @@ export async function executeSearch(query: string): Promise<string> {
   }
 
   // Route 4: DDG Lite (always available)
-  return ddgLiteSearch(query);
+  const ddg = await ddgLiteSearch(query);
+  // DDG 从这台机器出去是空的（round 123 curl 实测无响应体）。它返回"没有找到"
+  // 而不是抛错，所以这里补一道判据：**前面有路由失败 + DDG 也没结果 = 全灭**。
+  if (failedRoutes.length > 0 && ddg.startsWith('没有找到')) {
+    return `搜索全灭：${failedRoutes.join(' / ')} 都失败，DDG Lite 也无结果。`
+      + `（不是"没有相关信息"，是没有任何搜索提供商可用）`;
+  }
+  return ddg;
 }
 
 // ── StepFun 全网搜索 ──
