@@ -468,8 +468,22 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     }
     const total = f + o;
     const rate = total > 0 ? o / total : 0;
-    const bad = total >= 20 && rate < 0.5;
-    console.log(`  ${label.padEnd(16)} 成功 ${String(o).padStart(5)}｜失败 ${String(f).padStart(5)}  产出率 ${(rate * 100).toFixed(1).padStart(5)}%${bad ? '   ⚠️ 过低' : ''}`);
+    // 部署后的样本先算出来——**⚠️ 要由它说了算，不是全窗口**。
+    //
+    // round 121 的教训：全窗口含三段已修完的事故（整段外网中断约 1 小时 LLM 必败、
+    // 并发风暴期 round 81-93、7864 断额期），于是 `深度反思 25.2% ⚠️` 一直在报，
+    // 而等长窗口实测是 50-75%、部署后 75%。**修完的事故不该继续计息。**
+    //
+    // 所以判据改成：全窗口过低 **且** 部署后样本够（≥10）且也过低，才标 ⚠️。
+    // 部署后样本不够时标 `（部署后样本不足）` 而不是 ⚠️——那是"还不知道"，
+    // 不是"有问题"。
+    const pf0 = counts.get(`@${fail}`) ?? 0;
+    const po0 = ok ? (counts.get(`@${ok}`) ?? 0) : 0;
+    const ptot = pf0 + po0;
+    const bad = total >= 20 && rate < 0.5 && ptot >= 10 && (po0 / ptot) < 0.5;
+    const unsure = total >= 20 && rate < 0.5 && !bad;
+    const mark = bad ? '   ⚠️ 过低' : (unsure ? '   （部署后样本不足，全窗口含已修事故）' : '');
+    console.log(`  ${label.padEnd(16)} 成功 ${String(o).padStart(5)}｜失败 ${String(f).padStart(5)}  产出率 ${(rate * 100).toFixed(1).padStart(5)}%${mark}`);
     // 部署后单独一行。**这一行是 round 71 加的，因为窗口混了修复前后的数据：**
     // distiller 全窗口 32.5%（看着仍 ⚠️），而 round 47 部署之后实际是 **83.3%**
     // （130 成 / 26 败）。修复明明生效了，全窗口比率却在说还没修好。
