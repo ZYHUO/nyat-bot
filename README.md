@@ -1132,6 +1132,33 @@ Two fixes:
 The existing assertion `expect(callArg.maxTokens).toBeLessThanOrEqual(1200)` had been
 pinning the very budget that caused the failure.
 
+### The diary writes notes now, not only diaries
+
+The ask was "日记功能，不一定只能写日记，还能随笔记". The `free` slot exists for exactly
+that, and `slotGuidance()` tells the model it is *not* a diary and may be two or three
+sentences. Until 2026-09-21 it had never produced anything — every previous day's file
+had zero 随手 sections.
+
+Today's file, `data/dream-journal/2026-09-21.md`:
+
+```markdown
+## 08:04 · 起床/早上
+哈欠…刚掀开眼皮就被签到成功的提示震了一下喵，连3天累计34次，今天第4个签到还摸到了
+稀有「偶像喵」…脑子还沉得像灌了浆糊，再躺五分钟能不能再续个签到喵。
+
+## 11:23 · 随手
+蹲了半小时kddi系节点全躺，移动电信当场断气，联通也半死不活，等得本喵下巴都快磕键盘
+上了喵。刚刷到群里发的野生狗奶阴间梗图直接笑喷，手里的冰美式都晃出来三滴。
+
+## 12:00 · 随手
+蹲到SpeedTest_bot终于跑完，队列里还排着267个，进度条爬得让人想打瞌睡喵。转头就看见
+とくめ说机场没吃到好的只能多吃两碗饭，本喵手里的鼠标瞬间不香了，太阳都看饿了。
+```
+
+The morning section is a diary — how the bot feels about waking up. The two 随手 sections
+are notes: what happened in the last hour, observed rather than reflected on. Different
+register, same voice.
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead
