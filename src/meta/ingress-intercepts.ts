@@ -79,6 +79,43 @@ export async function tryMetaIngressIntercepts(
     }
   }
 
+  // ── 控制指令（别理我 / 可以说话了 / 记住X / 忘掉X）──
+  //
+  // 2026-09-21：这段逻辑此前**只在 legacy 的 `pipeline/stages/deliver.ts:293`**
+  // （`generateAndSendReplies` ← `runPostJudge` ← `processPipeline`）。
+  // `classifyDirective` 全库只有一个调用方，就是那一处。
+  // 于是生产主路径 Meta 上，用户跟 bot 说"别理我"**完全没反应**——
+  // 而这是用户点名要的"前置功能"那一类（和 time gate 同级）。
+  //
+  // 接在 Meta 入口：群里点名本喵、或私聊、短消息（≤40 字）、非匿名时才分类，
+  // 和 legacy 那道闸保持一致（避免给长对话/普通消息加成本）。
+  // 命中 → 静默执行 + emoji ack，不 typing、不回复。
+  if (
+    env().CONTROL_DIRECTIVE_ENABLED && !formatted.isAnonymous &&
+    ((chatId < 0 && addressed) || chatId > 0)
+  ) {
+    const dtext = text.trim();
+    if (dtext.length > 0 && dtext.length <= 40) {
+      try {
+        const { classifyDirective } = await import('../pipeline/directive.js');
+        const action = await classifyDirective(dtext);
+        if (action) {
+          const { executeControlActions } = await import('../pipeline/control-actions.js');
+          const ok = await executeControlActions([action], chatId, formatted.uid, formatted.messageId);
+          if (ok) {
+            logger.info(
+              { chatId, action: action.action, target: action.controlTarget ?? 'self' },
+              'Meta: control directive executed (silent)',
+            );
+            return 'handled';
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta: directive classify failed (non-critical)');
+      }
+    }
+  }
+
   // ── DM verification lock ──
   if (chatId > 0) {
     try {

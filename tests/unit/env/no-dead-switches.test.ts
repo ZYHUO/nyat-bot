@@ -85,7 +85,6 @@ function parseEnvFlags(): Array<{ name: string; isBool: boolean; defaultTrue: bo
  */
 const WEAK_ONLY_READERS: ReadonlySet<string> = new Set([
   // deliver.ts 里 e.X（e 是从参数/别处拿到的 env 子集，不是本文件 const e = env()）
-  'CONTROL_DIRECTIVE_ENABLED',
   'REPLY_HUMANIZER_SAFE_MODE',
   'TIMING_WAIT_HINT_ENABLED',
   'MOOD_TUNE_ENABLED',
@@ -282,6 +281,9 @@ describe('no dead switches', () => {
       'MULTI_AGENT_PERSONA_ENABLED',
       'MULTI_AGENT_PERSONA_CRITIC_ENABLED',
       'MULTI_AGENT_DIRECTOR_ENABLED',
+      // round 74 补：WRITER_SELECTOR 也在 orchestrator.ts:464，同一个父。
+      // 上一轮列 FAMILIES 时漏了它——只看了 orchestrator 里 185/404 两个位置。
+      'WRITER_SELECTOR_ENABLED',
     ]],
   ];
   /** 父关着但子旗标故意开着的，写理由。没在这里的一律算漏配。 */
@@ -290,6 +292,7 @@ describe('no dead switches', () => {
     MULTI_AGENT_PERSONA_CRITIC_ENABLED: '同上：人设批评员，等父旗标。',
     MULTI_AGENT_MEMORY_ENABLED: '记忆专家，等父旗标。',
     MULTI_AGENT_DIRECTOR_ENABLED: '导演，等父旗标。',
+    WRITER_SELECTOR_ENABLED: '写手择优选择，在 orchestrator.ts:464，等父旗标。',
   };
   it('self-check：没有"父关子开"且没写理由的不可达旗标', () => {
     const on = envTrueKeys();

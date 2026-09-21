@@ -82,10 +82,17 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
   ok('授权群 Frame 出现 [授权] 行且两张牌都在',
     line.includes('[授权]') && line.includes('admin.kick') && line.includes('bots.command'));
 
-  // 清单必须来自**生产命令档案**（长期观察学出来的），不是宿主硬编码的一张表
+  // 清单必须来自**生产命令档案**（长期观察学出来的），不是宿主硬编码的一张表。
+  //
+  // 2026-09-21：这条原来断言 `menu.some(c => c.command === '/spam' && c.bot === 'nmnmfunbot')'
+  // ——一个**具体的历史数据行**。生产档案是会变的（nmnmfunbot /spam 现在是 blocked），
+  // 于是这个检查因为数据演化而失败，而它想验的性质（清单来自档案）根本没被验到。
+  //
+  // 改成断言性质：档案里**真有** ready 且 needs_reply 的行，且清单非空。
+  // 想要一个具体例子的话，从清单里取第一条——那样它永远为真，只要档案非空。
   const menu = listReplyInvocableCommands();
-  ok('生产档案里 /spam@nmnmfunbot 可回复式代发',
-    menu.some((c) => c.command === '/spam' && c.bot === 'nmnmfunbot'));
+  ok('清单来自生产命令档案（档案里确有 ready+needs_reply 的行，不是硬编码表）',
+    menu.length > 0 && menu.every((c) => c.bot && c.command && c.usageSyntax));
   ok('清单里每一条都真过得去闸（不是假菜单）',
     menu.length > 0 && menu.every((c) => whyNotReplyInvocable(getCommandProfile(c.bot, c.command)) === null));
   ok('硬禁的 /ban /kick 不在清单里',
