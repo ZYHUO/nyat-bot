@@ -603,9 +603,13 @@ console.log('');
     const slow = [...text.matchAll(/^llm_concurrency_slow_waits_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
     if (waits > 0) {
       console.log(`  并发闸排队            等过 ${waits} 次｜总等 ${(waitTotal / 1000).toFixed(1)}s｜均 ${(waitTotal / waits).toFixed(0)}ms｜>2s 的 ${slow} 次`);
+      const to = [...text.matchAll(/^llm_concurrency_wait_timeout_total\{[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+      if (to > 0) {
+        console.log(`    其中 ${to} 次等超过 1500ms 上限被放行（超发一次 429 好过等掉半个超时预算）`);
+      }
       if (waits >= 10 && waitTotal / waits > 1500) {
-        console.log('    ⚠️  平均排队 >1.5s——并发闸可能正在把调用堵超时（撞的是 maxTimeoutMs 不是 429）。');
-        console.log('        考虑把 AI_MAX_CONCURRENCY_PER_ACCOUNT 调大，或给排队加超时。');
+        console.log('    ⚠️  平均排队 >1.5s——撞的是 maxTimeoutMs 不是 429。');
+        console.log('        （已改为等超 1500ms 就放行；这个数仍高说明 AI_MAX_CONCURRENCY_PER_ACCOUNT 该调大。）');
       } else if (waits >= 10) {
         console.log('    （排队不久而失败仍多 → 是 provider 自己在坏，不是闸的问题。）');
       }
