@@ -1067,6 +1067,29 @@ The rule this adds: **a provider label that has never worked looks exactly like 
 is rate-limited** — both just fail. Asking the endpoint what it serves takes one `curl`
 and separates "wrong model name" from "no credits".
 
+### The provider pool, diagnosed per-endpoint instead of as one blob
+
+Round 44 concluded "23 dead providers, credits exhausted" from the relay's `state.json`.
+That was one cause out of five. Asking each endpoint what it serves (`GET /v1/models`)
+and, when the answer is a 4xx, reading the body:
+
+| endpoint | labels | actual cause | |
+|---|---|---|---|
+| `127.0.0.1:7864` | 20 | `credits: 0` on all 3 accounts | top up |
+| `ark.cn-beijing.volces.com` | `k26` `dsv4pro` | `InvalidSubscription` — CodingPlan expired **and** the model names are wrong (`Kimi-K2.6` vs the served `kimi-k2-250905`) | renew + rename |
+| `ai.lfree.org` | `lfree` | requests `x-preview-f`, not in the served list — but the endpoint works, so the list is incomplete | needs a real probe |
+| `api.stepfun.com` | 6 | all healthy | — |
+| `developer.amd.com.cn` | `amdqwen` | wrong model name → 404 | **fixed** |
+| `newapi.gomami.wiki` | `spark13` | works, list incomplete, currently timing out | — |
+| `grok.168661.xyz` | `grok45` `grok45med` | connection failures | — |
+| `8317` cliproxyapi | `kimi` | `Invalid API key` | — |
+
+**15 labels are correctly configured and reachable today.** The models list is *not* a
+complete catalogue — `step5`, `spark13`, `lfree` and `stepexplore` all request names absent
+from their endpoint's list and still work — so "not in the list" is a lead, never a verdict.
+Round 82's `amdqwen` was a real mismatch; round 83's `k26`/`dsv4pro` turned out to be a
+subscription problem that merely *looked* like one.
+
 ### Client-side concurrency gate — "has a reader" ≠ "reachable"
 
 `MULTI_AGENT_PERSONA_ENABLED`, `MULTI_AGENT_PERSONA_CRITIC_ENABLED`,
