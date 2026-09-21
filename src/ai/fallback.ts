@@ -29,7 +29,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
 
   // Smart Group: reorder candidates by health/latency/cost if enabled.
   // getLabels 由 smart-group 内部惰性 import —— 默认关闭时零开销,也不碰测试 mock。
-  const smartOrderedNames = await smartGroupReorder(candidateNames);
+  // 第二个参数传 usage 名：声明 respectManualOrder 的 usage（画摊子）不参与重排,
+  // 否则手动链的顺序会被延迟排序翻回"最快但不会干这活"的模型。
+  const smartOrderedNames = await smartGroupReorder(candidateNames, options.usage);
 
   const cooldown = new CooldownTracker(getRedis());
   // 后台批任务(allowHedge:false)不 hedge —— 2s 后双发对延迟无感,纯翻倍账单。

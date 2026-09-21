@@ -171,14 +171,82 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
     }
   }
 
-  // 9c) 沙盒不可用时 prompt 不再推荐 computer.run
+  // 9d) 画摊子（art.draw）的 provider 链真的存在、真的通
+  //
+  // 2026-09-21 加。这条检查缺着的那段日子里，art.draw 在生产里 **0% 成功**
+  // （2 次尝试 0 次送达，`host art.draw(async) failed` ×2），而 414 个单测
+  // 文件全绿——artist 的测试把 callWithFallback mock 掉了，从没人问过
+  // "这个 usage 解析得出来吗"。
+  //
+  // 病因是 .env 清 label 时删掉 `AI_USAGE_ARTIST_LABEL=kimi` 整行，只留四条
+  // 孤儿键；env.ts 对没有 LABEL 的 usage 组直接跳过，USAGE_DEFAULTS 里也没
+  // artist → `AI usage not found: artist`，每次都死在这一行上。
+  //
+  // 所以这里三件事一起验：usage 解析得出、链上 label 都在池子里、主 label
+  // 真的打得通（不打 mock，和上面第 1 项搜索一样）。
   {
-    const { applySandboxAvailabilityNotes } = await import('../src/subagent/sandbox-prompt.js');
-    const withRun = '- computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}\n8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。';
-    const dead = applySandboxAvailabilityNotes(withRun, { terminalEnabled: true, isolationRequired: true, bwrapAvailable: false });
-    ok('终端不可用 → prompt 不再推荐 computer.run', !/建议用 computer\.run/.test(dead) && dead.includes('本机不可用'));
-    const alive = applySandboxAvailabilityNotes(withRun, { terminalEnabled: true, isolationRequired: true, bwrapAvailable: true });
-    ok('终端可用 → prompt 一字不改', alive === withRun);
+    const { getLabels, getUsage } = await import('../src/ai/labels.js');
+    const { env } = await import('../src/env.js');
+    const usageName = env().ARTIST_USAGE;
+    let chain: string[] = [];
+    let why = '';
+    try {
+      const u = getUsage(usageName);
+      chain = [u.label, ...u.backups];
+    } catch (e) {
+      why = (e as Error).message;
+    }
+    ok(`画摊子 usage「${usageName}」解析得出链（不是 "AI usage not found"）`,
+      why === '' && chain.length > 0);
+
+    const labels = getLabels();
+    ok('画摊子链上每个 label 都真实存在于 provider 池',
+      chain.length > 0 && chain.every((n) => labels.has(n)));
+
+    // 链不该是"同一个模型排五遍"：step-3.7-flash 五个 label 共用一个模型，
+    // 一个熔断全灭（fallback.ts 里那段注释记的就是这件事）。
+    const models = new Set(chain.map((n) => labels.get(n)!.model));
+    ok('画摊子链不是全同一个模型（一个熔断不该全灭）', models.size > 1);
+
+    // 链头那个 label 真的打得通——只问一句话，不真画（画一张要 60-90s）。
+    if (chain.length > 0) {
+      const { callModel } = await import('../src/ai/provider.js');
+      const primary = labels.get(chain[0]!)!;
+      try {
+        const r = await callModel(primary, [{ role: 'user', content: '只回一个词：pong' }],
+          { maxTokens: 200, temperature: 0, timeout: 30_000 });
+        ok(`画摊子主 label「${chain[0]}」（${primary.model}）打得通`, (r.content ?? '').trim().length > 0);
+      } catch (e) {
+        ok(`画摊子主 label「${chain[0]}」（${primary.model}）打得通 —— ${(e as Error).message}`, false);
+      }
+    }
+  }
+}
+
+// N) embedding 离线装载：**调用**判定函数，不靠 grep。
+//    grep 只能证明字符串在产物里；这里证明逻辑对 —— 合法的 onnx 认，HF 的 307
+//    redirect stub（~1KB 文本，curl 漏 -L 时存下来的那种）不认。
+//    这条线一旦退化，proxy 一抖 memory 就又会被兜进 "Memory write failed" 里 ——
+//    而那正是 2026-09-21 那 2280 条告警里 2270 条的来源（一度被误诊成 Qdrant 瞬断）。
+{
+  const { findEmbedOnnxWeights } = await import('../src/memory/chroma.js');
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xxb-verify-embed-'));
+  try {
+    const dir = path.join(root, 'onnx');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'model_quantized.onnx'),
+      Buffer.concat([Buffer.from([0x08, 0x01, 0x12, 0x00]), Buffer.alloc(2 * 1024 * 1024, 0x7f)]));
+    ok('onnx 权重在本地被认出（⇒ chroma 会传 local_files_only）',
+      findEmbedOnnxWeights(dir) === 'model_quantized.onnx');
+    fs.writeFileSync(path.join(dir, 'model_quantized.onnx'),
+      'Found. Redirecting to https://us.aws.cdn.hf.co/xet-bridge-us/abc?X-Amz-Signature=x');
+    ok('HF redirect stub 不算「已缓存」（不会被误判成离线可用）',
+      findEmbedOnnxWeights(dir) === null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 }
 

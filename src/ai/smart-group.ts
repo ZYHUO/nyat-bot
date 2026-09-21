@@ -156,13 +156,22 @@ export function recordSmartGroupResult(labelName: string, latencyMs: number, suc
 
 // ─── Selection ──────────────────────────────────────────────────────────────
 
+/** 这个 usage 是否声明"选路交还手动链"（见 UsageProfile.respectManualOrder）。 */
+function respectsManualOrder(usageName: string): boolean {
+  return USAGE_PROFILES[usageName]?.respectManualOrder === true;
+}
+
 /**
  * 重排候选 label。getLabels 惰性 import —— 只有 smart group 开启时才加载,
  * 默认关闭路径零开销,也不碰测试 mock(测试只 mock 了 getUsage/getLabel)。
  */
-export async function smartGroupReorder(labelNames: string[]): Promise<string[]> {
+export async function smartGroupReorder(labelNames: string[], usageName?: string): Promise<string[]> {
   const cfg = getConfig();
   if (!cfg.enabled || labelNames.length <= 1) return labelNames;
+
+  // 这个 usage 的选路有意交给手动链（见 UsageProfile.respectManualOrder）：
+  // 手动链的顺序本身就是答案，按延迟重排会把它翻回"最快但不会干这活"的模型。
+  if (usageName && respectsManualOrder(usageName)) return labelNames;
 
   const { getLabels } = await import('./labels.js');
   const labels = getLabels();
@@ -313,6 +322,20 @@ interface UsageProfile {
   /** 判成功率所需的最少样本数，默认 20。 */
   minSamples?: number;
   /**
+   * true = 这个 usage 的选路**完全交给手动链**（labels.ts 的 USAGE_DEFAULTS /
+   * .env 的 AI_USAGE_*_LABEL）：`smartGroupAutoAssign` 直接返回 []，
+   * `smartGroupReorder` 也不许动它的顺序。
+   *
+   * 什么时候需要它：调用方要的不是"最快能答话的模型"，而是**某一类能力**，
+   * 而池子里最快的那几个恰好没有这个能力。延迟排序在这里是反向指标。
+   *
+   * 实例就是画摊子（artist）：SVG 是长代码活，池子里最快的是 step-3.7-flash
+   * 五个同源 label（约 500ms），而它是 reasoning 模型——4096 token 全烧在
+   * 思维链上，`content` 必空（`claude: 空正文` 的主要来源）。auto-assign 开着时
+   * 手动链被 bypass，链头就落在它身上，画图 100% 翻车。
+   */
+  respectManualOrder?: boolean;
+  /**
    * "零成功"档的样本数：窗口里一个成功的都没有、且试过这么多次 → 不进链。
    * 比 minSamples 小得多，因为**零成功是强信号**（见下面的实现注释）。
    */
@@ -350,6 +373,11 @@ const USAGE_PROFILES: Record<string, UsageProfile> = {
   // 视频理解（2026-09-21）：count=2 就够——真能看的供应商本来就少，
   // 凑长度只会把不能看的塞进来。
   video:       { minTier: 'medium', vision: false, video: true,  count: 2 },
+  // 画摊子（2026-09-21）：**延迟排序对它是反向指标**，所以显式交还给手动链。
+  // 详见 UsageProfile.respectManualOrder 的注释——最短的那条链会把链头给
+  // 500ms 的 step-3.7-flash（reasoning，长 SVG 下正文必空）。count=2 是
+  // "万一将来重开自动选路"时的语义，现在靠 respectManualOrder 完全不走这条路。
+  artist:      { minTier: 'high',   vision: false, video: false, count: 2, respectManualOrder: true },
 };
 
 const DEFAULT_PROFILE: UsageProfile = { minTier: 'medium', vision: false, video: false, count: 3 };
@@ -390,6 +418,11 @@ export function isAutoAssignEnabled(): boolean {
 export async function smartGroupAutoAssign(usageName: string): Promise<string[]> {
   const cfg = getConfig();
   if (!cfg.enabled || !cfg.autoAssign) return [];
+
+  // 这个 usage 声明了"选路交还手动链"——直接返回 []，调用方就用 .env /
+  // USAGE_DEFAULTS 的链。**必须在读 profile 之前判断**： artist 的 profile 字段
+  // （minTier/count）是给"万一将来要重新开自动选路"留的语义，不是现在的路由。
+  if (respectsManualOrder(usageName)) return [];
 
   const { getLabels } = await import('./labels.js');
   const labels = getLabels();

@@ -118,6 +118,25 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   mundo:     { label: 'mundo',         backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
   // 「深想」异步深答(可选)
   deep_think:{ label: 'k27code',       backups: ['mundo', 'stepfunthink'], timeout: 120_000, maxTokens: 16_000 },
+  // 画摊子（agent/artist.ts）——SVG 是**长代码活**，选路标准和聊天正相反。
+  //
+  // 2026-09-21 事故：.env 在清 label 时把 `AI_USAGE_ARTIST_LABEL=kimi` 整行删了
+  // （kimi provider 也一起删），只留下 BACKUPS/TIMEOUT/MAX_TOKENS/TEMPERATURE
+  // 四条孤儿键。而 env.ts:350 对「没有 LABEL 的 usage 组」直接 continue——
+  // 这张表里又没有 artist，于是 `getUsage('artist')` 每次都抛
+  // `AI usage not found: artist`，art.draw 从上线起一次都没成功过
+  // （日志 2 次 `host art.draw(async) failed`，delivered 0，成功率 0%）。
+  //
+  // 现在把权威链写进代码（.env 没有 LABEL 时走这里）；同时 smart-group 给
+  // artist 关了 auto-assign（见 smart-group.ts USAGE_PROFILES），否则
+  // best-latency 会把链头还给 500ms 的 step-3.7-flash —— 那是 reasoning
+  // 模型，4096 token 全烧在思维链上、正文必空（`claude: 空正文` 的主来源）。
+  //
+  // dshkimi（kimi-for-coding）实测 69s 出一张 2048×2048 的 SVG 并光栅化成功；
+  // backup 顺序按实测排：stepfun（同一个模型，额度给到 8000 时 26s 能出完整 SVG）
+  // 在 step5 前面——step5 实测 90s 还没画完（超时），放第二位等于先白等一分半。
+  // timeout 120s：给最慢的 backup 一个真实机会，也覆盖 dshkimi 自己的 69s P50。
+  artist:    { label: 'dshkimi',       backups: ['stepfun', 'step5'], timeout: 120_000, maxTokens: 8_000, temperature: 0.7 },
 };
 
 export function getUsage(name: string): AIUsage {

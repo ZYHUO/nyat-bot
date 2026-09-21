@@ -114,6 +114,16 @@ const CHECKS: Array<[string, string]> = [
   ['全冷却可诊断', 'nothing was attempted'],
   // Qdrant 写瞬断重试（2026-09-21）
   ['Qdrant 瞬断重试', 'withQdrantRetry'],
+  // embedding 离线装载（2026-09-21）：onnx 权重若已在本地，必须锁死 local_files_only，
+  // 否则 proxy 一抖 memory 就被兜进 "Memory write failed" 里 —— 而那正是 2270/2280
+  // 条告警的真实来源（一度被误诊成 Qdrant 瞬断）。打包后这条机制必须还在。
+  ['embedding 离线装载', 'local_files_only'],
+  // 权重判定的兜底：HF 307 redirect stub（~1KB 文本）不能算"已在本地"。
+  // 匹配源里那个正则 /^\s*(?:found\.redirecting|<|<!doctype)/i 的片段
+  // （'\' 是转义符，别把带点的整串当 pattern，includes 会 miss）。
+  ['onnx 权重去 stub', 'redirecting'],
+  // 缺权重时的可操作告警（把出路写进日志：去跑 scripts/fetch-embed-model.mts）
+  ['embedding 缺失告警', 'Memory embedding weights'],
   // 沙盒控制流拒绝降级（2026-09-21）
   ['控制流拒绝降级', 'sandbox control flow (expected)'],
   // 选路：零成功 demote + vision 严格过滤（2026-09-21）
@@ -128,6 +138,9 @@ const CHECKS: Array<[string, string]> = [
   ['video_url 序列化', 'video_url'],
   ['claude 分支不再吞媒体', 'carriesMedia'],
   ['provider 健康播报', 'neverSucceeded'],
+  // 画摊子：SVG 长代码活的授权链 + 选路交还手动链（2026-09-21）
+  ['画摊子 usage 默认链', 'artist: { label: "dshkimi"'],
+  ['画摊子交还手动链', 'respectManualOrder'],
   // 仪器
   ['醒来检测', 'detectWakeTransition'],
   ['压力轨迹日志', 'trench pump tick'],

@@ -13,6 +13,7 @@
  *   ④ prompt 里找不到原文 → 安静返回，不抛（prompt 重构不该让所有任务失败）
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { applySandboxAvailabilityNotes } from '../../../src/subagent/sandbox-prompt.js';
 
 /**
@@ -124,5 +125,58 @@ describe('applySandboxAvailabilityNotes', () => {
     it('⑨ 隔离可用时这些一处都不改', () => {
       expect(applySandboxAvailabilityNotes(PROMPT, ALIVE)).toBe(PROMPT);
     });
+  });
+});
+
+// ─── 组合校验：拿**真的** EXECUTOR_SYSTEM 过一遍改写器 ────────────────────
+//
+// 上面那些用例的 PROMPT 是手抄的。手抄就会漂——sandbox-prompt.ts 里那句
+// "改 prompt 时这里必须同步，否则替换静默失效"说的就是这件事：正则可匹配不上的
+// 时候，函数安静返回原文，而 prompt 还在向模型推荐一条死路。
+//
+// 2026-09-21 那次审计就是这么发现的：art.draw 在生产 0% 成功，它的兜底建议
+// （python3.10 + PIL 走 computer.run）指向的终端永久不可用。改写器本身有覆盖
+// PIL 那行，但**没有任何测试拿真 prompt 验过它匹配得上**。
+//
+// 所以这里直接从 executor.ts 里把模板原文掏出来跑一遍：这是唯一能证明
+// "改写对当前这份 prompt 真的生效"的办法。
+describe('组合：真 EXECUTOR_SYSTEM 过改写器', () => {
+  const src = readFileSync('src/subagent/executor.ts', 'utf8');
+  // 终止反引号独占一行（prompt 里的反引号全都转义成 \`），所以用 \n`; 收尾。
+  const m = src.match(/const EXECUTOR_SYSTEM = `([\s\S]*?)\n`;/);
+  const REAL = m ? m[1]!.replace(/\\`/g, '`') : '';
+
+  it('掏得出真 prompt（掏不出来这条测试自己就该红）', () => {
+    expect(REAL.length).toBeGreaterThan(2000);
+    expect(REAL).toContain('art.draw(');
+  });
+
+  it('终端不可用 → 真 prompt 里不再有任何一处推荐死路', () => {
+    const out = applySandboxAvailabilityNotes(REAL, DEAD);
+    expect(out).not.toMatch(/建议用 computer\.run/);
+    expect(out).not.toContain('用 python3.10（有 PIL）');
+    expect(out).not.toContain('检查办法：写完 grep charset');
+    // 每一处提到 computer.run 的行都必须自带"不可用/没法用"
+    for (const line of out.split('\n').filter((l) => l.includes('computer.run'))) {
+      expect(line).toMatch(/不可用|没法用/);
+    }
+    // 每一处提到 python3.10 的行都必须说明本机做不了
+    for (const line of out.split('\n').filter((l) => l.includes('python3.10'))) {
+      expect(line).toMatch(/做不了|不可用/);
+    }
+  });
+
+  it('翻车之后，画图的正路仍在 prompt 里（art.draw 的指引一条都没被改写掉）', () => {
+    const out = applySandboxAvailabilityNotes(REAL, DEAD);
+    expect(out).toContain('art.draw(描述');
+    expect(out).toContain('画图必须用它');
+    expect(out).toContain('每任务限 2 次');
+    // 图像处理那条被改写后仍指向 art.draw，而不是让模型去撸 PIL
+    const pil = out.split('\n').find((l) => l.includes('图像处理'))!;
+    expect(pil).toContain('art.draw');
+  });
+
+  it('终端可用 → 真 prompt 一字不改', () => {
+    expect(applySandboxAvailabilityNotes(REAL, ALIVE)).toBe(REAL);
   });
 });
