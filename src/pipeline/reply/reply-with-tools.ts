@@ -14,6 +14,7 @@
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { getUsage, getLabel } from '../../ai/labels.js';
+import { acquireConcurrency, AI_MAX_CONCURRENCY_PER_ACCOUNT } from '../../ai/concurrency.js';
 import { CooldownTracker } from '../../ai/cooldown.js';
 import { getRedis } from '../../db/redis.js';
 import { buildToolSet } from '../tools/registry.js';
@@ -81,6 +82,13 @@ export async function generateReplyWithTools(input: ReplyWithToolsInput): Promis
       incrCounter('reply_merged_writer_skipped_total', { label: labelName, reason: 'cooling' });
       continue;
     }
+    // 客户端并发闸：这条路直接走 AI SDK 的 generateText，**不经过 callModel**，
+    // 所以 round 81 加在 callModel 上的信号量拦不到它。round 93 实测：恢复后 17 分钟
+    // stepfunvision（与 stepfun/judge/think/asi 共用同一账号）报 concurrency reached
+    // 27 次、Circuit breaker tripped 61 次——闸装了，但这条路绕过去了。
+    const release = await acquireConcurrency(
+      `${label.endpoint}|${apiKey ?? ''}`, AI_MAX_CONCURRENCY_PER_ACCOUNT,
+    );
 
     try {
       const provider = createOpenAI({ baseURL: label.endpoint, apiKey, compatibility: 'compatible' });
@@ -126,6 +134,8 @@ export async function generateReplyWithTools(input: ReplyWithToolsInput): Promis
         await cooldown.setCooldown(label.model).catch(() => {});
       }
       logger.warn({ err, label: labelName, chatId: input.chatId }, 'Merged tool-writer label failed, trying next');
+    } finally {
+      release();
     }
   }
 

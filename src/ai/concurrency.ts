@@ -16,6 +16,15 @@
 // 不同账号各算各的（这正是 smart-group 的 diversifyByUpstream 那条规则）。
 // 拿不到就排队等，不报错：等待好过被 429 后冷却一分钟。
 
+/**
+ * 每个账号同时在飞的调用上限。
+ *
+ * StepFun 的限额是 8、另一家 10。取 6 给 provider 自己的内部并发留余量。
+ * 导出是因为 `reply-with-tools.ts` 直接走 AI SDK 的 generateText、绕过了
+ * callModel，得自己在那边 acquire。
+ */
+export const AI_MAX_CONCURRENCY_PER_ACCOUNT = 6;
+
 interface Bucket { active: number; waiters: Array<() => void>; }
 
 const buckets = new Map<string, Bucket>();
