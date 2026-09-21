@@ -32,7 +32,7 @@ const VERIFY_STEP_RE = /写文件后建议用 computer\.run 验证内容正确[^
 /** 「电脑使用」小节标题：它说"SANDBOX_ENABLED 时可用"，可那一节里依赖终端的建议一句句都死了。 */
 const SECTION_HEADER = '## 电脑使用（SANDBOX_ENABLED 时可用）';
 /** 依赖终端的图像处理建议（python3.10 + PIL 走 computer.run）。 */
-const PIL_LINE_RE = /- \*\*图像处理（改尺寸\/裁剪\/转格式\/处理真实照片）用 python3\.10[^\n]*/;
+const PIL_LINE_RE = /- \*\*图像处理（改尺寸\/裁剪\/转格式\/处理真实照片）用[^\n]*/;
 /** 依赖终端的检查办法（grep 也是命令）。 */
 const GREP_ADVICE_RE = /检查办法：写完 grep charset，没有就补。/;
 

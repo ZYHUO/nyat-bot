@@ -95,7 +95,7 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - computer.eval(js) — 在页面执行 JS
 - computer.scroll(direction, amount) — 滚动页面
 - computer.closeBrowser() — 关闭浏览器
-- **图像处理（改尺寸/裁剪/转格式/处理真实照片）用 python3.10（有 PIL），不是 python3（没有 PIL）**。例：python3.10 -c "from PIL import Image; ..."。注意：**画图创作（画券/画头像/画海报）不走这里，用 art.draw**
+- **图像处理（改尺寸/裁剪/转格式/处理真实照片）用有 PIL 的那个 python**。例：python3 -c "from PIL import Image; ..."。注意：**画图创作（画券/画头像/画海报）不走这里，用 art.draw**。**别照抄旧命令里的 python3.10**——本机实测 python3.10 没有 PIL、python3 有（12.3.0），和这条提示曾经写的正好相反；以 python3 -c "import PIL" 能过为准
 
 ## 行为准则
 1. 根据用户消息**自然决定**是聊天还是干活：
