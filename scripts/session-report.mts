@@ -134,16 +134,23 @@ function readLog(): LogStats {
     // 每个 label 只在第一次截断时打 info（不刷屏），后续走 debug。
     // 所以这个数是"有几个 label 被发现会截断"，不是"重试了几次"。
     else if (msg.includes('思维链吃光额度')) { st.truncRetry++; if (t >= deployMs) st.afterTruncRetry++; }
-    else if (msg.startsWith('Meta ')) st.metaEvents++;
+    // **结构性忽略必须排在 `startsWith('Meta ')` 之前**。
+    // 2026-09-21：它的日志原文是 `Meta path: bot 未称呼本喵，结构性忽略（不烧心流）`——
+    // 以 'Meta ' 开头，于是先被上面那个分支吃掉，structuralIgnore 永远是 0。
+    // 实测 awake 窗口里它打了 6 次，报告却印 0。和 round 41 那条 else-if 断链同族：
+    // **宽泛的前缀分支排在具体分支前面，具体的就永远数不到**。
+    if (msg.includes('结构性忽略')) { st.structuralIgnore++; if (t >= deployMs) st.afterStructuralIgnore++; }
+    else if (msg.includes('denoise silenced')) st.semanticDenoise++;
     else if (msg.startsWith('Pipeline complete')) {
       st.legacyExits++;
       if (msg.includes('denoise')) st.legacyDenoise++;
       if (msg.includes('floor') || msg.includes('heart=pass') || msg.includes('asleep')) st.legacyReplyEngine++;
     }
-    else if (msg.includes('结构性忽略')) { st.structuralIgnore++; if (t >= deployMs) st.afterStructuralIgnore++; }
-    else if (msg.includes('denoise silenced')) st.semanticDenoise++;
     else if (msg.includes('转 wait 保句')) { st.keepAddressed++; if (t >= deployMs) st.afterKeepAddressed++; }
     else if (msg.includes('BLOCKED by envelope')) st.envelopeBlock++;
+    // `Meta ...` 兜底必须放在**最后**：它是个宽泛前缀，排在具体分支前面会把
+    // `Meta path: ...结构性忽略` / `Meta path: denoise silenced ...` 一起吃掉
+    // （2026-09-21：两个数都印 0，实际分别是 171 和 37）。
     else if (msg.includes('BLOCKED by trench gate')) {
       const why = String(d['why'] ?? '');
       if (why === 'budget_spent') st.budgetBlock++;
@@ -157,6 +164,8 @@ function readLog(): LogStats {
       // 部署后的任务单独一套 key（加前缀），免得跨窗口混在一起看不出效果
       if (t >= deployMs) st.taskSends.set(`@${tid}`, (st.taskSends.get(`@${tid}`) ?? 0) + 1);
     }
+    // 兜底放最后：见上面那条注释。宽泛前缀必须让具体分支先匹配。
+    else if (msg.startsWith('Meta ')) st.metaEvents++;
   }
   return st;
 }
