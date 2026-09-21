@@ -226,6 +226,12 @@ async function persistToRedis(labelName: string, h: LabelHealth): Promise<void> 
       errorCount: String(h.errorCount),
       successCount: String(h.successCount),
       lastUsed: String(h.lastUsed),
+      // 2026-09-21 round 106：窗口化结果也要持久化。
+      // 不写的话，每次重启 `recentOutcomes` 都从空开始，round 105 加的
+      // "零成功 5 次就挡"要重新攒 5 个样本——而重启正是 provider 最脆弱的时候
+      // （round 87：重启后前 5 分钟失败率是稳定期的 5-10 倍）。
+      // 冷启动那几分钟里坏替补又能各烧几个超时。
+      recentOutcomes: JSON.stringify((h.recentOutcomes ?? []).slice(-50)),
     });
     await redis.expire(key, 86400);
   } catch {
@@ -244,12 +250,18 @@ async function loadFromRedis(): Promise<void> {
       if (!data || !data.latencies) continue;
       let lats: number[];
       try { lats = JSON.parse(data.latencies); } catch { continue; }
+      let ring: number[] = [];
+      try {
+        const parsed = JSON.parse(data.recentOutcomes ?? '[]');
+        if (Array.isArray(parsed)) ring = parsed.filter((v) => v === 0 || v === 1);
+      } catch { /* 旧数据没有这个字段，空环起步 */ }
       memoryHealth.set(labelName, {
         healthy: data.healthy === '1',
         latencies: Array.isArray(lats) ? lats : [],
         errorCount: parseInt(data.errorCount ?? '0', 10),
         successCount: parseInt(data.successCount ?? '0', 10),
         lastUsed: parseInt(data.lastUsed ?? '0', 10),
+        recentOutcomes: ring,
       });
     }
   } catch {
