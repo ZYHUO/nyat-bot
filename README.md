@@ -1076,6 +1076,36 @@ The lesson generalises past this repo: **a reachability analysis over a dynamic-
 codebase is a filter, never a verdict** — and a filter that does not label its own false
 positive rate will be believed as a verdict.
 
+**And the first version of the filter was wrong in an instructive way.** It classified all
+of `src/pipeline/` as legacy — but the Heart, which AGENTS.md calls "the main path" in
+production, lives at `src/pipeline/heart/`. So `heart/self-state.ts`'s import of
+`tracking/obsessions.ts` made obsessions look legacy-only. Fixing the classification took
+the candidate list from 26 to 19. **A directory named after the old architecture does not
+mean everything in it is old.**
+
+### The two tool sets do not overlap
+
+The 19 candidates include ten `pipeline/tools/*` modules. Checking what each path can
+actually call:
+
+```
+legacy reply writer  SEARCH FETCH RECALL QUERY_MEMORY QUERY_PERSON_PROFILE
+                     FETCH_HISTORY BOT_KNOWLEDGE QUERY_JARGON TIMER POLL
+                     IP_QUALITY SSRF SKILLS
+Meta subagent       memory.search chats.recentMessages web.search
+                     telegram.sendText telegram.sendToChat computer.run
+                     admin.deleteMessage admin.mute admin.pin
+                     self.editPrompt bots.command
+```
+
+Timers, polls, recall, jargon lookup, bot-knowledge and IP-quality exist **only** on the
+legacy side. On the Meta path the model has no way to set a reminder or run a poll.
+
+This round documents the gap rather than closing it. Porting ten tools into the sandbox
+protocol is its own piece of work — each needs a permission tier, a Zod schema, a
+host-api binding and a test — and doing it as a drive-by alongside a reachability audit
+would produce exactly the kind of unverified change this repo keeps getting burned by.
+
 ### Batch crons need a batch-level gate, not just per-call limits
 
 Round 65 found `deep-reflection` ticks running 629s against a 600s interval, caused by

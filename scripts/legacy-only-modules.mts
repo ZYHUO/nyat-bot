@@ -31,8 +31,17 @@ for (const [f, src] of body) {
 
 // legacy 集合：只被这些模块（或它们的传递闭包）引用的，就是 legacy-only
 const LEGACY_SEEDS = ['src/pipeline/pipeline.ts', 'src/queue/worker.ts'];
+// ⚠️ **Heart 不是 legacy。** round 76 第一版漏了这条，把
+// `src/pipeline/heart/self-state.ts` 也算成 legacy，于是它 import 的
+// `tracking/obsessions.ts` 被误判成"只接在 legacy"。
+// AGENTS.md 写明："In production the **Heart branch is the main path**"。
+// 这条坑值得记：**目录名 `pipeline/` 会让人以为整个目录都是老路**，
+// 而生产主路径的心流和 turn-actor 就住在这个目录里。
 const isLegacy = (f: string): boolean =>
-  f.startsWith('src/pipeline/') && !f.startsWith('src/pipeline/stages/media.ts')
+  f.startsWith('src/pipeline/')
+  && !f.startsWith('src/pipeline/heart/')
+  && !f.startsWith('src/pipeline/turn/')
+  && !f.startsWith('src/pipeline/stages/media.ts')
   && !f.startsWith('src/pipeline/multimodal.ts') && !f.startsWith('src/pipeline/context/')
   && !f.startsWith('src/pipeline/shared') && !f.startsWith('src/pipeline/reply/')
   && !f.startsWith('src/pipeline/tools/bot-delegation.ts')
