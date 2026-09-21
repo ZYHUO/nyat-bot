@@ -89,6 +89,10 @@ const CHECKS: Array<[string, string]> = [
   ['Meta 代发回执', 'Meta: delegation receipt handled'],
   // Meta 主路径的实时学习 + ASI 自评（2026-09-21）
   ['Meta 实时学习', 'learnFromReply'],
+  // 批次级总闸（round 65/66）：这两个 tick 预算必须进包，否则循环没有上限
+  ['反思 tick 预算', 'REFLECTION_TICK_BUDGET_SEC'],
+  ['topic-scan tick 预算', 'TOPIC_SCAN_TICK_BUDGET_SEC'],
+  ['tick 预算跳过计数', 'skippedForBudget'],
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）
