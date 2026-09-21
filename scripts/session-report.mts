@@ -550,6 +550,17 @@ console.log('');
           + '2026-09-21 探针直接调 learnFromReply 传一段有内容的来回也返回 0，确认是这个原因。）');
       }
     }
+    // 等待重试的成败：等过一次之后是救回来了、还是仍然全冷却。
+    // 没这两个数，"我加了个重试"和"这个重试有用"看起来一模一样。
+    const wrOk = [...text.matchAll(/^llm_wait_retry_total\{[^}]*outcome="ok"[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    const wrCold = [...text.matchAll(/^llm_wait_retry_total\{[^}]*outcome="still_cooling"[^}]*\}\s+(\d+)/gm)].reduce((a, m) => a + Number(m[1]), 0);
+    if (wrOk > 0 || wrCold > 0) {
+      const tot = wrOk + wrCold;
+      console.log(`  全链冷却等最短醒来重试  救回 ${wrOk}｜等完仍全冷却 ${wrCold}  救回率 ${((wrOk / tot) * 100).toFixed(0)}%`);
+      if (tot >= 10 && wrOk / tot < 0.3) {
+        console.log('    ⚠️  救回率偏低——等的十几秒大多白等。考虑缩短上界（现 15s）或直接不等。');
+      }
+    }
     if (total >= 20 && rate > 25) {
         console.log('  ⚠️ 失败率偏高——但注意这是"每次尝试"的口径，一次 callWithFallback 可能试多跳。');
         console.log('     看上面 2. 节的心流失败率（那是"最终有没有拿到结果"的口径）判断实际影响。');

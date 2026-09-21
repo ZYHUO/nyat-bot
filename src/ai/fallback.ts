@@ -55,6 +55,8 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   let hedgeTriedLabel: string | undefined;
   /** 全链被冷却跳过时，最短的那个剩余冷却（秒）；0 表示没有候选被冷却跳过。 */
   let shortestCooldownSec = 0;
+  /** 是否真的等过一次（等完仍全冷却时用来分开记账）。 */
+  let waitedOnce = false;
 
   // P2 多模态:带图调用跳过明确声明 VISION=false 的 label(纯文本模型收到
   // image_url 必 400,白烧一跳还刷熔断)。undefined(未声明)照发,保持现状。
@@ -168,6 +170,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     }
   }
 
+  // 等过但仍全冷却：结局和不抛一样是错，只是晚了十几秒。分开记才看得出值不值。
+  if (waitedOnce) incrCounter('llm_wait_retry_total', { usage: options.usage, outcome: 'still_cooling' });
+
   const lastErr = errors.at(-1);
   if (lastErr) throw lastErr;
 
@@ -183,6 +188,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   // 它们不怕等，却因为设了那两条而被排除在这个重试之外。
   const mayWait = options.waitIfCooling || (!options.maxTimeoutMs && !options.signal);
   if (shortestCooldownSec > 0 && mayWait) {
+    waitedOnce = true;
     const waitSec = Math.min(shortestCooldownSec + 1, 15);
     logger.debug(
       { usage: options.usage, waitSec, candidates: smartOrderedNames },
@@ -197,6 +203,11 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         if (options.rejectEmpty && !result.content.trim()) continue;
         await cooldown.recordSuccess(label.model);
         if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
+        // 记账：这个重试到底救没救回来。2026-09-21 实测它在生产里已触发 46 次
+        // （MainPID 1979127），但触发次数不等于有用——等完仍全冷却的话，
+        // 结局和不等一样是抛错，只是晚了十几秒。没这个计数器，"我加了个重试"
+        // 和"这个重试有用"看起来一模一样。
+        incrCounter('llm_wait_retry_total', { usage: options.usage, outcome: 'ok' });
         return result;
       } catch (err) {
         errors.push(err instanceof Error ? err : new Error(String(err)));
