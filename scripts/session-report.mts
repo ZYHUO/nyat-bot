@@ -51,6 +51,8 @@ interface LogStats {
   afterDeploy: number;
   /** 最后一条 awake 处理证据的时间戳（0 = 没有） */
   lastAwakeMs: number;
+  /** `Meta path: asleep` 的行数（睡眠期排队，不是 awake 处理） */
+  metaAsleep: number;
   afterInbound: number;
   afterHeartFailed: number;
   afterHeartDecision: number;
@@ -84,7 +86,7 @@ function readLog(): LogStats {
     legacyReplyEngine: 0, structuralIgnore: 0, semanticDenoise: 0, keepAddressed: 0,
     envelopeBlock: 0, budgetBlock: 0, gapBlock: 0, sendBudgetEnd: 0,
     lines: 0, windowStart: 0, windowEnd: 0,
-    afterDeploy: 0, afterInbound: 0, afterHeartFailed: 0, afterHeartDecision: 0, lastAwakeMs: 0,
+    afterDeploy: 0, afterInbound: 0, afterHeartFailed: 0, afterHeartDecision: 0, lastAwakeMs: 0, metaAsleep: 0,
     afterTruncRetry: 0, afterKeepAddressed: 0, afterStructuralIgnore: 0,
     taskSends: new Map(),
   };
@@ -124,6 +126,7 @@ function readLog(): LogStats {
     // 恰好也在 AWAKE_MARKERS 里 → 第二个 if 恒真 → 后面的 else if 永远不执行 →
     // `心流裁决` 恒为 0，而 `LLM 失败` 照常计数（它不在 AWAKE_MARKERS 里）。
     // 报告于是显示"0 次裁决、1253 次失败"——一个看着像数据、其实是断链的数字。
+    if (msg === 'Meta path: asleep') st.metaAsleep++;
     if (msg !== 'Meta path: asleep' && AWAKE_MARKERS.has(msg)) {
       st.lastAwakeMs = Math.max(st.lastAwakeMs, t);
     }
@@ -465,13 +468,43 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     }
   }
   if (!any) console.log('  （窗口内这些 cron 都没有日志）');
-  if (!any) console.log('  （窗口内这些 cron 都没有日志）');
   // topic-scan 单列：它的"产出"是 tick 日志里的 observed 字段，不是另一条消息
   console.log('  （topic-scan 的产出率见上一节）');
   console.log('');
   console.log('  ⚠️ 的判据：≥20 次尝试而产出率 <50%。2026-09-21 实测修之前的形状：');
   console.log('     dreaming 805 次 0%、distiller 473/73=13%、post-task 失败 2104 次、');
   console.log('     topic-scan 2040 次调用只抽 91 个标签（4.5%）。全是"跑了但什么都没产出"。');
+
+// ── 机器可读输出（给 scripts/xcheck-report.mts 当左端用）─────────────────
+// 人看的排版里有 ├─、｜、百分比、全角空格，任何外部解析器都是脆的。
+// 所以这里让报告自己吐一份 key=value：xcheck 拿它和"直接 grep 日志"对，
+// 抓的是"报告的匹配漏了某条日志"（round 41 / round 57 两个恒 0 计数器）。
+if (process.argv.includes('--kv')) {
+  const kv: Array<[string, number]> = [
+    ['heart_decision', st.heartDecision],
+    ['heart_failed', st.heartFailed],
+    ['all_exhausted', st.allExhausted],
+    ['empty_response', st.emptyResponse],
+    ['trunc_retry', st.truncRetry],
+    ['meta_events', st.metaEvents],
+    ['legacy_exits', st.legacyExits],
+    ['legacy_denoise', st.legacyDenoise],
+    ['legacy_reply_engine', st.legacyReplyEngine],
+    ['structural_ignore', st.structuralIgnore],
+    ['semantic_denoise', st.semanticDenoise],
+    ['keep_addressed', st.keepAddressed],
+    ['envelope_block', st.envelopeBlock],
+    ['trench_gate_block', st.budgetBlock + st.gapBlock],
+    ['send_budget_end', st.sendBudgetEnd],
+    ['meta_asleep', st.metaAsleep],
+    ['inbound', st.inbound],
+  ];
+  // 三个出口的 cron 对（2c 节）——用同一份 counts，别重算
+  for (const [fail, ok, label] of PAIRS) {
+    kv.push([`cron_fail:${label}`, counts.get(fail) ?? 0]);
+    if (ok) kv.push([`cron_ok:${label}`, counts.get(ok) ?? 0]);
+  }
+  for (const [k, v] of kv) console.log(`${k}=${v}`);
 }
 console.log('');
 
@@ -563,4 +596,7 @@ console.log('  · 心流：LLM 失败率应低于 25%（修复前的实测值）
 console.log('  · 架构：legacy 回复引擎那一行是"老架构还剩多少"的唯一指标。');
 console.log('  · ASI：实测率 > 0 才说明 rubric 不再是常量；NULL 是诚实，不是故障。');
 console.log('');
+}
+
 process.exit(0);
+
