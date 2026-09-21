@@ -1154,6 +1154,25 @@ already validated, whose header comment records that FTS5's `trigram` tokenizer 
 find two-character Chinese words at all. Query side segmented, matched with `LIKE` against
 the raw content so the write side needs no migration.
 
+**Correction to the first version of this section.** It claimed experience recall "had
+exactly the round-60 bug" and implied it never worked. It did work — `experience recall
+injected` had been firing since 09-15, 1,226 times. Measuring old-vs-new on the same 25
+real task directions:
+
+```
+OLD  3,0,3,0,3,3,3,2,3,3,3,3,3,3,3,3,3,3,3,3,3,0,3,3,0   → 21/25 non-empty
+NEW  3,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3   → 25/25 non-empty
+```
+
+So it was **84% → 100%**, not 0% → 100%. Skills really was 0-for-6; experience was
+already finding most things because real task directions contain short Latin tokens
+(`@nlkio`, `#175213`, `uid:7648729949`) that survive punctuation splitting and do match.
+The Chinese half of the query was dead weight.
+
+The lesson is about how the first version got written: I fixed skills, saw the identical
+code copied into `episodes.ts`, and reported it as the identical bug without measuring the
+before. **Same code does not mean same symptom** — the surrounding data decides that.
+
 Two things worth recording:
 
 - **The default `botId` is a footgun.** `findRelevantExperience` defaults to `'self'`,
