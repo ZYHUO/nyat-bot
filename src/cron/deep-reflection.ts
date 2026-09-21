@@ -20,7 +20,22 @@ const MIN_MSGS = 20; // 太冷的群不值得反思
 const FAIL_PREFIX = 'xxb:reflect:fail:';
 // 链全灭的群冷却 30min 再试 —— 不退避则每个死群每 tick 白烧整条链 ×12s
 // (2026-08-07 两连 tick 12/12 全灭;dsv4flash flaky + stepfun 订阅失效期间每 tick 照烧)。
-const FAIL_COOLDOWN_SEC = 1800;
+/**
+ * 单群反思失败后的冷却。
+ *
+ * 2026-09-21 从 1800（30min）降到 300（5min）。round 52 给 STARVED 加了原因分布之后
+ * 第一次就看到真实病因：`{chats: 15, cooling: 12, too_few_msgs: 3, llm_failed: 0}`
+ * ——**12 个群在冷却，0 个 LLM 失败**。
+ *
+ * 那 12 个冷却是怎么来的：01:55-02:04 之间 provider 链整体抽了约 10 分钟，
+ * 15 个群**同时**超时（`Timeout: The operation was aborted due to timeout`），
+ * 于是每个群都被打上 30 分钟冷却。而 `REFLECTION_INTERVAL_MIN=10`——这条链
+ * 一恢复，还要再空转 3 个 tick 才能开始产出。
+ *
+ * 病因是共享的（provider 链），惩罚却是按群各自算 30 分钟。5 分钟足够避开
+ * 一次连续的坏周期，又不让恢复被拖延三个 tick。
+ */
+const FAIL_COOLDOWN_SEC = 300;
 
 const SYSTEM_PROMPT =
   '你是群聊的长期记忆整理器。下面是一个群最近的聊天记录。请提炼一份**给 bot 看的**"本群近况"' +
@@ -60,9 +75,22 @@ export async function reflectChat(chatId: number): Promise<{ tokens: number; rea
       ],
       maxTokens: 1200,
       temperature: 0.4,
-      // 蒸馏是后台批任务,不该为单群烧满 provider 超时(22s)再串行降级 ×4 跳 ——
-      // 一次 tick 12 群能把整条链的熔断计数全刷爆(2026-08-07 事故)。每跳 12s 封顶。
-      maxTimeoutMs: 12000,
+      // 每跳上限 12000 → 20000。
+      //
+      // 2026-09-21 实测：三个真实群的反思调用耗时 8780 / 9851 / 8718 毫秒
+      // ——**全部贴着 12s 的线**。只要链上第一个 label 在冷却、要往后跳一次，
+      // 单跳就超时。日志里 `deep-reflection: LLM failed` 的 err 全是
+      // `Timeout: The operation was aborted due to timeout`，没有一次是真失败。
+      //
+      // 这和 round 50 的 typesafe（3000ms < 实测 3.3s）是同一条病：
+      // **时限设在了真实延迟以下**。reasoning 模型 + 78 条消息的 prompt，
+      // 9 秒是正常速度，不是异常。
+      //
+      // 原注释担心的是"一次 tick 把整条链的熔断计数刷爆"（2026-08-07 事故）。
+      // 那个担心仍然成立，但方向反了：**超时也会刷爆熔断**——12 个群同时超时，
+      // 每个都记一次失败，正是那次事故的形状。20s 下单跳正常 9s 完成，
+      // 15 个群约 135s，仍在一个 tick 间隔（600s）内。
+      maxTimeoutMs: 20000,
       allowHedge: false,
     });
     digest = result.content.trim().slice(0, 600);
