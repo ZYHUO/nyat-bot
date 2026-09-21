@@ -82,6 +82,9 @@ export const judgeSection = {
   // 能把一个 tick 拖到 629s，而 tick 间隔只有 600s —— cron 变成连续运转。
   // 15 群 × (3 跳 × 20s + 等冷却 15s) ≈ 1125s 是理论上限。
   REFLECTION_TICK_BUDGET_SEC: z.coerce.number().int().positive().default(180),
+  // topic-scan 单个 tick 的墙钟预算（秒）。同 REFLECTION_TICK_BUDGET_SEC 的理由：
+  // extractTopic 原来没设每跳上限，用 judge usage 的 120s，20 群 × 3 跳 = 理论上限两小时。
+  TOPIC_SCAN_TICK_BUDGET_SEC: z.coerce.number().int().positive().default(180),
   REFLECTION_INTERVAL_MIN: z.coerce.number().int().positive().default(30),
   REFLECTION_CHATS_PER_TICK: z.coerce.number().int().positive().default(20),
   REFLECTION_WINDOW_MSGS: z.coerce.number().int().positive().default(250),

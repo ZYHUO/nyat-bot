@@ -45,6 +45,12 @@ async function extractTopic(chatId: number): Promise<string | null> {
       temperature: 0,
       // 纯文本标签输出 —— 关掉 usage 级 jsonMode（response_format 会强制 JSON，坏事）
       jsonMode: false,
+      // 每跳 12s。2026-09-21：这里原来没设 maxTimeoutMs，于是用 judge usage 自己的
+      // 120s——20 群 × 3 跳 × 120s = 理论上限 **7200s（两小时）**一个 tick。
+      // 实测相邻 tick 间隔最大 993s（间隔 480s），即真有 tick 跑了 ~8 分钟。
+      // 抽一个 4-12 字的标签不需要 120s；等冷却的重试也不该在这儿等
+      // （后台批任务，见 deep-reflection 的 tick 预算）。
+      maxTimeoutMs: 12_000,
     });
     const label = (res.content || '').trim().replace(/^[\s["'「『]+|[\s\]"'」』。.!?！？]+$/g, '').slice(0, 40);
     if (!label || label.toUpperCase() === 'NONE' || label.length < 2) return null;
@@ -65,8 +71,16 @@ export async function runTopicScan(): Promise<void> {
     logger.warn({ err }, 'topic-scan: discover failed');
     return;
   }
+  // **整 tick 的截止时间。** 2026-09-21：extractTopic 原来没有每跳上限，
+  // 用 judge usage 的 120s；20 群 × 3 跳 × 120s = 理论上限两小时。
+  // 和 deep-reflection（round 65）同一个病：**单跳合理 × N 群 ≠ 合理。**
+  // 到点的群跳过，下一个 tick 自然补上。
+  const deadlineMs = Date.now() + Math.max(30_000, env().TOPIC_SCAN_TICK_BUDGET_SEC * 1000);
+  let skippedForBudget = 0;
+
   let observed = 0;
   for (const chatId of chats) {
+    if (Date.now() >= deadlineMs) { skippedForBudget++; continue; }
     try {
       const label = await extractTopic(chatId);
       if (label) { observeTopic(chatId, label); observed++; }
@@ -76,7 +90,7 @@ export async function runTopicScan(): Promise<void> {
     }
   }
   pruneDeadTopics(); // global sweep:清掉已沉寂群里的 dead 话题(tick 只覆盖活跃群)
-  if (chats.length) logger.info({ chats: chats.length, observed }, 'Topic scan tick');
+  if (chats.length) logger.info({ chats: chats.length, observed, skippedForBudget }, 'Topic scan tick');
 
   // ── 抽取率告警 ────────────────────────────────────────────────────────
   //

@@ -1026,6 +1026,30 @@ to find out.
 Verified by calling `judge()` four times in a row: `backend=typesafe, ok=true` on all
 four, where before the change both probe calls came back `backend=chat`.
 
+### Batch crons need a batch-level gate, not just per-call limits
+
+Round 65 found `deep-reflection` ticks running 629s against a 600s interval, caused by
+two individually-correct fixes multiplying (per-hop timeout 12→20s, plus wait-if-cooling
+up to 15s, across 15 chats).
+
+Asking "same cause elsewhere?" over every cron that loops over chats found five more with
+**no deadline at all**: `topic-scan`, `knowledge-sync`, `bot-command-scan`, `memory-dream`,
+`tic-penalty`. `topic-scan` was the worst of them — `extractTopic` set no `maxTimeoutMs`,
+so it inherited the `judge` usage's 120s:
+
+```
+20 chats × 3 hops × 120s = 7200s theoretical ceiling for one tick
+measured: adjacent tick gaps up to 993s against a 480s interval
+```
+
+Both now carry a wall-clock budget (`REFLECTION_TICK_BUDGET_SEC`,
+`TOPIC_SCAN_TICK_BUDGET_SEC`, default 180s) plus a per-hop cap, and the tick log reports
+`skippedForBudget` so a budget that starts biting is visible rather than silent.
+
+The rule this leaves behind: **for anything that loops, the unit of measurement is the
+loop, not the iteration.** A per-call limit tells you one call is bounded; it says nothing
+about the batch, and "reasonable × N" is how a 12s fix becomes a two-hour tick.
+
 ### Fixing the merged tool-writer exposed what its failure had been hiding
 
 Round 45 got it running for the first time — 7 successes, all through `spark13`, after 195
