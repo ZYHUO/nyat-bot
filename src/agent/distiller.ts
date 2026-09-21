@@ -24,6 +24,36 @@ export interface DistillResult {
 }
 
 /** 解析 LLM 输出为 DistillResult；垃圾输出返回 null（不重试）。 */
+/**
+ * 把被 max_tokens 截断的 JSON 修到能解析：按栈补上未闭合的 `"`、`[`、`{`。
+ *
+ * 只在原样解析失败之后才会被尝试（见 candidates 最后一项），所以正常输出
+ * 走不到这里。修得好就救回一条 episode，修不好返回 ''（候选为空，跳过）。
+ */
+function repairTruncatedJson(raw: string): string {
+  const stack: string[] = [];
+  let inStr = false;
+  let esc = false;
+  for (const ch of raw) {
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '[' || ch === '{') stack.push(ch);
+    else if ((ch === ']' || ch === '}') && stack.length) stack.pop();
+  }
+  let out = raw;
+  if (inStr) out += '"';                       // 字符串写到一半
+  while (stack.length) {                       // 数组/对象没关
+    const open = stack.pop()!;
+    out += open === '[' ? ']' : '}';
+  }
+  return out;
+}
+
 export function parseDistillOutput(raw: string): DistillResult | null {
   try {
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -32,6 +62,11 @@ export function parseDistillOutput(raw: string): DistillResult | null {
       cleaned.replace(/,\s*([}\]])/g, '$1'),
       cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '',
       (cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '').replace(/,\s*([}\]])/g, '$1'),
+      // 截断自救：模型写到一半被 max_tokens 切断时，把开着的引号/数组/对象补齐再解析。
+      // 上面的四个候选都要求有收尾的 `}`，截断输出一个都过不了——于是 1287 次
+      // 里带 len/head 的那 14 条全是这个形状。补一条"闭合后重试"的候选，
+      // 让"summary 已经拿到、lessons 只写了一半"这种情况也能留下记录。
+      repairTruncatedJson(cleaned),
     ];
     let obj: Record<string, unknown> | null = null;
     for (const candidate of candidates) {
@@ -116,7 +151,17 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
         { role: 'system', content: system },
         { role: 'user', content: user },
       ],
-      maxTokens: 1200,
+      // 1200 → 3000。2026-09-21 实测：`distill output unparseable` 1287 次，
+      // 带原始输出的 14 条 len 分别是 61/85/112/172/183/236/262/267/283/457/477/605/688/911
+      // ——**全是 JSON 被从中间截断**（`{"summary": "本次任务要求…禁止复读原话` 就没了）。
+      // 模型输出形状一直是对的，是额度不够写完。
+      //
+      // 为什么 provider 层的截断重试没救它：`callModel` 只在 `!finalText`
+      // （正文全空）时才加额重试。这里正文非空、只是 JSON 不完整， provider 层
+      // 看不出问题，重试从不触发。这是 round 12（topic-scan 24）和 round 40
+      // （post-task 200）同一条病的第三例，但形状不同：前两例是"空正文"，
+      // 这例是"半个 JSON"。
+      maxTokens: 3000,
       temperature: 0.3,
       allowHedge: false, // fire-and-forget 复盘:hedge 双发纯翻倍账单
     });

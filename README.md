@@ -1050,6 +1050,38 @@ staying at zero is the scorer correctly refusing to forward command spam and
 speed-test bot output. **A feature that never fires because its input genuinely never
 qualifies is not a bug — it is the feature working.**
 
+### The distiller's JSON was being cut in half — 1287 times
+
+`distill output unparseable — skipping episode` fired 1287 times. Round 10 had already
+fixed the *sibling* bug in `dreaming.ts` (jsonMode silently ignored on Claude-format
+labels) and added raw-output logging there, but not here. Once this one also logged its
+raw output, 14 samples showed the shape unmistakably:
+
+```
+len=61   {"summary": "本次任务要求自然接话回应群内@GundamWarrior的#245609消息，禁止复读原话
+len=236  {"summary": "…", "lessons": ["群聊短回不能仅做简单附和，需顺着对方提及的核心点延续…
+len=911  …
+```
+
+The model was producing exactly the right JSON. It just ran out of tokens before the
+closing braces.
+
+**Why the provider layer's truncation retry never fired:** `callModel` only escalates
+when `!finalText` — an empty body. A half-written JSON object is non-empty, so from the
+provider's side the call succeeded. This is the third instance of the round-12 /
+round-40 disease (a small `maxTokens` on a reasoning model), but with a different
+symptom: those two produced *empty* bodies, this one produces *half a body*.
+
+Two fixes:
+
+- `maxTokens: 1200 → 3000`
+- `repairTruncatedJson()` — walk the string tracking the open-quote/bracket/object
+  stack and close whatever is still open, then retry the parse. A truncated output
+  whose `summary` did arrive now keeps that summary instead of being discarded whole.
+
+The existing assertion `expect(callArg.maxTokens).toBeLessThanOrEqual(1200)` had been
+pinning the very budget that caused the failure.
+
 ### The send ceiling scales with how lively the group is
 
 Before this, `TRENCH_BURST_MAX` / `TRENCH_BURST_MAX_ACTIVE` were flat constants — a dead
