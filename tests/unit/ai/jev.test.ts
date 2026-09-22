@@ -45,13 +45,13 @@ describe('jev — happy parsing (真实 relay 形状)', () => {
       usage: { input_tokens: 340, output_tokens: 8 },
     }));
     const a = await callJevChoice({ id: 'ROUTE', state: '查下 1.1.1.1', question: '借哪条?', criteria: { c0: '/geo', __none__: 'none' } });
-    expect(a).toEqual({ type: 'choice', choice: 'c0', confidence: 0.9, probability: 0.9 });
+    expect(a).toEqual({ latencyMs: expect.any(Number), type: 'choice', choice: 'c0', confidence: 0.9, probability: 0.9 });
   });
 
   it('noul: p(yes),没有独立 confidence 字段', async () => {
     vi.stubGlobal('fetch', stubJev({ answers: { IS_Q: { type: 'noul', noul: 0.08 } } }));
     const a = await callJevNoul({ id: 'IS_Q', state: 'asdf', question: '是问句吗?' });
-    expect(a).toEqual({ type: 'noul', probability: 0.08 });
+    expect(a).toEqual({ latencyMs: expect.any(Number), type: 'noul', probability: 0.08 });
   });
 
   it('score: 0-indexed 分值 + confidence', async () => {
@@ -59,7 +59,7 @@ describe('jev — happy parsing (真实 relay 形状)', () => {
       answers: { U: { type: 'score', score: 3.24, confidence: 0.74, legend: { 0: 'a', 1: 'b', 2: 'c', 3: 'd', 4: 'e' }, probabilities: { 3: 0.68, 4: 0.28 } } },
     }));
     const a = await callJevScore({ id: 'U', state: '急', question: '多急', levels: ['不急', '有点', '一般', '很急', '炸了'] });
-    expect(a).toEqual({ type: 'score', score: 3.24, confidence: 0.74 });
+    expect(a).toEqual({ latencyMs: expect.any(Number), type: 'score', score: 3.24, confidence: 0.74 });
   });
 
   it('请求体形状:打 /v1/systemone,choice 的 criteria 是对象、score 的是有序数组', async () => {
@@ -125,7 +125,7 @@ describe('jev — fail-open (任何失败都返 null,调用方降级)', () => {
       state: 's',
       questions: { ok: { type: 'noul', instructions: 'q' }, bad: { type: 'choice', instructions: 'q', criteria: { c0: '/geo' } } },
     });
-    expect(r).toEqual({ ok: { type: 'noul', probability: 0.5 } });
+    expect(r).toEqual({ ok: { latencyMs: expect.any(Number), type: 'noul', probability: 0.5 } });
   });
 });
 

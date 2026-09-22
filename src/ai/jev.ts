@@ -41,9 +41,9 @@ export interface JevChoiceQuestion { type: 'choice'; instructions: string; /** �
 export interface JevScoreQuestion { type: 'score'; instructions: string; /** 有序刻度(低→高) */ criteria: readonly string[]; }
 export type JevQuestion = JevNoulQuestion | JevChoiceQuestion | JevScoreQuestion;
 
-export interface JevNoulAnswer { type: 'noul'; /** P(yes) */ probability: number; }
-export interface JevChoiceAnswer { type: 'choice'; choice: string; confidence: number; probability: number | null; }
-export interface JevScoreAnswer { type: 'score'; /** 0-indexed 刻度上的(可为小数)分值 */ score: number; confidence: number; }
+export interface JevNoulAnswer { type: 'noul'; /** P(yes) */ probability: number;  latencyMs?: number; }
+export interface JevChoiceAnswer { type: 'choice'; choice: string; confidence: number; probability: number | null; /** round 12：这次调用耗时，调用方记账用 */ latencyMs?: number; }
+export interface JevScoreAnswer { type: 'score'; /** 0-indexed 刻度上的(可为小数)分值 */ score: number; confidence: number; latencyMs?: number; }
 export type JevAnswer = JevNoulAnswer | JevChoiceAnswer | JevScoreAnswer;
 
 export interface JevRequest {
@@ -178,7 +178,9 @@ export async function callJev(req: JevRequest): Promise<Record<string, JevAnswer
     for (const id of ids) {
       const a = parseAnswer(req.questions[id]!, answersRaw[id]);
       if (a === null) { anyNull = true; continue; }
-      parsed[id] = a;
+      // round 12：把这次调用的耗时挂到每条答案上——调用方（command-router）
+      // 要记 "Jev 花了多少 ms 省掉一次 LLM judge"，而 callJev 的返回里原本没有。
+      parsed[id] = { ...a, latencyMs } as JevAnswer;
     }
     if (Object.keys(parsed).length === 0) {
       noteFailure();

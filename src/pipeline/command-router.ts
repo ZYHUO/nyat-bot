@@ -38,9 +38,9 @@ function buildList(ready: BotCommandProfile[]): string {
 }
 
 type JevVerdict =
-  | { kind: 'match'; match: Match }
-  | { kind: 'none' }
-  | { kind: 'unsure' };
+  | { kind: 'match'; match: Match; latencyMs?: number }
+  | { kind: 'none'; latencyMs?: number }
+  | { kind: 'unsure'; latencyMs?: number };
 
 /** ready 命令 → Jev Choice 的选项集(反向索引:选项 key → 真实的 bot/command)。 */
 function buildJevCriteria(ready: BotCommandProfile[]): { criteria: Record<string, string>; byKey: Map<string, Match> } {
@@ -82,12 +82,12 @@ async function classifyWithJev(text: string, chatId: number, ready: BotCommandPr
       criteria,
       chatId,
     });
-    if (!ans) return { kind: 'unsure' };                       // 关着/失败/DM/熔断 → 降级
-    if (ans.choice === JEV_NONE_KEY) return { kind: 'none' }; // 有信心的“不借”
-    if (ans.confidence < e.JEV_MIN_CONFIDENCE) return { kind: 'unsure' }; // 没把握 → 大模型判
+    if (!ans) return { kind: 'unsure' };                          // 关着/失败/DM/熔断 → 降级
+    if (ans.choice === JEV_NONE_KEY) return { kind: 'none', latencyMs: ans.latencyMs };  // 有信心的“不借”
+    if (ans.confidence < e.JEV_MIN_CONFIDENCE) return { kind: 'unsure', latencyMs: ans.latencyMs };  // 没把握 → 大模型判
     const hit = byKey.get(ans.choice);
-    if (!hit) return { kind: 'unsure' };                       // 不在 ready(不应发生)→ 降级
-    return { kind: 'match', match: hit };
+    if (!hit) return { kind: 'unsure', latencyMs: ans.latencyMs };  // 不在 ready(不应发生)→ 降级
+    return { kind: 'match', match: hit, latencyMs: ans.latencyMs };
   } catch {
     return { kind: 'unsure' };                                 // Jev 永不拖垮路由
   }
@@ -100,7 +100,17 @@ async function classify(text: string, chatId: number, ready: BotCommandProfile[]
   try {
     const v = await classifyWithJev(text, chatId, ready);
     if (v.kind === 'none') {
-      logger.debug({ chatId }, 'command-router: jev → 无命令,跳过 LLM judge');
+      // round 12：**info + 计数器**，不只 debug。
+      //
+      // 这是 Jev 集成的**大头收益**——群里绝大多数消息不借力，以前每条都要烧
+      // 一次 ~4.4-6.6s 的 LLM judge，现在 1-2s 定完。而它原来只打 debug，
+      // LOG_LEVEL=info 的生产里**完全看不见**，于是"Jev 到底省了几次、
+      // 省了多少时间"无法回答。
+      //
+      // 这个会话已经为"量的东西缺分母"交过五次学费（round 26/81/96/125/128），
+      // 每次都是同一个形状：机制在工作，但没有计数，于是无法证明它工作。
+      incrCounter('command_router_jev_none_total', { chat: chatId });
+      logger.info({ chatId, latencyMs: v.latencyMs }, 'command-router: jev → 无命令,跳过 LLM judge');
       return null;
     }
     if (v.kind === 'match') {
