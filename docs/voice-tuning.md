@@ -162,3 +162,79 @@ console.log('起床', String(Math.floor(d.wakeMin/60)).padStart(2,'0')+':'+Strin
 **一条粗暴的自检**：`grep -c 'Meta path: asleep' logs/app.log` 如果远大于
 `grep -c 'Heart decision' logs/app.log`，你读的就是夜间窗口，
 任何"心流行为"的结论都不适用于白天。
+
+---
+
+## 拧哪个螺丝：让它安静下来的操作手册
+
+前面都是"我试了什么、结果如何"。这份是**你现在就能拧的**，
+按代价从低到高排。每一档都写清了它动的是判据还是机制、
+会不会动"心流说了算"那个立场。
+
+### 第 0 档：先量，别猜
+
+```bash
+npm run measure:voice -- --since 04:00     # UTC，北京 12:00 之后
+```
+
+看 ⑤睡眠门 和 按群那张表。如果 `asleep` 远大于 `到心流`，
+你在读夜间窗口——回去看上面"什么时候真的有流量"。
+
+看 ① 回复率 和 **条/小时**。这两个是**不同的病**（round 17）：
+
+| 症状 | 看哪个数 | 说明 |
+|---|---|---|
+| "它占了我看到的多少" | ①回复率 | 群也热时常是正常的 |
+| "它又说话了" | 条/小时 | **这才是"太爱说话"** |
+
+### 第 1 档：改 prompt（不动立场，最小代价）
+
+`prompts/task/heart.md`。三个可拧的点：
+
+| 拧哪里 | 效果 | 风险 |
+|---|---|---|
+| 第一关占比阈值（现在 ≥30%） | 降到 20% 更多群落到"默认不接" | 它可能在该接的时候也收着 |
+| 节奏那句的阈值（现在 5 条/时） | 降到 3 让"挺密的"更早出现 | 同上 |
+| "什么时候 reply"那段 | 删掉 `"我想说"本身就是足够的理由` 这类鼓励 | **人格会变钝**，这是它为什么像人的部分 |
+
+改完必跑 `tests/unit/pipeline/heart-prompt-balance.test.ts`——
+那条测试锁的是结构，不是字面。改坏了它会告诉你哪里塌了。
+
+### 第 2 档：改 usage 配置（不动代码，不动立场）
+
+`.env` 里这些直接影响心流能说什么：
+
+```
+# 用法：AI_USAGE_<NAME>_<FIELD>，NAME 就是 USAGE_PROFILES 的 key
+# （judge / reply / summarize / vision / deep_think），字段白名单在 env.ts:347
+AI_USAGE_JUDGE_MAX_TOKENS       # 太小 → 思维链吃光 → heart fail-closed pass
+                                 # （round 19 修的是调用方写死；这里管配置值）
+AI_USAGE_JUDGE_TIMEOUT          # 太小 → 超时 → fail-closed pass
+AI_USAGE_JUDGE_BACKUPS          # 链长一点的兜底
+SELF_HISTORY_WINDOW_MIN         # 心流看"我最近说了多少"的回看窗口
+HEART_COOLDOWN_AS_FACT          # true = 把冷却期当作事实递模型，false = host 直接拦
+```
+
+**`HEART_COOLDOWN_AS_FACT` 是设计立场的关键**：`true` = host 只报告状态，
+模型自己决定；`false` = host 直接拦。想少说话又不想破坏立场，把它开成 `true`
+同时把 prompt 第一关收紧——**让约束可读，而不是让约束隐形**。
+
+### 第 3 档：host 侧节奏上限（**动立场，要你拍板**）
+
+前面两档都不拦它，只是让它知道。第 3 档是真的拦：
+
+- 单群 reply 后 N 秒内被动消息不进心流（冷却）
+- 单群每小时 reply 硬上限
+
+为什么不在这份文档里直接给你：这两个都让 host 从"报告状态"变成"做决定"，
+而这个项目最不一样的地方恰恰是前一件。round 97 删过一次配额，
+理由记在 `src/ai/smart-group.ts` 的注释里。
+
+**要上的话我会先量一周的条/小时分布，把上限设在不误伤活跃群的位置。**
+
+### 我建议的顺序
+
+1 档 → 量一天 → 还不够再 2 档 → 再量一天 → 还不够才谈 3 档。
+
+跳级的结果我见过：round 3 我直接改 prompt 的第一关，
+治的是占比，而真病是条/小时——**改了 17 轮才量对**。
