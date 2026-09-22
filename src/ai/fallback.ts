@@ -163,7 +163,30 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       // 429 仍然记（那是真的 provider 侧限流，和内容无关）。
       const isContentRejected = err instanceof AIError && err.code === 'AI_CONTENT_REJECTED';
       if (isContentRejected) {
-        logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter, trying next provider (not counted against breaker)');
+        logger.warn({ label: labelName, chatId: options.chatId, usage: options.usage, err: err.message }, 'Content rejected by safety filter, trying next provider (not counted against breaker)');
+        // round 12（新 goal）：**把 censorship 拒绝记成独立计数器**。
+        //
+        // 2026-09-22 用户问"洗钱/广告那种会 safety 的该不该从 context 删除、
+        // 该不该记为 ad"。实测（logs/app.log 13:00-13:20）：
+        //   · 22 次 censorship_blocked，其中 15 次 stepfunthink
+        //   · 时段内心流裁决全是 chat=-1003821093564 —— 那个群在聊
+        //     '看他跳钢管舞' / 代理 / 节点 / 套餐 / grok，**是正常群聊**
+        //   · 另一条可疑内容是 13:19:53 的 `www.kcna.kp / www.rodong.rep.kp/`
+        //     （朝鲜通讯社，中国 provider 的敏感词）
+        //
+        // 也就是说 censorship 拒绝的内容**不等于是广告**——可能是政治敏感、
+        // 色情暴力，也可能只是 provider 误伤。所以绝不能无差别记进 adP
+        // （ad-pressure.ts:207 已经为"反安静"付过一次学费）。
+        //
+        // 但**完全丢掉更错**：provider 是独立的第三方判定，这条信号现在
+        // 一丝不剩（Label failed → 换 label → 什么都不留）。先让它可观测，
+        // 才能回答"哪个群/哪个 label 最常被拒、拒的可能是什么"。
+        //
+        // ⚠️ 这是第一步（可观测）。**没有**把它接进 anti-ad 的 adP 公式——
+        // 那是第二步，改核心判据，要用户先拍板（选项见 commit message）。
+        // **不带 chat 维度**：群有几百个，带上去 Prometheus 基数爆炸。
+        // 要按群看就用日志（上面那条 warn 已带 label，加 chatId 更准）。
+        incrCounter('llm_content_rejected_total', { label: labelName, usage: options.usage ?? 'unknown' });
       }
 
       // 429 → 短期冷却
