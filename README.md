@@ -2083,6 +2083,19 @@ Those are behavioural, so that is what gets measured.
 
 ---
 
+
+## More of my work
+
+Things I've built that pair well with an agent like this one:
+
+| | |
+|---|---|
+| [nyatdb](https://github.com/ZYHUO/nyatdb) | The embedded page store NyatBot can optionally use (`NYATDB_ENABLED=true`). Rust + napi-rs engine plus a TypeScript reference engine, both on the **same on-disk format**. |
+| [tg-newsbot](https://github.com/ZYHUO/tg-newsbot) | Telegram channel news push: RSS/Atom → dedupe → LLM Chinese summary → publish. Different job, same platform. |
+| [CLIProxy-Quota-Tray](https://github.com/ZYHUO/CLIProxy-Quota-Tray) | If you run LLMs through subscription accounts instead of API keys, a Windows/Linux tray that shows per-account quota windows and estimates what the usage queue is actually costing. |
+
+MIT across all of them, same as this repo.
+
 ## 📄 License
 
 MIT License — see [LICENSE](LICENSE) for details.
