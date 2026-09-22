@@ -1,0 +1,23 @@
+{
+  "name": "CRYPTO_PRICE",
+  "description": "查加密货币的当前价格和 24h 涨跌。有人问'BTC 多少了'、'ETH 现在什么价'、或贴了币种符号问行情时用。",
+  "parameters": {
+    "coin": {
+      "type": "string",
+      "description": "CoinGecko 的币种 id，小写：bitcoin、ethereum、solana、tether、usd-coin",
+      "required": true
+    },
+    "currencies": {
+      "type": "string",
+      "description": "计价货币，逗号分隔，如 usd,cny。默认 usd",
+      "required": false
+    }
+  },
+  "trusted": true,
+  "execute": {
+    "type": "http",
+    "method": "GET",
+    "url": "https://api.coingecko.com/api/v3/simple/price?ids={{coin}}&vs_currencies={{currencies}}&include_24hr_change=true",
+    "allowedHosts": ["api.coingecko.com"]
+  }
+}

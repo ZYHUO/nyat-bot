@@ -1,0 +1,18 @@
+{
+  "name": "IP_GEO",
+  "description": "查一个 IP 地址的地理位置、ASN、线路/机场归属。群里有人贴地址、问'这 IP 哪的'、'是不是落地'、'哪个机房'时用。只支持 IPv4/IPv6 地址，不要拿域名来问。",
+  "parameters": {
+    "ip": {
+      "type": "string",
+      "description": "要查的 IPv4 或 IPv6 地址，例如 8.8.8.8、2001:4860:4860::8888",
+      "required": true
+    }
+  },
+  "trusted": true,
+  "execute": {
+    "type": "http",
+    "method": "GET",
+    "url": "https://ipinfo.io/{{ip}}/json",
+    "allowedHosts": ["ipinfo.io"]
+  }
+}

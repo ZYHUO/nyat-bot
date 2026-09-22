@@ -1,0 +1,12 @@
+{
+  "name": "RANDOM_DOG",
+  "description": "随机一张狗子的图（返回图片 URL）。群里说'来点狗的'、'看看狗'、情绪低落求安慰、或者你自己想发点不用动脑的内容时用。",
+  "parameters": {},
+  "trusted": true,
+  "execute": {
+    "type": "http",
+    "method": "GET",
+    "url": "https://dog.ceo/api/breeds/image/random",
+    "allowedHosts": ["dog.ceo"]
+  }
+}

@@ -83,7 +83,14 @@ export const infraSection = {
   // （STREAMING_MIN_INTERVAL / STREAMING_MIN_CHARS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。流式节流在 task-progress.ts 里由 TASK_PROGRESS_* 系列管，这两个键无人读）
 
   // Tool System
-  SKILLS_DIR: z.string().default('./data/skills'),
+  // round 6（新 goal）：默认从仓库根的 \`./skills\` 读——那里随源码带着 4 个
+  // **不需要 API key** 的例子（IP_GEO / GITHUB_REPO / CRYPTO_PRICE / RANDOM_DOG），
+  // 见 docs/skills.md。原来是 \`./data/skills\`，而 \`data/\` 在 .gitignore 里，
+  // 于是一个新 clone 看到的 skills 目录永远空着：文档说"一个 JSON 文件就是
+  // 一个 skill"，却没有任何一个可抄。
+  //
+  // 想放到别处就设这个变量；想全关就指向一个不存在的目录（loader 静默跳过）。
+  SKILLS_DIR: z.string().default('./skills'),
   SEARXNG_URL: z.string().url().optional(),
   XAI_API_KEY: z.string().optional(),
   XAI_SEARCH_BASE_URL: z.string().url().default('https://new-api-zhcm.onrender.com/v1'),
