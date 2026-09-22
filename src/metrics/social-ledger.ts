@@ -19,6 +19,7 @@ export const SOCIAL_METRICS = [
   'decision_reply',
   'decision_wait',
   'decision_pass',
+  'decision_react',
   'reply_sent',
   'interrupt',
   'llm_calls',
@@ -57,7 +58,7 @@ export function recordMessageSeen(chatId: number): void {
 }
 
 /** 心流决策出口。act 是 reply / wait / pass。 */
-export function recordDecision(chatId: number, act: 'reply' | 'wait' | 'pass'): void {
+export function recordDecision(chatId: number, act: 'reply' | 'wait' | 'pass' | 'react'): void {
   guard(() => {
     const metric = `decision_${act}` as SocialMetric;
     bump(chatId, metric, 1);
@@ -153,7 +154,7 @@ export interface SocialReportRow {
   interruptRate: number | null;
   /** 回复/消息比 —— bot 的"话痨程度"。 */
   replyRate: number | null;
-  decisions: { reply: number; wait: number; pass: number };
+  decisions: { reply: number; wait: number; pass: number; react: number };
 }
 
 function ratio(num: number, den: number): number | null {
@@ -193,7 +194,7 @@ export function getSocialReport(fromDate: string, toDate: string): SocialReportR
       e2eLatencyMs: ratio(g('e2e_latency_ms_sum'), g('e2e_latency_count')),
       interruptRate: ratio(g('interrupt'), replySent),
       replyRate: ratio(replySent, g('msg_seen')),
-      decisions: { reply: g('decision_reply'), wait: g('decision_wait'), pass: g('decision_pass') },
+      decisions: { reply: g('decision_reply'), wait: g('decision_wait'), pass: g('decision_pass'), react: g('decision_react') },
     });
   }
   return out.sort((a, b) => b.msgSeen - a.msgSeen);

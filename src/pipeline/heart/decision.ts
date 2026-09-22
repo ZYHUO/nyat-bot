@@ -20,6 +20,7 @@ import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { normalizeReactionEmoji } from '../reply/reaction-emoji.js';
 import { answeredTimestamps } from '../../meta/answered.js';
 import { incrCounter } from '../../metrics/registry.js';
 import { getReflection } from '../../tracking/outcome.js';
@@ -27,7 +28,7 @@ import { isMentioningSelf } from '../judge/rules.js';
 import { getBotIdentity } from '../../bot/bot.js';
 import type { SelfState } from './self-state.js';
 
-export type HeartAct = 'reply' | 'wait' | 'pass';
+export type HeartAct = 'reply' | 'wait' | 'pass' | 'react';
 
 export interface HeartDecision {
   act: HeartAct;
@@ -35,6 +36,8 @@ export interface HeartDecision {
   path: 'chat' | 'lookup';
   why: string;
   latencyMs: number;
+  /** round 8：act=react 时模型挑的 emoji（已过白名单校验）；其余 act 为 undefined。 */
+  emoji?: string;
   /** 折算出的 JudgeResult(供下游 mute/intercept/telemetry 沿用既有形状) */
   judgeResult: JudgeResult;
 }
@@ -126,12 +129,19 @@ function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why:
   try {
     const obj = JSON.parse(m[0]) as Record<string, unknown>;
     const act = String(obj['act'] ?? '').toLowerCase();
-    if (act !== 'reply' && act !== 'wait' && act !== 'pass') return null;
+    if (act !== 'reply' && act !== 'wait' && act !== 'pass' && act !== 'react') return null;
     const pathRaw = String(obj['path'] ?? 'chat').toLowerCase();
+    // round 8（新 goal）：react 带一个 emoji 字段。模型自己选表情，
+    // 但只接受 Telegram 允许的那一小组（见 reaction-emoji.ts 的说明——
+    // ❤ 是 U+2764 不带变体选择符，直接让模型写很容易写错）。
+    // 不在集合里的回落到 null，由调用方随机挑。
+    const emojiRaw = String(obj['emoji'] ?? '');
+    const emoji = normalizeReactionEmoji(emojiRaw);
     return {
       act: act as HeartAct,
       path: pathRaw === 'lookup' ? 'lookup' : 'chat',
       why: String(obj['why'] ?? '').slice(0, 40),
+      ...(act === 'react' ? { emoji } : {}),
     };
   } catch {
     return null;

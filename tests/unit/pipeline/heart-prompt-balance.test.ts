@@ -26,6 +26,22 @@ describe('heart prompt 的说话节制结构', () => {
     expect(md).toMatch(/默认不接|先放一放/);
   });
 
+  it('②b react 是第四个出口且被真正描述（不是只列在 act 里）', () => {
+    expect(md).toMatch(/### react/);
+    // 输出示例带 emoji 字段
+    expect(md).toMatch(/"act":\s*"react"/);
+    // 明说可用的表情集合（否则模型会乱给）
+    expect(md).toContain('👍');
+    expect(md).toMatch(/发错情绪的 emoji 比不发更糟|错得上的就别用/);
+    // 和 reply / wait 的区别都写清楚
+    expect(md).toMatch(/react 和 reply 的区别/);
+    expect(md).toMatch(/react 和 wait 的区别/);
+  });
+
+  it('②c act 的四种取值都在输出说明里', () => {
+    expect(md).toMatch(/`reply`.*`react`.*`wait`.*`pass`/s);
+  });
+
   it('② wait 是三种选择里被真正描述的那个（不是只提一次）', () => {
     expect(md).toMatch(/### wait/);
     // 至少三种 wait 情形 + 和 pass 的区别

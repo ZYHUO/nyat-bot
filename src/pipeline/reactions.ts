@@ -23,6 +23,23 @@ const COOL_RE = /太强|牛[批逼b]|厉害|tql|nb|yyds|绝绝子|强爆|顶级|
 
 function pick(arr: string[]): string { return arr[Math.floor(Math.random() * arr.length)]!; }
 
+/**
+ * 给心流的 react 出口挑一个 emoji。
+ *
+ * round 8（新 goal）：heart 多了 act=react。它不经过 chooseReaction 的正则
+ * （那条路是"看到有趣的词就点一下"的副产品），而是心流已经决定要点、
+ * 只差一个表情。所以这里按情绪桶给一个默认值，不再判"值不值得"。
+ *
+ * 'neutral' 对应没带情绪的那些场合（"我看见了""+1"）——用 👀，比 👍 更像
+ * "在场但不想说话"。
+ */
+export function pickReactionEmoji(mood: 'funny' | 'cute' | 'cool' | 'neutral'): string {
+  if (mood === 'funny') return pick(FUNNY);
+  if (mood === 'cute') return pick(CUTE);
+  if (mood === 'cool') return pick(COOL);
+  return '👀';
+}
+
 /** Pick a sentiment-matched reaction emoji, or null if the text isn't reaction-worthy. */
 export function chooseReaction(text: string): string | null {
   if (!text) return null;

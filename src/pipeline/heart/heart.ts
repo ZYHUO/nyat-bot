@@ -310,6 +310,41 @@ export async function runHeartBranch(ctx: {
     } else {
     // L2:念头入持续内心(reply/pass/wait 都是念头,沉默也是思考)
     import("./mind.js").then(({ noteThought }) => noteThought(job.chatId, heart.why)).catch((err) => logger.debug({ err, chatId: job.chatId }, 'noteThought failed (non-critical)'));
+    if (heart.act === 'react') {
+      // round 8（新 goal，用户："bot 还是太爱说话了"）：
+      // 心流的**第四个出口**——点个表情，不说话。
+      //
+      // 为什么值得加：reactions.ts 早就有 setMessageReaction，但它只认正则
+      // （哈哈/太强/可爱 三种词表），每天每群最多 2 次，而且**心流不知道有这条路**。
+      // 于是模型想说"对对对/笑死"的时候，唯一能表达的方式是发一条文字气泡——
+      // 哪怕 prompt 里已经写了"2-10 字的微反应经常比完整句子更自然"，
+      // 机制上没有更便宜的出口，它就只会往"发文字"走。
+      //
+      // react 是这一族里最轻的那个：不进发送队列、不占打字预算、不产生气泡、
+      // 群里读起来就是"猫看见了"。对 reply_rate 的分子没有任何贡献。
+      //
+      // 模型自己选 emoji（parseHeart 用 normalizeReactionEmoji 校验白名单），
+      // 没给或不在白名单 → 随机挑一个匹配情绪的（复用 reactions.ts 的桶）。
+      const { pickReactionEmoji } = await import('../reactions.js');
+      const emoji = heart.emoji ?? pickReactionEmoji('neutral');
+      if (emoji) {
+        try {
+          const { reactToMessage } = await import('../../bot/sender/telegram.js');
+          await reactToMessage(job.chatId, formatted.messageId, emoji);
+          logger.info({ chatId: job.chatId, emoji, why: heart.why }, 'heart: reacted');
+          // 记在 social-ledger 而不是直接 incrCounter：decision_react 已经进了
+          // recordDecision 的三态之外，那里会同时写 per-chat 汇总和 counter。
+          void import('../../metrics/social-ledger.js')
+            .then(({ recordDecision }) => recordDecision(job.chatId, 'react'))
+            .catch(() => { /* telemetry never breaks */ });
+          // react 是出口：副作用已做完，让 pipeline 直接返回。
+          return { shouldReturn: true };
+        } catch (err) {
+          logger.debug({ err, chatId: job.chatId }, 'heart: reactToMessage failed (fall through)');
+          // 发不出去就当没说过，落到下面的 wait 分支
+        }
+      }
+    }
     if (heart.act === 'wait') {
       // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)。
       // review R3(被 verifier 误判 refuted,经代码对比确认真实):必须与
