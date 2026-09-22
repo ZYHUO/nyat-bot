@@ -128,3 +128,37 @@ wait 只占 0.3% 很可能就是**模型试过发现没什么用**——和 reac
 > 判据改了，机制没给 —— 是这个仓库反复出现的失败形状。
 > prompt 让它少说（①）、让它知道自己回过了（③），都是判据；
 > 真的给它一个更便宜的出口（⑤ react）、让它承诺的回访真的发生（②），才是机制。
+
+---
+
+## 什么时候真的有流量（20 轮才写下来的一张表）
+
+round 19 修完 maxTokens 写死，我一看"截断从每小时 80 次降到 2 次"，几乎要宣布修复成功。
+同期睡眠门 `asleep 1083`——**那个 2 是夜间窗口的 2**。
+
+`getSleepPhase()` 的相由 `daySchedule()` 决定（date-seeded，每天重新摇）：
+
+```
+wakeMin  = 456  → 北京 07:36 起床
+sleepMin = 1432 → 北京 23:52 就寝
+napStart = 791  → 北京 13:11 午睡
+napEnd   = 835  → 北京 13:55 午睡结束
+```
+
+**结论：想量心流行为，必须用 awake 段的数据。**
+
+- awake 段：北京 `wakeMin` → `sleepMin`，扣掉 nap 段
+- nap 段和 night 段一样，`metaSleepGate` 对 L2 非直呼直接 `silent`
+- `npm run measure:voice -- --since HH:MM` 的 **HH:MM 是 UTC**，比北京慢 8 小时
+- 查今天的作息：
+
+```bash
+npx tsx -e "import {daySchedule} from './src/tracking/life-state.js';
+const d = daySchedule('YYYY-MM-DD');
+console.log('起床', String(Math.floor(d.wakeMin/60)).padStart(2,'0')+':'+String(d.wakeMin%60).padStart(2,'0'),
+            '就寝', String(Math.floor(d.sleepMin/60)).padStart(2,'0')+':'+String(d.sleepMin%60).padStart(2,'0'));"
+```
+
+**一条粗暴的自检**：`grep -c 'Meta path: asleep' logs/app.log` 如果远大于
+`grep -c 'Heart decision' logs/app.log`，你读的就是夜间窗口，
+任何"心流行为"的结论都不适用于白天。
