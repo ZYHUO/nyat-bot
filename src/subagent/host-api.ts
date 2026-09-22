@@ -735,7 +735,11 @@ export function createHostApi(
     if (fallback) allowed.add(fallback);
 
     // 显式传了不在本任务 quotes 里的 id → 串台风险（DM 曾把群 messageId 贴进来），拦。
-    // 省略 = 不引用（2026-08-22 起群聊也不再自动补——真人不是每条回复都顶引用）。
+    //
+    // round 1（新 goal）：**显式 > 兜底 > 不引用**。原注释写的"省略 = 不引用"是
+    // 2026-08-22 的选择，那个选择在 20+ 秒延迟下让 56% 的群聊回复不带引用——
+    // 读者只能靠时间戳猜在回谁。见 1083 行 sendText 里的长注释。
+    // 兜底契约放这里做：显式给的才过白名单；兜底是宿主自己算的触发消息，必然合法。
     if (explicit !== undefined && allowed.size > 0 && !allowed.has(explicit)) {
       logger.warn(
         { chatId, fromModel: explicit, allowed: [...allowed], dm: isDM(chatId) },
@@ -1080,7 +1084,31 @@ export function createHostApi(
                   'host sendText: dropped duplicate reply anchor (already replied to this message in this task)',
                 );
               }
-              const replyTo = i === 0 && !alreadyAnchored ? resolveReplyTo(replyToMessageId) : undefined;
+              // round 1（新 goal）：**首气泡没显式 anchor 时，用任务的触发消息兜底。**
+              //
+              // 2026-09-22 用户报："bot反应10-16秒…中间可能隔了好几个人的话，
+              // 显得bot说话迟钝、前言不搭后语，原本没带replyto的可能又要带上"。
+              //
+              // subagent 七天全量实测（n=2194，消息级精确配对）：
+              //   总 t0→sendText p50 27.8s / p90 54.4s，近 24h 差到 p50 38s
+              //   回复期间同群穿插消息 p50=2 条、p90=11 条、≥5 条占 30.1%
+              //   4,008 次 sendText 中 **56.2%（群内 56.5%）replyTo=null**，
+              //   而 **99.8% 有 defaultReplyTo 锚点**（executor.ts:426 的 replyAnchor）
+              //
+              // 也就是说：**锚点一直算得出来，只是从没被喂进实际发送。**
+              // `opts.defaultReplyTo` 只进了 allowed 集合和 gate/debt 判断
+              // （host-api.ts:730 的 fallback 变量），没变成 reply_parameters。
+              // 2026-08-22 起群聊改成"默认不引用"——那是当时的选择，
+              // 但 20+ 秒延迟配上不引用，读者只能靠时间戳猜 bot 在回谁。
+              //
+              // 管道本身完好：telegram.ts:315-338 已支持 reply_parameters，
+              // 且锚点消息不存在时会自动降级成无引用重发。缺的就是这一行。
+              //
+              // 兜底只在**首气泡**生效（分句后续条仍不带，避免连环引用）；
+              // 模型显式传的仍然优先；本任务已回过的锚点仍去重。
+              const replyTo = i === 0 && !alreadyAnchored
+                ? (resolveReplyTo(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo))
+                : undefined;
               if (i === 0 && replyTo) repliedAnchors.add(replyTo);
               if (i === 0) firstReplyTo = replyTo;
               if (i === 0 && chatId < 0 && !replyTo && !opts.defaultReplyTo) {
@@ -1092,6 +1120,9 @@ export function createHostApi(
                     replyTo: replyTo ?? null,
                     fromModel: replyToMessageId ?? null,
                     fallback: opts.defaultReplyTo ?? null,
+                    // round 1：兜底命中要可测。否则"56% 无引用归零"这个结论
+                    // 只能从 replyTo 总数反推，分不清是模型变乖了还是兜底在工作。
+                    usedFallback: replyTo !== undefined && replyToMessageId === undefined,
                     dmNoDefault: isDM(chatId),
                     parts: parts.length,
                     preview: part.slice(0, 80),

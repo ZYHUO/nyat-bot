@@ -74,14 +74,16 @@ describe('host sendText replyTo + self-echo', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('omitting replyTo sends plain bubble (no forced quote since 2026-08-22)', async () => {
+  // round 1（新 goal）反转：2026-08-22 的"省略 = 不引用"在 20+ 秒延迟下
+  // 让 56% 的群聊回复不带引用（subagent 七天实测），读者只能靠时间戳猜在回谁。
+  // 现在改成 **显式 > 兜底（defaultReplyTo = 任务的触发消息）> 不引用**。
+  it('群聊省略 replyTo → 用 defaultReplyTo 兜底锚点（20s 延迟下读者要能看出在回谁）', async () => {
     const host = createHostApi(-1001, {
       defaultReplyTo: 392277,
       onEnd: () => {},
     });
     await host.telegram.sendText('喵？');
-    // 引用有指向才用——模型省略 = 不引用（真人不是每条回复都顶引用标）
-    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', undefined, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', 392277, undefined);
   });
 
   it('explicit task-quote replyTo still quotes (有指向的引用)', async () => {
@@ -93,7 +95,8 @@ describe('host sendText replyTo + self-echo', () => {
     expect(sendMessage).toHaveBeenCalledWith(-1001, '回你这句喵', 392277, undefined);
   });
 
-  it('segments long reply: no bubble quotes unless model explicitly asks', async () => {
+  // round 1：分句仍是"仅首条带锚"——首条用兜底，后续条不带（避免连环引用）。
+  it('segments long reply: only the first bubble carries the fallback anchor', async () => {
     const host = createHostApi(-1001, {
       defaultReplyTo: 392277,
       onEnd: () => {},
@@ -104,18 +107,23 @@ describe('host sendText replyTo + self-echo', () => {
     expect(long.length).toBeGreaterThan(60);
     await host.telegram.sendText(long);
     expect(sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
-    for (let i = 0; i < sendMessage.mock.calls.length; i++) {
+    // 首条：兜底锚点
+    expect(sendMessage.mock.calls[0]![2]).toBe(392277);
+    // 后续条：一律不带（同一条消息被引用 N 次会很吵）
+    for (let i = 1; i < sendMessage.mock.calls.length; i++) {
       expect(sendMessage.mock.calls[i]![2]).toBeUndefined();
     }
   });
 
-  it('DM does not force replyTo when model omits', async () => {
+  // round 1：DM 也兜底（原来 DM 有锚点但省略时不发；现在统一成显式 > 兜底 > 无）。
+  // DM 里引用同样帮助定位"你在回我哪一句"——尤其主人在连发多条时。
+  it('DM 省略 replyTo → 也用 defaultReplyTo 兜底（统一显式 > 兜底 > 无）', async () => {
     const host = createHostApi(6251541967, {
       defaultReplyTo: 99,
       onEnd: () => {},
     });
     await host.telegram.sendText('哼，才不告诉你');
-    expect(sendMessage).toHaveBeenCalledWith(6251541967, '哼，才不告诉你', undefined, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(6251541967, '哼，才不告诉你', 99, undefined);
   });
 
   it('DM rejects foreign replyTo ≠ task quote (no group→DM 串台)', async () => {

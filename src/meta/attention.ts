@@ -225,6 +225,23 @@ export class AttentionAccumulator {
       for (const it of sorted) {
         if (it.chatId > 0) continue; // DM: no hold
         if (it.layer === 'L1_CALLBACK') continue;
+        // round 1（新 goal）：**L0 direct 也不 hold。**
+        //
+        // 2026-09-22 用户报："消息从发出到bot收到4-6s、bot反应10-16s、发出去3-4s，
+        // 叠加起来显得迟钝、前言不搭后语"。实测三段：
+        //   发布 1.5s（不是4-6s）· 收到→任务启动 P50 12.7s · 任务→首条发出 P50 14s
+        // 段1 那 12.7s = Heart decide 4.8s + reflect 1.2s + dispatch 0.9s + **合并窗 2.8s** +
+        // 其余排队。
+        //
+        // 合并窗（META_L0_COALESCE_MS=2800）本来的目的是"连发→一回"：群里一口气
+        // 刷三条，别回三条。但那对**用户直接找 bot**（@/回 bot/叫昵称）是纯亏——
+        // 人家在等你答，你却又等了 2.8 秒。DM 早就豁免了（上一行），
+        // 群里的 direct 却要陪跑，而注释里写的"@ / 回 bot 可走 timing hard-bypass"
+        // 指的是 dispatch-gate 的节奏闸，**不是这个 attention 合并窗**——两回事。
+        //
+        // 连发合并仍然对 L2（被动消息）生效：那种确实是"看看要不要接话"，
+        // 等一批再判更接近人的行为。
+        if (it.layer === 'L0') continue;
         const t = it.createdAt || 0;
         latestAt.set(it.chatId, Math.max(latestAt.get(it.chatId) ?? 0, t));
       }
@@ -237,10 +254,14 @@ export class AttentionAccumulator {
         held = [];
         let wakeIn = Number.POSITIVE_INFINITY;
         for (const it of sorted) {
+          // hold 判据和上面 latestAt 的收集必须**同一套**：只 hold L2。
+          // 第一版这里写的是 `(L0 || L1)`，而上面已经不收 L0 了——
+          // 两处不一致的话，L0 数据在 latestAt 里没有，但 hold 判据仍认它，
+          // 行为会随"群里同时有没有 L2"漂移。round 1 修。
           const hold =
             hot.has(it.chatId) &&
             it.chatId < 0 &&
-            (it.layer === 'L0' || it.layer === 'L1');
+            (it.layer === 'L2' || it.layer === 'L1');
           if (hold) held.push(it);
           else ready.push(it);
         }

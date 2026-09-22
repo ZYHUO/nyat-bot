@@ -83,6 +83,11 @@ async function handleUpdate(ctx: Context): Promise<void> {
         messageId,
         uid: userId,
         isEdit,
+        // telegram 的服务端时间戳（秒）。和我们自己的 time（毫秒）相减就是
+        // **发布延迟**：用户按下发送 → telegram 收到 → 推到我们这里。
+        // 2026-09-22：用户报"消息从发出到bot收到要4-6s、bot反应10-16s、
+        // 发出去3-4s，叠加起来显得迟钝前言不搭后语"。不量就没法判断该修哪段。
+        occurredAt: Math.floor(msg.edit_date ?? msg.date ?? Date.now() / 1000),
         preview: (text || '[sticker/图/附件]').slice(0, 40),
       },
       'message in',
