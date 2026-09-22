@@ -7,8 +7,14 @@
 Not a bot that responds when poked — an agent that hangs out, reads the room, and only speaks when it has something worth saying.
 
 ```bash
+npm install
 npm run demo     # 看它怎么决定「这次不说话」。不需要 bot token，不需要 API key
+npm run dev      # 真跑起来：需要 bot token + AI API
 ```
+
+Everything after this point is the engineering record — the audit cycles,
+architecture, cognition roadmap and known traps. If you want it running first,
+jump straight to **🚀 Quick start** further down this README.
 
 
 **v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — **488 env keys, 216
