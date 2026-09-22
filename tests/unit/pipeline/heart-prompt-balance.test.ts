@@ -38,6 +38,16 @@ describe('heart prompt 的说话节制结构', () => {
     expect(md).toMatch(/react 和 wait 的区别/);
   });
 
+  // round 27：负面清单。只告诉它"什么时候用 react"不够——
+  // 有人叫你时点个赞、对方说正事时点个赞，都是在滥用。
+  // react 是"我看见了而且觉得不错"，不是"我在听"。
+  it('②b2 react 有负面清单，且点明"被叫到不能只点赞"', () => {
+    expect(md).toMatch(/什么时候\*\*别\*\*用 react/);
+    expect(md).toContain('有人叫你');
+    expect(md).toContain('轻佻');
+    expect(md).toMatch(/react 是"我看见了而且觉得不错"，不是"我在听"/);
+  });
+
   it('②c act 的四种取值都在输出说明里', () => {
     expect(md).toMatch(/`reply`.*`react`.*`wait`.*`pass`/s);
   });
