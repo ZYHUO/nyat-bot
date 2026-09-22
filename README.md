@@ -2152,6 +2152,9 @@ run `npm run measure:voice`, and tell us which group got chatty, when, and what 
 wanted instead. See [`.github/ISSUE_TEMPLATE/behaviour.yml`](.github/ISSUE_TEMPLATE/behaviour.yml).
 Behaviour is the product here; a bug report tells us less than "it talked 14 times in an hour".
 
+(If you are the one running it: [`docs/publish-checklist.md`](docs/publish-checklist.md) — the three
+things that actually move the needle on visibility, each with the clicks and how to verify.)
+
 ## 📄 License
 
 MIT License — see [LICENSE](LICENSE) for details.
