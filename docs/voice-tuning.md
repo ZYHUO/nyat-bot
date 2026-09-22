@@ -251,3 +251,21 @@ HEART_COOLDOWN_AS_FACT          # true = 把冷却期当作事实递模型，fal
 
 跳级的结果我见过：round 3 我直接改 prompt 的第一关，
 治的是占比，而真病是条/小时——**改了 17 轮才量对**。
+
+---
+
+## 让它自己记账：cron 每天收一次（round 30）
+
+"该量的时候没量"在这个会话发生了 6 次（round 14-19 每轮都差 20-30 分钟到 awake
+窗口，于是每轮都拿夜间数字下结论）。所以把"量"这件事从人身上挪走：
+
+```bash
+bash scripts/install-voice-daily-cron.sh     # 装：每天北京 23:00 收一次
+bash scripts/install-voice-daily-cron.sh --uninstall
+bash scripts/voice-daily.sh                  # 手动跑一次
+```
+
+写进 `logs/voice-daily.log`（滚动保留最近 4000 行 ≈ 60 天）。
+它只记账、不告警、不决策——**它的全部价值是让"该量的那天有数"**。
+
+装完亲眼确认过三件事：重装不会变两条、卸载干净、手动跑有输出。
