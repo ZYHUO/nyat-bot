@@ -88,6 +88,27 @@ for line in open(ENVF, encoding='utf8'):
 TRUE = {'true', '1', 'yes', 'on'}
 FALSE = {'false', '0', 'no', 'off', ''}
 
+# ── 2b. 值打码 ────────────────────────────────────────────────────────────
+# 2026-09-22：docs/flag-census.md 是公开仓库里的产物，而 .env 里躺着 BOT_TOKEN /
+# GEMINI_API_KEY / COMMON_API_KEY / WEBHOOK_SECRET 等真实凭据。这个脚本原来的
+# 设计目的就是「把 .env 实际值写进表里」，产物一 commit 就等于公开发布凭据
+# （GitHub secret scanning 已经有公开泄露告警）。现在一律不输出原值：
+# 纯布尔 / 纯数字保留（不是凭据，且「ON/off」这类信息是 census 的价值所在），
+# 其余一律替换成 <redacted>。
+REDACTED = '\x00REDACTED'
+
+def mask(v):
+    if v is None:
+        return None
+    t = v.strip().strip("'\"")
+    if t.lower() in TRUE or t.lower() in FALSE:
+        return t
+    if re.fullmatch(r'-?\d+(\.\d+)?', t):
+        return t
+    return REDACTED
+
+envmap = {k: mask(v) for k, v in envmap.items()}
+
 # ── 3. 有没有人读 ────────────────────────────────────────────────────────
 # 三种读法都要算，否则会把活旗标误判成死的（本会话已经因此差点误判 5 个）：
 #   ① env().FLAG            直接点
@@ -134,7 +155,9 @@ for f in flags:
     n = f['name']
     envval = envmap.get(n)
     is_bool = 'booleanFromEnv' in f['rhs']
-    if is_bool:
+    if envval == REDACTED:
+        state = '=<redacted>'
+    elif is_bool:
         if envval is None:
             state = f"默认 {f['default']}"
         elif envval.lower() in TRUE:
