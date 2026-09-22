@@ -22,7 +22,8 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "demo": "tsx scripts/demo.mts",
-    "measure:voice": "tsx scripts/measure-voice.mts"
+    "measure:voice": "tsx scripts/measure-voice.mts",
+    "measure:voice:compare": "node scripts/voice-compare.mjs"
   },
   "engines": {
     "node": ">=22.0.0 <23"
