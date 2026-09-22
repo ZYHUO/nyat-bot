@@ -44,6 +44,7 @@ jump straight to **🚀 Quick start** further down this README.
 - [📋 Behaviour: what was wrong, what changed](#-behaviour-what-was-wrong-what-changed)
 - [🛡️ Anti-ad: how a group owner turns it on](#️-anti-ad-how-a-group-owner-turns-it-on)
 - [More of my work](#more-of-my-work)
+- [⭐ If this is the kind of thing you wish existed](#-if-this-is-the-kind-of-thing-you-wish-existed)
 - [📄 License](#-license)
 
 ---
@@ -2138,6 +2139,18 @@ Things I've built that pair well with an agent like this one:
 | [CLIProxy-Quota-Tray](https://github.com/ZYHUO/CLIProxy-Quota-Tray) | If you run LLMs through subscription accounts instead of API keys, a Windows/Linux tray that shows per-account quota windows and estimates what the usage queue is actually costing. |
 
 MIT across all of them, same as this repo.
+
+---
+
+## ⭐ If this is the kind of thing you wish existed
+
+A star is genuinely useful here: this repo has no homepage, no listing, no post anywhere.
+It gets found by search or by someone linking it. That is the whole distribution channel.
+
+If you want to help beyond a star, the highest-signal thing is a **behaviour report** —
+run `npm run measure:voice`, and tell us which group got chatty, when, and what you
+wanted instead. See [`.github/ISSUE_TEMPLATE/behaviour.yml`](.github/ISSUE_TEMPLATE/behaviour.yml).
+Behaviour is the product here; a bug report tells us less than "it talked 14 times in an hour".
 
 ## 📄 License
 
