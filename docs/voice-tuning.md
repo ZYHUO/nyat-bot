@@ -150,6 +150,10 @@ napEnd   = 835  → 北京 13:55 午睡结束
 - awake 段：北京 `wakeMin` → `sleepMin`，扣掉 nap 段
 - nap 段和 night 段一样，`metaSleepGate` 对 L2 非直呼直接 `silent`
 - `npm run measure:voice -- --since HH:MM` 的 **HH:MM 是 UTC**，比北京慢 8 小时
+  · 想量"起床后的 8 小时" → 北京 07:36 起 → **UTC 前一天 23:36**
+    → `--since 23:30`（带日期更稳：`--day 2026-09-22` 是 UTC 当天）
+  · round 23 我自己在这里绕过一次：把"北京 07:36"当成了"UTC 07:36"，
+    于是等一个 44 分钟后的时刻，其实它在 8 小时前
 - 查今天的作息：
 
 ```bash

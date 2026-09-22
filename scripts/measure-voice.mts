@@ -58,6 +58,7 @@ let dupAnchorDropped = 0;
 const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0 };
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
+const reactedEmoji = new Map<string, number>();
 // round 15：按群拆。用户说"bot 太爱说话了"是**在某个群里的体感**，
 // 全量一个平均数会把"一个群在刷屏"和"所有群都正常"混成一回事。
 const byChat = new Map<string, { m: number; s: number; edit: number; first: number }>();
@@ -106,7 +107,14 @@ for await (const line of rl) {
   }
   // react 的副作用日志（heart.ts 的 'heart: reacted'）——Heart decision 那条
   // 已经含 act=react，但这里单独数一次，用来交叉检验"决策了"和"真点出去了"。
-  if (m === 'heart: reacted') { reacted += 1; continue; }
+  if (m === 'heart: reacted') {
+    reacted += 1;
+    // round 23：emoji 分布。如果它全挑同一个（或全挑 👍），说明它没在"选"，
+    // 只是在满足"要给个表情"这个要求——那 react 就退化成了常量输出。
+    const e = String(d.emoji ?? '(没给→回落)');
+    reactedEmoji.set(e, (reactedEmoji.get(e) ?? 0) + 1);
+    continue;
+  }
   if (m === 'Meta path: asleep') { gate.asleep += 1; continue; }
   if (m === 'Meta path: slash/checkin-stats → legacy pipeline') { gate.legacy += 1; continue; }
   if (m.includes('结构性忽略')) { gate.structuralIgnore += 1; continue; }
@@ -130,6 +138,16 @@ console.log(P(`   心跳那句"别每句都接"说的是这个。会话初期 8.
 console.log();
 console.log(P(`② 心流四态        reply ${act.reply} (${actTotal ? (act.reply * 100 / actTotal).toFixed(0) : 0}%)  react ${act.react} (${actTotal ? (act.react * 100 / actTotal).toFixed(0) : 0}%)  wait ${act.wait} (${actTotal ? (act.wait * 100 / actTotal).toFixed(0) : 0}%)  pass ${act.pass} (${actTotal ? (act.pass * 100 / actTotal).toFixed(0) : 0}%)   n=${actTotal}`));
 console.log(P(`   其中 react 真的点出去 ${reacted} 次（heart: reacted 日志；与决策数不一致说明有失败回落）。`));
+if (reactedEmoji.size > 0) {
+  const dist = [...reactedEmoji.entries()].sort((a, b) => b[1] - a[1]).map(([e, n]) => `${e}×${n}`).join(' ');
+  console.log(P(`   emoji 分布: ${dist}`));
+  // 单一表情占绝对多数 = 它没在选，只是走流程
+  const top = [...reactedEmoji.values()].sort((a, b) => b - a)[0]!;
+  if (top / reacted > 0.8) {
+    console.log(P(`   ⚠️ ${Math.round(top * 100 / reacted)}% 是同一个表情 —— 它不是在"选"，是在交差。`));
+    console.log(P(`      prompt 里那句"挑不到对得上的就别用这一档"就没起作用。`));
+  }
+}
 console.log(P(`   reply/wait/pass 是原三态；wait round 3 才重定义，修前 0-6 次/天；`));
 console.log(P(`   react round 8 加的第四个出口（点表情不说话，对回复率分子零贡献）。`));
 console.log(P(`   想看"少说话"有没有生效：react 涨 + reply 跌 才是对的形状，只是 reply 跌不是。`));
