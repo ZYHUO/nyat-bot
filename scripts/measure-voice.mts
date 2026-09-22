@@ -58,6 +58,9 @@ let dupAnchorDropped = 0;
 const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0 };
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
+// round 15：按群拆。用户说"bot 太爱说话了"是**在某个群里的体感**，
+// 全量一个平均数会把"一个群在刷屏"和"所有群都正常"混成一回事。
+const byChat = new Map<string, { m: number; s: number; edit: number }>();
 
 const rl = readline.createInterface({ input: createReadStream('logs/app.log'), crlfDelay: Infinity });
 for await (const line of rl) {
@@ -68,9 +71,21 @@ for await (const line of rl) {
   const t = typeof d.time === 'number' ? d.time : 0;
   if (t < cutoff) continue;
   const m = String(d.msg ?? '');
-  if (m === 'message in') { msgs++; continue; }
+  if (m === 'message in') {
+    msgs++;
+    const c = String(d.chatId ?? '?');
+    const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0 };
+    rec.m += 1;
+    if (d.isEdit) rec.edit += 1;
+    byChat.set(c, rec);
+    continue;
+  }
   if (m === 'host sendText') {
     first++;
+    const c = String(d.chatId ?? '?');
+    const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0 };
+    rec.s += 1;
+    byChat.set(c, rec);
     const a = d.replyTo;
     if (typeof a === 'number' && a > 0) {
       const k = `${d.chatId}:${a}`;
@@ -136,6 +151,24 @@ if (gateTotal > 0) {
   console.log(P(`      所以"回复率"和"心流四态"在夜间天然被压缩——别拿它当白天口径。`));
 }
 console.log();
+// ── 按群：谁在贡献那个平均数 ──────────────────────────────────────
+const chatRows = [...byChat.entries()]
+  .map(([c, v]) => ({ c, m: v.m, s: v.s, fresh: v.m - v.edit }))
+  .filter((r) => r.m >= 20)
+  .sort((a, b) => (b.s / Math.max(1, b.m)) - (a.s / Math.max(1, a.m)));
+if (chatRows.length > 0) {
+  console.log(P('按群（回复率降序，只列入站 >=20 的群）：'));
+  for (const r of chatRows.slice(0, 10)) {
+    console.log(P(`   ${r.c.padEnd(18)} in=${String(r.m).padStart(4)} (新 ${String(r.fresh).padStart(4)})  send=${String(r.s).padStart(3)}  ${(r.s * 100 / r.m).toFixed(1)}%`));
+  }
+  if (chatRows.length > 10) console.log(P(`   …另 ${chatRows.length - 10} 个群`));
+  const total = chatRows.reduce((a, r) => ({ m: a.m + r.m, s: a.s + r.s }), { m: 0, s: 0 });
+  console.log(P(`   这些小计 in=${total.m} send=${total.s} → ${(total.s * 100 / Math.max(1, total.m)).toFixed(1)}%`));
+  console.log(P('   ⚠️ "新"扣掉了 isEdit 的编辑重放——编辑不是新消息，却一直计在入站里，'));
+  console.log(P('      所以裸 in 会偏大、回复率偏小——报数字时要说清扣没扣。'));
+  console.log();
+}
+
 if (actByHour.size > 1) {
   console.log(P('按小时 reply%：'));
   for (const h of [...actByHour.keys()].sort()) {
