@@ -413,7 +413,7 @@ scripts/                  # install / update / migrate / offline-backfill
 **Minimal: one command** (installs git + clones + guided config):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/nyatos/install.sh | sudo bash
 ```
 
 > Pass flags with `-s --`, e.g. China mirror: `curl -fsSL .../install.sh | sudo bash -s -- --china`
@@ -446,7 +446,7 @@ Behind a firewall: `export HTTPS_PROXY=…` when downloads stall, or pre-downloa
 ```bash
 # manual (recommended): pull + deps + optional NyatDB native + build + restart
 sudo ./scripts/deploy.sh --update
-# or: curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash -s -- --update
+# or: curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/nyatos/install.sh | sudo bash -s -- --update
 ```
 
 Production hosts can also attach `scripts/systemd/xxb-autoupdate.{timer,service}` (aligns with `origin/main` every 5 min): `package-lock` / `native/nyatdb` changes trigger `npm ci` / `npm run build:nyatdb`, failed main builds roll back instead of restarting. Logs: `logs/auto-update.log`.
