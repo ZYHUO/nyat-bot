@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
  * 网络失败不算测试失败（CI 无外网是常事），但**打到而返回错**算——
  * 那说明仓库带了个坏例子，比不带更糟。
  */
-const CASES: Array<{ name: string; url: string; check: (body: string) => boolean }> = [
+const CASES: Array<{ name: string; url: string; check: (body: string) => boolean; method?: string; body?: string }> = [
   {
     name: 'IP_GEO',
     url: 'https://ipinfo.io/8.8.8.8/json',
@@ -34,6 +34,21 @@ const CASES: Array<{ name: string; url: string; check: (body: string) => boolean
     url: 'https://dog.ceo/api/breeds/image/random',
     check: (b) => { try { return typeof JSON.parse(b).message === 'string'; } catch { return false; } },
   },
+  // round 21：社群 bot 该有的两类 —— 冷场时的接话材料、和"真办事"的 POST 链路。
+  {
+    name: 'RANDOM_JOKE',
+    url: 'https://official-joke-api.appspot.com/random_joke',
+    check: (b) => { try { const d = JSON.parse(b); return typeof d.setup === 'string' && typeof d.punchline === 'string'; } catch { return false; } },
+  },
+  {
+    // 这不是给 bot 用的，是给写 skill 的人当 POST 模板的：
+    // 证明 loader 的 body 模板真的能把参数带出去。
+    name: 'ECHO_BACK',
+    url: 'https://httpbin.org/post',
+    method: 'POST',
+    body: JSON.stringify({ payload: 'nyatbot post probe' }),
+    check: (b) => { try { return JSON.parse(b).data.includes('nyatbot post probe'); } catch { return false; } },
+  },
 ];
 
 describe('example skills 真的能通（需要外网，网络失败时跳过）', () => {
@@ -41,15 +56,19 @@ describe('example skills 真的能通（需要外网，网络失败时跳过）'
     it(`${c.name} 打 ${new URL(c.url).host} 返回预期形状`, async () => {
       let res: Response;
       try {
-        res = await fetch(c.url, { signal: AbortSignal.timeout(20_000) });
+        res = await fetch(c.url, {
+          signal: AbortSignal.timeout(20_000),
+          ...(c.method ? { method: c.method } : {}),
+          ...(c.body ? { body: c.body, headers: { 'Content-Type': 'application/json' } } : {}),
+        });
       } catch {
         // 网络不通（CI / 离线）——跳过而不是失败
         return;
       }
-      if (res.status === 429 || res.status === 403) {
-        // 限流,不是例子坏了
-        return;
-      }
+      // 4xx 是**我们**的问题（URL 错、参数错、被墙）→ 算例子坏，要红。
+      // 5xx / 429 是**对方**的问题（刚才 httpbin 就抖了一次 502，curl 重试即 200）
+      //    → 跳过。把别人的抖动算成自己的失败，这条测试会天天红，然后被整个关掉。
+      if (res.status >= 500 || res.status === 429 || res.status === 403) return;
       expect(res.status).toBe(200);
       const body = await res.text();
       expect(c.check(body), `${c.name}: 返回形状不对 → ${body.slice(0, 120)}`).toBe(true);

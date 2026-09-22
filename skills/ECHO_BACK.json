@@ -1,0 +1,21 @@
+{
+  "name": "ECHO_BACK",
+  "description": "把一个 JSON 结构回传给调用方（httpbin 的 /post），用来验证 skill 的 POST 链路真的能带 body 出去。生产里很少直接调——它是给写 skill 的人当模板的。",
+  "parameters": {
+    "payload": {
+      "type": "string",
+      "description": "要回显的文本",
+      "required": true
+    }
+  },
+  "trusted": true,
+  "execute": {
+    "type": "http",
+    "method": "POST",
+    "url": "https://httpbin.org/post",
+    "allowedHosts": ["httpbin.org"],
+    "body": {
+      "payload": "{{payload}}"
+    }
+  }
+}

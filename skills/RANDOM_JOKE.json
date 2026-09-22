@@ -1,0 +1,12 @@
+{
+  "name": "RANDOM_JOKE",
+  "description": "随机一个程序员/技术圈冷笑话。群里冷场、有人说'来讲个笑话'、或者话题太沉重需要缓和一下时用。返回 setup + punchline 两条。",
+  "parameters": {},
+  "trusted": true,
+  "execute": {
+    "type": "http",
+    "method": "GET",
+    "url": "https://official-joke-api.appspot.com/random_joke",
+    "allowedHosts": ["official-joke-api.appspot.com"]
+  }
+}
