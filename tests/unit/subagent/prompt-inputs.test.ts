@@ -58,16 +58,22 @@ vi.mock('../../../src/shared/master-identity.js', () => ({
   buildMasterIdentityBlock: () => 'MASTER',
 }));
 
+// 注意：真实 loadCachedPrompt 是**同步**的（executor 里直接 .slice(0,1600)），
+// mock 也必须同步——写成 async 会返回 Promise，.slice 抛异常被 catch 成 ''。
 const config = {
-  loadCachedPrompt: vi.fn(async (name: string) => (name === 'knowledge/permanent.md' ? 'PERM' : '')),
+  loadCachedPrompt: vi.fn((name: string) => (name === 'knowledge/permanent.md' ? 'PERM' : '')),
 };
 vi.mock('../../../src/shared/config.js', () => ({
   loadCachedPrompt: (...a: unknown[]) => config.loadCachedPrompt(...(a as [string])),
 }));
 
-vi.mock('../../../src/pipeline/reply/member-cache.js', () => ({
+const memberCache = {
   getCachedRoster: vi.fn(() => 'ROSTER_CACHED'),
   setCachedRoster: vi.fn(),
+};
+vi.mock('../../../src/pipeline/reply/member-cache.js', () => ({
+  getCachedRoster: (...a: unknown[]) => memberCache.getCachedRoster(...(a as [number])),
+  setCachedRoster: (...a: unknown[]) => memberCache.setCachedRoster(...(a as [number, string])),
 }));
 
 const ctxManager = {
@@ -103,8 +109,9 @@ vi.mock('../../../src/agent/skills.js', () => ({
   findRelevantSkills: (...a: unknown[]) => skills.findRelevantSkills(...(a as [string, number])),
 }));
 
+const worldState = { buildWorldStateBlock: vi.fn(() => 'WORLD_BLOCK') };
 vi.mock('../../../src/agent/world-state.js', () => ({
-  buildWorldStateBlock: () => 'WORLD_BLOCK',
+  buildWorldStateBlock: (...a: unknown[]) => worldState.buildWorldStateBlock(...(a as [string, number])),
 }));
 
 const loopPolicy = {
@@ -214,15 +221,18 @@ beforeEach(() => {
   scratch.scratchPromptBlockSync.mockReturnValue('SCRATCH');
   chatStyle.getChatStyle.mockResolvedValue({});
   chatStyle.chatStylePromptLine.mockReturnValue('STYLE_LINE');
-  config.loadCachedPrompt.mockImplementation(async (name: string) => (name === 'knowledge/permanent.md' ? 'PERM' : ''));
+  config.loadCachedPrompt.mockImplementation((name: string) => (name === 'knowledge/permanent.md' ? 'PERM' : ''));
   ctxManager.getRecent.mockResolvedValue([] as never);
   ctxManager.getGroupMembers.mockResolvedValue([] as never);
+  memberCache.getCachedRoster.mockReturnValue('ROSTER_CACHED');
+  memberCache.setCachedRoster.mockReturnValue(undefined);
   selfState.composeSelfState.mockResolvedValue({ narration: 'SELF_STATE' });
   episodes.findRelevantExperience.mockReturnValue([{ id: 11, kind: 'lesson', content: 'exp-content' }] as never);
   skills.findRelevantSkills.mockReturnValue([
     { id: 22, name: 'sk-name', summary: 'sk-sum', triggerWhen: 'sk-trig', steps: 'sk-steps', pitfalls: '' },
   ] as never);
   loopPolicy.listActivePolicies.mockReturnValue([{ id: 33, rule: 'pol-rule' }] as never);
+  worldState.buildWorldStateBlock.mockReturnValue('WORLD_BLOCK');
   grounding.takeGroundingBlock.mockResolvedValue('GROUND_BLOCK');
   relationship.getRelationship.mockReturnValue({ bucket: 'close', affinity: 5, count: 9 });
   relationship.relationshipPromptHint.mockReturnValue('REL_HINT');
@@ -311,7 +321,7 @@ describe('collectPromptInputs — 各段产物', () => {
     expect(memInput.query).toContain('greet the user');
     // excludeMessageIds = 同一次 getRecent 的全部 id（去重注入）
     expect(memInput.excludeMessageIds).toBeInstanceOf(Set);
-    expect([...memInput.excludeMessageIds!].sort()).toEqual([999, 1000, 1001]);
+    expect([...memInput.excludeMessageIds!].sort((a, b) => a - b)).toEqual([999, 1000, 1001]);
 
     expect(workspaceCalls).toHaveLength(1);
     expect(workspaceCalls[0]!.queryText).toContain('锚点正文');
@@ -405,7 +415,10 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
     ['journal 抛', () => dream.readRecentDreamSnippet.mockRejectedValue(new Error('io down')), (i) => {
       expect(i.journal).toBe('');
     }],
-    ['roster 抛', () => ctxManager.getGroupMembers.mockRejectedValue(new Error('db down')), (i) => {
+    ['roster 抛（缓存脱靶后取成员表失败）', () => {
+      memberCache.getCachedRoster.mockReturnValue('');
+      ctxManager.getGroupMembers.mockRejectedValue(new Error('db down'));
+    }, (i) => {
       expect(i.roster).toBe('');
     }],
     ['workspace 抛', () => cognitiveWorkspace.buildCognitiveWorkspace.mockRejectedValue(new Error('boom')), (i) => {
@@ -442,6 +455,7 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
     episodes.findRelevantExperience.mockImplementation(() => { throw new Error('x'); });
     skills.findRelevantSkills.mockImplementation(() => { throw new Error('x'); });
     loopPolicy.listActivePolicies.mockImplementation(() => { throw new Error('x'); });
+    worldState.buildWorldStateBlock.mockImplementation(() => { throw new Error('x'); });
     grounding.takeGroundingBlock.mockRejectedValue(new Error('x'));
     relationship.getRelationship.mockImplementation(() => { throw new Error('x'); });
     botCmds.listReplyInvocableCommands.mockImplementation(() => { throw new Error('x'); });
@@ -464,7 +478,7 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
 
 describe('collectPromptInputs — 条件分支', () => {
   it('self-play → systemPrompt 整体换成 self-play.md（经验等仍追加在后）', async () => {
-    config.loadCachedPrompt.mockImplementation(async (name: string) =>
+    config.loadCachedPrompt.mockImplementation((name: string) =>
       name === 'task/self-play.md' ? 'SELFPLAY_PROMPT' : name === 'knowledge/permanent.md' ? 'PERM' : '');
     const inputs = await collectPromptInputs({
       task: makeTask({ contentDirection: '[selfplay] 练习' }),

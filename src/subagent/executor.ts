@@ -8,7 +8,6 @@ import { createHostApi, type HostApi } from './host-api.js';
 import { collectPromptInputs } from './prompt-inputs.js';
 import { sendChatAction } from '../bot/sender/telegram.js';
 import { formatBeijingNowLine } from '../shared/beijing-time.js';
-import { buildCodeActIdentityPrompt } from '../pipeline/reply/prompt-builder.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
 import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat, clearCheckpoint } from '../agent/checkpoint.js';
@@ -983,7 +982,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
               {
                 role: 'system',
                 content:
-                  buildCodeActIdentityPrompt() +
+                  (await import('../pipeline/reply/prompt-builder.js')).buildCodeActIdentityPrompt() +
                   '\n\n现在只输出一句纯文本回复，不要 JSON，不要代码。诚实说明没搞定，别假装完成了。',
               },
               {

@@ -33,8 +33,6 @@ import type { HostApi } from './host-api.js';
 
 /** 最近聊天行（context/manager.getRecent 的元素）。 */
 type RecentMessage = Awaited<ReturnType<typeof import('../pipeline/context/manager.js').getRecent>>[number];
-/** 回复式 bot 命令清单元素。 */
-type ReplyCommand = Awaited<ReturnType<typeof import('../learners/bot-command-store.js').listReplyInvocableCommands>>[number];
 
 /** collectPromptInputs 的产物：executor 组装最终 prompt 所需的全部原料。 */
 export interface PromptInputs {
@@ -79,6 +77,13 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
   const { task, host, isSelfPlay, replyAnchor, executorSystem } = ctx;
   const { chatId } = task;
   const group = chatId < 0;
+
+  // 同一模块只 import 一次、共享 promise。**不要**在多个并发 collector 里分别
+  // `await import()` 同一模块：vitest 的 mock 注册对并发二次 import 有竞态
+  // （首个拿 mock、并发的第二个会拿到真模块——2026-09-22 踩过，self-play 的
+  // loadCachedPrompt 就这样静默跑到真模块上被 catch 成 ''）；生产上也少一次解析。
+  const configModP = import('../shared/config.js');
+  const ctxManagerModP = import('../pipeline/context/manager.js');
 
   // ── 第一阶段：互不依赖的全部并发 ──────────────────────────────────────
   const [
@@ -150,7 +155,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     })(),
     (async () => {
       try {
-        const { loadCachedPrompt } = await import('../shared/config.js');
+        const { loadCachedPrompt } = await configModP;
         return loadCachedPrompt('knowledge/permanent.md').slice(0, 1600);
       } catch { return ''; }
     })(),
@@ -161,7 +166,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
         const { getCachedRoster, setCachedRoster } = await import('../pipeline/reply/member-cache.js');
         const cached = getCachedRoster(chatId);
         if (cached) return cached;
-        const { getGroupMembers } = await import('../pipeline/context/manager.js');
+        const { getGroupMembers } = await ctxManagerModP;
         const members = await getGroupMembers(chatId);
         if (members.length) {
           const text = members
@@ -288,7 +293,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     (async () => {
       if (!isSelfPlay) return '';
       try {
-        const { loadCachedPrompt } = await import('../shared/config.js');
+        const { loadCachedPrompt } = await configModP;
         return loadCachedPrompt('task/self-play.md');
       } catch { return ''; }
     })(),
@@ -297,7 +302,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     (async () => {
       if (!replyAnchor || replyAnchor <= 0) return [] as RecentMessage[];
       try {
-        const { getRecent } = await import('../pipeline/context/manager.js');
+        const { getRecent } = await ctxManagerModP;
         return await getRecent(chatId, 80, task.messageThreadId);
       } catch { return [] as RecentMessage[]; }
     })(),
@@ -359,7 +364,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
         if (parentId && parentId > 0) {
           let parent = recent.find((m) => m.messageId === parentId);
           if (!parent) {
-            const { getRecent } = await import('../pipeline/context/manager.js');
+            const { getRecent } = await ctxManagerModP;
             const wider = await getRecent(chatId, 120, task.messageThreadId);
             parent = wider.find((m) => m.messageId === parentId);
           }
