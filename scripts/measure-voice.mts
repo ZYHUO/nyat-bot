@@ -171,12 +171,15 @@ console.log(P(`   round 5 加：用户闲聊提"签到"不该变成一次真的�
 console.log();
 // ── 睡眠门：心流的"分母"是怎么来的 ────────────────────────────────
 const gateTotal = gate.asleep + gate.legacy + gate.structuralIgnore + actTotal;
-console.log(P(`⑤ 睡眠门           asleep ${gate.asleep} · legacy ${gate.legacy} · 结构性忽略 ${gate.structuralIgnore} · 到心流 ${actTotal}`));
+console.log(P(`⑤ 到心流的漏斗     asleep ${gate.asleep} · legacy ${gate.legacy} · bot未叫本喵 ${gate.structuralIgnore} · 到心流 ${actTotal}`));
 if (gateTotal > 0) {
   const pct = gate.asleep * 100 / gateTotal;
-  console.log(P(`   metaSleepGate 对 L2 非直呼消息直接 silent，占这个窗口的 ${pct.toFixed(0)}%。`));
-  console.log(P(`   ⚠️ 心流的四个出口只能影响**过了门**的那部分。夜间这是少数，`));
-  console.log(P(`      所以"回复率"和"心流四态"在夜间天然被压缩——别拿它当白天口径。`));
+  const reach = actTotal * 100 / gateTotal;
+  console.log(P(`   asleep ${pct.toFixed(0)}% · bot未叫本喵 ${(gate.structuralIgnore * 100 / gateTotal).toFixed(0)}% · legacy ${(gate.legacy * 100 / gateTotal).toFixed(0)}%`));
+  console.log(P(`   ⚠️ 心流的四个出口只影响**过了整条漏斗**的那部分：${reach.toFixed(0)}%。`));
+  console.log(P(`      夜间 asleep 是大头，别拿夜间数字当白天口径。`));
+  console.log(P(`      "bot未叫本喵"是正确的（不该跟别的 bot 聊个没完），但它是隐藏的一层——`));
+  console.log(P(`      round 44 第一次数它：08:00 前 8 条，全部来自 nmnmfunbot/KinhRoBot 等。`));
 }
 console.log();
 // ── 按群：谁在贡献那个平均数 ──────────────────────────────────────
