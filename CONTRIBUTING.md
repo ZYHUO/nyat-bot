@@ -23,6 +23,26 @@ was tried, what worked, and what didn't. Four numbers come from
 
 ## Reporting bugs
 
+**If nothing is broken but the bot behaves in a way you don't want** — use the
+**Behaviour report** template, not Bug report. Behaviour is the product here, and
+those are the highest-signal issues this repo gets.
+
+Run this first and paste it in; it turns "it's too chatty" into numbers:
+
+```bash
+npm run measure:voice -- --since 00:00
+```
+
+Two numbers, two different problems ([`docs/voice-tuning.md`](docs/voice-tuning.md)):
+
+| You see | The number |
+|---|---|
+| "it hogs the conversation" | ① reply rate |
+| "it speaks up every few minutes" | **msgs/hour** in the per-chat table |
+
+① is often *fine* in a busy group. The second is what people mean by
+"too chatty". Filing without them is still welcome — just expect to be asked.
+
 Use the **Bug report** template. The two most useful fields are the provider/model
 and the non-default flags you set — NyatBot's behaviour varies a lot across those.
 
