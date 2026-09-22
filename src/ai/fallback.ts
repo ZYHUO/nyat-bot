@@ -147,8 +147,23 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       }
 
       // Content safety rejection — **继续试下一个 provider**,不再一拒就放弃整条链。
-      if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
-        logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter, trying next provider');
+      //
+      // round 10（新 goal）：**不记熔断**。
+      //
+      // 2026-09-22 07:16 实测：stepfunvision 连续 5 次被 safety filter 拒
+      // （群里在聊洗钱/广告类内容），3 次即达 DEFAULT_FAILURE_THRESHOLD
+      // → 熔断 120s → 那 120s 内 **20 次 judge 调用全部 skipped**，
+      // 用户侧看到的是"没回复"而不是"慢回复"。
+      //
+      // 根因是判据错位：safety filter 拒的是**这条内容**，不是 provider 的
+      // 健康状态。同一个 model 对别的内容可能完全正常——拿内容问题罚 provider，
+      // 等于"这条消息里有敏感词 ⇒ 这个模型坏了"。而 safety filter 本身已经
+      // 给出了正确行为（换下一个 provider 试），再叠一层熔断是双重惩罚。
+      //
+      // 429 仍然记（那是真的 provider 侧限流，和内容无关）。
+      const isContentRejected = err instanceof AIError && err.code === 'AI_CONTENT_REJECTED';
+      if (isContentRejected) {
+        logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter, trying next provider (not counted against breaker)');
       }
 
       // 429 → 短期冷却
@@ -156,9 +171,10 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         await cooldown.setCooldown(label.model);
       }
 
-      // 所有失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）
+      // 其余失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）。
+      // **content rejected 例外**：它拒的是内容不是 provider 健康，见上。
       const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
-      const tripped = await cooldown.recordFailure(label.model, errCode);
+      const tripped = isContentRejected ? false : await cooldown.recordFailure(label.model, errCode);
       if (tripped) {
         const remaining = await cooldown.getRemainingSeconds(label.model);
         logger.warn({ label: labelName, model: label.model, errCode, breakerSec: remaining }, 'Circuit breaker tripped');
