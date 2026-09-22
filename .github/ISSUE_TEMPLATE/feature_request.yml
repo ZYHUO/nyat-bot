@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an idea
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What behaviour do you want, and from whom?
+      description: Describe the interaction you're after, not the mechanism.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why doesn't the current behaviour work?
+    validations:
+      required: false
+  - type: dropdown
+    id: cost
+    attributes:
+      label: Is this worth extra LLM calls?
+      description: NyatBot meters sends per task, so cost matters.
+      options:
+        - No, it should be free to evaluate
+        - Yes, if it means better behaviour
+        - Unsure
