@@ -11,6 +11,16 @@ Check whether the behaviour you're seeing is intentional by reading
 of behaviour is gated behind one of them. **The flag census fails the build if a
 dead switch comes back**, so a flag that exists should do something.
 
+## Reading the code
+
+Six files, about an hour: [`docs/code-tour.md`](docs/code-tour.md). It answers
+"where do I start" in order, and each step says what question it answers.
+
+If you want to change **how much** the bot talks, read
+[`docs/voice-tuning.md`](docs/voice-tuning.md) first — it is a measured log of what
+was tried, what worked, and what didn't. Four numbers come from
+`npm run measure:voice`.
+
 ## Reporting bugs
 
 Use the **Bug report** template. The two most useful fields are the provider/model
