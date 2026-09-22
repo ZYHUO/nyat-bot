@@ -107,6 +107,23 @@ export class AttentionAccumulator {
       }
     }
     const item = buildItem(partial);
+    // round 4（新 goal）：**L0 直呼立刻 kick 一次 metaTick，不等 META_TICK_MS 栅格。**
+    //
+    // 2026-09-22 用户报 4-6s + 10-16s + 3-4s 叠加迟钝。七天实测段①
+    // （message in → Heart decision）P50 8.2s，构成：
+    //   Heart decision 自己 4.8s + reflect 1.2s + **等 tick 最多 5s**。
+    // round 1 我让 L0 跳过了 `META_L0_COALESCE_MS=2800` 的 hold，但**栅格还在**——
+    // flush 只发生在 `startMetaLoop` 的 `setInterval(META_TICK_MS=5000)` 上，
+    // 没有"这条消息很急，现在就 flush"的通道。等于修了一半。
+    //
+    // 现在补上：L0（DM / @ / 回 bot / 叫昵称）ingest 后立刻排一次 tick。
+    // 用 `scheduleCoalesceWake(0)` 而不是直接 `metaTick()`——它有去重
+    // （clearTimeout 旧的）、有 unref（不拖住进程退出），且 50ms 下限给了
+    // 同一批连到的几条消息一个极短合并机会（连发第三条不会各 kick 一次）。
+    //
+    // L2 不 kick：那种是"看看要不要接话"，等栅格更接近人的行为，
+    // 而且实测 114/119 条入站都是 L2，全 kick 等于没有栅格。
+    if (item.layer === 'L0') scheduleCoalesceWake(0);
     try {
       await this.persistPush(item);
     } catch (err) {
