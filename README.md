@@ -6,6 +6,11 @@
 
 Not a bot that responds when poked — an agent that hangs out, reads the room, and only speaks when it has something worth saying.
 
+```bash
+npm run demo     # 看它怎么决定「这次不说话」。不需要 bot token，不需要 API key
+```
+
+
 **v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — **488 env keys, 216
 boolean flags, 188 live in production**. The audit that produced it found 9 dead switches
 and 4 test-only phantoms; all of them are now gone — `dead_and_on` and
