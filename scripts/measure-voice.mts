@@ -60,7 +60,7 @@ const actByHour = new Map<string, { r: number; w: number; p: number; x: number }
 let reacted = 0;
 // round 15：按群拆。用户说"bot 太爱说话了"是**在某个群里的体感**，
 // 全量一个平均数会把"一个群在刷屏"和"所有群都正常"混成一回事。
-const byChat = new Map<string, { m: number; s: number; edit: number }>();
+const byChat = new Map<string, { m: number; s: number; edit: number; first: number }>();
 
 const rl = readline.createInterface({ input: createReadStream('logs/app.log'), crlfDelay: Infinity });
 for await (const line of rl) {
@@ -74,7 +74,7 @@ for await (const line of rl) {
   if (m === 'message in') {
     msgs++;
     const c = String(d.chatId ?? '?');
-    const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0 };
+    const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0, first: t };
     rec.m += 1;
     if (d.isEdit) rec.edit += 1;
     byChat.set(c, rec);
@@ -83,7 +83,7 @@ for await (const line of rl) {
   if (m === 'host sendText') {
     first++;
     const c = String(d.chatId ?? '?');
-    const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0 };
+    const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0, first: t };
     rec.s += 1;
     byChat.set(c, rec);
     const a = d.replyTo;
@@ -153,19 +153,28 @@ if (gateTotal > 0) {
 console.log();
 // ── 按群：谁在贡献那个平均数 ──────────────────────────────────────
 const chatRows = [...byChat.entries()]
-  .map(([c, v]) => ({ c, m: v.m, s: v.s, fresh: v.m - v.edit }))
+  .map(([c, v]) => {
+    // round 17：**条/小时**——用户感知的是"它每隔几分钟就说一句"，不是占比。
+    // 占比 18.8% 看着收敛，13 条/小时就是每 4.6 分钟一句，群里的人只会觉得吵。
+    const hours = Math.max(0.5, (Date.now() - v.first) / 3_600_000);
+    return { c, m: v.m, s: v.s, fresh: v.m - v.edit, perHour: v.s / hours };
+  })
   .filter((r) => r.m >= 20)
-  .sort((a, b) => (b.s / Math.max(1, b.m)) - (a.s / Math.max(1, a.m)));
+  // 按条/小时降序，不按占比——更接近人的体感
+  .sort((a, b) => b.perHour - a.perHour);
 if (chatRows.length > 0) {
-  console.log(P('按群（回复率降序，只列入站 >=20 的群）：'));
+  console.log(P('按群（条/小时降序——这才是"吵不吵"的体感；只列入站 >=20 的群）：'));
   for (const r of chatRows.slice(0, 10)) {
-    console.log(P(`   ${r.c.padEnd(18)} in=${String(r.m).padStart(4)} (新 ${String(r.fresh).padStart(4)})  send=${String(r.s).padStart(3)}  ${(r.s * 100 / r.m).toFixed(1)}%`));
+    console.log(P(`   ${r.c.padEnd(18)} ${r.perHour.toFixed(1).padStart(5)}条/时  send=${String(r.s).padStart(3)}  in=${String(r.m).padStart(4)} (新 ${String(r.fresh).padStart(4)})  ${(r.s * 100 / r.m).toFixed(1)}%`));
   }
   if (chatRows.length > 10) console.log(P(`   …另 ${chatRows.length - 10} 个群`));
   const total = chatRows.reduce((a, r) => ({ m: a.m + r.m, s: a.s + r.s }), { m: 0, s: 0 });
   console.log(P(`   这些小计 in=${total.m} send=${total.s} → ${(total.s * 100 / Math.max(1, total.m)).toFixed(1)}%`));
   console.log(P('   ⚠️ "新"扣掉了 isEdit 的编辑重放——编辑不是新消息，却一直计在入站里，'));
   console.log(P('      所以裸 in 会偏大、回复率偏小——报数字时要说清扣没扣。'));
+  console.log(P('   ⚠️ 占比和条/小时是两个不同的病：占比高 = 话密但群也热；'));
+  console.log(P('      条/小时高 = 不管群热不热，它每隔几分钟就冒一句。前者常是正常的，'));
+  console.log(P('      后者才是"太爱说话"。我调了 17 轮占比，治的是前一个。'));
   console.log();
 }
 

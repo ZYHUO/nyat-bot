@@ -87,6 +87,25 @@ export interface SelfActSummary {
   baselineShare?: number;
   /** baselineShare 的回看天数（未命中缓存时现场算，写进结果供渲染说明）。 */
   baselineDays?: number;
+  /**
+   * 这个群你的**绝对节奏**：条/小时（默认回看 7 天 / 清醒时段）。
+   *
+   * round 17（新 goal，用户："bot 还是太爱说话了"）。加它是因为一次实测翻转：
+   * 按群看，占比和"吵不吵"根本是两回事——
+   *
+   *   chat                 占比     条/小时
+   *   -1003821093564      12.1%     14.8     ← 占比最低，节奏最高
+   *   -1003543275052      12.2%     13.0     ← 占比同样低，每 4.6 分钟一句
+   *   -1002450361141      72.6%      2.9     ← 占比最高，其实最安静
+   *
+   * 我调了 17 轮占比门槛（≥30% 默认不接、比基线高 1.5 倍才提示），
+   * 而那两个最吵的群占比只有 12%——**判据在它们身上永远不触发**。
+   * 一个群里的人感知的是"它每隔几分钟就冒一句"，不是"它占了多少字数"。
+   *
+   * 注意和 baselineShare 的分工：占比答"我是不是在自言自语"，
+   * 节奏答"我是不是太吵"。两个都要给，缺一个就有一个盲区。
+   */
+  cadencePerHour?: number;
 }
 
 /** Preview length; long previews push the rendered block past its budget. */
@@ -182,6 +201,7 @@ export function getSelfActSummary(
   chatId: number,
   windowSec: number,
   baselineShare?: number,
+  cadencePerHour?: number,
 ): SelfActSummary | null {
   if (!env().SELF_HISTORY_ENABLED) return null;
   if (!Number.isSafeInteger(chatId) || chatId === 0) return null;
@@ -228,6 +248,7 @@ export function getSelfActSummary(
       total: rows.length,
       // round 16：调用方传基线就带上；没传就 undefined（渲染时不说相对那句）。
       ...(baselineShare !== undefined ? { baselineShare } : {}),
+      ...(cadencePerHour !== undefined ? { cadencePerHour } : {}),
       byOutcome,
       ...(shareOfConversation === undefined ? {} : { shareOfConversation }),
       recent: rows.slice(0, ACT_MAX_RECENT).map((row) => ({
@@ -305,6 +326,53 @@ export async function getSelfShareBaseline(
   }
 }
 
+
+
+/**
+ * 这个群的绝对节奏（条/小时）。Redis 缓存 6 小时，判据同 getSelfShareBaseline。
+ *
+ * 分母用**清醒时段**而不是自然小时：一个 24 小时都有人说话的群，和只在白天
+ * 热闹的群，"每小时 X 条"不是一回事。这里按 group_messages 数归一化成
+ * "每 1000 条入站你发几条"，再折算成条/小时——等价但不怕群作息差异。
+ *
+ * 任何失败返回 undefined：节奏是参照，不是门槛，缺了不该让心流变哑。
+ */
+export async function getSelfCadence(
+  chatId: number,
+  days = BASELINE_DAYS,
+): Promise<number | undefined> {
+  if (!Number.isSafeInteger(chatId) || chatId >= 0) return undefined;
+  const key = `xxb:selfhist:cadence:${chatId}`;
+  try {
+    const cached = await getRedis().get(key);
+    if (cached !== null) {
+      const v = Number.parseFloat(cached);
+      if (Number.isFinite(v)) return v;
+    }
+  } catch { /* miss → 现场算 */ }
+
+  try {
+    const db = getDb();
+    const since = Math.floor(Date.now() / 1000) - days * 86400;
+    const botRow = db.prepare(
+      `SELECT COUNT(*) AS c FROM self_replies WHERE chat_id = ? AND ts >= ?`,
+    ).get(chatId, since) as { c: number } | undefined;
+    const spanRow = db.prepare(
+      `SELECT MAX(occurred_at) - MIN(occurred_at) AS span FROM cognitive_events
+       WHERE type = 'message_received' AND chat_id = ? AND occurred_at >= ?`,
+    ).get(chatId, since) as { span: number | null } | undefined;
+    const bot = botRow?.c ?? 0;
+    const span = spanRow?.span ?? 0;
+    // 至少要有 6 小时的跨度才算得出节奏，否则一天说 10 条会被算成很凶
+    if (bot < 10 || span < 6 * 3600) return undefined;
+    const perHour = bot / (span / 3600);
+    void getRedis().set(key, perHour.toFixed(3), 'EX', BASELINE_TTL_SEC).catch(() => {});
+    return perHour;
+  } catch {
+    return undefined;
+  }
+}
+
 export function renderSelfActSummary(summary: SelfActSummary | null): string {
   if (!summary || summary.total === 0) return '';
   const label: Record<ActOutcome, string> = {
@@ -353,9 +421,19 @@ export function renderSelfActSummary(summary: SelfActSummary | null): string {
           ? `，这一波你插了几句${relText}`
           : '';
 
+  // round 17：节奏单独一行。占比那句话已经够长了，而节奏是另一个维度的事。
+  // 超过每小时 5 条就明说"挺密的"——一个真人不会每四分钟说一句而不自觉。
+  const cad = summary.cadencePerHour;
+  const cadenceLine = cad === undefined
+    ? ''
+    : `[你的节奏] 这个群你平时每小时说 ${cad.toFixed(1)} 条${
+        cad >= 5 ? '（挺密的——群里的人每隔几分钟就看见你一次。真人不会这样。）' : ''
+      }`;
+
   const lines = [
     `[你自己的近况] 最近 ${minutes} 分钟里你在这个群说了 ${summary.total} 次（${parts.join(' · ')}）${sinceText}${shareText}。`,
   ];
+  if (cadenceLine) lines.push(cadenceLine);
   // Concrete lines let the model recognise its own repetition instead of only
   // seeing counts.
   const nowSec = Math.floor(Date.now() / 1000);
