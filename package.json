@@ -23,7 +23,8 @@
     "format": "prettier --write .",
     "demo": "tsx scripts/demo.mts",
     "measure:voice": "tsx scripts/measure-voice.mts",
-    "measure:voice:compare": "node scripts/voice-compare.mjs"
+    "measure:voice:compare": "node scripts/voice-compare.mjs",
+    "voice:phase": "node scripts/voice-phase.mjs"
   },
   "engines": {
     "node": ">=22.0.0 <23"
