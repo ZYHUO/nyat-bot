@@ -183,8 +183,12 @@ export async function evaluateMetaHeart(opts: {
   let selfHistory: string | undefined;
   if (e.SELF_HISTORY_ENABLED) {
     try {
+      // round 16：先取这个群自己的常态（7 天基线，Redis 缓存 6 小时），
+      // 再和"这一波"的占比一起递给心流。没有基线就退回到绝对占比。
+      const { getSelfShareBaseline } = await import('../tracking/self-history.js');
+      const baselineShare = await getSelfShareBaseline(chatId).catch(() => undefined);
       const parts = [
-        renderSelfActSummary(getSelfActSummary(chatId, e.SELF_HISTORY_WINDOW_MIN * 60)),
+        renderSelfActSummary(getSelfActSummary(chatId, e.SELF_HISTORY_WINDOW_MIN * 60, baselineShare)),
         // "when I said I'd think again" lives only in the event ledger.
         renderPendingWake(nextSelfWake({ visibility: 'chat', chatId })),
         // Acts that landed badly and were never revisited — the repair offer.

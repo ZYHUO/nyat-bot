@@ -27,6 +27,7 @@
 import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { getRedis } from '../db/redis.js';
 
 export interface SelfReply {
   ts: number;
@@ -68,6 +69,24 @@ export interface SelfActSummary {
    * having a host-side gate stop it after the fact.
    */
   shareOfConversation?: number;
+  /**
+   * 这个群的**长期基线占比**（默认回看 7 天，Redis 缓存 6 小时）。
+   *
+   * round 16（新 goal，用户："bot 还是太爱说话了"）。加它的原因是一次实测：
+   * 白天按群拆分，回复率从 13.8%（最活跃的群）到 70.8%（小群）**差 5 倍**，
+   * 而全量一个 17% 的均数把这件事完全盖住了。
+   *
+   * `shareOfConversation` 是**这一波**的占比（per-chat，30 分钟窗口），
+   * 它是相对值但没有参照——模型看到"这一波 42%"不知道在该不该收。
+   * 心流 prompt 里的门槛原本写死"≥30% 默认不接"，那是全局一条线：
+   * 平时只占 10% 的群和平时占 60% 的群读同一句，等于没按群区分。
+   *
+   * 有了基线就能说人话："这一波你占了 42%，**这个群你平时约 18%**"
+   * ——同一个数字在不同群里含义完全不同，而 bot 自己知道每个群的常态。
+   */
+  baselineShare?: number;
+  /** baselineShare 的回看天数（未命中缓存时现场算，写进结果供渲染说明）。 */
+  baselineDays?: number;
 }
 
 /** Preview length; long previews push the rendered block past its budget. */
@@ -162,6 +181,7 @@ export function closeSelfActOutcome(input: {
 export function getSelfActSummary(
   chatId: number,
   windowSec: number,
+  baselineShare?: number,
 ): SelfActSummary | null {
   if (!env().SELF_HISTORY_ENABLED) return null;
   if (!Number.isSafeInteger(chatId) || chatId === 0) return null;
@@ -206,6 +226,8 @@ export function getSelfActSummary(
       chatId,
       windowSec: window,
       total: rows.length,
+      // round 16：调用方传基线就带上；没传就 undefined（渲染时不说相对那句）。
+      ...(baselineShare !== undefined ? { baselineShare } : {}),
       byOutcome,
       ...(shareOfConversation === undefined ? {} : { shareOfConversation }),
       recent: rows.slice(0, ACT_MAX_RECENT).map((row) => ({
@@ -231,6 +253,58 @@ export function getSelfActSummary(
  * No thresholds, no "you should speak less", no quota — the host draws no
  * behavioural conclusion, because that decision belongs to the model.
  */
+
+
+/**
+ * 这个群的长期基线占比 = 本喵发言 / 人类发言，回看 `days` 天。
+ *
+ * Redis 缓存 BASELINE_TTL_SEC（6 小时）：DB 聚合要扫 cognitive_events，
+ * 而心流是全系统调用频次最高的路径，不能每条消息都扫一次。
+ * 基线本身变化很慢（一个群的作息不会几小时一变），6 小时足够。
+ *
+ * 任何失败都返回 undefined —— 那是"不知道自己的常态"，渲染时不说这句，
+ * 退回到原来的绝对占比。**基线是参照，不是门槛**，缺了不该让心流变哑。
+ */
+const BASELINE_CACHE_KEY = (chatId: number): string => `xxb:selfhist:baseline:${chatId}`;
+const BASELINE_DAYS = 7;
+const BASELINE_TTL_SEC = 6 * 3600;
+
+export async function getSelfShareBaseline(
+  chatId: number,
+  days = BASELINE_DAYS,
+): Promise<number | undefined> {
+  if (!Number.isSafeInteger(chatId) || chatId >= 0) return undefined;
+  const key = BASELINE_CACHE_KEY(chatId);
+  try {
+    const cached = await getRedis().get(key);
+    if (cached !== null) {
+      const v = Number.parseFloat(cached);
+      if (Number.isFinite(v)) return v;
+    }
+  } catch { /* cache miss → 现场算 */ }
+
+  try {
+    const db = getDb();
+    const since = Math.floor(Date.now() / 1000) - days * 86400;
+    const botRow = db.prepare(
+      `SELECT COUNT(*) AS c FROM self_replies WHERE chat_id = ? AND ts >= ?`,
+    ).get(chatId, since) as { c: number } | undefined;
+    const humanRow = db.prepare(
+      `SELECT COUNT(*) AS c FROM cognitive_events
+       WHERE type = 'message_received' AND chat_id = ? AND occurred_at >= ?`,
+    ).get(chatId, since) as { c: number } | undefined;
+    const bot = botRow?.c ?? 0;
+    const human = humanRow?.c ?? 0;
+    // 样本太少算不出常态（一个新群前 20 条什么都说明不了）
+    if (human < 50) return undefined;
+    const share = Math.min(1, bot / human);
+    void getRedis().set(key, share.toFixed(4), 'EX', BASELINE_TTL_SEC).catch(() => {});
+    return share;
+  } catch {
+    return undefined;
+  }
+}
+
 export function renderSelfActSummary(summary: SelfActSummary | null): string {
   if (!summary || summary.total === 0) return '';
   const label: Record<ActOutcome, string> = {
@@ -258,14 +332,25 @@ export function renderSelfActSummary(summary: SelfActSummary | null): string {
   // group and nothing in a busy one — what a person actually notices is whether
   // they are dominating the room. Rendered as a felt sense, not a statistic.
   const share = summary.shareOfConversation;
+  // round 16：**和这个群自己的常态比**，不是和一条全局线比。
+  //
+  // 白天实测：回复率 13.8%（1793 条的活跃群）到 70.8%（48 条的小群）。
+  // 写死"≥30% 就说多了"的话，前者永远触不到、后者永远触发——两边都学不到东西。
+  // 现在给出"这一波 X%，这个群你平时约 Y%"，让"比平时高多少"成为可判断的事实。
+  //
+  // 阈值：高出基线 1.5 倍才算"这一波偏多"，持平和偏低不提（别无病呻吟）。
+  const base = summary.baselineShare;
+  const relText = (share !== undefined && base !== undefined && base > 0 && share >= base * 1.5)
+    ? `（这个群你平时约 ${Math.round(base * 100)}%）`
+    : '';
   const shareText = share === undefined
     ? ''
     : share >= 0.5
-      ? `，这一波基本是你一个人在说`
+      ? `，这一波基本是你一个人在说${relText}`
       : share >= 0.3
-        ? `，这一波你说得有点多`
+        ? `，这一波你说得有点多${relText}`
         : share >= 0.15
-          ? `，这一波你插了几句`
+          ? `，这一波你插了几句${relText}`
           : '';
 
   const lines = [
