@@ -28,6 +28,7 @@ import { enqueueWaitResume } from '../../queue/producer.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
 import { appendPending, takeWaitAnchor } from '../turn/buffer.js';
 import { isTurnActorChat } from '../turn/flags.js';
+import { incrCounter } from '../../metrics/registry.js';
 
 export type { ChatTimingState, RuntimeState };
 
@@ -229,10 +230,22 @@ export async function handleWaitResume(args: {
   if (waitResume?.scheduledAt && state.waitUntil) {
     const expectedFireAt = waitResume.scheduledAt + waitResume.waitSec * 1000;
     if (Math.abs(expectedFireAt - state.waitUntil) > 2000) {
-      logger.debug(
+      // round 10（新 goal）：debug → info + 计数器。
+      //
+      // 2026-09-22 实测：心流今天 `Meta heart: wait` 21 次（waitSec 全是 8 秒），
+      // 而 `wait-resume → Meta Attention` 只有 1 次、`defer-resume fired` 11 次。
+      // 也就是说 **wait 承诺了"等 TA 说完我回来接"，20 次没兑现**。
+      //
+      // 最像的嫌疑人就是这个分支（只打 debug，生产 LOG_LEVEL=info 完全看不见），
+      // 但我**没有证据**——看不见的东西没法归因。把它提到 info 并计数，
+      // 下一轮 awake 就能回答"那 20 次是不是都死在这儿"。
+      //
+      // 这正是这个会话吃亏最多次的形状：机制在丢东西，而丢的地方不亮。
+      logger.info(
         { chatId, expectedFireAt, currentWaitUntil: state.waitUntil },
-        'wait-resume fired but waitUntil mismatch (newer wait active), dropping',
+        'wait-resume dropped: waitUntil mismatch (newer wait active)',
       );
+      incrCounter('wait_resume_dropped_total', { chat: chatId });
       return;
     }
   }
