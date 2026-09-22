@@ -21,6 +21,30 @@ Everything after this point is the engineering record — the audit cycles,
 architecture, cognition roadmap and known traps. If you want it running first,
 jump straight to **🚀 Quick start** further down this README.
 
+## Contents
+
+- [v1.1 — the second audit cycle (2026-09-22)](#v11--the-second-audit-cycle-2026-09-22)
+- [Why this exists](#why-this-exists)
+- [What it does now](#what-it-does-now)
+  - [🏗️ Architecture](#️-architecture)
+  - [🧭 Cognition roadmap (H0–H4, all shipped)](#-cognition-roadmap-h0h4-all-shipped)
+  - [🕳️ Known traps (learned the hard way)](#️-known-traps-learned-the-hard-way)
+  - [📏 Evaluation](#-evaluation)
+  - [📁 Project structure](#-project-structure)
+  - [🛠️ Tech stack](#️-tech-stack)
+  - [🚀 Quick start](#-quick-start)
+  - [⚙️ Configuration](#️-configuration)
+  - [📊 Prompt system](#-prompt-system)
+  - [💬 Command reference](#-command-reference)
+  - [🔐 Security](#-security)
+  - [🔧 Tool system](#-tool-system)
+  - [🔌 Skill plugin system](#-skill-plugin-system)
+- [🛡️ Anti-ad: how a group owner turns it on](#️-anti-ad-how-a-group-owner-turns-it-on)
+- [More of my work](#more-of-my-work)
+- [📄 License](#-license)
+
+---
+
 
 **v1.0** — the preview line ends here. What shipped in it: the Nyat Trench body layer (pressure / envelope / reflex), behavioural anti-ad with group-owner opt-in, the Meta+Subagent main path with per-task send budgets, StepFun search as the primary web route, and `step-5-preview` in the smart-group provider pool. A full flag census lives in [`docs/flag-census.md`](docs/flag-census.md) — **488 env keys, 216
 boolean flags, 188 live in production**. The audit that produced it found 9 dead switches
@@ -625,6 +649,7 @@ Drop a JSON file into `data/skills/` to add a custom tool, no code changes:
 ```
 
 Supports `type: "http"` (SSRF-guarded). See `data/skills/README.md`.
+
 ---
 
 ### Enforcement, when the owner asks for it
