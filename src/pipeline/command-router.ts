@@ -22,6 +22,28 @@ interface Match { bot: string; command: string; args: string; }
 /** Jev Choice 里代表“以上都不符合”的哨兵选项 key(避开 c0/c1… 真实命令 key)。 */
 const JEV_NONE_KEY = '__none__';
 
+/**
+ * 本 bot **自己**的斜杠命令。学到别的 bot 有同名命令时，不能凭语义相似就代发。
+ *
+ * round 5（新 goal，用户："不会用其他 bot 的指令 完全乱来"）。
+ *
+ * 生产实测两次误代发：
+ *   09-21 15:27  chat=-1003821093564  用户说「等下又要签到水句开盲盒了」
+ *              -> bot 向 nmnmfunbot 发了 /checkin
+ *   09-22 14:31  chat=-1004430867819  用户说「争取以后能有一周的全勤吧」
+ *              -> bot 又向 nmnmfunbot 发了 /checkin
+ *
+ * 两条都**不是**在要求签到，是在闲聊里提到"签到"这件事。
+ * 而 \`nmnmfunbot /checkin\` 恰好是 ready 的已学命令，语义一近就代发了。
+ *
+ * 用户要的是"帮我用别的 bot 的 X 命令"，不是"你听到 X 这个词就去按一次"。
+ * 尤其是撞名的那些：本 bot 自己就有 /checkin、/cards、/stats、/game。
+ */
+const OWN_COMMANDS = new Set([
+  '/checkin', '/help', '/status', '/stats', '/muteme', '/unmuteme',
+  '/watch', '/game', '/feature', '/setdefault', '/cards', '/wish', '/skill',
+]);
+
 const CLASSIFY_SYS =
   '你在判断群友对 bot 说的一句话,是不是想让 bot 去帮忙调用「群里其他 bot 的某条已知命令」。\n' +
   '**可用命令**(每行:@bot 命令 语法 — 用途):\n{list}\n\n' +
@@ -87,6 +109,16 @@ async function classifyWithJev(text: string, chatId: number, ready: BotCommandPr
     if (ans.confidence < e.JEV_MIN_CONFIDENCE) return { kind: 'unsure', latencyMs: ans.latencyMs };  // 没把握 → 大模型判
     const hit = byKey.get(ans.choice);
     if (!hit) return { kind: 'unsure', latencyMs: ans.latencyMs };  // 不在 ready(不应发生)→ 降级
+    // round 5：**撞名命令只在显式指定时才代发。**
+    //
+    // 「等下又要签到水句开盲盒了」这种闲聊里提到签到，不能变成一次真的代发。
+    // 判据：消息里必须出现目标 bot 的名字（@bot / bot 用户名本体），
+    // 否则一律 unsure → 回落 LLM judge，而 LLM judge 有完整上下文，
+    // 比"语义最近"靠谱。
+    if (OWN_COMMANDS.has(hit.command.toLowerCase()) && !namesBot(text, hit.bot)) {
+      logger.debug({ chatId, bot: hit.bot, cmd: hit.command }, 'command-router: 撞名命令未显式指定 → 不代发');
+      return { kind: 'unsure', latencyMs: ans.latencyMs };
+    }
     return { kind: 'match', match: hit, latencyMs: ans.latencyMs };
   } catch {
     return { kind: 'unsure' };                                 // Jev 永不拖垮路由
@@ -192,4 +224,22 @@ export async function routeLearnedCommand(chatId: number, formatted: FormattedMe
     logger.debug({ err, chatId }, 'routeLearnedCommand failed (non-critical)');
     return false;
   }
+}
+
+/**
+ * 这句话有没有**显式点到**目标 bot。
+ *
+ * 两种都算：@bot / bot 用户名本体（去掉 _bot 后缀后长度 >=3 才认，
+ * 否则 "uzu" 这种太短的词会误命中）。都不中就是"只在聊那个话题，
+ * 没在指挥那个 bot"。
+ *
+ * round 5 加，给撞名命令的守卫用。
+ */
+function namesBot(text: string, bot: string): boolean {
+  const b = bot.toLowerCase();
+  const t = text.toLowerCase();
+  if (t.includes('@' + b)) return true;
+  const stem = b.replace(/_bot$/, '');
+  if (stem.length >= 3 && t.includes(stem)) return true;
+  return false;
 }
