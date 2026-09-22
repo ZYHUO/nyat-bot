@@ -53,6 +53,9 @@ const act = { reply: 0, wait: 0, pass: 0, react: 0 } as Record<string, number>;
 const anchor = new Map<string, number>();
 let collision = 0;
 let dupAnchorDropped = 0;
+// round 14：**睡眠门吃掉了多少**——这 6 轮我把它当成"没流量"，
+// 于是"没法量"这个结论重复了六遍。
+const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0 };
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
 
@@ -89,6 +92,9 @@ for await (const line of rl) {
   // react 的副作用日志（heart.ts 的 'heart: reacted'）——Heart decision 那条
   // 已经含 act=react，但这里单独数一次，用来交叉检验"决策了"和"真点出去了"。
   if (m === 'heart: reacted') { reacted += 1; continue; }
+  if (m === 'Meta path: asleep') { gate.asleep += 1; continue; }
+  if (m === 'Meta path: slash/checkin-stats → legacy pipeline') { gate.legacy += 1; continue; }
+  if (m.includes('结构性忽略')) { gate.structuralIgnore += 1; continue; }
   if (m.includes('撞名命令未显式指定')) { collision++; continue; }
   if (m.includes('dropped duplicate reply anchor')) { dupAnchorDropped++; continue; }
 }
@@ -119,6 +125,16 @@ console.log(P(`   (同任务内分句去重 dropped duplicate anchor ${dupAnchor
 console.log();
 console.log(P(`④ 撞名守卫        拦下 ${collision} 次`));
 console.log(P(`   round 5 加：用户闲聊提"签到"不该变成一次真的代发。`));
+console.log();
+// ── 睡眠门：心流的"分母"是怎么来的 ────────────────────────────────
+const gateTotal = gate.asleep + gate.legacy + gate.structuralIgnore + actTotal;
+console.log(P(`⑤ 睡眠门           asleep ${gate.asleep} · legacy ${gate.legacy} · 结构性忽略 ${gate.structuralIgnore} · 到心流 ${actTotal}`));
+if (gateTotal > 0) {
+  const pct = gate.asleep * 100 / gateTotal;
+  console.log(P(`   metaSleepGate 对 L2 非直呼消息直接 silent，占这个窗口的 ${pct.toFixed(0)}%。`));
+  console.log(P(`   ⚠️ 心流的四个出口只能影响**过了门**的那部分。夜间这是少数，`));
+  console.log(P(`      所以"回复率"和"心流四态"在夜间天然被压缩——别拿它当白天口径。`));
+}
 console.log();
 if (actByHour.size > 1) {
   console.log(P('按小时 reply%：'));
