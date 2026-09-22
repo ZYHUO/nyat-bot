@@ -41,6 +41,7 @@ jump straight to **🚀 Quick start** further down this README.
   - [🔐 Security](#-security)
   - [🔧 Tool system](#-tool-system)
   - [🔌 Skill plugin system](#-skill-plugin-system)
+- [📋 Behaviour: what was wrong, what changed](#-behaviour-what-was-wrong-what-changed)
 - [🛡️ Anti-ad: how a group owner turns it on](#️-anti-ad-how-a-group-owner-turns-it-on)
 - [More of my work](#more-of-my-work)
 - [📄 License](#-license)
@@ -2061,6 +2062,21 @@ owner. Second, the buttons on its messages — which the bot cannot press, but c
 see [the second card](#the-second-card-letting-another-bot-do-the-punishing).
 
 ---
+
+## 📋 Behaviour: what was wrong, what changed
+
+四个反复出现的行为问题，每个都先量再改。完整记录在
+[`docs/voice-tuning.md`](docs/voice-tuning.md) —— 包括没生效的那些（占比问隚改了 17 轮，真病是条/小时）。
+
+| 问题 | 改了什么 | 证据 | 状态 |
+|---|---|---|---|
+| **不会用别的 bot 的指令** | 命令路由加了**撞名守卫**：命令名和本 bot 自己的撞到一起时，必须显式点出目标 bot 才代发 | 生产里拦住两次真误代发（用户闲聊提"签到" -> bot 真去按了 nmnmfunbot 的 /checkin） | ✅ |
+| **重复回复** | 把“这条你已经回过 N 次”当事实递给心流（`answeredTimestamps()`） | 最惨的锚点从回 5-6 次降到 2 次；全天重复率 1.9% | ✅ |
+| **架构问题比上一个多** | 同一个病留了 7 处：调用方**写死** `maxTokens`，reasoning 模型的思维链吃光 → 空正文 → 整条链被试完 | 白天实测 705 次截断 + 694 次 heart fail-closed + 2210 次"全灭"；修完后截断降了九成以上 | ✅ |
+| **太爱说话** | 心流多了第四个出口（`react` 点表情不说话）+ 节奏事实（这个群你平时每小时说几条） | 真因定位：**条/小时**不是占比——最吵的两个群占比只有 12%，全低于 30% 那条线 | 待 awake 段验证 |
+
+上面第四行就是为什么有 [`docs/voice-tuning.md`](docs/voice-tuning.md) 和
+`npm run measure:voice`：行为改动如果不能重复量到，就不算改动。
 
 ## 🛡️ Anti-ad: how a group owner turns it on
 
