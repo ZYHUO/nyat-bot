@@ -17,6 +17,8 @@ npm run demo     # 看它怎么决定「这次不说话」。不需要 bot token
 npm run dev      # 真跑起来：需要 bot token + AI API
 ```
 
+[**Website**](website/) · [**Six-file code tour**](docs/code-tour.md) · [**Voice-tuning log**](docs/voice-tuning.md) · [**Write a skill**](docs/skills.md)
+
 Everything after this point is the engineering record — the audit cycles,
 architecture, cognition roadmap and known traps. If you want it running first,
 jump straight to **🚀 Quick start** further down this README.

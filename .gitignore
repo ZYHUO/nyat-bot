@@ -29,3 +29,6 @@ var/
 
 # trench 的 VITEST 观测改道文件（生产日志 var/trench.jsonl 已由 var/ 覆盖）
 .probe/
+
+# npm run demo -- --html 的产物（生成物，不入库）
+demo.html
