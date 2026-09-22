@@ -181,6 +181,24 @@ Then in the group:
 
 ---
 
+## 自带的 7 个例子（含一个和内置重叠的）
+
+仓库根的 `skills/` 里有几个**开箱可用**的例子。其中一个和内置工具重名，值得先说清：
+
+| 名字 | 是什么 | 和内置的关系 |
+|---|---|---|
+| `IP_GEO` | ipinfo.io 查 IP 归属 | **免费替代**内置的 `IP_QUALITY`（那个要配 `IP_QUALITY_API_URL`，默认注释着） |
+| `CRYPTO_PRICE` | CoinGecko 查币价 | 无对应内置 |
+| `GITHUB_REPO` | 查公开仓库元信息 | 无对应内置 |
+| `RANDOM_DOG` | 随机狗图 | 无对应内置 |
+| `RANDOM_JOKE` | 程序员冷笑话 | 无对应内置 |
+| `ECHO_BACK` | httpbin 回显 | 无对应内置；**给写 skill 的人当 POST 模板** |
+| `WEATHER` | wttr.in 天气 | 本机用户自己写的那个 |
+
+两个都留着不冲突：`IP_QUALITY` 走的是你配的付费 API（更准、有 ASN 信誉），
+`IP_GEO` 走免费额度。想用哪个留哪个，删掉不想用的即可——
+`loadSkills` 会跳过不存在的文件，断言的只有 `BUILTIN_TOOLS` 那一组名字不许撞。
+
 ## Where the code lives
 
 | what | where |
