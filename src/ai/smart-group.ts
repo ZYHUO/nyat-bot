@@ -286,6 +286,26 @@ interface UsageProfile {
   /** 最低可接受 tier(含): high=只要 high, medium=medium+high, low=全部。 */
   minTier: Tier;
   /**
+   * 要求**确定性**输出：temperature 必须能为 0。
+   *
+   * 2026-09-22 round 9 加。实测 `smartGroupAutoAssign('judge')` 返回
+   * `dshkimi, stepfunvision, stepfunthink`——dshkimi（kimi-for-coding）
+   * **只接受 temperature=1**（`AI_PROVIDER_DSHKIMI_TEMPERATURE=1`，
+   * 打 0.7/0.8 直接 400 `invalid temperature`）。于是：
+   *   · `callModel` 里 `label.temperature ?? opts.temperature` = 1 ?? 0 = **1**
+   *   · judge/summarize 拿到 temperature=1 的"确定性判断"，语义落空
+   *   · 而 env 里精心配的 `judge: stepfun <- [stepfunjudge]`（claude 格式、
+   *     temperature=0）被 auto-assign 整体旁路，`stepfunjudge` 零调用
+   *
+   * 这不是"哪个模型更好"的问题，是**语义冲突**：judge 的定义就是
+   * "同一个输入给同一个答案"，temperature=1 的 judge 会让同一张图/同一条消息
+   * 在不同时刻得到不同裁决，shadow 对比（"gate 说 no，单次决策会说话吗"）
+   * 也会因为 judge 自身不稳而失去意义。
+   *
+   * 声明了的 usage 会排除 `label.temperature !== undefined` 的 label。
+   */
+  requiresDeterministic?: boolean;
+  /**
    * 实测中位延迟上限。**超过的 label 不进这条链**，不管它多健康。
    *
    * 2026-09-21 round 97 实测：`spark13` 中位 19.8s、`amdqwen` 中位 5.9s，
@@ -363,12 +383,13 @@ interface UsageProfile {
 const USAGE_PROFILES: Record<string, UsageProfile> = {
   reply:       { minTier: 'high',   vision: false, video: false, count: 5 },
   reply_pro:   { minTier: 'high',   vision: false, video: false, count: 5 },
-  judge:       { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000, minSuccessRate: 0.6, minSamples: 20 },
-  summarize:   { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000, minSuccessRate: 0.6, minSamples: 20 },
+  // judge/summarize/reflection 都要确定性 —— 见 UsageProfile.requiresDeterministic。
+  judge:       { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000, minSuccessRate: 0.6, minSamples: 20, requiresDeterministic: true },
+  summarize:   { minTier: 'medium', vision: false, video: false, count: 4, maxMedianLatencyMs: 8_000, minSuccessRate: 0.6, minSamples: 20, requiresDeterministic: true },
   vision:      { minTier: 'medium', vision: true,  video: false, count: 3 },
   audio:       { minTier: 'medium', vision: false, video: false, count: 2 },
   deep_think:  { minTier: 'high',   vision: false, video: false, count: 3 },
-  reflection:  { minTier: 'medium', vision: false, video: false, count: 3, maxMedianLatencyMs: 15_000, minSuccessRate: 0.6, minSamples: 20 },
+  reflection:  { minTier: 'medium', vision: false, video: false, count: 3, maxMedianLatencyMs: 15_000, minSuccessRate: 0.6, minSamples: 20, requiresDeterministic: true },
   mundo:       { minTier: 'high',   vision: false, video: false, count: 2 },
   // 视频理解（2026-09-21）：count=2 就够——真能看的供应商本来就少，
   // 凑长度只会把不能看的塞进来。
@@ -434,6 +455,14 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
   for (const [name, label] of labels.entries()) {
     const tier: Tier = label.tier ?? 'medium';
     if (TIER_RANK[tier] < TIER_RANK[profile.minTier]) continue;
+    // round 9：确定性 usage 排除 temperature 被锁死的 label。
+    //
+    // 实测 `smartGroupAutoAssign('judge')` 返回 `dshkimi, stepfunvision,
+    // stepfunthink` —— dshkimi 锁 temperature=1，而 judge 要 0。
+    // 不排除的后果：`label.temperature ?? opts.temperature` = 1 ?? 0 = 1，
+    // judge 拿到随机性；而 env 里配的 `stepfun <- stepfunjudge` 被整体旁路，
+    // 专用 label `stepfunjudge` 零调用。
+    if (profile.requiresDeterministic && label.temperature !== undefined) continue;
     // vision 现在和 video 同向：**没声明 true 的一律排除**。
     //
     // 2026-09-21 改。旧写法是 `=== false`（只排除显式声明不支持 vision 的），
