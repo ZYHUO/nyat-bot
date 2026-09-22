@@ -44,11 +44,17 @@ if (!cutoff) {
 
 const P = (s: string) => `  ${s}`;
 let msgs = 0, first = 0, cont = 0;
-const act = { reply: 0, wait: 0, pass: 0 } as Record<string, number>;
+// round 9：**现在就加 react**，不等它真的出现。
+// round 8 给心流加了第四个出口（act=react → setMessageReaction，不产生气泡）。
+// 上一轮我写"等跑出 react 再改口径"——那正是这个会话反复吃亏的形状：
+// 改了机制却用量旧口径，于是新机制的效果永远量不到。现在 react=0 是诚实的，
+// 真跑出来时数字自动就有。
+const act = { reply: 0, wait: 0, pass: 0, react: 0 } as Record<string, number>;
 const anchor = new Map<string, number>();
 let collision = 0;
 let dupAnchorDropped = 0;
-const actByHour = new Map<string, { r: number; w: number; p: number }>();
+const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
+let reacted = 0;
 
 const rl = readline.createInterface({ input: createReadStream('logs/app.log'), crlfDelay: Infinity });
 for await (const line of rl) {
@@ -71,15 +77,18 @@ for await (const line of rl) {
   }
   if (m === 'host sendText continuation' || m === 'host sendText segmented') { cont++; continue; }
   if (m === 'Heart decision') {
-    // 这个字段是 time 之外的次要键；从 d 取 act
     const a = String(d.act ?? '');
     if (a in act) act[a] = (act[a] ?? 0) + 1;
     const hour = new Date(t).toISOString().slice(0, 13) + 'Z';
-    const rec = actByHour.get(hour) ?? { r: 0, w: 0, p: 0 };
+    const rec = actByHour.get(hour) ?? { r: 0, w: 0, p: 0, x: 0 };
     if (a === 'reply') rec.r++; else if (a === 'wait') rec.w++; else if (a === 'pass') rec.p++;
+    else if (a === 'react') rec.x++;
     actByHour.set(hour, rec);
     continue;
   }
+  // react 的副作用日志（heart.ts 的 'heart: reacted'）——Heart decision 那条
+  // 已经含 act=react，但这里单独数一次，用来交叉检验"决策了"和"真点出去了"。
+  if (m === 'heart: reacted') { reacted += 1; continue; }
   if (m.includes('撞名命令未显式指定')) { collision++; continue; }
   if (m.includes('dropped duplicate reply anchor')) { dupAnchorDropped++; continue; }
 }
@@ -98,8 +107,11 @@ console.log();
 console.log(P(`① 回复率          ${replyRate.toFixed(1)}%   首气泡/入站`));
 console.log(P(`   心跳那句"别每句都接"说的是这个。会话初期 8.2%。`));
 console.log();
-console.log(P(`② 心流三态        reply ${act.reply} (${actTotal ? (act.reply * 100 / actTotal).toFixed(0) : 0}%)  wait ${act.wait} (${actTotal ? (act.wait * 100 / actTotal).toFixed(0) : 0}%)  pass ${act.pass} (${actTotal ? (act.pass * 100 / actTotal).toFixed(0) : 0}%)   n=${actTotal}`));
-console.log(P(`   wait 是 round 3 新加的中间档，修前 0-6 次/天。wait=0 说明它还是废的。`));
+console.log(P(`② 心流四态        reply ${act.reply} (${actTotal ? (act.reply * 100 / actTotal).toFixed(0) : 0}%)  react ${act.react} (${actTotal ? (act.react * 100 / actTotal).toFixed(0) : 0}%)  wait ${act.wait} (${actTotal ? (act.wait * 100 / actTotal).toFixed(0) : 0}%)  pass ${act.pass} (${actTotal ? (act.pass * 100 / actTotal).toFixed(0) : 0}%)   n=${actTotal}`));
+console.log(P(`   其中 react 真的点出去 ${reacted} 次（heart: reacted 日志；与决策数不一致说明有失败回落）。`));
+console.log(P(`   reply/wait/pass 是原三态；wait round 3 才重定义，修前 0-6 次/天；`));
+console.log(P(`   react round 8 加的第四个出口（点表情不说话，对回复率分子零贡献）。`));
+console.log(P(`   想看"少说话"有没有生效：react 涨 + reply 跌 才是对的形状，只是 reply 跌不是。`));
 console.log();
 console.log(P(`③ 重复回复率      ${dupRate.toFixed(1)}%   多出 ${extra} / 首气泡 ${first}`));
 console.log(P(`   同一锚点被回 >1 次的: ${[...anchor.values()].filter((v) => v > 1).length} 个；最惨的被回 ${Math.max(0, ...anchor.values())} 次。`));
@@ -114,7 +126,7 @@ if (actByHour.size > 1) {
     const r = actByHour.get(h)!;
     const n = r.r + r.w + r.p;
     if (n < 10) continue;
-    console.log(P(`   ${h}  n=${String(n).padStart(4)}  reply=${String(r.r).padStart(4)}(${(r.r * 100 / n).toFixed(0).padStart(2)}%)  wait=${r.w}  pass=${String(r.p).padStart(4)}`));
+    console.log(P(`   ${h}  n=${String(n).padStart(4)}  reply=${String(r.r).padStart(4)}(${(r.r * 100 / n).toFixed(0).padStart(2)}%)  react=${String(r.x).padStart(3)}  wait=${r.w}  pass=${String(r.p).padStart(4)}`));
   }
 }
 console.log();
