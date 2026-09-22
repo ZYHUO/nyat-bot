@@ -9,6 +9,7 @@ import { timingSection } from './env-sections/timing.js';
 import { judgeSection } from './env-sections/judge.js';
 import { cognitionSection } from './env-sections/cognition.js';
 import { coreSection } from './env-sections/core.js';
+import { aiSection } from './env-sections/ai.js';
 import { selfSection } from './env-sections/self.js';
 import { turnSection } from './env-sections/turn.js';
 import { metaSection } from './env-sections/meta.js';
@@ -22,6 +23,7 @@ const envSchema = z.object({
   ...timingSection,
   ...judgeSection,
   ...cognitionSection,
+  ...aiSection,
   ...coreSection,
   ...selfSection,
   ...turnSection,

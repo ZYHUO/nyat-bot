@@ -5,6 +5,13 @@
 // CodeAct executor 任务开头自取（takeGrounding，一次性）。
 // 严格 guardrail：无搜索证据 / 任何失败 → 什么都不存。全程 GROUNDING_ENABLED 门控，
 // 关掉时零行为变化；开着时任何错误也绝不冒泡进 dispatch / 执行主链路。
+//
+// 2026-09-22：executor 侧的短轮询已撤销。七天全量实测（n=2666 个跑过 LLM 的
+// 任务）：digest 从搜索到可读取要 3–6s，executor 第一次 take 时几乎从未就绪；
+// 轮询 1s×6 让进入轮询的任务 100% 多付最多 6s 串行延迟，而最终注入命中的只有
+// 25 个任务（0.9%）。得不偿失 → 改成"拿不到就没有"的单次 take（与 prompt 准备
+// 并行，见 subagent/prompt-inputs.ts）。pending 标记的唯一读者就是那个轮询门，
+// 一并移除。
 // ────────────────────────────────────────
 
 import { callWithFallback } from '../ai/fallback.js';
@@ -14,7 +21,6 @@ import { executeSearch } from '../pipeline/tools/search.js';
 import { logger } from '../shared/logger.js';
 
 const DIGEST_TTL_S = 600; // digest 10min 过期（派发→执行正常就几秒）
-const PENDING_TTL_S = 30; // pending 标记只用于 executor 决定要不要轮询
 const RATE_LIMIT_WINDOW_S = 600;
 const RATE_LIMIT_MAX = 3; // 每 chat 每 10min 最多 3 次核查
 const MIN_TEXT_LEN = 8; // 短于这个的问句没有核查价值（「真的吗？」）
@@ -22,9 +28,6 @@ const DIGEST_MAX_CHARS = 600;
 
 function digestKey(chatId: number, messageId: number): string {
   return `xxb:grounding:${chatId}:${messageId}`;
-}
-function pendingKey(chatId: number, messageId: number): string {
-  return `xxb:grounding:pending:${chatId}:${messageId}`;
 }
 function rateLimitKey(chatId: number): string {
   return `xxb:grounding:rl:${chatId}`;
@@ -106,42 +109,35 @@ export async function maybeStartGrounding(opts: {
       return;
     }
 
-    // pending 标记：executor 只在它存在时才轮询（否则一次 cheap 读取就走，
-    // 不为非问题类消息白等 6s）。
-    await redis.set(pendingKey(chatId, messageId), '1', 'EX', PENDING_TTL_S);
-    try {
-      const raw = await executeSearch(query.slice(0, 200));
-      if (!hasSearchEvidence(raw)) {
-        logger.info({ chatId, messageId }, 'grounding: no search evidence, dropped');
-        return;
-      }
-
-      const res = await callWithFallback({
-        usage: env().GROUNDING_USAGE,
-        messages: [
-          {
-            role: 'system',
-            content:
-              '你是事实核查摘要器。把搜索结果压成 150 字内的中文要点：只留与问题直接相关的事实结论，' +
-              '去掉来源列表/客套/过程描述。信息矛盾或不确定就直说。不要称呼提问者。',
-          },
-          { role: 'user', content: `问题：${query}\n\n搜索结果：\n${raw.slice(0, 3000)}` },
-        ],
-        maxTokens: 300,
-        temperature: 0.2,
-        allowHedge: false, // 后台任务，hedge 双发纯翻倍账单
-      });
-      const digest = (res.content ?? '').trim().slice(0, DIGEST_MAX_CHARS);
-      if (!digest) return;
-
-      await redis.set(digestKey(chatId, messageId), digest, 'EX', DIGEST_TTL_S);
-      logger.info(
-        { chatId, messageId, query: query.slice(0, 60), chars: digest.length },
-        'grounding digest stored',
-      );
-    } finally {
-      await redis.del(pendingKey(chatId, messageId)).catch(() => {});
+    const raw = await executeSearch(query.slice(0, 200));
+    if (!hasSearchEvidence(raw)) {
+      logger.info({ chatId, messageId }, 'grounding: no search evidence, dropped');
+      return;
     }
+
+    const res = await callWithFallback({
+      usage: env().GROUNDING_USAGE,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是事实核查摘要器。把搜索结果压成 150 字内的中文要点：只留与问题直接相关的事实结论，' +
+            '去掉来源列表/客套/过程描述。信息矛盾或不确定就直说。不要称呼提问者。',
+        },
+        { role: 'user', content: `问题：${query}\n\n搜索结果：\n${raw.slice(0, 3000)}` },
+      ],
+      maxTokens: 300,
+      temperature: 0.2,
+      allowHedge: false, // 后台任务，hedge 双发纯翻倍账单
+    });
+    const digest = (res.content ?? '').trim().slice(0, DIGEST_MAX_CHARS);
+    if (!digest) return;
+
+    await redis.set(digestKey(chatId, messageId), digest, 'EX', DIGEST_TTL_S);
+    logger.info(
+      { chatId, messageId, query: query.slice(0, 60), chars: digest.length },
+      'grounding digest stored',
+    );
   } catch (err) {
     logger.warn(
       { err, chatId: opts.chatId, messageId: opts.messageId },
@@ -165,12 +161,30 @@ export async function takeGrounding(chatId: number, messageId: number): Promise<
   }
 }
 
-/** executor 用它决定要不要短轮询：没有 pending 就不等（避免白等 6s）。 */
-export async function isGroundingPending(chatId: number, messageId: number): Promise<boolean> {
+export interface TakeGroundingBlockInput {
+  chatId: number;
+  /** 任务的回复锚点（= 触发消息 id）。缺失/≤0 → 没有可取的 digest。 */
+  messageId: number | undefined;
+  /** 仅用于日志关联；缺省时日志不带 taskId 字段。 */
+  taskId?: string;
+}
+
+/**
+ * executor 侧一次性拾取 + 渲染成 prompt 块。**不轮询**（撤销理由见文件头注记）：
+ * digest 到了就有，没到就没有——grounding 本就是 best-effort 参考。永不抛。
+ */
+export async function takeGroundingBlock(input: TakeGroundingBlockInput): Promise<string> {
   try {
-    if (!env().GROUNDING_ENABLED) return false;
-    return !!(await getRedis().get(pendingKey(chatId, messageId)));
+    if (!env().GROUNDING_ENABLED) return '';
+    if (!input.messageId || input.messageId <= 0) return '';
+    const digest = await takeGrounding(input.chatId, input.messageId);
+    if (!digest) return '';
+    logger.info(
+      { taskId: input.taskId, chatId: input.chatId, chars: digest.length },
+      'grounding digest injected',
+    );
+    return `## 联网核查参考（已脱敏，可能不准）\n${digest}\n自然消化，别照抄，别提「根据搜索结果」。`;
   } catch {
-    return false;
+    return '';
   }
 }

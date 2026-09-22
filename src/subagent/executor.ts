@@ -5,10 +5,10 @@ import { logger } from '../shared/logger.js';
 import { getGlobalState } from '../meta/global-state.js';
 import type { DispatchTask } from '../meta/types.js';
 import { createHostApi, type HostApi } from './host-api.js';
-import { applySandboxAvailabilityNotes } from './sandbox-prompt.js';
-import { getSandboxCapability } from '../sandbox/terminal.js';
+import { collectPromptInputs } from './prompt-inputs.js';
 import { sendChatAction } from '../bot/sender/telegram.js';
-import { isDM } from '../shared/chat.js';
+import { formatBeijingNowLine } from '../shared/beijing-time.js';
+import { buildCodeActIdentityPrompt } from '../pipeline/reply/prompt-builder.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
 import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat, clearCheckpoint } from '../agent/checkpoint.js';
@@ -444,208 +444,42 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   const audit = getExecutionAudit(host)!;
   const engine = getContextEngine(`subagent:${task.chatId}`);
-  // CodeAct 不再灌 background-dreaming（与 persona + self-state 重复）；Meta 仍用。
-  let journal = '';
-  let journalChannelLink: string | null = null;
-  let journalChatId = 0;
-  try {
-    const { readRecentDreamSnippet, getJournalChannelInfo } = await import('../cron/dream-journal.js');
-    journal = (await readRecentDreamSnippet(300)) ?? '';
-    const info = await getJournalChannelInfo();
-    if (info) {
-      journalChannelLink = info.link;
-      journalChatId = info.chatId;
-    }
-  } catch { /* optional */ }
-
-  // P5-B: 工作记忆 —— 回填进程缓存 + 读当前惦记的事注入 prompt（常驻）。
-  let scratchBlock = '';
-  try {
-    const { warmScratchCache, scratchPromptBlockSync } = await import('../tracking/scratchpad.js');
-    await warmScratchCache(task.chatId);
-    scratchBlock = scratchPromptBlockSync(task.chatId) ?? '';
-  } catch { /* optional */ }
-
-  // 群风格（长度镜像/引用率/标点漂移）——真人会融入房间；CodeAct 主链接上。
-  let chatStyleLine = '';
-  if (!isDM(task.chatId)) {
-    try {
-      const { getChatStyle, chatStylePromptLine } = await import('../tracking/chat-style.js');
-      chatStyleLine = chatStylePromptLine(await getChatStyle(task.chatId));
-    } catch { /* optional */ }
-  }
-
-  const { buildCodeActIdentityPrompt } = await import('../pipeline/reply/prompt-builder.js');
-  const { buildMasterIdentityBlock } = await import('../shared/master-identity.js');
-  const { formatBeijingNowLine } = await import('../shared/beijing-time.js');
-  const identity = buildCodeActIdentityPrompt(task.targetUserId);
-
-  let recentCtx = '';
-  try {
-    recentCtx = await host.memory.recentContext(60);
-  } catch { /* optional */ }
-
-  // Pin the exact user bubble this task must answer (models otherwise latch onto prior thread).
-  let targetBlock = '';
-  // 供长期记忆检索用:锚点正文当查询词,最近消息 id 用来排除重复注入。
-  let anchorText = '';
-  const recentMessageIds = new Set<number>();
-  if (replyAnchor && replyAnchor > 0) {
-    try {
-      const { getRecent } = await import('../pipeline/context/manager.js');
-      const { isShortFollowUpText, isBarePingText } = await import('../meta/reply-context.js');
-      const recent = await getRecent(task.chatId, 80, task.messageThreadId);
-      for (const m of recent) recentMessageIds.add(m.messageId);
-      const hit = recent.find((m) => m.messageId === replyAnchor && m.role !== 'assistant');
-      if (hit) {
-        anchorText = (hit.textContent || '').slice(0, 240);
-        const who = hit.username ? `@${hit.username}` : hit.fullName || `uid:${hit.uid}`;
-        const userText = (hit.textContent || '').slice(0, 240);
-        const followUp = isShortFollowUpText(userText) || isBarePingText(userText);
-        // ── reply 链：本条回的是哪条 ──
-        //
-        // 2026-09-22 round 3（新 goal）。用户的原始需求：
-        // "如果一条消息的 replyto 带的是 ad bot 要辨认是哪条消息是 ad 哪些不是，
-        //  nmbot 的 /spam 是需要附带一个 replyto 的。"
-        //
-        // 病因：上面这个 targetBlock 只给**本条**的 #id。而群里举报广告的正常形状是
-        // 「某人回复那条广告说"举报"」——本条 #X 是那句"举报"，**广告是它回复的 #Y**。
-        // 模型要发 `/spam@nmnmfunbot` 必须带 #Y，但 prompt 里从来没出现过 #Y，
-        // 它只能猜，而 executor.ts:107 明令"禁止传上下文里其它旧 #id——传错会
-        // reply_to_mismatch"。于是它要么不办，要么办错。
-        //
-        // 修法：本条自己是 reply 时，把父消息的 #id / 是谁 / 说了什么一并写进 prompt。
-        // 数据本来就有（FormattedMessage.replyTo），只是从来没往这儿送。
-        const parent = hit.replyTo;
-        const parentLine = parent && parent.messageId > 0
-          ? `#${replyAnchor} 回复的是 #${parent.messageId} ${parent.fullName || `uid:${parent.uid}`}: ${(parent.textSnippet || '（无正文，可能是图片/文件/ sticker）').slice(0, 160)}\n`
-            + `   ↑ 要处理/举报**上面这条 #${parent.messageId}** 时（例如 bots.command 的 /spam 回复式代罚），用这个 id。\n`
-          : '';
-        targetBlock =
-          `## 本轮必须回的那一句\n` +
-          `#${replyAnchor} ${who}: ${userText || '（几乎无正文，可能是 reply+@）'}\n` +
-          parentLine +
-          (followUp
-            ? `这是短接话/催问——必须结合下面「最近几句」继续同一话题，禁止当新开场（在听/怎么啦/想听什么）。禁止复读用户原话。`
-            : `接住这一句的意思，并结合最近聊天；禁止复读用户原话，也别无故复读自己上一句。`);
-
-        // Trailing thread for short follow-ups (DM「快点告诉我」 after food tease).
-        if (followUp && recent.length) {
-          const idx = recent.findIndex((m) => m.messageId === replyAnchor);
-          const window = (idx >= 0 ? recent.slice(Math.max(0, idx - 6), idx) : recent.slice(-6)).filter(
-            (m) => m.messageId !== replyAnchor,
-          );
-          if (window.length) {
-            const lines = window.map((m) => {
-              const w =
-                m.role === 'assistant'
-                  ? '你'
-                  : m.username
-                    ? `@${m.username}`
-                    : m.fullName || `uid:${m.uid}`;
-              return `#${m.messageId} ${w}: ${(m.textContent || '').slice(0, 160)}`;
-            });
-            targetBlock +=
-              `\n\n## 最近几句（接话必读）\n` + lines.join('\n') + `\n顺着这个话题回，不要装作没听过。`;
-          }
-        }
-
-        // Explicit parent bubble — legacy reply path had this; bare @+reply otherwise greets.
-        const parentId = hit.replyTo?.messageId;
-        if (parentId && parentId > 0) {
-          let parent = recent.find((m) => m.messageId === parentId);
-          if (!parent) {
-            const wider = await getRecent(task.chatId, 120, task.messageThreadId);
-            parent = wider.find((m) => m.messageId === parentId);
-          }
-          const parentWho = parent
-            ? parent.username
-              ? `@${parent.username}`
-              : parent.fullName || `uid:${parent.uid}`
-            : hit.replyTo?.fullName || '某人';
-          const parentBody = (
-            parent?.textContent ||
-            hit.replyTo?.textSnippet ||
-            ''
-          ).slice(0, 1800);
-          if (parentBody) {
-            targetBlock +=
-              `\n\n## 用户正在回复的原消息（必读）\n` +
-              `#${parentId} ${parentWho}: ${parentBody}\n` +
-              `用户本条若只有 @/很短，是在拉你看上面这段——针对其论点接话，禁止空问候（在呢/怎么啦）。`;
-          }
-        }
-      } else {
-        targetBlock = `## 本轮必须回的那一句\nmessageId=#${replyAnchor}（正文见最近聊天）。结合上下文接话，禁止复读自己上一句。`;
-      }
-    } catch {
-      targetBlock = `## 本轮必须回的那一句\nmessageId=#${replyAnchor}`;
-    }
-  }
-
-  // 主人块永不截断；permanent 其余可截断（认主关键句已在 master 块）
-  const masterBlock = buildMasterIdentityBlock();
-  let permanent = '';
-  try {
-    const { loadCachedPrompt } = await import('../shared/config.js');
-    permanent = loadCachedPrompt('knowledge/permanent.md').slice(0, 1600);
-  } catch { /* optional */ }
-
-  // Roster — persona 认人依赖 [群成员]；legacy reply 有，CodeAct 以前缺。
-  let roster = '';
-  if (task.chatId < 0) {
-    try {
-      const { getCachedRoster, setCachedRoster } = await import('../pipeline/reply/member-cache.js');
-      const cached = getCachedRoster(task.chatId);
-      if (cached) {
-        roster = cached;
-      } else {
-        const { getGroupMembers } = await import('../pipeline/context/manager.js');
-        const members = await getGroupMembers(task.chatId);
-        if (members.length) {
-          roster = members
-            .slice(0, 50)
-            .map((m) => {
-              const tag = m.username ? `@${m.username}` : `uid:${m.uid}`;
-              return `${tag} = ${m.fullName}`;
-            })
-            .join('\n');
-          setCachedRoster(task.chatId, roster);
-        }
-      }
-    } catch {
-      /* optional */
-    }
-  }
-
-  // 长期记忆(「相关往事」)。放在 selfState 之后、assemble 之前 —— 需要 targetBlock
-  // 已经算好的锚点正文当查询词。整段永不抛、有硬超时,失败一律空串。
-  let memoryBlock = '';
-  try {
-    const { buildSubagentMemoryBlock } = await import('./memory-context.js');
-    // 查询词 = 本轮要回的那句 + 任务方向。只用方向会太笼统(它是「短方向」不是台词),
-    // 只用锚点正文则在「快点告诉我」这类短接话上几乎没有信息量,两者相加最稳。
-    const query = [anchorText, task.contentDirection].filter(Boolean).join(' ').slice(0, 200);
-    memoryBlock = await buildSubagentMemoryBlock({
-      chatId: task.chatId,
-      query,
-      // 最近聊天里已有的不重复贴,否则同一条消息在 prompt 里出现两次。
-      excludeMessageIds: recentMessageIds,
-    });
-  } catch {
-    /* non-critical — 调用点再兜一层,异常绝不能冒泡进 CodeAct 主链路 */
-  }
-
-  // 此刻自我状态（上课/作息）— 与 legacy Heart/reply 对齐，避免「人设上学但 CodeAct 全天闲聊」。
-  let selfStateLine = '';
-  try {
-    const { composeSelfState } = await import('../pipeline/heart/self-state.js');
-    const ss = await composeSelfState(task.chatId);
-    // CodeAct 没有单独的 [你的念头] 块，用含 thought 的完整叙述即可。
-    if (ss?.narration) selfStateLine = ss.narration;
-  } catch {
-    /* optional */
-  }
+  // ── prompt 准备（并行化，依赖图见 subagent/prompt-inputs.ts） ──────────
+  // 2026-09-22 段⑤整治：原先是 ~20 个串行 await（recentContext / getRecent /
+  // memory block / relationship / workspace / grounding 轮询…），p50 793ms。
+  // 现在按依赖图并发：互不依赖的一段全部 Promise.all，只有 getRecent →
+  // targetBlock → {memoryBlock, workspace} 保持先后。每段 fail-soft 语义不变
+  // （任一环节抛异常只把自己降级为空串，executor 照常拿到 prompt）。
+  // grounding 只做单次 take 不轮询（撤销理由见 meta/grounding.ts 头注记）。
+  const inputs = await collectPromptInputs({
+    task,
+    host,
+    isSelfPlay,
+    replyAnchor,
+    executorSystem: EXECUTOR_SYSTEM,
+  });
+  const {
+    journal,
+    journalChannelLink,
+    journalChatId,
+    scratchBlock,
+    chatStyleLine,
+    identity,
+    masterBlock,
+    recentCtx,
+    permanent,
+    roster,
+    targetBlock,
+    memoryBlock,
+    selfStateLine,
+    systemPrompt,
+    injectedExperienceIds,
+    injectedSkillIds,
+    injectedPolicyIds,
+    groundingBlock,
+    relationshipBlock,
+    workspaceBlock,
+  } = inputs;
 
   // Unified CodeAct: 30 turns, 120s timeout, 4000 maxTokens — model decides chat vs work
   const maxTurns = 30;
@@ -653,206 +487,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // 长时间 Agent 循环：段号 + checkpoint 恢复 + 用户 interrupt 注入。
   const loopEnabled = env().AGENT_LOOP_ENABLED;
-
-  // Self-play tasks ([selfplay] marker) use the autonomous self-play prompt.
-  let systemPrompt = EXECUTOR_SYSTEM;
-
-  // 终端隔离不可用时，别把 computer.run 当验证手段推荐给模型。
-  // 理由与实现见 subagent/sandbox-prompt.ts。
-  systemPrompt = applySandboxAvailabilityNotes(systemPrompt, getSandboxCapability());
-
-  // ── 把"当前能借力的 bot 命令"从**写死的散文**换成**实时渲染的清单** ──
-  //
-  // 2026-09-22 round 9。EXECUTOR_SYSTEM 第 69 行原来写死着一句
-  //   （当前 = /spam@nmnmfunbot，回复那条广告发出去…）
-  // 这只是 2026-09-20 那一刻的快照。subagent 审计指出：它会**静默过期**——
-  // 学会了新命令 / 某个命令被 block / 群没授权，prompt 都不会变，
-  // 而模型只会拿着那句过期的话行事。
-  //
-  // 这和本会话反复出现的是同一条：**广告出去的能力和实际能用的能力不是一套**。
-  // round 123 搜索全灭还在说"没找到"、round 79 terminalEnabled、round 45 vision…
-  //
-  // 换成实时渲染：`listReplyInvocableCommands()` 只返**真过得去闸**的
-  // （ready + needs_reply=1 + 不 blocked + needs_admin 不拦 + output 可达）。
-  // 顺带只在真的有回复式命令时才渲染那段——没有就不写，模型不会以为有。
-  // 没有清单时保留"普通代发"那半句（它和回复式无关，永远成立）。
-  try {
-    const { listReplyInvocableCommands } = await import('../learners/bot-command-store.js');
-    const replyCmds = listReplyInvocableCommands();
-    if (replyCmds.length > 0) {
-      const rendered = replyCmds
-        .map((c) => `/${c.command.replace(/^\//, '')}@${c.bot}${c.usageSyntax && c.usageSyntax !== c.command ? `（${c.usageSyntax}）` : ''}`)
-        .join('、');
-      systemPrompt = systemPrompt.replace(
-        /（当前 = [^）]*）/,
-        `（**当前真过得去闸的回复式命令：${rendered}**——以这份为准，别用记忆里的旧名单）`,
-      );
-    } else {
-      // 一条都没有：把"当前 = …"那截括号整个删掉，别说一个不存在的名字
-      systemPrompt = systemPrompt.replace(/（当前 = [^）]*）/,'');
-    }
-  } catch {
-    /* 读不到就保留原句——至少那是 09-20 的真实快照，比空白好 */
-  }
-
-  // AGI Level 5 Phase 1: 本次任务注入的经验 id(终态时验证打分)。
-  let injectedExperienceIds: number[] = [];
-  // AGI Level 5 Phase 4: 本次任务注入的 loop 策略 id(终态时计数进化)。
-  let injectedPolicyIds: number[] = [];
-  if (isSelfPlay) {
-    try {
-      const { loadCachedPrompt } = await import('../shared/config.js');
-      const selfPlayPrompt = loadCachedPrompt('task/self-play.md');
-      if (selfPlayPrompt) systemPrompt = selfPlayPrompt;
-    } catch {
-      /* fall back to EXECUTOR_SYSTEM */
-    }
-  }
-
-  // AGI Level 4 P4-A: 开工前注入过往经验 —— 犯过的错不再犯第二遍（常驻）。
-  // AGI Level 5 Phase 1: 记录注入的经验 id,终态时验证打分(①)。
-  // AGI Level 5 Phase 5: 跨 bot 共享门控(EXPERIENCE_SHARE_ENABLED 时)。
-  try {
-    const { findRelevantExperience } = await import('../agent/episodes.js');
-    const hints = findRelevantExperience(task.contentDirection, 3, {
-      botId: env().BOT_USERNAME ?? 'self',
-      allowShared: env().EXPERIENCE_SHARE_ENABLED,
-    });
-    if (hints.length) {
-      // AGI L5 L2: 预算截断 + 信号重排(已验证优先,可疑垫底)。
-      let picked: typeof hints = hints;
-      if (env().RECALL_BUDGET_ENABLED) {
-        const { applyRecallBudget } = await import('../agent/recall-budget.js');
-        picked = applyRecallBudget(hints, env().RECALL_MAX_EXPERIENCE) as typeof hints;
-      }
-      systemPrompt += `\n\n[过往经验]\n${picked.map((h) => `- (${h.kind}) ${h.content}`).join('\n')}\n以上是之前做类似事总结的教训，能用就用，不适用就忽略。`;
-      injectedExperienceIds = picked.map((h) => h.id);
-      logger.info({ taskId: task.id, hintCount: picked.length, ids: injectedExperienceIds }, 'experience recall injected');
-    }
-  } catch {
-    /* recall is best-effort */
-  }
-
-  // 自我技能沉淀: 开工前检索相关 skill(结构化能力单元),注入 executor。
-  // 区别于经验(教训):skill 是「怎么做」,经验是「别踩什么坑」。
-  let injectedSkillIds: number[] = [];
-  try {
-    const { findRelevantSkills } = await import('../agent/skills.js');
-    const skills = findRelevantSkills(task.contentDirection, 2);
-    injectedSkillIds = skills.map((s) => s.id);
-    if (skills.length) {
-      systemPrompt += `\n\n[可用技能]\n${skills
-        .map((s) => `- 【${s.name}】${s.summary ?? s.triggerWhen}\n  触发: ${s.triggerWhen}\n  做法: ${s.steps}${s.pitfalls ? `\n  坑: ${s.pitfalls}` : ''}`)
-        .join('\n')}\n以上是你自己沉淀的技能，相关就用，不适用就忽略。`;
-      logger.info({ taskId: task.id, skillCount: skills.length, names: skills.map((s) => s.name) }, 'skill recall injected');
-    }
-  } catch {
-    /* skill recall is best-effort */
-  }
-
-  // AGI Level 5 Phase 6: 注入世界状态(对象中心实体,goal check 上下文基础)。
-  if (env().WORLD_STATE_ENABLED) {
-    try {
-      const { buildWorldStateBlock } = await import('../agent/world-state.js');
-      const block = buildWorldStateBlock(task.contentDirection, 4, {
-        visibility: 'task',
-        taskId: task.id,
-        chatId: task.chatId,
-      });
-      if (block) systemPrompt += block;
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  // AGI Level 5 Phase 4: 注入可进化的循环策略(OpenLoopEvolve 轻量版)。
-  if (env().LOOP_POLICY_ENABLED) {
-    try {
-      const { listActivePolicies } = await import('../agent/loop-policy.js');
-      const policies = listActivePolicies(env().LOOP_POLICY_MAX);
-      if (policies.length) {
-        systemPrompt +=
-          '\n\n[循环策略]\n' +
-          policies.map((p) => `- ${p.rule}`).join('\n') +
-          '\n以上是过往任务沉淀的循环策略,适用就用。';
-        injectedPolicyIds = policies.map((p) => p.id);
-        logger.info({ taskId: task.id, policyCount: policies.length }, 'loop policies injected');
-      }
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  // Grounding digest 拾取（GROUNDING_ENABLED 门控）：dispatch 时后台并行起的联网
-  // 核查，搜索要几秒。先一次 cheap 读取；没拿到且有 pending 标记才短轮询
-  // （最多 ~6s / 1s 间隔），超时就直接走 —— 绝不为它拖住主链路。
-  let groundingBlock = '';
-  if (env().GROUNDING_ENABLED && replyAnchor && replyAnchor > 0) {
-    try {
-      const { isGroundingPending, takeGrounding } = await import('../meta/grounding.js');
-      let digest = await takeGrounding(task.chatId, replyAnchor);
-      if (!digest && (await isGroundingPending(task.chatId, replyAnchor))) {
-        const deadline = Date.now() + 6_000;
-        while (!digest && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 1_000));
-          digest = await takeGrounding(task.chatId, replyAnchor);
-        }
-      }
-      if (digest) {
-        groundingBlock =
-          `## 联网核查参考（已脱敏，可能不准）\n${digest}\n` +
-          `自然消化，别照抄，别提「根据搜索结果」。`;
-        logger.info(
-          { taskId: task.id, chatId: task.chatId, chars: digest.length },
-          'grounding digest injected',
-        );
-      }
-    } catch {
-      /* grounding is best-effort */
-    }
-  }
-
-  // 好感度→语气分化(2026-08-31):CodeAct 主链此前完全没有 relationship 注入
-  // (只有旧 reply 链的 buildPersonalContext 有),生产语气对所有人一个样。
-  // 这里按 targetUserId 注入关系提示:亲近→更亲昵 / 反感→话冷 / 陌生人→矜持。
-  let relationshipBlock = '';
-  if (task.targetUserId && task.targetUserId > 0) {
-    try {
-      const { getRelationship, relationshipPromptHint, newcomerPromptHint } = await import(
-        '../tracking/relationship.js'
-      );
-      const rel = getRelationship(task.chatId, task.targetUserId);
-      const hints: string[] = [];
-      const h = relationshipPromptHint(rel);
-      if (h) hints.push(h);
-      const newcomer = newcomerPromptHint(rel.count);
-      if (newcomer) hints.push(newcomer);
-      if (hints.length) {
-        relationshipBlock = `## 和对方的关系\n${hints.join('\n')}`;
-        logger.info(
-          { taskId: task.id, chatId: task.chatId, uid: task.targetUserId, bucket: rel.bucket, affinity: rel.affinity },
-          'relationship hint injected',
-        );
-      }
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  let workspaceBlock = '';
-  try {
-    const { buildCognitiveWorkspace, renderCognitiveWorkspace } = await import('../agent/cognitive-workspace.js');
-    const workspace = await buildCognitiveWorkspace({
-      chatId: task.chatId,
-      taskId: task.id,
-      userId: task.targetUserId,
-      queryText: (anchorText || task.contentDirection).slice(0, 800),
-      asOfEventId: task.cognitiveAnchorEventId,
-    });
-    workspaceBlock = renderCognitiveWorkspace(workspace);
-  } catch (err) {
-    logger.debug({ err, taskId: task.id }, 'cognitive workspace unavailable');
-  }
 
   const { prompt, manifest } = await engine.assemble([
     staticText('sub-system', systemPrompt),

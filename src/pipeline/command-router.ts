@@ -13,10 +13,14 @@
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { callWithFallback } from '../ai/fallback.js';
+import { incrCounter } from '../metrics/registry.js';
 import type { FormattedMessage } from '../shared/types.js';
 import type { BotCommandProfile } from '../learners/bot-command-store.js';
 
 interface Match { bot: string; command: string; args: string; }
+
+/** Jev Choice 里代表“以上都不符合”的哨兵选项 key(避开 c0/c1… 真实命令 key)。 */
+const JEV_NONE_KEY = '__none__';
 
 const CLASSIFY_SYS =
   '你在判断群友对 bot 说的一句话,是不是想让 bot 去帮忙调用「群里其他 bot 的某条已知命令」。\n' +
@@ -33,7 +37,82 @@ function buildList(ready: BotCommandProfile[]): string {
     .join('\n');
 }
 
-async function classify(text: string, ready: BotCommandProfile[]): Promise<Match | null> {
+type JevVerdict =
+  | { kind: 'match'; match: Match }
+  | { kind: 'none' }
+  | { kind: 'unsure' };
+
+/** ready 命令 → Jev Choice 的选项集(反向索引:选项 key → 真实的 bot/command)。 */
+function buildJevCriteria(ready: BotCommandProfile[]): { criteria: Record<string, string>; byKey: Map<string, Match> } {
+  const criteria: Record<string, string> = {
+    [JEV_NONE_KEY]: '以上都不符合:闲聊、打招呼、或这句并没有明确对应上面任何一条命令。',
+  };
+  const byKey = new Map<string, Match>();
+  ready.forEach((p, i) => {
+    const key = `c${i}`;
+    criteria[key] = `@${p.bot_username} ${p.command_name} ${p.usage_syntax || ''} — ${p.use_scenario || ''}`.trim();
+    byKey.set(key, { bot: p.bot_username, command: p.command_name, args: '' });
+  });
+  return { criteria, byKey };
+}
+
+/**
+ * 用 Jev 的 Choice 原语做一次“要不要借力 + 借哪条”的定型判断(flag 门控,默认关)。
+ *
+ * 只判“借哪条命令 / 都不借”;**不取 args**——Jev 返定型答案、不给文本,所以命中的
+ * Match.args 恒为空。就绪命令清单里的 needs_reply / needs_admin 已被上游过滤,
+ * 空 args 交给 bot-delegation 的成熟度/冷却/安全闸去把最后一关(发 `/cmd@bot`)。
+ *
+ * 返回值三分:
+ *   match  → 一个**确实在 ready 名单里**的 Match(自信命中)。
+ *   none   → Jev 很有信心“没有要借的命令”(闲聊等),gating 后可省掉一次 LLM judge。
+ *   unsure → 关着 / 失败 / DM / 熔断 / 低置信 / 答非所问 → 交回原 LLM judge 路径
+ *            (行为与没接 Jev 时逐字一致——这是所有降级的最终落点)。
+ */
+async function classifyWithJev(text: string, chatId: number, ready: BotCommandProfile[]): Promise<JevVerdict> {
+  const e = env();
+  if (!e.JEV_ENABLED) return { kind: 'unsure' };
+  try {
+    const { callJevChoice } = await import('../ai/jev.js');
+    const { criteria, byKey } = buildJevCriteria(ready);
+    const ans = await callJevChoice({
+      id: 'ROUTE',
+      state: text.slice(0, 500),
+      question: '群里有人对 bot 说的这句话,最可能是想让 bot 帮忙调用哪一条命令?都不像就选 none,宁可 none 也别硬套。',
+      criteria,
+      chatId,
+    });
+    if (!ans) return { kind: 'unsure' };                       // 关着/失败/DM/熔断 → 降级
+    if (ans.choice === JEV_NONE_KEY) return { kind: 'none' }; // 有信心的“不借”
+    if (ans.confidence < e.JEV_MIN_CONFIDENCE) return { kind: 'unsure' }; // 没把握 → 大模型判
+    const hit = byKey.get(ans.choice);
+    if (!hit) return { kind: 'unsure' };                       // 不在 ready(不应发生)→ 降级
+    return { kind: 'match', match: hit };
+  } catch {
+    return { kind: 'unsure' };                                 // Jev 永不拖垮路由
+  }
+}
+
+async function classify(text: string, chatId: number, ready: BotCommandProfile[]): Promise<Match | null> {
+  // 快路径:Jev 结构化 Choice(flag 门控,默认关)。命中 → 直接代发(不带 args);
+  // 有信心的“不借” → 直接 null,省掉一次 ~数秒的 LLM judge;其余(关/失败/低置信/
+  // 答非所问)→ 落到下面原 LLM judge,行为与没接 Jev 时逐字一致。
+  try {
+    const v = await classifyWithJev(text, chatId, ready);
+    if (v.kind === 'none') {
+      logger.debug({ chatId }, 'command-router: jev → 无命令,跳过 LLM judge');
+      return null;
+    }
+    if (v.kind === 'match') {
+      incrCounter('command_router_jev_match_total', { chat: chatId });
+      logger.info({ chatId, bot: v.match.bot, cmd: v.match.command }, 'command-router: jev matched command(LLM judge skipped)');
+      return v.match;
+    }
+    // v.kind === 'unsure' → 继续走下面的 LLM judge。
+  } catch {
+    // 双保险:分类快路径出错绝不影响主流程,继续走 LLM judge。
+  }
+
   try {
     const r = await callWithFallback({
       usage: 'judge',
@@ -85,7 +164,7 @@ export async function routeLearnedCommand(chatId: number, formatted: FormattedMe
     const ready = listAllProfiles(100).filter((p) => p.status === 'ready' && !p.needs_admin && !p.needs_reply);
     if (ready.length === 0) return false;
 
-    const match = await classify(text, ready);
+    const match = await classify(text, chatId, ready);
     if (!match) return false;
 
     const { tryDelegateCommand } = await import('./tools/bot-delegation.js');

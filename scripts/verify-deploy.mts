@@ -145,6 +145,9 @@ const CHECKS: Array<[string, string]> = [
   ['醒来检测', 'detectWakeTransition'],
   ['压力轨迹日志', 'trench pump tick'],
   ['cron 心跳', 'wake-detect ran'],
+  // Jev / TypeSafe System One 结构化判断(lfree relay)——客户端与命令路由接入都得在包里
+  ['Jev systemone 端点', 'v1/systemone'],
+  ['Jev 命令路由接入', 'JEV_ENABLED'],
 ];
 
 let bundle = '';

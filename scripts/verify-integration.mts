@@ -250,6 +250,34 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
   }
 }
 
+// O) Jev 结构化判断客户端:flag 关时**零网络调用**且 fail-open 返 null。
+//    grep 型守卫(verify-deploy)只能证明字符串在包里;这里真的调 callJevChoice 看
+//    返回值 + 有没有偷偷发请求。JEV_ENABLED 默认关 → 断言关时一条请求都不打、
+//    直接返 null 让调用方(command-router)走回原 LLM judge 路径。
+//    若有人删了 JEV_ENABLED 那道门，这里会看到 fetch 被调用 → 红。
+//    开 flag 是运维选择(会打真实 relay、非确定性)，这条自动跳过不误报;
+//    choice/noul/score 的 happy-path 解析与降级由 tests/unit/ai/jev.test.ts 覆盖。
+{
+  const { callJevChoice, resetJevState } = await import('../src/ai/jev.js');
+  const { env } = await import('../src/env.js');
+  resetJevState();
+  if (!env().JEV_ENABLED) {
+    const originalFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => { fetchCalled = true; throw new Error('Jev 关时不该发请求'); }) as typeof fetch;
+    let result: unknown = 'unset';
+    try {
+      result = await callJevChoice({ id: 'ROUTE', state: '啾咪 查下 1.1.1.1', question: '想调用哪条命令?', criteria: { __none__: '都不符合', c0: '/geo 查IP' }, chatId: -100123 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    ok('Jev 关时零网络调用', !fetchCalled);
+    ok('Jev 关时 fail-open 返 null(调用方降级)', result === null);
+  } else {
+    ok('Jev flag 关(当前 .env 里开着,跳过 zero-network 检查 —— 开 relay 不是代码回归)', true);
+  }
+}
+
 console.log(`\n═══ 合龙验证 · ${out.length} 项 ═══\n`);
 for (const l of out) console.log(`  ${l}`);
 const bad = out.filter((l) => l.startsWith('✗')).length;

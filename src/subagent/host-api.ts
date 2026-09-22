@@ -1072,7 +1072,11 @@ export function createHostApi(
                   await new Promise((r) => setTimeout(r, 300));
                 }
               }
-              await sendChatAction(chatId, 'typing', opts.messageThreadId);
+              // 多段发送只在**首条**前播"正在输入"：后续段之间已有
+              // calculateTypingDelay 的用户级节奏，再各发一次 sendChatAction
+              // 只是多一次 Telegram API 往返（2026-09-22 段⑤整治，每次多段
+              // 发送省 1–2 次往返）。
+              if (i === 0) await sendChatAction(chatId, 'typing', opts.messageThreadId);
               // 分句：仅首条带 reply_to；后续默认不带。另一次 sendText 若显式传 messageId 才 quote（特别许愿）。
               // 同一任务里，同一条消息只允许被引用一次。第二次起再传同一个 id
               // （显式或 fallback）一律不引用——不然就是两条回复戳同一个人。

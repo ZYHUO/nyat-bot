@@ -2,6 +2,7 @@
  * grounding.ts — 启发式触发 / 脱敏 / Redis 存取 / 无证据丢弃 / 限流。
  * Redis 手 mock（Map -backed），executeSearch / callWithFallback mock。
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // env flags per-test mutable
@@ -38,11 +39,11 @@ vi.mock('../../../src/ai/fallback.js', () => ({
 }));
 
 import {
-  isGroundingPending,
   looksFactualQuestion,
   maybeStartGrounding,
   sanitizeForGrounding,
   takeGrounding,
+  takeGroundingBlock,
 } from '../../../src/meta/grounding.js';
 
 const EVIDENCE = '关于"新政策"的搜索结果：\n该政策确有其事，已于上月发布。\n来源：某新闻网';
@@ -121,8 +122,8 @@ describe('maybeStartGrounding / takeGrounding', () => {
     expect(digest).toBe('是的，该新政策确有其事，上月已发布。');
     // one-shot: second take returns null
     expect(await takeGrounding(-100, 42)).toBeNull();
-    // pending marker cleaned up
-    expect(await isGroundingPending(-100, 42)).toBe(false);
+    // 键已删（2026-09-22 撤销轮询后 pending 标记也一并移除，清理只剩 del digest）
+    expect(store.has('xxb:grounding:-100:42')).toBe(false);
   });
 
   it('searches with the sanitized query (no @/uid leakage)', async () => {
@@ -193,7 +194,69 @@ describe('maybeStartGrounding / takeGrounding', () => {
       maybeStartGrounding({ chatId: -100, messageId: 4, text: '最新的 iPhone 什么时候发布？' }),
     ).resolves.toBeUndefined();
     expect(await takeGrounding(-100, 4)).toBeNull();
-    // pending marker still cleaned up after failure
-    expect(await isGroundingPending(-100, 4)).toBe(false);
+    // 失败路径不写 digest，也不留 pending 标记（已移除）
+    expect(store.has('xxb:grounding:-100:4')).toBe(false);
+    expect([...store.keys()].some((k) => k.includes(':pending:'))).toBe(false);
+  });
+});
+
+// 2026-09-22 段⑤整治：executor 侧短轮询已撤销。这里锁死"单次 take、拿不到就没有"
+// —— 任何等待都必须有上界（这里是 0），否则 6s 轮询会悄悄回来。
+describe('takeGroundingBlock（executor 拾取：单次 take，不轮询）', () => {
+  beforeEach(() => {
+    store.clear();
+    counters.clear();
+    vi.clearAllMocks();
+    envState.GROUNDING_ENABLED = true;
+    executeSearch.mockResolvedValue(EVIDENCE);
+    callWithFallback.mockResolvedValue({ content: '是的，该新政策确有其事，上月已发布。' });
+  });
+
+  it('digest 已就绪 → 渲染成 prompt 块（有 digest 仍能注入）', async () => {
+    store.set('xxb:grounding:-100:55', '要点：确有此事。');
+    const block = await takeGroundingBlock({ chatId: -100, messageId: 55, taskId: 'task-1' });
+    expect(block).toContain('## 联网核查参考（已脱敏，可能不准）');
+    expect(block).toContain('要点：确有此事。');
+    expect(block).toContain('别提「根据搜索结果」');
+    // 一次性：take 即删，第二次拿不到了
+    expect(await takeGroundingBlock({ chatId: -100, messageId: 55, taskId: 'task-1' })).toBe('');
+  });
+
+  it('digest 没到 → 空串，且**不轮询**（推进 10s 也只读一次 Redis）', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = takeGroundingBlock({ chatId: -100, messageId: 77, taskId: 'task-2' });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await p).toBe('');
+      expect(redisMock.get).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flag 关 → 空串，不碰 Redis', async () => {
+    envState.GROUNDING_ENABLED = false;
+    store.set('xxb:grounding:-100:55', '本不该被读到');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: 55 })).toBe('');
+    expect(redisMock.get).not.toHaveBeenCalled();
+  });
+
+  it('无锚点/非法 messageId → 空串', async () => {
+    store.set('xxb:grounding:-100:55', '要点');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: undefined })).toBe('');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: 0 })).toBe('');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: -3 })).toBe('');
+    expect(redisMock.get).not.toHaveBeenCalled();
+  });
+
+  it('Redis 炸了 → 空串（fail-soft，绝不抛进主链路）', async () => {
+    redisMock.get.mockRejectedValueOnce(new Error('redis down'));
+    await expect(takeGroundingBlock({ chatId: -100, messageId: 55 })).resolves.toBe('');
+  });
+
+  it('executor 侧不再引用 isGroundingPending（轮询门已移除，防回归）', async () => {
+    const src = readFileSync('src/subagent/prompt-inputs.ts', 'utf8');
+    expect(src).not.toContain('isGroundingPending');
+    expect(src).not.toContain('setTimeout');
   });
 });
