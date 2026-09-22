@@ -455,6 +455,22 @@ Production hosts can also attach `scripts/systemd/xxb-autoupdate.{timer,service}
 
 #### Manual install
 
+> ⚠️ **先看这一行：Node 必须是 22（或 22.x）。**
+> `engines` 声明了 `>=22.0.0 <23`，但 npm 对 engines 默认**只警告不报错**——
+> 你会装完依赖后，到运行时才撞上：`better-sqlite3` 是原生模块，
+> Node 24/26 编译出来的 `.node` 和它的 `NODE_MODULE_VERSION` 不匹配，
+> 报的错是 `… was compiled against a different Node.js version`。
+> 而且它往往在 `npm start` 才撞，不是 `npm install` 时。
+>
+> ```bash
+> node --version          # 要是 v24/v26，先切回来
+> nvm install 22 && nvm use 22     # 或你自己的方式
+> ```
+>
+> 本地开发机器上安装在 `/opt/node22/bin`（所以门禁全都写
+> `export PATH=/opt/node22/bin:$PATH`）。有关这个坑的完整记录在
+> [Known traps](#️-known-traps-learned-the-hard-way)。
+
 ```bash
 git clone https://github.com/ZYHUO/nyat-bot.git
 cd nyat-bot
