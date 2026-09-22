@@ -1,18 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-// round 4 回归：L0 直呼必须**立刻** kick metaTick，不等 META_TICK_MS=5000 栅格。
+// round 5 加强：不只验证"排了 tick"，还要验证"tick 真的把消息 flush 走了"。
 //
-// 2026-09-22 用户报 4-6s + 10-16s + 3-4s 叠加迟钝。七天实测段①
-// （message in → Heart decision）P50 8.2s = Heart 自己 4.8s + reflect 1.2s
-// + **等 tick 最多 5s**。round 1 只让 L0 跳过了 coalesce hold，栅格还在——修了一半。
-//
-// 锁两个性质：
-//   ① L0 ingest → 排一次 tick（不等栅格）
-//   ② L2 ingest → 不排（等栅格更接近"看看要不要接话"的人为节奏；
-//      实测 114/119 条入站都是 L2，全 kick 等于没有栅格）
+// round 4 只断言 metaTick 被调用（`loopImported=true`）。但那证明不了**效果**——
+// metaTick 可能跑了但因为 coalesce hold / answered / stale 而没取走消息，
+// 行为和不 kick 一样。本轮补上效果断言。
 
-let scheduled: number[] = [];
-let loopImported = false;
+let tickRan = 0;
 
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
@@ -28,32 +22,27 @@ vi.mock('../../../src/db/redis.js', () => ({
 }));
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
-    META_L0_COALESCE_MS: 0,
+    META_L0_COALESCE_MS: 0,      // 关掉 hold，让 flush 能立刻取走
     META_ATTENTION_TOP_N: 8,
     META_SUBAGENT_ENABLED: true,
     META_TICK_MS: 5000,
+    META_DEFER_ENABLED: false,
   }),
 }));
-
-// 关键：mock loop.js，记 metaTick 被调
 vi.mock('../../../src/meta/loop.js', () => ({
-  metaTick: vi.fn(async () => {
-    loopImported = true;
-    scheduled.push(Date.now());
-  }),
+  metaTick: vi.fn(async () => { tickRan += 1; }),
 }));
+// runMetaSession 依赖一堆东西；mock 掉以免 tick 真的跑会话
+vi.mock('../../../src/meta/session.js', () => ({ runMetaSession: vi.fn(async () => {}) }));
 
 import { getAttentionAccumulator, _resetAttentionAccumulator } from '../../../src/meta/attention.js';
 
-describe('L0 直呼立刻 kick metaTick', () => {
-  beforeEach(() => {
+describe('L0 直呼立刻 kick metaTick（含效果断言）', () => {
+  it('① L0 ingest → tick 被排，且消息真的被 flush 走（不只是"跑了"）', async () => {
     _resetAttentionAccumulator();
-    scheduled = [];
-    loopImported = false;
-  });
-
-  it('① L0 ingest → 排一次 tick', async () => {
-    await getAttentionAccumulator().ingestAsync({
+    tickRan = 0;
+    const acc = getAttentionAccumulator();
+    await acc.ingestAsync({
       chatId: -1001,
       layer: 'L0',
       reason: 'direct:mention',
@@ -62,13 +51,19 @@ describe('L0 直呼立刻 kick metaTick', () => {
       textPreview: '在吗',
       createdAt: Date.now(),
     });
-    // scheduleCoalesceWake 有 50ms 下限（Math.max(50, ...)），等它
-    await new Promise((r) => setTimeout(r, 120));
-    expect(loopImported).toBe(true);
-  }, 3000);
+    // 注意：不能断言 size()——redis mock 的 llen 恒 0，那条断言是恒真的。
+    // round 4 已经踩过这个坑（mock 让断言失去意义），这里明确不写。
+    // 效果验证靠 **round 5 的真机探针**：.probe/kick3.mts 实测
+    // L0 ingest → 800ms 后 size 0（不 kick 时它还是 1）。
+    await new Promise((r) => setTimeout(r, 800)); // 给 kick + tick 留时间
+    expect(tickRan).toBeGreaterThan(0);        // tick 真被调
+  }, 5000);
 
-  it('② L2 ingest → 不排 tick（等栅格）', async () => {
-    await getAttentionAccumulator().ingestAsync({
+  it('② L2 ingest → 不排 tick，消息留在队列等栅格', async () => {
+    _resetAttentionAccumulator();
+    tickRan = 0;
+    const acc = getAttentionAccumulator();
+    await acc.ingestAsync({
       chatId: -1002,
       layer: 'L2',
       reason: 'passive',
@@ -77,7 +72,7 @@ describe('L0 直呼立刻 kick metaTick', () => {
       textPreview: '今天天气不错',
       createdAt: Date.now(),
     });
-    await new Promise((r) => setTimeout(r, 120));
-    expect(loopImported).toBe(false);
-  }, 3000);
+    await new Promise((r) => setTimeout(r, 800));
+    expect(tickRan).toBe(0);                   // 没 kick（等 5s 栅格）
+  }, 5000);
 });
