@@ -945,7 +945,16 @@ export async function runMetaSession(
             '根据剩余 Attention / Callbacks 做本轮编排。L2 默认沉默；dispatch 时务必 quotes:[msgId]，contentDirection 只写短方向不写台词。只在需要时写 js。',
         },
       ],
-      maxTokens: 1200,
+      // round 18（新 goal，用户："架构问题比上一个多太多"）：
+      // 这里原来写死 maxTokens: 1200。**Meta 编排是推理任务**，
+      // 而 stepfun 系的思维链把 1200 全烧光 → 空正文 →
+      // `claude: 空正文 —— 思维链吃光 max_tokens（截断）`。
+      // 白天实测 705 次截断、694 次 `heart LLM failed, fail-closed pass`、
+      // 2210 次 `all candidates skipped`——用户侧看到的是"没回复"。
+      //
+      // 不在这里调大数字：写死的值压过 usage/label 配置，
+      // 而配置在 .env 里、改完即生效。去掉写死让它落回去。
+      //（decision.ts 早在 round 6 就为同一件事去掉过写死，这边漏了。）
       temperature: 0.3,
     });
   } catch (err) {

@@ -172,7 +172,11 @@ export async function decideShadow(
       // shadow failed ~70% of the time, and the logged output showed truncated
       // JSON ("…是不是累到睡着啦🥺","). MAX_BUBBLES × MAX_BUBBLE_CHARS is ~2500
       // Chinese chars ≈ 1600 tokens, so budget comfortably above that.
-      maxTokens: 2000,
+      // round 18：去掉写死的 2000，理由同 meta/session.ts。
+      // shadow 走 usage=judge，而 judge 的链里出现过 reasoning 模型
+      // （stepfunvision / stepfunasi），思维链吃 2000 → 空正文。
+      // 上面那段 2026-09-18 的注释（600 会截断 JSON）依然成立——
+      // 只是"够大"该由 usage/label 配置决定，不该由这个调用点决定。
       temperature: 0.8,
       ...(options.signal ? { signal: options.signal } : {}),
       maxTimeoutMs: env().NYATOS_SHADOW_TIMEOUT_MS,
