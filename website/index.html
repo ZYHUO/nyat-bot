@@ -276,6 +276,69 @@ npm start</pre>
   </table>
 </section>
 
+<section id="faq">
+  <div class="kicker">Honest answers</div>
+  <h2>What people ask first.</h2>
+  <p class="lead">
+    Every number below comes from the repo or the production log, and the
+    uncomfortable ones are included. A project that only quotes its wins is
+    telling you how it will behave as a dependency.
+  </p>
+
+  <h3>Is it accurate?</h3>
+  <p class="lead" style="font-size:15px">
+    No guarantee, and the log says so. Over one production day the heart chose
+    <b>reply 44%</b> / <b>pass 55%</b> — and <b>694</b> of those were
+    <code>heart LLM failed, fail-closed pass</code>: the provider errored and the
+    host swallowed the reply rather than guessing. That is the design
+    (silence beats a wrong answer), but it means "it said nothing" and
+    "it chose not to speak" are different things in the metrics, and the repo
+    does not currently separate them for you.
+  </p>
+
+  <h3>Does it run on my machine?</h3>
+  <p class="lead" style="font-size:15px">
+    Node 22 + Redis + SQLite. Qdrant and the ONNX embedding weights are
+    <b>optional</b> — memory degrades and the app logs loudly instead of failing.
+    No GPU, no Docker required (though <code>deploy/</code> has systemd units).
+  </p>
+
+  <h3>Is it in production?</h3>
+  <p class="lead" style="font-size:15px">
+    Yes. <b>24 groups</b> hit it today, <b>10</b> with real volume, and it sent
+    <b>1062</b> replies across the day. That is also where every number on this
+    page comes from — including the ones above.
+  </p>
+
+  <h3>Where does my group's data go?</h3>
+  <p class="lead" style="font-size:15px">
+    Qdrant runs <b>locally</b>. Embeddings are <b>local ONNX models</b>, so nothing
+    leaves the machine for retrieval. The LLM calls obviously do go out — which
+    is why the provider pool is configurable per-usage, and why a dead provider
+    is a latency problem instead of a privacy one.
+  </p>
+
+  <h3>Why is it one 165k-line repo?</h3>
+  <p class="lead" style="font-size:15px">
+    The two reusable engines moved out to <code>packages/</code>
+    (<code>@nyat/nyatdb</code> + <code>@nyat/context-engine</code>). The cognition
+    layer stayed in the host because it is not reusable yet — it is entangled
+    with this one bot's persona and timing. Splitting it earlier would have
+    produced two repos that both need changing for every behaviour fix.
+  </p>
+
+  <h3>What is it bad at?</h3>
+  <p class="lead" style="font-size:15px">
+    · <b>Provider censorship.</b> On Chinese providers a normal group chat can
+    trip a content filter — one day saw <b>22</b> rejections that all traced back
+    to one lively group, not to anything objectionable.<br>
+    · <b>Silent failures look like silence.</b> See the accuracy answer.<br>
+    · <b>Setup is not one command.</b> Bot token, AI keys, Redis, and (optionally)
+    Qdrant. The install script handles the pieces; it cannot handle
+    <code>@BotFather</code>.
+  </p>
+</section>
+
 <div class="foot">
   <div class="row">
     <a href="https://github.com/ZYHUO/nyat-bot">GitHub</a>
@@ -283,6 +346,7 @@ npm start</pre>
     <a href="../docs/">Docs</a>
     <a href="../docs/code-tour.md">Code tour</a>
     <a href="../docs/voice-tuning.md">Voice tuning</a>
+    <a href="#faq">FAQ</a>
     <a href="../LICENSE">MIT</a>
   </div>
   <p style="margin-top:16px">
