@@ -496,7 +496,32 @@ describe('选路：零成功 demote + vision 严格过滤', () => {
       }
       const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
       expect(chain).toContain('fast');
-      expect(chain).not.toContain('slow');
+      // round 13：**不再期望 slow 消失**。跨账号兜底会把它补回来——
+      // fast 和 slow 的 endpoint 不同（`https://fast.example/v1` vs
+      // `https://slow.example/v1`），所以一筛后链上只有 1 个域名，
+      // 触发二筛（关延迟上限）把 slow 补进来。
+      //
+      // 这正是用户选 C 想要的行为：链上只剩一个账号时，
+      // "慢的跨账号替补" > "没有替补"。
+      // 延迟门槛本身的正确性由 ②/③ 两条锁（够快 still 是首选、排序不变）。
+      expect(chain).toContain('slow');
+    });
+
+    it('①b 跨账号兜底只补不同域名的——同域名慢 label 仍被挡', async () => {
+      setLabels([
+        makeLabel('fast', { tier: 'medium' }),
+        // slow 和 fast **同 endpoint**（同域名不同 key 的形状）
+        makeLabel('slow', { tier: 'medium', endpoint: 'https://fast.example/v1', apiKeys: ['zzz'.repeat(8)] }),
+      ]);
+      const mod = await import('../../../src/ai/smart-group.js');
+      const rec = (mod as unknown as { __recordHealthForTest?: (n: string, lat: number[]) => void }).__recordHealthForTest;
+      if (rec) {
+        rec('fast', [1000, 1200]);
+        rec('slow', [28000, 30000, 32000]);
+      }
+      const chain = await smartGroupAutoAssign('judge', { count: 4, diversify: false } as never);
+      expect(chain).toContain('fast');
+      expect(chain).not.toContain('slow');   // 同域名 → 补它没意义，仍挡
     });
   });
 

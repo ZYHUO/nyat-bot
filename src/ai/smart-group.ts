@@ -31,6 +31,13 @@ interface SmartGroupConfig {
   autoAssign: boolean;
   /** 链的上游去重：同一 (endpoint, key) 只先取一个。见 diversifyByUpstream。 */
   diversifyUpstream: boolean;
+  /**
+   * 跨账号兜底：链上只剩单一账号时，关掉延迟上限二筛一次，补一个跨账号的进来。
+   *
+   * round 13（新 goal，用户选 C）。默认开。见 smartGroupAutoAssign 里那段长注释。
+   * 关掉 = 回到"延迟门槛一刀切"，接受 censorship 爆发时整条链全灭。
+   */
+  accountFallback: boolean;
 }
 
 const DEFAULT_CONFIG: SmartGroupConfig = {
@@ -40,6 +47,7 @@ const DEFAULT_CONFIG: SmartGroupConfig = {
   rrIntervalSec: 300,
   autoAssign: false,
   diversifyUpstream: true,
+  accountFallback: true,
 };
 
 interface LabelHealth {
@@ -77,6 +85,7 @@ function getConfig(): SmartGroupConfig {
     rrIntervalSec: parseInt(process.env.SMART_GROUP_RR_INTERVAL ?? '300', 10),
     autoAssign: process.env.SMART_GROUP_AUTO_ASSIGN === 'true',
     diversifyUpstream: process.env.SMART_GROUP_DIVERSIFY_UPSTREAM !== 'false',
+    accountFallback: process.env.SMART_GROUP_ACCOUNT_FALLBACK !== 'false',
   };
 }
 
@@ -451,10 +460,19 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
 
   const profile = USAGE_PROFILES[usageName] ?? DEFAULT_PROFILE;
 
-  const candidates: { name: string; label: AILabel; tier: Tier }[] = [];
-  for (const [name, label] of labels.entries()) {
+  /**
+   * 单 label 能不能进这条链。`ignoreLatency` 只在"跨账号兜底"那一次二筛里为真。
+   *
+   * round 13（新 goal，用户选 C）抽出来的。原来整个过滤是一个大 for 循环，
+   * 没法"同一套判据跑两遍、第二遍只关延迟上限"。
+   */
+  const passesHardFilters = (
+    name: string,
+    label: AILabel,
+    ignoreLatency: boolean,
+  ): boolean => {
     const tier: Tier = label.tier ?? 'medium';
-    if (TIER_RANK[tier] < TIER_RANK[profile.minTier]) continue;
+    if (TIER_RANK[tier] < TIER_RANK[profile.minTier]) return false;
     // round 9：确定性 usage 排除 temperature 被锁死的 label。
     //
     // 实测 `smartGroupAutoAssign('judge')` 返回 `dshkimi, stepfunvision,
@@ -468,7 +486,7 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
     // 两态，等价于"配了就是锁死"。round 12 加了第三态 `'omit'`（不传该字段），
     // omit 的 provider 恰恰**更**确定——dshkimi 实测传 1 同 prompt 6 次翻 1 次，
     // 不传 6/6 一致。所以 omit 不该被挡，它比传固定温度更符合确定性语义。
-    if (profile.requiresDeterministic && typeof label.temperature === 'number') continue;
+    if (profile.requiresDeterministic && typeof label.temperature === 'number') return false;
     // vision 现在和 video 同向：**没声明 true 的一律排除**。
     //
     // 2026-09-21 改。旧写法是 `=== false`（只排除显式声明不支持 vision 的），
@@ -485,9 +503,10 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
     // **中位延迟超纲的不进链。** 见 UsageProfile.maxMedianLatencyMs 的长注释。
     // 判据用 memoryHealth 的滑窗中位（和排序同一个数），没有数据的 label 不拦——
     // 新 provider 仍然进得来（它还没证明自己慢），只是排位照旧由延迟决定。
-    if (profile.maxMedianLatencyMs) {
+    // **中位延迟超纲的不进链** —— 但 ignoreLatency 时跳过（跨账号兜底）。
+    if (profile.maxMedianLatencyMs && !ignoreLatency) {
       const med = medianOf(memoryHealth.get(name)?.latencies ?? []);
-      if (med > profile.maxMedianLatencyMs) continue;
+      if (med > profile.maxMedianLatencyMs) return false;
     }
     // **成功率不达标的不进链。** 见 UsageProfile.minSuccessRate 的长注释。
     // 样本不够（< minSamples）时不判——新 provider 仍然进得来。
@@ -506,18 +525,84 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
       // 二档：样本够了按窗口成功率判。
       // 两条都不拦"没数据的"——新 provider 仍然进得来（和延迟上限同一条原则）。
       const zeroOkNeed = profile.minZeroOkSamples ?? 5;
-      if (ring.length >= zeroOkNeed && ring.every((v) => v === 0)) continue;
+      if (ring.length >= zeroOkNeed && ring.every((v) => v === 0)) return false;
       if (ring.length >= need) {
         const okInWindow = ring.reduce((a, b) => a + b, 0);
-        if (okInWindow / ring.length < profile.minSuccessRate) continue;
+        if (okInWindow / ring.length < profile.minSuccessRate) return false;
       }
     }
-    if (profile.vision && label.capabilities?.vision !== true) continue;
+    if (profile.vision && label.capabilities?.vision !== true) return false;
     // video：没声明 true 的一律排除（理由见 UsageProfile.video）。
-    if (profile.video && label.capabilities?.video !== true) continue;
-    candidates.push({ name, label, tier });
+    if (profile.video && label.capabilities?.video !== true) return false;
+    return true;
+  };
+
+  // **按 host 判账号，不按 endpoint+key。**
+  //
+  // round 13 修正。第一版照抄了 diversifyByUpstream 的 `${endpoint}|${key}`
+  // 判据，但实测今天 22 次 censorship_blocked 的形状是：
+  //   stepfun   https://api.stepfun.com/step_plan/v1  key=4QeT2Y7…
+  //   step5     https://api.stepfun.com/step_plan/v1  key=另一个
+  // **同 host、不同 key**。而 censorship / 账号级限流是按 **host** 决策的
+  // （provider 那边看到的是"这个域名/这个账号"），不是按我们手里的哪个 key。
+  // 用 endpoint+key 判会把它们算成两个账号 → 二筛误判"已经跨账号" → 不补。
+  //
+  // host 粒度更粗但更诚实：**同一个域名就是同一个供应商**，
+  // 它整体抽风（censorship / 限流 / 维护）时我们手里的 key 不救命。
+  const upstreamOf = (label: AILabel): string => {
+    try { return new URL(label.endpoint).host; } catch { return label.endpoint; }
+  };
+
+  const candidates: { name: string; label: AILabel; tier: Tier }[] = [];
+  for (const [name, label] of labels.entries()) {
+    const tier: Tier = label.tier ?? 'medium';
+    if (passesHardFilters(name, label, false)) candidates.push({ name, label, tier });
   }
   if (candidates.length === 0) return [];
+
+  // ── round 13（新 goal，用户选 C）：跨账号兜底 ────────────────────
+  //
+  // 2026-09-22 实测的故障：judge 链实际是 [stepfun, step5, dshkimi]，
+  // 其中 stepfun / step5 **同账号**（api.stepfun.com，不同 key）。
+  // stepfun 一被 censoreship 拒，step5 同账号 같이 被限流 → 整条链瘫，
+  // 今天 22 次 censorship_blocked + 20 次 `all candidates skipped`。
+  //
+  // 而真正跨账号的候选（lfree / mio / big-pickle，都在 ai.lfree.org）
+  // 全被 `maxMedianLatencyMs=8000` 挡在池外——实测它们中位
+  // lfree 19026ms / mio 19611ms / big-pickle 15126ms。
+  //
+  // round 97 给这个门槛的理由是对的："一个 provider 对该调用方没有用处，
+  // 就不该占链位"。但那个理由有个前提——**链上还有别的选择**。
+  // 当链上只剩一个账号时，"慢的跨账号替补"比"没有替补"好得多：
+  // 被 censorship 拒 20 次 vs 等 19s 拿到一个裁决，后者好得多。
+  //
+  // 所以二筛：**只关延迟上限**，其余硬判据（requiresDeterministic /
+  // minTier / vision / video / 成功率）全部保留——那些是"能不能干活"，
+  // 延迟只是"多快"。把跨账号的补进来，直到链上有 >= 2 个账号。
+  //
+  // 全健康时代价为零： candidates 已经跨账号时二筛根本不触发。
+  //
+  // **目标是 3 个账号，不是 2 个。** round 13 实测：第一版写成 >= 2，
+  // 结果 judge 链变成 [stepfunthink, dshkimi, stepfunvision]——跨账号的
+  // 那个是 dshkimi，而它当天 healthy=0 / errorCount=6（concurrent limit
+  // 被打满）。2 个账号里有一个是坏的，等于还是单账号。
+  // 3 个账号才扛得住"一个挂 + 一个抖"。
+  const MIN_ACCOUNTS = 3;
+  if (cfg.accountFallback) {
+    const have = new Set(candidates.map((c) => upstreamOf(c.label)));
+    if (have.size < MIN_ACCOUNTS) {
+      for (const [name, label] of labels.entries()) {
+        if (have.size >= MIN_ACCOUNTS) break;
+        if (candidates.some((c) => c.name === name)) continue;
+        const up = upstreamOf(label);
+        if (have.has(up)) continue;              // 只补**跨账号**的
+        if (!passesHardFilters(name, label, true)) continue;
+        candidates.push({ name, label, tier: label.tier ?? 'medium' });
+        have.add(up);
+        logger.info({ usage: usageName, label: name, upstream: up }, 'smart group: 跨账号兜底补入（原链只剩单一账号）');
+      }
+    }
+  }
 
   const known = knownLatencies(candidates);
   const newcomerLatency = medianOf(known);
