@@ -39,7 +39,15 @@ const scriptExecuteSchema = z.object({
   timeout: z.number().default(10000),
 });
 
-const skillSchema = z.object({
+/**
+ * skill JSON 的 schema。**export 出来是为了让文档例子有测试可依。**
+ *
+ * 2026-09-22 round 1（提高知名度 goal）：写 docs/skills.md 时手打了示例 JSON。
+ * 这个会话为"文档和代码不是一套"付过学费（executor.ts 写死 /spam 名单、
+ * 说 python3.10 有 PIL 而本地是反的）。docs/skills.md 的测试要过真 schema，
+ * 否则文档说什么都验不了。
+ */
+export const skillSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
   parameters: paramSchema.default({}),

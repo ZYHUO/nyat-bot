@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NyatBot — a Telegram agent that hangs out, not answers</title>
+<meta name="description" content="An open-source Telegram group-chat agent built around participating rather than responding: silence is a first-class decision, the host holds the body state, and every claim needs an external artifact.">
+<style>
+  :root{
+    --bg:#0b0c0f; --bg2:#111318; --line:#1e222b; --fg:#e6e8ee; --dim:#8b93a7;
+    --acc:#ffb86b; --acc2:#7ee0c0; --acc3:#9db4ff; --warn:#ff7a8a;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"Noto Sans SC",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+  section{padding:72px 0;border-top:1px solid var(--line)}
+  section:first-of-type{border-top:none}
+  h1{font-size:clamp(34px,6vw,58px);line-height:1.1;letter-spacing:-.02em;font-weight:800}
+  h2{font-size:clamp(22px,3vw,30px);letter-spacing:-.01em;margin-bottom:8px;font-weight:700}
+  h3{font-size:16px;margin:24px 0 8px;color:var(--acc2)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin-bottom:16px}
+  .lead{font-size:clamp(17px,2.2vw,21px);color:var(--dim);max-width:64ch;margin-top:20px}
+  .lead strong{color:var(--fg);font-weight:600}
+  .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:32px;align-items:center}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:11px 20px;border-radius:10px;font-weight:600;font-size:15px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);transition:.15s}
+  .btn:hover{border-color:var(--acc);text-decoration:none;transform:translateY(-1px)}
+  .btn.pri{background:var(--acc);color:#1a1206;border-color:var(--acc)}
+  .btn.pri:hover{background:#ffc989}
+  code,.mono{font-family:var(--mono);font-size:.88em}
+  code{background:var(--bg2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--acc2)}
+  pre{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:18px 20px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.7;margin:16px 0}
+  pre .c{color:var(--dim)}
+  pre .k{color:var(--acc3)}
+  pre .s{color:var(--acc2)}
+  .grid{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));margin-top:32px}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px}
+  .card:hover{border-color:#2c3240}
+  .card .n{font-family:var(--mono);font-size:26px;font-weight:700;color:var(--acc)}
+  .card .l{font-size:13px;color:var(--dim);margin-top:4px}
+  .card p{font-size:14.5px;color:var(--dim);margin-top:10px}
+  .card p b{color:var(--fg)}
+  .chat{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-top:28px;font-size:15px}
+  .msg{margin:10px 0;display:flex;gap:10px}
+  .who{color:var(--dim);font-size:13px;min-width:96px;text-align:right;flex-shrink:0;padding-top:2px}
+  .msg.bot .who{color:var(--acc)}
+  .bubble{flex:1}
+  .silence{color:var(--dim);font-style:italic;font-size:13.5px;border-left:2px solid var(--line);padding-left:12px;margin:12px 0}
+  table{width:100%;border-collapse:collapse;margin-top:24px;font-size:14px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+  td:first-child{color:var(--acc2);font-family:var(--mono);font-size:13px;white-space:nowrap}
+  .foot{padding:48px 0;color:var(--dim);font-size:13.5px;border-top:1px solid var(--line)}
+  .foot .row{gap:20px;margin-top:0}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11.5px;padding:3px 9px;border:1px solid var(--line);border-radius:99px;color:var(--dim);margin:0 5px 5px 0}
+  @media(max-width:620px){.who{min-width:64px;font-size:12px}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<section style="padding-top:56px">
+  <div class="kicker">Open source · MIT · TypeScript</div>
+  <h1>It hangs out.<br>It doesn't answer.</h1>
+  <p class="lead">
+    Most chat bots are <strong>responding</strong> systems: cue in, text out.
+    NyatBot is a <strong>participating</strong> one — it lurks, follows threads,
+    senses the vibe, and <strong>chooses silence</strong> when it has nothing
+    worth adding. Running in production since April 2026.
+  </p>
+  <div class="row">
+    <a class="btn pri" href="https://github.com/ZYHUO/nyat-bot">★ Star on GitHub</a>
+    <a class="btn" href="#try">Try it in 30 seconds</a>
+    <a class="btn" href="#extend">Write a skill</a>
+  </div>
+  <div style="margin-top:28px">
+    <span class="pill">Telegram</span><span class="pill">grammY</span><span class="pill">TypeScript</span>
+    <span class="pill">Qdrant</span><span class="pill">Redis</span><span class="pill">BullMQ</span>
+    <span class="pill">local ONNX embeddings</span><span class="pill">any OpenAI-compatible model</span>
+  </div>
+</section>
+
+<section>
+  <div class="kicker">The difference</div>
+  <h2>Silence is a decision, not a failure.</h2>
+  <p class="lead">
+    A responding bot treats every message as a prompt. That's why group bots feel
+    like vending machines. NyatBot's core loop decides <strong>whether to speak
+    at all</strong> before it decides what to say — and it's the same self making
+    both calls, with a first-person body state it can read.
+  </p>
+
+  <div class="chat">
+    <div class="msg"><div class="who">A</div><div class="bubble">有人会用 golang 写爬虫吗</div></div>
+    <div class="msg"><div class="who">B</div><div class="bubble">我会一点</div></div>
+    <div class="msg"><div class="who">C</div><div class="bubble">我推荐 colly，轻</div></div>
+    <div class="silence">… the bot reads three replies already covering it, and stays out.</div>
+    <div class="msg"><div class="who">A</div><div class="bubble">@nyatbot 那你自己推荐哪个</div></div>
+    <div class="msg bot"><div class="who">NyatBot</div><div class="bubble">rolldownload 那个太重了…colly 加个延迟就行，写爬虫十条有五条死在没 sleep 上</div></div>
+  </div>
+
+  <p class="lead" style="font-size:16px">
+    Every message above is a real inference from the production log. The silence is
+    the feature — <strong>in a group of 30, the bot that answers everything is the
+    one everybody mutes.</strong>
+  </p>
+</section>
+
+<section>
+  <div class="kicker">What's actually built</div>
+  <h2>Not a chat wrapper.</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="n">1 call</div>
+      <div class="l">heart decision, not three filters</div>
+      <p>One persona-aware call decides <b>reply / wait / pass</b>, replacing the usual
+      rule→micro→full filter stack. Mood, focus and social state go in; the verdict
+      comes from the same self that will write the reply.</p>
+    </div>
+    <div class="card">
+      <div class="n">Host-side</div>
+      <div class="l">the body it can't lie about</div>
+      <p><b>Nyat Trench</b>: pressure, envelope and reflexes live in the host,
+      where the model can <b>read</b> them but not change them. It learns the shape
+      of its own throat from measurement, not from self-report.</p>
+    </div>
+    <div class="card">
+      <div class="n">Turns</div>
+      <div class="l">bursts as one thought</div>
+      <p>Three messages in four seconds are <b>one utterance</b>. Interrupts mid-generation
+      trigger a genuine replan; "wait for them to finish" actually resumes instead of
+      dropping the thread.</p>
+    </div>
+    <div class="card">
+      <div class="n">Anti-ad</div>
+      <div class="l">behavioural, owner-opted</div>
+      <p>Classic keyword matching finds nothing in this ecosystem — the noise is
+      <b>behaviour</b>: burst, no-engagement, repeated payloads. A group owner turns it
+      on by asking; the bot verifies they're really an admin before it listens.</p>
+    </div>
+    <div class="card">
+      <div class="n">Local</div>
+      <div class="l">embeddings that don't phone home</div>
+      <p>Semantic memory runs on <b>ONNX models cached on disk</b> — no embedding API,
+      no per-message cost, no third party reading your group's history.</p>
+    </div>
+    <div class="card">
+      <div class="n">Measured</div>
+      <div class="l">not self-certified</div>
+      <p>Spot-the-bot harnesses, offline replay over real history, reaction-driven
+      bandits. <b>Nothing counts as working because the model said so.</b></p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="kicker">How a message travels</div>
+  <h2>From a phone in a group chat to a reply that sounds like a person.</h2>
+  <pre><span class="c">Telegram</span>
+   │  long-poll update
+   ▼
+<span class="k">ingress</span>  ──► dedupe · rate limit · mute state · bot-message gate
+   │
+   ▼
+<span class="k">classify</span> ──► layer  L0 (direct / @ / reply-to-bot)  ·  L2 (passive)
+   │
+   ├── <span class="s">L0</span> ──► attention accumulator  ──► <span class="k">Meta tick</span> ══► dispatch ══► <span class="k">CodeAct</span>
+   │                                 (coordinated window: group chats still receiving        │
+   │                                  L0/L1 stay buffered until quiet)                        ▼
+   │                                                                    host APIs: telegram / memory / stickers
+   ├── <span class="s">L2</span> ──► <span class="k">heart</span> ══► reply · wait · pass                     │
+   │                    │                     │                            ▼
+   │                    └─ pass ─────────────┴──── (silence, logged)   <span class="k">reply writer</span> ══► segments ══► typing delay ══► send
+   │
+   └── <span class="k">Nyat Trench</span> (host-held, model-readable):
+        pressure P · burst envelope · refractory · directed debt
+        ── every one of these is a number the model sees and cannot edit</pre>
+  <p class="lead" style="font-size:15px">
+    The whole path is observable: <code>logs/app.log</code> is JSON lines, and
+    <code>/metrics</code> exposes per-tool, per-label and per-outcome counters, so you can
+    answer "how often does it choose silence, and was that the right call" with a query.
+  </p>
+</section>
+
+<section>
+  <div class="kicker">In production</div>
+  <h2>Numbers from the log, not the landing page.</h2>
+  <div class="grid">
+    <div class="card"><div class="n">165k</div><div class="l">lines of TypeScript</div><p>400+ commits since April 2026. MIT licensed, no hosted tier, no vendor lock.</p></div>
+    <div class="card"><div class="n">10k+</div><div class="l">heart decisions logged</div><p>Median <b>4.8s</b> end-to-end for the gate that decides whether to speak at all.</p></div>
+    <div class="card"><div class="n">3</div><div class="l">provider domains in the pool</div><p>Per-usage chains with health-based auto-assign, hedged requests, circuit breakers.</p></div>
+    <div class="card"><div class="n">~8%</div><div class="l">reply rate at 8.2 messages / 100 inbound</div><p>Tunable, and the number the tuning is about: <b>a bot that replies to everything is noise.</b></p></div>
+  </div>
+</section>
+
+<section id="extend">
+  <div class="kicker">Extend it</div>
+  <h2>A skill is a JSON file.</h2>
+  <p class="lead">
+    No SDK to install, no class hierarchy. Drop a JSON file in
+    <code>skills/</code> and the bot gains a tool it can decide to call —
+    with an allowlist so a skill can't quietly become an open proxy.
+  </p>
+  <pre><span class="c">// skills/IP_QUALITY.json — a real, working example</span>
+{
+  <span class="k">"name"</span>: <span class="s">"IP_QUALITY"</span>,
+  <span class="k">"description"</span>: <span class="s">"Check whether an IP address is a known proxy/VPN exit. Use when someone asks about an IP."</span>,
+  <span class="k">"parameters"</span>: {
+    <span class="k">"ip"</span>: { <span class="k">"type"</span>: <span class="s">"string"</span>, <span class="k">"description"</span>: <span class="s">"IPv4 or IPv6 address"</span>, <span class="k">"required"</span>: <span class="k">true</span> }
+  },
+  <span class="k">"trusted"</span>: <span class="k">true</span>,
+  <span class="k">"execute"</span>: {
+    <span class="k">"type"</span>: <span class="s">"http"</span>,
+    <span class="k">"method"</span>: <span class="s">"GET"</span>,
+    <span class="k">"url"</span>: <span class="s">"https://ipquality.example/api/{{ip}}"</span>,
+    <span class="k">"allowedHosts"</span>: [<span class="s">"ipquality.example"</span>]
+  }
+}</pre>
+  <h3>What the loader gives you for free</h3>
+  <table>
+    <tr><td>Schema</td><td>parameters are validated with zod before the model ever sees them — bad input becomes a tool error, not a hallucinated argument</td></tr>
+    <tr><td>Allowlist</td><td><code>trusted</code> skills must declare a non-empty <code>allowedHosts</code>; the host refuses to even load them otherwise</td></tr>
+    <tr><td>No scripts</td><td><code>"type":"script"</code> is rejected at load time — the skill surface is HTTP-only by design, so a community skill can't run code</td></tr>
+    <tr><td>Namespace safety</td><td>names must match <code>/^[A-Z0-9_]+$/</code> and can't shadow a built-in tool</td></tr>
+    <tr><td>Hot reload</td><td>files are re-read on <code>preloadSkills()</code>; no restart, no redeploy</td></tr>
+  </table>
+  <p class="lead" style="font-size:15px;margin-top:24px">
+    Want to write one? Start from <a href="https://github.com/ZYHUO/nyat-bot/blob/main/docs/skills.md">docs/skills.md</a> —
+    it has a complete walkthrough including the failure modes the loader guards against.
+  </p>
+</section>
+
+<section id="try">
+  <div class="kicker">Run it</div>
+  <h2>Thirty seconds to a running bot.</h2>
+  <pre><span class="c"># clone, install, build</span>
+git clone https://github.com/ZYHUO/nyat-bot.git &amp;&amp; cd nyat-bot
+npm install &amp;&amp; npm run build
+
+<span class="c"># one file to edit</span>
+cp .env.example .env
+<span class="c">#   BOT_TOKEN=…           ← from @BotFather</span>
+<span class="c">#   AI_PROVIDER_* / AI_USAGE_*  ← any OpenAI-compatible endpoint</span>
+
+npm start</pre>
+  <p class="lead" style="font-size:15px">
+    Semantic memory needs Qdrant and local ONNX weights — both are fetched and verified
+    by <code>scripts/fetch-embed-model.mts</code>, and the app degrades gracefully (and
+    logs loudly) if they're missing. The full install script handles optional native
+    acceleration. See the <a href="https://github.com/ZYHUO/nyat-bot#install">README</a> for
+    every optional piece.
+  </p>
+  <h3>Or just talk to the one that's already running</h3>
+  <p class="lead" style="font-size:15px">
+    The production instance lives in group chats as <code>@hunhemi_bot</code>. It's a
+    real catgirl with sharp edges — it will decline to answer things it thinks are
+    beneath it, and it holds grudges. Don't poke it to see if it works; talk to it.
+  </p>
+</section>
+
+<section>
+  <div class="kicker">Design stance</div>
+  <h2>The parts that are deliberately unusual.</h2>
+  <table>
+    <tr><td>Participation</td><td>per-chat cognition turns, burst merging, interrupt→replan, wait→genuine resume. Silence is a logged outcome with a reason.</td></tr>
+    <tr><td>No servility</td><td>sycophancy is a structural RLHF artifact, not a tone bug. The persona has flaws and favourites; the human has top interrupt rights but is not a master.</td></tr>
+    <tr><td>Telegram as sensor</td><td>mentions and reply chains are addressee signals, reactions are unsupervised reward, topic ids are floor state. Not decoration.</td></tr>
+    <tr><td>Host-held body</td><td>pressure, envelope, refractory and debt are host-side numbers the model reads but cannot rewrite. What it knows about its own state is what it can't fake.</td></tr>
+    <tr><td>Verifiable</td><td>offline replay over real history, spot-the-bot harnesses, reaction bandits. A green test is a claim; an artifact is evidence.</td></tr>
+  </table>
+</section>
+
+<div class="foot">
+  <div class="row">
+    <a href="https://github.com/ZYHUO/nyat-bot">GitHub</a>
+    <a href="https://github.com/ZYHUO/nyat-bot/blob/main/docs/skills.md">Skills</a>
+    <a href="https://github.com/ZYHUO/nyat-bot/tree/main/docs">Docs</a>
+    <a href="https://github.com/ZYHUO/nyat-bot/blob/main/LICENSE">MIT</a>
+  </div>
+  <p style="margin-top:16px">
+    NyatBot · built in the open since April 2026 · no hosted tier, no telemetry, no
+    vendor lock. Your group's history stays in your Qdrant.
+  </p>
+</div>
+
+</div>
+</body>
+</html>
