@@ -561,6 +561,11 @@ Everything is env-driven, see [`.env.example`](.env.example). Core knobs:
 
 ### 📊 Prompt system
 
+> **地图**：25 个 task prompt 按"我想改什么行为"索引，见 [`prompts/README.md`](prompts/README.md)。
+> 每条都给了加载它的代码，改 prompt 不用拿不到入口。
+>
+> **提 PR**：[`CONTRIBUTING.md`](CONTRIBUTING.md) 有 5 条规矩，其中一条是"改行为要说清改前改后 bot 做了什么"。
+
 **Writing replies** (`prompt-builder`) stays 5 layers:
 
 | Layer | File | Purpose |
