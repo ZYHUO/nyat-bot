@@ -337,7 +337,7 @@
 | features | `SILENCE_ALERT_INTERVAL_MIN` | 5 | 5 | 扫描周期(分钟)。 |
 | features | `SILENCE_ALERT_MAX_PER_RUN` | 5 | 5 | 单轮最多告警几个 chat(防告警风暴)。 |
 | features | `SILENCE_ALERT_THRESHOLD_MIN` | 30 | 30 | bot 最后回复距今超过该分钟数 = 判定沉默。 |
-| features | `STEPFUN_SEARCH_API_KEY` | '' | mCv500Dxe2hrBrWoz4Zo2VivSn5llYY4lWzrMX7Q |  |
+| features | `STEPFUN_SEARCH_API_KEY` | '' | <redacted> |  |
 | features | `STEPFUN_SEARCH_BASE_URL` | 'https://api.stepfun.com' | https://api.stepfun.com/step_plan/v1 |  |
 | features | `STEPFUN_SEARCH_CATEGORY` | '' | — |  |
 | features | `STEPFUN_SEARCH_MAX_RESULTS` | 5 | — | stepfun 不认 max_results（恒返回 10 条），所以在客户端切。 |
@@ -352,17 +352,17 @@
 | infra | `ALLOWLIST_MAX_SUBMISSIONS_PER_DAY` | 20 | 20 |  |
 | infra | `ALLOWLIST_REDIS_PREFIX` | 'xxb:mal:' | xxb:mal: |  |
 | infra | `BOT_NICKNAMES` |  | 啾咪囝,啾咪 |  |
-| infra | `BOT_TOKEN` |  | 8392759490:AAGBDKIKf9tlJ-PfZSHznuu2p2v0u | Telegram |
+| infra | `BOT_TOKEN` |  | <redacted> | Telegram |
 | infra | `BOT_USERNAME` | 'xxb_bot' | hunhebi_bot |  |
 | infra | `CHANNEL_SOURCE_IDS` |  | — | Channel source IDs — channel posts from these channels are ingested into ChromaDB as knowledge |
 | infra | `CHANNEL_SOURCE_USERNAMES` |  | zaihuapd | Public channel usernames to scrape (no admin needed, uses t.me/s/ web page) |
-| infra | `COMMON_API_KEY` |  | 74be0b744820a1501488f99b558f71d61c199f56 |  |
+| infra | `COMMON_API_KEY` |  | <redacted> |  |
 | infra | `CONTEXT_MAX_LENGTH` | 600 | 400 |  |
 | infra | `FETCH_GATEWAY_URL` |  | — |  |
 | infra | `FETCH_WORKER_URL` |  | — |  |
 | infra | `FIRECRAWL_API_KEY` |  | self-hosted | Firecrawl 兜底:JS 重页面 / Cloudflare 验证页,免费路由(直连/Jina/本地绕过) 全失败后才落到这条付费路由。未配 KEY → 默认关,不发任何 Firecrawl 调用。 |
 | infra | `FIRECRAWL_API_URL` | 'https://api.firecrawl.dev' | http://127.0.0.1:3002 |  |
-| infra | `GEMINI_API_KEY` |  | AIzaSyDxs8XRVUzn2-HqA6x73L97qjxXc-qodJo | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2. |
+| infra | `GEMINI_API_KEY` |  | <redacted> | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2. |
 | infra | `GEMINI_SEARCH_MODEL` | 'gemini-2.5-flash-lite' | gemini-2.5-flash-lite |  |
 | infra | `GEMINI_SEARCH_PROXY` |  | http://127.0.0.1:1081 | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/Firecrawl 等本地连接被绕)。 |
 | infra | `GLOBAL_FETCH_PROXY` |  | http://127.0.0.1:1081 | KVM 等受限网络：设 GLOBAL_FETCH_PROXY 后，所有外网 fetch 经 undici ProxyAgent 走代理（Telegram Bot API / LLM / Gemini / web-fetch），本地地址自动直 |
@@ -398,7 +398,7 @@
 | infra | `VIDEO_DESCRIBE_MAX_TOKENS` | 2000 | 2000 | reasoning 计入 completion:给小了会拿到空正文(实测 max_tokens=400 → 空)。 |
 | infra | `VIDEO_DESCRIBE_TIMEOUT_MS` | 120_000 | 120000 |  |
 | infra | `VIDEO_MAX_DURATION_SEC` | 300 | 300 | 视频时长硬上限（秒）。模型侧 5 分钟；Telegram 侧还有更紧的 20MB 下载上限 （代码里 MAX_MEDIA_BYTES=10MB），5 分钟视频几乎必然超——所以现实里能描述的 是短视频。超限的不下载，直接给带时长的中性占位。 |
-| infra | `WEBHOOK_SECRET` |  | 2a6242aa7e21c38b6982a7fe8e7a0159c678c4e2 |  |
+| infra | `WEBHOOK_SECRET` |  | <redacted> |  |
 | infra | `WEBHOOK_URL` |  | — | Webhook (optional — use polling if not set) |
 | infra | `WEB_FETCH_USER_AGENT` | 'XXB-WebFetch/1.0' | XXB-WebFetch/1.0 |  |
 | infra | `XAI_API_KEY` |  | — |  |
@@ -430,7 +430,7 @@
 | life | `DM_GREET_AFFINITY_MIN` | 40 | — |  |
 | life | `DM_GREET_MAX_USERS` | 2 | — |  |
 | life | `DM_PROACTIVE_COOLDOWN_HOURS` | 20 | — |  |
-| life | `MONITOR_TOKEN` | '' | xxb2026monitor | Monitor |
+| life | `MONITOR_TOKEN` | '' | <redacted> | Monitor |
 | life | `MOOD_DECAY_RATE_PER_HOUR` | 0.3 | — | 每小时衰减比例 (0..1)。0.3 = 1 小时后保留 70% 强度 |
 | life | `MOOD_INJECT_THRESHOLD` | 20 | 20 | \|valence\| < 该阈值时不注入 prompt（默认 calm 不打扰） |
 | life | `NYATOS_BUDGET_MAX_ACTS` | 6 | 6 |  |
@@ -545,7 +545,7 @@
 | timing | `TRENCH_BURST_WINDOW_SEC` | 3600 | 3600 |  |
 | timing | `TRENCH_DEBT_ATTENTION_BOOST` | 0.5 | 3.0 |  |
 | timing | `TRENCH_ENVELOPE_MODE` | 'off' | enforce | 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进 CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与—— 2026-09-19 真人对比分析定为此为"差一口气 |
-| timing | `TYPESAFE_API_KEY` | '' | apikey_218501f56bb4e8e247ee8af454adfae56 |  |
+| timing | `TYPESAFE_API_KEY` | '' | <redacted> |  |
 | timing | `TYPESAFE_ENDPOINT` | 'https://api.typesafe.ai/v1/systemone' | https://api.typesafe.ai/v1/systemone | TypeSafe System One 接入。/v1/systemone；key 是 secret（.env，勿提交）。 |
 | timing | `TYPESAFE_MODEL` | 'jev-latest' | jev-latest |  |
 | turn | `ANTI_REPEAT_THRESHOLD` | 0.85 | — |  |
@@ -617,7 +617,7 @@
 
 | key | 段 | .env | 说明 |
 |---|---|---|---|
-| `GEMINI_API_KEY` | infra | AIzaSyDxs8XRVUzn2-HqA6x73L97qjxXc-qodJo | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 k |
+| `GEMINI_API_KEY` | infra | <redacted> | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 k |
 | `GEMINI_SEARCH_MODEL` | infra | gemini-2.5-flash-lite |  |
 | `GEMINI_SEARCH_PROXY` | infra | http://127.0.0.1:1081 | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/ |
 | `PHP_WEBHOOK_URL` | life | — |  |
