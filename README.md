@@ -362,7 +362,7 @@ src/
 ├── eval/                 # long-horizon runner + agency canary
 └── tracking/             # activity + mood + relations + reputation + ASI + outcomes
                           #   + self-history (own acts with outcomes) + repair + open-threads
-prompts/                  # AI prompt templates (Markdown)
+prompts/                  # AI prompt templates (Markdown) — see prompts/README.md for the map
 ├── identity/             #   persona: persona.md + behavior-style.md (reply or not)
 ├── safety/               #   guardrails
 ├── contract/             #   output formats (JSON Schema)
