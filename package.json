@@ -21,7 +21,8 @@
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
-    "demo": "tsx scripts/demo.mts"
+    "demo": "tsx scripts/demo.mts",
+    "measure:voice": "tsx scripts/measure-voice.mts"
   },
   "engines": {
     "node": ">=22.0.0 <23"
