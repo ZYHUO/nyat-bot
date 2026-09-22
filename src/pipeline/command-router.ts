@@ -158,7 +158,8 @@ async function classify(text: string, chatId: number, ready: BotCommandProfile[]
   try {
     const r = await callWithFallback({
       usage: 'judge',
-      maxTokens: 80,
+      // round 26: 去掉写死的 maxTokens: 80 —— 这是全部里最小的一个,
+      // reasoning 模型的思维链连 80 的零头都不到。同 round 19/26 一路。
       temperature: 0,
       // round 4：原来没设 maxTimeoutMs，用 judge usage 自己的 45s。它 await 在
       // `tryMetaIngressIntercepts` 的**同步路径**上——排在 sleep gate **之前**

@@ -82,7 +82,6 @@ export async function runRewardGate(
           { role: 'system', content: system },
           { role: 'user', content: user },
         ],
-        maxTokens: 120,
         temperature: 0,
       }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), REWARD_GATE_TIMEOUT_MS)),
