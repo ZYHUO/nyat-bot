@@ -98,8 +98,25 @@ export async function generateReplyWithTools(input: ReplyWithToolsInput): Promis
         messages: input.messages as Parameters<typeof generateText>[0]['messages'],
         tools,
         maxSteps,
-        maxTokens: usage.maxTokens,
-        temperature: input.temperature ?? usage.temperature ?? 0.8,
+        // round 6（新 goal）：**label.temperature 优先于一切**。
+        //
+        // 2026-09-22 线上实测：`/checkin` 走合并写手 → dshkimi 报
+        //   `invalid temperature: only 1 is allowed for this model`
+        // 9.66s 后 `Merged tool-writer exhausted labels, fall back to legacy`，
+        // 用户等到 92 秒才收到回复（群里当场有人吐槽"一卡一卡的体验严重不行"）。
+        //
+        // 根因：这条路**不经过 callModel**（文件头注释写明"直接走 AI SDK 的
+        // generateText"），所以 provider.ts 里三处 `label.temperature ?? opts.temperature`
+        // 的强制覆盖拦不到它。而 `usage.temperature`（labels.ts 的 reply_tools 默认链）
+        // 没配 temperature，于是落到 0.8 —— dshkimi（kimi-for-coding）只接受 1。
+        //
+        // `AI_PROVIDER_DSHKIMI_TEMPERATURE=1` 早就配了、label.temperature 也确实
+        // 解析成 1（我验过），只是这条路径没读它。
+        //
+        // AILabel.temperature 的契约写的就是"per-label 强制覆盖(调用方显式值也让位)"，
+        // 这里补上尊重。maxTokens 同样：label.maxTokens 优先（同契约）。
+        maxTokens: label.maxTokens ?? usage.maxTokens,
+        temperature: label.temperature ?? input.temperature ?? usage.temperature ?? 0.8,
         abortSignal: mergeAbortSignals(usage.timeout, input.signal),
       });
 
