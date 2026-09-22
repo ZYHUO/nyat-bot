@@ -133,8 +133,8 @@ describe('post-task window', () => {
     expect(task.contentDirection).toContain('禁止复读');
 
     // trigger + 缓冲消息全部标 answered(防 Meta 双回)
-    expect(redisStore.get(`xxb:meta:answered:${CHAT}:1001`)).toBe('1');
-    expect(redisStore.get(`xxb:meta:answered:${CHAT}:1002`)).toBe('1');
+    expect(redisStore.get(`xxb:meta:answered:${CHAT}:1001`)).toMatch(/^\d+(,\d+)*$/);
+    expect(redisStore.get(`xxb:meta:answered:${CHAT}:1002`)).toMatch(/^\d+(,\d+)*$/);
   });
 
   it('judge=false → 不 dispatch、不标 answered', async () => {

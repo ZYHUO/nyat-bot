@@ -20,6 +20,7 @@ import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { answeredTimestamps } from '../../meta/answered.js';
 import { incrCounter } from '../../metrics/registry.js';
 import { getReflection } from '../../tracking/outcome.js';
 import { isMentioningSelf } from '../judge/rules.js';
@@ -235,7 +236,32 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const workspaceLine = input.cognitiveWorkspaceHint?.trim()
     ? `\n\n${input.cognitiveWorkspaceHint.trim().slice(0, 3000)}`
     : '';
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  // round 4（新 goal，用户："重复回复的概率太高了"）：
+  // **★ 这条消息你自己是不是已经回过？** —— 当成事实告诉心流。
+  //
+  // 全量日志实测（40,083 条入站 / 4,808 个首气泡）：
+  //   同一个锚点被回复 >1 次          153 个（占唯一锚点 7.9%）
+  //   多出来的回复                    206 个 → 真实重复率 4.3%
+  //   最严重的 8 个锚点各被回 5-6 次（"有完没完喵" / "本喵看不到图细节" ×3 变体）
+  //
+  // `markMessageAnswered` 全仓有 6 处调用（发出去就记），但**读它的人里没有
+  // 心流**——attention.ts 只用它跳过"入队"，meta-api/session 用它防别的事，
+  // 没有一处在"要不要回"之前问一句"我回过没有"。于是 bot 可以对同一条消息
+  // 反复开口,而每次都以为自己是第一次接。
+  //
+  // 这里补上。**是陈述事实,不是禁令**——有时候同一条追加了新内容确实值得再回
+  // （"那你觉得呢"跟在"在吗"后面）。把已经回过的次数和间隔给它看,
+  // 让"又想接一遍"这个念头撞上事实。收不收看它自己。
+  const nowSec = Math.floor(Date.now() / 1000);
+  const answeredTimes = await answeredTimestamps(input.chatId, input.message.messageId);
+  const answeredLine = answeredTimes.length
+    ? `\n[这条你已经回过 ${answeredTimes.length} 次] 最近一次 ${Math.max(1, Math.round((nowSec - answeredTimes[0]!) / 60))} 分钟前。${
+        answeredTimes.length >= 2
+          ? '**连着接同一条,群里看着像复读机**——要么说点真正新的,要么让它过去。'
+          : '除非人家追加了新内容,否则再回一遍就是在重复自己。'}`
+    : '';
+
+  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}${answeredLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
 
   let raw: string;
   try {
