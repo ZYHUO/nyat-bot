@@ -150,10 +150,19 @@ napEnd   = 835  → 北京 13:55 午睡结束
 - awake 段：北京 `wakeMin` → `sleepMin`，扣掉 nap 段
 - nap 段和 night 段一样，`metaSleepGate` 对 L2 非直呼直接 `silent`
 - `npm run measure:voice -- --since HH:MM` 的 **HH:MM 是 UTC**，比北京慢 8 小时
-  · 想量"起床后的 8 小时" → 北京 07:36 起 → **UTC 前一天 23:36**
-    → `--since 23:30`（带日期更稳：`--day 2026-09-22` 是 UTC 当天）
-  · round 23 我自己在这里绕过一次：把"北京 07:36"当成了"UTC 07:36"，
-    于是等一个 44 分钟后的时刻，其实它在 8 小时前
+- **`daySchedule(DATE)` 要的是北京日期**，不是 UTC 日期。UTC 22:50 时北京已经
+  是明天 —— 这个错让 round 23/24 连着绕了两次
+- 换算表（round 24 用真实时钟对过）：
+
+  | 想要 | 命令 |
+      |---|---|
+  | 今天起床后的全部   | `--day` 不用，直接 `npm run measure:voice`（脚本内部用 UTC 0 点切天） |
+  | 起床后到现在       | `--since` + UTC 时刻。北京 07:36 起床 → `--since 23:30`（**UTC 前一天**） |
+  | 今天北京哪天起的   | `npx tsx -e "import {daySchedule} from './src/tracking/life-state.js';console.log(daySchedule('<北京日期>'))"` |
+
+- 一条不会错的自检：`TZ=Asia/Shanghai date '+%m-%d %H:%M'` 和 `date -u '+%m-%d %H:%M'`
+  对着看。**北京 06:56 时 UTC 还是前一天 22:56** ——日期都不一样，
+  这个小时里所有"今天"都是有歧义的
 - 查今天的作息：
 
 ```bash
