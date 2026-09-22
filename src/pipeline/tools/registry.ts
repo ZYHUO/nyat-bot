@@ -35,6 +35,22 @@ export function preloadSkills(): Promise<void> {
   return _skillsLoading;
 }
 
+/**
+ * 已加载的 skill 名字列表（未加载/没配目录时返回空数组）。
+ *
+ * round 37（新 goal，用户："bot 的功能扩展"）加的。起因：round 21 给仓库
+ * 带了 8 个零配置 skill，但 `/help` 的文本是**手写死的**，一个都没列 ——
+ * 群里没人知道 bot 会查 IP / 查币价 / 随机狗图。功能加了，入口没给。
+ *
+ * 注意它读的是启动时缓存的 `_skillsCache`：skill 是**冷加载**的
+ * （`loadSkills` 只在 `preloadSkills()` 时跑，docs/skills.md 说的"热重载"
+ *  指的是那次调用会重读目录）。所以新加的 skill 要下次重启才出现在这里。
+ *  这是已知限制，写清楚比让它看起来是热的要好。
+ */
+export function listLoadedSkillNames(): string[] {
+  return _skillsCache ? Object.keys(_skillsCache).sort() : [];
+}
+
 function buildSchemasAndTools(
   chatId: number,
   userId: number,

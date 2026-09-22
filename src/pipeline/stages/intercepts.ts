@@ -124,7 +124,7 @@ export async function dispatchCommand(
   // /help — list all features
   if (cmd === "/help") {
     const { buildHelpText } = await import("../../bot/handlers/help.js");
-    await sender.sendDirect(chatId, buildHelpText(), formatted.messageId);
+    await sender.sendDirect(chatId, await buildHelpText(), formatted.messageId);
     return true;
   }
 

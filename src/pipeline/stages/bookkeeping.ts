@@ -141,7 +141,7 @@ export async function runBookkeeping(ctx: {
     redis.set(onboardKey, '1', 'NX').then(async (set) => {
       if (set === null) return; // already onboarded
       const { buildOnboardingText } = await import('../../bot/handlers/help.js');
-      await sender.sendDirect(job.chatId, buildOnboardingText(), formatted.messageId).catch((err) => logger.debug({ err, chatId: job.chatId }, 'onboarding send failed (non-critical)'));
+      await sender.sendDirect(job.chatId, await buildOnboardingText(), formatted.messageId).catch((err) => logger.debug({ err, chatId: job.chatId }, 'onboarding send failed (non-critical)'));
     }).catch((err) => logger.debug({ err }, 'Onboarding check failed (non-critical)'));
   }
 
