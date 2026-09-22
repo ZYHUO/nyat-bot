@@ -71,8 +71,12 @@ export interface EnvProvider {
   /** per-provider maxTokens 覆盖;给推理模型(如 mundo)单独放宽,防被小 maxTokens 截断成空。 */
   maxTokens?: number;
   /** per-provider temperature 强制覆盖(调用方显式值也让位):给只接受固定温度的模型
-   *  (如 kimi-k3 只允许 temperature=1,否则 400 invalid temperature)。 */
-  temperature?: number;
+   *  (如 kimi-k3 只允许 temperature=1,否则 400 invalid temperature)。
+   *
+   *  round 12（新 goal）：`'omit'` = 这个 provider **不要传 temperature 字段**。
+   *  dshkimi 实测：传 1 同 prompt 6 次翻 1 次，不传 6/6 一致。
+   *  见 AIImage.temperature / AILabel.temperature 的注释。 */
+  temperature?: number | 'omit';
   /** 声明是否支持图片输入(P2 多模态回复)。undefined=未知(照发,provider 自己拒);
    *  false=明确不支持(带图调用直接跳过该 label,不白烧一跳)。 */
   vision?: boolean;
@@ -306,7 +310,16 @@ export function getProviders(): Map<string, EnvProvider> {
       forceRaw: readBool(fields['RAW']),
       timeout: (() => { const n = fields['TIMEOUT'] ? parseInt(fields['TIMEOUT'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
       maxTokens: (() => { const n = fields['MAX_TOKENS'] ? parseInt(fields['MAX_TOKENS'], 10) : NaN; return Number.isFinite(n) && n > 0 ? n : undefined; })(),
-      temperature: (() => { const n = fields['TEMPERATURE'] ? parseFloat(fields['TEMPERATURE']) : NaN; return Number.isFinite(n) ? n : undefined; })(),
+      // round 12（新 goal）：支持字面量 `omit` —— 这个 label 不要传 temperature 字段。
+      // dshkimi 实测：传 1 → 同 prompt 6 次翻 1 次；不传 → 6/6 一致。
+      // 详见 AILabel.temperature 的注释。
+      temperature: (() => {
+        const raw = fields['TEMPERATURE'];
+        if (!raw) return undefined;
+        if (raw.trim().toLowerCase() === 'omit') return 'omit' as const;
+        const n = parseFloat(raw);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
       vision: readBool(fields['VISION']),
       video: readBool(fields['VIDEO']),
       tier: (fields['TIER'] === 'high' || fields['TIER'] === 'low') ? fields['TIER'] : (fields['TIER'] === 'medium' ? 'medium' : undefined),

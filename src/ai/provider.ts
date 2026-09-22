@@ -97,6 +97,23 @@ export function __resetTruncatingLabelsForTest(): void {
  * 而 judge/summarize/reflection 的默认 label 正是它们。按模型名认，
  * 不硬编码 label 名单——label 会增删，模型名不会。
  */
+/**
+ * 解析"这次调用该传什么 temperature"。三态：
+ *   · label.temperature 是数字     → 用它（per-label 强制覆盖，调用方显式值也让位）
+ *   · label.temperature === 'omit' → 返回 undefined，调用方别把 temperature 放进 body
+ *   · 否则                        → opts.temperature
+ *
+ * round 12（新 goal）加。dshkimi 传 1 会引入不确定性（同 judge prompt 6 次翻 1 次），
+ * 不传反而 6/6 一致——详见 AILabel.temperature 的注释。
+ */
+function resolveTemperature(
+  labelTemp: number | 'omit' | undefined,
+  optsTemp: number | undefined,
+): number | undefined {
+  if (labelTemp === 'omit') return undefined;
+  return labelTemp ?? optsTemp;
+}
+
 function isReasoningModel(label: AILabel): boolean {
   return /^step-/i.test(label.model);
 }
@@ -210,7 +227,7 @@ async function callClaudeOnce(
     ];
   }
 
-  const claudeTemp = label.temperature ?? opts.temperature;
+  const claudeTemp = resolveTemperature(label.temperature, opts.temperature);
   if (claudeTemp !== undefined) body['temperature'] = claudeTemp;
 
   const res = await fetch(`${label.endpoint}/messages`, {
@@ -379,7 +396,7 @@ async function callOpenAIRaw(
     messages: messages.map(m => ({ role: m.role, content: serializeContent(m.content) })),
   };
   if (opts.maxTokens != null) body['max_tokens'] = opts.maxTokens;
-  const rawTemp = label.temperature ?? opts.temperature;
+  const rawTemp = resolveTemperature(label.temperature, opts.temperature);
   if (rawTemp != null) body['temperature'] = rawTemp;
   if (opts.stream) body['stream'] = true;
   if (label.reasoningEffort) body['reasoning_effort'] = label.reasoningEffort;
@@ -678,7 +695,9 @@ async function callModelInner(
       model: provider(label.model),
       messages: messages as Parameters<typeof generateText>[0]['messages'],
       maxTokens: opts.maxTokens,
-      temperature: label.temperature ?? opts.temperature,
+      // round 12：omit 时整个字段都不给（AI SDK 的 generateText 对 undefined
+      // 就是不传该字段，实测 dshkimi 这条路走得通）。
+      temperature: resolveTemperature(label.temperature, opts.temperature),
       abortSignal: mergeAbortSignals(opts.timeout, opts.signal),
     });
 

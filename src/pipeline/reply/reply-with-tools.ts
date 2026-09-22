@@ -116,7 +116,10 @@ export async function generateReplyWithTools(input: ReplyWithToolsInput): Promis
         // AILabel.temperature 的契约写的就是"per-label 强制覆盖(调用方显式值也让位)"，
         // 这里补上尊重。maxTokens 同样：label.maxTokens 优先（同契约）。
         maxTokens: label.maxTokens ?? usage.maxTokens,
-        temperature: label.temperature ?? input.temperature ?? usage.temperature ?? 0.8,
+        // round 12：与 provider.ts 的 resolveTemperature 同语义——'omit' 时不给字段。
+        temperature: label.temperature === 'omit'
+          ? undefined
+          : (label.temperature ?? input.temperature ?? usage.temperature ?? 0.8),
         abortSignal: mergeAbortSignals(usage.timeout, input.signal),
       });
 

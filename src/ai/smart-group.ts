@@ -462,7 +462,13 @@ export async function smartGroupAutoAssign(usageName: string): Promise<string[]>
     // 不排除的后果：`label.temperature ?? opts.temperature` = 1 ?? 0 = 1，
     // judge 拿到随机性；而 env 里配的 `stepfun <- stepfunjudge` 被整体旁路，
     // 专用 label `stepfunjudge` 零调用。
-    if (profile.requiresDeterministic && label.temperature !== undefined) continue;
+    // round 12：**只有 temperature 是数字才算"锁死"**。
+    //
+    // round 9 写成 `!== undefined`，那时 label.temperature 只有 number|undefined
+    // 两态，等价于"配了就是锁死"。round 12 加了第三态 `'omit'`（不传该字段），
+    // omit 的 provider 恰恰**更**确定——dshkimi 实测传 1 同 prompt 6 次翻 1 次，
+    // 不传 6/6 一致。所以 omit 不该被挡，它比传固定温度更符合确定性语义。
+    if (profile.requiresDeterministic && typeof label.temperature === 'number') continue;
     // vision 现在和 video 同向：**没声明 true 的一律排除**。
     //
     // 2026-09-21 改。旧写法是 `=== false`（只排除显式声明不支持 vision 的），

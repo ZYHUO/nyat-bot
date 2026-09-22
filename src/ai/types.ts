@@ -19,9 +19,27 @@ export interface AILabel {
   timeout?: number;
   /** per-label maxTokens 覆盖(给推理模型放宽,防截断成空);调用方显式 maxTokens 优先。 */
   maxTokens?: number;
-  /** per-label temperature 强制覆盖(调用方显式值也让位):只接受固定温度的模型用
-   *  (如 kimi-k3 只允许 temperature=1)。 */
-  temperature?: number;
+  /**
+   * per-label temperature 强制覆盖(调用方显式值也让位):只接受固定温度的模型用
+   * (如 kimi-k3 只允许 temperature=1)。
+   *
+   * round 12（新 goal）：**新增 `'omit'`** —— 这个 label 不要传 temperature 字段。
+   *
+   * 2026-09-22 实测 dshkimi（kimi-for-coding）：
+   *   temperature=0    → 400 `invalid temperature: only 1 is allowed`
+   *   temperature=0.7  → 403（连续调用触发限流，非参数问题）
+   *   temperature=1    → 200，但**同一个 judge prompt 6 次里 1 次翻车**（reply×5/pass×1）
+   *   不传该字段       → 200，同 prompt 6 次**全部一致**（reply×6），中位 4109ms
+   *
+   * 也就是说"只接受 1"不等于"必须传 1"——**省掉字段让它用服务端默认**，
+   * 比强行传 1 更确定。round 9 我用"只接受 1 ⇒ judge 有 temperature=0 语义冲突"
+   * 把它从确定性 usage 里排掉了，那个判断漏了"omit"这个选项。
+   *
+   * 为什么这重要：dshkimi 是池子里**唯一跨账号且够快**的 provider
+   * （api.kimi.com，中位 4.1s）。排掉它之后 judge 只剩 api.stepfun.com 的
+   * stepfun + step5 —— 单账号，账号级劣化会同时打中两个。
+   */
+  temperature?: number | 'omit';
   /**
    * 能力声明。undefined = 未知（**保留**，不因此排除——本仓库多数 provider
    * 没声明过，一律按"没声明"处理，只有显式 false 才排除）。
