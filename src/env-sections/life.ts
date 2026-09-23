@@ -113,9 +113,27 @@ export const lifeSection = {
   //   5 分钟窗 p50=2 / p90=8 / p99=15 / max=20
   // 最忙群平均 19.4 条/小时。用户原话："日常都有点过高频率"。
   //
-  // 比主动发言的 90s 松得多（默认 30s）：无视直接提问是另一种失败，这里只要
+  // 比主动发言的 90s 松得多（默认 8s）：无视直接提问是另一种失败，这里只要
   // 削掉"5 秒内连回三个人"那种机器形状，不是要 bot 装死。0 = 关闭。
-  NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC: z.coerce.number().int().min(0).max(3600).default(30),
+  //
+  // **round 68 从 30 改到 8**（用户："bot 还是很难融入话题 / 前言不搭后语"）。
+  //
+  // 实测（2026-09-23，host sendText BLOCKED by trench gate 全量）：
+  //   1116 次回复被吞，why=just_answered 占 1096 次（98%）
+  //        part1/1 555 (49%)  ← 整条回复没了，群里什么都没看到
+  //        part2/3 240 (21%)  ← 第 1 片发了第 2 片被吞 → 半句话
+  //        part2/2 166 (14%)
+  //        part1/3  99 ( 8%)  ← 三分句只发后两片，更怪
+  //
+  // 09-23 当天：想发 543 次 / 实际发出 365 次 → **33% 的回复被咽回去**。
+  // 而 just_answered 的文案是"你 X 秒前才回过话，连得太密了"——
+  // 30s 的间隔对被叫到的消息太长了：群聊里三个人连着问三个问题是常态，
+  // bot 回第一个就被锁 30 秒，剩下两个都咽掉。
+  //
+  // 8s 的理由：足够削掉真正的机器连发（同一秒回三个人），又不至于
+  // 把正常的连续提问锁死。被叫到的消息本就该答——那是 round 3 就明确的
+  // "无视提问是另一种失败"。
+  NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC: z.coerce.number().int().min(0).max(3600).default(8),
 
   // ── Relationship narrative (Stage F): 每对 (chat,user) 累计 affinity ──
   RELATIONSHIP_ENABLED: booleanFromEnv.default(false),
