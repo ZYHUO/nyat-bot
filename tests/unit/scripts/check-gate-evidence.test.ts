@@ -45,6 +45,18 @@ describe('gate:evidence 脚本', () => {
     expect(p).toContain('scripts/check-gate-evidence.sh');
   });
 
+
+  it('⑦ 被拦的具体内容单独列出（round 131：否则拦截看不见）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    expect(s).toContain('最近被①拦下的');
+    expect(s).toContain('anchor=%s recent=%s');
+  });
+
+  it('⑥ 的注释记着 round 123 的误判（别再把"没拦"当"没发生"）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    expect(s).toContain('round 123');
+    expect(s).toContain('闸自己的日志是它动作的唯一观测点');
+  });
   it('⑥ 语法是合法的 bash', () => {
     const { execSync } = require('node:child_process');
     execSync('bash -n ' + SRC);
