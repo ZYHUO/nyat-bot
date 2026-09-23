@@ -2191,6 +2191,9 @@ host 侧上限在操作手册的第 3 桡）。
 [`docs/OBJECTIVE-STATUS.md`](docs/OBJECTIVE-STATUS.md)——那是同一件事的另一半：
 哪些问题有数字、数字是多少、哪些决定需要人拍板。两份合起来是完整答卷。
 
+**正在进行的事**在 [`docs/plan-reply-behaviour.md`](docs/plan-reply-behaviour.md)
+（2026-09-23 起：修"不会用别的 bot"和"说话太应激"，含根因、每步的实装位置和验收）。
+
 ## ⭐ If this is the kind of thing you wish existed
 
 A star is genuinely useful here: this repo has no homepage, no listing, no post anywhere.
