@@ -82,3 +82,34 @@
 或者看 `logs/voice-daily.log` 里每晚 23:00 的 cron 日报。
 
 **规则**：这份表回答"还没解决什么"和"为什么难"，不回答"现在是多少"。
+
+---
+
+## 八个守卫（都验过能红，别再重验）
+
+这个仓的"没人守着的规则"已经被守卫覆盖。**每一个都在 2026-09-23 验过
+"故意弄坏 → 测试红"**（round 145 逐条做的）。
+
+| 守卫 | 抓什么 | 在哪 |
+|---|---|---|
+| `no-dead-switches` | 开着但没人读的 env flag | `tests/unit/env/` |
+| `verify-deploy` | 改动没进 bundle | `scripts/verify-deploy.mts` |
+| `verify-integration` | 单独绿、组合坏 | `scripts/verify-integration.mts` |
+| `doc-references-exist` | 文档引用腐烂 | `tests/unit/docs/` |
+| `census-is-current` | flag 索引过期 | `tests/unit/env/census-is-current.test.ts` |
+| `objective-tools-exist` | 结论文档里捏造的工具名 | `tests/unit/docs/objective-tools-exist.test.ts` |
+| `check-gate-evidence` ⑦⑧ | 闸的明细被删 / 日报缺仪表盘 | `tests/unit/scripts/check-gate-evidence.test.ts` |
+| `measure-*` 的警示行 | 仪表盘丢了口径免责声明 | `tests/unit/scripts/measure-*.test.ts` |
+
+**两条关于守卫自己的教训**（都是这个 goal 付过学费的）：
+
+1. **`toContain` 一个字面量区分不了"机制在"和"注释提到"**（round 140/141/142）。
+   断言要查**未注释的代码行 / console.log 输出行**，而且必须逐条 `-t` 单跑验红——
+   "整份文件是红的"会遮住单条的假绿。
+2. **验红时弄坏的那一下要弄对地方**（round 145）。我两次 tamper 错文件/错链接，
+   差点把好守卫记成假绿。**先读测试再 tamper。**
+
+Circular dependency warning: `check-gate-evidence` 的测试 ⑦⑧ 断言的是
+`scripts/voice-daily.sh` 的内容，而那个脚本是**生成日报的**——如果哪天日报
+改成别的方式生成，这两条会静默失去意义（它们查的是脚本文本，不是日报本身）。
+真要看日报本身，读 `logs/voice-daily.log` 的最新条目。

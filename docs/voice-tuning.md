@@ -2492,8 +2492,8 @@ Round 142 的教训是"必须逐条断言验红"。这轮把剩下的守卫都�
 
 | 守卫 | 能红吗 | 怎么验的 |
 |---|---|---|
-| `doc-references-exist` | ✅ | 往 voice-tuning.md 塞 `src/does/not-exist-xyz.ts` → 红 |
-| `landing-page-links` ④ | ✅ | `../docs/skills.md` → `skills-MISSING.md` → 红 |
+| `doc-references-exist` | ✅ | 往 voice-tuning.md 末尾塞一条不存在的 src 路径引用 → 红 |
+| `landing-page-links` ④ | ✅ | 把页面上一个真实相对链接（docs/skills.md）改名 → 红 |
 | `landing-page-links` ⑤ | ✅ | `id="try"` → `id="tryX"` → 红 |
 | `check-gate-evidence` ⑦⑧ | ✅ | round 141/142 已验 |
 | `measure-*` 守卫 | ✅ | round 140/142 已验 |
@@ -2506,7 +2506,7 @@ Round 142 的教训是"必须逐条断言验红"。这轮把剩下的守卫都�
 读测试发现它**有意排除 README**，注释写得很清楚（README 的 `src/` 目录树图会误报）。
 **先读测试再下结论**，这次是读测试救了我。
 
-**② 我改 `docs/landing.html`，landing 测试没红。** 因为它的 `PAGE` 常量是
+**② 我改 website/index.html（我 tamper 错了文件），landing 测试没红。** 因为它的 `PAGE` 常量是
 `website/index.html`——我 tamper 了不存在的文件。而第一次 tamper
 `skills.html` 也没生效，因为页面上没有这个链接（真实链接是 `../docs/skills.md`）。
 
