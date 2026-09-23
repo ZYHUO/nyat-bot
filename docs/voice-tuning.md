@@ -2711,3 +2711,39 @@ Meta heart: pass       13157 次
 
 前三次我都改文档绕开（"别用反引号包路径"），第四次才修守卫。
 **绕开第三次就该意识到：不是作者的问题，是守卫的清单漏了一层。**
+
+---
+
+## round 75 家族系统扫：8 处防御性 debug，但只有 2 处真该可见（round 152）
+
+Round 75 抓到"截断重试走 debug 被过滤我排了十二项"。这个 goal 里陆续修了 5 处。
+这轮把全仓的防御性 `logger.debug` 扫一遍，问一句"它咽掉的是用户可感知的事吗"：
+
+```
+post-judge.ts:200  user hard-muted bot, skipping reply      ← 用户自己设的静音
+post-judge.ts:212  user soft-muted bot, skipping proactive  ← 同上
+context/manager.ts:85  skip NyatDB append (no messageId)    ← 市局
+planner/agentic-loop.ts:75  skipping cooled-down label       ← 市局
+reply-with-tools.ts:81  tool-writer: skip (cooling)          ← 市局
+pipeline.ts:61  Skipping non-formattable update             ← 市局
+pipeline.ts:67  Skipping own message                        ← 市局
+vision.ts:114  Skipping animated sticker                    ← 市局
+```
+
+**只有前两个是用户可感知的**（用户设了别理我，bot 照办——不出声是正确行为，
+但"为什么没回我"这类问题全靠它）。今天实测两条都 0 次，所以不是当下的问题。
+
+**其余 6 处是市局优化**（跳过不必要的工作），不需要吵。**所以 round 75 那个家族
+到这里就扫完了**——它不是"到处都有"，是集中在 LLM 失败那几个点上，而那五个已修。
+
+### 结论：这一族结案
+
+| 已修 | round |
+|---|---|
+| provider.ts 截断重试 | 75 |
+| stickers.pick 空 fileId | 77 |
+| reflection 计数器 | 78 |
+| 代发 guard | 84 |
+| 撞名守卫 | 87 |
+| Meta react 未送达 | 94 |
+| **本轮扫完剩余 8 处，确认只有 2 处该可见且当前 0 触发** | **152** |
