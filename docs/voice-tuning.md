@@ -4112,3 +4112,59 @@ SKIP 不是终点，是一个分类。
 
 现在这 7 个 SKIP 每一个都答得上。而 round 50 那批 15 个 SKIP 也都能
 按这三类归位（行为类占多数）。
+
+---
+
+## 同形多处的最后一个洞也修了：findIndex 类锚点要**向后**开窗口（round 59）
+
+Round 58 剩的洞：`send-log-has-taskid` 仍 GREEN。查出来是我窗口方向错了。
+
+```
+测试的写法：lines.findIndex(l => l.includes("'host sendText'"))  → logIdx = L1227
+            for (i = logIdx - 1; i >= 0; i--) 往上找 logger.info
+判据区域 = [open, logIdx+1]     ← 在 anchor 的**前面**
+我的窗口： [anchor, anchor+900]  ← 只往后开
+```
+
+而 `taskId: opts.taskId ?? null` 在 **L1224**（msg 行上面 3 行）——向后开的窗口
+覆盖不到，于是脚本 tampers 了窗口外的另一处（L1233 continuation）。
+
+修法：findIndex 类锚点开**向后**窗口 `[i-1200, i+200]`。
+（indexOf 类仍向前，那才是"从某处开始看后面"。）
+
+改完：
+
+```
+send-log-has-taskid            RED ✓
+```
+
+### 本 session 新守卫的终态（7 个）
+
+```
+RED  3   cooldown-armed-log / no-duplicate-current-numbers / send-log-has-taskid
+SKIP 4   3 behavioural（import 真调，天然有保证）
+         1 script/string（flag-census-no-orphan-section，round 50 抓过它①恒真）
+GREEN 0
+```
+
+**从 round 54 的「RED 13 / GREEN 7 / SKIP 15」到现在这 7 个 RED 3 / GREEN 0 / SKIP 4
+（其中 3 个 SKIP 是正确的），tamper-audit 的选点从"最长字符串"进步到
+"测试自己的 slice 方向"**——四轮打磨：
+
+| 轮 | 选点策略 |
+|---|---|
+| 54 | 最长的字面量（7 个 GREEN，6 个是选点错） |
+| 55 | 测试自己的 slice 窗口（仍错同形多处） |
+| 58 | markdown：所有处一起改 |
+| **59** | **findIndex 锚点向后开窗口** |
+
+### 归档：定位类工具的三个方向问题
+
+```
+1. 选错字符串     → 从"断言它的那个 it 块"取（round 58）
+2. 选错位置       → 按测试的 slice 方向开窗口（round 59）
+3. 选错份数       → 文档类要改所有处；代码类不能（round 58）
+```
+
+三个我都犯过，而且**每一个都是"测试是好的、工具是瞎的"**。
+所以工具的输出必须带它改的那一行——这句话 round 55 就写了，这轮又验证一次。

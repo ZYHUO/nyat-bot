@@ -58,25 +58,29 @@ function pickTarget(testFile: string): { src: string; needle: string; from: numb
   const lits = docLit ? [docLit] : [...s.matchAll(/to(?:Not)?Contain\(\s*'([^']{6,})'/g)].map((m) => m[1]!)
     .filter((lit) => (isDoc ? full.includes(lit) : true));
   const code = full.split('\n').filter((l) => !l.trimStart().startsWith('//'));
-  const anchors = [
-    ...[...s.matchAll(/\.(?:indexOf|lastIndexOf)\(\s*'([^']{4,})'/g)].map((m) => m[1]!),
-    // round 55: 原来的正则要求 `findIndex(` 和 `includes(` 在同一个 `[^)]*` 里，
-    // 而 `findIndex((l) => l.includes("X"))` 中间有另一个 `)`，匹配不上。
-    // 改成先找 findIndex 行、再在行内找 includes的参数。
+  // round 59: **findIndex 类的锚点要向后开窗口**。
+  // 测试往往是 `lines.findIndex(...)` 拿到一个行号，再
+  // `for (i = logIdx - 1; i >= 0; i--)` 往上找。所以断言的区域在
+  // anchor 的**前面**，不是后面。
+  // 现象：send-log-has-taskid 的 anchor `'host sendText'` 在 L1227（msg 行），
+  // 而要改的 taskId 在 L1224（它上面 3 行）——向后开 900 字符的窗口覆盖不到。
+  interface Anchor { text: string; backward: boolean }
+  const anchorList: Anchor[] = [
+    ...[...s.matchAll(/\.(?:indexOf|lastIndexOf)\(\s*'([^']{4,})'/g)].map((m) => ({ text: m[1]!, backward: false })),
     ...s.split('\n')
-      .map((l) => {
-        // `includes("'host sendText'")` 形状：双引号包单引号。
-        // `[^'"]{4,}` 遇到内部单引号就断，所以改取行内所有引号字符串。
+      .filter((l) => l.includes('findIndex('))
+      .flatMap((l) => {
         const sq = [...l.matchAll(/'([^']{4,})'/g)].map((m) => m[1]!);
         const dq = [...l.matchAll(/"([^\"]{4,})"/g)].map((m) => m[1]!);
-        return [...sq, ...dq];
-      })
-      .flat()
-  ].filter((a) => code.some((l) => l.includes(a)));
+        return [...sq, ...dq].map((t) => ({ text: t, backward: true }));
+      }),
+  ].filter((a) => code.some((l) => l.includes(a.text)));
   const windows: Array<[number, number]> = [];
-  for (const a of anchors) {
-    const i = full.indexOf(a);
-    if (i > 0) windows.push([i, i + 900]);
+  for (const a of anchorList) {
+    const i = full.indexOf(a.text);
+    if (i <= 0) continue;
+    // 向后开窗口（indexOf 形状）还是先向后看再往前（findIndex 形状）
+    windows.push(a.backward ? [Math.max(0, i - 1200), i + 200] : [i, i + 900]);
   }
   const inWindow = (lit: string): boolean => {
     if (windows.length === 0) return true;
