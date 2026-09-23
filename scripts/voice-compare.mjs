@@ -49,7 +49,6 @@ function run(v) {
     heart: grab('② 心流四态'),
     dup: grab('③ 重复回复率'),
     collision: grab('④ 撞名守卫'),
-    gate: grab('⑤ 睡眠门'),
     totalIn: out.match(/message in\s+(\d+)/)?.[1] ?? '?',
     rows,
   };
