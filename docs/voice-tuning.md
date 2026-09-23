@@ -445,4 +445,4 @@ src/meta/dispatch-gate.ts         1 处   ← 但那是 no_action 分支（没�
 
 全天 1.9% 是因为多数重复发生在 Subagent 路径（mark 覆盖到的那部分）；
 心流路径一旦重复就完全没拦。**这不是"修完了"，是一个待补的缺口。**
-修它要动发送公共出口（`sender/telegram.ts` 或 pipeline 的 deliver 段）。
+修它要动发送公共出口（`src/bot/sender/telegram.ts`）。**round 52 已经修了**；那时还没动手。

@@ -278,12 +278,39 @@ export async function sendMessage(
     recordSpeech();
     recordBotReply(chatId);
     recordConnectivityWindow(chatId, first, Math.floor(Date.now() / 1000));
+    // 同上：分片路径的第一片也带 anchor，一样要标。
+    if (replyToId && replyToId > 0) {
+      void import('../../meta/answered.js')
+        .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
+        .catch(() => { /* telemetry never breaks the send path */ });
+    }
     return first;
   }
   const messageId = await sendMarkdownOnce(chatId, shards[0]!, text, replyToId, messageThreadId);
   recordSpeech();
   recordBotReply(chatId);
   recordConnectivityWindow(chatId, messageId, Math.floor(Date.now() / 1000));
+  // round 52（新 goal）：**发出去就把锚点标记为"回过"**。
+  //
+  // 这是 round 4 那个病的另一半。round 4 修好了"读"的那端（心流的 prompt 里
+  // 注入"这条你已经回过 N 次"），但 markMessageAnswered 全仓 7 处调用**全在
+  // subagent / gate=no_action 路径上**——心流产出 reply 的主路径一次都没标。
+  // 于是"这条我回过"这个事实对心流下一次决策不可见。
+  //
+  // 今早实测的后果：两条跨任务重复
+  //   -1003821093564:180091  00:09 "认命吧" → 00:17 "熊大熊二都出来了"（隔 8 分钟）
+  //   -1004430867819:13331   00:12 "谁查你岗了" → 00:14 "紧张什么"（隔 2.5 分钟）
+  // 重复率从全天 1.9% 跳到今早 12.5%。
+  //
+  // 放在这里是因为 sendMessage 是所有回复的公共出口（legacy pipeline、
+  // 心流、subagent failsafe 全走它），补一处覆盖全部路径。
+  // 顺序 import：telegram.ts 被 sender 自己引用，顶层 import answered.js
+  // 会成环（answered → redis，不环；但保持和其它非关键路径一致）。
+  if (replyToId && replyToId > 0) {
+    void import('../../meta/answered.js')
+      .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
+      .catch(() => { /* telemetry never breaks the send path */ });
+  }
   return messageId;
 }
 
