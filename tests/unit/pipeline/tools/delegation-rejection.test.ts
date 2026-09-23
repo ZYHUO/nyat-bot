@@ -35,7 +35,14 @@ describe('代发回执：命令被退回', () => {
     const s = fs.readFileSync(SRC, 'utf8');
     const i = s.indexOf('isCommandRejection(resultText)');
     const after = s.slice(i, i + 700);
-    expect(after).toContain('redis.del(PENDING_KEY(chatId))');
+    // round 54：**切口收窄到下一个分支之前**。
+    // 原本 slice(i, i+700) 跨了两个分支（退回分支 + 命中结果分支），
+    // 而“命中结果”那个分支里也有一句 redis.del（L579）——
+    // 所以即使把退回分支那句改坏，这句断言依然绿（切片里还有对方那句）。
+    // round 54 tamper 审核抓到的：这是一个真假绿。
+    const nextBranch = s.indexOf('命中最终结果', i);
+    const rejBlock = nextBranch > i ? s.slice(i, nextBranch) : after;
+    expect(rejBlock).toContain('redis.del(PENDING_KEY(chatId))');
   });
 
   it('④ 有计数器 + info 日志（round 75 家族：跳过也要可观测）', () => {

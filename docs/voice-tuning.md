@@ -3903,3 +3903,67 @@ objective-tools-exist          没红 ✗  ← 见下
 
 第 3 条最通用：`.toContain(A)` 的失败条件是"A 不在"；
 而"∀ x ∈ S, P(x)" 的失败条件是"∃ x ∈ S, ¬P(x)"——**往 S 里加坏东西，不是从 S 里删好东西**。
+
+---
+
+## tamper 审计固化成一个脚本，跑出 7 个 GREEN，其中 1 个是真假绿（round 54）
+
+Round 53 的发现值得复用，所以把 round 49-53 学的三条 tamper 规则写成
+`scripts/tamper-audit.mts`（自动选点：测试里最长的、出现在**未注释代码行**的
+字面量；备份到 /tmp，跑完还原，被杀也不留破坏）。
+
+跑本 session 全部 34 个守卫：
+
+```
+RED 13   GREEN 7   SKIP 15
+```
+
+SKIP 15 是行为类守卫（import 模块不读文件），脚本不处理。
+7 个 GREEN 逐个手验，结论：
+
+| 测试 | 为什么没红 |
+|---|---|
+| `cooldown-armed-log` | 脚本 tamper 的 `logger.info(` 是**别处**的（round 53 已手验：info→debug 会红） |
+| `known-issues` | tamper 的 markdown 行不是被断言的那行 |
+| `no-duplicate-current-numbers` | 同上 |
+| `measure-react-both-paths` | 同上 |
+| `send-log-has-taskid` | `taskId: opts.taskId` 在 host-api 里有 12 处，脚本改的不是日志点那处 |
+| `task-burst-gate` | 脚本选的最长字面量落在无关行 |
+| **`delegation-rejection`** | **真问题，见下** |
+
+### 那 1 个真假绿
+
+③ 断言「退回分支里清了 pending」：
+
+```ts
+const i = s.indexOf('isCommandRejection(resultText)');
+const after = s.slice(i, i + 700);          // ← 跨了两个分支
+expect(after).toContain('redis.del(PENDING_KEY(chatId))');
+```
+
+700 字符的切片跨过**退回分支**和**命中最终结果分支**——而后者也有一句
+`redis.del`（L579）。所以把退回分支那句改坏，切片里还有对方那句 → **仍然绿**。
+
+改法：把切片收到下一个分支之前。
+
+```ts
+const nextBranch = s.indexOf('命中最终结果', i);
+const rejBlock = nextBranch > i ? s.slice(i, nextBranch) : after;
+```
+
+验过红：改坏 L564 → 2 条红（改之前 0 条）。
+
+**这是 round 140/142/174/176 那一族（切片太宽）的又一例，而且是第一次
+由脚本自动发现的**——前五次都是我肉眼读出来的。
+
+### 归档
+
+tamper 审计的产出要分两类：
+
+```
+选点问题（6/7）  → 改进脚本选点：优先取"测试自己 slice 的那个邻域"
+                （例：测试 slice(i, i+700) 时，只在那 700 字符里选 needle）
+真问题（1/7）    → 修测试：把切片收到判据真正的分支内
+```
+
+下轮改脚本选点（按测试自己的 slice 邻域挑 needle），预期 SKIP/GREEN 会大幅下降。
