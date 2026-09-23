@@ -50,7 +50,20 @@
 
 ## 四、实施步骤
 
-### 第 0 步｜止血触发面（R1）
+### 第 0 步｜止血触发面（R1）—— ✅ 已完成（round 167）
+
+**已部署**：`src/meta/ingress-intercepts.ts:121` 加 `opts.isDirect` 要求。
+未寻址且本来会试路由的消息，现在走 `incrCounter('command_router_skip_unaddressed_total')`
++ info 日志 `command router: skipped (message did not address the bot)`。
+
+寻址判据**没有新造**——用的就是全仓同一个 `opts.isDirect`
+（来自 `detectDirectInteraction`：点名 @bot / 昵称 / 回复 bot / 自身是命令）。
+
+测试 4 条，逐条 `-t` 验过红（把 `if (opts.isDirect)` 改成 `if (true)` → ①④ 红）。
+
+**预期效果**：`command-router: jev matched command` 的分子里未点名样本应归零。
+
+### 第 1 步｜回执判读（R2/R4）
 
 **改**：`src/meta/ingress-intercepts.ts:111` 的条件从
 

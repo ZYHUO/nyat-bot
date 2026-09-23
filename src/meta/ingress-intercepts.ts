@@ -16,6 +16,7 @@ import { dispatchCommand } from '../pipeline/stages/intercepts.js';
 import { hasActiveGame, playGame } from '../pipeline/games/manager.js';
 import { getBotUid } from '../bot/bot.js';
 import { env } from '../env.js';
+import { incrCounter } from '../metrics/registry.js';
 
 
 export type MetaIngressResult = 'legacy' | 'handled' | 'continue';
@@ -106,15 +107,34 @@ export async function tryMetaIngressIntercepts(
   // 而 `command-router: delegated learned command` 生产 **0 次**。
   //
   // 和 round 33/35 是同一种病：功能接在了一条生产不走的路上。
-  // 接在这儿（Meta 入口），群聊、非 bot、没被寻址时也试一次——
-  // 代发本身就是这次的响应，命中就短路。
-  if (chatId < 0 && !formatted.isBot && text.length >= 3
-      && env().BOT_COMMAND_ROUTER_ENABLED && env().BOT_DELEGATION_ENABLED) {
-    try {
-      const { routeLearnedCommand } = await import('../pipeline/command-router.js');
-      if (await routeLearnedCommand(chatId, formatted)) return 'handled';
-    } catch (err) {
-      logger.debug({ err, chatId }, 'Meta: learned-command router failed (non-critical)');
+  //
+  // round 167：**但"没被寻址时也试一次"是错的。**
+  //
+  // 2026-09-23 15:05 现场（群 -1003184176508）：
+  //   15:05:10 IN "global-warp有无搞头"   ← 没 @ 没回复任何人
+  //   15:05:20 Delegation: command sent → uzumaru_geoip_bot cmd=/geo   ← 无参数
+  // 用户抱怨「不会用别的 bot」。真根因不是捏造参数，是**闲聊能借到命令**——
+  // 这条条件让命令路由变成"任何 >=3 字的群消息都撞一次"的抽奖机。
+  //
+  // 改成要求寻址，用的是**全仓同一个寻址判据**（detectDirectInteraction：
+  // 点名 @bot / 昵称 / 回复 bot / 自身就是命令），不新造信号。
+  const routerEligible = chatId < 0 && !formatted.isBot && text.length >= 3
+    && env().BOT_COMMAND_ROUTER_ENABLED && env().BOT_DELEGATION_ENABLED;
+  if (routerEligible) {
+    if (opts.isDirect) {
+      try {
+        const { routeLearnedCommand } = await import('../pipeline/command-router.js');
+        if (await routeLearnedCommand(chatId, formatted)) return 'handled';
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta: learned-command router failed (non-critical)');
+      }
+    } else {
+      // round 75 家族：跳过也要可观测。否则下次说不清"没触发"还是"被拦了"。
+      incrCounter('command_router_skip_unaddressed_total', { chat: String(chatId) });
+      logger.info(
+        { chatId, preview: text.slice(0, 40) },
+        'command router: skipped (message did not address the bot)',
+      );
     }
   }
 
