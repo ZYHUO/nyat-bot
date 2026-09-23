@@ -2958,3 +2958,49 @@ window=6, minHits=3, 候选自己算第 1 次
 ### 门禁
 
 typecheck 0 · lint 0 · test 499 文件 / 3939 过 · build ok · 部署核验 75/75
+
+---
+
+## 话题词复用闸接上生产路径并部署（round 163）
+
+Round 162 把纯函数写好并测过，但**没接上发送路径 = 死代码**（这个仓反复出现的
+形态）。这轮接上、部署、并踩了两个坑。
+
+### 接线
+
+`src/subagent/host-api.ts` 的 `isRecentBotEcho` 之前（`sendMessage` 之前）：
+
+```ts
+const topicHit = findTopicRepeat(recentBotTextsByChat.get(chatId) ?? [], clean);
+if (topicHit) {
+  logger.info({ chatId, preview, bigram, hits, window }, 'host sendText rejected topic-word repeat');
+  incrCounter('send_topic_word_repeat_total', { chat: chatId });
+  throw new Error(`未发送：「${bigram}」这个词你在最近几条里已经说了 ${hits} 次了，换个说法……`);
+}
+```
+
+历史用的是已有的 `recentBotTextsByChat`（每群最近 6 条，跨任务共享），
+不另开状态。
+
+### 坑 1：`git checkout` 吞了我未提交的接线
+
+验红时我把闸块删了，然后用 `git checkout src/subagent/host-api.ts` 还原——
+**而那文件的接线还没提交过**，于是一次 checkout 把整个接线抹了。
+靠 `git status` 里那个 `M` 早该发现（它就在告诉我"有未提交改动"）。
+重接一遍。**教训：还原未提交的改动用备份文件，不要用 git checkout。**
+
+### 坑 2：自称"本喵"把一条旧测试拦了
+
+`host-replyto-echo` 的 fixture 里"本喵"出现 3 次，新闸先响，那条测试的
+`expected 'Error: 未发送…' to match /echo_self/` 就红了。
+
+这不是误报要绕开，是**判据本身漏了自称**——自称/名字每句话都可能带，
+是最常见的误伤源。加进停用词表（`本喵` / `啾咪` / `喵喵`）。
+
+**这条比"修测试"重要**：如果一个自称能触发闸，那所有群聊都会触发。
+
+### 门禁
+
+typecheck 0 · lint 0 · test 500 文件 / 3944 过 · build ok ·
+部署核验 75/75 · **集成核验 31/31** · 服务 active / health 200
+（round 159 那个 dshkimi 403 这次过了——印证它是瞬时态）

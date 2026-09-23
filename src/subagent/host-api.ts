@@ -7,6 +7,7 @@ import { getReadyStickersByIntent } from '../knowledge/sticker/store.js';
 import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-identity.js';
 import { isDM } from '../shared/chat.js';
 import { isEchoOf } from '../shared/echo-text.js';
+import { findTopicRepeat } from './topic-repeat.js';
 import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
 
 /**
@@ -902,6 +903,27 @@ export function createHostApi(
 
             // Reject parroting the user's latest line(s) — common when direction embeds user text.
             // Also reject copying the bot's own recent lines (跨任务复读「小鱼干」回怼到「病好了」).
+            // round 162：**话题词复用闸**（用户 2026-09-23 21:51 现场报的 bug）。
+            //
+            // 上面四个去重（isRecentBotEcho / 4 字前缀 / 语义相似度 / 同锚点）
+            // 全是"整句相同"族，抓不到"同一个词换着句子说"。现场是 30 秒 7 个气泡里
+            // "固定资产"出现 3 次，人眼一看就是重复，而那四个闸一次都没响。
+            //
+            // 判据：一个非停用中文二字组，连这条候选一起，在本群最近 6 条里
+            // 出现 >= 3 次。阈值取 3 是因为正常聊一个话题也会带同一个词——
+            // 只有密集到第 3 次才是机器形状。
+            const topicHit = findTopicRepeat(recentBotTextsByChat.get(chatId) ?? [], clean);
+            if (topicHit) {
+              logger.info(
+                { chatId, preview: clean.slice(0, 60), bigram: topicHit.bigram, hits: topicHit.hits, window: topicHit.window },
+                'host sendText rejected topic-word repeat',
+              );
+              incrCounter('send_topic_word_repeat_total', { chat: chatId });
+              throw new Error(
+                `未发送：「${topicHit.bigram}」这个词你在最近几条里已经说了 ${topicHit.hits} 次了，` +
+                '换个说法——同样的词翻来覆去说，读起来就是重复（宿主软闸，不是建议）。',
+              );
+            }
             const localHit = isRecentBotEcho(chatId, clean);
             if (localHit) {
               logger.info(
