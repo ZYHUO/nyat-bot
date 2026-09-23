@@ -2061,3 +2061,41 @@ ic2全家桶啊？行，要原版还是带附属的整合包？  <- 追问，该
 - 代价：咽掉 25 条第二句，其中约一半是该说的补充/追问/回呛
 
 **等你的命令。**
+
+---
+
+## Gemini 搜索 403 的 224 次是**死代码路径**（round 126）
+
+巡最后几个子系统。看到 `Gemini search failed, falling back` 224 次，
+err 是 `Gemini search 403: Your API key w…`（key 无效）。
+
+去 `src/pipeline/tools/search.ts` 找那段代码 —— **已经没有了**。
+文件头注释（round 133）写着：
+
+```
+2026-09-21 round 132/133：主路由换成 MCP；
+round 133 按用户要求删掉 Gemini grounding
+```
+
+而第 237 行只剩三行注释说明它曾经是什么。
+
+所以那 224 次 403 是 **09-21 round 133 删除 Gemini 之前的历史日志**，
+不是现在的失败。当前搜索路由是 StepFun MCP → StepFun REST。
+
+**又一个假警报**（round 76 vision / round 122 dream / 这轮 Gemini）。
+而且这次的性质不同：前两个是"修复前的快照"，这个是**代码已删除、
+日志是遗物**——如果有人 grep 日志去判断"搜索健康度"，会被 224 次 403 误导。
+
+同类：`Mid-term NyatDB compression failed` 200 次是 provider 审查
+（AIError content rejected），代码还在、标了 non-critical，属于**已知成本**。
+
+## 三次假警报的共同点
+
+| 轮 | 现象 | 真相 |
+|---|---|---|
+| 76 | Vision failed 连降四天 | 旧修复生效 |
+| 122 | dream 2.9% 产出率 | 修复前快照 |
+| 126 | Gemini 403 ×224 | 代码已删除，日志是遗物 |
+
+**规律：日志是历史，代码是现在。** 判断某件事"健康吗"必须同时看两边，
+只 grep 日志会把遗物当症状。
