@@ -144,6 +144,8 @@ const CHECKS: Array<[string, string]> = [
   ['代发缺参闸（arity-aware）', 'usageNeedsArg'],
   ['代发缺参兜底：人类消息带实参', 'humanMessageCarriesArg'],
   ['发送日志带 taskId（per-task 发送分布可算）', "taskId: opts.taskId ?? null"],
+  ['task 级 burst 闸（同任务连发）', 'send_task_burst_total'],
+  ['task 级 burst 闸的键只在调用完成后写', 'taskLastSendKey(burstTaskId)'],
   ['命令路由要求寻址', 'command_router_skip_unaddressed_total'],
   ['画摊子交还手动链', 'respectManualOrder'],
   // 仪器

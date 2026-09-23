@@ -37,6 +37,27 @@ import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
  */
 const REPEAT_ANCHOR_WINDOW_SEC = 180;
 const REPEAT_ANCHOR_MAX = 2;
+
+// round 171（计划 3c 提前）：**同一任务两次开口之间的最小间隔（秒）。**
+//
+// 现场（2026-09-23 15:05）：一个 CodeAct 任务在 51 秒内 4 次 sendText 调用，
+// 每次 1-3 个气泡，共 11 个气泡。用户抱怨"说话太应激"。
+//
+// 为什么是 task 级而不是别的（k3 2026-09-24 裁决）：
+//   · 不能用 `NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC`（chat 级全局阀门）——
+//     那是"群里隔多久开一次口"，管不了"一个任务自己连开几次"；
+//     而且 30s 是 round 68 按用户"33% 被咽回去"的抱怨否决不用的值。
+//   · 不能用 `AGENT_TASK_SEND_BUDGET`（任务终身总额）——它数的是**调用**，
+//     而 incident 是 4 次远未触 6 的顶；且调小会走 failsafe → raw sendMessage
+//     → 绕过全部闸，用户收到的是"没搞定"的假失败（比连发更难解释）。
+//   · task 级 burst 闸与上面两个都正交，**不可能回归 round 68**。
+//
+// 闸只管"调用"，不管分片——分片是同一句话的多个气泡（round 71 的理由）。
+const TASK_BURST_GAP_SEC = 12;
+
+// task 级"上次开口时间"的 Redis 键。只在一次 sendText 调用**完成**后写，
+// 不在分片上写——否则同一调用的第 2 片会把第 1 片当上一次。
+const taskLastSendKey = (taskId: string): string => `xxb:agent:lastsend:${taskId}`;
 import type { ApplyOutcome, MasterActionOutcome } from '../allowlist/bot-flow.js';
 import { appendCognitiveEvent } from '../agent/cognitive-events.js';
 import { recordPrediction } from '../agent/predictions.js';
@@ -1247,6 +1268,43 @@ export function createHostApi(
               // 是误用。实测 07:14-07:15（round 70 部署后）仍有 part=2/3、part=2/2
               // 被咽，就是这条。
               //
+              // round 171：**task 级 burst 闸**，放在 trench gate 之前，因为它和
+              // chat 级的被叫间隔是两个轴（见 TASK_BURST_GAP_SEC 的注释）。
+              //
+              // 判据：这个任务上一次 sendText 调用距现在 < TASK_BURST_GAP_SEC
+              //       → 抛回模型，让它把想说的合成一条或者先收尾。
+              // 键只在调用完成后写，所以同一次调用的分片不会互相触发。
+              //
+              // 形状：判定放 try 里、throw 放 try 外——否则自己的 catch 会把该抛的错
+              // 吞掉，闸就永远不生效（round 171 第一版就是这么写错的，测试没抓到，
+              // 因为测试查的是文本不是行为；靠读代码才发现）。
+              let burstGap: number | null = null;
+              if (opts.taskId) {
+                try {
+                  const { getRedis } = await import('../db/redis.js');
+                  const br = getRedis();
+                  const last = await br.get(taskLastSendKey(opts.taskId)).catch(() => null);
+                  if (last) {
+                    const gap = Math.floor(Date.now() / 1000) - Number(last);
+                    if (Number.isFinite(gap) && gap >= 0 && gap < TASK_BURST_GAP_SEC) burstGap = gap;
+                  }
+                } catch (err) {
+                  // 防变胖的闸绝不能因为它自己出错挡住发送（round 75 家族的反面）。
+                  logger.debug({ err, chatId, taskId: opts.taskId }, 'task burst gate check failed — fail-open');
+                }
+              }
+              if (burstGap !== null) {
+                // round 84 的形状：挡住要**可数**，否则说不清"挡掉了"还是"没被调用"。
+                logger.info(
+                  { chatId, taskId: opts.taskId, gapSec: burstGap, limit: TASK_BURST_GAP_SEC, part: i + 1, of: parts.length },
+                  'host sendText rejected task burst (same task spoke moments ago)',
+                );
+                incrCounter('send_task_burst_total', { chat: chatId });
+                throw new Error(
+                  `未发送：你这个任务 ${burstGap} 秒前才在这个群说过话，一口气连说会显得很应激。` +
+                  `要么把想说的并成一条，要么先收尾等下一轮。（间隔阈值 ${TASK_BURST_GAP_SEC} 秒，宿主软闸，不是建议。）`
+                );
+              }
               // 判据：本任务第 0 片过闸之后，后续片直接放行（gatePassed 已置位）。
               if (chatId < 0 && env().TRENCH_GATE_ENABLED && !gatePassed) {
                 const { canSpeakActively, activeSpeechCooldownRemainingSec, addressedSpeechCooldownRemainingSec }
@@ -1499,6 +1557,16 @@ export function createHostApi(
                 }
               }
               lastMessageId = messageId;
+              // round 171：这次调用说完了，记下时间给 burst 闸用。
+              // 只在这里写一次（不在分片上），理由见 TASK_BURST_GAP_SEC 的注释。
+              if (opts.taskId) {
+                const burstTaskId = opts.taskId;   // 闭包里收窄，TS 才不会判 undefined
+                void import('../db/redis.js')
+                  .then(({ getRedis }) => getRedis().set(
+                    taskLastSendKey(burstTaskId), String(Math.floor(Date.now() / 1000)), 'EX', 3600,
+                  ))
+                  .catch(() => undefined);   // 遥测永不挡发送
+              }
               lastSentNorm = part;
               sentTexts.push(part);
               rememberBotText(chatId, part);
