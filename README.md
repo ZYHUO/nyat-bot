@@ -44,6 +44,7 @@ jump straight to **🚀 Quick start** further down this README.
 - [📋 Behaviour: what was wrong, what changed](#-behaviour-what-was-wrong-what-changed)
 - [🛡️ Anti-ad: how a group owner turns it on](#️-anti-ad-how-a-group-owner-turns-it-on)
 - [More of my work](#more-of-my-work)
+- [📊 Ecosystem status](#-ecosystem-status)
 - [⭐ If this is the kind of thing you wish existed](#-if-this-is-the-kind-of-thing-you-wish-existed)
 - [📄 License](#-license)
 
@@ -2163,6 +2164,21 @@ MIT across all of them, same as this repo.
 
 ---
 
+## 📊 Ecosystem status
+
+这个 goal 做出来的每一样东西，逐条列在
+[`docs/ecosystem-status.md`](docs/ecosystem-status.md)（含每件的证据）。
+
+简片：落地页、`npm run demo`、代码导游、prompt 地图、
+skill 教程 + 7 个可跑示例、行为报告模板、
+四个量测命令 + cron、调校记录与操作手册。
+
+四个行为问题里，三个已统有证据地修完（撞名守卫 / 重复回复 / 7 处写死）；
+“太爱说话”诊断完成而干预待批（真因是条/小时不是占比，
+host 侧上限在操作手册的第 3 桡）。
+
+**Star 仍是 9**——本机侧能做的都做了，剩下三件（挂 Pages / 发帖 / 投 awesome-list）
+在 [`docs/publish-checklist.md`](docs/publish-checklist.md)，每件 5 分钟。
 ## ⭐ If this is the kind of thing you wish existed
 
 A star is genuinely useful here: this repo has no homepage, no listing, no post anywhere.
