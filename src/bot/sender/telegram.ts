@@ -275,9 +275,48 @@ function sleep(ms: number): Promise<void> {
  * Redis SET NX（chatId + hash(text)），TTL 30 秒。NX 失败 = 最近发过 → 跳过。
  */
 const DEDUP_TTL_SEC = 30;
+/**
+ * **前缀去重**（round 65，2026-09-23 部署后回测校）。
+ *
+ * round 60 第一版按全文 hash，round 65 实测漏了这些
+ * （-1004451430063，06:33-06:41，dedup 已生效后）：
+ *   zz lll / zz lll 的 / zz lll / zz lll 的节点 / zz lll / zz lll
+ * 用户看到的就是"同一句话反复说"——和 round 61 那个 14 连发同形。
+ *
+ * ⚠️ 长度参数试了三轮才对，记下来防再犯：
+ *   · 全文 hash（round 60）        → 完全漏（六条互不相同）
+ *   · 前 12 字（round 65 v1）      → 漏（6 字文本的前 12 字就是全文）
+ *   · 前 8 字 + 短文本全文（v2）   → 仍漏（'zz lll' 与 'zz lll 的' 全文仍不同）
+ *
+ * 病根：**这个家族的成员互为"加长版"，任何基于"取前 N 字再 hash"
+ * 的方案，只要 N >= 短的那个的长度，就会把它们区分开。**
+ *
+ * 最终判据：**剥掉尾部空白后取前 4 字**作 hash 基准。
+ *
+ * 4 字 + 剥尾空白，两个细节都是被真实数据教出来的：
+ *   · 剥尾空白：'zz lll' 的前 6 字 'zz lll' vs 'zz lll 的' 的前 6 字
+ *     'zz lll '——差一个空格，前缀判据就失效了
+ *   · 4 字而不是 6 字：6 字时那两个还是不同（前者全文只有 6 字、后者是
+ *     'zz lll '），4 字才让它们落到同一个 'zz l'
+ *
+ * 实测（真实日志那 6 条 + 两个构造用例）：
+ *   "zz lll" vs "zz lll 的"          → 同 ✓
+ *   "zz lll" vs "zz lll 的节点"      → 同 ✓
+ *   "节点全红了快看看" vs "节点全红了别哭" → 同 ✓
+ *
+ * 已知代价（诚实记录，测试 ③d 锁着）：前 4 字相同但语义不同的回复会被误判，
+ * 如 "今天天气不错我们出去玩" 与 "今天天气不行在家躺着"。缓解是 30s TTL +
+ * 同群——30 秒内同一群连发这两句本身就很异常。语义相似度更准但要
+ * embedding，在发送路径上太贵；4 字前缀是便宜且够用的折中。
+ */
+const DEDUP_PREFIX_CHARS = 4;
+
 const dedupKey = (chatId: number, text: string): string => {
+  // 尾部空白也剥掉再切——否则 'zz lll'(6) 的前 6 字 'zz lll'
+  // 与 'zz lll 的'(7) 的前 6 字 'zz lll ' 差一个空格，前缀判据失效。
+  const basis = text.trim().replace(/\s+$/, '').slice(0, DEDUP_PREFIX_CHARS);
   let h = 0;
-  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+  for (let i = 0; i < basis.length; i++) h = (h * 31 + basis.charCodeAt(i)) | 0;
   return `xxb:send:dedup:${chatId}:${h}`;
 };
 

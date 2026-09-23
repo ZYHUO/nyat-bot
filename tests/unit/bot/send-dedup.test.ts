@@ -15,8 +15,9 @@ describe('sendMessage 的同群同文本去重', () => {
   /** 与 telegram.ts 的 dedupKey 同形。 */
   const DEDUP_TTL_SEC = 30;
   const dedupKey = (chatId: number, text: string): string => {
+    const basis = text.trim().replace(/\s+$/, '').slice(0, 4);
     let h = 0;
-    for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+    for (let i = 0; i < basis.length; i++) h = (h * 31 + basis.charCodeAt(i)) | 0;
     return `xxb:send:dedup:${chatId}:${h}`;
   };
 
@@ -33,7 +34,30 @@ describe('sendMessage 的同群同文本去重', () => {
   });
 
   it('③ 同群不同文本 key 不同', () => {
-    expect(dedupKey(-100, 'A')).not.toBe(dedupKey(-100, 'B'));
+    expect(dedupKey(-100, '今天天气不错啊')).not.toBe(dedupKey(-100, '明天天气不行啊'));
+  });
+
+  it('③b 前缀相同即 key 相同（round 65 实测漏洞：zz lll vs zz lll 的）', () => {
+    // 06:33-06:41 六条文本互不完全相同，全文 hash 全部放行，
+    // 而用户看到的就是"同一句话反复说"。
+    expect(dedupKey(-100, 'zz lll')).toBe(dedupKey(-100, 'zz lll 的'));
+    expect(dedupKey(-100, 'zz lll')).toBe(dedupKey(-100, 'zz lll 的节点'));
+    expect(dedupKey(-100, '节点全红了快看看。')).toBe(dedupKey(-100, '节点全红了快看看呀。'));
+  });
+
+  it('③c 前 4 字内不同 → key 不同（不把两个长回复误判成一个）', () => {
+    const a = '节点全红了赶紧看';
+    const b = '节点全绿了放心睡';
+    expect(dedupKey(-100, a)).not.toBe(dedupKey(-100, b));
+  });
+
+  it('③d 已知代价：前 4 字相同的不同回复会误判（诚实记录）', () => {
+    // round 65 的取舍：4 字前缀能抓"加长版"家族，代价是前 4 字相同的
+    // 不同回复被误判。30s TTL + 同群是缓解——30 秒内同群连发
+    // "今天天气不错" 和 "今天天气不行" 本身就很异常。
+    const a = '今天天气不错我们出去玩';
+    const b = '今天天气不行在家躺着';
+    expect(dedupKey(-100, a)).toBe(dedupKey(-100, b));   // ← 会误判，已知代价
   });
 
   it('④ 空文本不去重（不该把空串当重复信号）', () => {
