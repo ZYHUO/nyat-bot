@@ -1133,6 +1133,10 @@ export function createHostApi(
             // round 71：同一次 sendText 的分片共享一次过闸结果。
             // 见下面 trench gate 那段的长注释。
             let gatePassed = false;
+            // round 173：burst 闸一次调用只判一次（分片豁免），和 gatePassed 同款。
+            // 没这个标志时，第 2 片会读到第 1 片 1 秒前写的键 → 自己吞掉自己
+            // 的后半句（k3 round 173 实测复现，行为测试 ⑦ 钉住）。
+            let burstChecked = false;
             for (let i = 0; i < parts.length; i++) {
               const part = parts[i]!;
               if (i > 0) {
@@ -1279,7 +1283,8 @@ export function createHostApi(
               // 吞掉，闸就永远不生效（round 171 第一版就是这么写错的，测试没抓到，
               // 因为测试查的是文本不是行为；靠读代码才发现）。
               let burstGap: number | null = null;
-              if (opts.taskId) {
+              if (opts.taskId && !burstChecked) {
+                burstChecked = true;   // 同一次调用的后续分片不再判（round 71 的形状）
                 try {
                   const { getRedis } = await import('../db/redis.js');
                   const br = getRedis();
@@ -1559,7 +1564,9 @@ export function createHostApi(
               lastMessageId = messageId;
               // round 171：这次调用说完了，记下时间给 burst 闸用。
               // 只在这里写一次（不在分片上），理由见 TASK_BURST_GAP_SEC 的注释。
-              if (opts.taskId) {
+              if (opts.taskId && i === 0) {
+                // 只记第 0 片的时间：若每片都写，"距上次开口"会被推到末片，
+                // 分片越多的调用闸越松（k3 round 173 指出的系统性放松）。
                 const burstTaskId = opts.taskId;   // 闭包里收窄，TS 才不会判 undefined
                 void import('../db/redis.js')
                   .then(({ getRedis }) => getRedis().set(

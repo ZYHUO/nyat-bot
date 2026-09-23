@@ -122,4 +122,24 @@ describe('task 级 burst 闸（行为）', () => {
     await expect(host.telegram.sendText('redis 挂了也要发', 111)).resolves.toBeTruthy();
     spy.mockRestore();
   });
+
+  it('⑧ 多片发完之后，紧接着再开口仍要拦（修分片不能把闸关死）', async () => {
+    const host = createHostApi(-100, { onEnd: () => {}, taskId: 'b8', maxTextSends: 3 });
+    await expect(host.telegram.sendText('第一句说完了。第二句也说完了。', 111)).resolves.toBeTruthy();
+    await new Promise((r) => setTimeout(r, 5));
+    // 同一任务、同一秒再开口 → 必须拦
+    await expect(host.telegram.sendText('补一句别的', 111)).rejects.toThrow(/未发送|秒前才在这个群说过话/);
+  });
+
+  it('⑦ 一条多片的话：所有片都要发得出去（k3 round 173 报的 P0）', async () => {
+    // P0 复现：burst 键原来写在 parts 循环体内，于是第 2 片读到第 1 片
+    // 1 秒前写的键 → gap≈1s < 12 → 自己吞掉自己的后半句。
+    // 这正是 round 71 花大力气消灭的"半句话"，且形态是闸吃自己。
+    const host = createHostApi(-100, { onEnd: () => {}, taskId: 'b7', maxTextSends: 3 });
+    const text = '第一句说完了。第二句也说完了。第三句照样说得完。';
+    await expect(host.telegram.sendText(text, 111)).resolves.toBeTruthy();
+    const n = sendMessage.mock.calls.length;
+    expect(n, '多片调用的每一片都该发出去（现在只剩 ' + n + ' 片）').toBeGreaterThan(1);
+  });
 });
+

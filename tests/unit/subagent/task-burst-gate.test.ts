@@ -32,8 +32,10 @@ describe('task 级 burst 闸', () => {
     // round 171 第二版：结构是"if (opts.taskId) { try { ...取 redis 读键... } catch fail-open }"
     // 然后是 try 外的 `if (burstGap !== null) { ...throw }`。
     // 这么认是为了同时防两种弄坏：禁用 if、或把 throw 挪回 try 里（自我吞掉）。
+    // round 173：入口行多了 !burstChecked，所以这里匹配的是新形状
     const guardIdx = lines.findIndex(
-      (l, i) => l.trim() === 'if (opts.taskId) {' && (lines[i + 1] ?? '').trim() === 'try {',
+      (l, i) => l.trim() === 'if (opts.taskId && !burstChecked) {'
+        && (lines[i + 1] ?? '').trim() === 'burstChecked = true;   // 同一次调用的后续分片不再判（round 71 的形状）',
     );
     expect(guardIdx, 'burst 闸的 if (opts.taskId) { 入口不在/被禁用').toBeGreaterThan(-1);
     const after = lines.slice(guardIdx, guardIdx + 30).join('\n');
@@ -62,14 +64,32 @@ describe('task 级 burst 闸', () => {
     expect(g).toContain('宿主软闸');
   });
 
-  it('④ 键只在调用完成后写一次，不在分片上写（round 71 的理由）', () => {
+  it('④ 键只在第 0 片之后写一次，不在每片上都写（round 71 的理由）', () => {
+    // round 173：第一版这里断言"写入区域含 lastMessageId = messageId"，
+    // 而 per-part 写同样满足（它就在那句旁边）——所以它是 grep guard，
+    // 测不出意图（round 142 教训第二次）。改成查**写入行的条件**本身。
     const s = fs.readFileSync(SRC, 'utf8');
     const lines = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
-    const w = lines.findIndex((l) => l.includes('taskLastSendKey(burstTaskId)'));
+    const w = lines.findIndex((l) => l.includes('const burstTaskId = opts.taskId;'));
     expect(w).toBeGreaterThan(-1);
-    // 写的上下文应是 lastMessageId 赋值处（一次调用的终点），不是 parts 循环体首
-    const region = lines.slice(Math.max(0, w - 6), w + 8).join('\n');
-    expect(region).toContain('lastMessageId = messageId');
+    // 往上找这一层的 if，必须是 `if (opts.taskId && i === 0) {`
+    let ifLine = '';
+    for (let k = w - 1; k >= 0; k--) {
+      if (lines[k]!.trim().startsWith('if (')) { ifLine = lines[k]!; break; }
+    }
+    expect(ifLine).toContain('if (opts.taskId && i === 0) {');
+  });
+
+  it('④b burst 闸一次调用只判一次（分片豁免，round 71 同款形状）', () => {
+    // P0 的另半边：判定也必须只跑一次，否则第 2 片读到第 1 片写的键
+    const s = fs.readFileSync(SRC, 'utf8');
+    const code = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+    expect(code.some((l) => l.trim() === 'let burstChecked = false;')).toBe(true);
+    const guard = code.find((l) => l.includes('let burstGap: number | null = null;'));
+    expect(guard).toBeDefined();
+    const i = code.indexOf(guard!);
+    expect(code[i + 1]).toContain('if (opts.taskId && !burstChecked) {');
+    expect(code[i + 2]).toContain('burstChecked = true;');
   });
 
   it('⑤ 阈值常量存在且给的是保守值（10~15 区间）', () => {
