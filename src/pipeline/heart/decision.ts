@@ -421,7 +421,12 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
         // 反思模型是 newapiv4pro(轻思考,~2-6s),放宽到 10s;超了就放弃、用原念头。
         maxTimeoutMs: 10_000,
       });
-      const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
+      // round 164：**refined 也要过 cleanWhy。** 之前这里只剥「」引号，
+      // 不剥 {}[]——反射模型回 JSON 残片时，覆写后的 why 就带着前导 `{`。
+      // 实测 09-21/22/23 三天 dirty why 532/352/211 条，全是这条路径漏的
+      // （parseHeart 里的 cleanWhy 在覆写之前就跑完了）。
+      // 而 why 会注入 [你的念头] 给写手——这里脏了，下游拿到的是垃圾方向。
+      const refined = cleanWhy((rr.content || '').trim()).slice(0, 60);
       if (refined.length >= 2) {
         logger.info({ chatId: input.chatId, from: parsed.why, to: refined }, 'Heart reflect refined 念头');
         parsed = { ...parsed, why: refined };

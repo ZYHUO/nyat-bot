@@ -3054,3 +3054,39 @@ round 114 react 日志名、这次）。
 
 （不影响行为——why 只是日志和 [你的念头] 注入的文本。但它让我 round 59
 的报告失真，而用户当时问的就是"前言不搭后语"相关。）
+
+---
+
+## dirty why 修好并部署：reflect 覆写前过 cleanWhy（round 165）
+
+Round 164 定位到 reflect 路径漏清洗，这轮修 + 部署。
+
+```ts
+// 之前：只剥「」引号，不剥 {}[]
+const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
+// 现在：走同一个 cleanWhy
+const refined = cleanWhy((rr.content || '').trim()).slice(0, 60);
+```
+
+一并把 `cleanWhy` 的 40 字上限带过来（原来是 60）——prompt 自己写的是
+「≤30 字」，40 已经宽松。
+
+**为什么这条值得单独修**：why 会注入 `[你的念头]` 给写手。这里脏了，
+下游拿到的是 JSON 残片当"说话方向"——那可能就是用户说的"说话没重点"的一部分。
+
+### 测试（3 条，验过红）
+
+① refined 由 cleanWhy 产出（把 cleanWhy 拿掉 → 红）
+② 覆写仍在 guard 之后（cleaned 为空就不覆写，保住原 why）
+③ cleanWhy 本身剥前导 `{` 的正则没被削弱
+
+### 门禁
+
+typecheck 0 · lint 0 · test 501 文件 / 3947 过 · build ok ·
+部署核验 75/75 · 集成核验 31/31 · 服务 active / health 200
+
+### 预期效果
+
+部署后脏 why 应该停增。下一天的 `Heart decision` 日志里
+`"why":"{` 应该归零——那是 round 59 就该做到而没做到的事，
+隔了 105 轮才补上。
