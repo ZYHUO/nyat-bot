@@ -543,6 +543,19 @@ async function autoDispatchL0(
                   addressed ? 'agent_interrupt_addressed_total' : 'agent_interrupt_background_total',
                   { chat: String(chatId) },
                 );
+                // round 92：分桶也要有**日志行**。之前只有 counter，而 counter 是进程内的
+                // —— 重启归零，且 /metrics 只给当前值。round 91 查出
+                // agent_interrupt_addressed_total=3 / background=6，但日志 grep 0 行，
+                // 于是"这个分桶在生产有没有跑过"只能看一个会归零的数。
+                logger.info({
+                  chatId,
+                  agentTaskId,
+                  addressed,
+                  bucket: addressed ? 'addressed' : 'background',
+                  count: withIds.length,
+                }, addressed
+                  ? 'agent interrupt triage: addressed (directly at the bot)'
+                  : 'agent interrupt triage: background (chat noise while task runs)');
               }
               logger.info(
                 { chatId, agentTaskId, intercepted: withIds.length },

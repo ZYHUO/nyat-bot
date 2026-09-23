@@ -347,3 +347,24 @@ Round 83 立的规矩：**标记一个问题时同时决定它在哪一轮修；
 **修法**：用 `npm run log:count agent_interrupt` 看真实形状，
 把 OBJECTIVE-STATUS 里那句"6 个闸在生产有证据"的引用改成真实 msg。
 **状态**：待排期（round 92）。
+
+## 既存失败：bookkeeping-hooks ③④ 在全 meta 目录下红（round 92 发现）
+
+**现象**：`npx vitest run tests/unit/meta` 稳定红 2 条
+（`③ bot 群消息 → 查代发回执`、`④ 一个 hook 抛错不影响其他 hook`）。
+
+**已排除**：
+- **不是我的改动引入的**——`git stash -u` 回干净 HEAD 也红（174 → 2 failed）。
+- **不是 flaky**——默认 reporter 连跑 3 次全红；`--reporter=basic` 跑全绿。
+- **不是顺序敏感**——这两个文件和我的新测试一起跑就过（19 passed）。
+
+**DBG 输出指向**：`delegation fn type: function`（mock 在）但
+`expect(...).toHaveBeenCalled()` 失败 → **真函数从未被调用**。
+
+**怀疑**（未证实）：`vi.mock` 在某个 reporter 模式下没拦住一次真实 dynamic import，
+或 DBG 的 `console.log` 本身改变了某处时序。**没继续查**：它既存、且
+`npm run test` 全量跑时不知是否也红（只跑了 meta 目录）。
+
+**排期**：round 93 先用 `npm run test` 全量确认它红不红（这决定优先级——
+如果全量绿，那是目录级测试隔离问题；如果全量红，那是真回归）。
+**状态**：待排期 round 93。
