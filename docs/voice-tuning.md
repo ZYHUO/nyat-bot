@@ -1407,3 +1407,53 @@ A（JSON 生态）我做了文档+7 示例+动态列表；
 B（蒸馏技巧）我一次没碰，因为不知道它存在。
 
 这和 round 39/57 一样：**生态不止一个，我先做了我知道的那个。**
+
+---
+
+## 蒸馏 skill 的 helpfulness 信号恒为 0（round 97）
+
+Round 96 报"4 个 big skill 用了 3198 次"。但那只是 `use_count`——
+而 `src/agent/skills.ts:78` 的注释明写：
+
+> Retrieval counts (use_count) measure recall, not helpfulness — never conflate the two.
+
+### 更严的那个信号是空的
+
+```
+人设群聊接梗  use_count 1632  verified_use_count 0
+角色语气适配  use_count 1438  verified_use_count 0
+承诺跟踪      use_count  106  verified_use_count 0
+社群互动与交付 use_count   24  verified_use_count 0
+```
+
+### 链条逐段查（这次没漏）
+
+```
+findRelevantSkills(prompt-inputs.ts:216)  → ids
+  → injectedSkillIds(executor.ts:476)
+  → recordSkillVerifiedUse(executor.ts:1110)
+      只写库 if evidence === 'verified'
+```
+
+两个 flag 都开着（`EXPERIENCE_VERIFY_ENABLED=true` /
+`SKILL_VERIFIED_USE_ENABLED=1`），但**日志里 assessment status
+从来没出现过 `verified`**：
+
+```
+done 3211 · failed 370 · queued 144 · unverified 6
+waiting_user 5 · administrator 2 · verified 0
+```
+
+而能产出 `'verified'` 的是 `src/eval/agi-like-evaluator.ts:16`
+（`EvaluationStatus = 'verified' | 'failed' | 'unverified' | 'blocked'`）——
+**而它在 src/ 里没有任何调用者。**
+
+### 结论
+
+不是接错线，是**上游根本没跑**。所以：
+
+  · "哪些技巧真的有用" 这个信号从系统上线就是空的
+  · 淘汰只能靠 use_count（recall），而注释自己说那不等于 helpfulness
+  · round 96 我报的"3198 次使用"是 recall，**我用它撑不起"它为什么像个人"那个结论**
+
+（这不影响运行——skill 照常注入照常用。只是它的自优化少了一个输入。）
