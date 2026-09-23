@@ -16,6 +16,19 @@ export interface AgentInterrupt {
   from: string;
   messageId?: number;
   at: number;
+  // round 177（计划 (b) 的观测半边）：这条 interrupt 是不是**冲着 bot 来**的。
+  //
+  // 现场（2026-09-23 15:05）：3 条人类消息被推进同一个正在跑的任务，
+  // 其中 "你看看在那个 状态检测那边" / "能不能重启 waro" / "warp*"
+  // **没有 @ 也没回复 bot**，只是群里闲聊——任务照样每条都回，
+  // 于是一个任务 51 秒发了 4 次。
+  //
+  // k3 round 173 建议的治法（(b) interrupt 分级）：只让**寻址**的 interrupt
+  // 要求回应，其余只作背景注入。但那是 prompt 语义改动，而我现在没有
+  // taskId 生产数据能验它——所以先只**打标 + 计数**，拿到分桶数据再定。
+  //
+  // 缺省 undefined = 旧数据/未判定，消费方按"未知"处理，不当成寻址。
+  addressed?: boolean;
 }
 
 export async function pushInterrupt(

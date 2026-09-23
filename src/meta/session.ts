@@ -18,6 +18,8 @@ import {
   formatAttentionReplyToBit,
   replyToFromPayload,
 } from './reply-context.js';
+import { incrCounter } from '../metrics/registry.js';
+import { getBotIdentity } from '../bot/bot.js';
 
 const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
@@ -512,11 +514,35 @@ async function autoDispatchL0(
             } else {
               for (const s of withIds) {
                 const from = s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人';
+                // round 177（计划 (b) 的观测半边）：打标 + 分桶计数。
+                //
+                // 判据用全仓同一个寻址定义（detectDirectInteraction：点名 @bot /
+                // 昵称 / 回复 bot / 自身是命令），不新造第二套。
+                // 这里只有 textPreview 和 payload，拿不到原始 Update，
+                // 所以退化成文本判据：@bot / 昵称命中，或 payload 里有 replyTo。
+                // **判不出来的一律算未寻址**（宁可少拦，不可误拦）。
+                const raw = s.textPreview ?? '';
+                const p2 = s.payload ?? {};
+                const repliedTo = typeof p2['replyTo'] === 'object' && p2['replyTo'] !== null
+                  && Number((p2['replyTo'] as Record<string, unknown>)['uid'] ?? 0) > 0;
+                // 点名判据：@username 或任一昵称。用 getBotIdentity 拿当前身份，
+                // 不在模块顶层缓存——bot 身份可能被热更新。
+                const ident = getBotIdentity();
+                const handle = ident.username ? `@${ident.username}`.toLowerCase() : '';
+                const lowerText = raw.toLowerCase();
+                const mentioned = (!!handle && lowerText.includes(handle))
+                  || (ident.nicknames ?? []).some((n: string) => !!n && raw.includes(n));
+                const addressed = repliedTo || mentioned;
                 await pushInterrupt(agentTaskId, {
-                  text: (s.textPreview ?? '').slice(0, 500),
+                  text: raw.slice(0, 500),
                   from,
                   messageId: s.messageId,
+                  addressed,
                 });
+                incrCounter(
+                  addressed ? 'agent_interrupt_addressed_total' : 'agent_interrupt_background_total',
+                  { chat: String(chatId) },
+                );
               }
               logger.info(
                 { chatId, agentTaskId, intercepted: withIds.length },

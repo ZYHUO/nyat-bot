@@ -194,7 +194,17 @@ env 变量名并指回 `life.ts` 的理由注释。
 确认它在模板字符串里而不是 JS 注释。
 
 **仍待数据**：3b 后半（6→3）等 calls 维度观测的数据出来再拍；
-(b) interrupt 分级（寻址 vs 噪音）排最后，因为它动 prompt 语义。
+**(b) interrupt 分级（观测半边已完成，round 177）**：
+k3 排它做最后（动 prompt 语义，风险最高，而且没有数据能验）。
+所以先只做**打标 + 分桶计数**，真正的分级等分桶数据出来再定：
+
+· `AgentInterrupt` 加 `addressed?: boolean`（缺省=unknown，不当成寻址）
+· `session.ts` 推 interrupt 时打标：点名 @bot / 昵称 / payload 有 replyTo
+  → addressed；**判不出来的一律算未寻址**（宁可少拦，不可误拦）
+· 两个计数器：`agent_interrupt_addressed_total` / `agent_interrupt_background_total`
+  · 旧日志没有这个字段，分桶从本次部署起算
+
+测试 6 条两种弄坏都验过红（addressed 恒 true、不传 addressed）。
 
 按代价排序，**前两步零代码**：
 
