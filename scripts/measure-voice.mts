@@ -146,7 +146,10 @@ for await (const line of rl) {
   }
   // react 的副作用日志（heart.ts 的 'heart: reacted'）——Heart decision 那条
   // 已经含 act=react，但这里单独数一次，用来交叉检验"决策了"和"真点出去了"。
-  if (m === 'heart: reacted') {
+  // round 114: **生产走 Meta 路径，日志名是 'Meta heart: reacted'**。
+  // round 54 接 Meta 时改了日志名但没同步这里 -> 恒报 0（今天 27 次全报 0）。
+  // 两个名字都收，别再把量具落在一条路径上。
+  if (m === 'heart: reacted' || m === 'Meta heart: reacted') {
     reacted += 1;
     // round 23：emoji 分布。如果它全挑同一个（或全挑 👍），说明它没在"选"，
     // 只是在满足"要给个表情"这个要求——那 react 就退化成了常量输出。
