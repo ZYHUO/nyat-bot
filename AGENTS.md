@@ -200,22 +200,31 @@ section. Then re-run the census and bump the key count in `schema-sections.test.
 must exist before its wiring lands, add it to `ALLOWLIST` in the dead-switch test *with a
 reason* — that is an IOU, not an exemption.
 
-## Editing files: write real newlines, never `\n` escapes
+## Writing Chinese into files and commit messages
 
-Multi-line insertions via python `"...\n..."` string literals land as **literal backslash-n**
-in the file, and esbuild then fails with `Syntax error "n"` (round 118, and the same
-family cost this session five rounds: `\uXXXX` for Chinese in round 42/63/67, `\\n` here).
+Three rules, each of which cost this session multiple rounds:
 
-Rules:
+**1. Multi-line text: real newlines, never `\n` escapes.**
+Python `"...\n..."` string literals land as **literal backslash-n** in the file, and
+esbuild then fails with `Syntax error "n"` (round 118, and the same family cost this
+session five rounds: `\uXXXX` for Chinese in round 42/63/67, `\\n` here).
+If a tool call needs a multi-line block, build it as a **list joined with `"\n"`**
+(`"\n".join([...])`), or use the `write`/`edit` tools — not one escaped literal.
 
-- Multi-line text: use the `write` tool, `printf`, or a heredoc with real newlines.
-- Chinese into docs/README: write it directly. Never `\uXXXX` escapes — they mangle
-  ("傲慢"→"僵慢") and the mangling survives sed.
-- If a tool call needs a multi-line block, build it as a **list joined with `"\n"`**
-  (`"\n".join([...])`), or append line by line — not as one escaped literal.
+**2. Chinese into docs/README: write it directly.** Never `\uXXXX` escapes — they mangle
+("傲慢"→"僵慢") and the mangling survives sed (round 154/168/176; in round 175 a wrong
+codepoint turned 吱 into 咚 and the prompt shipped it).
+**Verify by reading it back** — the write action is not the proof.
 
-A syntax error from this is loud, which is the good case. The bad case is the one that
-*silently* writes the wrong character — that only shows up when someone reads the file.
+**3. Commit messages with Chinese + backticks + braces: use `-F file`, never `-m`.**
+`git commit -m "中文 + \`code\` + ${x} + {}"` breaks bash quoting (round 179, and many
+times before). Write the message to a temp file and `git commit -F /tmp/msg.txt`.
+
+Rule 2's corollary applies to all three: **after any non-trivial text write, read the
+result back**. A syntax error is loud, which is the good case; the bad case is the one
+that *silently* writes the wrong character — that only shows up when someone reads the
+file (round 175's 咚 was in a production system prompt for one round).
+
 
 ## Cross-checking two numbers: confirm they should be equal first
 
@@ -249,11 +258,3 @@ the cause was writing `AGENTS.md` / `README.md` — repo-root files, which
 `referenceExists` did not list until round 151. The rest were deliberate bad examples
 (`src/does/not-exist-xyz.ts`, `skills-MISSING.md`) that I put in backticks while writing
 up *how the guard works*.
-
-Rules:
-
-- Describing a path that does not exist? Write it in prose ("一个 src 下不存在的文件"),
-  not as `` `src/does/not-exist.ts` ``.
-- If a guard keeps firing on your own document, the third time is the signal to fix the
-  **guard's list**, not to keep rewording the doc (round 151 spent three rounds rewording
-  before adding `existsSync(name)` for repo-root files).
