@@ -43,7 +43,7 @@ if (!cutoff) {
 }
 
 const P = (s: string) => `  ${s}`;
-let msgs = 0, first = 0, cont = 0;
+let msgs = 0, fresh = 0, first = 0, cont = 0;
 // round 9：**现在就加 react**，不等它真的出现。
 // round 8 给心流加了第四个出口（act=react → setMessageReaction，不产生气泡）。
 // 上一轮我写"等跑出 react 再改口径"——那正是这个会话反复吃亏的形状：
@@ -80,6 +80,9 @@ for await (const line of rl) {
   const m = String(d.msg ?? '');
   if (m === 'message in') {
     msgs++;
+    // round 49：isEdit 的重放不是新消息。实测今天 08:00 前 52 条入站里
+    // 32 条是编辑重放（62%）—— 分母被这个灌水，"回复率"被系统性低估。
+    if (!d.isEdit) fresh += 1;
     const c = String(d.chatId ?? '?');
     const rec = byChat.get(c) ?? { m: 0, s: 0, edit: 0, first: t };
     rec.m += 1;
@@ -144,14 +147,17 @@ for await (const line of rl) {
 
 const extra = [...anchor.values()].reduce((s, v) => s + v - 1, 0);
 const dupRate = first > 0 ? (extra * 100 / first) : 0;
-const replyRate = msgs > 0 ? (first * 100 / msgs) : 0;
+// round 49：**回复率的分母改成新消息**（扣掉 isEdit 的重放）。
+// 旧口径（含编辑）保留在括号里，因为历史数字是那个口径——
+// 但现在它会低估：今天 08:00 前 62% 的"入站"是编辑重放。
+const replyRate = fresh > 0 ? (first * 100 / fresh) : 0;
 const actTotal = act.reply + act.wait + act.pass;
 
 console.log();
 console.log('  心流说话习惯 · 三条判据的量');
 console.log('  ────────────────────────────────────────────────────────');
 console.log(P(`窗口: ${new Date(cutoff).toISOString().slice(0, 16)}Z 之后`));
-console.log(P(`message in ${msgs}   首气泡 ${first}   分句后续 ${cont}   气泡总 ${first + cont}`));
+console.log(P(`message in ${msgs}（新消息 ${fresh}，编辑重放 ${msgs - fresh}）  首气泡 ${first}   分句后续 ${cont}   气泡总 ${first + cont}`));
 // round 40：**空窗口禁结论**。voice:phase 说"可以量"只答了"相对不对"，
 // 没答"有没有流量"——刚起床那几分钟两者都成立而 n=0，五个数全是 0/0。
 // 那看着像"完美收敛"（回复率 0%！），其实是没有样本。
