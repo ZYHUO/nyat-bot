@@ -27,6 +27,7 @@
     "measure:engage": "tsx scripts/measure-engage.mts",
     "measure:timing": "tsx scripts/measure-timing.mts",
     "gate:evidence": "bash scripts/check-gate-evidence.sh",
+    "tamper:audit": "tsx scripts/tamper-audit.mts --changed",
     "voice:phase": "node scripts/voice-phase.mjs"
   },
   "engines": {

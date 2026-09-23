@@ -4168,3 +4168,40 @@ GREEN 0
 
 三个我都犯过，而且**每一个都是"测试是好的、工具是瞎的"**。
 所以工具的输出必须带它改的那一行——这句话 round 55 就写了，这轮又验证一次。
+
+---
+
+## 又差点整份重写 package.json——这次是在"加一个 npm script"这种小事上（round 61）
+
+Round 60 归档了定位工具的规矩，但它**没有 npm script 就不会被用**。
+加 `tamper:audit` 时我用 python `json.dumps(我重建的 dict)` 写回——
+
+**把 25 个 dependencies、12 个 devDependencies、workspaces、engines 全丢了**，
+只剩 18 个 scripts。`git checkout HEAD -- package.json` 还原（它是已提交的，安全），
+再用 edit 工具插一行。
+
+### 这是"整份重写"这个错的第 4 次
+
+| 轮 | 我拿整份重写干什么 |
+|---|---|
+| 172 | `git checkout` 抹掉未提交的 wiring |
+| 181 | `git checkout` 抹掉未提交的 session-report 改动 |
+| 182 | `git checkout` 抹掉未提交的 fallback.ts |
+| 200 | 把 319 行的 plan 覆盖成 30 行摘要 |
+| **61** | **把 package.json 覆盖成只有 scripts** |
+
+前四次里有三次是 `git checkout`（已归档"别用它还原未提交改动"），
+第五次是 python 重写整个 JSON。
+
+**共同点全是"重建"而不是"增量"**：只要我从头构造目标状态，
+就会漏掉我没逐项列出来的东西；而只要我用 edit/追加，就漏不掉。
+
+### 归档（补进 AGENTS.md 第 2 条的推论）
+
+> **改文件一律增量（edit / 追加行 / 插入行），不要"读进来→改→整份写回"。**
+> 整份写回的任何一次，漏项都是静默的——
+> package.json 这种有 schema 的文件还能被 typecheck/lint 抓到，
+> 但 plan/voice-tuning 这种纯文本漏了**没有任何东西会响**。
+
+这一条比我之前归档的三条（转义/中文/commit -F）更根本：
+那三条治的是"写错内容"，这一条治的是"漏掉没写的内容"。
