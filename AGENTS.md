@@ -216,3 +216,23 @@ Rules:
 
 A syntax error from this is loud, which is the good case. The bad case is the one that
 *silently* writes the wrong character — that only shows up when someone reads the file.
+
+## Cross-checking two numbers: confirm they should be equal first
+
+"两个数不相等 → 有 bug" 是这个会话最有效的发现手段（round 114 react 量具、
+round 116 的 254 次失败、round 131 的闸、round 132 的双签都是这么挖出来的）。
+但它空转过两次，原因都一样：
+
+| 轮 | 我对的两个数 | 为什么不该相等 |
+|---|---|---|
+| 134 | `decision:reply` vs `host sendText` | sendText 是**所有**发送的公共出口（命令/代发/主动发言全走它） |
+| 135 | 账本戳数 vs 带锚发送数 | 一个发送会标多个锚点（`firstReplyTo` + `defaultReplyTo` + `relatedQuoteIds`） |
+
+Before comparing, answer one question: **是什么机制保证这两个数相等？**
+答不上来就不是不变量，别把它当 bug 报。
+
+三次真发现都答得上：`decision:pass` 与 `meta:pass`（同一次决策两条日志）、
+react 决策与真发（同一次调用）、闸日志与我看到的发送（闸自己的日志更全）。
+
+Also check units: the log's `time` is **milliseconds**, the answered bookkeeping is
+**seconds**. Comparing them silently passes everything (round 135 lost ten minutes to this).
