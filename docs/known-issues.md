@@ -48,3 +48,4 @@
 | `--since 'YYYY-MM-DD HH:MM'` 的 padStart bug | 藏了 42 轮，任何 HH:MM 都会静默退化成全天（round 93） |
 | 编辑重放算进入站 | 分母灌水，回复率被低估（round 49） |
 | 累计 vs 当天、20 分钟窗口 vs 全天 | 反复犯，判据已固化进 measure-voice 和 compare |
+| 自己的探针算进生产统计 | round 120：跑 LLM 探针量 LLM 健康度，那 5 个点的失败率是自己打的（真实 12% 而非 17%） |
