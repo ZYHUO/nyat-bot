@@ -19,8 +19,14 @@ import * as fs from 'node:fs';
 
 const SRC = 'AGENTS.md';
 
-const bodyLines = (): string[] => {
-  const raw = fs.readFileSync(SRC, 'utf8').split('\n');
+// round 88: 拉宽到四份。Round 87 只覆盖了 AGENTS.md，而那三份
+// 同样每轮被读（它们是我的"结论形式"）。实测四份都没有重复行，
+// 但不要因为现在干净就不守——round 86 那个错也是一时的。
+const ALL_DOCS = ['AGENTS.md', 'docs/OBJECTIVE-STATUS.md', 'docs/known-issues.md',
+  'docs/plan-reply-behaviour.md', 'docs/voice-tuning.md'];
+
+const bodyLines = (file = SRC): string[] => {
+  const raw = fs.readFileSync(file, 'utf8').split('\n');
   let inFence = false;
   const out: string[] = [];
   for (const l of raw) {
@@ -41,7 +47,7 @@ describe('AGENTS.md 结构', () => {
     expect(bold + secs, `粗体 ${bold} + 节 ${secs}`).toBeGreaterThanOrEqual(9);
   });
 
-  it('② 没有超过 40 字节的重复正文行（round 86 复发的"anchor 尾部被写两遍"）', () => {
+  it('② 五份文档都没有超过 40 字节的重复正文行', () => {
     const seen = new Map<string, number>();
     const dups: string[] = [];
     for (const l of bodyLines()) {
@@ -51,6 +57,20 @@ describe('AGENTS.md 结构', () => {
       if (n === 1) dups.push(l.trim().slice(0, 60));
     }
     expect(dups, '这些长行出现了两次：\n  ' + dups.join('\n  ')).toEqual([]);
+  });
+
+  it('③ 另四份也没有重复长行（round 88 拉宽）', () => {
+    for (const f of ALL_DOCS.slice(1)) {
+      const seen = new Map<string, number>();
+      const dups: string[] = [];
+      for (const l of bodyLines(f)) {
+        if (Buffer.byteLength(l) < 40) continue;
+        const n = seen.get(l) ?? 0;
+        seen.set(l, n + 1);
+        if (n === 1) dups.push(l.trim().slice(0, 50));
+      }
+      expect(dups, `${f} 里这些行出现了两次：\n  ` + dups.join('\n  ')).toEqual([]);
+    }
   });
 
   it('③ 边界表标了实证/假设（round 77）', () => {
