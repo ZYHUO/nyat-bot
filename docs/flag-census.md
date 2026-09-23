@@ -65,15 +65,15 @@
 |---|---|---|---|---|---|
 | cognition | `CONNECTIVITY_TRACKING_ENABLED` | false | 1 | ── AGI Level 6 Phase 14: 反向阀门 L7 ─────────────────────────────── 连接率埋点(新核心指标)+ 私聊风险分档。初期只记录不改行为。 | agent/reverse-valve.ts, cron/scheduler.ts |
 | cognition | `DREAM_CONSOLIDATE_ENABLED` | false | true | ── AGI Level 5 Phase 2: Dreaming 整合 ─────────────────────────────── 每周一次语义合并冗余/冲突经验(MindMemOS dreaming)。走 judge 链。 | cron/dream-consolidate.ts, cron/scheduler.ts |
-| cognition | `EXPERIENCE_SHARE_ENABLED` | false | true | ── AGI Level 5 Phase 5: 多智能体安全共享 ───────────────────────────── 只有 verified=1(已证实)的经验可跨 bot 共享;未验证/可疑仅本 bot 用。 | subagent/executor.ts |
+| cognition | `EXPERIENCE_SHARE_ENABLED` | false | true | ── AGI Level 5 Phase 5: 多智能体安全共享 ───────────────────────────── 只有 verified=1(已证实)的经验可跨 bot 共享;未验证/可疑仅本 bot 用。 | subagent/prompt-inputs.ts |
 | cognition | `EXPERIENCE_VERIFY_ENABLED` | false | true | ── AGI Level 5 Phase 1: 经验验证器（常驻）──────────────────────────── 注入的经验在任务终态打分：done+干净路径 → success_count；failed → failure_count。成功≥2 次 → verified=1(已证实)，失 | subagent/executor.ts |
 | cognition | `GOAL_EVIDENCE_GATE_ENABLED` | false | 1 | ── Phase 2: 证据门学习 ────────────────────────────────────────── 默认 OFF:OFF 时行为与 Phase-2 之前一致(legacy 直写路径)。 开启后:goal achieved 必须 host verified;skill verif | subagent/executor.ts |
 | cognition | `GOAL_LONG_TERM_ENABLED` | false | true | ── AGI Level 5 Phase 3: 长期任务语义 ──────────────────────────────── goal 升级为跨周持续关注:check_goal 主动探查世界悄悄的变化(VibeLifeBench)。 long_term goal 的 stale 窗口放宽到 30  | agent/goals.ts |
 | cognition | `GROUP_NORMS_ENABLED` | false | true | ── AGI Level 5 Phase 9: 群体风格画像 ──────────────────────────────── LoSoNA: 每个群有自己的隐性规范,观察消息 → 推断 → 注入 reply。 | cron/unified-tick.ts, pipeline/reply/prompt-builder.ts |
 | cognition | `HOBBY_DISTILL_ENABLED` | false | true | ── 爱好系统（从群友爱好蒸馏 bot 自己的爱好）──────────────────────── 聚合群友常聊话题 → LLM 蒸馏成 bot 自己的爱好 → 注入 self-state。 慢变量(几天重蒸馏一次),区别于 obsessions 的 3h 短周期轮换。 | cron/scheduler.ts |
-| cognition | `LOOP_POLICY_ENABLED` | false | true | ── AGI Level 5 Phase 4: Loop 策略资产化 ───────────────────────────── executor 循环策略(验证/重试/停止)从静态升级为可进化资产: 注入 prompt + 任务终态计数,成功率 <30% 自动 disable。 | subagent/executor.ts |
+| cognition | `LOOP_POLICY_ENABLED` | false | true | ── AGI Level 5 Phase 4: Loop 策略资产化 ───────────────────────────── executor 循环策略(验证/重试/停止)从静态升级为可进化资产: 注入 prompt + 任务终态计数,成功率 <30% 自动 disable。 | subagent/executor.ts, subagent/prompt-inputs.ts |
 | cognition | `MEMORY_FRESHNESS_ENABLED` | false | true | ── AGI Level 5 Phase 12: 记忆陈旧检测 ─────────────────────────────── 超期未确认 → stale 降权;变化词(换工作/分手) → 相关旧属性 stale。 只检测不自动删;检索到 stale 时注明可能过时。 | pipeline/reply/reply.ts, pipeline/stages/bookkeeping.ts |
-| cognition | `RECALL_BUDGET_ENABLED` | false | true | ── AGI Level 5 Phase 8: Context rot 防护 ───────────────────────────── 少召回+重排+最高信号放前(防「迷失在中间」/干扰项误导)。 | subagent/executor.ts |
+| cognition | `RECALL_BUDGET_ENABLED` | false | true | ── AGI Level 5 Phase 8: Context rot 防护 ───────────────────────────── 少召回+重排+最高信号放前(防「迷失在中间」/干扰项误导)。 | subagent/prompt-inputs.ts |
 | cognition | `REVERSE_VALVE_ENABLED` | false | 1 | Phase 14.1 接线: DM 风险 → 写手提示 + humanizer 衰减。默认 OFF,OFF 时 currentRiskLevel 恒 low(提示/衰减全是 undefined,行为与改造前逐字节一致)。 只在 DM(chatId > 0)生效,群聊零变化。 | agent/reverse-valve.ts, pipeline/reply/prompt-builder.ts, pipeline/stages/bookkeeping.ts, pipeline/stages/deliver.ts |
 | cognition | `SELF_EDIT_GUARDRAILS_ENABLED` | false | 1 |  | agent/self-improve.ts, subagent/host-api.ts |
 | cognition | `SKILL_CONSOLIDATE_ENABLED` | false | true |  | cron/scheduler.ts |
@@ -81,7 +81,7 @@
 | cognition | `SKILL_VERIFIED_USE_ENABLED` | false | 1 |  | subagent/executor.ts |
 | cognition | `TASK_EXECUTOR_ENABLED` | false | true | ── AGI Level 6 Phase 13: Task 对象架构 ───────────────────────────── 补 harness 的「执行+状态」:BullMQ 独立队列跑任务,与消息处理隔离。 | agent/task-store.ts, cron/scheduler.ts, pipeline/judge/task-trigger.ts, pipeline/pipeline.ts |
 | cognition | `TOM_STATE_ENABLED` | false | true | ── AGI Level 5 Phase 10: ToM 心智状态层 ───────────────────────────── 回复前先想「对方想要什么/什么情绪/期待什么反应」,白捡的策略性收益。 | pipeline/reply/reply.ts |
-| cognition | `WORLD_STATE_ENABLED` | false | true | ── AGI Level 5 Phase 6: 轻量世界状态 ──────────────────────────────── 对象中心实体(person/project/topic)持续维护,goal check 开工前注入上下文。 | subagent/executor.ts |
+| cognition | `WORLD_STATE_ENABLED` | false | true | ── AGI Level 5 Phase 6: 轻量世界状态 ──────────────────────────────── 对象中心实体(person/project/topic)持续维护,goal check 开工前注入上下文。 | subagent/executor.ts, subagent/prompt-inputs.ts |
 | core | `AGENCY_FAIL_CLOSED` | true | None |  | **无人读** |
 | core | `COGNITIVE_CONTINUITY_ENABLED` | false | true | Event-backed mission/process continuity. It only emits durable wake and checkpoint records; tools and Telegram side effects still need a separate host | cron/scheduler.ts |
 | core | `COGNITIVE_EVENTS_ENABLED` | true | true | Durable perception/event log. Disable only for emergency rollback; callers remain fail-soft when the migration is not present yet. | agent/cognitive-events.ts |
@@ -166,7 +166,7 @@
 | meta | `DEBT_SWEEP_ENABLED` | false | true | （TASK_PROGRESS_CODEACT_ENABLED / TASK_PROGRESS_RESEARCH_ENABLED 2026-09-21 删除： 两个都默认 true 而全仓库无一处读取。task-progress.ts 只读 TASK_PROGRESS_ENABLED， 这两个"按任务 | cron/scheduler.ts |
 | meta | `DIGEST_PERSIST_ENABLED` | false | true |  | cron/unified-tick.ts, meta/session-digest.ts, meta/session.ts, subagent/host-api.ts |
 | meta | `DREAMING_ENABLED` | false | true |  | cron/dreaming.ts, cron/scheduler.ts |
-| meta | `GROUNDING_ENABLED` | false | true |  | meta/grounding.ts, meta/session.ts, subagent/executor.ts |
+| meta | `GROUNDING_ENABLED` | false | true |  | meta/grounding.ts, meta/session.ts |
 | meta | `GROUP_NORMS_AUTO_UPDATE_ENABLED` | false | true | LLM group-norm proposals do not mutate the durable hypothesis by default; verified host evidence uses the separate evidence-gated updater. | agent/group-norms.ts |
 | meta | `META_DEFER_ENABLED` | false | true |  | bot/handlers/message.ts, meta/dispatch-gate.ts, meta/loop.ts, meta/timing-adapter.ts |
 | meta | `META_DISPATCH_GATE_ENABLED` | false | true |  | meta/dispatch-gate.ts |
@@ -290,9 +290,9 @@
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
 | cognition | `DISTILL_USAGE` | 'summarize' | — | ── AGI Level 4 P4-A: 经验沉淀（常驻）───────────────────────────────── 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection 检索相关经验注入  |
-| cognition | `DREAM_CONSOLIDATE_USAGE` | 'judge' | judge |  |
+| cognition | `DREAM_CONSOLIDATE_USAGE` | 'judge' |  REDACTED |  |
 | cognition | `EXPERIENCE_VERIFY_MIN_SUCCESS` | 2 | 2 |  |
-| cognition | `GROUP_NORMS_INFER_USAGE` | 'judge' | judge |  |
+| cognition | `GROUP_NORMS_INFER_USAGE` | 'judge' |  REDACTED |  |
 | cognition | `GROUP_NORMS_TTL_HOURS` | 6 | 6 |  |
 | cognition | `HOBBY_DISTILL_USAGE` | 'summarize' | — |  |
 | cognition | `LOOP_POLICY_MAX` | 5 | 5 |  |
@@ -319,9 +319,9 @@
 | features | `ANTIAD_CHAT_IDS` | '' | — |  |
 | features | `CODEACT_BANNED_WORDS` |  | — | CodeAct 禁词(逗号分隔),出站文本命中则拒发并要求重写。 |
 | features | `DREAM_JOURNAL_CHAT_ID` | 0 | 3954993432 | 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。 |
-| features | `DREAM_JOURNAL_CRON` | '0 23 * * *,0 15 * * *' | 0 23 * * *,0 4 * * *,0 15 * * * | 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。 |
-| features | `DREAM_JOURNAL_DIR` | './data/dream-journal' | ./data/dream-journal |  |
-| features | `DREAM_JOURNAL_USAGE` | 'reply' | reply |  |
+| features | `DREAM_JOURNAL_CRON` | '0 23 * * *,0 15 * * *' |  REDACTED | 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。 |
+| features | `DREAM_JOURNAL_DIR` | './data/dream-journal' |  REDACTED |  |
+| features | `DREAM_JOURNAL_USAGE` | 'reply' |  REDACTED |  |
 | features | `EXPRESSION_INJECT_COUNT` | 5 | 3 |  |
 | features | `JARGON_INFERENCE_THRESHOLDS` | '3,8,25,100' | — | G1: 首档 4→3,黑话冷启动更快过推断线(重检计数修复后才有意义) |
 | features | `LEARNER_BATCH_SIZE` | 80 | — |  |
@@ -337,8 +337,8 @@
 | features | `SILENCE_ALERT_INTERVAL_MIN` | 5 | 5 | 扫描周期(分钟)。 |
 | features | `SILENCE_ALERT_MAX_PER_RUN` | 5 | 5 | 单轮最多告警几个 chat(防告警风暴)。 |
 | features | `SILENCE_ALERT_THRESHOLD_MIN` | 30 | 30 | bot 最后回复距今超过该分钟数 = 判定沉默。 |
-| features | `STEPFUN_SEARCH_API_KEY` | '' | <redacted> |  |
-| features | `STEPFUN_SEARCH_BASE_URL` | 'https://api.stepfun.com' | https://api.stepfun.com/step_plan/v1 |  |
+| features | `STEPFUN_SEARCH_API_KEY` | '' |  REDACTED |  |
+| features | `STEPFUN_SEARCH_BASE_URL` | 'https://api.stepfun.com' |  REDACTED |  |
 | features | `STEPFUN_SEARCH_CATEGORY` | '' | — |  |
 | features | `STEPFUN_SEARCH_MAX_RESULTS` | 5 | — | stepfun 不认 max_results（恒返回 10 条），所以在客户端切。 |
 | features | `TIC_PENALTY_INTERVAL_MIN` | 30 | — |  |
@@ -350,61 +350,61 @@
 | infra | `ALLOWLIST_AI_CONTEXT_MAX_CHARS` | 24000 | 24000 |  |
 | infra | `ALLOWLIST_AI_MESSAGE_LIMIT` | 100 | 100 |  |
 | infra | `ALLOWLIST_MAX_SUBMISSIONS_PER_DAY` | 20 | 20 |  |
-| infra | `ALLOWLIST_REDIS_PREFIX` | 'xxb:mal:' | xxb:mal: |  |
-| infra | `BOT_NICKNAMES` |  | 啾咪囝,啾咪 |  |
-| infra | `BOT_TOKEN` |  | <redacted> | Telegram |
-| infra | `BOT_USERNAME` | 'xxb_bot' | hunhebi_bot |  |
+| infra | `ALLOWLIST_REDIS_PREFIX` | 'xxb:mal:' |  REDACTED |  |
+| infra | `BOT_NICKNAMES` |  |  REDACTED |  |
+| infra | `BOT_TOKEN` |  |  REDACTED | Telegram |
+| infra | `BOT_USERNAME` | 'xxb_bot' |  REDACTED |  |
 | infra | `CHANNEL_SOURCE_IDS` |  | — | Channel source IDs — channel posts from these channels are ingested into ChromaDB as knowledge |
-| infra | `CHANNEL_SOURCE_USERNAMES` |  | zaihuapd | Public channel usernames to scrape (no admin needed, uses t.me/s/ web page) |
-| infra | `COMMON_API_KEY` |  | <redacted> |  |
+| infra | `CHANNEL_SOURCE_USERNAMES` |  |  REDACTED | Public channel usernames to scrape (no admin needed, uses t.me/s/ web page) |
+| infra | `COMMON_API_KEY` |  |  REDACTED |  |
 | infra | `CONTEXT_MAX_LENGTH` | 600 | 400 |  |
 | infra | `FETCH_GATEWAY_URL` |  | — |  |
 | infra | `FETCH_WORKER_URL` |  | — |  |
-| infra | `FIRECRAWL_API_KEY` |  | self-hosted | Firecrawl 兜底:JS 重页面 / Cloudflare 验证页,免费路由(直连/Jina/本地绕过) 全失败后才落到这条付费路由。未配 KEY → 默认关,不发任何 Firecrawl 调用。 |
-| infra | `FIRECRAWL_API_URL` | 'https://api.firecrawl.dev' | http://127.0.0.1:3002 |  |
-| infra | `GEMINI_API_KEY` |  | <redacted> | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2. |
-| infra | `GEMINI_SEARCH_MODEL` | 'gemini-2.5-flash-lite' | gemini-2.5-flash-lite |  |
-| infra | `GEMINI_SEARCH_PROXY` |  | http://127.0.0.1:1081 | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/Firecrawl 等本地连接被绕)。 |
-| infra | `GLOBAL_FETCH_PROXY` |  | http://127.0.0.1:1081 | KVM 等受限网络：设 GLOBAL_FETCH_PROXY 后，所有外网 fetch 经 undici ProxyAgent 走代理（Telegram Bot API / LLM / Gemini / web-fetch），本地地址自动直 |
+| infra | `FIRECRAWL_API_KEY` |  |  REDACTED | Firecrawl 兜底:JS 重页面 / Cloudflare 验证页,免费路由(直连/Jina/本地绕过) 全失败后才落到这条付费路由。未配 KEY → 默认关,不发任何 Firecrawl 调用。 |
+| infra | `FIRECRAWL_API_URL` | 'https://api.firecrawl.dev' |  REDACTED |  |
+| infra | `GEMINI_API_KEY` |  |  REDACTED | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 key 上 quota=0(需计费);2. |
+| infra | `GEMINI_SEARCH_MODEL` | 'gemini-2.5-flash-lite' |  REDACTED |  |
+| infra | `GEMINI_SEARCH_PROXY` |  |  REDACTED | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/Firecrawl 等本地连接被绕)。 |
+| infra | `GLOBAL_FETCH_PROXY` |  |  REDACTED | KVM 等受限网络：设 GLOBAL_FETCH_PROXY 后，所有外网 fetch 经 undici ProxyAgent 走代理（Telegram Bot API / LLM / Gemini / web-fetch），本地地址自动直 |
 | infra | `HEDGE_DELAY_MS` | 2000 | 0 | AI tuning |
-| infra | `HOST` | '0.0.0.0' | 0.0.0.0 |  |
+| infra | `HOST` | '0.0.0.0' |  REDACTED |  |
 | infra | `IP_QUALITY_API_URL` |  | — |  |
 | infra | `JUDGE_WINDOW_SIZE` | 10 | 30 |  |
 | infra | `KNOWLEDGE_BASE_DIR` | './data/knowledge' | — | Knowledge base (file-backed, PHP parity) |
 | infra | `KNOWLEDGE_CRON_CHAT_IDS` |  | — | Knowledge cron (cron_long_term.php parity) |
 | infra | `KNOWLEDGE_CRON_HASH_PATH` |  | — |  |
 | infra | `KNOWLEDGE_CRON_SCHEDULE` | '30 * * * *' | — |  |
-| infra | `LOG_LEVEL` | 'info' | info |  |
+| infra | `LOG_LEVEL` | 'info' |  REDACTED |  |
 | infra | `MASTER_UID` | 0 | 6251541967 | Business |
 | infra | `MASTER_UID_EXTRA` |  | — |  |
-| infra | `NODE_ENV` | 'development' | production |  |
+| infra | `NODE_ENV` | 'development' |  REDACTED |  |
 | infra | `NYATDB_CHAT_RING_MAX` | 200 | 200 |  |
 | infra | `NYATDB_MAX_MESSAGES_PER_CHAT` | 5000 | 5000 |  |
-| infra | `NYATDB_PATH` | './data/nyatdb' | ./data/nyatdb |  |
+| infra | `NYATDB_PATH` | './data/nyatdb' |  REDACTED |  |
 | infra | `NYATDB_POOL_FRAMES` | 64 | 128 |  |
 | infra | `NYATDB_SYNC_EVERY` | 8 | 8 |  |
 | infra | `PERSONA_DIR` |  | — | Persona override directory (per-user {uid}.md / .txt) |
 | infra | `PORT` | 3000 | 3001 | Server |
-| infra | `QDRANT_HOST` | '127.0.0.1' | 127.0.0.1 | Qdrant (vector memory) — zod-coerced; a non-numeric QDRANT_PORT now fails validation at startup instead of producing `po |
+| infra | `QDRANT_HOST` | '127.0.0.1' |  REDACTED | Qdrant (vector memory) — zod-coerced; a non-numeric QDRANT_PORT now fails validation at startup instead of producing `po |
 | infra | `QDRANT_PORT` | 6333 | 6333 |  |
 | infra | `QUEUE_CONCURRENCY` | 8 | 8 | Queue |
 | infra | `RATE_LIMIT_PER_MIN` | 30 | 60 | Rate limiting |
-| infra | `REDIS_URL` | 'redis://127.0.0.1:6379/0' | redis://127.0.0.1:6379/5 | Redis |
+| infra | `REDIS_URL` | 'redis://127.0.0.1:6379/0' |  REDACTED | Redis |
 | infra | `SEARXNG_URL` |  | — |  |
-| infra | `SKILLS_DIR` | './data/skills' | — | Tool System |
-| infra | `SQLITE_PATH` | './data/xxb.db' | ./data/xxb.db | SQLite |
+| infra | `SKILLS_DIR` | './skills' | — | Tool System round 6（新 goal）：默认从仓库根的 \`./skills\` 读——那里随源码带着 4 个 **不需要 API key** 的例子（IP_GEO / GITHUB_REPO / CRYPTO_PRICE  |
+| infra | `SQLITE_PATH` | './data/xxb.db' |  REDACTED | SQLite |
 | infra | `TIMER_API_URL` |  | — |  |
 | infra | `TIMER_CALLBACK_URL` |  | — |  |
 | infra | `VIDEO_DESCRIBE_MAX_TOKENS` | 2000 | 2000 | reasoning 计入 completion:给小了会拿到空正文(实测 max_tokens=400 → 空)。 |
 | infra | `VIDEO_DESCRIBE_TIMEOUT_MS` | 120_000 | 120000 |  |
 | infra | `VIDEO_MAX_DURATION_SEC` | 300 | 300 | 视频时长硬上限（秒）。模型侧 5 分钟；Telegram 侧还有更紧的 20MB 下载上限 （代码里 MAX_MEDIA_BYTES=10MB），5 分钟视频几乎必然超——所以现实里能描述的 是短视频。超限的不下载，直接给带时长的中性占位。 |
-| infra | `WEBHOOK_SECRET` |  | <redacted> |  |
+| infra | `WEBHOOK_SECRET` |  |  REDACTED |  |
 | infra | `WEBHOOK_URL` |  | — | Webhook (optional — use polling if not set) |
-| infra | `WEB_FETCH_USER_AGENT` | 'XXB-WebFetch/1.0' | XXB-WebFetch/1.0 |  |
+| infra | `WEB_FETCH_USER_AGENT` | 'XXB-WebFetch/1.0' |  REDACTED |  |
 | infra | `XAI_API_KEY` |  | — |  |
 | infra | `XAI_SEARCH_BASE_URL` | 'https://new-api-zhcm.onrender.com/v1' | — |  |
 | infra | `XAI_SEARCH_MODEL` | 'grok-4.3-fast' | — |  |
-| judge | `JUDGE_SUBSTRATE_BACKEND` | 'typesafe' | typesafe |  |
+| judge | `JUDGE_SUBSTRATE_BACKEND` | 'typesafe' |  REDACTED |  |
 | judge | `JUDGE_SUBSTRATE_BREAKER_COOLDOWN_MS` | 60000 | — |  |
 | judge | `JUDGE_SUBSTRATE_BREAKER_FAILS` | 3 | — |  |
 | judge | `JUDGE_SUBSTRATE_CACHE_TTL_MS` | 120000 | — |  |
@@ -414,47 +414,47 @@
 | judge | `REFLECTION_CHATS_PER_TICK` | 20 | 15 |  |
 | judge | `REFLECTION_INTERVAL_MIN` | 30 | 10 |  |
 | judge | `REFLECTION_TICK_BUDGET_SEC` | 180 | — | 单个反思 tick 的墙钟预算（秒）。超时的群跳过，下一个 tick 自然补上。 2026-09-21：没有它时，waitIfCooling（round 55）+ 每跳 20s（round 53） 能把一个 tick 拖到 629s，而 t |
-| judge | `REFLECTION_USAGE` | 'summarize' | reflection |  |
+| judge | `REFLECTION_USAGE` | 'summarize' |  REDACTED |  |
 | judge | `REFLECTION_WINDOW_MSGS` | 250 | 200 |  |
 | judge | `TIMING_CONTINUATION_WINDOW_SEC` | 180 | — |  |
 | judge | `TIMING_GATE_COOLDOWN_SEC` | 15 | — | 阶段 4：gate 选 wait/no_action 后，下次再调 gate 的冷却时间（秒）。 对应 MaiBot 的 timing_gate_non_continue_cooldown_seconds。 |
-| judge | `TIMING_GATE_MAX_TOKENS` | 1200 | 1200 | gate LLM 的 max_tokens。  2026-09-21 修：这里原来是**调用点写死的 200**，而 gate 的 usage 现在是 `reflection` → stepfun = step-3.7-flash，一个 * |
+| judge | `TIMING_GATE_MAX_TOKENS` | 4000 | 4000 | gate LLM 的 max_tokens。  2026-09-21 修：这里原来是**调用点写死的 200**，而 gate 的 usage 现在是 `reflection` → stepfun = step-3.7-flash，一个 * |
 | judge | `TIMING_GATE_TIMEOUT_MS` | 8000 | 20000 |  |
 | judge | `TIMING_TALK_VALUE` | 1.0 | 0.3 | P1-C talk_value 频率阈值(0..1]:1.0 = 该层关闭(no-op)。<1 时非直接消息需攒 ceil(1/有效值) 条才评一次 gate,未达阈值 → defer 延迟重评;有空闲补偿兜底。 per-chat Redi |
 | judge | `TIMING_WAIT_MAX_SEC` | 120 | — | 阶段 4：wait 工具最大允许秒数；超过会被裁剪。 |
 | judge | `TIMING_WAIT_MIN_SEC` | 5 | — |  |
 | judge | `TOPIC_SCAN_TICK_BUDGET_SEC` | 180 | — | topic-scan 单个 tick 的墙钟预算（秒）。同 REFLECTION_TICK_BUDGET_SEC 的理由： extractTopic 原来没设每跳上限，用 judge usage 的 120s，20 群 × 3 跳 = 理论 |
 | judge | `TURN_GATE_DEFER_MAX_REPLAYS` | 1 | — | P0-B defer=延迟重评:同一条消息最多被 defer 重排几次(超限按旧语义静默丢弃)。 |
-| life | `ADMIN_CORS_ORIGINS` |  | https://miniapp.gomami.wiki | Admin |
-| life | `DAILY_LIFE_PROFILE` | 'auto' | auto |  |
+| life | `ADMIN_CORS_ORIGINS` |  |  REDACTED | Admin |
+| life | `DAILY_LIFE_PROFILE` | 'auto' |  REDACTED |  |
 | life | `DM_GREET_AFFINITY_MIN` | 40 | — |  |
 | life | `DM_GREET_MAX_USERS` | 2 | — |  |
 | life | `DM_PROACTIVE_COOLDOWN_HOURS` | 20 | — |  |
-| life | `MONITOR_TOKEN` | '' | <redacted> | Monitor |
+| life | `MONITOR_TOKEN` | '' |  REDACTED | Monitor |
 | life | `MOOD_DECAY_RATE_PER_HOUR` | 0.3 | — | 每小时衰减比例 (0..1)。0.3 = 1 小时后保留 70% 强度 |
 | life | `MOOD_INJECT_THRESHOLD` | 20 | 20 | \|valence\| < 该阈值时不注入 prompt（默认 calm 不打扰） |
 | life | `NYATOS_BUDGET_MAX_ACTS` | 6 | 6 |  |
-| life | `NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC` | 30 | 30 | 两次**被叫到**的回复之间的最小间隔（秒）。  2026-09-21 补上这条的原因：原来最小间隔只拦主动发言，而被叫到的那条路 （生产流量几乎全带引用锚点）**一点间隔都没有**。实测近 3 天 3008 次群发送： 小时窗 p50=6 |
+| life | `NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC` | 8 | 8 | 两次**被叫到**的回复之间的最小间隔（秒）。  2026-09-21 补上这条的原因：原来最小间隔只拦主动发言，而被叫到的那条路 （生产流量几乎全带引用锚点）**一点间隔都没有**。实测近 3 天 3008 次群发送： 小时窗 p50=6 |
 | life | `NYATOS_BUDGET_MIN_GAP_SEC` | 90 | 90 | 两次主动发言之间的最小间隔（秒）。计数额度挡不住"1 分钟连发 6 条"—— Phase 2.3 实测的 48 次/28 分钟、中位间隔 7 秒正是这个形状。 这是"我刚说过，让别人说"的那一半，与计数额度互补。0 = 关闭。 |
 | life | `NYATOS_BUDGET_WINDOW_SEC` | 3600 | 3600 |  |
-| life | `NYATOS_SHADOW_CHAT_IDS` |  | -1002750574953,-1003184176508,-100382109 | 影子判断的灰度群（空 = 开启后全量）。影子每次会多一次 LLM 调用， 先限定内部群可以把成本与干扰都控制住。 |
+| life | `NYATOS_SHADOW_CHAT_IDS` |  |  REDACTED | 影子判断的灰度群（空 = 开启后全量）。影子每次会多一次 LLM 调用， 先限定内部群可以把成本与干扰都控制住。 |
 | life | `NYATOS_SHADOW_TIMEOUT_MS` | 20_000 | 20000 |  |
 | life | `PHP_WEBHOOK_URL` |  | — |  |
 | life | `RELATIONSHIP_INJECT_THRESHOLD` | 20 | 20 | \|affinity\| < 该值时不注入 prompt（默认 一般 关系不打扰） |
-| life | `RESIDENT_STICKER_PACKS` |  | kawaiikipfel_by_moe_sticker_bot,NekoBia | 常驻贴纸包(逗号分隔的贴纸包 set_name):作为 bot 主力贴纸,选择时占多数候选槽。 |
+| life | `RESIDENT_STICKER_PACKS` |  |  REDACTED | 常驻贴纸包(逗号分隔的贴纸包 set_name):作为 bot 主力贴纸,选择时占多数候选槽。 |
 | life | `SELF_HISTORY_INJECT_LIMIT` | 5 | 5 |  |
 | life | `SELF_HISTORY_WINDOW_DAYS` | 30 | — |  |
 | life | `SELF_HISTORY_WINDOW_MIN` | 45 | — | 心流看到的"近况"窗口（分钟）。只影响行为史事实块，不影响对某人的一致性注入。 |
-| life | `TS_WEBHOOK_URL` |  | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |
+| life | `TS_WEBHOOK_URL` |  |  REDACTED | Cutover (optional — only used by scripts/cutover.sh) |
 | life | `TTS_VOICE` | 'zh-CN-XiaoxiaoNeural' | — | edge-tts 语音名(中文默认晓晓;也可换 zh-CN-XiaoyiNeural 等)。 |
 | memory | `CACHE_WARMUP_INTERVAL_MIN` | 4 | — |  |
-| memory | `MEMORY_COLLECTION` | 'xxb_group_history' | xxb_group_history_v2 |  |
+| memory | `MEMORY_COLLECTION` | 'xxb_group_history' |  REDACTED |  |
 | memory | `MEMORY_DEDUP_THRESHOLD` | 0.93 | — |  |
-| memory | `MEMORY_EMBED_MODEL` | 'Xenova/all-MiniLM-L6-v2' | Xenova/paraphrase-multilingual-MiniLM-L1 | ── 长期记忆嵌入模型 / collection / 相关性下限 ────────────── 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文 同义 0.7543 / 无关 0.6 |
+| memory | `MEMORY_EMBED_MODEL` | 'Xenova/all-MiniLM-L6-v2' |  REDACTED | ── 长期记忆嵌入模型 / collection / 相关性下限 ────────────── 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文 同义 0.7543 / 无关 0.6 |
 | memory | `MEMORY_MIN_SCORE` | 0 | — | 检索相关性下限(0..1)。0 = 不过滤,保持历史行为(纯 topK)。 换模型与调阈值刻意分成两次改动;标定必须用真实语料,别沿用旧模型下的经验值。 |
 | memory | `MEMORY_SENSITIVE_CHAT_IDS` |  | — | 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 由 DM_AUTO_PRIVATE 自动判定。 |
 | memory | `PROFILE_MERGE_CHAT_IDS` |  | — | 合并灰度群列表(逗号分隔 chatId,群为负数),空 = 对所有上下文生效。 |
-| memory | `PROFILE_MERGE_USAGE` | 'summarize' | summarize | 全局画像合并走哪个便宜模型 usage 路由。 |
+| memory | `PROFILE_MERGE_USAGE` | 'summarize' |  REDACTED | 全局画像合并走哪个便宜模型 usage 路由。 |
 | memory | `REPLY_DIRECT_RECENT_WINDOW` | 30 | — | 优化:direct 模式只取最近 N 条(原 50)——砍掉不可缓存的上下文体积,降 token/延迟。 |
 | memory | `SLEEP_WAKE_WINDOW_MIN` | 20 | — |  |
 | memory | `SUBAGENT_MEMORY_CHAT_IDS` |  | — | 灰度名单。**空 = 关闭**,与本仓其他 flag 的「空 = 全量」刻意相反: 这是隐私相关特性,配错的代价不对称 —— 漏开只是没效果,误开是内容外泄。 |
@@ -466,26 +466,26 @@
 | meta | `AGENT_COMPACT_USAGE` | 'judge' | — | （AGENT_PROGRESS_PING_ENABLED 2026-09-21 删除：全仓库无一处读取，.env 里开着。 它描述的"确定性进度 ping"从未实现——真要做是个新功能，不是翻一个旧开关。） 上下文压缩用的 AI usage |
 | meta | `AGENT_MAX_SEGMENTS` | 10 | — | 单个任务最多跑几段（每段 CODEACT_MAX_TURNS 轮）。超限强制诚实收尾。 |
 | meta | `AGENT_TASK_SEND_BUDGET` | 6 | 6 | 单个任务**一共**最多发几条消息（跨段累计）。 2026-09-21 之前这个预算实际是"每段 6 条 × 10 段 = 60 条"——每段重建 host api 就把 textSent 归零了。实测 1555 个任务/2965 次投递， |
-| meta | `ARTIST_USAGE` | 'reply' | artist | 画摊子（agent/artist.ts）的 AI usage 名：SVG 是代码活，默认跟 reply 主链。 |
+| meta | `ARTIST_USAGE` | 'reply' |  REDACTED | 画摊子（agent/artist.ts）的 AI usage 名：SVG 是代码活，默认跟 reply 主链。 |
 | meta | `CODEACT_CONCURRENCY` | 4 | — | CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。 |
 | meta | `CODEACT_TIMEOUT_MS` | 30_000 | 45000 | （CODEACT_MAX_TURNS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。每段轮数上限是 executor.ts 里写死的 30，不是这个 8） |
-| meta | `CODEACT_USAGE` | 'reply' | reply |  |
+| meta | `CODEACT_USAGE` | 'reply' |  REDACTED |  |
 | meta | `DEBT_SEMANTIC_MATCH_MAX_CANDIDATES` | 4 | — |  |
 | meta | `DEBT_SEMANTIC_MATCH_MIN_SCORE` | 0.72 | — |  |
 | meta | `DEBT_SEMANTIC_MATCH_TIMEOUT_MS` | 2_500 | — |  |
 | meta | `DEBT_SEMANTIC_MATCH_USAGE` | 'judge' | — |  |
 | meta | `DEBT_SWEEP_INTERVAL_MIN` | 30 | — |  |
 | meta | `DREAMING_CRON` | '17 19 * * *' | — | dreaming cron（UTC）。默认 19:17 UTC = 北京 03:17。 |
-| meta | `GROUNDING_USAGE` | 'judge' | reflection | grounding 搜索综合用的 AI usage 名（便宜快模型）。 |
+| meta | `GROUNDING_USAGE` | 'judge' |  REDACTED | grounding 搜索综合用的 AI usage 名（便宜快模型）。 |
 | meta | `META_ATTENTION_TOP_N` | 8 | 8 | 单次 Meta flush 最多处理几个 attention 条目。 |
 | meta | `META_HEART_REFRACTORY_MS` | 45_000 | 30000 |  |
 | meta | `META_L0_COALESCE_MS` | 2800 | 2800 |  |
 | meta | `META_SUBAGENT_CHAT_IDS` |  | — | 灰度 chatId 列表(逗号分隔)。空 = META_SUBAGENT_ENABLED 时对所有 chat 生效。 |
 | meta | `META_TICK_MS` | 5000 | 5000 | Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。 |
-| meta | `META_USAGE` | 'judge' | judge | Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。 |
-| meta | `POST_TASK_FOLLOWUP_USAGE` | 'judge' | reflection | follow-up 判定用的 AI usage 名（便宜快模型）。 |
+| meta | `META_USAGE` | 'judge' |  REDACTED | Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。 |
+| meta | `POST_TASK_FOLLOWUP_USAGE` | 'judge' |  REDACTED | follow-up 判定用的 AI usage 名（便宜快模型）。 |
 | meta | `POST_TASK_WINDOW_MS` | 120_000 | — | 发酵窗口时长(ms)。默认 2 分钟。 |
-| meta | `PROMISE_CHECK_USAGE` | 'reflection' | reflection | 承诺兜底判定用的 AI usage 名（便宜快模型；LLM 判定非规则引擎）。 |
+| meta | `PROMISE_CHECK_USAGE` | 'reflection' |  REDACTED | 承诺兜底判定用的 AI usage 名（便宜快模型；LLM 判定非规则引擎）。 |
 | meta | `TASK_PROGRESS_KEEPALIVE_MS` | 35_000 | — | （TASK_PROGRESS_START_DELAY_MS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。task-progress.ts 的节流只读 KEEPALIVE/ |
 | meta | `TASK_PROGRESS_MAX_VISIBLE_UPDATES` | 6 | — |  |
 | meta | `TASK_PROGRESS_MIN_INTERVAL_MS` | 30_000 | — |  |
@@ -504,11 +504,11 @@
 | self | `UNIFIED_TICK_HOUR_START` | 8 | — |  |
 | self | `UNIFIED_TICK_INTERVAL_MIN` | 5 | — | ── AGI Level 5 P5-A: 统一唤醒循环（常驻）─────────────────────────── 决策合并：一次 tick 一次 LLM 决定干什么（关心主人/群冒泡/自玩/查goal/安静）， 执行保留旧 cron 的 |
 | self | `UNIFIED_TICK_USAGE` | 'judge' | — |  |
-| social | `ASI_RUBRIC_MAX_TOKENS` | 1200 | 1200 | rubric 的 max_tokens。step-3.7-flash 是 reasoning 模型，思维链计入 completion： 实测 120/600 都只拿到空 content，1200 才出正文。别改小。 |
+| social | `ASI_RUBRIC_MAX_TOKENS` | 8000 | 8000 | rubric 的 max_tokens。step-3.7-flash 是 reasoning 模型，思维链计入 completion： 实测 120/600 都只拿到空 content，1200 才出正文。别改小。 round 69 从 1 |
 | social | `ASI_SAMPLE_RATE` | 0.2 | 0.2 | ASI 回复自评抽样率:1.0 = 全量(每条回复都自评),0.5 = 抽一半。 默认 0.2。ASI rubric 与 realtime-learn 的回复自评对**同一对** (trigger, reply) 各打 一次分,维度都是"贴 |
 | social | `ASI_USAGE` | 'asi' | — | ASI rubric 走哪个 usage。  2026-09-21：原来硬编码 'judge'，而 judge 的 label 是 FORMAT=claude 的 stepfun → 走 callClaude（Anthropic /mess |
 | social | `BOT_COMMAND_LEARN_INTERVAL_MIN` | 30 | 30 | 学习扫描间隔(分钟) |
-| social | `BOT_COMMAND_LEARN_USAGE` | 'summarize' | summarize | 学习侧(把观察到的命令提炼成用法/场景)的 LLM 路由。离线 cron、不赶时间、是深 推理任务 → 正好交给 mundo(qwen3.6);设 'mundo' 需 MUNDO_ENABLED。默认走 summarize。 |
+| social | `BOT_COMMAND_LEARN_USAGE` | 'summarize' |  REDACTED | 学习侧(把观察到的命令提炼成用法/场景)的 LLM 路由。离线 cron、不赶时间、是深 推理任务 → 正好交给 mundo(qwen3.6);设 'mundo' 需 MUNDO_ENABLED。默认走 summarize。 |
 | social | `BOT_DELEGATION_COOLDOWN_SEC` | 60 | 60 | 每群代发限速(秒):两次代发最小间隔 |
 | social | `BOT_REPLY_DELEGATION_COOLDOWN_SEC` | 60 | 60 | 两次回复式代发最小间隔(秒)。群管动作连着来就像机器在干活。 |
 | social | `BOT_REPLY_DELEGATION_MAX_PER_HOUR` | 3 | 3 | 每群每小时回复式代发上限。超过就只观察不动手。 |
@@ -527,27 +527,27 @@
 | social | `REALTIME_LEARN_TIMEOUT_MS` | 10000 | — |  |
 | social | `REPLY_TOOLS_MAX_STEPS` | 4 | 4 |  |
 | social | `REPLY_TOOLS_USAGE` | 'reply_tools' | — | 合并写手（reply-with-tools）用的 AI usage。它走 AI SDK 的 tools，**只吃 OpenAI 兼容格式**，而 reply 主链默认是 claude 原生格式——用同一个 usage 会让链上每个 labe |
-| social | `RSS_FEEDS_JSON` | '[]' | [{"url":"https://www.geekpark.net/rss"," | JSON 数组: [{url, chatId, autoPost?, sourceName?}] |
+| social | `RSS_FEEDS_JSON` | '[]' |  REDACTED | JSON 数组: [{url, chatId, autoPost?, sourceName?}] |
 | social | `RSS_MAX_ITEM_AGE_HOURS` | 72 | — | 新条目新鲜度闸（小时）：pubDate 比阈值老的直接丢（仍计 seen 防回潮）； 没日期/解析不了的放行（误杀比漏放糟）。2026-08-24：Opus 4.6 旧闻标题党被端上桌的教训。 |
 | social | `RSS_MONITOR_INTERVAL_MIN` | 30 | 30 |  |
 | social | `RSS_USAGE` | 'summarize' | — | 自动发送时使用的 LLM 路由 |
-| social | `WEATHER_CITY` | 'Beijing' | Beijing |  |
+| social | `WEATHER_CITY` | 'Beijing' |  REDACTED |  |
 | social | `WRITER_BEST_OF_N` | 1 | 1 | Best-of-N 写手:生成 N 稿,选择器挑最贴的发。N=1 关闭。写手 token ×N。 默认 1。best-of-N 对 direct 闲聊路由没有降级(orchestrator.ts:281),等于让一个 maxTokens:2 |
 | social | `WRITER_SELECTOR_TIMEOUT_MS` | 6000 | — |  |
 | timing | `GROUNDING_ASKED_MAX` | 0.35 | 0.35 |  |
 | timing | `GROUNDING_PRESENT_MAX` | 0.35 | 0.35 | topic_present 低于此值算"聊天里没提过"，user_asked 低于此值算"用户没在问"；两者都低才拦。 |
 | timing | `TIMING_DEBOUNCE_MAX_BUFFER_MS` | 8000 | — |  |
 | timing | `TIMING_DEBOUNCE_MS` | 2000 | — | 阶段 1：消息去抖窗口（毫秒）。0 = 关闭去抖。 同一 chat 内，新消息会重置定时器；超过 MAX_BUFFER_MS 强制 flush 防止饥饿。 |
-| timing | `TIMING_GATE_USAGE` | 'judge' | reflection | 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。 |
+| timing | `TIMING_GATE_USAGE` | 'judge' |  REDACTED | 阶段 3：Timing Gate LLM usage label。默认走 judge usage（小模型）。 |
 | timing | `TIMING_STATE_TTL_SEC` | 86400 | — | 阶段 2：ChatRuntime 状态过期时间（秒）。超过则视作 STOP 默认状态。 |
 | timing | `TRENCH_BURST_MAX` | 30 | 30 | 默认值不是拍的，是回测出来的（scripts/envelope-backtest.mts，近 3 天 1841 条）： 实测小时窗峰值 107 / p99 64 / p95 37；5 分钟窗峰值 19 / p99 16。 设 150/100 |
 | timing | `TRENCH_BURST_MAX_ACTIVE` | 20 | 20 |  |
 | timing | `TRENCH_BURST_WINDOW_SEC` | 3600 | 3600 |  |
 | timing | `TRENCH_DEBT_ATTENTION_BOOST` | 0.5 | 3.0 |  |
-| timing | `TRENCH_ENVELOPE_MODE` | 'off' | enforce | 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进 CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与—— 2026-09-19 真人对比分析定为此为"差一口气 |
-| timing | `TYPESAFE_API_KEY` | '' | <redacted> |  |
-| timing | `TYPESAFE_ENDPOINT` | 'https://api.typesafe.ai/v1/systemone' | https://api.typesafe.ai/v1/systemone | TypeSafe System One 接入。/v1/systemone；key 是 secret（.env，勿提交）。 |
-| timing | `TYPESAFE_MODEL` | 'jev-latest' | jev-latest |  |
+| timing | `TRENCH_ENVELOPE_MODE` | 'off' |  REDACTED | 房间感知注入：把 frame 已算好的"圈子里谁在跟谁说话/我多久没说话/未了话题"渲染进 CodeAct 任务 prompt。真人不是只回上一条的，bot 却永远在回应、从不在参与—— 2026-09-19 真人对比分析定为此为"差一口气 |
+| timing | `TYPESAFE_API_KEY` | '' |  REDACTED |  |
+| timing | `TYPESAFE_ENDPOINT` | 'https://api.typesafe.ai/v1/systemone' |  REDACTED | TypeSafe System One 接入。/v1/systemone；key 是 secret（.env，勿提交）。 |
+| timing | `TYPESAFE_MODEL` | 'jev-latest' |  REDACTED |  |
 | turn | `ANTI_REPEAT_THRESHOLD` | 0.85 | — |  |
 | turn | `META_HEART_BYPASS_CHAT_IDS` |  | — | Nyat Trench Phase 1 旁路的**灰度群列表**。空 = 不旁路任何群（默认）。 为什么需要灰度：翻旗的预期效果是把最忙群的发送率从 22% 抬到 86%（投影 3.9x）， 全量翻等于同时改所有群的行为，出了问题也分不清是 |
 | turn | `MTM_CHUNK` | 150 | — | 每轮压缩的最老消息条数 |
@@ -617,8 +617,8 @@
 
 | key | 段 | .env | 说明 |
 |---|---|---|---|
-| `GEMINI_API_KEY` | infra | <redacted> | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 k |
-| `GEMINI_SEARCH_MODEL` | infra | gemini-2.5-flash-lite |  |
-| `GEMINI_SEARCH_PROXY` | infra | http://127.0.0.1:1081 | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/ |
+| `GEMINI_API_KEY` | infra |  REDACTED | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 k |
+| `GEMINI_SEARCH_MODEL` | infra |  REDACTED |  |
+| `GEMINI_SEARCH_PROXY` | infra |  REDACTED | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/ |
 | `PHP_WEBHOOK_URL` | life | — |  |
-| `TS_WEBHOOK_URL` | life | https://hunhebi.sharon.wiki | Cutover (optional — only used by scripts/cutover.sh) |
+| `TS_WEBHOOK_URL` | life |  REDACTED | Cutover (optional — only used by scripts/cutover.sh) |
