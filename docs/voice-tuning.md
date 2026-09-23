@@ -4545,3 +4545,36 @@ round 49 → round 82 放了 33 轮。那就不留给下一轮——**这轮修�
 round 82 立的"标记≠放过"当场兑现了一次：标记完同一轮就修。
 代价：半小时、一个脚本、零生产风险。
 ```
+
+---
+
+## JSON.parse 自检守卫：package.json 坏了，npm 全线报，但 5 条测试全绿（round 90）
+
+Round 89 花 20 分钟才把 package.json 改对。那轮立了"改完立刻 json.loads 自检"，
+但它是**我说给自己听的一句话**，不是守卫。这轮变成守卫。
+
+`tests/unit/package-json-intact.test.ts` 加 ①：全文必须 `JSON.parse` 成功。
+
+### 为什么原有 5 条治不了这个
+
+它们数的是 **keys=11 / deps=25 / devDeps=12 / workspaces 存在**——
+而我 round 89 改坏的是**一个逗号**。数目一个没变，所以 5 条全绿，
+而 `npm run` 全线报 `Expected "," in JSON but found "session:report"`。
+
+**"结构对"和"内容对"是两件事**，原来的守卫只查内容。
+
+### 验红时的三个发现
+
+1. **第一次 tamper 没红**：我用 `lines[31]` 定位，但 round 89 之后
+   `voice:phase` 在 32 行 —— tamper 落在别的行上，JSON 仍合法。
+   **这是 round 54-59 "定位类工具四方向"的又一次**：我连手工 tamper 都会选错行。
+2. **第二次 tamper 写盘后测试跑不出来**：因为我把 tamper 和 `git checkout`
+   写在同一个 bash 调用里，**restore 先于测试执行**——round 66 那条
+   「还原不能和验证串在一起」的同类。
+3. **分开执行后确认**：`esbuild 报 ERROR: Expected "," in JSON`，exit 非 0，
+   6 条测试一条都没跑。
+
+而第 3 点暴露一个新问题：**JSON 坏掉时 vitest 整个 transform 失败，
+我的 ① 断言根本没机会执行**。所以这条守卫**在 CI 里有效**
+（`npm run test` 会失败），但**它报的不是我写的错误消息，是 esbuild 的**。
+对一个读者来说那仍然足够——它指向 package.json:33:4，比我原来的猜位置准。
