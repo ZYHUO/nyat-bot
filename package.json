@@ -29,7 +29,11 @@
     "gate:evidence": "bash scripts/check-gate-evidence.sh",
     "tamper:audit": "tsx scripts/tamper-audit.mts --changed",
     "log:count": "tsx scripts/log-count.mts",
-    "voice:phase": "node scripts/voice-phase.mjs"
+    "voice:phase": "node scripts/voice-phase.mjs",
+    "session:report": "tsx scripts/session-report.mts",
+    "verify:deploy": "npx tsx scripts/verify-deploy.mts",
+    "verify:integration": "npx tsx scripts/verify-integration.mts",
+    "verify": "npm run typecheck && npm run lint && npm run build && npm run verify:deploy && npm run verify:integration"
   },
   "engines": {
     "node": ">=22.0.0 <23"
