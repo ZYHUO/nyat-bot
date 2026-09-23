@@ -281,9 +281,10 @@ async function main(): Promise<void> {
   // Prometheus metrics(借鉴 CGM:LLM token/缓存/延迟按用途可见)— flag-gated。
   if (config.METRICS_ENABLED) {
     const { initLlmMetrics } = await import('./metrics/llm-collector.js');
-    const { renderMetrics } = await import('./metrics/registry.js');
     initLlmMetrics();
-    app.get('/metrics', (c) => c.text(renderMetrics()));
+    // round 73: 带口径头——裸 Prometheus 给机器读的，但这里主要读者是人。
+    const { renderMetricsWithBanner } = await import('./metrics/registry.js');
+    app.get('/metrics', (c) => c.text(renderMetricsWithBanner()));
     logger.info('Prometheus /metrics enabled');
   }
   // Mount admin API at /miniapp_api (kept: allowlist review console posts here;
