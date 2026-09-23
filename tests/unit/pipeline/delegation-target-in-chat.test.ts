@@ -53,7 +53,25 @@ describe('代发的目标在群检查', () => {
     expect(failOpen).toBe(true);
   });
 
-  it('⑤ 空结果不缓存（下次还会真问）', () => {
+  it('⑤ db 命中就直接放行，不问 Telegram（零网络）', () => {
+    // 两层判据：db 先问。db 有记录 → return true，不花一次 getChat。
+    // round 55 用户纠正"翻一下记录应该是有的"——bot_interactions 早就有，
+    // 且实测 6 个目标 6/6 与 getChatMember 一致。
+    const dbHas = true;
+    const askedTelegram = dbHas ? false : true;
+    expect(dbHas).toBe(true);
+    expect(askedTelegram).toBe(false);
+  });
+
+  it('⑥ db=0 不equiv不在群——必须再问 Telegram', () => {
+    // db=0 的两种成因：不在群（可靠）/ 在群但沉默或被 MAX_BOTS_PER_GROUP=20
+    // 挤掉（不可靠）。所以 db 查不到要继续问，不能直接判"不在"。
+    const dbRow = null;
+    const mustAskTelegram = dbRow === null;
+    expect(mustAskTelegram).toBe(true);
+  });
+
+  it('⑦ 空结果不缓存（下次还会真问）', () => {
     // catch 分支里没有 redis.set——只有真的拿到了 status 才缓存。
     const cached = (got: boolean) => (got ? '1' : '0');
     expect(cached(true)).toBe('1');

@@ -47,8 +47,21 @@ async function targetBotInChat(chatId: number, botName: string): Promise<boolean
     const cached = await getRedis().get(key);
     if (cached === '0') return false;
     if (cached === '1') return true;
-  } catch { /* cache miss -> 现问 */ }
+  } catch { /* cache miss -> 下面两层 */ }
 
+  // 第一层：本地 db。零网络、毫秒级、有 (chat_id, bot_username) 索引。
+  try {
+    const { getDb } = await import('../../db/sqlite.js');
+    const row = getDb().prepare(
+      'SELECT 1 FROM bot_interactions WHERE chat_id = ? AND bot_username = ? LIMIT 1',
+    ).get(chatId, botName) as unknown;
+    if (row) {
+      void getRedis().set(key, '1', 'EX', IN_CHAT_TTL_SEC).catch(() => {});
+      return true;
+    }
+  } catch { /* db 不可用 -> 落到 Telegram */ }
+
+  // 第二层：db 没记录 —— 可能真不在群，也可能在群但沉默。歧义只能用 Telegram 解。
   try {
     const { getBot } = await import('../../bot/bot.js');
     // ⚠️ getChatMember 的 user_id **不吃 @username**（实测 Bad Request:
