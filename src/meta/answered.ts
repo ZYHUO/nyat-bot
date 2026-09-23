@@ -19,7 +19,24 @@ export async function markMessageAnswered(chatId: number, messageId: number): Pr
     const times = prev && prev !== '1'
       ? prev.split(',').map((x) => Number.parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0)
       : [];
-    times.push(Math.floor(Date.now() / 1000));
+    // round 132：**同一次回答不能记两个戳。**
+    //
+    // 生产实测 `xxb:meta:answered:-1003350411234:68491` =
+    //   1790169018,1790169058,1790169058,1790169094
+    //                     ^^^^^^^^^ 同一秒两个戳，而那个锚点只成功发过一条。
+    //
+    // 根因是调用点重复，不是这里：
+    //   - `src/bot/sender/telegram.ts:410` sendMessage 是公共出口，发完就标
+    //   - `src/subagent/host-api.ts:1511` 同一个 firstReplyTo，Meta 路径再标一遍
+    // 全仓 10 处调用，逐处去重容易漏；在这里挡一次覆盖全部。
+    //
+    // 判据用同一秒：两次真正分开的回答至少差几秒（要等心流/模型），
+    // 而同一次发送的两个 mark 只差几毫秒。隔一秒的回答仍然各记一次。
+    // 直接 return，不续 TTL：上一次写就是同一秒前的事，
+    // 它已经把 TTL 设成 TTL_SEC 了，再续没有意义（也少一个依赖的方法）。
+    const now = Math.floor(Date.now() / 1000);
+    if (times.length > 0 && times[times.length - 1] === now) return;
+    times.push(now);
     await getRedis().set(key(chatId, mid), times.slice(-5).join(','), 'EX', TTL_SEC);
   } catch (err) {
     logger.debug({ err, chatId, messageId: mid }, 'markMessageAnswered failed');

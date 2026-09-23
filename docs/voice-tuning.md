@@ -2153,3 +2153,46 @@ app.log 对不上（其中一个时间戳重复了）。不影响闸的行为（
 `gate:evidence` 现在会列被拦的明细（这轮加的），但"成功发送按锚点计数"
 仍要扫日志。下一步可以把 measure-voice 的 ③ 改成读账本而不是日志——
 那样 ① 的分母和闸的口径就一致了。这轮先把结论钉住。
+
+---
+
+## 一次回答记两个戳，闸比设计早一轮拦（round 132）
+
+Round 131 读 Redis 账本时发现 `1790169058,1790169058` —— 同一秒两个戳，
+而那个锚点当时只成功发过一条消息。
+
+查调用点，全仓 10 处 `markMessageAnswered`，其中同一次发送会标两遍：
+
+```
+src/bot/sender/telegram.ts:410     sendMessage 是公共出口，发完就标
+src/subagent/host-api.ts:1511      同一个 firstReplyTo，Meta 路径再标一遍
+```
+
+而 `markMessageAnswered` 是 **append 无去重**（`times.push(...)`）。
+
+### 后果
+
+`answeredTimestamps` 多数一次 → 重复锚点闸（`REPEAT_ANCHOR_MAX=2`）在
+**一次回答后就认为 recent=2**，把本该允许的第二次也拦掉。
+设计意图是「拦第 N+1 次」，实际变成「拦第 2 次」。
+
+这也让 round 123/124 那笔账失真：我以为收益是"消除 25 组回两次"、
+代价是"咽 25 条第二句"，而实际上闸本来就在按"一次即满"跑。
+
+### 修
+
+在 `answered.ts` 里挡一次，覆盖全部 10 处调用（逐处去重会漏）：
+
+```ts
+const now = Math.floor(Date.now() / 1000);
+if (times.length > 0 && times[times.length - 1] === now) return;
+times.push(now);
+```
+
+判据用**同一秒**：真正分开的回答至少差几秒（要等心流/模型），
+而同一次发送的两个 mark 只差几毫秒。不续 TTL——上一次写就是同一秒前的事。
+
+### 测试
+
+3 条：同一次标两遍只记一个 · 5 秒后的第二次仍记（差值为 5）· 隔一秒也记。
+先跑出红 `[1790170958, 1790170958]` 才改的。
