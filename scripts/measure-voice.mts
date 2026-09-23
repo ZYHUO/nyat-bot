@@ -96,6 +96,11 @@ const actByHour = new Map<string, { r: number; w: number; p: number; x: number; 
 let reacted = 0;
 // round 117: 坏掉的 pass（LLM 失败 fail-closed），不算选择不说。
 let metaFailedPass = 0;
+// round 150: **影子决策崩掉的次数。** 它不进 Meta heart: pass（shadow.ts:225
+// 是独立 warn 日志，返回 why='shadow_error'），所以不污染 ② 的分母——
+// 但它也没进过任何仪表盘：session-report 2c 没有这一行，这里原来也不数。
+// 今天实测 2737 次。谁想知道只能 grep 日志。
+let shadowThrew = 0;
 const reactedEmoji = new Map<string, number>();
 // round 15：按群拆。用户说"bot 太爱说话了"是**在某个群里的体感**，
 // 全量一个平均数会把"一个群在刷屏"和"所有群都正常"混成一回事。
@@ -142,6 +147,7 @@ for await (const line of rl) {
   // 差 254 全是 llm_failed（LLM 失败时 Meta 打 pass + llm_failed，
   // 而 decision.ts 的 Heart decision 那条没打）。
   // 旧口径把 254 次"坏掉不说话"全算漏，② 的 n 少 16%。
+  if (m === 'shadow decision THREW (counted as silent)') { shadowThrew++; continue; }
   if (m === 'Meta heart: pass') {
     const why = String(d.why ?? '');
     if (why === 'llm_failed' || why === 'parse_failed') {
@@ -231,6 +237,9 @@ console.log(P(`② 心流四态        reply ${act.reply} (${actTotal ? (act.rep
 console.log(P(`   其中 react 真的点出去 ${reacted} 次（heart: reacted 日志；与决策数不一致说明有失败回落）。`));
 // round 117：把坏掉的 pass 拆出来。round 66/95 我说 pass 84-88% 它真的在读上下文，
 // 而 round 116 交叉验证发现其中 16% 是 llm_failed —— 那不是选择，是哑。
+if (shadowThrew > 0) {
+  console.log(P(`  另有 ${shadowThrew} 次影子决策崩掉（shadow_error，日志在 shadow.ts:225）——它不进 pass，但也没进过任何仪表盘。`));
+}
 if (metaFailedPass > 0) {
   const bad = 100 * metaFailedPass / Math.max(1, actTotal + metaFailedPass);
   console.log(P(`   ⚠️ ${metaFailedPass} 次 pass 是 LLM 失败 fail-closed（不是选择不说），占 ${bad.toFixed(0)}%。`));

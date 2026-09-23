@@ -2657,3 +2657,31 @@ Round 148 定位了 exhausted 的起点（09-19 起跳）。这轮按"谁在报�
 
 （`measure:voice` 的 ② 现在只拆了 `llm_failed`/`parse_failed`，
 没拆 shadow THREW —— 那 1654 次仍算在正常 pass 里。）
+
+---
+
+## 修正 round 149：shadow THREW 不混在 pass 里，它是一个没仪表盘的 2737 次（round 150）
+
+Round 149 我说"shadow THREW 1654 次被当成沉默算在 pass 里"。
+这轮查了它怎么落的：`src/nyatos/shadow.ts:225` 是**独立 warn 日志**，
+返回的是 `why: 'shadow_error'`，**不进 `Meta heart: pass`**。
+
+```
+shadow decision THREW   2737 次（今天仍新增）
+Meta heart: pass       13157 次
+```
+
+所以正确说法是：**有一个 2737 次的失败源，任何仪表盘都不数它。**
+
+它不污染 ②（那是我 round 149 说错的），但它自己是个黑洞——
+`session-report` 的 2c 节没有这一行，`measure:voice` 也不数。
+谁想知道"影子决策崩了多少"，只能 grep 日志。
+
+### 修
+
+把这一行加进 `measure:voice` 的输出（和 failedPass 并列），
+让"② 之外还有多少决策崩了"可见。不动 shadow.ts 本身——
+它已经按 round 96 的规矩从 debug 提到 warn 并有字段了。
+
+**顺带又一处"没查就下结论"**：round 149 我把两个独立的失败源说成同一个。
+这次是查了落点才发现。

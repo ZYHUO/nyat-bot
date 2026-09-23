@@ -43,4 +43,13 @@ describe('measure:voice 的 failed-pass 拆分', () => {
     const out = execSync('npx tsx scripts/measure-voice.mts -- --day=2026-09-23 2>/dev/null', { encoding: 'utf8' });
     expect(out).toContain('LLM 失败 fail-closed');
   });
+
+  it('⑥ 影子决策的崩掉也数（round 150：它不进 pass，但也没进过任何仪表盘）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    const codeLines = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+    expect(codeLines.some((l) => l.includes("m === 'shadow decision THREW (counted as silent)'"))).toBe(true);
+    expect(codeLines.some((l) => l.includes('shadowThrew'))).toBe(true);
+    const outLines = s.split('\n').filter((l) => !l.trimStart().startsWith('//') && l.includes('console.log'));
+    expect(outLines.some((l) => l.includes('影子决策崩掉'))).toBe(true);
+  });
 });
