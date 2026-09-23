@@ -4613,3 +4613,45 @@ round 162 加它就是为了这个，等了 3 天才第一次真的拦到。
 
 **处置**：下一轮用 `log:count` 查 `agent_interrupt` 的实际日志形状，
 别再用我猜的字符串。这条还没修，**它现在排在 round 92**。
+
+---
+
+## interrupt 的 background 桶：0 次，但这次连"判据是什么"都答不上（round 94）
+
+Round 92 补了 triage 日志，生产 4 条**全是 addressed**。background 0 次。
+按 round 36 的规矩先回放判据：
+
+```
+判据 = repliedTo || mentioned
+background = 长任务运行中 + 有人说了句既没 reply 它也没 @ 它
+```
+
+**但回放失败**：那 2008 条老 interrupt 日志是 round 92 之前打的，
+**没有 `addressed` 字段、也没记原文**——所以我算不出它们属于哪一桶。
+
+这一条比 round 191「debug 不可见」更进一步：
+
+| round | 坑 | 性质 |
+|---|---|---|
+| 191 | 日志在 debug 级，`LOG_LEVEL=info` 看不到 | **看得见与否** |
+| 194 | 日志在，但没记判据需要的字段 | **看得见但不够用** |
+
+**Round 92 补的日志已经把 `addressed` + `bucket` 记上了**，所以从现在起
+background 可判。在这之前它是"未观测"而不是"0 次"。
+
+### 一个连带判断（这次能答上）
+
+「round 167 的入口拦会不会把 background 吃掉？」——**不会**。
+入口拦只作用于 `routerEligible` 且走的是 `routeLearnedCommand`，
+消息照旧走完 pipeline；background interrupt 的入口是长任务运行时
+任意群消息，没被前置掉。**所以 background 0（从 round 92 起）是真的没触发，
+不是被拦掉了。**
+
+### 归档（补进 round 92）
+
+```
+补一条日志时要问：这条日志够不够回放它自己的判据？
+· round 191：日志在，级别不对 → 不可见
+· round 194：日志可见，字段不全 → 不可回放
+  （2008 条老 interrupt 日志就是，没有 addressed/text）
+```
