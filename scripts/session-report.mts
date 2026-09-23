@@ -72,6 +72,9 @@ interface LogStats {
   // topic-word 闸要筹满 6 来自己发的话才开始判，开发期基本不可能。
   processRestarts: number;
   processSends: number;
+  // round 83: 编辑重放（isEdit=true）占入站 15.6%（round 49 标记、round 82 复量仍在）。
+  // 它灌所有以"入站"为分母的率，必须单列。
+  editedReplay: number;
   // round 181：影子决策的收支。round 149 量出它是 exhaust 的第 2 大报错方
   // （2772 次 THREW，仅次于心流 2699），而 session-report 里 grep 'shadow'
   // 是 0 次——它一直是个没有仪表盘的 LLM 消费者。
@@ -110,6 +113,7 @@ function readLog(): LogStats {
     shadowCompared: 0,
     processRestarts: 0,
     processSends: 0,
+    editedReplay: 0,
   };
   let fd: string;
   try {
@@ -138,7 +142,10 @@ function readLog(): LogStats {
     // "Empty response" 都是被 fallback 链包在 err 中上传的。只看 msg 会全得 0，
     // 而 0 和"没有数据"是两件事。
     const errMsg = String((d['err'] as { message?: string } | undefined)?.message ?? d['error'] ?? '');
-    if (msg === 'message in') { st.inbound++; if (t >= deployMs) st.afterInbound++; }
+    if (msg === 'message in') {
+      st.inbound++; if (t >= deployMs) st.afterInbound++;
+      if (d['isEdit'] === true) st.editedReplay++;   // round 83：编辑重放单列，别灌分母
+    }
     // 最后一条"醒着在处理"的证据。睡眠期消息走 `Meta path: asleep` 排队，
     // 不算 awake 处理——拿它当证据会以为功能在跑，其实只是消息到了。
     //
@@ -414,6 +421,15 @@ console.log(`    其中有触发（真回复）        ${db.sendsTriggered ?? 0}
 console.log(`    其中主动（cron 冒泡）       ${db.sendsProactive ?? 0}`);
 // 真正的"频率"是**比率**：每 100 条入站消息里 bot 说几句。
 // 绝对数随群活跃度浮动，比率才是用户说的"日常都有点过高频率"那个东西。
+// round 83: 编辑重放占比——round 49 标记"灌水三分之一"，round 82 复量 15.6% 未修。
+// 这里把它从入站里择出来，让"回复率"类结论知道自己的分母干不干净。
+if (st.inbound > 0) {
+  const replayPct = (100 * st.editedReplay / st.inbound).toFixed(1);
+  console.log(`\n\u7f16辑重放占入站 ${replayPct}%（${st.editedReplay}/${st.inbound}）` +
+    (Number(replayPct) >= 5 ? '   \u26a0\ufe0f 以\u4e0a\u6bd4\u4f8b\u7684\u201c\u5165\u7ad9\u201d\u662f\u540c\u4e00\u6761\u88ab\u6539\u8fc7\u7684\u5185\u5bb9\uff0c' +
+    '\u56de\u590d\u7387\u7c7b\u7684分母\u8981\u6309\u6b64\u6298\u7b97' : ''));
+}
+
 if (st.inbound > 0 && db.sends > 0) {
   const per100 = (db.sends / st.inbound) * 100;
   console.log(`  每 100 条入站发言            ${per100.toFixed(1)} 句   ← 这才是"频率"`);
