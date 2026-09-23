@@ -1908,3 +1908,35 @@ Round 114 的教训（量具只认一条路径）让我怀疑别的量具也有�
 **这轮的净收获**：系统扫了一遍量具的路径依赖，确认只有 round 114 那一处；
 另外清了一个死字段。而"我以为找到第二个"本身是误判——**记录它，
 因为下一个人（或下一轮）会重复同样的怀疑。**
+
+---
+
+## 交叉验证对出 254 次心流失败从没进过账（round 116）
+
+Round 114 抓到量具 bug 靠的是"交叉验证两个数"。这轮把剩下的数对也交叉：
+
+```
+today（09-23）:
+  decision:reply = 226   vs  meta:reply2Att = 200   差 26
+  decision:pass  = 1400  vs  meta:pass      = 1654  差 254
+  decision:react =  40   vs  meta:reacted   =  28   差 12（round 94 已知）
+```
+
+### 254 差全是 llm_failed
+
+```
+decision pass: 1400 (其中 llm_failed   0)
+meta pass:    1654 (其中 llm_failed 256)
+```
+
+**`decision:pass` 里 llm_failed 一次都没有，而 Meta pass 有 256 次。**
+
+即：心流 LLM 调用失败时，Meta 路径会打 pass + llm_failed，
+**而 decision.ts 的 `Heart decision` 那条日志压根没打**——
+所以 `measure:voice` 的 ② 从来没见过这 256 次失败，全ogl算进正常 pass。
+
+### 后果
+
+`measure:voice` ② 的 n=1580 里，**16% 是坏掉不说话，不是选择不说**。
+而我 round 66/95 报的 "pass 84-88%" 都把这 16% 算进去了——
+口头上说"它真的在读上下文"，实际有六分之一是哑的。
