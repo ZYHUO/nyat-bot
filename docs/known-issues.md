@@ -49,3 +49,20 @@
 | 编辑重放算进入站 | 分母灌水，回复率被低估（round 49） |
 | 累计 vs 当天、20 分钟窗口 vs 全天 | 反复犯，判据已固化进 measure-voice 和 compare |
 | 自己的探针算进生产统计 | round 120：跑 LLM 探针量 LLM 健康度，那 5 个点的失败率是自己打的（真实 12% 而非 17%） |
+
+## 诊断工具的卫生（round 120/121）
+
+**会污染统计的**：任何打 LLM 的临时探针。Round 120 实测：跑三个探针的那小时
+给生产加了 614 次 `All labels exhausted`，把全天失败率从 12% 抬到 17%。
+
+**不污染的**（每晚 23:00 cron 跑的这四个）：
+
+| 命令 | 读什么 | 打 LLM？ |
+|---|---|---|
+| `measure:voice` | 只读 `logs/app.log` | 否 |
+| `measure:engage` | DB + Redis（self-act） | 否 |
+| `measure:timing` | 只读 `logs/app.log` | 否 |
+| `gate:evidence` | grep 日志 | 否 |
+
+**规则**：想量某个子系统，先用这四个里能回答的那个；必须写探针时，
+在报告里注明"这一段含我自己探针的调用"，或者干脆分窗口报（round 120 的做法）。
