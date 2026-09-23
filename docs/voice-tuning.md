@@ -3357,3 +3357,52 @@ exhausted 按小时: 03Z 149 · 04Z 83 · 05Z 51 · 12Z 56 · 13Z 72 · 其余 9
 
 这修正了我 round 148 的印象（"09-20 起恶化"）：恶化的起点更可能是
 **09-22 就已经很差**，09-20/21 是爬坡段。
+
+---
+
+## 「一半的回复发不出去」是假的：Reply generated 不是 1:1（round 188）
+
+这轮开头看到 `Reply generated` 之后没有 `host sendText`，追下去看到一个
+**看起来很严重的bug**：
+
+```
+09-16  gen 27  sent 27     ← 之前完全 1:1
+09-22  gen 105 sent 50     ← 一半不见了！
+09-23  gen  79 sent 37
+```
+
+55 条回复消失。而 gap 从 09-21 开始，正是我改动最密集的那几天。
+差点写成"我的改动把一半的回复吞了"。
+
+### 但 `Reply generated` 不是 1:1 的
+
+一条 reply 会**多次**生成：
+
+```
+Reply generated (1 message(s))   107 次
+Reply generated (2 message(s))   102 次
+Multi-agent: critic rewrite      171 次   ← 批评者重写，又生成一次
+```
+
+multi-agent 的 critic rewrite 会重新生成，然后才发一次。
+所以 gen 数天然大于 sent 数。
+
+直接配对（gen 之后 90s 内、同 chat 有 `Reply sent`）之后：
+
+```
+09-21  gen 29  sent 24  未配对 5（其中 1 次后面有重启）
+09-22  gen 105 sent 100 未配对 5（其中 2 次）
+09-23  gen  82 sent  78  未配对 4（其中 1 次）
+合计未配对 14 / 377 = 3.7%，且 29% 明显是重启打断
+```
+
+**没有泄漏。** 3.7% 且基本恒定，重启解释了一部分。
+
+### 教训（round 136 那条的第 N 次）
+
+我又拿两个**不是不变量**的数对上了：
+`Reply generated` 与 `Reply sent` 看着像"生成vs送达"，
+但生成端有重写循环，本来就不是 1:1。
+
+这次和前几次不同：**我这次是自己发现单位不对的**，因为先查了 msg 的
+实际取值（`grep -oE '"msg":"Reply sent[^"]*"'`）而不是直接除。
