@@ -15,6 +15,17 @@ import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 import { smartGroupReorder, recordSmartGroupResult, smartGroupAutoAssign, isAutoAssignEnabled } from './smart-group.js';
 
+/**
+ * round 83：403 / 账号级限流的冷却时长。
+ *
+ * 默认 60s / 熔断 120s 对「concurrent request limit」不够——那种限流
+ * REST 解除取决于在飞的请求跑完，不是墙上时钟。实测 dshkimi 一天 570 次
+ * 失败里 491 次是这个形状（86%），平均每 2.4 分钟一次循环。
+ *
+ * 5 分钟是折中：够长到让在飞请求跑完，又不至于一个账号被罚站半小时。
+ */
+const RATE_LIMIT_COOLDOWN_SEC = 300;
+
 export async function callWithFallback(options: AICallOptions): Promise<AICallResult> {
   const usage = getUsage(options.usage);
   const manualNames = [usage.label, ...usage.backups];
@@ -192,6 +203,19 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       // 429 → 短期冷却
       if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
         await cooldown.setCooldown(label.model);
+      }
+      // round 83：**403 concurrent limit（账号级限流）→ 冷却久一点。**
+      //
+      // 实测 09-23：dshkimi 一天 570 次失败，其中 **491 次（86%）是
+      // `HTTP 403: You've reached your concurrent request limit`，
+      // 平均每 2.4 分钟一次。而默认冷却只有 60s、熔断 120s——
+      //  REST 解除需要的是「在飞的请求跑完」，不是墙上时钟走到 120s。
+      // 于是形成循环：熔断 120s → 回链 → 立刻再被打 → 403 → 再熔断。
+      //
+      // 403 用 5 分钟（RATE_LIMIT_COOLDOWN_SEC），是账号级信号不是单次抖动。
+      // 只影响这一个错误码，其余照旧。
+      if (err instanceof AIError && /concurrent request limit|rate.?limit|too many requests/i.test(err.message)) {
+        await cooldown.setCooldown(label.model, RATE_LIMIT_COOLDOWN_SEC);
       }
 
       // 其余失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）。
