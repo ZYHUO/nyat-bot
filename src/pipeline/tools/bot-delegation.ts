@@ -387,6 +387,27 @@ function isProgressPlaceholder(text: string): boolean {
   return t.length > 0 && t.length < 120 && PROGRESS_RE.test(t);
 }
 
+// round 168（计划第 1 步）：**命令被对端退回**的识别，与 isProgressPlaceholder 同级。
+//
+// 现场（2026-09-23 15:05，群 -1003184176508）：
+//   15:05:20 代发 /geo 给 uzumaru_geoip_bot —— 无参数
+//   15:05:22 对端回 "Please provide an IP or domain / Usage: /geo IP_or_domain"
+//   15:05:3x 它把这个当成"查询结果"，按 answerFromDelegation 的指示
+//            （"结果用不上或为空就说没查到"）解了一句"没查到相关数据喵"
+//
+// 所以在旧代码里它既不是结果也不是占位，而是**第三种**回执：
+// 命令根本不成立，再发一次也一样。必须和"结果"分开处理，
+// 否则就是教模型把用法说明当数据解。
+//
+// 判据收紧：必须是明显的 usage/参数缺失形状，且短（真结果也可能含 "Usage" 一词，
+// 所以加长度上限，和 isProgressPlaceholder 同一个思路）。
+const REJECTION_RE = /usage\s*:|please\s*(provide|specify|enter)|命令格式|用法|使用方法|缺少参数|参数不足|参数错误|无效参数|invalid\s*(argument|usage|command)|missing\s*(argument|parameter)|required argument/i;
+function isCommandRejection(text: string): boolean {
+  const t = text.trim();
+  // 120 字上限：用法说明都是短句；长文本里出现 "Usage" 更可能是真结果在解释用法。
+  return t.length > 0 && t.length < 120 && REJECTION_RE.test(t);
+}
+
 /**
  * 入站消息是不是某条代发的回执;是则消费它并另起一条回复用结果答原问题。
  * 返回 true = 已处理(调用方应 return,别再走 judge)。
@@ -429,6 +450,24 @@ export async function tryHandleDelegationReceipt(
   if (isProgressPlaceholder(resultText)) return false; // 还在跑,继续等
   if (!resultText && !hasMedia) return false; // 空消息,继续等
 
+  // round 168：**命令被退回 ≠ 结果。** 放在这里（占位之后、结果之前）是因为
+  // 它的语义是"这条代发死了"：不清 pending 的话下一条群消息会被当成它的结果
+  // 消费掉（现场就是这么串味的），而当结果解就会教模型说"没查到"。
+  if (resultText && isCommandRejection(resultText)) {
+    await redis.del(PENDING_KEY(chatId)).catch(() => {});
+    incrCounter('delegation_receipt_usage_error_total', { chat: String(chatId) });
+    logger.info(
+      { chatId, bot: pending.bot, cmd: pending.command, args: pending.args, preview: resultText.slice(0, 80) },
+      'Delegation: receipt is a usage error, not a result',
+    );
+    try {
+      await answerFromDelegation(chatId, botUid, pending, resultText.slice(0, 300), true);
+    } catch (err) {
+      logger.warn({ err, chatId }, 'Delegation: rejection answer failed');
+    }
+    return true;
+  }
+
   // 命中最终结果(文本或媒体):清 pending,另起一条回复
   await redis.del(PENDING_KEY(chatId)).catch(() => {});
   // 媒体类:对方已把文件/音频发到群里(大家都看得见),没有正文时给个说明,
@@ -447,6 +486,7 @@ async function answerFromDelegation(
   botUid: number,
   pending: PendingDelegation,
   resultText: string,
+  rejected = false,
 ): Promise<void> {
   const { getRecent, addAssistant } = await import('../context/manager.js');
   const { slimContextForAI } = await import('../context/slim.js');
@@ -459,10 +499,18 @@ async function answerFromDelegation(
   const current = recent.at(-1)!;
   const contextStr = slimContextForAI(recent.slice(0, -1), current, botUid);
   const systemPrompt = buildSystemPrompt(undefined, chatId);
-  const userMsg =
-    `[群聊上下文]\n${contextStr}\n\n` +
-    `[代发结果] 你刚才替群里某人向 @${pending.bot} 发了 ${pending.command}${pending.args ? ' ' + pending.args : ''},它回的结果是:\n「${resultText}」\n\n` +
-    `用这个结果,自然口语地回答群友最初的问题。别复述命令、别说"我代发/我查询",就像你自己知道一样顺口说出来。结果用不上或为空就说没查到。输出 JSON。`;
+  // round 168：退回和结果用两套完全不同的指示。
+  // 旧代码只有一套"结果"指示，于是 usage 说明被当成数据、模型还说"没查到"。
+  const userMsg = rejected
+    ? `[群聊上下文]\n${contextStr}\n\n` +
+      `[代发被退回] 你刚才替群里某人向 @${pending.bot} 发了 ${pending.command}` +
+      `${pending.args ? ' ' + pending.args : ''}——**没有给参数**。对方回的是用法说明:\n「${resultText}」\n\n` +
+      `这不是查询结果,别把它当数据,更别说"没查到相关数据"——那样是把人家的` +
+      `使用说明误解成了查询答案。现在两条路:直接跟群友说这个命令要带什么参数、` +
+      `问他要;或者直说这个查不了。**绝对不要自己编一个参数再发一次。**输出 JSON。`
+    : `[群聊上下文]\n${contextStr}\n\n` +
+      `[代发结果] 你刚才替群里某人向 @${pending.bot} 发了 ${pending.command}${pending.args ? ' ' + pending.args : ''},它回的结果是:\n「${resultText}」\n\n` +
+      `用这个结果,自然口语地回答群友最初的问题。别复述命令、别说"我代发/我查询",就像你自己知道一样顺口说出来。结果用不上或为空就说没查到。输出 JSON。`;
 
   const result = await callWithFallback({
     usage: 'reply',

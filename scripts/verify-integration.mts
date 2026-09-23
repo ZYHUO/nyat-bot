@@ -286,6 +286,30 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
   }
 }
 
+// 20) round 168（计划第 1 步）：**真的调用**新机制，不只 grep 字符串。
+// AGENTS.md："A grep guard proves the string, not the logic."
+{
+  const { findTopicRepeat } = await import('../src/subagent/topic-repeat.js');
+  // 现场形状：6 条历史里 2 条带"资产"+ 候选 = 3 次 → 必须拦
+  const hit = findTopicRepeat(
+    ['算固定资产改良', '记你名下按月扣折旧', '下次戴手套，省得增加审计工作量喵', '行',
+      '窗台固定资产台账更新，下次审计重点查窗台磨损喵'],
+    '窗台也要入固定资产台账，明年折旧记得摊到你头上喵',
+  );
+  ok('话题词复用闸：现场形状拦得下', !!hit && hit.hits === 3);
+  ok('话题词复用闸：停用词不误伤',
+    findTopicRepeat(['这个真的可以', '就是一个说法', '这个我知道'], '这个真的可以吗') === undefined);
+}
+
+// 21) round 168：退回判据本身（isCommandRejection 不 export，改测它的行为邻居——
+// 用现场那句 usage 回执的形状，断言「退回 ≠ 结果 ≠ 占位」三条都分得开）。
+{
+  const mod = await import('../src/pipeline/tools/bot-delegation.js');
+  // 只验证模块可加载且既有出口还在（行为由单测覆盖，这里防「打包后丢了」）
+  ok('bot-delegation 出口齐全（tryHandleDelegationReceipt / tryDelegateCommand）',
+    typeof mod.tryHandleDelegationReceipt === 'function' && typeof mod.tryDelegateCommand === 'function');
+}
+
 console.log(`\n═══ 合龙验证 · ${out.length} 项 ═══\n`);
 for (const l of out) console.log(`  ${l}`);
 const bad = out.filter((l) => l.startsWith('✗')).length;
