@@ -4655,3 +4655,46 @@ background 可判。在这之前它是"未观测"而不是"0 次"。
 · round 194：日志可见，字段不全 → 不可回放
   （2008 条老 interrupt 日志就是，没有 addressed/text）
 ```
+
+---
+
+## 审「日志够不够回放判据」：63 个 incrCounter 里 36 个不合格（round 95）
+
+Round 94 立的规矩：补日志时要问「够不够回放它自己的判据」。
+这轮拿它**审全仓**，而不只是审我这 session 加的几个。
+
+```
+63 个 incrCounter 调用点 → 排除 metrics ledger 和 registry → 剩 ~50
+· 19 个只有 logger.debug（info 级不可见 → round 191 同坑）
+· 13 个完全没有日志
+·  1 个有日志但不带 chatId（无法定位到具体案例）
+·  1 个是我的审计脚本窗口开反了（见下）
+```
+
+### 而这个审计脚本第一版就错了——又是「定位四方向」
+
+第一版窗口只**向后**看 22 行。`command-router.ts:133` 的
+`incrCounter` 它的 `logger.info` 在**上面 4 行**，于是被误报成"缺日志"。
+改成前后都看，误报从 50 降到 36。
+
+**「logger.info 在 incrCounter 前还是后」是没有规律的**——
+这跟 round 59 `findIndex` 向上走 / `indexOf` 向下走是同一件事：
+**位置关系必须按实际形状判断，不能假设一个方向**。
+
+### 但这一轮我没有挨个修
+
+36 个里 19 个是 `debug` 级——把它们提到 `info` 会让**日志量涨几倍**
+（`reply-with-tools` 之类每次回复都走）。而 round 191 的教训是
+「不可见」，但**不是所有计数器都需要可见**：多数是性能/路径统计，
+不是"闸拦了"那种需要事后追溯的。
+
+所以分三类处置：
+
+| 类 | 例子 | 处置 |
+|---|---|---|
+| **闸类**（拦了要追溯） | `send_*`、`delegation_*`、`agent_interrupt_*` | 必须 info + 判据字段（这 session 已补齐） |
+| **路径统计**（看分布） | `cognitive_route_total`、`reply_merged_writer_*` | debug 可接受，**但 /metrics 必须有** |
+| **纯账目** | `bgllm_cooldown_total` | counter 就够 |
+
+**这条比"一律 info"准确**：一律 info 会淹没真正的闸日志
+（round 191 那一课的另一面——不是所有 debug 都是 bug）。
