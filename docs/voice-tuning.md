@@ -787,3 +787,49 @@ label=stepfun       maxTokens=4000 outputTokens=4000
 
 下次带上 `pino` 的 `hooks`/`mixin` 或者直接在 `callClaude` 里加一条
 无条件的 `logger.debug('callClaude enter')` 再观察。**比继续静态推演快。**
+
+---
+
+## 全天体检：三个修复的累计效果 + vision 失败在降（round 76）
+
+### 三个修复的同日对比（09-23，按部署点切窗口）
+
+```
+窗口              分钟   BLOCKED/h   空正文/h
+07:11 前          429       25.0       40.4
+07:11-09:39       148       18.2       30.8
+09:39 后           30        4.0        6.0
+```
+
+**BLOCKED 降 84%、空正文降 85%**（09:39 后只有 30 分钟样本，禁结论；
+稳态看今晚 cron）。
+
+### 全仓门禁全绿
+
+typecheck 0 error / lint 0 error / verify-deploy 75/75 /
+verify-integration **31/31**（dshkimi 限流那条也过了）。
+
+### vision 失败连降四天（无新 bug，是旧修复在生效）
+
+```
+09-18 127 · 09-19 252 · 09-20 437 · 09-21 384 · 09-22 167 · 09-23 37
+```
+
+今天的 37 次成因：
+
+```
+21  Client network socket disconnected   ← 代理下 TLS 断流
+10  All labels exhausted (cooling)        ← LLM 链
+ 2  Rate limited (concurrent 9/limit)     ← provider 限流
+ 2  HTTP 403 concurrency                  ← provider 限流
+```
+
+**这一条是"看着像新 bug 其实是旧修复见效"**：09-20 的 437 次里
+`All labels exhausted` 占 560/1134，正是 round 72 抬下限修的那一家；
+09-21 之后归零，vision 失败随之连降。
+
+顺带确认 `installGlobalFetchProxy`（`src/shared/fetch-proxy.ts`）
+已正确接管 `globalThis.fetch`，所以 `vision.ts:122` 那个裸
+`fetch(fileUrl)` 也走代理——不需要单独修。
+（round 63 我一度以为它是漏的，那次是为 getChatMember 写的curl；
+裸 fetch 这条路本来是通的。）
