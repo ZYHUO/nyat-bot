@@ -226,6 +226,12 @@ async function main(): Promise<void> {
       } catch (err) {
         logger.debug({ err }, 'breaker state reset failed (non-critical)');
       }
+      // round 63：进程内守卫的状态在这里清零，所以每次启动都留一句"为什么这值得记"。
+      // 否则下一轮看到某条闸"拦 0 次"，又要花一轮才查出是没机会（round 41-44 花了两轮）。
+      {
+        const { logProcessBootContext } = await import('./cron/restart-hygiene.js');
+        await logProcessBootContext();
+      }
       void bot.start({
         onStart: () => {
           logger.info('Bot started (polling)');
