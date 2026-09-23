@@ -4205,3 +4205,44 @@ Round 60 归档了定位工具的规矩，但它**没有 npm script 就不会被
 
 这一条比我之前归档的三条（转义/中文/commit -F）更根本：
 那三条治的是"写错内容"，这一条治的是"漏掉没写的内容"。
+
+---
+
+## round 66 规矩的同类扫描：learner-gate 是安全的，差别在"泄漏有没有自愈"（round 67）
+
+Round 66 归档了「自动运行的挂钩不能依赖惹事的进程还活着」。
+按它扫全仓 `try/finally` 里做还原/清理的地方，最像的是 `learner-gate.ts`：
+
+```
+注释明写："On success the caller MUST call releaseLearnerSlot in a finally block."
+调用点 cron/learner-scan.ts:210  finally { await releaseLearnerSlot(chatId); }
+```
+
+但它是**安全的**，两个状态源都不会永久卡死：
+
+| 状态源 | 会不会永久泄漏 | 自愈机制 |
+|---|---|---|
+| `activeChats`（进程内 Set） | 不会 | 进程重启即清 |
+| Redis NX 锁 | 不会 | `LEARNER_LOCK_TTL = 300`（注释写 stale-lock self-heal） |
+
+### 所以 round 66 那条规矩的适用边界是「泄漏有没有自愈」
+
+```
+round 66 的 tamper-audit：改磁盘上的源码，无 TTL、重启也不会还原 → 永久
+learner-gate：进程内 Set（重启清）+ Redis 锁带 TTL（过期自愈）   → 自愈
+```
+
+**判据（可复用）**：问一句「如果这一次的清理没跑，谁会把现场恢复原样？」
+
+- 答不上来 → 必须把清理挪到**下一次启动**（round 66 的修法）
+- 答得上来（TTL / 重启清零 / 幂等重试）→ `finally` 就够了
+
+这条比 round 66 原版更可用：原版说「别依赖 finally」，容易把人推向
+「所有 finally 都要改成启动时清扫」——那对 learner-gate 是**过度工程**
+（它本来就会自愈，加了反而多一套状态）。
+
+### 顺带：这条扫描本身也是 round 63「我记得→它会响」的延伸
+
+不同的是这次「响」的是一篇文档，不是一个测试——因为这是个**判据**，
+不是个不变量。（如果需要它可以变成一个测试：断言 learner-gate 的 Redis 锁
+必须有 TTL。但那测的是注释里的事实，收益低，没做。）
