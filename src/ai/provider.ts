@@ -73,7 +73,21 @@ interface ClaudeResponse {
  * 进程内记忆（不落盘）：重启后第一次截断会重新教会它，而截断本身就会打 warn，
  * 所以"学不会"是不可能的。不落盘是为了不给每条 LLM 调用加一次 Redis 读。
  */
-const REASONING_TOKEN_FLOOR = 1200;
+// round 72：1200 → 4000。
+//
+// 上面写着"1200 是实测值——step-3.7-flash 在短 prompt 上 reasoning + 正文
+// 合计约 840 token"。那句当时对。但 prompt 变长之后，生产实测（09-23）：
+//   maxTokens=1200  outputTokens=1200   ← 1200 不够
+//   maxTokens=2400  outputTokens=2400   ← 2400 也不够
+//   maxTokens=8192  outputTokens=8192   ← 长 prompt 上连 8192 都被吃光
+//
+// 而且这个下限是**反应式**的（进程内记忆，label 要先截断一次才学会），
+// 所以每次重启都要重新交一遍学费。4000 让首轮就不再触顶。
+//
+// 为什么改下限而不是改那 20+ 个调用点：它们多数是故意的
+//（draft-selector 20 = "挑一个"、jargon-explainer 200 = "解释一个词"），
+// 逐个改既改不全也会把故意改大。下限是一处覆盖全部，且只对撞过顶的 label 生效。
+const REASONING_TOKEN_FLOOR = 4000;
 
 
 /** 观测到过"思维链吃光额度"的 label —— 之后给它下限而不是调用方写的小值。 */
