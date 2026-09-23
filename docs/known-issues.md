@@ -252,3 +252,35 @@ Round 42/43 说「进程内状态的闸在频繁重启期间是瞎的」。
 
 **倾向第三个**：开发期本来就该少发消息验证，而这条闸治的是稳态下的连发。
 但要**知道**这条边界，否则会把"0 次"误读成"已修"。
+
+---
+
+## counters的缺席：54 个里 7 个进过文档（round 79）
+
+Round 78 发现"缺席比拷贝难发现"。这轮把范围放到全部计数器：
+全仓 `incrCounter('...')` 54 个，`grep docs/*.md AGENTS.md` **只有 7 个被提到**。
+
+缺席 47 个里大部分是合理的（`llm_tokens_total` 这种纯度量、`bgllm_cooldown_total`
+这种 round 98 以后才有的），但**有 5 个是该在表上而缺席的**：
+
+| 计数器 | 治什么 | 状态 |
+|---|---|---|
+| `send_duplicate_skipped_total` | round 191 的那个"读不到" | 文档讲了 debug→info，**没用计数器名** |
+| `send_repeat_anchor_total` | 重复锚点闸 | 表格讲"拦住 3 次"，**没用计数器名** |
+| `send_task_burst_total` | task 级 burst 闸 | plan 里提过 |
+| `llm_inflight_cap_skipped_total` | round 198 在飞上限 | **只字未提** |
+| `llm_short_cooldown_total` | round 182 冷却分级 | **只字未提** |
+
+后两个是本 session 新加的机制，**计数器名从没出现在任何文档里**——
+意味着下一个人想看"在飞上限挡了几次"，得先 `grep -r incrCounter` 才知道叫什么。
+
+### 归档：新增计数器的交付物是"名字进了哪个文档"
+
+```
+round 75 家族（五个地方只有 debug 日志）的推论：
+一个计数器如果没有任何文档提它的名字，它等于不存在——
+因为没人会去查一个他不知道名字的东西。
+```
+
+**处置**：在 `docs/OBJECTIVE-STATUS.md` 加一张"本 session 新增计数器索引"表，
+一行一个：计数器名 / 机制 / 在哪份文档讲。这样缺席就有对象可比。
