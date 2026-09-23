@@ -29,15 +29,15 @@
 
 | | |
 |---|---|
-| total_keys | 488 |
-| bool_flags | 216 |
-| on_in_prod | 188 |
-| set_in_env | 314 |
+| total_keys | 496 |
+| bool_flags | 217 |
+| on_in_prod | 189 |
+| set_in_env | 322 |
 | dead_no_reader | 5 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
-**216 个布尔旗标里，生产实际开着 188 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**217 个布尔旗标里，生产实际开着 189 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -57,12 +57,13 @@
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
 
-## 生产开着的旗标（188 个）
+## 生产开着的旗标（189 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
 | 段 | flag | 默认 | .env | 是什么（注释摘要） | 读者 |
 |---|---|---|---|---|---|
+| ai | `JEV_ENABLED` | false | true | Jev 结构化判断总开关。默认关：开了会影响用户等待路径上的延迟，先灰度再放开。 | ai/jev.ts, pipeline/command-router.ts |
 | cognition | `CONNECTIVITY_TRACKING_ENABLED` | false | 1 | ── AGI Level 6 Phase 14: 反向阀门 L7 ─────────────────────────────── 连接率埋点(新核心指标)+ 私聊风险分档。初期只记录不改行为。 | agent/reverse-valve.ts, cron/scheduler.ts |
 | cognition | `DREAM_CONSOLIDATE_ENABLED` | false | true | ── AGI Level 5 Phase 2: Dreaming 整合 ─────────────────────────────── 每周一次语义合并冗余/冲突经验(MindMemOS dreaming)。走 judge 链。 | cron/dream-consolidate.ts, cron/scheduler.ts |
 | cognition | `EXPERIENCE_SHARE_ENABLED` | false | true | ── AGI Level 5 Phase 5: 多智能体安全共享 ───────────────────────────── 只有 verified=1(已证实)的经验可跨 bot 共享;未验证/可疑仅本 bot 用。 | subagent/prompt-inputs.ts |
@@ -285,10 +286,17 @@
 | social | `PROACTIVE_COORDINATOR_ENABLED` | false | — | ── P2-A: 主动搭话统一调度 ── 防止 idle + proactive-scan 同时对同一群发消息；全局每群每小时上限 |
 | social | `PROACTIVE_MEMORY_ENABLED` | false | — | ── P2-A: 主动搭话记忆驱动 ── 主动发言时搜索 Qdrant 群聊记忆，注入"上次聊过的相关话题" |
 
-## 非布尔参数（272 个）
+## 非布尔参数（279 个）
 
 | 段 | key | 默认 | .env | 是什么（注释摘要） |
 |---|---|---|---|---|
+| ai | `JEV_API_KEY` | '' |  REDACTED | relay 的 bearer key。默认空；真值只在 .env。 |
+| ai | `JEV_BASE_URL` | '' |  REDACTED | lfree relay 的系统 one 端点基址（不带 /v1/systemone，代码自己拼）。 默认空：真实的 /bot/<route> 只放 .env，不进被跟踪的源码。 |
+| ai | `JEV_BREAKER_COOLDOWN_MS` | 60000 | 60000 |  |
+| ai | `JEV_BREAKER_FAILS` | 3 | 3 | 熔断：连续失败这么多次后开路一段时间，期间 callJev 直接返 null（不发起请求）， 让调用方走降级路径，而不是每条消息都干等一次超时。理由同 JUDGE_SUBSTRATE_*。 |
+| ai | `JEV_MIN_CONFIDENCE` | 0.6 | 0.6 | 接受一个 choice 答案的最低置信度。低于它 → 当作"没把握"，交给原 LLM judge 兜底（大模型可能直接判对）——绝不用一个低置信的结构化答案去驱动代发动作。 0..1，confident 的判定实测常接近 1，0.6 挡住的 |
+| ai | `JEV_MODEL` | 'jev-1.13' |  REDACTED | 模型名。relay 的 /v1/models 里出现过 jev-1.13（owned_by: relay）。 |
+| ai | `JEV_TIMEOUT_MS` | 4000 | 4000 | 单次调用超时(ms)。实测这条 relay 的 systemone 在 1.5–2.9s；官方宣称 ~100ms 但 这条镜像到不了。留 4s 余量给抖动，又压在 command-router 那条 8s per-attempt 预算之内— |
 | cognition | `DISTILL_USAGE` | 'summarize' | — | ── AGI Level 4 P4-A: 经验沉淀（常驻）───────────────────────────────── 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection 检索相关经验注入  |
 | cognition | `DREAM_CONSOLIDATE_USAGE` | 'judge' |  REDACTED |  |
 | cognition | `EXPERIENCE_VERIFY_MIN_SUCCESS` | 2 | 2 |  |

@@ -20,7 +20,7 @@ ENVF = '.env'
 import glob
 
 SECTION_ORDER = [
-    'infra', 'memory', 'timing', 'judge', 'cognition', 'core',
+    'ai', 'infra', 'memory', 'timing', 'judge', 'cognition', 'core',
     'self', 'turn', 'meta', 'features', 'social', 'life',
 ]
 
@@ -60,13 +60,25 @@ def parse_section(path: str, section: str) -> list[dict]:
     return out
 
 
+# round 192：**段列表改成 glob，不再手写。**
+#
+# 之前 SECTION_ORDER 是手写的 12 段，而 `src/env-sections/ai.ts`（8 个 JEV_*
+# 旗标）加进来之后没往里加——于是 census 报 488 个键，实际 496，
+# `docs/flag-census.md` 也跟着停在 488。这是 round 21 那个
+# 「flag-census 从 round 21 起就没更新过」的同型复发：清单靠人记得补。
+#
+# 改成 glob `src/env-sections/*.ts`（排除 `_shared.ts`，那是共用 helper 不是段），
+# 新段文件一落地就被统计到。SECTION_ORDER 只留作**输出排序**用途。
 flags: list[dict] = []
-for sec in SECTION_ORDER:
-    path = f'src/env-sections/{sec}.ts'
-    if not os.path.exists(path):
-        print(f'⚠️  缺段文件 {path}')
+_discovered = sorted(glob.glob('src/env-sections/*.ts'))
+for path in _discovered:
+    sec = os.path.basename(path)[:-3]      # .ts
+    if sec.startswith('_'):
         continue
     flags.extend(parse_section(path, sec))
+_new = [f for f in {f['section'] for f in flags} if f not in SECTION_ORDER]
+if _new:
+    print(f'⚠️  发现不在 SECTION_ORDER 里的段：{sorted(_new)}')
 
 # src/env.ts 本体若还有裸键（拆段后不该有）也抓一遍，别静默漏掉
 flags.extend(parse_section(SRC, '(env.ts 本体)'))
