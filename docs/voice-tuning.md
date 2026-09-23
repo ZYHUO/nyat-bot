@@ -4019,3 +4019,52 @@ needle/窗口配对还有一处没对齐。
 **一个会误报的工具仍然比没有工具有用**，因为它把"要人看一眼"的成本
 从 34 个文件降到 1 个。但工具的输出必须带**它改的那一行**（现在有），
 否则人没法复查。
+
+---
+
+## 05:06 CST：等群醒的 2.5 小时里把 tamper-audit 用到最新守卫上（round 56）
+
+离 awake 窗还有 2.5 小时，不需要群醒的事先做。用 round 54/55 的脚本审
+**最新**那批守卫（round 154 之后加的 7 个里的 4 个）：
+
+```
+cooldown-armed-log               SKIP   （行为类，readFileSync 之外的）
+no-duplicate-current-numbers     GREEN  ← tamper 的是 markdown 一行，非断言目标
+flag-census-no-orphan-section    SKIP
+arg-carrier-shape                SKIP
+```
+
+### 那 1 个 GREEN：脚本对 markdown 类测试选不了点
+
+`no-duplicate-current-numbers` 断言的是 `round 196 快照` 这个标注在不在，
+而脚本按"最长字面量 + 出现在未注释代码行"选中了 OBJECTIVE-STATUS 里
+一段正文——改它当然不影响断言。
+
+**手工 tamper 真正目标**（把表头 `| 闸 | round 196 快照 |` 改回 `| 最新证据 |`）
+→ **2 条红** ✓。这和 round 52 加的三个哨兵是同一批东西，都在工作。
+
+### 一个观察：SKIP 的四个里三个是行为类
+
+脚本只处理"读源码/文档文件"的守卫。行为类（import 模块真调）的 tamper
+本来就该由**测试自己**承担——它们调用真模块，模块坏了自然红。
+round 53 手工验过三个（answered-dedupe / topic-repeat / objective-tools）
+都是真的。
+
+所以 SKIP 不必然是漏洞：**行为类守卫的"tamper 验证"= 它们跑在真模块上**。
+
+### 但有一种 SKIP 是漏洞
+
+`flag-census-no-orphan-section` 是 SKIP，而它有几条断言是**跑完脚本比字符串**
+（`censusOut.match(...)`），不是读文件。这类测试的"tamper"只能改**被跑的脚本**
+或**被测的输入**——正是 round 50 发现它 ① 恒真的那个测试。
+
+**所以 SKIP 要分两类**：
+```
+行为类（import 真调）      → 天然有 tamper 保证，SKIP 是正确输出
+跑脚本/比字符串类          → 脚本没帮着验，要人工定
+```
+
+### 归档：把 tamper-audit 的 SKIP 语义写进脚本
+
+下轮在 SKIP 的 detail 里区分这两种（看测试里是 `await import` 还是 `execSync`），
+否则每次都要人重新判断这 15 个 SKIP 里哪些该管。
