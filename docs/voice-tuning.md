@@ -3714,3 +3714,50 @@ dedup 的 Redis key 是 30s TTL——**它活在 Redis，活得过去重启**。
 
 **所以"短命进程里闸无效"这个现象有两种成因，不能一概而论。**
 而 round 44 我把它们混成一种了（都说成"重启清零"）——dedup 根本不是那个原因。
+
+---
+
+## 把本 session 的守卫逐个 tamper 一遍：5 个里 1 个是假绿（round 49）
+
+Round 48 立的规矩：「tamper 必须真的红，没红 = 要么 tamper 没生效，
+要么断言没在测那个东西。」
+
+这轮拿它回头查**我自己这个 session 写的守卫**。做法：把每个测试测的那个
+源码标识符改坏，跑该测试。
+
+```
+cooldown-armed-log.test.ts           红(2) ✓
+cooldown-split.test.ts               红(2) ✓
+dedup-observable.test.ts             红(2) ✓
+command-router-addressed.test.ts     没红 ✗   ← 假绿
+arg-carrier-shape.test.ts            红(2) ✓
+```
+
+### 假绿的那个，原因有两层
+
+第一层我 tamper 错了文件（`src/meta/session.ts`，而代码在 `ingress-intercepts.ts`）。
+按规矩这时该判定"tamper 没生效"而不是"测试是绿的"——**我确实没直接下结论**。
+
+第二层更有意思：测试的 `SRC` 是对的（`ingress-intercepts.ts`），它按
+`routerEligible` 定位一个 20 行的 block，然后断言 block 里有
+`if (opts.isDirect) {`。我第一版 tamper 只改了**日志字符串**，它仍在 block 内
+→ 不红。改成 tamper `if (opts.isDirect)` → 2 条红。
+
+**所以这个测试本身是好的，坏的是我的 tamper 选点。**
+
+### 但这暴露了一个真问题：它的断言是「block 内出现字符串」
+
+和 round 140/142/174/176 同一族：**字符串在场 ≠ 机制在**。
+如果哪天有人把 `if (opts.isDirect) {` 挪到 block 外、或包一层 `if (false && ...)`，
+按 20 行窗口取的 block 可能仍然包含那个字符串 → 测试还是绿。
+
+**改进方向（未做，记下）**：① 的断言应该查「`routeLearnedCommand` 的调用点
+位于一个以 `if (opts.isDirect)` 为条件的块内」，而不是「这 20 行里有这两串」。
+也就是要**按结构定位而不是按窗口切片**。
+
+### 归档
+
+Round 48 的规矩要补一句：**没红时先分清是"tamper 没生效"还是"断言太弱"**。
+这两者都会表现成"测试绿着"，但修法相反：
+  tamper 没生效 → 换 tamper 选点（这次）
+  断言太弱       → 改断言的结构（round 140/142/174/176 那五次的修法）
