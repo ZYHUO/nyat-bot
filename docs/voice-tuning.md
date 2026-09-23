@@ -3855,3 +3855,51 @@ Round 50 归档了假绿第二种形态。这轮全仓扫（`tests/**/*.test.ts`
 
 判据：**如果那个字符串回来了，测试会红吗？**
   会 → 哨兵；不会（因为字符串太具体/根本不会有人那么写）→ 装饰。
+
+---
+
+## 行为类守卫 tamper：三次"没红"全是 tamper 撞在注释里（round 53）
+
+Round 50 的脚本只处理"读源码文件"的守卫。本 session 还有 12 个是**行为类**
+（import 模块真调）。补一轮，结果三个全"没红"：
+
+```
+answered-dedupe                 没红 ✗
+topic-repeat-production-replay  没红 ✗
+objective-tools-exist           没红 ✗
+```
+
+### 原因：我的 tamper 撞在注释里
+
+我用 `s.replace('markMessageAnswered', 'ZZ_...', 1)`——**替换第一次出现**，
+而那在 30 行注释块里。代码一行没动，测试当然绿。
+
+这正是 round 140/141/142/176 那条（注释里也有同样的话）的**tamper 侧版本**：
+之前是"断言撞注释"，这次是"tamper 撞注释"。
+
+改成**只改未注释的代码行**后：
+
+```
+answered-dedupe                红 ✓
+topic-repeat-production-replay 红 ✓
+objective-tools-exist          没红 ✗  ← 见下
+```
+
+### 第三个不是问题，是判据形状不同
+
+`objective-tools-exist` 的判据是**"文档引用的 npm run 都有定义"**——
+我删文档里的一个引用，集合只是变小，剩下的仍都存在 → 绿。
+
+它的正确 tamper 是**删掉 package.json 里的一个脚本定义**。照做 → 2 条红。
+
+### 归档：tamper 选点的三条规则
+
+```
+1. 只改**未注释的代码行**——否则撞注释（round 53 三次都是这个）
+2. tamper 的对象必须是该测试判据的**失败条件**，不是随便一个相关串
+   （objective-tools 的判据是"引用都存在"，失败条件是"有引用没定义"）
+3. 判据是"X 都成立"的测试，tamper 要制造一个**反例**，不是删掉一个正例
+```
+
+第 3 条最通用：`.toContain(A)` 的失败条件是"A 不在"；
+而"∀ x ∈ S, P(x)" 的失败条件是"∃ x ∈ S, ¬P(x)"——**往 S 里加坏东西，不是从 S 里删好东西**。
