@@ -334,3 +334,16 @@ Round 83 立的规矩：**标记一个问题时同时决定它在哪一轮修；
 
 `scripts/session-report.mts` 的编辑重放行现在是这条规矩的实证锚点：
 它从"已知"变成"已修 · round 83"，中间隔了 34 轮。
+
+
+## interrupt 分桶：counter 有值但日志行 0（round 91 标记，round 92 排期）
+
+`agent_interrupt_addressed_total` 在 `/metrics` 里有值（群醒后），
+但 `grep "interrupt triage" logs/app.log` = 0 行。
+
+**判据**：counter 和日志是两条独立的观测路径（round 63/64 立的坑，第 5 次）。
+有 counter 说明代码跑了，没日志说明**日志的 msg 和我猜的不一样**或只打了 counter。
+
+**修法**：用 `npm run log:count agent_interrupt` 看真实形状，
+把 OBJECTIVE-STATUS 里那句"6 个闸在生产有证据"的引用改成真实 msg。
+**状态**：待排期（round 92）。

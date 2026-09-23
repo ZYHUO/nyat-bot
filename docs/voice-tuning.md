@@ -4578,3 +4578,38 @@ Round 89 花 20 分钟才把 package.json 改对。那轮立了"改完立刻 jso
 我的 ① 断言根本没机会执行**。所以这条守卫**在 CI 里有效**
 （`npm run test` 会失败），但**它报的不是我写的错误消息，是 esbuild 的**。
 对一个读者来说那仍然足够——它指向 package.json:33:4，比我原来的猜位置准。
+
+---
+
+## 群醒后第一次实测：两个"等数据"的闸当场响了（round 91）
+
+`07:09 CST`——awake 窗（07:36-23:52）刚开始。等了整夜的几个量，第一次有数据：
+
+| 等的东西 | 之前 | 现在 |
+|---|---|---|
+| 带 taskId 的 sendText | 2 条（18:33 那一次） | **12 条，涉及 3 个 chat** |
+| topic-word 闸（round 162） | 0 次，round 66 还被我自己写坏 15 轮 | **2 次** ✅ |
+| task burst 闸（round 171） | 0 次 | **2 次** ✅ |
+| interrupt 分桶（round 177） | 0 次 | metrics 有值，日志行 0 |
+
+### 两个闸的第一次真拦
+
+```
+topic-word：preview "算你听话。快去吧" bigram "快去" hits=3 window=6
+            同进程内 6 条自己的发送里"快去"出现 3 次 → 拦
+task burst ：taskId ec85af0d, gapSec=11, limit=12, part=1 of 1
+            同 task 距上次 11 秒 < 12 秒下限 → 拦
+```
+
+**这正是用户"说话太重复"的原话**：`快去吧` 这种词在 6 条里说 3 遍。
+round 162 加它就是为了这个，等了 3 天才第一次真的拦到。
+
+### 一个新问题：interrupt 分桶 metrics 有值但日志行 0
+
+`agent_interrupt_addressed_total` 在 `/metrics` 里，但日志 grep 不到
+`interrupt triage` 之类。查：那条日志打的 msg 和我的猜测不一样
+（或压根没打 msg，只有 counter）。**这正是 round 63/64 立的那个坑的**
+**第 5 次**——计数器有、日志没有，或者反过来。
+
+**处置**：下一轮用 `log:count` 查 `agent_interrupt` 的实际日志形状，
+别再用我猜的字符串。这条还没修，**它现在排在 round 92**。
