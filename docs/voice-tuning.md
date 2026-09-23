@@ -3967,3 +3967,55 @@ tamper 审计的产出要分两类：
 ```
 
 下轮改脚本选点（按测试自己的 slice 邻域挑 needle），预期 SKIP/GREEN 会大幅下降。
+
+---
+
+## tamper 脚本按"测试自己的窗口"选点——还剩一个选点漏洞（round 55）
+
+Round 54 说下轮要按"测试自己 slice 的邻域"选 needle。做了：
+
+```
+pickTarget 增加 anchors 提取 + 窗口返回
+  · s.indexOf('X')                        → 字符串参数
+  · lines.findIndex(l => l.includes('X')) → 行内最后一个引号串
+  · 窗口 = [anchor 位置, +900]
+runOne 只在窗口内找要改的那一行（不再取全文第一次出现）
+```
+
+效果（4 个样本）：`delegation-rejection` / `dedup-observable` /
+`interrupt-addressed-tag` 全 RED ✓，`send-log-has-taskid` 仍 GREEN。
+
+### 剩下的漏洞（已定位，未修）
+
+`send-log-has-taskid` 的源码里有 **3 处** `taskId: opts.taskId ?? null`：
+
+| 行 | 是哪个日志点 |
+|---|---|
+| 1224 | **主 `host sendText`** ← 测试②查的就是这处 |
+| 1233 | `continuation` 日志（注释写"round 170：同上"） |
+| 2914 | 另一处 |
+
+脚本选了 1233（continuation）， tamper 它 → 绿。
+手工 tamper 1224（主点）→ **4 条红**。
+
+所以**测试是好的，脚本选点仍然会选错同形的多个位置**。
+根因：窗口 `[anchor, +900]` 同时覆盖了 1224 和 1233，而 `find` 取窗口内第一行——
+但 picks 的 needle 是 `'taskId: opts.taskId ?? null'`（lits 里最后那个），
+它的第一次出现在窗口内是 1233 之前的 1224……实际跑到 1233 说明 picker 的
+needle/窗口配对还有一处没对齐。
+
+**没继续修的理由**：这是工具打磨，而这个脚本本轮的价值已经兑现
+（它把 `delegation-rejection` 那个真真假绿抓了出来，并且现在 3/4 能自动判红）。
+继续抠选点的边际收益低于去修别处。
+
+### 归档：工具的第一版别追求全对
+
+```
+脚本的作用不是"替代人工判断"，是"把可疑的挑出来给人看"。
+本轮 4 个里 3 个自动判对、1 个 GREEN——那个 GREEN 引我手工查了一遍，
+反倒确认了测试本身是好的（tamper 对的位置就红）。
+```
+
+**一个会误报的工具仍然比没有工具有用**，因为它把"要人看一眼"的成本
+从 34 个文件降到 1 个。但工具的输出必须带**它改的那一行**（现在有），
+否则人没法复查。
