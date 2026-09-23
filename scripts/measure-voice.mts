@@ -94,6 +94,8 @@ const gate = {
 };
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
+// round 117: 坏掉的 pass（LLM 失败 fail-closed），不算选择不说。
+let metaFailedPass = 0;
 const reactedEmoji = new Map<string, number>();
 // round 15：按群拆。用户说"bot 太爱说话了"是**在某个群里的体感**，
 // 全量一个平均数会把"一个群在刷屏"和"所有群都正常"混成一回事。
@@ -134,6 +136,16 @@ for await (const line of rl) {
     continue;
   }
   if (m === 'host sendText continuation' || m === 'host sendText segmented') { cont++; continue; }
+  // round 117: **Meta heart: pass 也要计数，并把 llm_failed 拆出来。**
+  //
+  // round 116 交叉验证发现：decision:pass 1400 vs meta:pass 1654，
+  // 差 254 全是 llm_failed（LLM 失败时 Meta 打 pass + llm_failed，
+  // 而 decision.ts 的 Heart decision 那条没打）。
+  // 旧口径把 254 次"坏掉不说话"全算漏，② 的 n 少 16%。
+  if (m === 'Meta heart: pass') {
+    const why = String(d.why ?? '');
+    if (why === 'llm_failed' || why === 'parse_failed') metaFailedPass++;
+  }
   if (m === 'Heart decision') {
     const a = String(d.act ?? '');
     if (a in act) act[a] = (act[a] ?? 0) + 1;
@@ -211,6 +223,13 @@ console.log(P(`   心跳那句"别每句都接"说的是这个。会话初期 8.
 console.log();
 console.log(P(`② 心流四态        reply ${act.reply} (${actTotal ? (act.reply * 100 / actTotal).toFixed(0) : 0}%)  react ${act.react} (${actTotal ? (act.react * 100 / actTotal).toFixed(0) : 0}%)  wait ${act.wait} (${actTotal ? (act.wait * 100 / actTotal).toFixed(0) : 0}%)  pass ${act.pass} (${actTotal ? (act.pass * 100 / actTotal).toFixed(0) : 0}%)   n=${actTotal}`));
 console.log(P(`   其中 react 真的点出去 ${reacted} 次（heart: reacted 日志；与决策数不一致说明有失败回落）。`));
+// round 117：把坏掉的 pass 拆出来。round 66/95 我说 pass 84-88% 它真的在读上下文，
+// 而 round 116 交叉验证发现其中 16% 是 llm_failed —— 那不是选择，是哑。
+if (metaFailedPass > 0) {
+  const bad = 100 * metaFailedPass / Math.max(1, actTotal + metaFailedPass);
+  console.log(P(`   ⚠️ ${metaFailedPass} 次 pass 是 LLM 失败 fail-closed（不是选择不说），占 ${bad.toFixed(0)}%。`));
+  console.log(P(`      上面的百分比把它们算成了正常 pass；真实"选择不说"要扣掉这部分。`));
+}
 if (reactedEmoji.size > 0) {
   const dist = [...reactedEmoji.entries()].sort((a, b) => b[1] - a[1]).map(([e, n]) => `${e}×${n}`).join(' ');
   console.log(P(`   emoji 分布: ${dist}`));
