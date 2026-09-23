@@ -39,9 +39,24 @@ function pickTarget(testFile: string): { src: string; needle: string; from: numb
   const srcs = [...s.matchAll(/const SRC = '([^']+)'/g)].map((m) => m[1]!).filter((p) => fs.existsSync(p));
   if (srcs.length === 0) return null;
   const src = srcs[0]!;
-  const lits = [...s.matchAll(/to(?:Not)?Contain\(\s*'([^']{6,})'/g)].map((m) => m[1]!);
-  if (lits.length === 0) return { src, needle: '', from: 0, to: full.length };
   const full = fs.readFileSync(src, 'utf8');
+  // round 58: SRC 是文档/脚本（.md/.sh/.py）时，needle 就是测试断言的那个字符串本躈。
+  // round 56/57 那个 GREEN 就是这类：脚本选了正文里一段，而断言的另有其字符串。
+  const isDoc = /\.(md|sh|py|json)$/.test(src);
+  // round 58 round 2: isDoc 时要选**断言它在的那个 it 块里的字符串**，
+  // 不是全文第一个匹配的。否则 no-duplicate-current-numbers 会选中
+  // 正文里的 `gate:evidence`（那个 it 根本没断言它）。
+  let docLit = '';
+  if (isDoc) {
+    // 拆成 it 块，找有 toContain 的那个，取它里的字符串
+    const blocks = s.split(/\n  it\(/).slice(1);
+    for (const b of blocks) {
+      const has = b.match(/to(?:Not)?Contain\(\s*'([^']{6,})'/);
+      if (has && full.includes(has[1]!)) { docLit = has[1]!; break; }
+    }
+  }
+  const lits = docLit ? [docLit] : [...s.matchAll(/to(?:Not)?Contain\(\s*'([^']{6,})'/g)].map((m) => m[1]!)
+    .filter((lit) => (isDoc ? full.includes(lit) : true));
   const code = full.split('\n').filter((l) => !l.trimStart().startsWith('//'));
   const anchors = [
     ...[...s.matchAll(/\.(?:indexOf|lastIndexOf)\(\s*'([^']{4,})'/g)].map((m) => m[1]!),
@@ -128,7 +143,17 @@ function runOne(testFile: string): Result {
       return { test: testFile, verdict: 'SKIP', line: '', detail: 'asserts on comments (rationale check)' };
     }
     const original = lines[idx]!;
-    lines[idx] = original.replace(t.needle, 'ZZ_TAMPERED');
+    const isDoc = /\.(md|sh|py|json)$/.test(t.src);
+    if (isDoc) {
+      // round 58: 文档里同一个声明往往出现多处（gate:evidence 出现 3 次）。
+      // 只改第一处断言依然绿——这就是 round 55 那个同形多处缺陷的文档版。
+      // 对文档，声明被所有处同时反诉才算被验证。
+      let n = 0;
+      for (let i = 0; i < lines.length; i++) lines[i] = lines[i]!.split(t.needle).join('ZZ_TAMPERED'), n += lines[i]!.split('ZZ_TAMPERED').length - 1;
+      void n;
+    } else {
+      lines[idx] = original.replace(t.needle, 'ZZ_TAMPERED');
+    }
     fs.writeFileSync(t.src, lines.join('\n'));
     let red = 0;
     try {
