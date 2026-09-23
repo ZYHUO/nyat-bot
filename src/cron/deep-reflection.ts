@@ -73,7 +73,12 @@ export async function reflectChat(chatId: number): Promise<{ tokens: number; rea
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `群最近 ${msgs.length} 条聊天:\n${lines}\n\n输出「本群近况」简报:` },
       ],
-      maxTokens: 1200,
+            // round 70：去掉写死的 maxTokens（原来是 1200），让它落到 usage 级配置。
+      // 1200 是上一个模型够用的遗留；推理模型（step-3.7-flash 的
+      // reasoning_content 计入 completion）下一个 prompt 的思维链就超过它，
+      // 于是 content 恒空。上面 topic-scan 的注释早就写了这个病因，值没跟着改——
+      // 同 round 69 的 ASI rubric：**代码知道病因而配了错的值**。
+
       temperature: 0.4,
       // 每跳上限 12000 → 20000。
       //

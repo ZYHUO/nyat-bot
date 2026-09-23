@@ -41,7 +41,12 @@ async function extractTopic(chatId: number): Promise<string | null> {
       // "让我想想"都不够，content 恒为空，topic-scan 于是静默地什么都产不出
       // （2026-09-21 实测：50 分钟内 193 次空正文，maxTokens 24/48 各 79/73 次）。
       // provider 层已有下限兜底，这里仍写够，别依赖兜底。
-      maxTokens: 1200,
+            // round 70：去掉写死的 maxTokens（原来是 1200），让它落到 usage 级配置。
+      // 1200 是上一个模型够用的遗留；推理模型（step-3.7-flash 的
+      // reasoning_content 计入 completion）下一个 prompt 的思维链就超过它，
+      // 于是 content 恒空。上面 topic-scan 的注释早就写了这个病因，值没跟着改——
+      // 同 round 69 的 ASI rubric：**代码知道病因而配了错的值**。
+
       temperature: 0,
       // 纯文本标签输出 —— 关掉 usage 级 jsonMode（response_format 会强制 JSON，坏事）
       jsonMode: false,

@@ -51,7 +51,19 @@ export const judgeSection = {
   // "实测依据"放了很久，没人去修。
   //
   // 1200 是按实测留的余量：合法 JSON 只要 ~260 completion token。
-  TIMING_GATE_MAX_TOKENS: z.coerce.number().int().positive().default(1200),
+  // round 70：1200 → 4000。
+  //
+  // 1200 是"按实测留的余量：合法 JSON 只要 ~260 completion token"——
+  // 那句当时是对的。但 gate 的 usage 现在落到 step-3.7-flash（reasoning 模型，
+  // reasoning_content 计入 completion），思维链长度不稳定，07:10 实测
+  // outputTokens=1200/maxTokens=1200 全被 thinking 吃光 → content 空。
+  //
+  // 上面那段注释（"200 会被思维链吃光，content 为空 → parse failed"）
+  // 早就把这个病因写对了，值从 200 改到 1200 就停了——没跟着模型换而再改。
+  // 同 round 69 ASI rubric：**代码知道病因而配了错的值**。
+  //
+  // 4000 对齐 AI_USAGE_SUMMARIZE_MAX_TOKENS。
+  TIMING_GATE_MAX_TOKENS: z.coerce.number().int().positive().default(4000),
   // 阶段 4：wait 工具最大允许秒数；超过会被裁剪。
   TIMING_WAIT_MAX_SEC: z.coerce.number().int().positive().default(120),
   TIMING_WAIT_MIN_SEC: z.coerce.number().int().positive().default(5),

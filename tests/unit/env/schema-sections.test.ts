@@ -59,7 +59,7 @@ describe('env schema 拆段', () => {
     const parsed = parseEnv({ BOT_TOKEN: 'x', REDIS_URL: 'redis://127.0.0.1:6379/5' });
     // 抽几个不同段里的键，确认它们都还在且默认值没丢
     expect(parsed.BOT_TOKEN).toBe('x');                        // infra
-    expect(parsed.TIMING_GATE_MAX_TOKENS).toBe(1200);          // timing
+    expect(parsed.TIMING_GATE_MAX_TOKENS).toBe(4000);          // timing (round 70: 1200 被思维链吃光)
     expect(parsed.CORE_V2_ENABLED).toBe(true);                 // core
     expect(parsed.AGENT_TASK_SEND_BUDGET).toBe(6);             // meta
     expect(parsed.VIDEO_DESCRIBE_ENABLED).toBe(true);          // features
