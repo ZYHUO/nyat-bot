@@ -37,6 +37,7 @@ import { startCodeActWorker, closeCodeActWorker } from './subagent/index.js';
 import { getSandboxCapability } from './sandbox/terminal.js';
 
 import { installGlobalFetchProxy } from './shared/fetch-proxy.js';
+import { startDynamicLogLevel } from './shared/logger.js';
 
 /**
  * host-api 故意抛出的控制流错误——模型没 await 时会以 unhandledRejection 的形式
@@ -62,6 +63,10 @@ async function main(): Promise<void> {
   if (installGlobalFetchProxy(config.GLOBAL_FETCH_PROXY)) {
     logger.info('Global fetch proxy enabled (local addrs direct)');
   }
+
+  // 1.3 round 85：动态日志级别开关（redis xxb:log:level，30s 内生效，不用重启）。
+  // 必须在任何 logger.info 之前装，否则启动日志本身的级别是固定的。
+  startDynamicLogLevel();
 
   // 1.5 Preload external skills
   void preloadSkills();
