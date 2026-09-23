@@ -55,7 +55,13 @@ let collision = 0;
 let dupAnchorDropped = 0;
 // round 14：**睡眠门吃掉了多少**——这 6 轮我把它当成"没流量"，
 // 于是"没法量"这个结论重复了六遍。
-const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0 };
+// round 46：漏斗的第五项。之前 27 入站 = 10 忽略 + 6 legacy + 2 到心流 + **9 条无账**。
+// 查 message.ts 有 5 处 ingestAsync，其中 4 处**绕过心流**强制入 attention：
+//   364 same_speaker_burst（连发的人）· 524 heart→Attention · 559 同上（另一分支）
+//   614 heartPath='bypass'（心流说要等/不接但 obligation 未清）
+//   700 TRENCH_DEBT_ATTENTION_ENABLED（欠的回复要还）
+// 它们都不经过心流决策，所以"心流影响多少流量"要把它们算进分母的另一边。
+const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0, bypassIngest: 0 };
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
 const reactedEmoji = new Map<string, number>();
@@ -118,6 +124,14 @@ for await (const line of rl) {
   if (m === 'Meta path: asleep') { gate.asleep += 1; continue; }
   if (m === 'Meta path: slash/checkin-stats → legacy pipeline') { gate.legacy += 1; continue; }
   if (m.includes('结构性忽略')) { gate.structuralIgnore += 1; continue; }
+  // 绕过心流强制入 attention 的四类（都不烧心流决策）
+  // 只有这两个是绕过心流的直摄：
+  //   same_speaker_burst —— 连发的人，不问心流
+  //   bypass             —— 心流说了不等但 obligation 没清
+  // 'Meta attention ingested (heart)' 不算：那是心流**做了决策**之后入 attention 的，
+  // 属于产出不是绕过。（第一版把它也算进去了，456/473 的差就是这么来的。）
+  if (m === 'Meta attention ingested (same_speaker_burst)') { gate.bypassIngest += 1; continue; }
+  if (m.includes('bypass')) { gate.bypassIngest += 1; continue; }
   if (m.includes('撞名命令未显式指定')) { collision++; continue; }
   if (m.includes('dropped duplicate reply anchor')) { dupAnchorDropped++; continue; }
 }
@@ -170,16 +184,16 @@ console.log(P(`④ 撞名守卫        拦下 ${collision} 次`));
 console.log(P(`   round 5 加：用户闲聊提"签到"不该变成一次真的代发。`));
 console.log();
 // ── 睡眠门：心流的"分母"是怎么来的 ────────────────────────────────
-const gateTotal = gate.asleep + gate.legacy + gate.structuralIgnore + actTotal;
-console.log(P(`⑤ 到心流的漏斗     asleep ${gate.asleep} · legacy ${gate.legacy} · bot未叫本喵 ${gate.structuralIgnore} · 到心流 ${actTotal}`));
+const gateTotal = gate.asleep + gate.legacy + gate.structuralIgnore + gate.bypassIngest + actTotal;
+console.log(P(`⑤ 到心流的漏斗     asleep ${gate.asleep} · legacy ${gate.legacy} · bot未叫本喵 ${gate.structuralIgnore} · 绕过心流直摄 ${gate.bypassIngest} · **到心流 ${actTotal}**`));
 if (gateTotal > 0) {
-  const pct = gate.asleep * 100 / gateTotal;
+  const pct = (n: number) => (n * 100 / gateTotal).toFixed(0) + '%';
   const reach = actTotal * 100 / gateTotal;
-  console.log(P(`   asleep ${pct.toFixed(0)}% · bot未叫本喵 ${(gate.structuralIgnore * 100 / gateTotal).toFixed(0)}% · legacy ${(gate.legacy * 100 / gateTotal).toFixed(0)}%`));
+  console.log(P(`   asleep ${pct(gate.asleep)} · bot未叫本喵 ${pct(gate.structuralIgnore)} · legacy ${pct(gate.legacy)} · 绕过直摄 ${pct(gate.bypassIngest)}`));
   console.log(P(`   ⚠️ 心流的四个出口只影响**过了整条漏斗**的那部分：${reach.toFixed(0)}%。`));
+  console.log(P(`      "绕过心流直摄"是 round 46 才数的一项：连发的人/心流说等但债没清/欠的回复要还，`));
+  console.log(P(`      这四类都跳过心流决策直接进 attention。它们是对的，但让上面的 ${reach.toFixed(0)}% 更高估不得。`));
   console.log(P(`      夜间 asleep 是大头，别拿夜间数字当白天口径。`));
-  console.log(P(`      "bot未叫本喵"是正确的（不该跟别的 bot 聊个没完），但它是隐藏的一层——`));
-  console.log(P(`      round 44 第一次数它：08:00 前 8 条，全部来自 nmnmfunbot/KinhRoBot 等。`));
 }
 console.log();
 // ── 按群：谁在贡献那个平均数 ──────────────────────────────────────
