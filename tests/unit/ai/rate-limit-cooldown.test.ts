@@ -44,9 +44,14 @@ describe('账号级限流的冷却时长', () => {
   });
 
   it('⑤ 判据只在 AIError 上跑（别把 TypeError 也当限流）', () => {
+    // round 71: 原断言靠"setCooldown 前 300 字里含 instanceof"——round 71 加的
+    // 注释正好把它挤出窗口，于是红。**这是断言选点的窗口依赖**（round 174 同族），
+    // 不是行为退化。改成断言 msg0 的定义本身：非 AIError → 空串 → 两个分级都命不中。
     const s = fs.readFileSync(SRC, 'utf8');
-    const i = s.indexOf('RATE_LIMIT_COOLDOWN_SEC);');
-    const before = s.slice(Math.max(0, i - 300), i);
-    expect(before).toContain('err instanceof AIError');
+    const code = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+    const def = code.find((l) => l.includes('const msg0 ='));
+    expect(def, 'msg0 定义不在').toBeDefined();
+    expect(def!).toContain('err instanceof AIError');
+    expect(def!).toContain(": ''");   // 非 AIError 走空串，不会误判成限流
   });
 });

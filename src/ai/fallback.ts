@@ -284,7 +284,12 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       // 不缩短并发限流那一档：round 83 的实测就是说 120s 不够，
       // 改回去就是回到 403 死循环。
       const msg0 = err instanceof AIError ? err.message : '';
-      if (/concurrent request limit|in-flight|concurrent requests/i.test(msg0)) {
+      // round 71: 加上 `access_terminated_error` 和 `overloaded`。
+      // round 70 实测 dshkimi 的 403 变成：消息体仍然写 concurrent request limit，
+      // 但 error **type** 换成 `access_terminated_error`。现在能命中（文案还在），
+      // 但如果有一天只剥出 type、文案换掉，分级就会漏到短冷却去。
+      if (/concurrent request limit|in-flight|concurrent requests/i.test(msg0)
+        || /access_terminated_error|overloaded/i.test(msg0)) {
         await cooldown.setCooldown(label.model, RATE_LIMIT_COOLDOWN_SEC);
         // round 197：**把"冷却已上架"打到 info。**
         //
