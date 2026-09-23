@@ -351,7 +351,21 @@ export async function sendMessage(
         // 最近发过同一句 —— 跳过，但**不返回 0**（0 在调用方语义里是"发送失败"）。
         // 打点后照常返回一个非零 id 的替代：用 replyToId 或 0 会让上层以为失败而重试。
         _dedupSkipped += 1;
-        logger.debug({ chatId, chars: trimmed.length, text: trimmed.slice(0, 40) }, 'sendMessage: duplicate text within 30s, skipped');
+        // round 191：**从 debug 提到 info。**
+        //
+        // AGENTS.md round 66 那条坑的第二次：「a debug line is invisible at
+        // LOG_LEVEL=info, which puts the hole straight back」。
+        //
+        // 实测：`LOG_LEVEL=info`，而全日志的 905 条 debug 最后一条在
+        // **09-23 11:03**——这个跳过点一次都没写出来过。
+        // 于是 `scripts/check-gate-evidence.sh` 的「同群同文本去重 跳过 0 次」
+        // 是**读不到，不是没发生**：按闸自己的判据（同群 + 前 4 字 + 30s）回放日志，
+        // 命中 391 次，其中 190 次是同一句的真重复。
+        //
+        // 提到 info 之后这个数才真的可读。计数器本来就有
+        // （send_duplicate_skipped_total），但 Prometheus 只在**本次进程内**
+        // 自增过才导出，重启即清零——跨重启的历史只能靠日志。
+        logger.info({ chatId, chars: trimmed.length, text: trimmed.slice(0, 40) }, 'sendMessage: duplicate text within 30s, skipped');
         incrCounter('send_duplicate_skipped_total', { chat: chatId });
         return -1;
       }
