@@ -86,4 +86,16 @@ for (const w of wins) {
 console.log(P(''));
 console.log(P('基线 09-23：① 11.3s/23.2s · ② 19.4s/42.3s · 快接 51%/84%/89%'));
 console.log(P('要对上"融得进"：总延迟压到 20s 内（快接 ~80%）。那是第 3 档的设计选择。'));
+console.log(P(''));
+// round 140：**① 的边界是糊的，别引用它的细分。**
+//
+// ① 里有一段是 Telegram 发布延迟（median 1.3s / p90 3.9s，round 138 用日志的
+// occurredAt 量的）——那不是我们的代码。剩下约 4s 在我们 handler 里，
+// 而那 12 个 await 一条日志都不打（round 139），归因不了。
+//
+// 更要紧的：attention ingest 和 Heart decision 常常同一秒发生，连着的两个决策
+// 间隔 6.5s 而没有新消息——心流是批量/续接决策的。所以按消息配对本来就不准。
+console.log(P('① 的边界是糊的（round 137/139）：里面约 1.3s 是 Telegram 发布延迟，'));
+console.log(P('  剩下的步骤零日志可归因，且心流是批量决策的——按消息配对不准。'));
+console.log(P('  方向可用，具体细分数字别引用。② 是干净的（用 taskId 关联）。'));
 process.exit(0);

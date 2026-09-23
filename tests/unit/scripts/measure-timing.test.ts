@@ -46,4 +46,14 @@ describe('measure:timing', () => {
     const s = fs.readFileSync(SRC, 'utf8');
     expect(s).toContain('总延迟压到 20s 内');
   });
+
+  it('⑦ 输出行里说明 ① 的边界是糊的（round 139：别引用细分）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    // 只查 console.log 的输出行，不查注释——注释里也有同样的话，
+    // 光查字符串的话改了输出行测试还是绿（round 140 实测过）。
+    const outLines = s.split('\n').filter((l) => l.includes('console.log'));
+    expect(outLines.some((l) => l.includes('① 的边界是糊的'))).toBe(true);
+    expect(outLines.some((l) => l.includes('Telegram 发布延迟'))).toBe(true);
+    expect(outLines.some((l) => l.includes('方向可用，具体细分数字别引用'))).toBe(true);
+  });
 });
