@@ -1507,3 +1507,46 @@ Round 97 的观察仍然成立：`verified_use_count` 全是 0。
 
 看到一个"没人调用的产出者"就判定"上游没跑"——我又犯了。
 **先问：这个产出者是给谁用的？** 那一条能省一整轮。
+
+---
+
+## helpfulness 的外部信号已经有，只是没接到 skill 上（round 99）
+
+Round 98 的结论是"群聊不可能有独立验收，helpfulness 长不出来"。
+这轮查下去发现**那句话只对了一半**。
+
+### 已经有的外部信号（`src/tracking/outcome.ts:190-215`）
+
+```
+explicit_positive  → outcome 'reacted'   y=0.5（回声）
+explicit_negative  → outcome 'corrected' y=-0.5
+user_replied       → outcome 'replied'   y=1.0
+ignored_*          → outcome 'ignored'   y=0
+```
+
+它靠**行为信号**识别好评/差评，而且已经接了三处消费者：
+
+  · `closeSelfActOutcome` → self-history（模型看到"这条被纠正了"）
+  · `settleEcho(chatId, y)` → 回声调参（E 值）
+  · `feedback-aggregate.ts` → pos/neg 汇总
+
+**即：外部验收信号存在，且已在驱动别的东西。**
+
+### 缺口（缩小）
+
+`recordSkillVerifiedUse` 只认 `'verified'`（caller 契约），
+而这些行为信号（explicit_positive 等）**没有一条通向 skill 的
+`verified_use_count`**。
+
+所以 round 98 说的"需要外部验收"其实已经有了——
+差的只是**把它接到 skill 计数器上**。
+
+### 但要不要接，是个设计决定
+
+接上的话：
+  · 好处：skill 淘汰从"只用 recall"变成"也用实际反馈"
+  · 代价：`explicit_positive` 的判据是"下一条消息带正面词"，
+    那可能是对**别人**说的，不一定是夸 bot 这条回复
+    （判据精度未知，没量过）
+
+所以这不在我能单方面做的范围内——**它改的是"什么算 skill 有效"的语义**。
