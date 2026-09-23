@@ -24,8 +24,11 @@ if (!a || !b) {
   process.exit(1);
 }
 
-const isDay = /^\d{4}-\d{2}-\d{2}$/.test(a);
-const flag = isDay ? '--day' : '--since';
+// 带日期的都走 --since（那两个都支持 'YYYY-MM-DD HH:MM'），
+// 纯 HH:MM 才是 --day 的 --since（取今天）。原来的 isDay 分得太粗，
+// 导致 '2026-09-22 23:36' 会被当成 --day 传给 measure，而它只吃 YYYY-MM-DD。
+const hasDate = /^\d{4}-\d{2}-\d{2}/.test(a) || /^\d{4}-\d{2}-\d{2}/.test(b);
+const flag = hasDate ? '--since' : '--day';
 
 function run(v) {
   const out = execFileSync('npx', ['tsx', 'scripts/measure-voice.mts', flag, v], {

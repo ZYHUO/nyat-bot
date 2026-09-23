@@ -32,10 +32,20 @@ if (dayIdx >= 0) {
   cutoff = start;
   void end;
 } else if (sinceIdx >= 0) {
-  const hhmm = argv[sinceIdx + 1] ?? '00:00';
-  const [h = '0', m = '0'] = hhmm.split(':');
-  const today = new Date().toISOString().slice(0, 10);
-  cutoff = Date.parse(`${today}T${h.padStart(2, '0')}:${m.padStart(2, '0')}:00Z`);
+  // round 51：**支持 `--since 'YYYY-MM-DD HH:MM'`**（跨日切片）。
+  // 原来只吃 HH:MM 并默认取今天——于是"昨天同时段 vs 今天同时段"比不了，
+  // 而那是唯一能区分"刚醒来说话多"和"一直都这么多"的比法。
+  // 两种形式都收：`23:36`（今天）和 `2026-09-22 23:36`（任意一天）。
+  const raw = (argv[sinceIdx + 1] ?? '00:00').trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const [datePart, timePart = '00:00'] = raw.split(/\s+/);
+    cutoff = Date.parse(`${datePart}T${timePart.padStart(8, '0').slice(0, 8)}Z`);
+    if (!Number.isFinite(cutoff)) cutoff = Date.parse(`${datePart}T00:00:00Z`);
+  } else {
+    const [h = '0', m = '0'] = raw.split(':');
+    const today = new Date().toISOString().slice(0, 10);
+    cutoff = Date.parse(`${today}T${h.padStart(2, '0')}:${m.padStart(2, '0')}:00Z`);
+  }
 }
 if (!cutoff) {
   // 默认：今天 UTC 0 点
