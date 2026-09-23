@@ -4783,3 +4783,85 @@ Round 91 起群醒，三个闸都响过。这轮想看它们今天的增量，`l
 同 task 间隔 <12s、分桶要长任务运行中），17 条里多数不满足任何一个
 是正常的。**"没涨"不等于"没在工作"——但也不等于"在工作"，
 要按判据一条条看**（round 36 的老规矩，第 6 次用到）。
+
+---
+
+## background 桶 9/16——但分母全在一个 task 上，n 实际上是 1（round 101）
+
+Round 100 我盘点时说 background「n=6，卡在数据量」。Round 101 数据涨到：
+
+```
+分桶（07:34 CST）：addressed 7 · background 9 · 合计 16
+background 占比 56%
+```
+
+**如果只看这个数，会得出「过半的打断是它自己凑上来的」。**
+但按 task 拆开：
+
+| task | addressed | background |
+|---|---|---|
+| 25249feb | 4 | **9** |
+| 0502614d | 2 | 0 |
+| 639010a2 | 1 | 0 |
+| **合计** | **7** | **9** |
+
+**9 条 background 全部来自同一个 task。** 那个 task 活了 **297 分钟**
+（09-23 18:37 → 23:34 UTC，跨了整个 awake 窗）。
+
+### 所以真实的 n 是 1，不是 9
+
+这是 round 194「第二个数字必须同分母」的又一次：
+- 全局分母 16 → 「56% 是 background」← **假的一般结论**
+- task 级分母 13（25249feb 自己的 13 条）→ 「这个 task 有 69% 是 background」
+- 跨 task 分母 3 → 「3 个长任务里有 1 个出现 background」
+
+**三个都真，但回答的不是同一个问题。** 而第一个最容易被读成
+「bot 很应激」——那是把**一个 task 的行为**说成**系统的行为**。
+
+### 这件事本身仍然值得记
+
+一个活了 5 小时的长任务，期间 13 条打断里 9 条是「没人在跟它说话」。
+那说明：**它不是在忙，是在挂机等**，而挂机期间仍然把群里的话算作对自己说话。
+
+这跟用户说的「应激」对上了，但**触发条件不是"忙"而是"活着"**——
+那可能是另一个形状：长任务的 interrupt 收集条件太宽。
+
+**样本仍是 n=1 task，不下系统结论**（round 47）。但它值得单独查一次：
+`25249feb` 是哪类任务、为什么活 5 小时、它的 interrupt 判据是什么。
+
+---
+
+## 那个 task 是什么：CodeAct 长任务 stall 了 4.5 小时仍在收打断（round 102）
+
+Round 101 说「值得单独查：25249feb 是哪类任务、为什么活 5 小时」。查了：
+
+```
+CodeAct task start         2 次   ← 两个不同 pid，说明中间重启过
+CodeAct job failed         1 次   err: "job stalled more than allowable limit"
+agent: message routed ... 23 次
+interrupt triage           13 次（background 9 / addressed 4）
+```
+
+**它是一个 CodeAct 任务，job 在 09-23 18:51 UTC 就 stall 失败了
+（`job stalled more than allowable limit`），但"running long task"的状态
+一直没清——所以后来 4.5 小时里每一句群话都还在往里送。**
+
+### 这是真 bug，不是口径问题
+
+```
+期望：CodeAct job stall/fail → 清理 running 状态 → 后续消息不再当 interrupt
+实际：CodeAct job stall/fail → running 状态留着 → 4.5 小时里 23 条消息全被
+      路由成 interrupt，其中 9 条是 background（没人在跟它说话）
+```
+
+**它同时解释了三件事**：
+1. background 桶为什么突然有数据（不是 bot 变应激，是有一个僵尸任务在收）
+2. 用户说的「说话太应激」的一个具体来源：群里每句话它都当是对自己说
+3. 为什么全局分母会骗人（9 条全在一个 task 上）
+
+**修法候选**（未做，已排期）：
+a. CodeAct job 失败/stall 时同步清 `running long task` 注册表
+b. 给 interrupt 路由加"任务年龄上限"——活了 N 分钟的任务不再收新打断
+c. `reportProcessLifetime` 旁边加一个 `long task age` 量纸
+
+**排期：round 103**（round 84-85 证明过：排了期不当轮做，它就一直躺着）

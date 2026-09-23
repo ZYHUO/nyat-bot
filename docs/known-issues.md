@@ -397,3 +397,20 @@ mock 的依赖图；单独跑目录时那条链没建立。
 **处置**：不改测试（会掩盖问题），改成**在 AGENTS.md 记一句**：
 "meta 目录单独跑会假红 2 条，验证 meta 用全量或用单文件"。
 这样下一个人不会像 round 192/198 那样，把假红当成自己刚改出的回归。
+
+
+## 僵尸长任务：CodeAct stall 后仍收 4.5 小时打断（round 102 发现，round 103 排期）
+
+**现场**：task `25249feb` 是 CodeAct 任务，`CodeAct job failed` at 09-23 18:51 UTC
+（err: `job stalled more than allowable limit`），但 running 状态没清——
+之后 4.5 小时里 23 条群消息全被路由成 interrupt，其中 9 条 background。
+
+**危害**：不只是计数脏。群里每句话都被它当"对自己说"，这是用户
+「说话太应激」的一个具体来源。
+
+**修法候选**：
+  a. CodeAct job 失败/stall 时同步清 running 注册表（治本）
+  b. interrupt 路由加"任务年龄上限"（治标，但能兜住别的泄漏路径）
+  c. 长效任务年龄量纸
+
+**排期：round 103。**
