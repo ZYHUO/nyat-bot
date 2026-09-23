@@ -1629,3 +1629,49 @@ Round 100 我说「有人接的共同点：点名具体的人 + 可回的钩子�
 
 replied 2-6%、ignored 74-80% 仍然成立（self-act 稳态统计）。
 **变的只是"我知道为什么"变成了"我不知道"**——而后者比错解释更有价值。
+
+---
+
+## replied 那两个数差 25 倍，而我看错了 3 轮（round 103）
+
+### 触发
+
+Round 102 建了 measure:engage。这轮想看"为什么群与群差 10 倍"
+（最好 18% vs 最差 2%），逐条对比两个群时发现：
+
+```
+-1002450361141  sends 19  真人接 9   = 47%
+-1003821093564  sends 81  真人接 40  = 49%
+-1004451430063  sends 65  真人接 41  = 63%
+```
+
+而 self-act 报这三个群是 18% / 2% / 2%。
+
+### 差在哪
+
+`src/tracking/outcome.ts:19,310`：
+
+```ts
+const OUTCOME_CHECK_WINDOW = 5;      // 条人类消息
+const OUTCOME_MAX_WAIT_SEC = 600;    // 10 分钟
+
+if (msgsAfter >= OUTCOME_CHECK_WINDOW || waitedLongEnough) {
+  signal = `ignored_${OUTCOME_CHECK_WINDOW}_msgs`;   // ← ignored
+}
+```
+
+**ignored 的判据是"发完后群里出现 5 条人类消息还没人接"。**
+在活跃群（每小时 80+ 条），5 条约等于 3-4 分钟。
+
+| 判据 | 度量什么 | 数字 |
+|---|---|---|
+| self-act replied | 5 条人类消息内有人接（约 3-4 分钟窗口） | 2-6% |
+| 30s 判据 | 30 秒内有人接 | 47-63% |
+
+**两者都对，度量不同的东西。** self-act 那个是"慢热融不进去"，
+不是"没人理"。
+
+### 我错了 3 轮
+
+round 100 报 replied 2-6% 当"融入失败"、round 101 验崩"点名+钩子"、
+round 102 验崩"小群更容易"——三次都在解释一个**度量口径不同的数**。
