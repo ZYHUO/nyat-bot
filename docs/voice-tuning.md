@@ -3238,3 +3238,42 @@ src/subagent/host-api.ts:2288  循环内既读又写 xxb:chat_title:${}
 **结论：这个 bug 类不是系统性的**，是我 round 171 新造的那个。
 不配套的 lint/测试守卫——真出现时形态各异（缓存回填 vs 自噬），
 grep 判据分不开，加了只会误报。
+
+---
+
+## 冷却分级：并发限流仍 5 分钟，普通 RPM 还给 60 秒（round 182）
+
+Round 83 为 403 concurrent limit 加了 5 分钟冷却，止住了 dshkimi 的 403 死循环
+（570 次/天 → 可控）。但它那条正则
+（`concurrent request limit|rate.?limit|too many requests`）把**普通 RPM 限流
+也一并打成 5 分钟**——而 429 上面已经有 60s 短期冷却，这一行把它覆盖成 300s。
+
+代价（round 148 量的）：09-20 起 `All labels exhausted` 从 138/天 涨到
+1600-2700/天。**每个 label 不可用时间 ×5 这里有份功劳**；链越短
+（reflection 只有 1 个 label）越容易整批全灭（round 147：deep-reflection
+产出率掉到 35%）。
+
+### 分级依据是解除条件的物理形状，不是错误码
+
+| 形状 | 解除条件 | 冷却 |
+|---|---|---|
+| concurrent limit | 等在飞请求跑完，与墙上时钟无关 | **5 分钟**（不变） |
+| RPM / too many requests | 滚动窗口，等一等就好 | **60 秒**（还给它） |
+
+不缩短并发限流那一档——round 83 的实测就是 120s 不够，改回去回到 403 死循环。
+
+### 这是 round 148 那条曲线的第一个"我自己能动"的处置
+
+Round 148/147 把链容量不足定为第 3 档（要你点头加账号）。
+但这条**不需要加任何东西**：它只是把我上一轮改动的副作用收窄。
+预期：`All labels exhausted` 的日计数下降（每个 label 的不可用时间缩短），
+deep-reflection 产出率回升。**待下一天的 session-report 验。**
+
+### 同一轮里第三次犯同一个错
+
+为验红做 tamper / 还原，我用 `git checkout src/ai/fallback.ts` 恢复，
+**把未提交的改动整个抹了**。这是本会话第三次（round 172 host-api /
+round 181 session-report / 这次），而我 round 181 刚为它写过
+"还原未提交的改动用备份文件，别用 git checkout"——犯完照样再犯。
+
+**知道 ≠ 做到。** 已重做并立即提交。
