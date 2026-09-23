@@ -284,6 +284,25 @@ three different windows (all log / 3 days / current window) and were being read 
 
 A number without its denominator is not a finding. It is a shape that looks like one.
 
+### Do not extrapolate a number you did not read
+
+Round 38 caught itself writing "deploy check 101/107" in a commit message when the
+actual counts were 87 and 41. Those commands had timed out under the 60s harness cap,
+so `tail -1` returned nothing, and the number was extrapolated from "last round plus what
+I added". **It was never observed.**
+
+This is the same failure as every stale number in `docs/` — but worse in one direction:
+a stale number was once true, an extrapolated one never was. The count also went *up*
+each round, which is what an extrapolation does when you keep adding checks.
+
+**Rule: if a command times out or produces no readable output, write "unverified" — do
+not carry forward.** A gate that could not be read is not a gate that passed.
+
+Corollary that would have caught it: **the gate output is part of the evidence, so paste
+the line you actually saw** rather than the number you expected. If the line is not
+there, neither is the evidence.
+
+
 
 ## Docs: never wrap a path-shaped example in backticks
 
