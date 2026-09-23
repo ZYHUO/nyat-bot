@@ -232,9 +232,13 @@ out.append('2026-09-21 起 schema 按子系统拆成 `src/env-sections/*.ts`（`
 out.append('⚠️ 判定读者时**排除 `src/env.ts` 与 `src/env-sections/*`**——那两处只是"这个键存在"，'
            '不是"有人读它"。拆段当晚漏了这条，21 个死键一夜之间全变成"有读者"。\n')
 
-SECTION_ORDER = ['infra', 'memory', 'timing', 'judge', 'cognition', 'core',
-                 'self', 'turn', 'meta', 'features', 'social', 'life']
+# round 198：**删掉这个重复定义。** round 192 以为改的是“段列表”，
+# 改的是文件顶部那个（第 22 行）；而输出构造区这里又定义了一份**不含 'ai' 的**，
+# 把它盖掉了。于是 glob 修好了键数（497），段索引仍然停在 12 段/488。
+# round 192 的测试只钩了 total_keys（那部分确实修好了），没钩段索引——这个坑
+# 留了 6 轮。现在两份合成一份，SECTION_DESC 也补上 'ai'。
 SECTION_DESC = {
+    'ai': 'TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限',
     'infra': 'Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关',
     'memory': '主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入',
     'timing': 'Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation）',

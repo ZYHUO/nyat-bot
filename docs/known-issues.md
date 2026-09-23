@@ -166,3 +166,17 @@ Circular dependency warning: `check-gate-evidence` 的测试 ⑦⑧ 断言的是
 `scripts/voice-daily.sh` 的内容，而那个脚本是**生成日报的**——如果哪天日报
 改成别的方式生成，这两条会静默失去意义（它们查的是脚本文本，不是日报本身）。
 真要看日报本身，读 `logs/voice-daily.log` 的最新条目。
+
+**round 198：假说已验证。** 用现有日志就能分开两种情况（不需要新流量）：
+
+```
+events: 1275
+same label, same second: 178     ← 同一秒内同一个 label 被打多次
+same label, gap <=5s: 553
+```
+
+**一条串行链不可能在同一秒内打同一个 label 两次**——那只能是多个并发的
+`callWithFallback` 调用（不同 chat/任务/usage）在同一刻都通过了冷却检查，
+然后一起发车。178 个同秒同 label 是直接证据。
+
+所以这不是假说，是已验证的根因：**冷却是 check-then-launch，拦不住已经并行发出去的那批。**

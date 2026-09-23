@@ -26,6 +26,38 @@ import { smartGroupReorder, recordSmartGroupResult, smartGroupAutoAssign, isAuto
  */
 const RATE_LIMIT_COOLDOWN_SEC = 300;
 
+// round 198：**每个 model 的在飞上限**（原子的那一半）。
+//
+// 已验证的根因（不是假说）：1275 次 concurrent-limit 报错里，
+// **178 次是"同一秒内同一个 label 被打多次"**，553 次是"同 label 间隔 <=5 秒"。
+// 一条串行链不可能在同一秒内打同一个 label 两次——那只能是多个并发的
+// callWithFallback（不同 chat/任务/usage）在同一刻都通过了冷却检查，然后一起发车。
+//
+// round 83 的冷却天生拦不住：check-then-launch 不是原子的。它只阻止
+// "新的尝试"，阻止不了"已经并行发出去的那批"，而账号级并发上限是被那一批撞开的。
+//
+// INCR 是原子的，所以多个并发调用里只有一个能拿到最后一个坑。
+// Redis 出错时放行——这是限流优化不是正确性前提（同 dedup 的 catch 放行）。
+const INFLIGHT_KEY = (model: string): string => `xxb:ai:inflight:${model}`;
+const INFLIGHT_TTL_SEC = 120;   // 泄漏保护：忘了 DECR 也会自己消掉
+
+async function acquireInFlight(model: string): Promise<boolean> {
+  try {
+    const redis = getRedis();
+    const cap = env().AI_MAX_INFLIGHT_PER_MODEL;
+    const key = INFLIGHT_KEY(model);
+    const n = await redis.incr(key);
+    if (n > cap) { await redis.decr(key); return false; }
+    // 只在第一个占坑者身上设 TTL：只要有一个人在飞，key 就在。
+    if (n === 1) await redis.expire(key, INFLIGHT_TTL_SEC);
+    return true;
+  } catch { return true; }   // Redis 不可用 → 放行
+}
+
+async function releaseInFlight(model: string): Promise<void> {
+  try { await getRedis().decr(INFLIGHT_KEY(model)); } catch { /* TTL 兜底 */ }
+}
+
 export async function callWithFallback(options: AICallOptions): Promise<AICallResult> {
   const usage = getUsage(options.usage);
   const manualNames = [usage.label, ...usage.backups];
@@ -100,6 +132,18 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       continue;
     }
 
+    // round 198：原子的在飞上限。冷却是 check-then-launch，拦不住并行的那批；
+    // INCR 才是原子的。挡下来时也记最短剩余，让尾部"全被挡"的逻辑知道要等多久。
+    if (!(await acquireInFlight(label.model))) {
+      logger.debug({ label: labelName, model: label.model, cap: env().AI_MAX_INFLIGHT_PER_MODEL },
+        'Skipping model at in-flight cap');
+      incrCounter('llm_inflight_cap_skipped_total', { label: labelName, model: label.model });
+      const rem = await cooldown.getRemainingSeconds(label.model).catch(() => 0);
+      if (rem > 0 && (shortestCooldownSec === 0 || rem < shortestCooldownSec)) shortestCooldownSec = rem;
+      continue;
+    }
+    let inFlightHeld = true;
+
     // per-label 覆盖:给慢/推理模型(如 mundo,回复链里需几分钟 + 大 maxTokens 防
     // 推理截断成空)单独放宽,而不动 usage 配置(正常回复的快模型照旧 60s/小 maxTokens)。
     // 超时仍受调用方 maxTimeoutMs 上限约束(heart/gate 等延迟敏感路径设了 maxTimeoutMs
@@ -125,6 +169,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
           throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
         }
         if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
+      if (inFlightHeld) { inFlightHeld = false; void releaseInFlight(label.model); }
         return result;
       }
 
@@ -147,6 +192,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       void recordSmartGroupResult(labelName, result.latencyMs, true);
       return result;
     } catch (err) {
+      if (inFlightHeld) { inFlightHeld = false; void releaseInFlight(label.model); }
       errors.push(err instanceof Error ? err : new Error(String(err)));
 
       // External abort (turn interrupt) — don't fallback, surface immediately.

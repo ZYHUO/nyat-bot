@@ -20,8 +20,19 @@ import { z } from 'zod';
 import { booleanFromEnv } from './_shared.js';
 
 export const aiSection = {
-  // Jev 结构化判断总开关。默认关：开了会影响用户等待路径上的延迟，先灰度再放开。
+  // round 198：**每个 model 的在飞上限**（并发限流的原子那一半）。
+  //
+  // 已验证的根因：1275 次 concurrent-limit 报错里，**178 次是「同一秒内同一个
+  // label 被打多次」**。一条串行链不可能在同一秒内打同一个 label 两次，那只能是多个
+  // 并发的 callWithFallback（不同 chat/任务/usage）在同一刻都通过了冷却检查，然后
+  // 一起发车。所以 round 83 的冷却（check-then-launch）天生拦不住，这里用原子的
+  // INCR 补上原子那一半。
+  //
+  // 默认 2：多数账号的并发上限在 2-4，取 2 保守但不会把链序列化到一个。
+  // 调大 = 更多并发（更快，但容易撞上限）；调小 = 更拖屈。
+  AI_MAX_INFLIGHT_PER_MODEL: z.coerce.number().int().min(1).max(16).default(2),
   JEV_ENABLED: booleanFromEnv.default(false),
+  // Jev 结构化判断总开关。默认关：开了会影响用户等待路径上的延迟，先灰度再放开。
   // lfree relay 的系统 one 端点基址（不带 /v1/systemone，代码自己拼）。
   // 默认空：真实的 /bot/<route> 只放 .env，不进被跟踪的源码。
   JEV_BASE_URL: z.string().default(''),
