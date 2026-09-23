@@ -228,6 +228,41 @@ export async function evaluateMetaHeart(opts: {
     .then(({ noteThought }) => noteThought(chatId, heart.why))
     .catch(() => {});
 
+  // round 54（新 goal）：**Meta 路径补上 act=react**。
+  //
+  // 今大量样本（n=596）里 react 第一次非零（9 次），而表情一个都没发出去。
+  // 原因：`'Heart decision'` 日志唯一来源是 decision.ts，而调它的有两条路径——
+  // heart.ts（pipeline，round 8 接了 react）和 heart-adapter.ts（**Meta，没接）。
+  // Meta 只判 wait / pass，react 落到默认分支被静默丢掉。
+  // 而 Meta 是生产主路径（group_chats_processed 105 vs legacy 7）——
+  // 所以 round 8 说“机制已接”只接了一半。
+  //
+  // 和 round 4（只接读不接写）、round 19/26（只修 2 处漏 5 处）同形：
+  // **改了 A 路径就宣布做完，而生产走 B。**
+  if (heart.act === 'react') {
+    const { pickReactionEmoji } = await import('../pipeline/reactions.js');
+    const emoji = heart.emoji ?? pickReactionEmoji('neutral');
+    let sent = false;
+    if (emoji) {
+      try {
+        const { reactToMessage } = await import('../bot/sender/telegram.js');
+        sent = await reactToMessage(chatId, formatted.messageId, emoji);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'Meta heart reactToMessage failed');
+      }
+    }
+    if (sent) {
+      logger.info({ chatId, emoji, why: heart.why }, 'Meta heart: reacted');
+      void import('../metrics/social-ledger.js')
+        .then(({ recordDecision }) => recordDecision(chatId, 'react'))
+        .catch(() => { /* telemetry never breaks */ });
+      // react 是出口：副作用已做完，让 Meta 当成静默。
+      return { verdict: 'silence', layer: 'L1', reason: `heart_react:${heart.why}` };
+    }
+    // 发不出去（够不着的消息/权限）——别坐实“点过”。
+    // 落到下面的 wait 分支让它继续被当条消息对待。
+    logger.debug({ chatId, emoji }, 'Meta heart: react not delivered, falling through');
+  }
   if (heart.act === 'wait') {
     const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
     try {
