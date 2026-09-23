@@ -75,6 +75,11 @@ interface LogStats {
   // round 83: 编辑重放（isEdit=true）占入站 15.6%（round 49 标记、round 82 复量仍在）。
   // 它灌所有以"入站"为分母的率，必须单列。
   editedReplay: number;
+  // round 108: interrupt 分桶的两个分母（入站和 host sendText）。
+  // Round 107 发现 background 是**群密度的函数**（非死亡 3 条/分 vs 死亢 0.63 条/分），
+  // 所以 bare 计数没意义，要和入站数放在一起。
+  interruptAddressed: number;
+  interruptBackground: number;
   // round 181：影子决策的收支。round 149 量出它是 exhaust 的第 2 大报错方
   // （2772 次 THREW，仅次于心流 2699），而 session-report 里 grep 'shadow'
   // 是 0 次——它一直是个没有仪表盘的 LLM 消费者。
@@ -114,6 +119,8 @@ function readLog(): LogStats {
     processRestarts: 0,
     processSends: 0,
     editedReplay: 0,
+    interruptAddressed: 0,
+    interruptBackground: 0,
   };
   let fd: string;
   try {
@@ -144,8 +151,13 @@ function readLog(): LogStats {
     const errMsg = String((d['err'] as { message?: string } | undefined)?.message ?? d['error'] ?? '');
     if (msg === 'message in') {
       st.inbound++; if (t >= deployMs) st.afterInbound++;
-      if (d['isEdit'] === true) st.editedReplay++;   // round 83：编辑重放单列，别灌分母
+        if (d['isEdit'] === true) st.editedReplay++;   // round 83：编辑重放单列，别灌分母
     }
+    // round 108: interrupt 分桶计数——round 92 加的日志行，这里收集成率。
+    // 必须在 `if (msg === 'message in')` 块**外面**：第一片我把 else-if
+    // 插进了块内，结果永远达不到——而 tsc 不报（寬来就是死代码）。
+    else if (msg === 'agent interrupt triage: addressed (directly at the bot)') st.interruptAddressed++;
+    else if (msg === 'agent interrupt triage: background (chat noise while task runs)') st.interruptBackground++;
     // 最后一条"醒着在处理"的证据。睡眠期消息走 `Meta path: asleep` 排队，
     // 不算 awake 处理——拿它当证据会以为功能在跑，其实只是消息到了。
     //
@@ -428,6 +440,21 @@ if (st.inbound > 0) {
   console.log(`\n\u7f16辑重放占入站 ${replayPct}%（${st.editedReplay}/${st.inbound}）` +
     (Number(replayPct) >= 5 ? '   \u26a0\ufe0f 以\u4e0a\u6bd4\u4f8b\u7684\u201c\u5165\u7ad9\u201d\u662f\u540c\u4e00\u6761\u88ab\u6539\u8fc7\u7684\u5185\u5bb9\uff0c' +
     '\u56de\u590d\u7387\u7c7b\u7684分母\u8981\u6309\u6b64\u6298\u7b97' : ''));
+}
+
+// round 108: **interrupt 分桶率**——bare 计数没意义，round 107 已经证明
+// background 是群密度的函数。这里给分母：
+//   每百条入站产生多少条 background 打断（不管它们对哪个 task）
+// 那样才能诹布"bot 很应激"——否则你只能说"今天有 26 条"，而那可能只是群热。
+if (st.inbound > 0 && (st.interruptAddressed + st.interruptBackground) > 0) {
+  const per100 = ((st.interruptAddressed + st.interruptBackground) / st.inbound * 100).toFixed(1);
+  const bgShare = (st.interruptBackground / (st.interruptAddressed + st.interruptBackground) * 100).toFixed(0);
+  console.log('');
+  console.log(`Interrupt 打断：共 ${st.interruptAddressed + st.interruptBackground} 条 `
+    + `· 每百条入站 ${per100} 条`
+    + ` · background 占 ${bgShare}%（${st.interruptBackground}/${st.interruptAddressed + st.interruptBackground}）`);
+  console.log('    (口径：background = 无关群话被长任务当成对自己的打断。round 107: 它是群密度的函数，'
+    + '别看 bare 计数。)');
 }
 
 if (st.inbound > 0 && db.sends > 0) {
