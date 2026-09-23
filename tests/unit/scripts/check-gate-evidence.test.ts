@@ -32,9 +32,11 @@ describe('gate:evidence 脚本', () => {
     expect(s).toContain('>=20');
   });
 
-  it('④ 注明口径是全累计（round 40 的教训）', () => {
+  it('④ 注明口径（round 40 的教训：累计会把修复前样本混进来）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).toContain('全日志累计');
+    // round 112 起分母按 UTC 今天切，不再用全累计
+    expect(s).toContain('UTC');
+    expect(s).toContain('date -u +%Y-%m-%d');
   });
 
   it('⑤ npm script 叫 gate:evidence', () => {
