@@ -61,7 +61,7 @@ let dupAnchorDropped = 0;
 //   614 heartPath='bypass'（心流说要等/不接但 obligation 未清）
 //   700 TRENCH_DEBT_ATTENTION_ENABLED（欠的回复要还）
 // 它们都不经过心流决策，所以"心流影响多少流量"要把它们算进分母的另一边。
-const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0, bypassIngest: 0 };
+const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0, bypassIngest: 0, coalesceHold: 0 };
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
 const reactedEmoji = new Map<string, number>();
@@ -124,6 +124,12 @@ for await (const line of rl) {
   if (m === 'Meta path: asleep') { gate.asleep += 1; continue; }
   if (m === 'Meta path: slash/checkin-stats → legacy pipeline') { gate.legacy += 1; continue; }
   if (m.includes('结构性忽略')) { gate.structuralIgnore += 1; continue; }
+  // 第六条路径（round 48）：进了 Attention 但被 coalesce 扣着等安静——还没到心流。
+  // 这不是 bug（爆发合并是设计），但它是漏斗最后一块：不数它，
+  // "到心流"和"入站"之间永远差一截解释不清。
+  // ⚠️ coalesce hold 是**事件**不是消息（一批消息对应一次 hold），
+  // 所以它只单独报数、不进 gateTotal——否则分母虚高，占比全错。
+  if (m.includes('Attention coalesce hold')) { gate.coalesceHold += 1; continue; }
   // 绕过心流强制入 attention 的四类（都不烧心流决策）
   // 只有这两个是绕过心流的直摄：
   //   same_speaker_burst —— 连发的人，不问心流
@@ -184,12 +190,13 @@ console.log(P(`④ 撞名守卫        拦下 ${collision} 次`));
 console.log(P(`   round 5 加：用户闲聊提"签到"不该变成一次真的代发。`));
 console.log();
 // ── 睡眠门：心流的"分母"是怎么来的 ────────────────────────────────
+// coalesceHold 故意不在分母里：它是事件不是消息（见上面那条注释）。
 const gateTotal = gate.asleep + gate.legacy + gate.structuralIgnore + gate.bypassIngest + actTotal;
-console.log(P(`⑤ 到心流的漏斗     asleep ${gate.asleep} · legacy ${gate.legacy} · bot未叫本喵 ${gate.structuralIgnore} · 绕过心流直摄 ${gate.bypassIngest} · **到心流 ${actTotal}**`));
+console.log(P(`⑤ 到心流的漏斗     asleep ${gate.asleep} · legacy ${gate.legacy} · bot未叫本喵 ${gate.structuralIgnore} · 绕过心流直摄 ${gate.bypassIngest} · coalesce扣着 ${gate.coalesceHold} · **到心流 ${actTotal}**`));
 if (gateTotal > 0) {
   const pct = (n: number) => (n * 100 / gateTotal).toFixed(0) + '%';
   const reach = actTotal * 100 / gateTotal;
-  console.log(P(`   asleep ${pct(gate.asleep)} · bot未叫本喵 ${pct(gate.structuralIgnore)} · legacy ${pct(gate.legacy)} · 绕过直摄 ${pct(gate.bypassIngest)}`));
+  console.log(P(`   asleep ${pct(gate.asleep)} · bot未叫本喵 ${pct(gate.structuralIgnore)} · legacy ${pct(gate.legacy)} · 绕过直摄 ${pct(gate.bypassIngest)} · coalesce扣着 ${gate.coalesceHold} 次(事件,不计占比)`));
   console.log(P(`   ⚠️ 心流的四个出口只影响**过了整条漏斗**的那部分：${reach.toFixed(0)}%。`));
   console.log(P(`      "绕过心流直摄"是 round 46 才数的一项：连发的人/心流说等但债没清/欠的回复要还，`));
   console.log(P(`      这四类都跳过心流决策直接进 attention。它们是对的，但让上面的 ${reach.toFixed(0)}% 更高估不得。`));
