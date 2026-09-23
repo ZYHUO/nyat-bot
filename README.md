@@ -2185,7 +2185,12 @@ host 侧上限在操作手册的第 3 桡）。
 **还没解决的事情**（含头衔：等生产样本的、等拍板的、我做过但无效的）在
 [`docs/known-issues.md`](docs/known-issues.md)。每条都写了怎么验。
 
-"我做过但无效的"那一节是为了防下一个人（或下一轮）重复同样的勻无效劳动。
+"我做过但无效的"那一节是为了防下一个人（或下一轮）重复同样的无效劳动。
+
+**已经修完、并且量出效果的**在
+[`docs/OBJECTIVE-STATUS.md`](docs/OBJECTIVE-STATUS.md)——那是同一件事的另一半：
+哪些问题有数字、数字是多少、哪些决定需要人拍板。两份合起来是完整答卷。
+
 ## ⭐ If this is the kind of thing you wish existed
 
 A star is genuinely useful here: this repo has no homepage, no listing, no post anywhere.
