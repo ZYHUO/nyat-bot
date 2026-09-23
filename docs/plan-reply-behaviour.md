@@ -207,7 +207,22 @@ review 还会把它当方案：
 
 **(a) 观测（round 170）**：`host sendText` / `continuation` 加 `taskId`。
 （之前两条都不带，于是"一个任务发了几个气泡"从日志里算不出来。）
-⚠️ 生产未验证—— 16:32 部署后群还没醒。
+✅ **生产已验证**（2026-09-24 18:33 UTC）：第一条带 `taskId` 的 `host sendText` 出现（chat=-1003821093564　task=ee6ca857　parts=1）。全链路：
+
+```
+18:33:18  Meta dispatch.taskToGroup
+18:33:19  CodeAct task start
+18:33:42  host sendText  parts=1
+18:33:43  task delivery recorded
+18:33:48  CodeAct task done
+18:34:10  episode distilled
+```
+
+**一个任务 1 次开口 1 个气泡，29 秒收尾**——健康形状。
+而 `session-report.mts` 的“每任务开口次数”维度（round 174 加的）也第一次在生产拿到数据。
+
+仍然 **n=1**——按 round 186 的规矛，一条不算“没病”的证据。
+目标样本量：>2 次开口的任务占比（k3 密度判据该治的批次）。
 
 **(c) task 级 burst 闸（round 171，从 3c 提前）**：
 `TASK_BURST_GAP_SEC = 12`，读 `xxb:agent:lastsend:{taskId}`（只在一次

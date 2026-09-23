@@ -3406,3 +3406,38 @@ multi-agent 的 critic rewrite 会重新生成，然后才发一次。
 
 这次和前几次不同：**我这次是自己发现单位不对的**，因为先查了 msg 的
 实际取值（`grep -oE '"msg":"Reply sent[^"]*"'`）而不是直接除。
+
+---
+
+## 等了两小时的数据到了：第一条带 taskId 的发送（round 190）
+
+16:32 部署的 `taskId` 字段，到 **18:33 UTC** 才等到第一条发送。
+两小时的等待，这轮兑现：
+
+```
+18:33:18  Meta dispatch.taskToGroup   chat=-1003821093564
+18:33:19  experience recall injected  task=ee6ca857
+18:33:19  skill recall injected       task=ee6ca857
+18:33:19  CodeAct task start          task=ee6ca857
+18:33:19  room awareness injected
+18:33:42  host sendText  parts=1      "快三点了，你该说晚安，不是问我时间喵。"
+18:33:43  task delivery recorded      task=ee6ca857
+18:33:48  task finalization requested
+18:33:48  CodeAct task done
+18:34:10  episode distilled
+```
+
+**一个任务 1 次开口 1 个气泡，29 秒收尾**——健康形状。
+两条同时兑现：
+
+  · 3a 的 `taskId` 字段：生产已验证 ✅
+  · round 174 加的「每任务开口次数」维度：第一次拿到数据 ✅
+    （`session-report.mts 1` → `每任务开口次数: 1次×1`）
+
+## 但 n=1
+
+按 round 186 的规矩，**一条不构成"没病"的证据**。
+要看的数字是「超过 2 次开口的任务占比」——那才是 k3 密度判据该治的批次。
+现在 0/1。
+
+真正的验收要等一个完整 awake 周期（07:36 CST 起）。
