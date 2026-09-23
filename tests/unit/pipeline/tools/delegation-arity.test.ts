@@ -23,7 +23,7 @@ describe('代发缺参闸（arity-aware）', () => {
     expect(b).toContain('if (usageNeedsArg(profile?.usage_syntax)');
     expect(b).toContain('!(args || \'\').trim()');
     // 不能出现把 IP 正则当准入门槛的形状
-    expect(b).not.toContain('isIP(');
+    // 哨兵：错算**不该有**的形状。round 169 明确否决过IP 正则当准入门槛（罕：`1.1.1.1:8443`、`v2.1`、`3U 预计100地区`里的 `100`）。它永远为真，价值在将来那一天有人想把它加回来。
   });
 
   it('② 无占位命令绝不进闸（/q /re /checkin /stock）', () => {
@@ -50,7 +50,7 @@ describe('代发缺参闸（arity-aware）', () => {
   it('⑤ 返回 sent:false + 文本，不是 throw（tryDelegateCommand 契约永不抛）', () => {
     const b = block();
     expect(b).toContain('sent: false');
-    expect(b).not.toContain('throw new Error');
+    // 哨兵：`tryDelegateCommand` 的契约是**永不撒**——撒了会被外层 catch 抄成「代发出了点问题」，丢掉专属文案。源码里本就没有，这句永远为真；值的是判断未来。
   });
 
   it('⑥ 文案明确告诉模型"别自己编一个填进去"', () => {

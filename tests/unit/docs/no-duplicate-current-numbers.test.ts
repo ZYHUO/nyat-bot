@@ -30,6 +30,8 @@ describe('no two copies of a current number', () => {
   it('the table header says snapshot, not "latest" (latest reads as current)', () => {
     const s = fs.readFileSync(SRC, 'utf8');
     expect(s).toContain('round 196 \u5feb\u7167');
+    // sentinel: the header 最新证据 must not come back — it reads as
+    // "current", and round 47/48 was exactly this header + two hand-copied numbers.
     expect(s).not.toContain('\u6700\u65b0\u8bc1\u636e');
   });
 

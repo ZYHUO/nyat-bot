@@ -23,9 +23,16 @@ import * as fs from 'node:fs';
 describe('截断重试的可观测性', () => {
   const SRC = 'src/ai/provider.ts';
 
-  it('① 重试日志不走 firstTime ? info : debug（那会让观察者为 0）', () => {
+  // round 52：这条原来是"装饰"——断言一个过于具体的字符串，恒真且没有未来约束力。
+  // 按 round 50 归档的修法（装饰 → 改成断言现在的结构）重写：
+  // 不再问"没有那一行三元"，而是问"重试日志到底用哪个级别、且不受 firstTime 影响"。
+  it('① 重试日志固定级别，不随 firstTime 变（否则观察者为 0）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).not.toContain('const log = firstTime ? logger.info : logger.debug;');
+    const code = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+    // 现在的结构：`const log = logger.warn.bind(logger);`
+    expect(code.some((l) => l.includes('const log = logger.warn.bind(logger);'))).toBe(true);
+    // 不该出现 firstTime 决定级别的形状（不管写法）
+    expect(code.some((l) => /firstTime\s*\?/.test(l))).toBe(false);
   });
 
   it('② 固定走 warn（异常路径 + 频率已被下限压住）', () => {
