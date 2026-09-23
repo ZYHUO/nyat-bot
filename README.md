@@ -45,6 +45,7 @@ jump straight to **🚀 Quick start** further down this README.
 - [🛡️ Anti-ad: how a group owner turns it on](#️-anti-ad-how-a-group-owner-turns-it-on)
 - [More of my work](#more-of-my-work)
 - [📊 Ecosystem status](#-ecosystem-status)
+- [🚩 Known issues](#🚩-known-issues)
 - [⭐ If this is the kind of thing you wish existed](#-if-this-is-the-kind-of-thing-you-wish-existed)
 - [📄 License](#-license)
 
@@ -2179,6 +2180,12 @@ host 侧上限在操作手册的第 3 桡）。
 
 **Star 仍是 9**——本机侧能做的都做了，剩下三件（挂 Pages / 发帖 / 投 awesome-list）
 在 [`docs/publish-checklist.md`](docs/publish-checklist.md)，每件 5 分钟。
+## 🚩 Known issues
+
+**还没解决的事情**（含头衔：等生产样本的、等拍板的、我做过但无效的）在
+[`docs/known-issues.md`](docs/known-issues.md)。每条都写了怎么验。
+
+"我做过但无效的"那一节是为了防下一个人（或下一轮）重复同样的勻无效劳动。
 ## ⭐ If this is the kind of thing you wish existed
 
 A star is genuinely useful here: this repo has no homepage, no listing, no post anywhere.
