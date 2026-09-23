@@ -186,6 +186,39 @@ export async function tryDelegateCommand(
       return { sent: false, text: `${bot} 不在这个群里,代发了也没人接。` };
     }
 
+    // round 169（计划第 2 步）：**arity-aware 的缺参闸。**
+    //
+    // 现场（2026-09-23 15:05）：代发 /geo 给 uzumaru_geoip_bot 时 args 为空，
+    // 对端回用法说明，然后它自己编了个 8.8.8.8。第 1 步修"把退回当结果解"，
+    // 这里修"根本就不该发的也发了"。
+    //
+    // 判据用库里已有的 usage_syntax 推 arity，**不用全局 IP 正则**（k3 评审点出的坑：
+    // 1.1.1.1:8443 / 8.8.8.8/29 会漏；v2.1 / a.b / 文件名乱放行；而
+    // "3U 预计100地区"里的 100 不是 IP——现场那句就是反例）。
+    //
+    //   /geo <IP或域名>    有占位 → 要参数
+    //   /music <歌名>      有占位 → 要参数
+    //   /q、/re、/checkin  无占位 → 不要参数，绝不拦
+    //
+    // 形状认两种：尖括号/方括号占位，和命令名之后还有裸 token。
+    if (usageNeedsArg(profile?.usage_syntax) && !(args || '').trim()) {
+      // 兜底：人类这条消息本身可能就带了实参（点名让查 1.1.1.1）。
+      // 查不到才拦——否则会把"人明明给了 IP"的也吞掉。
+      if (!(await humanMessageCarriesArg(chatId))) {
+        // round 84 的形状：挡住要**可数**，否则说不清"挡掉了"还是"没被调用"。
+        logger.info(
+          { chatId, bot, cmd, syntax: profile?.usage_syntax },
+          'delegation: command needs an argument but none was given — blocked',
+        );
+        incrCounter('delegation_missing_args_total', { chat: chatId, bot, cmd });
+        return {
+          sent: false,
+          text: `${profile?.usage_syntax ?? cmd} 这个命令要带参数,群里没人给。` +
+            '直接跟群友说要查的那个(IP/域名/关键词),别自己编一个填进去。',
+        };
+      }
+    }
+
     const cleanArgs = (args || '').trim().slice(0, 120);
     const text = `${cmd}@${bot}${cleanArgs ? ' ' + cleanArgs : ''}`;
     const sentMid = await sendMessage(chatId, text);
@@ -402,6 +435,46 @@ function isProgressPlaceholder(text: string): boolean {
 // 判据收紧：必须是明显的 usage/参数缺失形状，且短（真结果也可能含 "Usage" 一词，
 // 所以加长度上限，和 isProgressPlaceholder 同一个思路）。
 const REJECTION_RE = /usage\s*:|please\s*(provide|specify|enter)|命令格式|用法|使用方法|缺少参数|参数不足|参数错误|无效参数|invalid\s*(argument|usage|command)|missing\s*(argument|parameter)|required argument/i;
+// round 169：usage_syntax 是否要求参数。判据只认两种形状，认不出来的一律
+// **不当成要参数**——漏拦好过误拦：误拦会让该发的也不发，而漏拦有第 1 步兜底。
+function usageNeedsArg(usageSyntax: string | undefined): boolean {
+  const s = (usageSyntax || '').trim();
+  if (!s) return false;
+  // 形状一：占位符 <IP或域名> / [链接] / <me|chat|ID|用户名|链接>
+  if (/[<\[][^>\]]{1,60}[>\]]/.test(s)) return true;
+  // 形状二：命令名之后还有裸 token（"/geo IP 域名"）。
+  // 但"或回复消息使用"这类是说明不是参数要求，排除掉。
+  const rest = s.replace(/^\/[a-z0-9_]+/i, '').trim();
+  if (rest && !/^(或|回复消息|回复时)/.test(rest)) return true;
+  return false;
+}
+
+/**
+ * 最近几条人类消息里有没有"像实参"的串（IP / 域名 / 普通关键词）。
+ * 只为兜底"人明明给了实参"，所以判据故意宽——宽一点只会少拦，
+ * 不会造成"该发的也不发"。
+ */
+async function humanMessageCarriesArg(chatId: number): Promise<boolean> {
+  try {
+    const { getRecent } = await import('../context/manager.js');
+    const recent = await getRecent(chatId, 6);
+    for (const m of recent) {
+      if (m.role !== 'user' || m.isBot) continue;
+      const t = (m.textContent || '').trim();
+      if (!t) continue;
+      // IP（含端口/掩码）
+      if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(t)) return true;
+      // 域名
+      if (/\b[a-z0-9][a-z0-9-]{1,62}(?:\.[a-z0-9][a-z0-9-]{1,62})+\b/i.test(t)) return true;
+      // 任何 >=2 字的非纯标点串（关键词类参数）
+      if (/[\u4e00-\u9fa5\w]{2,}/.test(t.replace(/[\s\p{P}]/gu, ''))) return true;
+    }
+    return false;
+  } catch {
+    return true;   // 读不到上下文时不拦（fail-open）
+  }
+}
+
 function isCommandRejection(text: string): boolean {
   const t = text.trim();
   // 120 字上限：用法说明都是短句；长文本里出现 "Usage" 更可能是真结果在解释用法。

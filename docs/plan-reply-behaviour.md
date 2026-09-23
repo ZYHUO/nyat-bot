@@ -113,7 +113,23 @@ if (chatId < 0 && !formatted.isBot && text.length >= 3 && ...)
 单测喂 usage 形状的 bot 消息断言不当结果消费；进 `verify-integration.mts` 真调一次。
 弄坏验证：判据恒 false → 测试红。
 
-### 第 2 步｜arity-aware 的缺参闸（R1 的兜底）
+### 第 2 步｜arity-aware 的缺参闸（R1 的兜底）—— ✅ 已完成（round 169）
+
+**已部署**：`src/pipeline/tools/bot-delegation.ts` 的 `tryDelegateCommand`，
+在 `targetBotInChat` 检查之后、发送之前。
+
+- `usageNeedsArg(profile?.usage_syntax)`：只认两种形状（`<占位>`/`[占位]`、
+  命令名之后还有裸 token），**认不出来的一律不当成要参数**（漏拦好过误拦）
+- 有占位且 `args` 为空时，先 `humanMessageCarriesArg(chatId)` 兜底
+  （人类自己带了实参就放行），读不到上下文 fail-open
+- 拦住 → `incrCounter('delegation_missing_args_total', {chat,bot,cmd})` + info，
+  `return { sent:false, text }`（**不 throw**——`tryDelegateCommand` 契约永不抛）
+
+判据在 14 个**真实** `usage_syntax` 形状上全对（`/geo <IP或域名>`→要，
+`/q`/`/re`/`/checkin`/`/stock`/`/cards`→不要，`/q 或回复消息使用`→不要）。
+测试 ⑧ 把这个集合钉住，改了判据就红，逼人重新对一遍真实数据。
+
+### 第 3 步｜B 的真主药：一个任务被 interrupt 吊着连发（R6）
 
 **改**：`tryDelegateCommand`（唯一收口：command-router / host-api `bots.command` / legacy registry 三路全走它）。
 判据用库里已有的 `getCommandProfile(bot, cmd).usage_syntax` 推 arity：

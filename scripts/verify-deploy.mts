@@ -141,6 +141,8 @@ const CHECKS: Array<[string, string]> = [
   // 画摊子：SVG 长代码活的授权链 + 选路交还手动链（2026-09-21）
   ['画摊子 usage 默认链', 'artist: { label: "dshkimi"'],
   ['代发回执：命令被退回单独一支', 'isCommandRejection'],
+  ['代发缺参闸（arity-aware）', 'usageNeedsArg'],
+  ['代发缺参兜底：人类消息带实参', 'humanMessageCarriesArg'],
   ['命令路由要求寻址', 'command_router_skip_unaddressed_total'],
   ['画摊子交还手动链', 'respectManualOrder'],
   // 仪器
