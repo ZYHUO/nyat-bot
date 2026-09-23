@@ -67,6 +67,11 @@ interface LogStats {
   // 因此判定"超过 6 条的尾巴 16/1316"是分片副产物，不是预算失灵。
   // round 170 起 host sendText 带 taskId，这里按它另外数一份**开口**维度。
   taskCalls: Map<string, number>;
+  // round 181：影子决策的收支。round 149 量出它是 exhaust 的第 2 大报错方
+  // （2772 次 THREW，仅次于心流 2699），而 session-report 里 grep 'shadow'
+  // 是 0 次——它一直是个没有仪表盘的 LLM 消费者。
+  shadowThrew: number;
+  shadowCompared: number;
 }
 
 /** 最后一次 "Bot started (polling)" 的时间戳 —— 这一轮的改动都是重启后生效的。 */
@@ -96,6 +101,8 @@ function readLog(): LogStats {
     afterTruncRetry: 0, afterKeepAddressed: 0, afterStructuralIgnore: 0,
     taskSends: new Map(),
     taskCalls: new Map(),
+    shadowThrew: 0,
+    shadowCompared: 0,
   };
   let fd: string;
   try {
@@ -138,6 +145,10 @@ function readLog(): LogStats {
       st.lastAwakeMs = Math.max(st.lastAwakeMs, t);
     }
     if (msg === 'Heart decision') { st.heartDecision++; if (t >= deployMs) st.afterHeartDecision++; }
+    // round 181：影子决策。THREW = 崩了（fail-closed 成沉默）；
+    // core shadow compare = 真的比了一次（有产出）。
+    else if (msg === 'shadow decision THREW (counted as silent)') { st.shadowThrew++; }
+    else if (msg === 'core shadow compare') { st.shadowCompared++; }
     else if (msg === 'heart LLM failed, fail-closed pass') { st.heartFailed++; if (t >= deployMs) st.afterHeartFailed++; }
     else if (errMsg.includes('All labels exhausted')) st.allExhausted++;
     else if (errMsg.includes('Empty response')) st.emptyResponse++;
@@ -401,6 +412,10 @@ console.log(`    ├─ All labels exhausted     ${st.allExhausted}  ${pct(st.al
 console.log(`    └─ 空正文                   ${st.emptyResponse}`);
 console.log(`  发现会截断的 label             ${st.truncRetry}   部署后 ${st.afterTruncRetry}   （每个只记第一次，不刷屏）`);
 console.log(`  保句闸 (被叫到 → wait)        ${st.keepAddressed}   部署后 ${st.afterKeepAddressed}`);
+// round 181：影子决策的收支。它是纯观测（k3：shadow 且爆了照发，只观测），
+// 但每崩一次就白烧一次 LLM——而在链已经 exhausted 的时候，那就是在跟心流抢额度。
+console.log(`  影子决策 比较成功/崩掉        ${st.shadowCompared} / ${st.shadowThrew}` +
+  `   ${st.shadowThrew > 0 && st.shadowThrew > st.shadowCompared ? '⚠️ 崩的比成的多——纯观测在白烧链上额度' : ''}`);
 console.log('');
 
 console.log('── 2b. topic-scan 抽取率（低产 = LLM 在空转）──');
