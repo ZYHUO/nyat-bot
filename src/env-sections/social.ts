@@ -171,7 +171,22 @@ export const socialSection = {
   ASI_USAGE: z.string().default('asi'),
   // rubric 的 max_tokens。step-3.7-flash 是 reasoning 模型，思维链计入 completion：
   // 实测 120/600 都只拿到空 content，1200 才出正文。别改小。
-  ASI_RUBRIC_MAX_TOKENS: z.coerce.number().int().positive().default(1200),
+    // round 69 从 1200 改到 8000。
+  //
+  // 病因：`asi-scoring.ts:306` 显式传 `maxTokens: ASI_RUBRIC_MAX_TOKENS`，
+  // 而显式参数压过 usage 级配置（同 round 26 清的那 7 处，只是那处是写死数字、
+  // 这处是写死 env 值）。而 ASI 链现在指向 step-3.7-flash——reasoning 模型，
+  // `reasoning_content` **计入 completion**。1200 全被思维链吃光 → 空 content →
+  // `rejectEmpty` → 整条链 fail-closed → 本条不记分。
+  //
+  // 上面那行注释（'给小了只会拿到空 content'）在 round 26 就写对了，
+  // 但值一直没跟着改。**代码知道病因而配了错的值**——这是最隐蔽的一类。
+  //
+  // 09-23 实测代价：285 次空正文，全部来自 stepfun 三个标签 × maxTokens=1200
+  //   （stepfunvision 97 · stepfun 89 · stepfunthink 53）。
+  // 8000 对齐 AI_USAGE_VISION_MAX_TOKENS=32000 的量级——推理模型都给足。
+
+  ASI_RUBRIC_MAX_TOKENS: z.coerce.number().int().positive().default(8000),
 
   // P2:成熟后真正代发命令(USE_BOT_COMMAND 工具)。默认关 —— 没学够/没开就只"教用户"
   BOT_DELEGATION_ENABLED: booleanFromEnv.default(false),
