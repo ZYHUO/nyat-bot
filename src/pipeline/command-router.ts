@@ -116,7 +116,21 @@ async function classifyWithJev(text: string, chatId: number, ready: BotCommandPr
     // 否则一律 unsure → 回落 LLM judge，而 LLM judge 有完整上下文，
     // 比"语义最近"靠谱。
     if (OWN_COMMANDS.has(hit.command.toLowerCase()) && !namesBot(text, hit.bot)) {
-      logger.debug({ chatId, bot: hit.bot, cmd: hit.command }, 'command-router: 撞名命令未显式指定 → 不代发');
+      // round 87：debug → info + 计数。
+      //
+      // 这条在**快路径**上——每次 Jev 有信心的命中撞名命令都走（`jev: ok`
+      // 今天 2706 次），而它此前只有 debug 日志，生产 LOG_LEVEL=info 下
+      // 一律不可见。于是 round 84 我说"撞名守卫 0 触发"，
+      // 其实它可能每天都在拦几十次。
+      //
+      // 同代发目标不在群（round 84）那一处：**0 次不是没问题。**
+      // 顺带：unsure 会回落 LLM judge，那是几秒的额外延迟；
+      // 有了计数才知道这个代价值不值。
+      logger.info(
+        { chatId, bot: hit.bot, cmd: hit.command, preview: text.slice(0, 60) },
+        'command-router: 撞名命令未显式指定 → 不代发（回落 LLM judge）',
+      );
+      incrCounter('command_collision_guard_total', { chat: chatId });
       return { kind: 'unsure', latencyMs: ans.latencyMs };
     }
     return { kind: 'match', match: hit, latencyMs: ans.latencyMs };
