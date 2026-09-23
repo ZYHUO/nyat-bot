@@ -619,8 +619,15 @@ export async function generateReply(
   // L1: 内心独白压轴(order=99,离 CURRENT_MESSAGE 最近) —— 写手顺着决定
   // 接话的那个念头开笔,而不是失忆后重新猜一个角度。keep=2(必留,永不被裁)。
   // (旧 bug:念头用 priority 2 入列被排到块最前,正好和这条意图相反。)
-  const heartPart = callOpts?.heartWhy
-    ? `[你的念头] 你看到这条消息时心里想的是:「${callOpts.heartWhy}」。顺着这个念头说,别另起炉灶。`
+  // round 59：**空/无效的念头不注入**。
+  //
+  // cleanWhy 之后仍可能是空串（模型给了 `{}` 或只有 JSON 残片）。
+  // 空字符串在模板字符串里会渲染成 `心里想的是:「」。` —— 写手收到一个
+  // 空洞的指令，比没有这条更糟（它会去猜"空"是什么意思）。
+  // 所以：trim 后为空就不注入，让写手自己读上下文。
+  const heartWhyClean = (callOpts?.heartWhy ?? '').trim();
+  const heartPart = heartWhyClean
+    ? `[你的念头] 你看到这条消息时心里想的是:「${heartWhyClean}」。顺着这个念头说,别另起炉灶。`
     : undefined;
   // AGI L5 L4: ToM 心智状态 —— 回复前先想 3 行:对方想要什么/什么情绪/期待什么反应。
   // 白捡的收益:让回复更有针对性,而不是答录机。(群聊 + flag 开启)

@@ -122,6 +122,49 @@ function llmFailedDecision(
   return { act, path: 'chat', why, latencyMs, judgeResult: toJudgeResult(act, 'chat', latencyMs) };
 }
 
+/**
+ * 清洗心流的 `why`——它会被原样注入写手的 prompt 当"念头"。
+ *
+ * 2026-09-23（新 goal，用户："前言不搭后语"）。实测 10,807 条 Heart decision：
+ *
+ *   why 含 `{`   926 条（9%）
+ *   why 被截断    164 条（2%）
+ *
+ * 那些 why 长这样：
+ *
+ *   {doro发的众筹澳门家宽，倍率还行，要参吗？
+ *   {刚撩猫羽就发男铜贴纸，这反差绷不住
+ *
+ * 模型有时在 why 里塞引用链/嵌套 JSON 片段（它把 `→回复 某人(#22222)`
+ * 这类上下文记号当成了自己输出的一部分）。原样收下再截到 40 字，
+ * 这条断裂的 JSON 片段就会被注入：
+ *
+ *   reply.ts:623  [你的念头] 你看到这条消息时心里想的是:「{doro发的众筹…」。
+ *
+ * 写手拿到一个坏念头，还被要求"顺着这个念头说，别另起炉灶"——
+ * 于是它接得莫名其妙。**9% 的回复带着坏念头开笔。**
+ *
+ * 清洗规则（保守，只去明显是机器残留的部分，不动人话）：
+ *   · 去掉首尾的 `{` `}` `[` `]` `"` `'` 和空白
+ *   · 去掉尾部被截断的 JSON 尾巴（`…`、`,`、`："`、未闭合的引号）
+ *   · 全部清完还为空 -> 返回 ''（调用方据此决定不注入）
+ */
+function cleanWhy(raw: string): string {
+  let t = String(raw ?? '').trim();
+  if (!t) return '';
+  // 首尾的括号/引号/空白（模型把 JSON 结构也写进了 why）
+  t = t.replace(/^[\s{}[\]"'`]+/, '').replace(/[\s{}[\]"'`]+$/, '');
+  // 尾部截断的 JSON 残留：`…","path":"cha` 这种——在第一个 `","x":"` 处切断，
+  // 只留人的那部分。（round 58 实测的是"散文 + 首尾括号"，
+  // 这里是同一家族的另一种：整段 JSON 被塞进 why 后截断。）
+  const cut = t.search(/["']\s*,\s*["'][\w-]+["']\s*:/);
+  if (cut > 0) t = t.slice(0, cut);
+  t = t.replace(/[,，:：、\s]+$/, '').trim();
+  // 未闭合的引号（截断在字符串中段）
+  if ((t.match(/"/g)?.length ?? 0) % 2 === 1) t = t.replace(/["']?[^"']*$/, '').trim();
+  return t.slice(0, 40);
+}
+
 function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why: string } | null {
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
   const m = cleaned.match(/\{[\s\S]*\}/);
@@ -140,7 +183,7 @@ function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why:
     return {
       act: act as HeartAct,
       path: pathRaw === 'lookup' ? 'lookup' : 'chat',
-      why: String(obj['why'] ?? '').slice(0, 40),
+      why: cleanWhy(String(obj['why'] ?? '')),
       ...(act === 'react' ? { emoji } : {}),
     };
   } catch {
