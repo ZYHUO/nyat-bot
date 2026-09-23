@@ -1457,3 +1457,53 @@ waiting_user 5 · administrator 2 · verified 0
   · round 96 我报的"3198 次使用"是 recall，**我用它撑不起"它为什么像个人"那个结论**
 
 （这不影响运行——skill 照常注入照常用。只是它的自优化少了一个输入。）
+
+---
+
+## verified=0 不是 bug，是**设计如此**（round 98 修正 round 97）
+
+Round 97 我说"能产出 verified 的 agi-like-evaluator 在 src/ 里没有调用者，
+所以上游根本没跑"。**那是不对的。**
+
+### 真相（task-evidence.ts:78-80）
+
+```ts
+// 模型自评不算数，设计如此！
+return { status: contract.source === 'caller' ? 'verified' : 'unverified',
+  reasons: [contract.source === 'caller' ? 'caller_checks_passed'
+                                        : 'model_checks_not_independent'], checks };
+```
+
+**`'verified'` 只在 contract 来自 `caller`（宿主/外部给定）时产出。**
+模型自己 `propose()` 的检查永远得 `unverified`——理由写在代码里：
+`model_checks_not_independent`。
+
+而群聊里 bot 的回复**没有 caller 契约**（没有外部验收方），
+所以 status 恒 unverified —— **这是正确的行为，不是缺了一根线**。
+
+### 我 round 97 错在哪
+
+把它当"断线"查，是因为看到"计数器 0 + 有个能产出该值的模块没被调用"。
+但那个模块（`agi-like-evaluator`）是**离线 A/B 评测 harness**，
+文件头原话：
+
+  Offline paired replay evaluator. This is an engineering harness,
+  not a model benchmark: the caller owns the executor and acceptance contract.
+
+它和运行时的 `task.assessment` 共用 `'verified'` 这个枚举值，但**是两件事**。
+我把它当成运行时验收的提供者了。
+
+### 正确的结论（缩小版）
+
+Round 97 的观察仍然成立：`verified_use_count` 全是 0。
+但它**不是"信号断了"**，而是"群聊场景下不可能有独立验收"。
+
+含义也变了：
+  · 技能库的 helpfulness 不会从群聊任务里自动长出来
+  · 想让它长，需要**外部**验收（主人 / 群管 / 规则）——那是功能不是修 bug
+  · 我 round 97 说的"系统上线就是空的"仍对，但"上游没跑"是错的归因
+
+### 教训
+
+看到一个"没人调用的产出者"就判定"上游没跑"——我又犯了。
+**先问：这个产出者是给谁用的？** 那一条能省一整轮。
