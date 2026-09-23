@@ -3004,3 +3004,53 @@ if (topicHit) {
 typecheck 0 · lint 0 · test 500 文件 / 3944 过 · build ok ·
 部署核验 75/75 · **集成核验 31/31** · 服务 active / health 200
 （round 159 那个 dshkimi 403 这次过了——印证它是瞬时态）
+
+---
+
+## 用户 23:05 现场：两件事，其中"dirty why 归零"是我 round 59 的错误结论（round 164）
+
+用户贴了 23:05-23:06 的实录，两个抱怨：
+1. **还是不会用别的 bot** —— bot 先发了不带参数的 `/geo@uzumaru_geoip_bot`，
+   被回 "Please provide an IP or domain"，然后才补 `/geo 8.8.8.8`
+2. **说话太应激** —— 对 "sb" 回 "笨死了"，还有 "？" / "骂谁呢"
+
+### 查现场时顺带发现：round 59 的"dirty why 9%→0%"是错的
+
+15:05:39 的 `Heart decision` why 是：
+
+```
+{刚骂完warp抽风，global还有救吗？
+```
+
+**前导 `{` 没被剥掉。** 而 `cleanWhy()` 的第一正则就是
+`replace(/^[\s{}[\]"'`]+/, '')`——它应该被剥掉。
+
+追下去找到真因：`cleanWhy` 只用在 `parseHeart()` 里，而 **round 88 加的
+"Heart reflect" 会用 refined 覆写 `parsed.why`，而 refined 没过 `cleanWhy`**：
+
+```ts
+const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
+if (refined.length >= 2) { parsed = { ...parsed, why: refined }; }
+```
+
+那个 replace 只剥「」引号，**不剥 `{}[]`**。
+
+### 数字
+
+```
+dirty why（前导 { 或含 ","key":）按天：
+  09-21  532
+  09-22  352
+  09-23  211     ← 今天
+```
+
+**我 round 59 说"9%→0%"，实际是每天 200-500 条。** 那次我量的是
+`parseHeart` 之前/之后的对比，而 reflect 是后加的覆写路径——同一个错误
+（修了一处，另一条路没修），这个会话第三次（round 52 markMessageAnswered、
+round 114 react 日志名、这次）。
+
+这也解释了一个长期现象：`measure:voice` 的 ② 里那些"为什么 pass/why"
+看起来一直有杂质，我从没细究。
+
+（不影响行为——why 只是日志和 [你的念头] 注入的文本。但它让我 round 59
+的报告失真，而用户当时问的就是"前言不搭后语"相关。）
