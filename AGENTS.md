@@ -359,7 +359,19 @@ have a boundary; two were actually over-executed before the boundary was found:
 | "read Chinese back after writing" | re-read the whole file each time | spot-check the changed lines; re-reading everything is another waste |
 
 Asking the question at write-time costs one line and saves the round that would have
-found the boundary the hard way. The two rules with no over-executed form:
+found the boundary the hard way.
+
+**But an answer produced by asking is a hypothesis, not a fact.** Round 68 asked and
+wrote "heredoc + real newlines is safe"; round 75 broke a doc with a heredoc whose
+delimers did not match. The asked-for version said "never use a heredoc"; the real
+failure was "never *chain* a heredoc with later commands in one shell call". So mark
+which boundaries are confirmed by a real break and which are still guesses:
+confirmed = r50/r51, r66/r67, r41, r75; guesses = the "unverified is a legal ending"
+and "spot-check the changed lines" rows. When one of the guesses does break, update the
+row — do not add a new one, or the table grows into the same stale-copy problem it was
+built to fix.
+
+The two rules with no over-executed form:
 `-F` for commit messages (its boundary is *shape*, not universality) and
 "never extrapolate a number you did not read" (there is no cheaper direction).
 
