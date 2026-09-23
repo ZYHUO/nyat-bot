@@ -209,6 +209,14 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
     ok('画摊子链不是全同一个模型（一个熔断不该全灭）', models.size > 1);
 
     // 链头那个 label 真的打得通——只问一句话，不真画（画一张要 60-90s）。
+    //
+    // round 160：**这一项天生会flaky，红 ≠ 代码回归。** 它是真实打 provider 的
+    // 探针，而 dshkimi 正是链上被 403 打得最多的账号（round 83 实测：570 次失败
+    // 里 491 次是它，86%）。2026-09-23 22:39 goal 收尾时它红了一次，
+    // 两分钟后重跑就绿——403 是在飞请求跑完就解除的瞬时状态。
+    //
+    // 所以看到这一项红时，先重跑一次；仍然红才是账号真被限流
+    // （那种情况下它其实是个有用的哨兵：红 = 账号在限流）。
     if (chain.length > 0) {
       const { callModel } = await import('../src/ai/provider.js');
       const primary = labels.get(chain[0]!)!;

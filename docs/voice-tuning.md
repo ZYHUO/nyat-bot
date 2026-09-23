@@ -2805,3 +2805,90 @@ Round 158 发现 round 66 写花的 `勻`，想全面扫一遍。用"连续重�
 两个启发式，**噪音 2056 处**（我的常用字集太小，正常汉字全被报）。没有词典
 就没有便宜的自动检查。那两个写花的字都是**读**到的，不是扫到的——记下这个
 限制，别指望有工具。
+
+---
+
+## 用户现场报 bug：21:51 之后有一段连发（round 160）
+
+用户 21:51 报：「啾咪囝, [21:51] 算固定资产改良 那个群从这个回复开始有一段两次回复」。
+
+**时间点很关键**：我 round 132 的部署在 13:46 UTC = **21:46 CST**，只早 5 分钟。
+第一反应必须是"是不是我的改动造成的"。
+
+拉那个群（`-1002450361141`）13:45-13:56 的日志：
+
+```
+13:51:13  Heart decision → reply → Attention
+13:51:17  CodeAct task start
+13:51:31  host sendText segmented
+13:51:32  host sendText  anchor=46604  算固定资产改良      ← 用户引用的那句
+13:51:34  host sendText continuation   记你名下按月扣折旧
+13:51:36  host sendText continuation   下次戴手套，省得增加审计工作量喵
+13:51:46  host sendText segmented
+13:51:47  host sendText: dropped duplicate reply anchor
+13:51:47  host sendText               行
+13:51:49  host sendText continuation   窗台固定资产台账更新，下次审计重点查窗台磨损喵
+13:52:02  host sendText rejected semantic repeat   窗台也要入固定资产台账，明年折旧记得摊到你头上喵
+```
+
+**一个 CodeAct 任务在 31 秒内试发 7 个气泡**，其中两个被闸拦下
+（"dropped duplicate reply anchor" 和 "rejected semantic repeat"），
+**5 个到达用户**——那就是用户看到的"一段两次回复"。
+
+**注意最后一行**：`rejected semantic repeat` —— 有个我没细看的闸在这里拦了一次。
+
+---
+
+## 追出现场：7 个气泡来自**两次** sendText 调用，不是一次的分片（round 161）
+
+用户 21:51 报"算固定资产改良 那个群从这个回复开始有一段两次回复"。
+我 round 132 部署在 21:46，只早 5 分钟，第一反应是"是不是我造成的"。
+追下去发现不是，但发现了另一个真问题。
+
+### 先看是什么形状
+
+`maxSentenceNum: 3`（`segmenter.ts:42`，注释写"最多拆 3 条（之前 8，太碎）"），
+所以**一次 `segmentReply` 最多 3 片**。而现场有 7 个气泡 → 不是一次分片。
+
+看日志的 msg 名能分开：
+
+```
+13:51:31  host sendText segmented        ← 第 1 次调用的分片标记
+13:51:32  host sendText       算固定资产改良      ← 第 1 片的锚
+13:51:34  host sendText continuation  记你名下按月扣折旧
+13:51:36  host sendText continuation  下次戴手套，省得增加审计工作量喵
+13:51:46  host sendText segmented        ← 第 2 次调用！
+13:51:47  host sendText       行                   ← 第 2 次调用的第 1 片
+13:51:49  host sendText continuation  窗台固定资产台账更新，下次审计重点查窗台磨损喵
+13:52:02  host sendText rejected semantic repeat  窗台也要入固定资产台账，明年折旧记得摊到你头上喵
+```
+
+**两次调用**（两个 segmented + 两个首片），每次 ≤3 片，共 7 个气泡 / 31 秒。
+而两次调用之间人类在持续加话（"算 记入窗台折旧费"、"行 记窗台头上（"），
+所以第 2 次调用是在回新的输入——**不是重复回复同一句**。
+
+### 我的改动无关
+
+这 7 个气泡里只有 1 个带 anchor（46604），其余 6 个是 continuation
+（`replyTo: null`）。重复锚点闸只查首片的锚点（round 90 的 `i === 0`），
+而我 round 132 改的是那个账本的去重——**与这 6 个 continuation 无关**。
+
+### 但用户看到的"重复"是真的，是另一种
+
+把内容排开看：
+
+```
+算固定资产改良
+记你名下按月扣折旧
+下次戴手套，省得增加审计工作量喵
+行
+窗台固定资产台账更新，下次审计重点查窗台磨损喵
+窗台也要入固定资产台账，明年折旧记得摊到你头上喵   ← 被 semantic repeat 拦了
+```
+
+**"台账"这个词出现了 3 次（30 秒内），"审计"2 次。** 最后那一句被
+`rejected semantic repeat` 拦掉，说明那个闸抓到了第三次，但前两次它没管。
+
+**缺口在这**：现有去重全是"同文本"（4 字前缀 / 同锚点），
+**没有"同一话题词在短窗口内重复 N 次"的闸**。人眼看到的重复是这个，
+机器抓到的重复是那个。
