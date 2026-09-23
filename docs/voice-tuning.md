@@ -2518,3 +2518,52 @@ Round 142 的教训是"必须逐条断言验红"。这轮把剩下的守卫都�
 确认页面上有 8 个以上相对链接（`../LICENSE` / `../README.md` / `../docs/*.md`），
 所以"所有相对链接都解析到真实文件"这条不是空循环。
 （第一版 grep 用 `href="[a-z]` 漏看了 `../` 开头的，差点误判它空转。）
+
+---
+
+## session-report 第一次跑：deep-reflection 产出率 35%，且它现在是单 label 无备份（round 147）
+
+这个 goal 里我从没跑过 `scripts/session-report.mts`——`AGENTS.md` 说它是
+"读生产效果"的主工具，而它的 2c 节（cron 产出率）正是为"跑了但什么都没产出"
+建的。补跑一次，抓到 goal 以来最大的一个：
+
+```
+深度反思   成功 316｜失败 588  产出率 35.0%  ⚠️ 过低
+          部署后 成功 3｜失败 8  产出率 27.3%
+```
+
+拆 `src/cron/deep-reflection.ts`（用法 `REFLECTION_USAGE`，`.env` 里
+`AI_USAGE_REFLECTION_LABEL=lfree`）：
+
+```
+deep-reflection: digest too short, skipped   1301 次
+deep-reflection tick complete                 997 次
+deep-reflection: LLM failed                   939 次   ← 全是 All labels exhausted
+tick STARVED — 0 chats reflected                77 次
+```
+
+`All labels exhausted` = 链上候选全部在冷却。而 reflection 这条链
+**只有一个 label（lfree）没有 BACKUPS**：
+
+```
+# .env
+AI_USAGE_REFLECTION_LABEL=lfree
+# 没有 AI_USAGE_REFLECTION_BACKUPS
+```
+
+所以 lfree 一旦被限流（`ai.lfree.org` 的并发限制），**这条链没有第二跳**，
+整批 deep-reflection 全灭。`round 83` 给别的链加了 403 冷却，反而让这种
+"全冷却"更常见（冷却期间连锁反应）。
+
+**这和 round 80/81 的 judge 链是同一个病：单 label 或单账号依赖。**
+而 `.env` 注释（2026-08-19）写着"reflection 摘掉 kimi——backoff of batch tasks
+连累 reply 主链"，说明当时是**有意**把备份摘掉避免连累主链。两难的双方都有记录。
+
+### 这是第 3 档，但性质比前四个轻
+
+不需要新语义，只需要**给 reflection 加一个不共用主链的备份**
+（`AI_USAGE_REFLECTION_BACKUPS=<某个非主链 label>`）。它不会改 bot 怎么说话，
+只让后台批任务别成批死掉。
+
+但我不知道哪个 label 适合——`smart-group` auto-assign 会把 judge 类 usage
+重新分派（round 80 的教训），手动链可能又被旁路。所以先记不动。
