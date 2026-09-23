@@ -955,3 +955,57 @@ commit message 应该说清这一点——当时我没验生产就写了"修：�
 | **80** | judge 链加跨账号 backup | `.env` 手动链被 auto-assign 旁路 |
 
 **共同点：改了配置/代码，没验证生产走的是哪条路。**
+
+---
+
+## 全链路巡检：四个子系统都健康，没有新 bug（round 82）
+
+按用户第一句「各部分在不在正常工作」逐个过了一遍。
+
+### 1. CodeAct 队列 — 健康
+
+`CodeAct job failed` 60 次，但 **56 次挤在 09-21 一天**（同一个
+`hasContract` 的 TypeError），09-23 只有 1 次且是 BullMQ 的老问题
+`job stalled more than allowable limit`。形态像某次改动引入 + 后续修掉。
+
+### 2. unified tick — 健康（9% 需重试，但重试兜住了）
+
+`tick verdict unparseable, retrying` **1154 次 / 12766 tick = 9%**。
+看着吓人，拆开：
+
+| raw 形状 | 次数 |
+|---|---|
+| `''`（模型返回空） | 1093 |
+| `` ```json\n{ `` 围栏 | 12 |
+| `{"action": ...` 合法 JSON 但 parse 不出来 | 10 |
+| `<｜DSML｜tool_calls>` DSL | 6 |
+
+而 **attempt 分布全是 0**——即第一次失败、第二次成功，日志只在失败时打。
+真正的损耗远小于 9%。各出口都有产出：
+
+```
+goal check dispatched 245 · vetoed by drive satiation 237
+proactive rejected 20 · self-play 13 · cared for master 10 · spoke in group 2
+```
+
+`unified-tick.ts:746` 已有完整的重试 + 强化提示（round 26 建的）。
+**够用，不用改。**
+
+### 3. 心流 exhausted — 零头，且形状合理
+
+`heart LLM failed` 143 次/天，占今天 1131 次 pass 的 11%。
+按分钟拆：10:00-10:02 集中 20 次（3 分钟内），之后零星，10:25 后归零。
+
+**尖峰和我的 restart 对不上**（restart 在 10:21/10:27）——
+是 18:00 北京群聊真的密集触发的心流高峰。属容量问题不是 bug。
+
+### 4. 前言不搭后语 — 产品层未复现（这次连分句也验了）
+
+取今天全部 **147 条分句发送**（parts>=2，最容易暴露半句话），抽 12 条：
+全部对得上，包括「啧」对「你故意的吧我靠～怎么只故意搞我」、
+「刚复活就被撸下架了」对「刚复活咋没得？」。
+
+### 结论
+
+**没有新 bug。** 上一轮（round 81）记的"judge 链改动无效"是真问题但属第 3 档；
+这一轮巡的四个都健康。
