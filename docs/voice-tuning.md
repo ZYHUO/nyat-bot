@@ -833,3 +833,61 @@ verify-integration **31/31**（dshkimi 限流那条也过了）。
 `fetch(fileUrl)` 也走代理——不需要单独修。
 （round 63 我一度以为它是漏的，那次是为 getChatMember 写的curl；
 裸 fetch 这条路本来是通的。）
+
+---
+
+## 产品层体检：前言不搭后语没复现，84% pass 的真相（round 79）
+
+### 抽样 94 条有锚回复（近 2 小时）
+
+```
+锚'他那个新套餐刚上火山就没了' → '上架即绝版，限时皮肤都活得更久点'   ✓
+锚'直接曝光了我三次'          → '废话，群里就你烂活最多，不写你写谁'   ✓
+锚'没空'                     → '一个睡觉一个没空，你们对完口供了吧'   ✓
+锚'可以定制啊'                → '哦，还能定制啥'                     ✓
+锚'定制价格emmm'              → '价格咋样，别太离谱喵'               ✓
+锚'作者上线了'                → '猜对了？'                           ✓
+```
+
+**前言不搭后语在产品层没复现。** round 59（why 清洗）+ round 65（前缀去重）
+两个修复看起来真的生效了。
+
+### 但 self-act 显示 replied 从 17% 掉到 4%——差点又误判
+
+```
+round 60（3h 66 次）：replied 17% · reacted 3% · ignored 68%
+现在（4h 182 次）：    replied  4% · reacted 6% · ignored 77%
+```
+
+看着像"round 3 的 prompt 重写把 bot 变得太安静"。**又是累计 vs 当天的坑**：
+
+```
+09-22 全天（round 3 修前）：reply 45% · pass 55%
+09-23 全天（round 3 修后）：reply 15% · pass 84% · react 3%
+```
+
+全天口径下 reply 只从 45% 掉到 15%，不是 4%。而各群实际发送量健康
+（大群 90-135 条/10h = 9-13 条/h）——**它不是变安静了**。
+
+### 84% pass 的真相：分母里大量是不需要回的消息
+
+今天 1131 次真实 pass，**785 种不同理由，最高频只占 1%**
+（"跟我无关，懒得接" 15 次）——它真的在读上下文。
+
+而心流被调用 1181 次、pass 996 次的原因：漏斗带进来的
+（`bot未叫本喵 477` / `coalesce 85` / `绕过直摄 79`）大量是**不该回的**。
+
+### 真问题：pass 里 11% 是 llm_failed（134 次）
+
+```
+71  All labels exhausted (candidates cooling down)
+38  The operation was aborted due to timeout
+ 7  HTTP 403 concurrent request limit
+ 8  Content rejected
+```
+
+**这 134 次不是"选择不说"，是坏掉不说话。** round 78 刚把
+deep-reflection 摘出 stepfun 账号，心流自己还在那张账号上
+（`AI_USAGE_JUDGE_LABEL=stepfun`，近 1 小时 179 次 Heart decision）。
+
+下一个可攻的点：心流也该有账号隔离，或者 stepfun 该降级成 backup。
