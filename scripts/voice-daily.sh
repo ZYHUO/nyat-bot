@@ -16,6 +16,15 @@ mkdir -p "$ROOT_DIR/logs"
 
 {
   echo "─ $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M %Z') ─"
+  # round 144：**记下跑的这一刻（UTC）和最近一次部署。**
+  #
+  # 今天 20:21 那条日报里"react 真的点出去 0 次"是 round 114 修复之前的数据
+  # （20:21 CST = 12:21 UTC，修复在 12:40 UTC）——差了 19 分钟就足以让读数失真。
+  # 而这个仓每次改动都要重启才生效（AGENTS.md），所以混合窗口会把效果藏在里面。
+  # 学 session-report.mts 的做法：单独一列"部署之后"。
+  # 部署边界用 systemd 的服务启动时间（不是最后一条日志的时间——那等于现在）
+  DEPLOYED=$(systemctl show xxb-ts -p ActiveEnterTimestamp --value 2>/dev/null | sed 's/^[A-Za-z]* //' | head -c 16)
+  echo "  跑于 UTC $(date -u '+%H:%M:%S') · 服务启动（=最近部署） ${DEPLOYED:-?}"
   # --since 04:00 UTC = 北京 12:00，覆盖白天主体（awake 07:36–23:52 减去 nap）
   npm run --silent measure:voice -- --since 04:00 2>/dev/null \
     | grep -E '①|②|③|④|⑤|条/时|按群|小计|-1003|-1002|-1004|react 真的' \

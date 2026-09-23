@@ -63,6 +63,19 @@ describe('gate:evidence 脚本', () => {
     expect(s).toContain('round 123');
     expect(s).toContain('闸自己的日志是它动作的唯一观测点');
   });
+
+  it('⑧ 日报条目自带部署边界（round 144：否则修复前后的数据混在一行）', () => {
+    const d = fs.readFileSync('scripts/voice-daily.sh', 'utf8');
+    expect(d).toContain('服务启动');
+    expect(d).toContain('systemctl show xxb-ts -p ActiveEnterTimestamp');
+  });
+
+  it('⑨ 日报每个条目必须含三个仪表盘（缺一个下一天的对比就不完整）', () => {
+    const d = fs.readFileSync('scripts/voice-daily.sh', 'utf8');
+    for (const t of ['measure:voice', 'measure:engage', 'measure:timing']) {
+      expect(d).toContain(t);
+    }
+  });
   it('⑥ 语法是合法的 bash', () => {
     const { execSync } = require('node:child_process');
     execSync('bash -n ' + SRC);
