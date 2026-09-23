@@ -1009,3 +1009,43 @@ proactive rejected 20 · self-play 13 · cared for master 10 · spoke in group 2
 
 **没有新 bug。** 上一轮（round 81）记的"judge 链改动无效"是真问题但属第 3 档；
 这一轮巡的四个都健康。
+
+---
+
+## 功能使用率盘点（round 84 的用户第三问：「有没有需要增添或者优化的」）
+
+### 在用的功能
+
+| 功能 | 全日志次数 | 状态 |
+|---|---|---|
+| Meta react（round 54 接上） | 34 决策 / 23 真发出 | ✅ 真的在用 |
+| 心流 wait（第三态） | 24 决策 | ✅ 少但存在 |
+| 代发别的 bot 命令 | 66 次（28 收到回执 / 24 答了） | ✅ |
+| 撞名守卫（round 5） | **0 次触发** | ⚠️ 修好了但无法验证 |
+
+撞名守卫 0 触发不是"没接上"（round 5 修它时确有两次误代发事故），
+但**0 触发 = 无法证明它现在还能拦**。
+
+### 代发的新疑点
+
+66 次代发里 **38 次无回执**——和 round 55 查之前的形状一样。
+而 round 55 加的"目标不在群"检查 **只有 fail-open 时走 debug**，
+成功/挡住路径完全静默，于是分不清：
+
+  挡掉了（guard 在工作）        → 不用管
+  发了但没人接（bot 真不在群）  → 要修 guard
+  没被调用（代码没接上）        → 要接线
+
+**这个会话第四次犯同一个病**（round 75 截断重试走 debug /
+round 77 sticker pick 返裸 null / round 78 reflection 无计数器）。
+
+### 修：挡住时打 info + 计数器
+
+```ts
+logger.info({ chatId, bot, cmd }, 'delegation: target bot not in chat — blocked');
+incrCounter('delegation_target_absent_total', { chat: chatId });
+```
+
+fail-open 仍是 debug（那个不需要吵）。
+
+测试 5 条锁住：info 级、有计数、带 chat 维度、守卫本身还在、fail-open 不动。

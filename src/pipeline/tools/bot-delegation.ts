@@ -13,6 +13,7 @@ import { getCommandProfile, whyNotInvocable, listReplyInvocableCommands, whyNotR
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import type { FormattedMessage } from '../../shared/types.js';
+import { incrCounter } from '../../metrics/registry.js';
 
 export const PENDING_KEY = (chatId: number): string => `xxb:delegation:${chatId}`;
 const COOLDOWN_KEY = (chatId: number): string => `xxb:delegation:cd:${chatId}`;
@@ -172,6 +173,16 @@ export async function tryDelegateCommand(
     // 今天 18 次代发里 5 个目标不在群（uzumaru_geoip_bot 在 4 个群 left；
     // KairoClaw_bot 在 3 个群里 2 个 left）——发进去没人接，就是 38 次无回执的来源。
     if (!(await targetBotInChat(chatId, bot))) {
+      // round 84：挡住要**可数**。round 55 加这个检查时只验证了"生效前有 5/6
+      // 目标不在群"，之后没有任何数据说明它还在挡——防问题的 guard
+      // 看不出自己是真在挡还是没被调用,是这一家族的通病
+      //（round 75 截断重试走 debug / round 77 sticker pick 返裸 null /
+      // round 78 reflection 和心流共账号）。
+      //
+      // 顺带：66 次代发里 38 次无回执——那个形状 round 55 也见过。
+      // 有了这个计数就能分清"挡掉了"和"发了但没人接"。
+      logger.info({ chatId, bot, cmd }, 'delegation: target bot not in chat — blocked');
+      incrCounter('delegation_target_absent_total', { chat: chatId });
       return { sent: false, text: `${bot} 不在这个群里,代发了也没人接。` };
     }
 
