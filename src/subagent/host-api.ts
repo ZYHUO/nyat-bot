@@ -1059,6 +1059,9 @@ export function createHostApi(
             // Past gate: finish even if task closes (model often skips await before endTask).
             let lastMessageId = 0;
             let firstReplyTo: number | undefined;
+            // round 71：同一次 sendText 的分片共享一次过闸结果。
+            // 见下面 trench gate 那段的长注释。
+            let gatePassed = false;
             for (let i = 0; i < parts.length; i++) {
               const part = parts[i]!;
               if (i > 0) {
@@ -1166,7 +1169,19 @@ export function createHostApi(
                   throw new Error(renderEnvelopeBlock(env0 as never, isAddressed));
                 }
               }
-              if (chatId < 0 && env().TRENCH_GATE_ENABLED) {
+              // round 71：**同一次 sendText 的分片不再重复过闸**。
+              //
+              // 8s 的修复（round 68）解决的是"整条被吞"（49%），但漏了"分片被吞"
+              // （35%）：第 1 片发出 → markActiveSpeech 写 lastact → 第 2 片带着
+              // 打字延迟到达 → 已超 8s → 被咽。群里看到的就是半句话。
+              //
+              // 而分片是**同一句话的多个气泡**，不是两次发言。闸的本意是分隔
+              // "两次开口"（"5 秒内连回三个人"那种机器形状），拿它切自己的一句话
+              // 是误用。实测 07:14-07:15（round 70 部署后）仍有 part=2/3、part=2/2
+              // 被咽，就是这条。
+              //
+              // 判据：本任务第 0 片过闸之后，后续片直接放行（gatePassed 已置位）。
+              if (chatId < 0 && env().TRENCH_GATE_ENABLED && !gatePassed) {
                 const { canSpeakActively, activeSpeechCooldownRemainingSec, addressedSpeechCooldownRemainingSec }
                   = await import('../nyatos/budget.js');
                 // 三条尺寸不同的尺子：
@@ -1201,6 +1216,8 @@ export function createHostApi(
                   );
                 }
               }
+              // 闸放过这一片了 → 同任务的后续分片不再问（round 71）
+              gatePassed = true;
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               if (messageId > 0) {
                 void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
