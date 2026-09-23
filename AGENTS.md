@@ -364,3 +364,36 @@ wastes a round.
 exact line it broke.** Without that line a human cannot tell "selected wrong" from
 "assertion too weak" — the two have opposite fixes.
 
+### A self-running tool must not depend on the process that caused the problem staying alive
+
+Round 66 found the worst failure of this session, and it was caused by my own tool:
+`scripts/tamper-audit.mts` edits source in place and restores it in a `finally`.
+The harness's 60s cap is **SIGKILL** — `finally` does not run. Round 50's audit was
+killed mid-flight and left `incrCounter('ZZ_BROKEN_ZZ', ...)` in
+`src/subagent/host-api.ts`. Only the audited subset was run (green), so it was
+committed, **and shipped in production for 15 rounds**.
+
+The counter `send_topic_word_repeat_total` therefore had no data for 15 rounds —
+while `OBJECTIVE-STATUS.md` still claimed it as production evidence.
+
+**The root cause is not "forgot to restore" but "restoring depends on the process
+exiting cleanly."** So the fix is not "remember to restore" but:
+
+```
+restore on the next run, not on this run's exit
+```
+
+`recoverLeftovers()` now scans `/tmp/tamper-audit-backup*` at startup and writes the
+files back; each backup's first line is `// tamper-audit-original: <path>` (the
+filename alone cannot encode it — paths contain both `_` and `.`).
+
+The sharper form of round 62's rule:
+
+> **"It will ring" must also mean "it does not depend on the process that caused the
+> problem still being alive to ring."**
+
+`try/finally` fails that. A startup sweep does not. And the guard
+(`no-tamper-leftovers.test.ts`, which fails on any `ZZ_` marker in `src/` or `dist/`)
+covers the case where the recovery itself never runs.
+
+
