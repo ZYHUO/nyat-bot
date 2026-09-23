@@ -20,6 +20,51 @@ import * as fs from 'node:fs';
 
 interface Result { test: string; verdict: 'RED' | 'GREEN' | 'SKIP'; line: string; detail: string }
 
+/**
+ * round 66：**启动时清理上次被杀则的留残**。
+ *
+ * 事故：round 66 发现 `incrCounter('ZZ_BROKEN_ZZ', ...)` 在生产里待了 15 轮——
+ * 因为本脚本的 `try/finally` 还原在 **SIGKILL 下不执行**（harness 的 60s 超时）。
+ *
+ * 所以上面那个事故的根因不是"忘记还原"，而是"**还原依赖进程正常退出**"。
+ * 修法：把还原改成**下次启动时做**——那不受这一次怎么死影响。
+ */
+function recoverLeftovers(): string[] {
+  const restored: string[] = [];
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync('/tmp').filter((f) => f.startsWith('tamper-audit-backup'));
+  } catch {
+    return restored;
+  }
+  for (const f of entries) {
+    const bak = `/tmp/${f}`;
+    try {
+      const content = fs.readFileSync(bak, 'utf8');
+      // 备份文件的名字编码了原路径：tamper-audit-backup:_src_xxx_ts
+      const m = f.replace(/^tamper-audit-backup:/, '').replace(/_/g, '/');
+      // 上面的 replace 会把 . 也当分隔符，所以改用反向构造：从 CHECKS 里的原路径反推太芝。
+      // 简单起见：备份的同时把真路径写进内容第一行注释。
+      const firstLine = content.split('\n')[0] ?? '';
+      const pm = firstLine.match(/tamper-audit-original: (\S+)/);
+      if (!pm) continue;
+      const orig = pm[1]!;
+      const body = content.split('\n').slice(1).join('\n');
+      fs.writeFileSync(orig, body);
+      fs.unlinkSync(bak);
+      restored.push(orig);
+    } catch {
+      /* 单个备份失败不阻止其余 */
+    }
+  }
+  return restored;
+}
+
+const leftovers = recoverLeftovers();
+if (leftovers.length > 0) {
+  console.log(`\n⚠️  还原了 ${leftovers.length} 个上次被杀则留下的 tamper：${leftovers.map((f) => '\n    ' + f).join('')}\n`);
+}
+
 const BACKUP = '/tmp/tamper-audit-backup';
 
 /**
@@ -124,7 +169,9 @@ function runOne(testFile: string): Result {
     return { test: testFile, verdict: 'SKIP', line: '', detail: kind };
   }
   const backup = BACKUP + ':' + t.src.replace(/[^\w]/g, '_');
-  fs.copyFileSync(t.src, backup);
+  // round 66: 备份的第一行写真路径，让下次启动的 recoverLeftovers 能还原。
+  // 只靠文件名编码不行：`_` 和 `.` 都会出现在路径里，不可逆。
+  fs.writeFileSync(backup, `// tamper-audit-original: ${t.src}\n` + fs.readFileSync(t.src, 'utf8'));
   try {
     // round 53 rule 1: only non-comment lines
     // round 55 rule 2: only inside the test's own slice window

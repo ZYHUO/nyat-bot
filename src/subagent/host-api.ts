@@ -939,7 +939,7 @@ export function createHostApi(
                 { chatId, preview: clean.slice(0, 60), bigram: topicHit.bigram, hits: topicHit.hits, window: topicHit.window },
                 'host sendText rejected topic-word repeat',
               );
-              incrCounter('ZZ_BROKEN_ZZ', { chat: chatId });
+              incrCounter('send_topic_word_repeat_total', { chat: chatId });
               throw new Error(
                 `未发送：「${topicHit.bigram}」这个词你在最近几条里已经说了 ${topicHit.hits} 次了，` +
                 '换个说法——同样的词翻来覆去说，读起来就是重复（宿主软闸，不是建议）。',
