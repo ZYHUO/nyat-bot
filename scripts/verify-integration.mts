@@ -311,6 +311,24 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
   ok('task 级 burst 闸的计数器名稳定', src.includes('send_task_burst_total'));
 }
 
+// 21c) round 198/199：**真的调一次**在飞上限（AGENTS.md：grep 只证字符串）。
+// 行为断言在 tests/unit/ai/inflight-cap-behaviour.test.ts（6 条：
+// 并发 cap=1 只发一次、cap=2 发两次、串行不受限、失败也放坑、
+// 被挡要抛错而不是静默空、计数器名稳定）。这里只证明机制进了 bundle。
+{
+  const src = await import('node:fs').then((fs) => fs.readFileSync('src/ai/fallback.ts', 'utf8'));
+  ok('在飞上限：incr/decr/expire 三件套都在 bundle 里',
+    src.includes('INFLIGHT_KEY(') && src.includes('acquireInFlight(') && src.includes('releaseInFlight('));
+  ok('在飞上限：hedge 侧也占坑（不然 herd 全走 hedge）',
+    src.includes('const hedgeInFlight = await acquireInFlight(hedgeLabel.model)'));
+  ok('在飞上限：成功路径也放坑（第一版漏了，每次成功泄漏 120s）',
+    src.includes('void recordSmartGroupResult(labelName, result.latencyMs, true);'));
+  const lines = src.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+  const releases = lines.filter((l) => l.includes('if (inFlightHeld)')).length;
+  ok('在飞上限：三条退出路径都放坑（hedge/成功/失败）', releases >= 3);
+  ok('在飞上限：计数器名稳定', src.includes('llm_inflight_cap_skipped_total'));
+}
+
 // 21) round 168：退回判据本身（isCommandRejection 不 export，改测它的行为邻居——
 // 用现场那句 usage 回执的形状，断言「退回 ≠ 结果 ≠ 占位」三条都分得开）。
 {

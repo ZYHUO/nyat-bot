@@ -159,8 +159,11 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       if (i === 0 && smartOrderedNames.length > 1 && hedgeDelayMs > 0) {
         hedgeTriedLabel = smartOrderedNames[1]!;
         const hedgeLabel = getLabel(hedgeTriedLabel);
+        // round 198：hedge 那条也是真发车，同样要占坑——否则并发 herd 全走
+        // hedge 侧，上限就只限住了主链。占不到就当它满了，hedge 不跑（主链照跑）。
+        const hedgeInFlight = await acquireInFlight(hedgeLabel.model);
         const result = await hedgedCall(
-          label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown,
+          label, hedgeInFlight ? hedgeLabel : undefined, options.messages, callOpts, hedgeDelayMs, cooldown,
           options.rejectEmpty ?? false, options.maxTimeoutMs,
           options.usage, options.suppressMetrics ?? false, options.chatId,
         );
@@ -170,6 +173,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         }
         if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
       if (inFlightHeld) { inFlightHeld = false; void releaseInFlight(label.model); }
+      if (hedgeInFlight) void releaseInFlight(hedgeLabel.model);
         return result;
       }
 
@@ -190,6 +194,10 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
       // Smart Group: always record (decoupled from suppressMetrics — routing data ≠ metrics)
       void recordSmartGroupResult(labelName, result.latencyMs, true);
+      // round 198：成功也要放坑。第一版只在 hedge 分支和 catch 放了，
+      // 成功路径漏了——每次成功泄漏一个坑 120s，cap=2 下两次成功就把
+      // 这个 model 堵死两分钟。测试③（串行两次后坑必须归零）抓到的。
+      if (inFlightHeld) { inFlightHeld = false; void releaseInFlight(label.model); }
       return result;
     } catch (err) {
       if (inFlightHeld) { inFlightHeld = false; void releaseInFlight(label.model); }
@@ -404,7 +412,7 @@ function attemptOptsFor(
 
 async function hedgedCall(
   primaryLabel: ReturnType<typeof getLabel>,
-  hedgeLabel: ReturnType<typeof getLabel>,
+  hedgeLabel: ReturnType<typeof getLabel> | undefined,   // round 198：占不到在飞坑时传 undefined = 不跑 hedge
   messages: AICallOptions['messages'],
   callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
   hedgeDelayMs: number,
@@ -480,6 +488,14 @@ async function hedgedCall(
     });
     return Promise.reject(toError(err));
   });
+
+  // round 198：hedgeLabel 为 undefined = 调用方没占到在飞坑，不跑 hedge。
+  // 单独 reject 而不是跳过整段，让 hedgePromise 的失败路径照旧（不新增退出路径）。
+  if (!hedgeLabel) {
+    return new Promise<AICallResult>((_resolve, reject) => {
+      reject(new AIError('Hedge skipped (in-flight cap)', 'unknown', 'unknown', 'AI_HEDGE_FAILED'));
+    });
+  }
 
   // After hedgeDelayMs, start hedge if primary hasn't resolved yet and hedge isn't cooling down
   let hedgeStarted = false;
