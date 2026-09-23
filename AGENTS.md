@@ -236,3 +236,24 @@ react 决策与真发（同一次调用）、闸日志与我看到的发送（�
 
 Also check units: the log's `time` is **milliseconds**, the answered bookkeeping is
 **seconds**. Comparing them silently passes everything (round 135 lost ten minutes to this).
+
+## Docs: never wrap a path-shaped example in backticks
+
+`tests/unit/docs/doc-references-exist.test.ts` extracts every `` `something.ext` `` from
+the docs and asserts the file exists. It cannot tell "an example of a bad path" from
+"a real reference" — and it should not have to. So this is a rule for the doc author, not
+a thing to fix in the test.
+
+**This guard caught me five times in one day** (round 37-39, 146, 150, 151, 153). Twice
+the cause was writing `AGENTS.md` / `README.md` — repo-root files, which
+`referenceExists` did not list until round 151. The rest were deliberate bad examples
+(`src/does/not-exist-xyz.ts`, `skills-MISSING.md`) that I put in backticks while writing
+up *how the guard works*.
+
+Rules:
+
+- Describing a path that does not exist? Write it in prose ("一个 src 下不存在的文件"),
+  not as `` `src/does/not-exist.ts` ``.
+- If a guard keeps firing on your own document, the third time is the signal to fix the
+  **guard's list**, not to keep rewording the doc (round 151 spent three rounds rewording
+  before adding `existsSync(name)` for repo-root files).
