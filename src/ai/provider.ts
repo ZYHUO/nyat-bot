@@ -137,6 +137,18 @@ async function callClaude(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean },
 ): Promise<AICallResult> {
+  // round 75：一行排查用的观测点（debug 级，只在 LOG_LEVEL=debug 时出）。
+  //
+  // 起因是 round 73/74 一个排不光的现象：`claude: 空正文` warn 打了
+  // （证明确实进了 callClaudeOnce），但紧接着的
+  // `思维链吃光额度导致空正文 → 抬到下限重试一次` 一条都没有。
+  // round 74 逐项验证十二环全对（进程唯一/pid 匹配/dist floor=4e3/
+  // 重试分支在/truncated 回传在/label fmt=claude/isReasoning=true/
+  // 同文件 info 通路正常/无日志丢失/单测通过），结论仍矛盾。
+  //
+  // 静态推演到头，改成加观测点再观察：这一行能回答
+  // "callClaude 到底进没进、进的时候 asked 是多少"。
+  logger.debug({ label: label.name, model: label.model, asked: opts.maxTokens ?? null }, 'callClaude: enter');
   const asked = opts.maxTokens ?? 4096;
   // reasoning 模型一律托底下限：**不是**只对撞过的。
   // 上面 isReasoningModel 的注释解释了为什么反应式不够。
@@ -160,10 +172,17 @@ async function callClaude(
     // 重试额度用**下限**而不是 2×：调用方写 24 时 2× 只有 48，照样不够
     // （诊断里 48 出现 73 次，就是重试也失败了）。下限是实测够用的值。
     const retryBudget = Math.min(Math.max(budget * 2, REASONING_TOKEN_FLOOR), 32_000);
-    // 每个 label 只 info 一次：第一次截断是"这个模型想多了，我记下了"，
-    // 值得看见；之后每次截断都 info 就是刷屏（实测 50 分钟 193 次）。
-    // 后续的走 debug，靠上面的空正文 warn 诊断兜底。
-    const log = firstTime ? logger.info : logger.debug;
+    // round 75：**截断重试这条固定走 warn**（原来是 firstTime ? info : debug）。
+    //
+    // 改成固定的理由是 round 73/74 那个排不光的矛盾：warn 打了而重试日志
+    // 一条没有。若它走的是 debug，而 LOG_LEVEL=info，那我**永远看不到**——
+    //  observed 0 条不能区分"没走到"和"走了但被过滤"。
+    // 这是个观测设计错误：把待诊断的事件放在会被过滤的级别上。
+    //
+    // 用 warn 而不是 info：截断是异常路径，且频率已经被下限压住
+    //（round 72 后 37.8 → 12.2 次/h），warn 不会刷屏。
+    // 原注释的顾虑（50 分钟 193 次）是 1200 下限时代的事，现在不成立。
+    const log = logger.warn.bind(logger);
     log(
       { label: label.name, model: label.model, budget, retryBudget, floor: REASONING_TOKEN_FLOOR, firstTime },
       'claude: 思维链吃光额度导致空正文 → 抬到下限重试一次',
