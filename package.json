@@ -26,6 +26,7 @@
     "measure:voice:compare": "node scripts/voice-compare.mjs",
     "measure:engage": "tsx scripts/measure-engage.mts",
     "measure:timing": "tsx scripts/measure-timing.mts",
+    "gate:evidence": "bash scripts/check-gate-evidence.sh",
     "voice:phase": "node scripts/voice-phase.mjs"
   },
   "engines": {
