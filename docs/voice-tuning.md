@@ -2747,3 +2747,31 @@ vision.ts:114  Skipping animated sticker                    ← 市局
 | 撞名守卫 | 87 |
 | Meta react 未送达 | 94 |
 | **本轮扫完剩余 8 处，确认只有 2 处该可见且当前 0 触发** | **152** |
+
+---
+
+## 23:00 那份额外日报的干净前提：服务 13:44 重启后 src 只改过一次（round 156）
+
+等 cron 的时候把"干净"的前提验了一遍，避免又读一份混合窗口的数据。
+
+**cron 用的不是 dist，是 `npm run` → `tsx` → `src/`**（`voice-daily.sh`
+三条都是 `npm run --silent measure:*`）。所以脚本类改动即时生效，不需要重启。
+
+**而生产 bot 服务跑 `dist/index.js`**，它的最近一次重启是 13:44（= round 132
+的 answered 去重）。查那之后的 src 改动：
+
+```
+git log --since='2026-09-23 13:44' --name-only | grep ^src/
+→ src/meta/answered.ts（就是 round 132 本身）
+```
+
+**即：13:44 之后 src 零改动。** 那之后我改的全是 `scripts/` `docs/` `tests/`，
+不影响 bot 行为，也不影响 `measure:*`（它们读日志/DB，不读 bot 进程）。
+
+所以 23:00 那份日报的"部署后"窗口 = 13:44 → 23:00，**含今天全部的实质修复**：
+
+  - round 132 answered 双签去重（13:46 部署）
+  - round 114/117/118 量具拆分（脚本层，即时生效）
+  - round 150 shadow THREW 计数（脚本层，即时生效）
+
+这两件 22:40 左右的脚本改动会在今晚第一次出现在日报里。
