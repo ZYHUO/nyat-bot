@@ -206,7 +206,12 @@ export async function activeSpeechCooldownRemainingSec(chatId: number): Promise<
 /**
  * 两次**被叫到**的回复之间的最小间隔。
  *
- * 与 activeSpeechCooldownRemainingSec 分开的两个数：主动插话 90s，被叫到 30s。
+ * 与 activeSpeechCooldownRemainingSec 分开的两个数：主动插话 90s，被叫到看
+ * NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC（round 68 从 30s 改成 8s，原因见
+ * env-sections/life.ts 的注释：30s 会把群友连着问三个问题时的后两个吐掉）。
+ *
+ * round 170（计划 3d）：这行注释之前写死的"30s"，而 .env 里实际是 8s——
+ * 差一个数字，但让所有拿这行当事实的人（包括我）把刹车片想得厚 4 倍。
  * 理由——生产流量几乎全在"被叫到"那条路上（近 3 天 2702 次 host sendText 里
  * 1356 次显式带 replyTo、1340 次只有任务默认锚点），而原来那条路**一点间隔都
  * 没有**：5 分钟窗 p90=8、max=20，最忙群 19.4 条/小时。

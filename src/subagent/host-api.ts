@@ -1182,6 +1182,21 @@ export function createHostApi(
                     usedFallback: replyTo !== undefined && replyToMessageId === undefined,
                     dmNoDefault: isDM(chatId),
                     parts: parts.length,
+                    // round 170（计划第 3a）：**taskId 必须出现在发送日志里。**
+                    //
+                    // 之前这条日志没有 taskId。
+                    // 于是"一个任务发了几个气泡"
+                    // 这个对"说话太应激"最直接的指标，
+                    // 从日志里**算不出来**
+                    // ——只能按时间窗近似（round 106
+                    // 那么干过，那个"36% 的任务在 30-60s"
+                    // 其实混了不同任务）。
+                    //
+                    // session-report 的 per-task 分布能算，是因为它读
+                    // task-runtime-events；而那条路只有 opts.taskId 非空才写。
+                    // legacy / failsafe / 回执直答的发送两边都不记。加了这一行，
+                    // 从日志就能按 taskId 聚合，不需要另找一条路。
+                    taskId: opts.taskId ?? null,
                     preview: part.slice(0, 80),
                   },
                   'host sendText',
@@ -1189,7 +1204,9 @@ export function createHostApi(
                 countTool('telegram.sendText');
               } else {
                 logger.info(
-                  { chatId, part: i + 1, of: parts.length, replyTo: null, preview: part.slice(0, 60) },
+                  { chatId, part: i + 1, of: parts.length, replyTo: null,
+                    taskId: opts.taskId ?? null,   // round 170：同上
+                    preview: part.slice(0, 60) },
                   'host sendText continuation',
                 );
                 countTool('telegram.sendText');

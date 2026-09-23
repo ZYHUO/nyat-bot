@@ -143,6 +143,7 @@ const CHECKS: Array<[string, string]> = [
   ['代发回执：命令被退回单独一支', 'isCommandRejection'],
   ['代发缺参闸（arity-aware）', 'usageNeedsArg'],
   ['代发缺参兜底：人类消息带实参', 'humanMessageCarriesArg'],
+  ['发送日志带 taskId（per-task 发送分布可算）', "taskId: opts.taskId ?? null"],
   ['命令路由要求寻址', 'command_router_skip_unaddressed_total'],
   ['画摊子交还手动链', 'respectManualOrder'],
   // 仪器

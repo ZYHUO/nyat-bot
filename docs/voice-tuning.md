@@ -3090,3 +3090,45 @@ typecheck 0 · lint 0 · test 501 文件 / 3947 过 · build ok ·
 部署后脏 why 应该停增。下一天的 `Heart decision` 日志里
 `"why":"{` 应该归零——那是 round 59 就该做到而没做到的事，
 隔了 105 轮才补上。
+
+---
+
+## 第 3 步 (a)+(d)：发送日志终于带 taskId，注释脱节修掉（round 170）
+
+### (a) 加 taskId —— 但发现这是个更基础的观测缺口
+
+`host sendText` 和 `host sendText continuation` 之前**都不带 taskId**。
+后果："一个任务发了几个气泡"这个对"说话太应激"最直接的指标，
+**从日志里算不出来**。
+
+我 round 106 那么干过——按时间窗近似，得出"36% 的任务在 30-60s"。
+现在知道了：**那个数混了不同任务**，因为窗内可能有多个任务在跑。
+
+`session-report` 的 per-task 分布能算，是因为它读 task-runtime-events，
+而那条路只有 `opts.taskId` 非空才写——**legacy / failsafe / 回执直答的发送两边都不记**。
+
+加了 `taskId: opts.taskId ?? null` 之后，从日志就能按 taskId 聚合。
+
+**⚠️ 生产未验证**：部署（16:32）之后 bot 还没发过东西（00:33 CST 已近入睡），
+所以日志里还没有带 taskId 的行。下一轮先看这个，再谈 3b/3c。
+
+### (d) 修注释脱节
+
+`src/nyatos/budget.ts:209` 写死"被叫到 30s"，而 `.env:884` 实际是 **8s**
+（round 68 改的）。差一个数字，但会让所有拿这行当事实的人——**包括我**——
+把刹车片想得厚 4 倍。k3 评审点出这条时说："调它之前先修注释，
+否则下一轮 review 还会拿 30s 当事实。"
+
+改成"看 `NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC`"并指回 life.ts 的理由注释，
+再加一段说明这行曾写死错过。
+
+### 顺带第三次踩 round 154 归档的规矩
+
+python heredoc 里用 `\u` 拼中文，落成 `round 170兮划第 3a公` 这种乱码。
+已换成真字符。**这条规则我已经归档两轮了（round 154/159）还在犯**——
+说明"写进 AGENTS.md"对我也不是充分条件，可能要在动作层面强制：
+多行中文一律用 write/edit 工具，不用 python 字符串。
+
+### 门禁
+
+test 505 文件 / 3970 过 · lint 0 · build ok · 部署核验 81/81 · 服务 active / health 200
