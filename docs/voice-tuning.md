@@ -701,3 +701,40 @@ part1/3    99 ( 8%)  ← 三分句只发后两片
 
 **第 N 次"答案早就写在配置注释里"**（round 19 找 reply ts config /
 round 39 内置 skill 重叠 / round 57 bot_interactions）。
+
+---
+
+## 4000 下限仍不够少数 prompt，且重试没兜住（round 73 待查）
+
+Round 72 把 `REASONING_TOKEN_FLOOR` 从 1200 抬到 4000。效果：
+
+```
+修复前（00:00-09:39）：365 次 / 579 分钟 = 37.8 次/h
+修复后（09:39-09:55）：  2 次 /  16 分钟 = 12.2 次/h
+```
+
+降了 68%，但没归零。残余两次：
+
+```
+09:47:49  label=stepfunthink  maxTokens=4000 outputTokens=4000
+09:50:13  label=stepfun       maxTokens=4000 outputTokens=4000
+```
+
+即那 2 个 prompt 的思维链 > 4000（round 72 注释预见过：
+"maxTokens=8192 outputTokens=8192 ← 长 prompt 上连 8192 都被吃光"）。
+
+**但真正的问题是重试没兜住**：`callClaude` 有
+`if (first.truncated) → 抬到 retryBudget (= budget*2 = 8000) 再试一次`，
+而这两次之后日志里**一条重试记录都没有**（`思维链吃光额度导致空正文`
+info/debug 各 0 条，debug 全日志也是 0 条——说明不是"firstTime=false 走了 debug"）。
+
+已排除的：
+  · 进程只一个（systemd MainPID = 1836356，两个 pgrep 命中之一是子 shell）
+  · dist 里 floor 确实是 4e3
+  · `truncated = !finalText && stop_reason==='max_tokens'` 与 warn 的条件
+    互斥不成立——warn 打了就必然 truncated=true
+  · `callClaudeOnce` 全仓只有 `callClaude` 一个调用方
+
+**结论：这是个没查完的真缺口。** 下次从"这两次请求走的是哪条分支"入手
+（`label.apiFormat === 'claude' && !carriesMedia` 才进 callClaude；
+带媒体或 forceRaw 会去 callOpenAIRaw——但那条路的 warn 字符串全仓只有一处）。
