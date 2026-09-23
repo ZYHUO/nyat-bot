@@ -180,3 +180,40 @@ same label, gap <=5s: 553
 然后一起发车。178 个同秒同 label 是直接证据。
 
 所以这不是假说，是已验证的根因：**冷却是 check-then-launch，拦不住已经并行发出去的那批。**
+
+### round 201：**代发缺参闸从没真拦过——它的兜底条件宽到永不触发**
+
+Round 169 上了 arity-aware 的缺参闸（`usage_syntax` 有占位 + args 空 + 人类消息没带参 → 拦）。
+`gate:evidence` 一直报它 0 次，round 196 我还写了「判据场景还没出现」。
+
+**回放发现场景发生了很多次**：
+
+| 口径 | 数 |
+|---|---|
+| 全日志 `command-router: delegated learned command` | 72 |
+| 其中 `usage_syntax` 有占位（闸**该拦**） | **36** |
+| 其中 `/geo` 且 args 为空 | **20** |
+
+闸的日志（`delegation: command needs an argument but none was given — blocked`）出现 **0 次**。
+
+**根因在第三个条件**（`humanMessageCarriesArg`）：
+
+```ts
+// 任何 >=2 字的非纯标点串（关键词类参数）
+if (/[\u4e00-\u9fa5\w]{2,}/.test(t.replace(/[\s\p{P}]/gu, ''))) return true;
+```
+
+群聊里最近 6 条人类消息**几乎总有**两个以上的中文字符——于是这个函数几乎恒为 true，
+闸的第三条件永远满足，**闸永远不拦**。
+
+这是本会话第 N 次「守卫自己不成立」家族：
+
+| 轮 | 形态 |
+|---|---|
+| 122 | reopen gate was a no-op |
+| 191 | debug 级日志 → "0 次"读不到 |
+| 201 | **兜底条件宽到永不触发** |
+
+**修法**：把「人类带了参」从「有任何中文」收窄成「有**匹配这个占位形状**的串」——
+占位写 `<IP或域名>` 就只认 IP/域名，写 `[@用户名]` 就只认 @name，写 `[链接]` 就只认 URL。
+认不出的占位形状 → fail-open（宁可少拦）。
