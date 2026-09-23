@@ -344,6 +344,25 @@ not "be careful" — it is **name the three faces before calling a guard done**,
 each one with a different instrument: replay the criterion (behaviour), grep the log at
 the level it's actually written (observability), grep for a second copy (call sites).
 
+**Corollary that paid for itself (round 68): when you write a rule down, ask in the same
+breath "what is its over-executed form?"** Six of this file's ten rules turned out to
+have a boundary; two were actually over-executed before the boundary was found:
+
+| rule | over-executed form | boundary |
+|---|---|---|
+| "an absent assertion target means fake-green" (r50) | delete anything constantly true | **sentinel vs decoration** (r51) — sentinels stay |
+| "don't depend on finally" (r66) | convert every finally to a startup sweep | **if the leak self-heals (TTL / reboot-clear), don't** (r67) |
+| "replay a 0's criterion" | replay every 0 | replay only proves **log/DB-derived** criteria (r41) |
+| "real newlines only" | never use a heredoc | heredoc + real newlines is safe; **python string literals** are the hazard |
+| "the second number must share the denominator" | never conclude without one | **"unverified" is a legal ending** (r37 stated it plainly) |
+| "read Chinese back after writing" | re-read the whole file each time | spot-check the changed lines; re-reading everything is another waste |
+
+Asking the question at write-time costs one line and saves the round that would have
+found the boundary the hard way. The two rules with no over-executed form:
+`-F` for commit messages (its boundary is *shape*, not universality) and
+"never extrapolate a number you did not read" (there is no cheaper direction).
+
+
 ### A locating tool fails in three directions — all three are "the test was fine, the tool was blind"
 
 `scripts/tamper-audit.mts` breaks a guard's own target and checks the test goes red.
