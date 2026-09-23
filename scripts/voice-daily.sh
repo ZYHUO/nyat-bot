@@ -21,6 +21,13 @@ mkdir -p "$ROOT_DIR/logs"
     | grep -E '①|②|③|④|⑤|条/时|按群|小计|-1003|-1002|-1004|react 真的' \
     || echo '  (measure:voice 失败——见 logs/app.log)'
   echo
+  # round 102：**"说完有没有人接"也每天收。**
+  # 用户 41 轮来说"很难融入话题"，而我 42 轮修的都是让它"说得出"。
+  # 这个数（replied 率）是那件事的最终指标，此前从没进过日报。
+  npm run --silent measure:engage -- --hours=24 2>/dev/null \
+    | grep -E '说完|n=|合计|replied =|回复率|corrected' \
+    || echo '  (measure:engage 失败——见 logs/app.log)'
+  echo
 } >> "$OUT"
 
 # 只留最近 60 天，别让日志无限长

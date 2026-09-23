@@ -24,6 +24,7 @@
     "demo": "tsx scripts/demo.mts",
     "measure:voice": "tsx scripts/measure-voice.mts",
     "measure:voice:compare": "node scripts/voice-compare.mjs",
+    "measure:engage": "tsx scripts/measure-engage.mts",
     "voice:phase": "node scripts/voice-phase.mjs"
   },
   "engines": {
