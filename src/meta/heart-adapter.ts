@@ -26,6 +26,7 @@ import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
 import { getSelfActSummary, renderSelfActSummary } from '../tracking/self-history.js';
 import { nextSelfWake, renderPendingWake } from '../agent/cognitive-clock.js';
 import { findUnrepairedActs, renderUnrepairedActs } from '../tracking/repair.js';
+import { incrCounter } from '../metrics/registry.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
@@ -261,7 +262,14 @@ export async function evaluateMetaHeart(opts: {
     }
     // 发不出去（够不着的消息/权限）——别坐实“点过”。
     // 落到下面的 wait 分支让它继续被当条消息对待。
-    logger.debug({ chatId, emoji }, 'Meta heart: react not delivered, falling through');
+    // round 94：debug → warn + 计数。本会话第 5 处"防问题的机制只有 debug 日志"
+    // （前四处：round 75 截断重试 / round 77 sticker pick / round 78 reflection /
+    //   round 84 代发 guard / round 87 撞名守卫）。
+    //
+    // 它 0 次触发，但和"非法的 0"一样——debug 级下看不见，
+    // 分不清"没发生"和"发生了但被过滤"。
+    logger.warn({ chatId, emoji }, 'Meta heart: react not delivered, falling through');
+    incrCounter('meta_react_undelivered_total', { chat: chatId });
   }
   if (heart.act === 'wait') {
     const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
