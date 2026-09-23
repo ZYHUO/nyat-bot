@@ -214,8 +214,27 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       //
       // 403 用 5 分钟（RATE_LIMIT_COOLDOWN_SEC），是账号级信号不是单次抖动。
       // 只影响这一个错误码，其余照旧。
-      if (err instanceof AIError && /concurrent request limit|rate.?limit|too many requests/i.test(err.message)) {
+      //
+      // round 182：**把"并发限流"和"别的限流"分开。** 上面那个正则
+      // （concurrent request limit|rate.?limit|too many requests）把普通
+      // RPM 限流也一并打成 5 分钟——而 429 上面已经有 60s 短期冷却，这一行
+      // 把它覆盖成 300s。于是：
+      //   · 09-20 起 All labels exhausted 从 138/天 涨到 1600-2700/天
+      //     （round 148 量的），这里有份功劳：每个 label 的不可用时间 x5
+      //   · 链越短（reflection 只有 1 个 label）越容易整批全灭
+      //     （round 147：deep-reflection 产出率掉到 35%）
+      //
+      // 分开的判据是**解除条件的物理形状**，不是错误码：
+      //   · concurrent limit —— 等在飞请求跑完，与墙上时钟无关 → 长冷却
+      //   · RPM / too many requests —— 滚动窗口，等一等就好 → 交给上面的 60s
+      // 不缩短并发限流那一档：round 83 的实测就是说 120s 不够，
+      // 改回去就是回到 403 死循环。
+      const msg0 = err instanceof AIError ? err.message : '';
+      if (/concurrent request limit|in-flight|concurrent requests/i.test(msg0)) {
         await cooldown.setCooldown(label.model, RATE_LIMIT_COOLDOWN_SEC);
+      } else if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
+        // 普通限流只保留 60s 短期冷却（上面那行已经设过，这里不再覆盖）。
+        incrCounter('llm_short_cooldown_total', { label: labelName });
       }
 
       // 其余失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）。
