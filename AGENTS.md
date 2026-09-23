@@ -354,6 +354,7 @@ have a boundary; two were actually over-executed before the boundary was found:
 | "don't depend on finally" (r66) | convert every finally to a startup sweep | **if the leak self-heals (TTL / reboot-clear), don't** (r67) |
 | "replay a 0's criterion" | replay every 0 | replay only proves **log/DB-derived** criteria (r41) |
 | "real newlines only" | never use a heredoc | heredoc + real newlines is safe; **python string literals** are the hazard |
+| "use a heredoc for Chinese text" | chain it with later commands in one call | the heredoc is fine; **chaining it with `git commit` etc. in the same shell call** dumps the rest of the command into the doc when the delimiters do not match (round 75: `MDEOF` opened, `EOF` closed — the tail of the command line landed in `docs/voice-tuning.md`). Run the heredoc in its own call. |
 | "the second number must share the denominator" | never conclude without one | **"unverified" is a legal ending** (r37 stated it plainly) |
 | "read Chinese back after writing" | re-read the whole file each time | spot-check the changed lines; re-reading everything is another waste |
 
