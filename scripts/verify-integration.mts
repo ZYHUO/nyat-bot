@@ -14,7 +14,14 @@
  */
 
 const out: string[] = [];
-const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '✗'} ${name}`); };
+const acctFails: string[] = [];   // round 72: 账号侧的红，不是代码回归
+// round 72: kind = 'account' 的红不算代码回归（账号限流等）。
+// 结尾统计时分开报，否则“合龙 41 项里 1 项红”这句话没意义——
+// 两种红的处置相反（一个等重跑，一个要修）。
+const ok = (name: string, cond: boolean, kind: 'account' | 'code' = 'code'): void => {
+  out.push(`${cond ? '✓' : '✗'} ${name}`);
+  if (!cond && kind === 'account') acctFails.push(name);
+};
 
 // 1) StepFun 全网搜索（主路由）——走生产代码路径，不打 mock
 {
@@ -225,7 +232,21 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
           { maxTokens: 200, temperature: 0, timeout: 30_000 });
         ok(`画摊子主 label「${chain[0]}」（${primary.model}）打得通`, (r.content ?? '').trim().length > 0);
       } catch (e) {
-        ok(`画摊子主 label「${chain[0]}」（${primary.model}）打得通 —— ${(e as Error).message}`, false);
+        // round 72: **把"红"这个信号分级**。
+        // 这一项红的两种原因处置相反：
+        //   账号限流（临时/持续）→ 哨兵，重跑或记账号状态
+        //   代码回归              → 要修
+        // 而它们共用同一个 ✗。round 71 在冷却分级上做的同一件事，这里也要。
+        //
+        // 判据：错误消息里有限流/账号类关键字 → 红但标成"账号状态"，
+        // 不算代码回归。方法同 round 182的分级：看**解除条件的物理形状**。
+        const m = (e as Error).message ?? '';
+        const accountSide = /concurrent request limit|rate.?limit|too many requests|access_terminated|overloaded|429|403/i.test(m);
+        if (accountSide) {
+          ok(`画摊子主 label「${chain[0]}」（${primary.model}）—— 账号状态（非代码回归）：${m.slice(0, 80)}`, false, 'account');
+        } else {
+          ok(`画摊子主 label「${chain[0]}」（${primary.model}）打得通 —— ${m}`, false);
+        }
       }
     }
   }
@@ -341,5 +362,20 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
 console.log(`\n═══ 合龙验证 · ${out.length} 项 ═══\n`);
 for (const l of out) console.log(`  ${l}`);
 const bad = out.filter((l) => l.startsWith('✗')).length;
-console.log(bad === 0 ? `\n✅ ${out.length}/${out.length} 合龙通过\n` : `\n❌ ${bad} 项失败\n`);
+// round 72: acctFails 只应该是真红的子集（kind==='account' 才 push）。
+// 若它比 bad 大，说明有非 红 的项被当成账号侧——那本身就是个 bug，报出来。
+const codeBad = Math.max(0, bad - acctFails.length);
+if (acctFails.length > bad) {
+  console.log('内部错误：账号侧计数超过总失败数，分级逻辑有 bug');
+}
+if (bad === 0) {
+  console.log(`\n✅ ${out.length}/${out.length} 合龙通过\n`);
+} else if (codeBad === 0) {
+  // round 72: 全部红都是账号侧——说明代码没回归，但要知道。
+  console.log(`\n⚠️  ${bad} 项红，但全部是账号侧（限流/403），不是代码回归\n`);
+  for (const n of acctFails) console.log(`     · ${n}`);
+  console.log('     处置：重跑一次；仍然红才是账号真被限流。\n');
+} else {
+  console.log(`\n❌ ${bad} 项失败（其中账号侧 ${acctFails.length} 项，代码侧 ${codeBad} 项）\n`);
+}
 process.exit(bad === 0 ? 0 : 1);
