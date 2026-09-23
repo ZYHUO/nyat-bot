@@ -1,10 +1,14 @@
 # 修「不会用别的 bot」+「说话太应激」的实施计划
 
-状态：**可做的全做完了，剩下等群醒后的生产数据**（见贴首那节）
+状态：**原计划可做的全做完；等数据的期间又挖出并修了四个更重的问题**（见文末「round 200 补记」）
 
 ---
 
-## ⚠️ 剩下的全部只等一份数据（群醒）
+## ⚠️ 原计划剩两件，都等生产数据
+
+**① taskId 到位了 —— round 190 已验**（18:33 UTC 第一条带 `taskId` 的 `host sendText`，
+全链路 `dispatch → task start → sendText → delivery recorded → done`）。
+②③④ 见下面每项的「怎么看」。
 
 目前（2026-09-24 01:50 CST）群在睡，最后一次 `host sendText` 是
 **15:09 UTC，而 round 170 加的 `taskId` 字段那一后才生效**，
@@ -317,3 +321,42 @@ dist grep 没有（`verify-deploy.mts` 无此项）、`verify-integration.mts` �
 
 理由：0 止血且让 2 从"每发必拦"降回"真缺参才拦"；1 便宜且纯函数；
 3a/3b/3d 零代码，先拿到数据；4 是还债，独立于前四步。
+
+---
+
+## round 200 补记：等数据期间挖出并修掉的四个问题
+
+原计划的 3b 后半 + (b) 都要等数据。等的时候拿同一份日志问别的問題，
+结果四个都比原计划那两个 bug 重，都已修完上线：
+
+| # | 发现 | 轮 | 修法 |
+|---|---|---|---|
+| 1 | **并发限流冷却是 check-then-launch，拦不住并发 herd**。<br>1275 次 concurrent-limit 报错里 **178 次是「同一秒内同一个 label 被打多次」**；87% 的重试间隔落在 300s 冷却期内。<br>→ 这解释了 `All labels exhausted` 为什么降不下来，以及 deep-reflection 35% 产出率 | 197 | ✅ 原子的在飞上限<br>`AI_MAX_INFLIGHT_PER_MODEL`（默认 2）+ INCR/DECR + 120s TTL 兜底 + hedge 侧也占坑 + **三条退出路径都放坑** |
+| 2 | **关机卡在 `closeCodeActWorker`**。<br>全日志 384 次关机，53 次 forced exit 里 **48 次卡在第一步**（cron → closeCodeActWorker），而 round 64 修的 closeRedis **一次都没卡过**。<br>→ 卡住 = `process.exit(1)`，systemd 记失败，且跳过 WAL checkpoint / token 记账 / BullMQ 锁释放 | 189 | ✅ 两个 close 各 5s 赛跑 + 各自的 `shutdown step` |
+| 3 | **dedup 跳过写在 debug 级，「0 次」是读不到不是没发生**。<br>`gate:evidence` 报「同群同文本去重 0 次（判据场景还没出现）」，按闸自己的判据（同群+前 4 字+30s）回放：**命中 391 次，其中 190 次是真重复** | 191 | ✅ 提到 info<br>（AGENTS.md round 66 那条坑的第三次） |
+| 4 | **flag-census 有两份 `SECTION_ORDER`**。<br>round 192 改的是顶部那份，输出构造区那份（不含 `'ai'`）把它盖掉了 → glob 修好了键数（497）但段索引仍停在 12 段/488 | 198 | ✅ 删重复 + `SECTION_DESC` 补 `'ai'` + 测试④钉「段索引覆盖每一段且合计 == total_keys」 |
+
+### 这四件事共同的教学
+
+**它们全是「上一轮/上一环的修复只做了一半」**：
+
+| 修的东西 | 漏的那半 |
+|---|---|
+| round 83 的冷却 | 只治了新尝试，没治并行已发出的 |
+| round 64 的 closeRedis | 修对了，但故障搬到了 closeCodeActWorker |
+| round 60 的 dedup | 逻辑在，可观测性在 debug 级 |
+| round 192 的 census glob | 改了第一个 SECTION_ORDER，漏了第二个 |
+
+**判断一个修复完没完，要看它治的「机制」有几个面**：行为 / 观测 / 所有调用点。
+而这个会话里反复出现的形状是：**第一面修好了，后两面没人看。**
+
+### 顺带修掉的文档债（round 193/195/196）
+
+OBJECTIVE-STATUS 里三个不可复现的数字，全部换成带分母/带口径的：
+
+- 「33% 曾被闸咽回 → 现在 4%」→ 「1190/48640 入站 = 2.4%（按 Heart decision 作分母 9.7%）」
+- 「影子决策 1654 / 今天 259」→ 「当前窗 295；另两个是不同窗口」
+- 「重复锚点 24 组→0 组」→ 四个可复现的数 + 「闸①拦 3 次 ≠ 没重复，上游闸拦了 846 次」
+- 「同群同文本去重 0 次（场景未出现）」→ 「0 次是读不到，按判据回放命中 391」
+
+**归档**（AGENTS.md）：round 186「没问题的结论要第二个数字」+ round 194「第二个数字必须同口径」。
