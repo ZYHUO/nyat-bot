@@ -50,8 +50,3 @@
 `docs/ecosystem-status.md` 生态盘点 · 7 个可跑 skill · 落地页 ·
 CONTRIBUTING · 4 个 issue 模板 · 四个每日仪表盘 + `gate:evidence` ·
 `docs/known-issues.md` 未解决清单。
-
-## 我修不了的（同上，精简）
-
-`docs/OBJECTIVE-STATUS.md` 是结论。三件要你点头的都在
-`docs/publish-checklist.md`。`docs/known-issues.md` 记未解决的。
