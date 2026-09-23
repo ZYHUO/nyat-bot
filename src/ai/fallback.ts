@@ -232,6 +232,17 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       const msg0 = err instanceof AIError ? err.message : '';
       if (/concurrent request limit|in-flight|concurrent requests/i.test(msg0)) {
         await cooldown.setCooldown(label.model, RATE_LIMIT_COOLDOWN_SEC);
+        // round 197：**把"冷却已上架"打到 info。**
+        //
+        // 实测（已知问题里）：同 model 相邻两次被打的间隔，87% 落在 300s 冷却期内，
+        // 甚至有 0-1 秒的。也就是说 setCooldown 写了、isCoolingDown 也读了，
+        // 同一个 model 在冷却期内仍然被反复尝试。
+        //
+        // 假说是"check-then-launch 不是原子的，并发的多个 callWithFallback 在
+        // 同一刻都读到'没在冷却'，然后一起发车"——但那条路之前没有任何日志，
+        // 无法验证。这条 info 让下一次能看到"冷却上了 / 多久之后又被试"。
+        logger.info({ label: labelName, model: label.model, cooldownSec: RATE_LIMIT_COOLDOWN_SEC },
+          'llm: concurrent-limit cooldown armed');
       } else if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
         // 普通限流只保留 60s 短期冷却（上面那行已经设过，这里不再覆盖）。
         incrCounter('llm_short_cooldown_total', { label: labelName });
