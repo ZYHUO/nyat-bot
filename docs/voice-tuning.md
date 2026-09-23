@@ -2481,3 +2481,40 @@ Round 143 发现 20:21 那条日报里"react 真的点出去 0 次"是 round 114
 ### 守卫（2 条，都验过红）
 
 ⑧ 日报含部署边界 · ⑨ 每个条目含三个仪表盘
+
+---
+
+## 逐条验红的结果：守卫都是真的（round 145）
+
+Round 142 的教训是"必须逐条断言验红"。这轮把剩下的守卫都验了一遍。
+
+### 结果
+
+| 守卫 | 能红吗 | 怎么验的 |
+|---|---|---|
+| `doc-references-exist` | ✅ | 往 voice-tuning.md 塞 `src/does/not-exist-xyz.ts` → 红 |
+| `landing-page-links` ④ | ✅ | `../docs/skills.md` → `skills-MISSING.md` → 红 |
+| `landing-page-links` ⑤ | ✅ | `id="try"` → `id="tryX"` → 红 |
+| `check-gate-evidence` ⑦⑧ | ✅ | round 141/142 已验 |
+| `measure-*` 守卫 | ✅ | round 140/142 已验 |
+| `census-is-current` | ✅ | round 128 已验 |
+| `objective-tools-exist` | ✅ | round 129 已验 |
+
+### 两次"以为坏了其实没坏"
+
+**① 我改 README 的锚点，doc-references 没红。** 差点记成"假绿"——
+读测试发现它**有意排除 README**，注释写得很清楚（README 的 `src/` 目录树图会误报）。
+**先读测试再下结论**，这次是读测试救了我。
+
+**② 我改 `docs/landing.html`，landing 测试没红。** 因为它的 `PAGE` 常量是
+`website/index.html`——我 tamper 了不存在的文件。而第一次 tamper
+`skills.html` 也没生效，因为页面上没有这个链接（真实链接是 `../docs/skills.md`）。
+
+两次都是**我 tamper 错了地方**，不是守卫坏。这本身就是 round 142 那条教训的
+镜像：**验红时弄坏的那一下要弄对地方**——而"弄对地方"需要先读代码。
+
+### ④ 非空转
+
+确认页面上有 8 个以上相对链接（`../LICENSE` / `../README.md` / `../docs/*.md`），
+所以"所有相对链接都解析到真实文件"这条不是空循环。
+（第一版 grep 用 `href="[a-z]` 漏看了 `../` 开头的，差点误判它空转。）
