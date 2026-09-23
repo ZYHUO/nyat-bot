@@ -2369,3 +2369,40 @@ structural-ignore/denoise 判定
 
 所以 A/B 那 5.4s / 7.8s 的划分**边界是糊的**——方向上（两段各占一半）可能对，
 具体数字别引用。要精确得用 taskId 这类真实关联，而 attention ingestion 没有。
+
+---
+
+## 七个守卫里有两个是"假绿"（round 141）
+
+Round 140 发现 measure-timing 的守卫假绿（断言查全文字符串，注释里也有同样的话）。
+这轮把同样的审计推广到全部 7 个守卫：对每个断言问一句
+**"这个字面量只可能出现在注释里吗？"**
+
+```
+docs/known-issues.md            assertions 8   可能只命中注释 6   ← 散文文档，无"执行"可分，不算问题
+scripts/measure-timing.mts      assertions 11  可能只命中注释 5   ← round 140 已收紧
+scripts/check-gate-evidence.sh  assertions 12  可能只命中注释 5   ← 这轮收紧
+scripts/measure-voice.mts       assertions 8   可能只命中注释 2
+```
+
+markdown 文档那 6 处不算问题——整份文件都是内容，没有"注释 vs 输出"的分界。
+脚本那 12 处是真风险：删掉可执行部分、留注释，测试还是绿。
+
+### 收紧的办法
+
+不是"查得更多"，是**查得准**：只查**非注释行**。
+
+```ts
+const codeLines = s.split('\n').filter((l) => !l.trimStart().startsWith('#'));
+expect(codeLines.some((l) => l.includes('anchor=%s recent=%s'))).toBe(true);
+```
+
+`check-gate-evidence` 的 ⑦ 和 ④ 改成这个口径，并**故意删掉输出行验过会红**。
+
+### 一条更普适的教训
+
+"toContain 一个字面量"这种断言，**区分不了"机制在"和"注释提到"**。
+AGENTS.md 早写了"A grep guard proves the string, not the logic"，
+但这七个守卫全是 grep 型。真正能防住的只有"故意弄坏看它红"——
+而 round 140/141 两次发现：**弄坏的那一下要弄对地方**（弄注释不会红，
+要弄可执行部分）。

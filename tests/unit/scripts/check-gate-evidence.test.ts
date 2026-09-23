@@ -32,11 +32,12 @@ describe('gate:evidence 脚本', () => {
     expect(s).toContain('>=20');
   });
 
-  it('④ 注明口径（round 40 的教训：累计会把修复前样本混进来）', () => {
+  it('④ 分母按 UTC 今天切（round 40 的教训：累计会混入修复前样本）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
-    // round 112 起分母按 UTC 今天切，不再用全累计
-    expect(s).toContain('UTC');
-    expect(s).toContain('date -u +%Y-%m-%d');
+    const codeLines = s.split('\n').filter((l) => !l.trimStart().startsWith('#'));
+    expect(codeLines.some((l) => l.includes('date -u +%Y-%m-%d'))).toBe(true);
+    const echoLines = s.split('\n').filter((l) => l.includes('echo '));
+    expect(echoLines.some((l) => l.includes('UTC'))).toBe(true);
   });
 
   it('⑤ npm script 叫 gate:evidence', () => {
@@ -47,9 +48,14 @@ describe('gate:evidence 脚本', () => {
 
 
   it('⑦ 被拦的具体内容单独列出（round 131：否则拦截看不见）', () => {
+    // 只查 echo 行：`anchor=%s recent=%s` 也出现在注释里，
+    // 查全文字符串的话删掉输出行测试还是绿（round 140 同款教训）。
+    // 判据：该字面量出现在**非注释行**里就够。anchor=%s recent=%s 在
+    // python heredoc 的 print 里（不是 echo），所以不能只查 echo 行。
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).toContain('最近被①拦下的');
-    expect(s).toContain('anchor=%s recent=%s');
+    const codeLines = s.split('\n').filter((l) => !l.trimStart().startsWith('#'));
+    expect(codeLines.some((l) => l.includes('最近被①拦下的'))).toBe(true);
+    expect(codeLines.some((l) => l.includes('anchor=%s recent=%s'))).toBe(true);
   });
 
   it('⑥ 的注释记着 round 123 的误判（别再把"没拦"当"没发生"）', () => {
