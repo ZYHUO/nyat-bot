@@ -738,3 +738,52 @@ info/debug 各 0 条，debug 全日志也是 0 条——说明不是"firstTime=f
 **结论：这是个没查完的真缺口。** 下次从"这两次请求走的是哪条分支"入手
 （`label.apiFormat === 'claude' && !carriesMedia` 才进 callClaude；
 带媒体或 forceRaw 会去 callOpenAIRaw——但那条路的 warn 字符串全仓只有一处）。
+
+---
+
+## 一个排不光的不可能：warn 出了而重试的 info 没出（round 74 待解）
+
+Round 73 遗留的缺口，这轮把能验的全验了一遍，**每一环都对，结论却矛盾**。
+
+### 事实
+
+09:47:19 / 09:47:49 / 09:50:13 三条 warn：
+
+```
+label=stepfun       maxTokens=4000 outputTokens=4000
+label=stepfunthink  maxTokens=4000 outputTokens=4000
+label=stepfun       maxTokens=4000 outputTokens=4000
+```
+
+而 `claude: 思维链吃光额度导致空正文 → 抬到下限重试一次`
+（info 或 debug）**0 条**。
+
+### 逐个排掉的
+
+| 检查 | 结果 |
+|---|---|
+| 进程唯一性 | 只有一个（systemd MainPID = 1836356，起于 09:46:43；另一个 pgrep 命中是子 shell） |
+| pid 匹配 | 三条 warn 的 pid 都是 1836356 ✓ |
+| dist 的 floor | `REASONING_TOKEN_FLOOR = 4e3` ✓ |
+| dist 的重试分支 | `if (first.truncated) { ... log7(...) }` 在 ✓ |
+| dist 的 truncated 回传 | `return { result: {...}, truncated }` ✓ |
+| label 格式 | stepfun `fmt=claude`、`stream/raw/effort` 全 undefined → 必进 callClaude ✓ |
+| isReasoningModel | `/^step-/i.test('step-3.7-flash')` = true → needsFloor=true ✓ |
+| warn 与 truncated 的互斥 | warn 的条件 `!finalText` 与 `truncated` 的 `!finalText` 同源 → warn 打了就必 truncated=true |
+| logger.info 通路 | 同一文件的 `'prompt cache'` info **29 条在** ✓ |
+| 日志丢失 | app.log 单文件 79MB 未 rotate ✓ |
+| 单测复现 | `重试也截断` 用例通过（模拟环境逻辑对） |
+
+### 结论
+
+**不是没走到，是走到了却没打日志。** 这一步我排不光。
+
+可能的最后两个方向（都没验）：
+1. `logger.info` 在那个闭包里被 esbuild 的变量提升/重命名改了指向
+   （dist 里叫 `log7`，理论上是同一引用）
+2. 那条 warn 其实来自**重试后的第二次** `callClaudeOnce`，
+   而第一次的 warn + info 都在更早——但同窗口只有这 3 条 warn，
+   且 09:47:19→09:47:49 隔 29 秒、label 不同，不像同一次重试
+
+下次带上 `pino` 的 `hooks`/`mixin` 或者直接在 `callClaude` 里加一条
+无条件的 `logger.debug('callClaude enter')` 再观察。**比继续静态推演快。**
