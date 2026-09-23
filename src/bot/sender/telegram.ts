@@ -9,6 +9,8 @@ import { recordSpeech } from '../../tracking/speech-meter.js';
 import { recordBotReply } from '../../tracking/reply-activity.js';
 import { recordBotMessageForConnectivity } from '../../agent/reverse-valve.js';
 import { logger } from '../../shared/logger.js';
+import { getRedis } from '../../db/redis.js';
+import { incrCounter } from '../../metrics/registry.js';
 
 const MAX_RETRIES = 3;
 
@@ -254,12 +256,62 @@ function sleep(ms: number): Promise<void> {
 /**
  * Send a text message to a chat.
  */
+/**
+ * round 60（新 goal，用户："前言不搭后语"）：同群 30 秒内**同文本**去重。
+ *
+ * 实测（2026-09-23，近 2 小时）：同一句话在 30 秒内被发两遍 2 次 ——
+ *   -1003931124139  "能用 刚还在跑"          隔 7s
+ *   -1004449419602  "确实，扫两眼也懒得翻了"  隔 19s
+ *
+ * 成因不是同一次任务内的分句重复（那个由 repliedAnchors 去重，round 1 就有），
+ * 而是**两次独立回合**给出了同一句话——通常是同一波消息被评估了两次，
+ * 或者 humanizer 的 delete-and-resend 之外又发了一遍。
+ *
+ * 判据故意很窄：同群 + 同文本 + 30 秒内。窄是为了不误伤——
+ *  · 不同群可以同文本（不同人问同一问题）
+ *  · 超过 30 秒同文本是合理的（别人又问了一遍）
+ *  · 同一次任务的多气泡本来就不是同文本
+ *
+ * Redis SET NX（chatId + hash(text)），TTL 30 秒。NX 失败 = 最近发过 → 跳过。
+ */
+const DEDUP_TTL_SEC = 30;
+const dedupKey = (chatId: number, text: string): string => {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+  return `xxb:send:dedup:${chatId}:${h}`;
+};
+
+let _dedupSkipped = 0;
+
+/** round 60：因同群同文本 30s 内重复而被跳过的次数（可观测）。 */
+export function dedupSkippedCount(): number {
+  return _dedupSkipped;
+}
+
 export async function sendMessage(
   chatId: number,
   text: string,
   replyToId?: number,
   messageThreadId?: number,
 ): Promise<number> {
+  // round 60：同群同文本 30 秒内去重（见上面 dedupKey 的注释）。
+  const trimmed = text.trim();
+  if (trimmed.length > 0) {
+    try {
+      // ioredis 的 set 重载对 'NX' + 'EX' 组合有类型歧义，用 opts 形式
+      const ok = await getRedis().set(dedupKey(chatId, trimmed), '1', 'EX', DEDUP_TTL_SEC, 'NX');
+      if (ok !== 'OK') {
+        // 最近发过同一句 —— 跳过，但**不返回 0**（0 在调用方语义里是"发送失败"）。
+        // 打点后照常返回一个非零 id 的替代：用 replyToId 或 0 会让上层以为失败而重试。
+        _dedupSkipped += 1;
+        logger.debug({ chatId, chars: trimmed.length, text: trimmed.slice(0, 40) }, 'sendMessage: duplicate text within 30s, skipped');
+        incrCounter('send_duplicate_skipped_total', { chat: chatId });
+        return -1;
+      }
+    } catch {
+      // Redis 不可用 → 放行（去重是优化，不是正确性前提）
+    }
+  }
   const shards = shardMarkdownV2(toMarkdownV2(text));
   if (shards.length > 1) {
     logger.info({ chatId, shards: shards.length, chars: text.length }, 'Reply exceeded Telegram limit, sharding');

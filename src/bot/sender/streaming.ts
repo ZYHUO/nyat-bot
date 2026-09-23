@@ -93,6 +93,9 @@ export class StreamingSender {
     text: string,
     replyToId?: number,
   ): Promise<{ messageId: number }> {
+    // round 60：sendMessage 可能返回 -1 = "同群同文本 30s 内重复，已跳过"
+    // （0 才是"发送失败"）。原样透传，让调用方自己决定——
+    // 吞成 0 会让上层以为失败然后重试，那正好抵消去重的目的。
     const messageId = await sendMessage(chatId, text, replyToId);
     return { messageId };
   }
