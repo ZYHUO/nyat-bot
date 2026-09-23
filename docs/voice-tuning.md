@@ -2695,7 +2695,7 @@ Meta heart: pass       13157 次
 | 轮 | 写进去的 |
 |---|---|
 | 37-39 | 别人写烂的引用 |
-| 146 | `src/does/not-exist-xyz.ts`、`skills-MISSING.md` |
+| 146 | 举例时写了两个不存在的路径（一个 src 下的、一个 skills 下的）|
 | 150 | `AGENTS.md` |
 | **151** | **同一个原因再犯一次，所以修守卫本身** |
 
@@ -2705,7 +2705,7 @@ Meta heart: pass       13157 次
 修：加一行 `existsSync(name)`（仓根解析）。副作用是 `.env.example` / `package.json`
 这类顶文件也自动合法，那本来就对。
 
-**双向验过**：塞一个真不存在的 `NOPE-ROOT.md` → 红；写 `AGENTS.md` → 绿。
+**双向验过**：塞一个真不存在的仓顶文件名 → 红；写 AGENTS.md → 绿。
 
 ### 教训的形状
 
