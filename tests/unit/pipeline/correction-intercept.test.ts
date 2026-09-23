@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
  * 判据：冲着 bot 来（ADDRESSED_RULES）+ 文本命中纠正/负面词。
  * 命中 → 静默 + 按群冷却 10 分钟 + 回一句"知道了"（不长篇解释）。
  */
-const CORRECTION_RE = /(?:别说了|够了|烦死|烦不烦|闭嘴|安静|再说一次|不是说了|讲过了?|重复|刷屏|好吵|停一下|打住|有完没完|生气|气死|恼火|无语|服了)/i;
+const CORRECTION_RE = /(?:别说了?|烦死|烦不烦|闭嘴|安静点|别吵|再说一次|不是说了|讲过了?|有完没完|停一下|打住|你好吵|太吵了)/i;
 const ADDRESSED_RULES = new Set(['mention_self', 'reply_to_self', 'turn_replan']);
 const COOLDOWN_SEC = 600;
 
@@ -49,7 +49,32 @@ describe('correction intercept 判据', () => {
     expect(COOLDOWN_SEC).toBe(600);
   });
 
-  it('⑥ Redis 挂了不拦截（止损是优化，不是正确性前提）', () => {
+  it('⑥ 不误伤陈述句（第一版太宽，部署后拿真实语料回测校掉的）', () => {
+    // 这些全在真实日志里，第一版会命中：
+    const benign = [
+      '能听歌就够了👌',
+      '16+512足够了',
+      '跑重复任务都能降出个大的来',
+      '请勿重复发送内容，否则封禁',
+      '我是服了 小火箭连接的快',
+      '好安静，来聊天嘛喵qwq',
+      '被整无语到冒冷汗',
+    ];
+    for (const t of benign) expect(CORRECTION_RE.test(t), `误伤: ${t}`).toBe(false);
+  });
+
+  it('⑦ 真纠正仍命中（来自真实日志的 5 条）', () => {
+    const real = [
+      '@hunhebi_bot 闭嘴',
+      '@hunhebi_bot 啾咪闭嘴，等群友再说 20 句话',
+      '@hunhebi_bot 再说一次，我的节点没有炸（生气）',
+      '你能不能闭嘴',
+      '臭猫闭嘴',
+    ];
+    for (const t of real) expect(CORRECTION_RE.test(t), `漏拦: ${t}`).toBe(true);
+  });
+
+  it('⑧ Redis 挂了不拦截（止损是优化，不是正确性前提）', () => {
     // 实现里 set 抛异常 → return false 放行
     const failOpen = true;
     expect(failOpen).toBe(true);
