@@ -2521,13 +2521,37 @@ export function createHostApi(
       },
     },
     stickers: {
+      // round 77：返回**可诊断的失败**，不再是裸 null。
+      //
+      // 实测 09-22/23：53 次 `host sendSticker rejected bad fileId`，
+      // fileId 全是空串。链条是：prompt 说"先 stickers.pick(mood) 拿贴纸
+      // 再 telegram.sendSticker"，而 pick 失口返回 null，模型把 null
+      // 当 fileId 传下去 → `String(null ?? '') === ''` → 被守卫拦下。
+      //
+      // 守卫工作正常（没崩），但**贴纸没发出去**——它的情绪出口少了一次，
+      // 而日志里只有一条 warn 说"fileId 不对"，没人知道根因是 pick 空了。
+      // 这跟 round 75 是同一个病：失败长得不像失败。
+      //
+      // 现在：返回一句人话原因（模型会在 [observation] 里看到，
+      // 然后自己决定换个 mood 或放弃贴纸），并打 warn 计数。
       async pick(mood = 'happy') {
         try {
-          const cands = getReadyStickersByIntent(mood);
-          if (!cands.length) return null;
+          const m = String(mood ?? '').trim().slice(0, 40);
+          if (!m) {
+            logger.warn({ chatId }, 'host stickers.pick: empty mood');
+            return '没有贴纸：mood 是空的。换个情绪词再试，或者这条就不发贴纸。';
+          }
+          const cands = getReadyStickersByIntent(m);
+          if (!cands.length) {
+            logger.warn({ chatId, mood: m }, 'host stickers.pick: no candidate for mood');
+            incrCounter('sticker_pick_empty_total', { chat: chatId });
+            return `没有贴纸：${m} 这个情绪的库存是空的。换个 mood（playful/cute/sleepy/teasing/shy 都有），或者这条纯文字。`;
+          }
+          countTool('stickers.pick');
           return cands[0]!.fileId;
-        } catch {
-          return null;
+        } catch (err) {
+          logger.warn({ err, chatId, mood: String(mood).slice(0, 40) }, 'host stickers.pick failed');
+          return '贴纸查找失败（库读不到）。这条就纯文字发，别卡在这里。';
         }
       },
     },
