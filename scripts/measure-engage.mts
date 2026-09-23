@@ -38,7 +38,20 @@ for (const r of rows) console.log(r);
 console.log(P(`合计 n=${T}  replied ${R}(${(100 * R / T).toFixed(0)}%)  mentioned ${M}(${(100 * M / T).toFixed(0)}%)  corrected ${C}(${(100 * C / T).toFixed(0)}%)  ignored ${I}(${(100 * I / T).toFixed(0)}%)`));
 console.log();
 console.log(P('replied = 有人回了它这句。这是"融不融入话题"的最终指标，'));
+console.log();
+// round 104：**三个窗口的快接率**（30s / 5min / 10min）。
+//
+// round 103 的教训：self-act 的 replied 是「5 条人类消息内有人接」，
+// 在活跃群约等于 3-4 分钟——它度量「慢热融不进去」，不是「没人理」。
+// 而我 round 100/101/102 三轮都在那个 2-6% 上编故事。
+//
+// 全天实测（09-23，357 条带锚发送）：30s 51% · 5min 84% · 10min 89%
+// 即：说的话最终有人接（89%），但一半要等 30 秒以上——
+// 那才是用户说的「中间隔了好几个人的话」。
 console.log(P('跟回复率（它说了多少）是两件事——回复率可以由它自己控制，这个不能。'));
 console.log(P('基线：09-22 全天 15-18%，09-23 全天 2-6%（口径见 docs/voice-tuning.md round 100）。'));
+console.log(P('   ⚠️ 那 2-6% 是「5 条人类消息内有人接」的口径（活跃群约 3-4 分钟），'));
+console.log(P('      不是「没人理」。同一天扫日志算秒级：30s 51% / 5min 84% / 10min 89%'));
+console.log(P('      （docs/voice-tuning.md round 103/104）。三个数都要看。'));
 if (C > 0) console.log(P(`corrected ${C} 次 = 人被它惹到/纠正了它。那是止损闸的输入。`));
 process.exit(0);
