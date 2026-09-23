@@ -61,6 +61,12 @@ interface LogStats {
   afterStructuralIgnore: number;
   /** taskId → 该任务的投递条数，用来看"每任务发送分布" */
   taskSends: Map<string, number>;
+  // round 174：**按开口（调用）计的每任务分布**。
+  // 上面 taskSends 数的是 task delivery recorded，而 experimental 表明它既不是
+  // 调用也不是气泡（5734 次调用 / 964 片 / 5189 条 delivery）——k3 round 173
+  // 因此判定"超过 6 条的尾巴 16/1316"是分片副产物，不是预算失灵。
+  // round 170 起 host sendText 带 taskId，这里按它另外数一份**开口**维度。
+  taskCalls: Map<string, number>;
 }
 
 /** 最后一次 "Bot started (polling)" 的时间戳 —— 这一轮的改动都是重启后生效的。 */
@@ -89,6 +95,7 @@ function readLog(): LogStats {
     afterDeploy: 0, afterInbound: 0, afterHeartFailed: 0, afterHeartDecision: 0, lastAwakeMs: 0, metaAsleep: 0,
     afterTruncRetry: 0, afterKeepAddressed: 0, afterStructuralIgnore: 0,
     taskSends: new Map(),
+    taskCalls: new Map(),
   };
   let fd: string;
   try {
@@ -160,6 +167,12 @@ function readLog(): LogStats {
       else if (why === 'just_spoke') st.gapBlock++;
     }
     else if (msg.includes('send budget exhausted')) st.sendBudgetEnd++;
+    // round 174：开口维度（只在有 taskId 时才算，所以 round 170 之前的数据为空）
+    else if (msg === 'host sendText' && d['taskId']) {
+      const tid = String(d['taskId']);
+      st.taskCalls.set(tid, (st.taskCalls.get(tid) ?? 0) + 1);
+      if (t >= deployMs) st.taskCalls.set(`@${tid}`, (st.taskCalls.get(`@${tid}`) ?? 0) + 1);
+    }
     else if (msg === 'task delivery recorded') {
       const tid = String(d['taskId'] ?? '');
       if (!tid) continue;
@@ -246,7 +259,7 @@ function readDb(): DbStats {
  * 每任务发送分布。这是频率的真实指标——修复前 6 条以上的任务有 79 个
  * （最差一个 46 秒 12 条），修复后该尾巴应该消失。
  */
-function printTaskDistribution(taskSends: Map<string, number>): void {
+function printTaskDistribution(taskSends: Map<string, number>, taskCalls: Map<string, number>): void {
   const dump = (label: string, pick: (k: string) => boolean): void => {
     const vals = [...taskSends.entries()].filter(([k]) => pick(k)).map(([, v]) => v);
     if (vals.length === 0) {
@@ -268,6 +281,20 @@ function printTaskDistribution(taskSends: Map<string, number>): void {
     return;
   }
   dump('全窗口:  ', (k) => !k.startsWith('@'));
+  // round 174：开口维度（同任务开了几次口）。这是 task 级 burst 闸
+  // （TASK_BURST_GAP_SEC）和 k3 建议的密度判据的唯一验收量。
+  if (taskCalls.size === 0) {
+    console.log('  每任务开口次数                （没有带 taskId 的发送——round 170 起才有，旧日志为空）');
+  } else {
+    const cd = [...taskCalls.entries()].filter(([k]) => !k.startsWith('@')).map(([, v]) => v);
+    const dist = new Map<number, number>();
+    for (const n of cd) dist.set(n, (dist.get(n) ?? 0) + 1);
+    const over2 = cd.filter((n) => n > 2).length;
+    console.log('  每任务开口次数:  ' + [...dist.entries()].sort((a, b) => a[0] - b[0])
+      .map(([k, v]) => `${k}次×${v}`).join('  '));
+    console.log(`    任务 ${cd.length} 个｜超过 2 次开口的 ${over2} 个   ← burst 闸要治的就是这批`);
+  }
+
   dump('部署后:  ', (k) => k.startsWith('@'));
 }
 
@@ -364,7 +391,7 @@ console.log(`  包络拦截 (L1 Wall)           ${st.envelopeBlock}`);
 console.log(`  计数额度拦截 (6/h)           ${st.budgetBlock}`);
 console.log(`  最小间隔拦截                 ${st.gapBlock}`);
 console.log(`  每任务预算耗尽收尾           ${st.sendBudgetEnd}`);
-printTaskDistribution(st.taskSends);
+printTaskDistribution(st.taskSends, st.taskCalls);
 console.log('');
 
 console.log('── 2. 心流健康 ──');

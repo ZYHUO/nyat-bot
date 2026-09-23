@@ -3132,3 +3132,49 @@ python heredoc 里用 `\u` 拼中文，落成 `round 170兮划第 3a公` 这种�
 ### 门禁
 
 test 505 文件 / 3970 过 · lint 0 · build ok · 部署核验 81/81 · 服务 active / health 200
+
+---
+
+## session-report 加"每任务开口次数"：现有频率指标是分片副产物（round 174）
+
+k3 round 173 指出一件事，我实验证实了：
+
+```
+host sendText（调用）              5734
+host sendText continuation（片）    964
+task delivery recorded             5189
+```
+
+`session-report` 的"每任务发送分布"数的是 `task delivery recorded`，
+而它**既不是调用也不是气泡**（5189 在两者之间）。所以那个
+`超过 6 条的尾巴 13/907`——以及 AGENTS.md 里"修复后这项应该归零"那句话——
+**拿的是分片副产物当预算失灵**。budget 数的是调用，尾巴数的是气泡，
+两个单位从来没对齐过。
+
+而 task 级 burst 闸（`TASK_BURST_GAP_SEC`）治的是"一个任务开了几次口"，
+**那个维度此前没有量具**。
+
+### 加了什么
+
+`taskCalls`：按 `host sendText` 的 `taskId` 另外数一份开口维度，
+和 taskSends 并列输出：
+
+```
+每任务开口次数:  1次×.. 2次×.. 3次×..
+  任务 N 个｜超过 2 次开口的 M 个   ← burst 闸要治的就是这批
+```
+
+**现在输出是空的**（`没有带 taskId 的发送——round 170 起才有，旧日志为空`）——
+round 170 加的 taskId 字段还没有生产数据（群沉睡 1.2h+）。
+空数据明确说为什么空，不报 0%（round 92 的教训）。
+
+### 测试 ⑥ 条
+
+② 是这轮最费劲的一条：第一版查"输出在函数名之后"，
+而我把它 tamper 到 main 的沉睡警告前，**测试不红**（那个位置也在函数名之后）。
+改成**花括号配结对出函数体范围**，再断言块在体内、且 `bot 已沉睡` 不在体内——
+这才抓住。
+
+（同一个"字符串在场 ≠ 机制在/位置对"的教训，这个会话第五次：
+round 140/141/142 的注释 vs 输出行、round 173 的 `lastMessageId` grep guard、
+这次的"在函数名之后"。）
