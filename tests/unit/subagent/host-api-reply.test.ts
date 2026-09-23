@@ -37,6 +37,8 @@ vi.mock('../../../src/db/redis.js', () => ({
 
 vi.mock('../../../src/meta/answered.js', () => ({
   markMessageAnswered: vi.fn(async () => {}),
+  // round 89：重复锚点闸要读它。默认返回空 = 没被读过（不影响原有用例）。
+  answeredTimestamps: vi.fn(async () => [] as number[]),
 }));
 
 vi.mock('../../../src/meta/timing-adapter.js', () => ({

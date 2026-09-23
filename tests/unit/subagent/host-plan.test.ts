@@ -44,7 +44,8 @@ vi.mock('../../../src/tracking/scratchpad.js', () => ({
   setScratch: vi.fn(async () => undefined),
   clearScratch: vi.fn(async () => undefined),
 }));
-vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined) }));
+vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined),
+  answeredTimestamps: vi.fn(async () => [] as number[]) }));
 vi.mock('../../../src/meta/attention.js', () => ({
   getAttentionAccumulator: () => ({ ingestAsync: vi.fn(async () => undefined) }),
 }));

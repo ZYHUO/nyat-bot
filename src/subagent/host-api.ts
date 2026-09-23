@@ -7,7 +7,35 @@ import { getReadyStickersByIntent } from '../knowledge/sticker/store.js';
 import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-identity.js';
 import { isDM } from '../shared/chat.js';
 import { isEchoOf } from '../shared/echo-text.js';
-import { markMessageAnswered } from '../meta/answered.js';
+import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
+
+/**
+ * round 89：**同一锚点短时间内重复回复要拦。**
+ *
+ * 2026-09-23 抓到现行（用户："前言不搭后语 + 重复回复"）：
+ * mid=13862 在 7 分钟内被回了 4 次——
+ *   10:53:13 '不然呢，不然本喵怎么看得懂那些缩写喵'
+ *   10:56:51 '不然本喵怎么知道 CN 是中国喵'
+ *   10:59:52 '本喵是啾咪，不跟莹抢DeepSeekV4F的名号'
+ *   11:00:18 '本喵不是DeepSeekV4F，本喵是啾咪喵'
+ *
+ * Redis 里 `xxb:meta:answered:<chat>:13862` 存着 **5 个时间戳**——
+ * `markMessageAnswered` 一直在记，但读者只有 Heart decision 的 prompt 注入
+ * （"这条你已经回过 N 次"）。那是**提示，不是闸**；而那 5 次发送里只有 1 次
+ * 经过心流，其余 4 次走 subagent / CodeAct / self-continue，压根不读账本。
+ *
+ * 三轮去重修的是三个形状：同任务内（round 1 repliedAnchors）、
+ * 同文本 30s（round 65 前缀去重）、只记不拦（round 52）。
+ * 这个形状——**跨任务、跨分钟、同一锚点、文本不同**——一次都没被挡。
+ *
+ * 近 6 小时量化：207 条带锚发送里 12 组是这种（5.8%）。
+ *
+ * 判据（保守）：同一锚点在 REPEAT_ANCHOR_WINDOW_SEC 内已被标过
+ * REPEAT_ANCHOR_MAX 次 → 拦住第 N+1 次。窗口故意短（3 分钟）：
+ * 隔了很久再回同一条是合理的（有人追问），密集重复才是问题。
+ */
+const REPEAT_ANCHOR_WINDOW_SEC = 180;
+const REPEAT_ANCHOR_MAX = 2;
 import type { ApplyOutcome, MasterActionOutcome } from '../allowlist/bot-flow.js';
 import { appendCognitiveEvent } from '../agent/cognitive-events.js';
 import { recordPrediction } from '../agent/predictions.js';
@@ -1446,6 +1474,25 @@ export function createHostApi(
             lastDeliveryKind = kind;
             if (kind === 'final') finalSent = true;
             else intermediateSent = true;
+
+            // round 89：短窗口内重复锚点闸（见上面 REPEAT_ANCHOR_WINDOW_SEC 的注释）。
+            // 只查**首气泡**的锚点——后续分句不带引用，不构成"又回了一次"。
+            if (firstReplyTo && firstReplyTo > 0) {
+              const stamped = await answeredTimestamps(chatId, firstReplyTo).catch(() => [] as number[]);
+              const nowSec = Math.floor(Date.now() / 1000);
+              const recent = stamped.filter((t) => nowSec - t <= REPEAT_ANCHOR_WINDOW_SEC).length;
+              if (recent >= REPEAT_ANCHOR_MAX) {
+                logger.warn(
+                  { chatId, anchor: firstReplyTo, recent, windowSec: REPEAT_ANCHOR_WINDOW_SEC, preview: (parts[0] ?? '').slice(0, 50) },
+                  'sendText: 同一锚点短时间内已回过 — 拦下（别刷同一条）',
+                );
+                incrCounter('send_repeat_anchor_total', { chat: chatId });
+                throw new Error(
+                  `未发送：这条消息你 ${Math.round((nowSec - stamped[stamped.length - 1]!) / 60)} 分钟内才回过，` +
+                  `连着回同一条会显得在刷屏。要么说点新的，要么就让这条过去。`,
+                );
+              }
+            }
 
             const answeredIds = new Set<number>();
             // Only mark after successful send — never a stale fromModel id.

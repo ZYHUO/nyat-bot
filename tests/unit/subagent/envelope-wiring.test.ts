@@ -28,7 +28,8 @@ vi.mock('../../../src/memory/chroma.js', () => ({ searchMemory: vi.fn(async () =
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ addAssistant: vi.fn(async () => undefined), getRecent: vi.fn(async () => []) }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ set: vi.fn(async () => 'OK') }) }));
 vi.mock('../../../src/meta/timing-adapter.js', () => ({ noteMetaBotReply: vi.fn(async () => undefined) }));
-vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined) }));
+vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined),
+  answeredTimestamps: vi.fn(async () => [] as number[]) }));
 
 const { createHostApi } = await import('../../../src/subagent/host-api.js');
 beforeEach(() => { sendMessage.mockClear(); checkEnvelope.mockClear(); spendEnvelope.mockClear(); checkEnvelope.mockImplementation(async () => ({ ok: true, mode: 'off' })); });

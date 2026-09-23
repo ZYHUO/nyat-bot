@@ -25,6 +25,7 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
 
 vi.mock('../../../src/meta/answered.js', () => ({
   markMessageAnswered: vi.fn(async () => {}),
+  answeredTimestamps: vi.fn(async () => [] as number[]),
 }));
 
 vi.mock('../../../src/pipeline/reply/anti-repeat.js', () => ({

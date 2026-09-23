@@ -38,7 +38,8 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({ get: async () => null, set: async () => 'OK', del: async () => 1 }),
 }));
-vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => {}) }));
+vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => {}),
+  answeredTimestamps: vi.fn(async () => [] as number[]) }));
 vi.mock('../../../src/meta/timing-adapter.js', () => ({ noteMetaBotReply: vi.fn(async () => {}) }));
 vi.mock('../../../src/pipeline/reply/anti-repeat.js', () => ({
   checkNearDuplicate: vi.fn(async () => ({ isNearDuplicate: false, ratio: 0 })),
