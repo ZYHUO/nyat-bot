@@ -262,9 +262,27 @@ coincidence the round would have concluded "09-22 was fine".
 number that says the same thing.** A trend, a prior day, a counter — anything measured a
 different way. If you cannot find one, say the number is unverified rather than fine.
 
-The same asymmetry shows up in the four false alarms this session (round 76/122/126/184):
-each was caught because the number screamed. The one false *negative* (round 185) needed a
-coincidence. Assume the second kind is the one that gets through.
+### Same rule, sharper: the second number must share the denominator
+
+Finding a second number is not enough on its own — a second number measured over a
+**different window or against a different denominator** is not a second opinion, it is a
+different measurement, and comparing them produces a fake trend.
+
+Round 193: a doc said "33% swallowed by the gate → now 4%". Both numbers were real.
+The 33% was 468/1421 over a *conservative window* (bot awake, and addressed only); the
+"4%" came from a full-log ink that reported an absolute count with no rate. The two were
+never the same ratio. Recomputing with the denominator written out gave 1190/48640 inbound
+= 2.4%, or 9.7% against Heart decisions. Three numbers, three windows.
+
+The same session had "shadow decision: 1654, today 259" where the three figures came from
+three different windows (all log / 3 days / current window) and were being read as a trend.
+
+**So the rule has two halves:**
+1. find a second number, **and**
+2. state the window and denominator of both. If they differ, they do not corroborate —
+   say so, or recompute one of them to match.
+
+A number without its denominator is not a finding. It is a shape that looks like one.
 
 
 ## Docs: never wrap a path-shaped example in backticks
