@@ -147,6 +147,8 @@ const CHECKS: Array<[string, string]> = [
   ['task 级 burst 闸（同任务连发）', 'send_task_burst_total'],
   ['interrupt 寻址分桶（寻址）', 'agent_interrupt_addressed_total'],
   ['interrupt 寻址分桶（背景）', 'agent_interrupt_background_total'],
+  ['关机分步：CodeAct worker', "'codeact-worker'"],
+  ['关机分步：CodeAct queue', "'codeact-queue'"],
   ['task 级 burst 闸的键只在调用完成后写', 'taskLastSendKey(burstTaskId)'],
   ['命令路由要求寻址', 'command_router_skip_unaddressed_total'],
   ['画摊子交还手动链', 'respectManualOrder'],
