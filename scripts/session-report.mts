@@ -67,6 +67,11 @@ interface LogStats {
   // 因此判定"超过 6 条的尾巴 16/1316"是分片副产物，不是预算失灵。
   // round 170 起 host sendText 带 taskId，这里按它另外数一份**开口**维度。
   taskCalls: Map<string, number>;
+  // round 64：窗口内的重启次数与 host sendText 条数——算"进程内闸有没有机会"。
+  // round 44 量出 09-22..23 重启 111 次、平均进程寿命 21 分钟；
+  // topic-word 闸要筹满 6 来自己发的话才开始判，开发期基本不可能。
+  processRestarts: number;
+  processSends: number;
   // round 181：影子决策的收支。round 149 量出它是 exhaust 的第 2 大报错方
   // （2772 次 THREW，仅次于心流 2699），而 session-report 里 grep 'shadow'
   // 是 0 次——它一直是个没有仪表盘的 LLM 消费者。
@@ -103,6 +108,8 @@ function readLog(): LogStats {
     taskCalls: new Map(),
     shadowThrew: 0,
     shadowCompared: 0,
+    processRestarts: 0,
+    processSends: 0,
   };
   let fd: string;
   try {
@@ -178,6 +185,9 @@ function readLog(): LogStats {
       else if (why === 'just_spoke') st.gapBlock++;
     }
     else if (msg.includes('send budget exhausted')) st.sendBudgetEnd++;
+    // round 64：进程内闸的"机会成本"计数（重启次数 + 发送条数）
+    else if (msg === 'Bot started (polling)') st.processRestarts += 1;
+    else if (msg === 'host sendText') st.processSends += 1;
     // round 174：开口维度（只在有 taskId 时才算，所以 round 170 之前的数据为空）
     else if (msg === 'host sendText' && d['taskId']) {
       const tid = String(d['taskId']);
@@ -365,6 +375,25 @@ if (deployMs > 0 && Date.now() - deployMs < 10 * 60_000) {
   console.log(`⚠️  距上次重启才 ${mins} 分钟——"部署后"那一列现在是**重启低谷**，不是稳态`);
   console.log('    （熔断键已改为启动时清理，但真在失败的 provider 几十秒内会重新熔断）。');
   console.log('    想看稳态效果，等 10 分钟以上再跑，或看全窗口那一列。');
+  console.log('');
+}
+
+// round 64：**"闸拦 0 次"要读成"没机会"还是"没生效"** —— 把 round 41-44 的判据接到报告上。
+//
+// 若干闸的判据状态是**进程内 Map**（如 recentBotTextsByChat），每次重启清零；
+// 而 round 44 量出 09-22..23 重启 111 次、平均进程寿命 21 分钟（p50 7 分钟）。
+// topic-word 闸要攒满 6 条自己的发送才开始判——开发期基本不可能。
+//
+// 所以只看"拦 0 次"会得到两种完全相反的结论。这里按日志把分野写出来：
+//   本窗口内重启次数 + 每进程平均发送数 → 人一眼看出"有没有机会"
+if (st.processRestarts > 0) {
+  const perProcess = st.processSends > 0 ? (st.processSends / st.processRestarts).toFixed(1) : '?';
+  console.log(`进程内闸的机会成本：本窗口重启 ${st.processRestarts} 次、host sendText ${st.processSends} 条` +
+    ` → 平均每进程 ${perProcess} 条`);
+  if (st.processRestarts >= 5) {
+    console.log('    ⚠️  重启偏多：**进程内判据的闸（topic-word / burst 等）可能没攒满窗口**，');
+    console.log('        "拦 0 次"要读作"从没被给过机会"，不是"没生效"（round 41-44）。');
+  }
   console.log('');
 }
 
