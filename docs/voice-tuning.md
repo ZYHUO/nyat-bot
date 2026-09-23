@@ -648,3 +648,56 @@ dedup 的目的和判据都不用改。
 （这也是本会话第 N 次"用错归因"：round 17 占比而非节奏、
 round 14 睡眠相当空闲、round 61 12 次 pass 当同质、
 round 45/55 累计当当天。已全部记在案。）
+
+---
+
+## "很难融入话题"的真凶：33% 的回复被自己的闸咽回（round 68）
+
+Round 11 重测 ignored（round 60 基线 68%）→ 77%。逐群查时撞见一条
+从没细看的日志：`host sendText: BLOCKED by trench gate (active speech)`。
+
+全量统计：**1116 次回复被吞，why=just_answered 占 1096 次（98%）**。
+
+按分片位置拆：
+
+```
+part1/1   555 (49%)  ← 整条回复没了，群里什么都没看到
+part2/3   240 (21%)  ← 第 1 片发了第 2 片被吞 → 半句话
+part2/2   166 (14%)
+part1/3    99 ( 8%)  ← 三分句只发后两片
+```
+
+09-23 当天：想发 543 / 实际发出 365 → **33% 被咽回**。
+
+### 病因
+
+`NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC=30`（`src/env-sections/life.ts` 默认值）。
+它的文案是"你 X 秒前才回过话，连得太密了"——**30s 对被叫到的消息太长了**：
+群聊里三个人连着问三个问题是常态，bot 回第一个就被锁 30 秒，剩下两个都咽掉。
+
+两种伤害对应用户的两个抱怨：
+
+| 现象 | 伤害 |
+|---|---|
+| 49% 整条吞 | **很难融入话题**（想回但群里看不到） |
+| 35% 分片被吞 | **前言不搭后语**（发出去半句话） |
+
+### 修：30 → 8
+
+改默认值而不只改 `.env`——`.env` gitignored，改它不留痕也不可复现。
+`.env.example` 补上并写清理由。
+
+这个闸是 round 6 为压刷屏加的（当时最忙群 19.4 条/小时）。
+现在刷屏已由 round 62/63/65 三套去重+止损接管，副作用大于收益。
+
+## 顺带：截断的根因 .env:364 早就写着
+
+`claude: 空正文 —— 思维链吃光 max_tokens` 追下去是 stepfun 三个标签
+（vision 97 / stepfun 89 / think 53，maxTokens 全 1200）。而 `.env:364` 原话：
+
+```
+# step-3.7-flash 易把 max_tokens 吃光成空 content; 账号 RPM≈10 勿当热路径主选。
+```
+
+**第 N 次"答案早就写在配置注释里"**（round 19 找 reply ts config /
+round 39 内置 skill 重叠 / round 57 bot_interactions）。
