@@ -4865,3 +4865,56 @@ b. 给 interrupt 路由加"任务年龄上限"——活了 N 分钟的任务不�
 c. `reportProcessLifetime` 旁边加一个 `long task age` 量纸
 
 **排期：round 103**（round 84-85 证明过：排了期不当轮做，它就一直躺着）
+
+---
+
+## 僵尸长任务已修：failed handler 补上解索引（round 103，没有留给 round 104）
+
+Round 102 发现僵尸 CodeAct 任务，排期写的是 round 103。**这轮就做了**——
+round 84-85 的结论（排了期又不动，它就一直躺着）当场兑现。
+
+### 根因（一句话）
+
+`unregisterAgentChat` 只在 executor 的**正常终态**和**异常逃逐**两条路径上调，
+而 **stall 的原进程根本没返回**（卡死/挂死）——所以 `xxb:agent:active-chat:{chat}`
+这个 24h 索引永远不清，interrupt 路由就一直把它当"活跃任务"往里送。
+
+### 而且有两个不同的 key
+
+```
+xxb:codeact:active:{chat}      ← isCodeActBusy 用，finally 里清过
+xxb:agent:active-chat:{chat}   ← interrupt 路由用，从没被清过
+```
+
+`clearCodeActActive` 清前者，`unregisterAgentChat` 清后者——**名字像，key 不同**。
+这是 round 192/198「两份拷贝」的 Redis 版本：我以为清了，清的是另一个。
+
+### 修法
+
+`_worker.on('failed')` 里补三件事：
+1. `unregisterAgentChat(chatId, taskId)`
+2. `clearCodeActActive(chatId, taskId)`
+3. **把 task status 改成 `failed`**——因为 interrupt 路由的活性校验查的是 status，
+   只清 key 的话 key 被别处重写还会路由过来
+
+### 验证
+
+- 测试 5 条，**第一次验红失败**：tamper 掉调用后仍 5 过——
+  因为我的断言是 `toContain('unregisterAgentChat')`，而文件里这词出现 3 次
+  （注释 1 + import 1 + 调用 1），import 行把它带绿了。
+  **改成 `unregisterAgentChat(d.chatId`（认调用本身）→ 2 条红。**
+  这是 round 54-59 "定位四方向"的又一次：断言选点选到了别处。
+- subagent 56 文件 345 测试全过
+- build ok / verify-deploy 88/88 / 重启后 health 200
+- **redis 里 `xxb:agent:active-chat:*` 现在扫不到任何残留**
+
+### 这一轮和 round 102 合起来是「观测 → 定位 → 修」的三连
+
+```
+101 按 task 拆分母    → 9 条 background 全在一个 task 上，n 实际是 1
+102 查那个 task        → CodeAct stall 4.5 小时，索引没清
+103 修 + 验            → failed handler 补清理，redis 确认无残留
+```
+
+**而如果没有 round 101 那次"按分母拆"，我会把 56% 读成"bot 很应激"**
+——那会指向完全错误的修法（去改语气闸），而不是这个索引泄漏。
