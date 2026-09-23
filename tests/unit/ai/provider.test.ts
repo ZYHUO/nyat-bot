@@ -248,7 +248,7 @@ describe('callModel', () => {
         }));
         // claudeLabel 的 model 是 step-5-preview → reasoning
         await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 200 });
-        expect(calls).toEqual([1200]);   // 第一次就直接是下限，不是 200
+        expect(calls).toEqual([4000]);   // 第一次就直接是下限，不是 200
       });
 
       it('非 reasoning 模型不受下限影响（尊重显式小额）', async () => {
@@ -278,11 +278,11 @@ describe('callModel', () => {
         await callModel(plain, [{ role: 'user', content: '判断' }], { maxTokens: 200 });  // 撞一次 → 学会
         calls.length = 0;
         await callModel(plain, [{ role: 'user', content: '判断' }], { maxTokens: 200 });  // 第二次直接托底
-        expect(calls).toEqual([1200]);
+        expect(calls).toEqual([4000]);
       });
 
 
-      it('重试用下限（1200）而不是 2×——24 翻倍成 48 照样不够', async () => {
+      it('重试用下限（4000）而不是 2×——24 翻倍成 48 照样不够', async () => {
         const { __resetTruncatingLabelsForTest } = await import('../../../src/ai/provider.js');
         __resetTruncatingLabelsForTest();
         const calls: number[] = [];
@@ -295,7 +295,7 @@ describe('callModel', () => {
         }));
         const r = await callModel(claudeLabel, [{ role: 'user', content: '判断' }], { maxTokens: 24 });
         expect(r.content).toBe('{"ok":1}');
-        expect(calls).toEqual([1200, 2400]); // reasoning 模型第一次就托底；仍截断则重试翻倍
+        expect(calls).toEqual([4000, 8000]); // reasoning 模型第一次就托底；仍截断则重试翻倍
       });
 
       it('记住之后，同一个 label 的后续调用直接拿下限（不再先撞一次）', async () => {
@@ -313,7 +313,7 @@ describe('callModel', () => {
         await callModel(claudeLabel, [{ role: 'user', content: 'b' }], { maxTokens: 24 });
         // 每次都直接是下限——reasoning 模型不需要先撞一次
         await callModel(claudeLabel, [{ role: 'user', content: 'c' }], { maxTokens: 24 });
-        expect(calls).toEqual([1200, 2400, 1200, 1200]);
+        expect(calls).toEqual([4000, 8000, 4000, 4000]);
       });
 
       it('调用方已经给了大于下限的值 → 不压（尊重显式配置）', async () => {
@@ -327,7 +327,7 @@ describe('callModel', () => {
           return Promise.resolve(n === 1 ? truncOnce() : okOnce());
         }));
         await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 8000 });
-        // 8000 > 1200：第一次照 8000 发（不被压成下限），重试按 2× 抬到 16000。
+        // 8000 > 4000：第一次照 8000 发（不被压成下限），重试按 2× 抬到 16000。
         // 下限只托底，不封顶。
         expect(calls).toEqual([8000, 16000]);
       });
@@ -355,10 +355,10 @@ describe('callModel', () => {
         }));
         const r = await callModel(claudeLabel, [{ role: 'user', content: 'a' }], { maxTokens: 24 });
         expect(r.content).toBe('');
-        expect(calls).toEqual([1200, 2400]);
-        // reasoning 模型本来就托底，"记住"对它无额外影响：第三次仍是 1200/2400
+        expect(calls).toEqual([4000, 8000]);
+        // reasoning 模型本来就托底，"记住"对它无额外影响：第三次仍是 4000/8000
         await callModel(claudeLabel, [{ role: 'user', content: 'b' }], { maxTokens: 24 });
-        expect(calls).toEqual([1200, 2400, 1200, 2400]);
+        expect(calls).toEqual([4000, 8000, 4000, 8000]);
       });
     });
 

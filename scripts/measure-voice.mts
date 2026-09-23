@@ -71,7 +71,14 @@ let dupAnchorDropped = 0;
 //   614 heartPath='bypass'（心流说要等/不接但 obligation 未清）
 //   700 TRENCH_DEBT_ATTENTION_ENABLED（欠的回复要还）
 // 它们都不经过心流决策，所以"心流影响多少流量"要把它们算进分母的另一边。
-const gate = { asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0, bypassIngest: 0, coalesceHold: 0 };
+// round 73：两个新计数。它们此前只能 grep 日志才知道，而它们是
+// "想说话但没出去"的唯一痕迹——用户抱怨"融不进去/前言不搭后语"时，
+// 这两个数比回复率更接近病根。
+const gate = {
+  asleep: 0, continue: 0, legacy: 0, structuralIgnore: 0,
+  bypassIngest: 0, coalesceHold: 0,
+  blockedByGate: 0, truncated: 0,
+};
 const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
 let reacted = 0;
 const reactedEmoji = new Map<string, number>();
@@ -143,6 +150,10 @@ for await (const line of rl) {
   // ⚠️ coalesce hold 是**事件**不是消息（一批消息对应一次 hold），
   // 所以它只单独报数、不进 gateTotal——否则分母虚高，占比全错。
   if (m.includes('Attention coalesce hold')) { gate.coalesceHold += 1; continue; }
+  // 被自己的闸咽回（trench gate）：round 68 量化出 1116 次，98% 是 just_answered。
+  if (m.includes('BLOCKED by trench gate')) { gate.blockedByGate += 1; continue; }
+  // 思维链吃光 max_tokens（provider 层空正文）：round 72 把下限抬到 4000。
+  if (m.includes('空正文')) { gate.truncated += 1; continue; }
   // 绕过心流强制入 attention 的四类（都不烧心流决策）
   // 只有这两个是绕过心流的直摄：
   //   same_speaker_burst —— 连发的人，不问心流
@@ -209,6 +220,12 @@ console.log();
 // coalesceHold 故意不在分母里：它是事件不是消息（见上面那条注释）。
 const gateTotal = gate.asleep + gate.legacy + gate.structuralIgnore + gate.bypassIngest + actTotal;
 console.log(P(`⑤ 到心流的漏斗     asleep ${gate.asleep} · legacy ${gate.legacy} · bot未叫本喵 ${gate.structuralIgnore} · 绕过心流直摄 ${gate.bypassIngest} · coalesce扣着 ${gate.coalesceHold} · **到心流 ${actTotal}**`));
+  console.log(P(`   另：被自己的闸咽回 ${gate.blockedByGate} 次（trench gate）· 思维链吃光 ${gate.truncated} 次（空正文）`));
+  if (gate.blockedByGate > 0 || gate.truncated > 0) {
+    console.log(P(`   ⚠️ 这两个数是"想说话但没出去"——比回复率更接近"融不进去"的病根。`));
+    console.log(P(`      round 68 被叫间隔 30s→8s · round 71 同一次 sendText 只过一次闸 ·`));
+    console.log(P(`      round 72 推理下限 1200→4000。仍 >0 说明还有下一处。`));
+  }
 if (gateTotal > 0) {
   const pct = (n: number) => (n * 100 / gateTotal).toFixed(0) + '%';
   const reach = actTotal * 100 / gateTotal;
