@@ -246,6 +246,27 @@ react 决策与真发（同一次调用）、闸日志与我看到的发送（�
 Also check units: the log's `time` is **milliseconds**, the answered bookkeeping is
 **seconds**. Comparing them silently passes everything (round 135 lost ten minutes to this).
 
+### "No problem" conclusions need a second number
+
+A measurement that leans **toward** a problem gets checked — something looks wrong, so
+you look. A measurement that leans toward *fine* does not: there is nothing to trigger
+the second look, so a wrong "0" goes straight into the conclusion.
+
+Round 185 froze the 09-22 baseline and the first instrument read `All labels
+exhausted = 0` (it looked in `d.msg`; the value lives in `d.err.message`). Real value:
+598. That is a 598x error in the *reassuring* direction, and it was only caught because
+an older count (1656) happened to be in the log to contradict it. Without that
+coincidence the round would have concluded "09-22 was fine".
+
+**Rule: before writing "X is healthy / unchanged / not a problem", find one independent
+number that says the same thing.** A trend, a prior day, a counter — anything measured a
+different way. If you cannot find one, say the number is unverified rather than fine.
+
+The same asymmetry shows up in the four false alarms this session (round 76/122/126/184):
+each was caught because the number screamed. The one false *negative* (round 185) needed a
+coincidence. Assume the second kind is the one that gets through.
+
+
 ## Docs: never wrap a path-shaped example in backticks
 
 `tests/unit/docs/doc-references-exist.test.ts` extracts every `` `something.ext` `` from
