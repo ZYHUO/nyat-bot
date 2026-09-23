@@ -343,3 +343,24 @@ Round 200's addendum lists the four fixes that were each "half applied". The les
 not "be careful" — it is **name the three faces before calling a guard done**, and check
 each one with a different instrument: replay the criterion (behaviour), grep the log at
 the level it's actually written (observability), grep for a second copy (call sites).
+
+### A locating tool fails in three directions — all three are "the test was fine, the tool was blind"
+
+`scripts/tamper-audit.mts` breaks a guard's own target and checks the test goes red.
+Building it took six rounds (54–59) and each fixing round was a different failure direction:
+
+| direction | what it looks like | fix |
+|---|---|---|
+| **wrong string** | picked a literal from elsewhere in the test file (round 56: the first `it` used a *variable*, so the regex fell through to the next literal) | take the literal from the `it` block that asserts it |
+| **wrong position** | picked another occurrence of the same string (round 55: `taskId: opts.taskId` appears 3× in `host-api.ts`) | scope the search to the test's own slice |
+| **wrong direction** | slice opened the wrong way (round 59: the test does `findIndex` then walks **up**; the window opened down) | `findIndex` anchors → backward window; `indexOf` anchors → forward |
+| **wrong arity** | changed one of N copies (round 58: markdown claims appear 3×) | for docs, break **all** occurrences; for code, never — it breaks compilation confusingly |
+
+In every one of these the **test was correct** — tampering the right thing made it red
+immediately. So the tool's blind spots read as "the test is fake-green", and chasing that
+wastes a round.
+
+**Corollary, written at round 55 and re-confirmed at 59: the tool's output must include the
+exact line it broke.** Without that line a human cannot tell "selected wrong" from
+"assertion too weak" — the two have opposite fixes.
+
