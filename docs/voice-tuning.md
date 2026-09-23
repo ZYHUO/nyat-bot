@@ -891,3 +891,67 @@ deep-reflection 摘出 stepfun 账号，心流自己还在那张账号上
 （`AI_USAGE_JUDGE_LABEL=stepfun`，近 1 小时 179 次 Heart decision）。
 
 下一个可攻的点：心流也该有账号隔离，或者 stepfun 该降级成 backup。
+
+---
+
+## round 80 的改动大半无效：`SMART_GROUP_AUTO_ASSIGN=true` 旁路了手动链（round 81 记）
+
+### 我改了什么
+
+`AI_USAGE_JUDGE_BACKUPS=stepfunjudge` → `stepfunjudge,lfree`，
+配上 5 条测试先红后绿，以为解决了 round 79 指出的"心流还在单账号上"。
+
+### 实际没解决
+
+10 时后 `heart LLM failed` 仍 37 次，其中 23 次还是
+`All labels exhausted (all candidates cooling down)`。
+
+### 根因：`.env` 的手动链被 auto-assign 旁路
+
+`src/ai/fallback.ts:24-28`：
+
+```ts
+const manualNames = [usage.label, ...usage.backups];
+let candidateNames = manualNames;
+if (isAutoAssignEnabled()) {
+  const auto = await smartGroupAutoAssign(options.usage);
+  if (auto.length > 0) candidateNames = auto;      // ← 手动链整条被换掉
+}
+```
+
+而 `SMART_GROUP_AUTO_ASSIGN=true`（.env:738）。
+
+**所以我改的 `AI_USAGE_JUDGE_BACKUPS` 在生产里一次都没被读到。**
+
+### 但跨账号兜底其实早就做了（round 13）
+
+`smart-group.ts:591` 的 `accountFallback`（默认 true）：
+
+  · 按 **host** 判账号（不是 endpoint+key——同域名不同 key 是同一个供应商）
+  · `MIN_ACCOUNTS = 3`：链上不到 3 个账号就二筛
+  · 二筛**只关延迟上限**，其余硬判据全保留
+  · 注释写明"目标是 3 个账号，不是 2 个"——2 个里有一个坏的等于单账号
+
+实测近 1h `Fallback label used = lfree` **111 次**——它确实在链上。
+（lfree / mimo 都在 `ai.lfree.org`，算同一个 host；`dshkimi` 在
+`api.kimi.com`——所以三个账号是 stepfun / lfree / kimi。）
+
+### 所以还剩什么
+
+23 次 exhausted 的成因不是"没有跨账号候选"，而是**三个账号同时在冷却**：
+stepfun 被并发上限打满（RPM≈10）、lfree 中位延迟 15-19s 容易超时、
+kimi 也在限流。`waitIfCooling` 等 15s 上界，等不来。
+
+**我的 round 80 改动不是零价值**（测试判据对、.env.example 写清了、
+auto-assign 关掉时手动链就是跨账号的），但它**没有解决我说它解决的那个问题**。
+commit message 应该说清这一点——当时我没验生产就写了"修：加跨账号 backup"。
+
+### 教训（第三次）
+
+| 轮 | 我说修了什么 | 实际 |
+|---|---|---|
+| 54 | react 机制已接 | 只接了 legacy，生产走 Meta |
+| 70 | maxTokens 写死清了 | 真闸在 provider.ts 的下限里 |
+| **80** | judge 链加跨账号 backup | `.env` 手动链被 auto-assign 旁路 |
+
+**共同点：改了配置/代码，没验证生产走的是哪条路。**
