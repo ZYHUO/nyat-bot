@@ -28,6 +28,18 @@ mkdir -p "$ROOT_DIR/logs"
     | grep -E '说完|n=|合计|replied =|回复率|corrected' \
     || echo '  (measure:engage 失败——见 logs/app.log)'
   echo
+  # round 108：**接话延迟的三段账也每天收。**
+  # round 103-106 诊断出"很难融入话题"是延迟问题（30s 快接 51%、
+  # 两段 16.6s + 19.5s），round 107 固化成 measure:timing。
+  # 不接进 cron 的话那四轮诊断就只是 commit message，下次看要重写脚本。
+    # ⚠️ 日期口径：measure-timing 按 **UTC 日期**过滤日志（new Date(t).toISOString()），
+  # 而这里显示的是北京日期。cron 在北京 23:00 = UTC 15:00 跑，两者碰巧同一天；
+  # 但如果把 cron 改到北京 00:00-08:00，UTC 就是前一天，日期会错。
+  # 所以传 **UTC 日期**，和脚本口径一致，不受 cron 时间影响。
+  npm run --silent measure:timing -- --day="$(date -u +%Y-%m-%d)" 2>/dev/null \
+    | grep -E '接话延迟|①|②|快接率|30s|300s|600s|基线' \
+    || echo '  (measure:timing 失败——见 logs/app.log)'
+  echo
 } >> "$OUT"
 
 # 只留最近 60 天，别让日志无限长
