@@ -19,6 +19,8 @@ import { logger } from "../../shared/logger.js";
 import { applyMoodEvent } from "../../tracking/mood.js";
 import { startGame, stopGame } from "../games/manager.js";
 import { createGuessNumberGame } from "../games/guess-number.js";
+import { getRedis } from '../../db/redis.js';
+import { incrCounter } from '../../metrics/registry.js';
 
 // ── Extracted helper 2: Mute command intercepts ─────────────────────
 
@@ -145,6 +147,79 @@ export async function dispatchCommand(
   return false;
 }
 
+/**
+ * round 61（新 goal，用户："很难融入话题"）：**人在纠正/生气时硬止损。**
+ *
+ * 实测（2026-09-23，-1004430867819，0/18 没人接）：
+ *   04:49-04:56 bot 连发 14 条，全是同一件事的变体。
+ *   而群里的人已经在纠正它：
+ *     @hunhebi_bot 再说一次，我的节点没有炸（生气）
+ *     噗，人家又没说你节点炸。
+ *
+ * 人在纠正，它还在刷。而这个群 0% 有人接的真相是：刷的内容没人想接，
+ * 人只在纠正它——"纠正"没被算进 replied/reacted，所以我量成了 0%。
+ *
+ * 这是**止损**，不是改心流判据（那是操作手册第 3 档、要拍板）。
+ * 判据纯文本：冲着 bot 来（@ / 回复 bot / 叫名字）+ 带纠正或负面词。
+ * 命中就静默 + 按群冷却 N 分钟。**不发任何解释性回复**——
+ * 这时候任何回复都是加分。
+ */
+const CORRECTION_RE = /(?:别说了|够了|烦死|烦不烦|闭嘴|安静|再说一次|不是说了|讲过了?|重复|刷屏|好吵|停一下|打住|有完没完|生气|气死|恼火|无语|服了)/i;
+const CORRECTION_COOLDOWN_SEC = 600;
+const CORRECTION_KEY = (chatId: number): string => `xxb:corrected:${chatId}`;
+
+export async function tryCorrectionIntercept(
+  chatId: number,
+  formatted: FormattedMessage,
+  judgeOrOpts: JudgeResult | { addressedRule: string },
+): Promise<boolean> {
+  if (chatId >= 0) return false;                 // 群聊 only
+  if (formatted.isBot || formatted.isAnonymous) return false;
+  const text = (formatted.textContent || formatted.captionContent || '').trim();
+  if (text.length < 2) return false;
+
+  // 只认"冲着 bot 来"的——ADDRESSED_RULES 是既有判据。
+  // 群友之间互呛不该让 bot 闭嘴。
+  // ADDRESSED_RULES 已在文件顶部从 ../shared.js 导入。
+  // 两种调用形态：legacy 传 JudgeResult（有 rule）；Meta 没有 judge，
+  // 传 { addressedRule }（它只有 isDirect）。判据取 rule ?? addressedRule。
+  // Meta 那边没有 judgeResult，用 opts.isDirect 合成：
+  //   isDirect=true  → 'mention_self'（ADDRESSED_RULES 里最通用的"冲着 bot 来"）
+  //   isDirect=false → '' （空串必不命中 = 不拦）
+  // 不能塞 'direct'——它不在 ADDRESSED_RULES 里，拦不住任何东西。
+  // 用 optional-chaining + 判别联合：JudgeResult.rule 是 `string | undefined`
+  // （可缺省），而 Meta 那侧的 `addressedRule` 一定存在。
+  // 直接 'rule' in x 判不出联合（JudgeResult 也可能带 undefined 的 rule）。
+  const maybeRule = (judgeOrOpts as { rule?: string }).rule;
+  const rule = maybeRule !== undefined
+    ? maybeRule
+    : ((judgeOrOpts as { addressedRule?: string }).addressedRule === 'direct' ? 'mention_self' : '');
+  if (!ADDRESSED_RULES.has(rule)) return false;
+
+  if (!CORRECTION_RE.test(text)) return false;
+
+  try {
+    await getRedis().set(CORRECTION_KEY(chatId), '1', 'EX', CORRECTION_COOLDOWN_SEC);
+  } catch {
+    return false;                                 // Redis 挂了不拦截
+  }
+  logger.info(
+    { chatId, uid: formatted.uid, rule, text: text.slice(0, 60), cooldownSec: CORRECTION_COOLDOWN_SEC },
+    'correction: 人在纠正/生气 → 群冷却',
+  );
+  incrCounter('correction_cooldown_total', { chat: chatId });
+  await sender.sendDirect(chatId, '…知道了。本喵安静会儿。', formatted.messageId);
+  return true;
+}
+
+/** round 61：这个群当前是不是处在"被纠正"冷却中。*/
+export async function isCorrectionCooling(chatId: number): Promise<boolean> {
+  try {
+    return (await getRedis().get(CORRECTION_KEY(chatId))) === '1';
+  } catch {
+    return false;
+  }
+}
 export async function tryPreMuteIntercepts(
   chatId: number,
   formatted: FormattedMessage,

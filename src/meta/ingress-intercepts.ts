@@ -118,6 +118,29 @@ export async function tryMetaIngressIntercepts(
     }
   }
 
+  // ── 人在纠正/生气 → 群冷却（round 61，新 goal）──
+  //
+  // 实测（2026-09-23，-1004430867819，0/18 没人接）：
+  //   04:49-04:56 bot 连刷 14 条同一件事的变体，而群里的人已经在纠正它：
+  //     @hunhebi_bot 再说一次，我的节点没有炸（生气）
+  //   人在纠正，它还在刷。这个群 0% 有人接的真相：刷的内容没人想接，
+  //   人只在纠正它——"纠正"没被算进 replied/reacted，所以我量成了 0%。
+  //
+  // 这是**止损**，不是改心流判据（那是操作手册第 3 档、要拍板）。
+  // 判据纯文本：冲着 bot 来 + 带纠正/负面词。命中就静默 + 按群冷却 10 分钟。
+  // （Meta 侧没有 judgeResult，用 opts.isDirect 合成 addressedRule——
+  //   tryCorrectionIntercept 的第三个参数已改成兼容两种形态。）
+  //
+  // 必须接在 Meta 上：round 54 的教训（react 只接 legacy，生产走 Meta，
+  // 于是 9 次 react 全被丢弃）。
+  if (chatId < 0 && !formatted.isBot && text.length >= 2) {
+    try {
+      const { tryCorrectionIntercept } = await import('../pipeline/stages/intercepts.js');
+      if (await tryCorrectionIntercept(chatId, formatted, { addressedRule: opts.isDirect ? 'direct' : 'passive' })) return 'handled';
+    } catch (err) {
+      logger.debug({ err, chatId }, 'Meta: correction intercept failed (non-critical)');
+    }
+  }
   // ── 贴纸差评拦截 ──
   //
   // 2026-09-22 round 8。同 antiad-command 的病：原来只在 legacy 的

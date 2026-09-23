@@ -8,7 +8,7 @@ import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath } from "../../sh
 import { resolveReplyPath } from "../../shared/types.js";
 import { applyChatPathPolicy } from "../path-policy.js";
 import { TEMP_MUTE_CLEAR_RULES, DIRECT_INTERACTION_RULES, buildDeferEntry } from "../shared.js";
-import { tryMuteCommandIntercepts, tryPreMuteIntercepts, tryPostMuteIntercepts } from "./intercepts.js";
+import { tryCorrectionIntercept, tryMuteCommandIntercepts, tryPreMuteIntercepts, tryPostMuteIntercepts } from "./intercepts.js";
 import { generateAndSendReplies, type ChatLockState } from "./deliver.js";
 import {
   getMuteState,
@@ -177,6 +177,14 @@ export async function runPostJudge(ctx: {
   // 5.4 Mute / unmute / self-mute commands
   if (await tryMuteCommandIntercepts(job.chatId, formatted, judgeResult)) {
     closeKernel("completed", "mute_command_intercept");
+    return { completed: true };
+  }
+
+  // 5.415 Correction intercept (round 61): 人在纠正/生气 → 静默 + 群冷却。
+  // 必须在 pre-mute 之前——它要赶在心流/写手之前拦，别烧一次 LLM 去接一句
+  // "别说了"。实测 -1004430867819 04:49-04:56 连刷 14 条，人已经在纠正它。
+  if (await tryCorrectionIntercept(job.chatId, formatted, judgeResult)) {
+    closeKernel('completed', 'correction_intercept');
     return { completed: true };
   }
 
