@@ -1265,3 +1265,55 @@ round 89/90/91 的重复锚点闸：
 | **生产效果** | ⏳ **未验**（部署后仅 3 条带锚样本） |
 
 要等今晚 cron 或群聊恢复。基线记在这里：**部署前 7.0%（343 条里 24 组）**。
+
+---
+
+## react 的 11 个"没发出"是我口径错了 + 1 个真缺口（round 94）
+
+### 表面
+
+`Meta heart: reacted` 24 次，而 `Heart decision act=react` 35 个。差 11 个。
+
+### 查下去
+
+35 个 react 决策**全部 `emoji=(none)`**——模型输出 act=react 但不给 emoji。
+我 round 54 的代码会随机挑一个（`heart.emoji ?? pickReactionEmoji('neutral')`），
+所以应该能发。
+
+逐个对时间戳，那 11 个"没对应发送"的分布在 01:21-08:51。
+看 01:21:04 那条附近：
+
+```
+01:21:04  Heart decision why=这贴纸就是我现在的状态
+01:21:04  Meta heart: reply → Attention        ← adapter 译成 reply 了
+01:21:04  Meta attention ingested (heart)
+01:21:07  Meta dispatch.taskToGroup
+01:21:07  CodeAct task start
+```
+
+**`act=react` 在 Meta 侧被译成了 `reply → Attention`。**
+即那一波根本不是 react 发送路径，是 reply 路径。
+
+所以"35 vs 24 差 11"这个数本身就是**混了两个口径**：
+`Heart decision`（decision.ts 打的，两条路径共用）
+vs `Meta heart: reacted`（只在 Meta 的 react 分支打）。
+
+### 真缺口：react 分支的失败只有 debug 日志
+
+`src/meta/heart-adapter.ts:264`：
+
+```ts
+logger.debug({ chatId, emoji }, 'Meta heart: react not delivered, falling through');
+```
+
+这是本会话**第 5 处**"防问题的机制只有 debug 日志"：
+round 75（截断重试）/ 77（sticker pick）/ 78（reflection 计数器）/
+84（代发 guard）/ 87（撞名守卫）+ 这一处。
+
+它 0 次触发——但和非法的 0 一样，** debug 级看不见**。
+
+### 教训
+
+"两个数不相等"就想找差异，是我第 N 次**没先确认两个数同口径**。
+round 48 的量具教训（heart-answered-recall 测试的注释写着
+"different shapes for the same flow"）说的就是这件事。
