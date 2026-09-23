@@ -11,6 +11,10 @@
 import { env } from '../env.js';
 import { runDailyReport } from './report.js';
 import { runModelCheck } from './model-check.js';
+// round 85: 进程忩命量纸——把“重启很频”变成可见的行。
+// round 84 把它列为“待排期”而且斩此会脚应喝的是调度的代价（一个告警）；
+// round 85 发现它其实不费——差的只是轮次号，所以当轮做。
+import { reportProcessLifetime } from './restart-hygiene.js';
 import { runCleanup, type CleanupDeps } from './cleanup.js';
 import { runKnowledgeSync } from './knowledge-sync.js';
 import { runUserProfileSync } from '../tracking/user-profile.js';
@@ -43,6 +47,8 @@ export function startCronJobs(deps?: CronDeps): void {
 
   // Model status check — every 5 minutes
   reg({ name: 'model-check', everySec: 5 * 60, run: runModelCheck });
+  // round 85：进程忩命量纸（每小时一行，不存状态不告警）
+  reg({ name: 'process-lifetime', everySec: 3600, run: async () => { reportProcessLifetime(); } });
 
   // Daily report — every day at 23:55 Beijing time
   reg({ name: 'daily-report', dailyAt: { hour: 23, minute: 55 }, run: runDailyReport });
