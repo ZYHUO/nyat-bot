@@ -375,6 +375,28 @@ The two rules with no over-executed form:
 `-F` for commit messages (its boundary is *shape*, not universality) and
 "never extrapolate a number you did not read" (there is no cheaper direction).
 
+### A "known issue" that never got a round number was never going to get fixed
+
+Three times in a row (rounds 83, 84, 85) I picked a `待排期` item off
+`docs/known-issues.md` and fixed it **in the same round**. Each time the cost was
+lower than I had estimated when scheduling it:
+
+| item | scheduled in | fixed in | cost |
+|---|---|---|---|
+| edit replays inflating the inbound denominator | 49, "known" | 83 | half an hour, one script, zero prod risk |
+| counter names absent from every doc | 79 | 80 | one table + one guard |
+| process-lifetime readability | 84 | 85 | one function, one cron registration |
+
+The round-84 audit is the finding: **two of them had already been fixed, and neither
+was fixed by a schedule — both were fixed "while I was in there"**. So the reason they
+sat for 34, 1, and 0 rounds was not difficulty.
+
+**Rule: when you mark a problem, decide which round it gets fixed in. If you cannot
+decide, write "待排期" with the trigger ("after 3 days without a restart") — never
+"已知".** "已知" is a state name that defers forever, because nothing points at it.
+And corollary from rounds 83-85: **if you scheduled it and never scheduled it, the
+estimate was probably wrong — try it once before escalating it to a plan.**
+
 
 ### A locating tool fails in three directions — all three are "the test was fine, the tool was blind"
 
