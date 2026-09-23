@@ -2523,7 +2523,7 @@ Round 142 的教训是"必须逐条断言验红"。这轮把剩下的守卫都�
 
 ## session-report 第一次跑：deep-reflection 产出率 35%，且它现在是单 label 无备份（round 147）
 
-这个 goal 里我从没跑过 `scripts/session-report.mts`——`AGENTS.md` 说它是
+这个 goal 里我从没跑过 `scripts/session-report.mts`——AGENTS.md（仓根的代理指南） 说它是
 "读生产效果"的主工具，而它的 2c 节（cron 产出率）正是为"跑了但什么都没产出"
 建的。补跑一次，抓到 goal 以来最大的一个：
 
