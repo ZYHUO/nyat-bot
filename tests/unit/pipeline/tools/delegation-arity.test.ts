@@ -35,7 +35,9 @@ describe('代发缺参闸（arity-aware）', () => {
 
   it('③ 有兜底：人类消息带了实参就放行', () => {
     const b = block();
-    expect(b).toContain('humanMessageCarriesArg(chatId)');
+    // round 201：签名多了 usage_syntax——"人类带了参"要按占位形状判，
+    // 不再"有任何中文就算"（那条宽判据让这个兜底恒真，闸从未真拦过）。
+    expect(b).toContain('humanMessageCarriesArg(chatId, profile?.usage_syntax)');
   });
 
   it('④ 拦住时有计数器 + info，且带 usage_syntax 字段（round 84 的形状）', () => {
@@ -60,9 +62,9 @@ describe('代发缺参闸（arity-aware）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
     const i = s.indexOf('async function humanMessageCarriesArg');
     expect(i).toBeGreaterThan(-1);
-    const body = s.slice(i, i + 900);
+    const body = s.slice(i, i + 1200);
     expect(body).toContain('catch');
-    expect(body).toContain('return true');
+    expect(body).toContain('return true');   // fail-open
   });
 
   it('⑧ 判据对真实 usage_syntax 全对（形状来自 data/xxb.db 的 ready 档案）', () => {

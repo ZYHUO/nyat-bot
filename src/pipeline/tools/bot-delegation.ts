@@ -204,7 +204,7 @@ export async function tryDelegateCommand(
     if (usageNeedsArg(profile?.usage_syntax) && !(args || '').trim()) {
       // 兜底：人类这条消息本身可能就带了实参（点名让查 1.1.1.1）。
       // 查不到才拦——否则会把"人明明给了 IP"的也吞掉。
-      if (!(await humanMessageCarriesArg(chatId))) {
+      if (!(await humanMessageCarriesArg(chatId, profile?.usage_syntax))) {
         // round 84 的形状：挡住要**可数**，否则说不清"挡掉了"还是"没被调用"。
         logger.info(
           { chatId, bot, cmd, syntax: profile?.usage_syntax },
@@ -454,7 +454,25 @@ function usageNeedsArg(usageSyntax: string | undefined): boolean {
  * 只为兜底"人明明给了实参"，所以判据故意宽——宽一点只会少拦，
  * 不会造成"该发的也不发"。
  */
-async function humanMessageCarriesArg(chatId: number): Promise<boolean> {
+async function humanMessageCarriesArg(
+  chatId: number,
+  usageSyntax?: string,
+): Promise<boolean> {
+  // round 201：**按占位符的形状判，不再"任何中文就算带了参"。**
+  //
+  // 现场：全日志 72 条 delegated learned command 里 36 条本该被这个闸拦，
+  // 而闸的日志出现 0 次。原因就是原来第三个条件太宽：
+  //
+  //   // 任何 >=2 字的非纯标点串
+  //   if (/[\u4e00-\u9fa5\w]{2,}/.test(t)) return true;
+  //
+  // 群聊里最近 6 条人类消息几乎总有两个以上中文字符，于是这个函数几乎
+  // 恒为 true——**闸永远不拦**。
+  //
+  // 现在：占位符里写什么，就只认什么形状。推不出来的形状 → fail-open
+  // （宁可少拦，不可误拦——和 round 169 的 usageNeedsArg 同一个原则）。
+  const shapes = argShapesFor(usageSyntax);
+  if (shapes.length === 0) return true;
   try {
     const { getRecent } = await import('../context/manager.js');
     const recent = await getRecent(chatId, 6);
@@ -462,12 +480,7 @@ async function humanMessageCarriesArg(chatId: number): Promise<boolean> {
       if (m.role !== 'user' || m.isBot) continue;
       const t = (m.textContent || '').trim();
       if (!t) continue;
-      // IP（含端口/掩码）
-      if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(t)) return true;
-      // 域名
-      if (/\b[a-z0-9][a-z0-9-]{1,62}(?:\.[a-z0-9][a-z0-9-]{1,62})+\b/i.test(t)) return true;
-      // 任何 >=2 字的非纯标点串（关键词类参数）
-      if (/[\u4e00-\u9fa5\w]{2,}/.test(t.replace(/[\s\p{P}]/gu, ''))) return true;
+      for (const re of shapes) if (re.test(t)) return true;
     }
     return false;
   } catch {
@@ -475,6 +488,27 @@ async function humanMessageCarriesArg(chatId: number): Promise<boolean> {
   }
 }
 
+/**
+ * round 201：从 `usage_syntax` 的占位符文字推它要什么形状。
+ * `/geo <IP或域名>` → [IPv4, 域名]；`/copy [@用户名]` → [@name]；`/jx [链接]` → [URL]。
+ * 推不出来返回 []（调用方据此 fail-open）。
+ */
+function argShapesFor(usageSyntax: string | undefined): RegExp[] {
+  if (!usageSyntax) return [];
+  const placeholders = [...usageSyntax.matchAll(/[<[]([^>\]]{1,40})[>\]]/g)].map((m) => m[1]!);
+  const out: RegExp[] = [];
+  for (const ph of placeholders) {
+    const low = ph.toLowerCase();
+    if (/ip|地址|address/.test(low)) {
+      out.push(new RegExp('\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b'));
+      out.push(new RegExp('\\b[a-z0-9][a-z0-9-]{1,62}(?:\\.[a-z0-9][a-z0-9-]{1,62})+\\b', 'i'));
+    }
+    if (/url|链接|http/.test(low)) out.push(/https?:\/\//i);
+    if (/@|用户名|user/.test(low)) out.push(/@[A-Za-z0-9_]{3,}/);
+    if (/关键词|搜索|query|keyword/.test(low)) out.push(/[一-龥\w]{2,}/);
+  }
+  return out;
+}
 function isCommandRejection(text: string): boolean {
   const t = text.trim();
   // 120 字上限：用法说明都是短句；长文本里出现 "Usage" 更可能是真结果在解释用法。

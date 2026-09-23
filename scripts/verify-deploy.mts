@@ -143,6 +143,7 @@ const CHECKS: Array<[string, string]> = [
   ['代发回执：命令被退回单独一支', 'isCommandRejection'],
   ['代发缺参闸（arity-aware）', 'usageNeedsArg'],
   ['代发缺参兜底：人类消息带实参', 'humanMessageCarriesArg'],
+  ['代发缺参兜底：按占位形状判（round 201）', 'argShapesFor('],
   ['发送日志带 taskId（per-task 发送分布可算）', "taskId: opts.taskId ?? null"],
   ['task 级 burst 闸（同任务连发）', 'send_task_burst_total'],
   ['interrupt 寻址分桶（寻址）', 'agent_interrupt_addressed_total'],
