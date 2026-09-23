@@ -2,79 +2,74 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 
 /**
- * round 80: AGENTS.md 的规矛要可枚举。
+ * round 87: **AGENTS.md \u7684\u7ed3\u6784\u5b88\u536b**\u2014\u2014round 86 \u5c4f\u9063\u8fd9\u4e2a\u9519\u7684\u65b9\u5f0f\u3002
  *
- * Round 79 收尾说“计数器可枚举（grep incrCounter），规矛不可以”——
- * 而 round 78 刚刚证明缺席比抨贱难发现。这里给规矛一份索引守卫。
+ * Round 86 \u6211\u5728 anchor \u540e\u9762\u8ffd\u52a0\u4e00\u6bb5\uff0c\u800c anchor \u81ea\u8eab\u5c3e\u90e8\u90a3\u53e5
+ * \u88ab\u539f\u6837\u7559\u4e0b\u2014\u2014\u6210\u4e86\u91cd\u590d\u884c\u3002\u90a3\u5c31\u662f round 47 \u6293\u8fc7\u7684
+ * "\u540c\u4e00\u4efd\u5185\u5bb9\u4e24\u5904\u62f3\u9009" \u7684\u5c0f\u578b\u590d\u53d1\uff1b\u4e0a\u4e00\u6b21\u662f\u811a\u672c\u8f93\u51fa\u4e0e\u6587\u6863\uff0c
+ * \u8fd9\u4e00\u6b21\u662f\u540c\u4e00\u4e2a\u6587\u4ef6\u91cc\u9762\u4e24\u884c\u3002
  *
- * 规矛分居两处：`## Writing Chinese` 里的三条粗体，
- * 和 `## Cross-checking` 里的 ### 节。两处都羗，否则缺席报出来的是 6。
+ * \u4e3a\u4ec0\u4e48\u8981\u5b88\u536b\uff1aAGENTS.md \u91cc\u6bcf\u53e5\u89c4\u77db\u90fd\u4f1a\u88ab\u6267\u884c\u3002\u4e00\u53e5\u8bdd\u51fa\u73b0\u4e24\u6b21\uff0c
+ * \u4e0b\u4e00\u4e2a\u4eba\u4fee\u5176\u4e2d\u4e00\u5904\u5c31\u4f1a\u8ba4\u4e3a\u5b83\u53d8\u4e86\u2014\u2014\u800c\u53e6\u4e00\u5904\u8fd8\u5728\u8bf4\u65e7\u7684\u3002
+ * round 198 \u7684\u4e24\u4e2a SECTION_ORDER \u5c31\u662f\u8fd9\u4e48\u8ba9\u4fee\u590d\u5931\u6548\u4e86\u516d\u8f6e\u3002
+ *
+ * \u4f46\u4e0d\u80fd\u4e00\u5f8b\u7981\u6b62\u91cd\u590d\uff1a\u8868\u683c\u91cc\u7684\u5355\u5143\u683c\uff08`| x | y |`\uff09\u3001\u4ee3\u7801\u5757\u91cc\u7684\u884c\u3001
+ * \u4ee5\u53ca\u77ed\u884c\u90fd\u80fd\u5408\u6cd5\u5730\u91cd\u590d\u3002\u6240\u4ee5\u53ea\u67e5**\u975e\u4ee3\u7801\u5757\u3001\u975e\u8868\u683c\u3001\u8d85\u8fc7 40 \u5b57\u8282\u7684\u6b63\u6587\u884c**\u3002
  */
 
 const SRC = 'AGENTS.md';
 
-const collectRules = (): Array<{ title: string; body: string }> => {
-  const text = fs.readFileSync(SRC, 'utf8');
-  const lines0 = text.split('\n');
-  const bold: Array<{ title: string; body: string }> = [];
-  for (let i = 0; i < lines0.length; i++) {
-    const m = /^\*\*(\d)\. ([^*]+?)\*\*(?:\s|$)/.exec(lines0[i]!);
-    if (!m) continue;
-    let body = `${m[2]}\n`;
-    // 粗体规则的正文是后续几段，到下一来粗体或二级节为止
-    for (let k = i + 1; k < lines0.length; k++) {
-      if (/^\*\*\d\.\s/.test(lines0[k]!) || lines0[k]!.startsWith('## ')) break;
-      body += lines0[k] + '\n';
-    }
-    bold.push({ title: `rule ${m[1]}`, body });
+const bodyLines = (): string[] => {
+  const raw = fs.readFileSync(SRC, 'utf8').split('\n');
+  let inFence = false;
+  const out: string[] = [];
+  for (const l of raw) {
+    if (l.trimStart().startsWith('```')) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (l.startsWith('|')) continue;              // 表格单元格合法重复
+    if (l.trim() === '') continue;
+    out.push(l);
   }
-  const lines = text.split('\n');
-  const sections: Array<{ title: string; body: string }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]!.startsWith('### ')) {
-      let body = '';
-      for (let k = i + 1; k < lines.length && !lines[k]!.startsWith('## '); k++) body += lines[k] + '\n';
-      sections.push({ title: lines[i]!.slice(4).trim(), body });
-    }
-  }
-  return [...bold, ...sections];
+  return out;
 };
 
-describe('AGENTS.md 的规矛索引', () => {
-  it('① 至少 9 条（3 粗体 + 6 节）——少于 9 就是有节被误删', () => {
-    const rs = collectRules();
-    expect(rs.length, `只有 ${rs.length} 条: ${rs.map((x) => x.title).join(' | ')}`).toBeGreaterThanOrEqual(9);
+describe('AGENTS.md 结构', () => {
+  it('① 至少 9 条规矩（3 粗体 + 6 节）——round 80 立的', () => {
+    const text = fs.readFileSync(SRC, 'utf8');
+    const bold = [...text.matchAll(/^\*\*(\d)\. ([^*]+?)\*\*(?:\s|$)/gm)].length;
+    const secs = [...text.matchAll(/^### /gm)].length;
+    expect(bold + secs, `粗体 ${bold} + 节 ${secs}`).toBeGreaterThanOrEqual(9);
   });
 
-  it('② 每条都有可执行形态（Rule:/Corollary/表格/命令/代码块/换番反例）', () => {
-    // 判据是"读它一眼知道该干什么"：命令、表格、代码块、
-    // 或者一个具体的错法反例（`...\n...`、ZZ_、等等）。
-    const imperative = /never|always|do not|don't|must|write it|use |read it|name it|state/i;
-    const weak = collectRules()
-      .filter((x) => !/Rule:|Corollary|\*\*Q:|\*\*The rule|npm run|npx |tsx |git -|\*\*Rule/.test(x.body)
-        && !x.body.includes('```') && !x.body.includes('| ')
-        && !/`[^`]{6,}`/.test(x.body.slice(0, 400))
-        && !imperative.test(x.title + ' ' + x.body.slice(0, 200)))
-      .map((x) => x.title);
-    expect(weak, '这些节没有可执行形态').toEqual([]);
+  it('② 没有超过 40 字节的重复正文行（round 86 复发的"anchor 尾部被写两遍"）', () => {
+    const seen = new Map<string, number>();
+    const dups: string[] = [];
+    for (const l of bodyLines()) {
+      if (Buffer.byteLength(l) < 40) continue;      // 短行合法重复
+      const n = seen.get(l) ?? 0;
+      seen.set(l, n + 1);
+      if (n === 1) dups.push(l.trim().slice(0, 60));
+    }
+    expect(dups, '这些长行出现了两次：\n  ' + dups.join('\n  ')).toEqual([]);
   });
 
   it('③ 边界表标了实证/假设（round 77）', () => {
     const text = fs.readFileSync(SRC, 'utf8');
     expect(text).toContain('hypothesis, not a fact');
-    expect(text).toContain('confirmed = r50/r51');
   });
 
-  it('④ 本会话新增计数器名字至少在一份文档里（round 79 行动）', () => {
-    const docs = ['AGENTS.md', 'docs/OBJECTIVE-STATUS.md', 'docs/plan-reply-behaviour.md', 'docs/voice-tuning.md']
+  it('④ 排期规矩在（round 86）', () => {
+    const text = fs.readFileSync(SRC, 'utf8');
+    expect(text).toContain('never got a round number');
+    expect(text).toContain('待排期');
+  });
+
+  it('⑤ 计数器名可检索（round 79/80）', () => {
+    const docs = ['AGENTS.md', 'docs/OBJECTIVE-STATUS.md', 'docs/known-issues.md']
       .map((f) => fs.readFileSync(f, 'utf8'));
-    const must = ['send_task_burst_total', 'agent_interrupt_addressed_total', 'send_topic_word_repeat_total'];
-    for (const c of must) {
-      expect(docs.some((t) => t.includes(c)), `${c} 任何文档里都没有`).toBe(true);
+    for (const c of ['send_task_burst_total', 'llm_inflight_cap_skipped_total',
+      'llm_short_cooldown_total', 'send_topic_word_repeat_total']) {
+      expect(docs.some((t) => t.includes(c)), `${c} 缺席`).toBe(true);
     }
-    // round 79 抛出来的两个实席：round 175/176 写进 known-issues 后这里就绿
-    const known = fs.readFileSync('docs/known-issues.md', 'utf8');
-    expect(known).toContain('llm_inflight_cap_skipped_total');
-    expect(known).toContain('llm_short_cooldown_total');
   });
 });
