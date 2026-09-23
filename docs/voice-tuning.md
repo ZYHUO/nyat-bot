@@ -4284,3 +4284,36 @@ Round 67 说「立规矩和定边界成对出现」，这是第三次出现，�
 
 **可复用的动作**：立完规矩立刻问一句「它的过度执行版是什么？」。
 这次问出来的 4 条边界，每一条都能省一轮。
+
+---
+
+## 70 轮全门禁实测：verify-integration 红在账号限流（非代码回归）（round 70）
+
+按 round 39 的规矩（命令读不到就写"没验"）跑全门禁，这次全读到了：
+
+```
+typecheck          0 error
+lint               0
+build              ok
+verify-deploy      exit 0
+verify-integration exit 1  ← 1 项失败
+tamper:audit       nothing to audit（工作树干净）
+```
+
+**那一项是 `dshkimi` 的 HTTP 403 concurrent request limit**——
+`AGENTS.md` 明写"dshkimi 403 is account rate limits, not code regression"
+（round 148/152/156 都碰过）。这是本会话第 N 次，不是新故障。
+
+### 但这次值得记的是：403 的**类型**变了
+
+```
+旧：You've reached your concurrent request limit
+新：access_terminated_error     ← 同一个 403，错误 type 不同
+```
+
+`access_terminated_error` 看着比并发限流严重（像账号被封）。但同一轮里
+`Model check completed` 正常跑、`smart group: 跨账号兜底补入` 也在跑——
+说明链上还有其他 label 能通，只是 dshkimi 这一路断了。
+
+**没深究**：这是账号层的事，不是代码层；而且改它要账号凭证（第 3 档）。
+记在这里，等下次 workflow 或用户提及时再定。
