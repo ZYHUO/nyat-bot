@@ -43,6 +43,62 @@ export async function logProcessBootContext(): Promise<void> {
  * \u4e0d\u5b58 Redis\u3001\u4e0d\u67e5\u72b6\u6001\u2014\u2014\u5b83\u53ea\u770b\u81ea\u5df1\u8fd9\u4e2a\u8fdb\u7a0b\u6d3b\u4e86\u591a\u4e45\u3002
  * \u90a3\u4e2a\u6570\u5b57\u5df2\u7ecf\u8db3\u591f\u56de\u7b54"\u8fdb\u7a0b\u5185\u95f8\u73b0\u5728\u662f\u4e0d\u662f\u76f2\u7684"\u3002
  */
+/**
+ * round 105: **残留活动任务索引的自慈摧拦。**
+ *
+ * Round 102-105 的故事：CodeAct job `stalled more than allowable limit` 失败，
+ * 但 `xxb:codeact:tasks` hash 里 status 还是 `running`、`xxb:agent:active-chat:{chat}`
+ * 索引还在——结果 5 小时里每句群话都被当成 interrupt。
+ *
+ * Round 103 修的是"未来的 failed 事件要清"，那已经坏掉的状态没人管。
+ * round 104 我还因为查了错的 redis db 认为"查不出来"。
+ *
+ * 规则（保守，只清肯定是死的）：
+ *   - status 是 `running` / `queued`  且 createdAt 超过 STALE_TASK_SEC
+ *   - **`waiting_user` 不清**——它合法地在等人，可能等很久
+ *   - hash 里已经没有了的索引（纯死键）也清
+ *
+ * 为什么 2 小时：CodeAct 单段任务预算 30 轮/120s（CLAUDE.md），
+ * 即使拖成长任务也是分段续跑＠120s 的数十倍仍然安全。
+ */
+const STALE_TASK_SEC = 2 * 3600;
+
+export async function sweepStaleAgentTasks(): Promise<{ cleared: string[]; checked: number }> {
+  const cleared: string[] = [];
+  let checked = 0;
+  try {
+    const redis = (await import('../db/redis.js')).getRedis();
+    const { unregisterAgentChat } = await import('../agent/checkpoint.js');
+    const { loadCodeActTask, persistCodeActTask } = await import('../subagent/task-store.js');
+    const keys = await redis.keys('xxb:agent:active-chat:*');
+    const now = Math.floor(Date.now() / 1000);
+    for (const k of keys) {
+      const chatId = Number(k.slice('xxb:agent:active-chat:'.length));
+      const taskId = await redis.get(k);
+      if (!taskId || !Number.isFinite(chatId)) { cleared.push(k); continue; }
+      checked++;
+      const t = await loadCodeActTask(taskId);
+      if (!t) {                                  // 形态 B：hash 已过期，索引是纯死键
+        await redis.del(k);
+        cleared.push(`${k} (task gone)`);
+        continue;
+      }
+      if (t.status !== 'running' && t.status !== 'queued') continue;   // waiting_user/done/failed 都不碰
+      const age = now - (t.createdAt ?? 0);
+      if (age < STALE_TASK_SEC) continue;
+      t.status = 'failed';
+      await persistCodeActTask(t);
+      await unregisterAgentChat(chatId, taskId);
+      cleared.push(`${k} (task ${taskId.slice(0, 8)} age ${Math.round(age / 60)}min, marked failed)`);
+      logger.warn({ chatId, taskId, ageMin: Math.round(age / 60) },
+        'agent: stale running task swept (index cleared, status failed)');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'sweepStaleAgentTasks failed (non-fatal)');
+  }
+  return { cleared, checked };
+}
+
 export function reportProcessLifetime(): void {
   const now = Math.floor(Date.now() / 1000);
   if (now - lastLogSec < EVERY_SEC) return;

@@ -5035,3 +5035,56 @@ xxb:codeact:tasks hash 里它 status=**running**  createdAt=09-23 18:37 UTC
   4. 它跨重启吗
 第 2 步我 round 104 跳过了——直接用了 redis-cli 的默认 db。
 ```
+
+---
+
+## 僵尸清了 + 加了自愈清扫；顺带发现 background 有真信号（round 106）
+
+Round 105 定位到真因（我查错 redis db）。这轮把三件事做完：
+
+### 1. 一次性清理
+
+```
+清理前: 25249feb status=running createdAt=09-23 18:37 UTC（job 18:51 就 failed）
+清理后: status=failed · 索引已删
+```
+
+**效果**：`25249feb` 最后一次活动 23:46:13 UTC，清理后再无一条。
+而 23:48-49 出现的 background 来自**新任务**（c6943bf1 / dbb1087e）——
+那是正常行为，不是僵尸。
+
+### 2. 自愈清扫（sweepStaleAgentTasks）
+
+```
+sweepStaleAgentTasks()  每小时一次
+  · 扫 xxb:agent:active-chat:*
+  · hash 里已消失的索引        → 直接删（形态 B：TTL 不同步）
+  · status=running/queued 且 age > 2h → 改 failed + 解索引（形态 A）
+  · status=waiting_user       → **不碰**（它合法地在等人）
+```
+
+测试 7 条，两条验红（去掉 waiting_user 保护 → 2 红；去掉 hash-消失分支 → 2 红）。
+
+`waiting_user` 那个边界是 round 67 的同款应用：**不要治不会发生的病**。
+清扫一个正在等人的任务，比僵尸更糟——它会把用户的下一句话变成重复 dispatch。
+
+### 3. 顺带：background 桶可能有真信号
+
+清掉僵尸后 **background 还在涨**（来自新任务）。那说明：
+
+```
+僵尸贡献的：18 条（一个任务的泄漏）
+新任务贡献的：至少 4 条（23:48-49）
+```
+
+**round 96-101 我把 56% 全归给僵尸是对的，但那之前 "background 有一天会有真信号"
+这个判断也是对的**——只是那天还没到。现在 n 够看趋势了：
+
+```
+僵尸清掉后，background 仍在产生 → 说明长任务运行时把无关群话当打断，
+不只是泄漏，也是**常态行为**。这跟用户的"应激"直接相关。
+```
+
+**这才是这条线真正的产物**：round 101 我以为"n=1 是泄漏"就完了，
+清完发现泄漏只占一部分。如果没有做清理+清扫这两步，
+我会停在"这是泄漏"这个结论上，而那不完整。
