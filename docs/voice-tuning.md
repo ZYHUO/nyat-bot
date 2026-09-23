@@ -4068,3 +4068,47 @@ round 53 手工验过三个（answered-dedupe / topic-repeat / objective-tools�
 
 下轮在 SKIP 的 detail 里区分这两种（看测试里是 `await import` 还是 `execSync`），
 否则每次都要人重新判断这 15 个 SKIP 里哪些该管。
+
+---
+
+## SKIP 分完三类：行为类 / 脚本比字符串 / 故意断言注释（round 57）
+
+Round 56 归档"SKIP 要分两类"，做的时候发现**三类**。
+
+```
+behavioural (calls real module — SKIP is correct)
+    import 真调模块 → tamper 保证来自模块真的被跑
+script/string compare — needs human audit
+    execSync 跑脚本比字符串 → 工具帮不上，要人定
+    （round 50 抓到的"断言对象被自己删掉"就在这一类）
+asserts on comments (rationale check)
+    故意断言注释 → 验的是"道理写下来了"
+```
+
+第三类是这轮新发现的：`cooldown-armed-log` 的 ③ 断言 `check-then-launch`
+在注释里——而那正是它要查的东西（round 66 容允这种：
+"写下为什么，否则下一个人当冗余删掉"）。
+
+**前两类是"这个测试没法自动验"，第三类是"这个测试不需要自动验"。**
+不分开的话，第三类会被当成漏项反复查。
+
+### 顺带：本轮跑出来的分布（7 个新守卫）
+
+```
+4 behavioural SKIP   2 script/string SKIP   1 comment-assert SKIP   1 GREEN
+```
+
+那个 GREEN 是 `no-duplicate-current-numbers`——脚本 tamper 的是
+markdown 里 `gate:evidence` 字样（round 56 已手验：改真正目标会红）。
+markdown 类测试的选点仍没解，记着。
+
+### 归档：工具的输出要自带"为什么我不管这个"
+
+```
+SKIP 不是终点，是一个分类。
+每个 SKIP 都要能回答"这个不用管，因为……"——
+答不上来的 SKIP 就是漏项。
+```
+
+现在这 7 个 SKIP 每一个都答得上。而 round 50 那批 15 个 SKIP 也都能
+按这三类归位（行为类占多数）。

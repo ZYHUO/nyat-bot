@@ -90,7 +90,19 @@ function pickTarget(testFile: string): { src: string; needle: string; from: numb
 function runOne(testFile: string): Result {
   const t = pickTarget(testFile);
   if (!t || !t.needle) {
-    return { test: testFile, verdict: 'SKIP', line: '', detail: 'no code-line target found' };
+    // round 56: SKIP 分两类，否则每次都要人重新判断这 15 个 SKIP 里哪些该管。
+    //   behavioural   — the test imports and CALLS the real module, so its tamper
+    //                   guarantee comes from the module itself being exercised.
+    //   script/string — the test runs a script and compares strings; this tool
+    //                   cannot help, a human must decide (round 50's constant-true
+    //                   assertion was in exactly this class).
+    const src0 = fs.readFileSync(testFile, 'utf8');
+    const kind = /await import\(|from '[^']*src\//.test(src0)
+      ? 'behavioural (calls real module — SKIP is correct)'
+      : /execSync\(/.test(src0)
+        ? 'script/string compare — needs human audit'
+        : 'no code-line target';
+    return { test: testFile, verdict: 'SKIP', line: '', detail: kind };
   }
   const backup = BACKUP + ':' + t.src.replace(/[^\w]/g, '_');
   fs.copyFileSync(t.src, backup);
@@ -108,7 +120,13 @@ function runOne(testFile: string): Result {
       if (line.trimStart().startsWith('//')) continue;
       if (line.includes(t.needle)) { idx = i; break; }
     }
-    if (idx < 0) return { test: testFile, verdict: 'SKIP', line: '', detail: 'needle only in comments' };
+    if (idx < 0) {
+      // round 57: 第三类 SKIP —— 测试故意断言**注释**（验证"道理写下来了"）。
+      // 这不是缺陷：`cooldown-armed-log` 的 ③ 断言 `check-then-launch`
+      // 在注释里，而那就是它要查的东西（round 66 容许这种：
+      // "写下为什么，否则下一个人当冗余删掉"）。
+      return { test: testFile, verdict: 'SKIP', line: '', detail: 'asserts on comments (rationale check)' };
+    }
     const original = lines[idx]!;
     lines[idx] = original.replace(t.needle, 'ZZ_TAMPERED');
     fs.writeFileSync(t.src, lines.join('\n'));
@@ -154,6 +172,7 @@ const pad = (s: string, n: number): string => s.length >= n ? s.slice(0, n) : s 
 console.log('\n=== tamper audit ===\n');
 for (const r of rows) {
   console.log(`  ${pad(r.test.replace('tests/', ''), 62)} ${r.verdict}${r.line ? '  <- ' + r.line : ''}`);
+  if (r.verdict === 'SKIP' || r.verdict === 'GREEN') console.log(`      (${r.detail})`);
 }
 const red = rows.filter((r) => r.verdict === 'RED').length;
 const green = rows.filter((r) => r.verdict === 'GREEN').length;
