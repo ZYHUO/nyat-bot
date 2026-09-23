@@ -1,5 +1,6 @@
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
+import { incrCounter } from '../metrics/registry.js';
 
 /** 7 天 — 重启后 Attention 残留 / busy requeue 不能再回同一条 */
 const TTL_SEC = 7 * 24 * 3600;
@@ -19,6 +20,26 @@ export async function markMessageAnswered(chatId: number, messageId: number): Pr
     const times = prev && prev !== '1'
       ? prev.split(',').map((x) => Number.parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0)
       : [];
+    // round 38：**给账本加打点。**
+    //
+    // round 37 回放各闸时发现：重复锚点闸（round 89）全日志只拦 3 次，而我按它判据
+    // 从 `host sendText` 日志回放得 3854 候选——差 1285 倍。
+    //
+    // 两个数来源不同：我的回放读发送日志，闸自己读 `answeredTimestamps(chat, anchor)`，
+    // 而那个的源就是这里的 `markMessageAnswered`——**这个函数此前零打点**。
+    // 于是"闸拦得少"这件事无法定论：上一份日志看得到"发了"，看不到"记了账吗"。
+    //
+    // 三个数分开记（都是 chat label，和 delegation_target_absent_total 同形）：
+    //   写入 —— 新戳真的进了账本
+    //   旧格式 —— prev === '1'（历史遗留，正常但要知道有多少）
+    //   同秒去重 —— round 132 修的那个双签还能看到（应为 0，非 0 = 有人在绕过这里）
+    // 这两个"非写入"分支其实比写入更值得看：它们正是"账本和发送日志对不上"的位置。
+    incrCounter('answered_stamp_read_total', { chat: chatId });
+    if (prev === '1') incrCounter('answered_legacy_format_total', { chat: chatId });
+    const now = Math.floor(Date.now() / 1000);
+    if (times.length > 0 && times[times.length - 1] === now) {
+      incrCounter('answered_same_second_skipped_total', { chat: chatId });
+    }
     // round 132：**同一次回答不能记两个戳。**
     //
     // 生产实测 `xxb:meta:answered:-1003350411234:68491` =
@@ -34,10 +55,10 @@ export async function markMessageAnswered(chatId: number, messageId: number): Pr
     // 而同一次发送的两个 mark 只差几毫秒。隔一秒的回答仍然各记一次。
     // 直接 return，不续 TTL：上一次写就是同一秒前的事，
     // 它已经把 TTL 设成 TTL_SEC 了，再续没有意义（也少一个依赖的方法）。
-    const now = Math.floor(Date.now() / 1000);
     if (times.length > 0 && times[times.length - 1] === now) return;
     times.push(now);
     await getRedis().set(key(chatId, mid), times.slice(-5).join(','), 'EX', TTL_SEC);
+    incrCounter('answered_stamp_written_total', { chat: chatId, stamps: times.length });
   } catch (err) {
     logger.debug({ err, chatId, messageId: mid }, 'markMessageAnswered failed');
   }
