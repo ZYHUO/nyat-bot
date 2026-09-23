@@ -3761,3 +3761,50 @@ Round 48 的规矩要补一句：**没红时先分清是"tamper 没生效"还是
 这两者都会表现成"测试绿着"，但修法相反：
   tamper 没生效 → 换 tamper 选点（这次）
   断言太弱       → 改断言的结构（round 140/142/174/176 那五次的修法）
+
+---
+
+## 33 个守卫一次 tamper 完：20 真红、3 个"SUSPECT"全是 tamper 选点问题（round 50）
+
+Round 49 说还有 ~26 个守卫可查。这轮写了个脚本一次跑完（选点：从测试里抽
+`incrCounter('...')` 或 `toContain('...')`，去源码里改坏，看是否红）。
+
+```
+20 个 RED OK
+ 3 个 GREEN ← SUSPECT
+12 个 NO_SRC / NO_PATTERN（脚本抽不到目标，不是失败）
+```
+
+### 三个 SUSPECT，逐个手动验完，全是 tamper 选点问题
+
+| 测试 | 脚本 tamper 的 | 为什么没红 | 手动 tamper 后 |
+|---|---|---|---|
+| `cooldown-armed-log` | `logger.debug` | 断言的是 `logger.info`，改 debug 碰不到它 | info→debug → **2 红** ✓ |
+| `check-gate-evidence` | `"gate:evidence"` | 脚本选了字符串，而那条测的是别的东西 | 去掉 `date -u` 的 UTC 限定 → **2 红** ✓ |
+| `flag-census-no-orphan-section` | `for sec in SECTION_ORDER` | 那行 round 198 已经删了，tamper 一个不存在的串 | 见下 |
+
+### 第三个是真发现
+
+`flag-census-no-orphan-section` 的 ① 断言 `expect(loopBlock).not.toContain('for sec in SECTION_ORDER')`——
+**它在断言一个"已经不存在的东西不存在"**。这种断言无法被 falsify（falsify 不了）：
+
+```
+if (X removed) then expect(not contain X) 恒真
+```
+
+这是"假绿"的一种新形态：不是断言太弱（round 140/142/174/176 那族），
+而是**断言的对象被自己的修复删掉了，测试就退化成一个永远为真的句子**。
+
+→ 那 2 条 RED（③④ 那份）仍然是真的，所以测试整体还有用，
+但 ① 已经死了。
+
+### 归档：假绿的三种形态
+
+| 形态 | 轮 | 修法 |
+|---|---|---|
+| 字符串在场 ≠ 机制在（注释里也有） | 140/142/174/176 | 断言查未注释的代码行/结构 |
+| **断言的对象被自己的修复删掉了** | **50** | 改成断言"现在的结构"而不是"旧结构不在" |
+| tamper 没生效（选点错/文件错） | 48/49/50 | 先分清三种再动手 |
+
+第二种是新的，而且**最阴**：它不报错、不警告、永远绿，
+而你每次看到它都会以为"这条守住了"。
