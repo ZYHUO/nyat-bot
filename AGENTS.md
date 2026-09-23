@@ -297,3 +297,30 @@ the cause was writing `AGENTS.md` / `README.md` — repo-root files, which
 `referenceExists` did not list until round 151. The rest were deliberate bad examples
 (`src/does/not-exist-xyz.ts`, `skills-MISSING.md`) that I put in backticks while writing
 up *how the guard works*.
+### A guard that reports "0 times" has never once meant "didn't happen"
+
+Three separate times this session a guard's counter read 0 and the natural reading —
+"the scenario never occurred" — was wrong:
+
+| round | guard | what "0" actually meant |
+|---|---|---|
+| 191 | same-text dedup | the skip is logged at `debug`, and `LOG_LEVEL=info` — invisible (391 criterion hits, 190 real duplicates) |
+| 196 | same-text dedup (doc) | the doc said "scenario hasn't appeared"; it had, 390+ times |
+| 201 | delegation arg guard | the fallback condition (`/[\u4e00-\u9fa5\w]{2,}/` on recent human messages) is almost always true in a busy group, so the guard could never fire — 36 real candidates |
+
+**Before trusting a zero, replay the guard's own criterion against the log and see
+whether the scenario occurred.** If it did and the counter is still 0, the guard — or
+its observability — is the bug, not the traffic.
+
+The general shape: a guard has three faces, and fixing one leaves the other two:
+
+| face | what breaks when it's wrong |
+|---|---|
+| **behaviour** | the guard blocks nothing (round 201: condition too wide to ever be false) |
+| **observability** | the guard blocks things but you cannot tell (round 191: `debug` under `LOG_LEVEL=info`) |
+| **every call site** | the fix lands on one of two copies (round 192/198: two `SECTION_ORDER`s; round 173: key written inside the shard loop) |
+
+Round 200's addendum lists the four fixes that were each "half applied". The lesson is
+not "be careful" — it is **name the three faces before calling a guard done**, and check
+each one with a different instrument: replay the criterion (behaviour), grep the log at
+the level it's actually written (observability), grep for a second copy (call sites).
