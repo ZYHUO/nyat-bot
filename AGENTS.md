@@ -199,3 +199,20 @@ comment in place of it saying why (so nobody re-adds it), and note it in the cen
 section. Then re-run the census and bump the key count in `schema-sections.test.ts`. If a flag
 must exist before its wiring lands, add it to `ALLOWLIST` in the dead-switch test *with a
 reason* — that is an IOU, not an exemption.
+
+## Editing files: write real newlines, never `\n` escapes
+
+Multi-line insertions via python `"...\n..."` string literals land as **literal backslash-n**
+in the file, and esbuild then fails with `Syntax error "n"` (round 118, and the same
+family cost this session five rounds: `\uXXXX` for Chinese in round 42/63/67, `\\n` here).
+
+Rules:
+
+- Multi-line text: use the `write` tool, `printf`, or a heredoc with real newlines.
+- Chinese into docs/README: write it directly. Never `\uXXXX` escapes — they mangle
+  ("傲慢"→"僵慢") and the mangling survives sed.
+- If a tool call needs a multi-line block, build it as a **list joined with `"\n"`**
+  (`"\n".join([...])`), or append line by line — not as one escaped literal.
+
+A syntax error from this is loud, which is the good case. The bad case is the one that
+*silently* writes the wrong character — that only shows up when someone reads the file.
