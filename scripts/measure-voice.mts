@@ -92,7 +92,7 @@ const gate = {
   bypassIngest: 0, coalesceHold: 0,
   blockedByGate: 0, truncated: 0,
 };
-const actByHour = new Map<string, { r: number; w: number; p: number; x: number }>();
+const actByHour = new Map<string, { r: number; w: number; p: number; x: number; f: number }>();
 let reacted = 0;
 // round 117: 坏掉的 pass（LLM 失败 fail-closed），不算选择不说。
 let metaFailedPass = 0;
@@ -144,13 +144,19 @@ for await (const line of rl) {
   // 旧口径把 254 次"坏掉不说话"全算漏，② 的 n 少 16%。
   if (m === 'Meta heart: pass') {
     const why = String(d.why ?? '');
-    if (why === 'llm_failed' || why === 'parse_failed') metaFailedPass++;
+    if (why === 'llm_failed' || why === 'parse_failed') {
+      metaFailedPass++;
+      const h2 = new Date(t).toISOString().slice(0, 13) + 'Z';
+      const hr = actByHour.get(h2) ?? { r: 0, w: 0, p: 0, x: 0, f: 0 };
+      hr.f++;
+      actByHour.set(h2, hr);
+    }
   }
   if (m === 'Heart decision') {
     const a = String(d.act ?? '');
     if (a in act) act[a] = (act[a] ?? 0) + 1;
     const hour = new Date(t).toISOString().slice(0, 13) + 'Z';
-    const rec = actByHour.get(hour) ?? { r: 0, w: 0, p: 0, x: 0 };
+    const rec = actByHour.get(hour) ?? { r: 0, w: 0, p: 0, x: 0, f: 0 };
     if (a === 'reply') rec.r++; else if (a === 'wait') rec.w++; else if (a === 'pass') rec.p++;
     else if (a === 'react') rec.x++;
     actByHour.set(hour, rec);
@@ -311,9 +317,9 @@ if (actByHour.size > 1) {
   console.log(P('按小时 reply%：'));
   for (const h of [...actByHour.keys()].sort()) {
     const r = actByHour.get(h)!;
-    const n = r.r + r.w + r.p;
+    const n = r.r + r.w + r.p + r.f;
     if (n < 10) continue;
-    console.log(P(`   ${h}  n=${String(n).padStart(4)}  reply=${String(r.r).padStart(4)}(${(r.r * 100 / n).toFixed(0).padStart(2)}%)  react=${String(r.x).padStart(3)}  wait=${r.w}  pass=${String(r.p).padStart(4)}`));
+    console.log(P(`   ${h}  n=${String(n).padStart(4)}  reply=${String(r.r).padStart(4)}(${(r.r * 100 / n).toFixed(0).padStart(2)}%)  react=${String(r.x).padStart(3)}  wait=${r.w}  pass=${String(r.p).padStart(4)}${r.f ? `  失败 ${r.f}` : ''}`));
   }
 }
 console.log();
