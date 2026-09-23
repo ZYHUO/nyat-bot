@@ -38,13 +38,24 @@ echo
 echo "  分母（能不能读出结论）："
 # round 111：把"0 算不算数"的判断也自动做。
 # 固定用今天 UTC 日期的带锚发送数 >= 20，与 measure:voice 的 ③ 守卫同阈值。
-ANCHORED=$(awk -v d="$(date -u +%Y-%m-%d)" '
+# round 112：按 **UTC 今天** 切（和 measure:voice --day 同口径）。
+# 原来数全累计 → 把修复前的样本混进来（round 40 的教训），
+# 而四个闸里三个是这几轮加的，会让分母虚高、结论偏乐观。
+# JSON 的 time 是 ms since epoch，用 strftime 拼 UTC 日期再比。
+ANCHORED=$(awk -v want="$(date -u +%Y-%m-%d)" '
   /"msg":"host sendText"/ && /"replyTo":[0-9]+/ {
-    # 只按行里的 time 粗判日期（ISO 从 time 换算），不够精确但够分流
-    n++
+    if (match($0, /"time":([0-9]+)/, m)) {
+      secs = int(m[1] / 1000);
+      if (strftime("%Y-%m-%d", secs, 1) == want) n++;
+    }
   }
   END{print n+0}' logs/app.log 2>/dev/null || echo 0)
-echo "    全日志累计带锚发送 ${ANCHORED} 条（粗筛；精确按天算见 measure:voice ③）"
+echo "    今天（UTC）带锚发送 ${ANCHORED} 条，需要 >=20 才读得动上面那些数"
+if [ "${ANCHORED}" -lt 20 ]; then
+  echo "    ⚠️ 分母 <20 —— 上面四个 0 都**不算证据**（等今晚 23:00 的 cron）"
+else
+  echo "    ✓ 分母够。"
+fi
 echo
 echo "  四个闸都是"拦住越多越说明在工作"，但 0 也可能是没遇到场景。"
 echo "  分母够且 0 组重复 = 修好了；分母不够 = 什么都别读。"
