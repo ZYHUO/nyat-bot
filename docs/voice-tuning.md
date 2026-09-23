@@ -2325,3 +2325,47 @@ Telegram 长轮询的物理延迟。
 
 又一处"没先分清责任就下结论"。round 137 我说 A 段"是纯基建延迟"，
 把整段都算成我们能改的；里面有三分之一是别人（Telegram）的。
+
+---
+
+## handler 的 4.1s 归因不了：中间的步骤一条日志都不打（round 139）
+
+Round 138 分出"我们 handler → attention 约 4.1s"。这轮想定位它花在哪。
+
+`src/bot/handlers/message.ts` 在 `message in` 到 attention 之间有 **12 个 await**：
+
+```
+isDuplicate · isRateLimited · isAsleep · addMessage · recordUserMessage
+ingestIncomingPostTask · runIngressShadow · tryMetaIngressIntercepts
+metaSleepGate · shouldForceSameSpeakerL0/markSpeakerBurst · hasTimedBypass
+structural-ignore/denoise 判定
+```
+
+但**它们一条日志都不打**。实测（最活跃群 11:55-12:15）：
+
+```
+11:59:20  message in
+11:59:26  Heart decision act=reply
+11:59:26  attention ingested (heart)      ← 和决策同一秒
+```
+
+即从 `message in` 到第一个输出只有 6.1s，中间**没有任何可观测的路标**。
+另一个窗口同样：`12:00:42 message in → 12:00:58 decision`（15s），中间空的。
+
+### 结论（诚实的版本）
+
+**这 4.1s 用日志归因不了。** 要么加插桩（12 个点、给生产路径加代码、为了一次性测量），
+要么等今晚 cron 的稳态数据看它在全天尺度上是否稳定。
+
+我选后者。理由：为一 次性测量往生产热路径加 12 个时间戳，成本和收益不成比例，
+而且加完还要想清楚怎么关掉（AGENTS.md 的 flag 规矩）。
+
+### 顺带修正 round 137 的一个口径
+
+我把 ① 拆成 A（消息→attention）和 B（attention→决策）时，B 的配对是
+"这个决策之前最近的一次 ingestion"。但日志显示 ingestion 和 decision
+**常常同一秒发生**，而且连着的两个决策间隔 6.5s 而没有新消息。
+说明心流是**批量/续接**决策的，不是一个消息一次。
+
+所以 A/B 那 5.4s / 7.8s 的划分**边界是糊的**——方向上（两段各占一半）可能对，
+具体数字别引用。要精确得用 taskId 这类真实关联，而 attention ingestion 没有。
