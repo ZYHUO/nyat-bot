@@ -129,23 +129,44 @@ if (chatId < 0 && !formatted.isBot && text.length >= 3 && ...)
 `/q`/`/re`/`/checkin`/`/stock`/`/cards`→不要，`/q 或回复消息使用`→不要）。
 测试 ⑧ 把这个集合钉住，改了判据就红，逼人重新对一遍真实数据。
 
-### 第 3 步｜B 的真主药：一个任务被 interrupt 吊着连发（R6）
+### 第 3 步｜B 的真主药 —— 已按 k3 裁决改写，(a)(c)(d) 完成（round 170-171）
 
-**改**：`tryDelegateCommand`（唯一收口：command-router / host-api `bots.command` / legacy registry 三路全走它）。
-判据用库里已有的 `getCommandProfile(bot, cmd).usage_syntax` 推 arity：
+**k3 2026-09-24 裁决：原 3b 前半否决、后半不动。**理由记在这里，否则下一轮
+review 还会把它当方案：
 
-- usage **无占位**的命令（`/checkin`）→ 不进闸
-- usage **有占位**且 `args` 为空 → 查最近 6 条人类消息里有没有该占位形状的串；没有就 `return { sent:false, text }`
+· **`NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC` 8→20~30 否决**。它是 **chat 级全局**
+  阀门（`budget.ts:231` 的 `xxb:nyatos:lastact:{chatId}`，无 task 维度），
+  管的是"群里隔多久开一次口"，管不了"一个任务自己连开几次"。
+  而且 **30s 是 round 68 按用户"33% 的回复被吐回去"那个抱怨否决不用的值**——
+  拿一个已被用户否定的实验值去修一个它管不着的机制，是纯回归。
+  验收指标也**不可分辨**：per-task 气泡数下降既可能是"止住连发"，
+  也可能是"吐回更多回复"，在 session-report 里长得一模一样。
+· **`AGENT_TASK_SEND_BUDGET` 6→3 不动**。单位错配：budget 数的是**调用**，
+  而 `>6 条的尾巴 16/1316` 是"3 片一调"的分片副产物，不是预算失灵。
+  且调小会走 `endTask('send_budget_exhausted')` → failsafe → **raw sendMessage
+  绕过全部闸** → 用户收到"没搞定"的**假失败**，比连发更难解释。
+  legitimately 需要 4+ 次调用的形状有四种（中段汇报/回执转述/3 条 interrupt
+  各回应一次/跨小时多段任务）。
 
-**不是 throw**：`tryDelegateCommand` 的契约是永不抛（docstring），外层 catch 会把专属文案换成"代发出了点问题"。既有形状是 `return { sent:false, text }`。
+**(a) 观测（round 170）**：`host sendText` / `continuation` 加 `taskId`。
+（之前两条都不带，于是"一个任务发了几个气泡"从日志里算不出来。）
+⚠️ 生产未验证—— 16:32 部署后群还没醒。
 
-**为什么不用全局 IP 正则**：`1.1.1.1:8443`、`8.8.8.8/29` 会漏；`v2.1`、`a.b`、文件名又乱放行；而 `3U 预计100地区` 里的 `100` 不是 IP——现场那句就是反例。
+**(c) task 级 burst 闸（round 171，从 3c 提前）**：
+`TASK_BURST_GAP_SEC = 12`，读 `xxb:agent:lastsend:{taskId}`（只在一次
+sendText **调用完成**后写，不在分片上写），距上次调用 <12s → 抛回模型
+`send_task_burst_total` 计数器 + info。**与 MIN_GAP 正交，不可能回归 round 68。**
 
-**验收**：`incrCounter('delegation_missing_args_total', { chat, bot, cmd })`（round 84 的
-`delegation_target_absent_total` 是现成样板）；单测覆盖"有占位+空 args → 不发送"和
-"无占位 → 放行"两路；上线看 `delegated learned command` 里 `args:""` 占比下降。
+**两个实现要点**（都是弄坏验证时教出来的）：
+1. 判定放 `try` 里、`throw` 放 `try` 外——第一牌把 throw 写在 try 里，
+   自己的 `catch` 会把它吐掉，**闸永远不生效**。测试① 钢住这个顺序。
+2. `try` 里 fail-open：防变胖的闸不能因为它自己出错挡住发送。
 
-### 第 3 步｜B 的真主药：一个任务被 interrupt 吊着连发（R6）
+**(d) 修注释脱节（round 170）**：`budget.ts:209` 写死"被叫到 30s"→ 改成引用
+env 变量名并指回 `life.ts` 的理由注释。
+
+**仍待数据**：3b 后半（6→3）等 calls 维度观测的数据出来再拍；
+(b) interrupt 分级（寻址 vs 噪音）排最后，因为它动 prompt 语义。
 
 按代价排序，**前两步零代码**：
 
