@@ -84,7 +84,23 @@ if (chatId < 0 && !formatted.isBot && text.length >= 3 && ...)
 
 **已知代价**：闲聊借命令的命中率下降（这正是目的），但可能砍掉一些本来好用的代发。
 
-### 第 1 步｜回执判读（R2/R4）
+### 第 1 步｜回执判读（R2/R4）—— ✅ 已完成（round 168）
+
+**已部署**：`src/pipeline/tools/bot-delegation.ts`
+· `isCommandRejection(text)`（`isProgressPlaceholder` 的兄弟函数，120 字上限）
+· `tryHandleDelegationReceipt` 在占位**之后**、结果**之前**加一支：命中 → 清 pending
+  + `incrCounter('delegation_receipt_usage_error_total')` + info
+  `Delegation: receipt is a usage error, not a result`
+· `answerFromDelegation(..., rejected=true)` 走另一套指示：「这不是查询结果，
+  别把它当数据，更别说"没查到相关数据"…绝对不要自己编一个参数再发一次」
+
+**清 pending 是关键**：不清的话下一条群消息会被当成它的结果消费掉
+（现场"答非所问成串"的来源之一）。
+
+测试 7 条（删掉整个分支验过红）。两个新机制接进 verify-deploy CHECKS
+（75→77）和 verify-integration 真调 findTopicRepeat（31→34）——
+后者是还 round 163 的债：当时加完话题词闸没做集成核验，
+导致"说不清它在不在拦"。
 
 **改**：`src/pipeline/tools/bot-delegation.ts` 加 `isCommandRejection(text)`
 （`isProgressPlaceholder` 的兄弟函数，放它旁边）。命中时**不当结果消费 pending**，
