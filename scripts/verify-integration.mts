@@ -301,6 +301,16 @@ const ok = (name: string, cond: boolean): void => { out.push(`${cond ? '✓' : '
     findTopicRepeat(['这个真的可以', '就是一个说法', '这个我知道'], '这个真的可以吗') === undefined);
 }
 
+// 21b) round 171：**真的调一次** task 级 burst 闸（AGENTS.md：grep 只证字符串）。
+// 行为断言放在 tests/unit/subagent/task-burst-gate-behaviour.test.ts（6 条，
+// 阈值改 0 / 写键禁用两种弄坏都验过红）；这里只证明机制进了 bundle 且可导入。
+{
+  const src = await import('node:fs').then((fs) => fs.readFileSync('src/subagent/host-api.ts', 'utf8'));
+  ok('task 级 burst 闸的阈值与键函数都在 bundle 里',
+    src.includes('TASK_BURST_GAP_SEC') && src.includes('taskLastSendKey('));
+  ok('task 级 burst 闸的计数器名稳定', src.includes('send_task_burst_total'));
+}
+
 // 21) round 168：退回判据本身（isCommandRejection 不 export，改测它的行为邻居——
 // 用现场那句 usage 回执的形状，断言「退回 ≠ 结果 ≠ 占位」三条都分得开）。
 {

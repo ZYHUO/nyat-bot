@@ -165,6 +165,21 @@ sendText **调用完成**后写，不在分片上写），距上次调用 <12s �
 **(d) 修注释脱节（round 170）**：`budget.ts:209` 写死"被叫到 30s"→ 改成引用
 env 变量名并指回 `life.ts` 的理由注释。
 
+**行为验证（round 172）**：上面的结构测试（task-burst-gate.test.ts，7 条）只能证明
+"代码在那儿"。现在有了 **行为测试**（task-burst-gate-behaviour.test.ts，6 条，
+真的调 `host.telegram.sendText` 两次）：
+
+  ① 同一任务紧接着第二次开口 → 抛回模型，且 `sendMessage` 只被调一次
+  ② 换一个 taskId → 不受影响
+  ③ 没有 taskId（legacy / failsafe）→ 完全不管
+  ④ 距上次 > 阈值 → 放行（把键写到 60s 前）
+  ⑤ 键真的被写下来（否则第二次永远放行，闸是死的）
+  ⑥ redis 读失败 → fail-open（防变胖的闸不能挡住发送）
+
+两种弄坏都验过红：阈值 12→0（① 红）、写键禁用（①⑤ 红）。
+现在 **3a/3c 只差生产确认**（群醒了就能看到 taskId 字段和
+`send_task_burst_total` 计数器）。
+
 **仍待数据**：3b 后半（6→3）等 calls 维度观测的数据出来再拍；
 (b) interrupt 分级（寻址 vs 噪音）排最后，因为它动 prompt 语义。
 
