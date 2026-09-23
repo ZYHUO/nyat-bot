@@ -423,3 +423,26 @@ round 15 我标记过"`isEdit` 污染入站分母"，当时的决定是
 已经接近"每三条回一条"，用户说"太爱说话"比我以为的更严重。
 
 （n=9 禁结论。但这个口径错误影响过去 34 轮的所有回复率数字。）
+
+---
+
+## ③ 的一个真实缺口：心流路径不 mark answered（round 52）
+
+今早重复率 0.0% → 12.5%（2/16）。追下去发现 **round 4 只修了一半**：
+
+`markMessageAnswered` 全仓 7 处调用，但分布是
+
+```
+src/subagent/host-api.ts          6 处   ← Subagent 路径
+src/subagent/post-task-window.ts  1 处   ← Subagent 路径
+src/meta/dispatch-gate.ts         1 处   ← 但那是 no_action 分支（没回才标）
+```
+
+**心流产出 reply 的主回复路径一次都没 mark**（`heart.ts` 只返回
+`judgeResult`，之后由 pipeline/sender 发出）。于是"这条我回过"这个事实
+对心流的下一次决策不可见——8 分钟后对同一条又回一次，每次都以为
+自己是第一次。
+
+全天 1.9% 是因为多数重复发生在 Subagent 路径（mark 覆盖到的那部分）；
+心流路径一旦重复就完全没拦。**这不是"修完了"，是一个待补的缺口。**
+修它要动发送公共出口（`sender/telegram.ts` 或 pipeline 的 deliver 段）。
