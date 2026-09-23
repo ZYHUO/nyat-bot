@@ -16,6 +16,56 @@ import type { FormattedMessage } from '../../shared/types.js';
 
 export const PENDING_KEY = (chatId: number): string => `xxb:delegation:${chatId}`;
 const COOLDOWN_KEY = (chatId: number): string => `xxb:delegation:cd:${chatId}`;
+/** round 55（用户报"呼味将出去调用"）：目标 bot 在不在这个群的缓存。 */
+const IN_CHAT_KEY = (chatId: number, bot: string): string => `xxb:delegation:inchat:${chatId}:${bot.toLowerCase()}`;
+/** 缓存 10 分钟：getChatMember 是一次网络请求，而代发本身不频繁。 */
+const IN_CHAT_TTL_SEC = 600;
+
+/**
+ * 目标 bot 在不在这个群。
+ *
+ * 2026-09-23（用户："这个群里没有那个 bot 也去调用，结果啥都没有还天天调用"）。
+ *
+ * 先验证再修（通过 GLOBAL_FETCH_PROXY 直连 Telegram，本地 DNS 把 api.telegram.org
+ * 解析到 Facebook 的 IP，不走代理连不上）。今天 18 次代发里 **5 个目标不在群**：
+ *   -1004430867819 @uzumaru_geoip_bot  left
+ *   -1003543275052 @uzumaru_geoip_bot  left
+ *   -1004451430063 @KairoClaw_bot      left
+ *   -1003350411234 @uzumaru_geoip_bot  left
+ *   -1002683458784 @KairoClaw_bot      left
+ * 只有 -1003543275052 的 KairoClaw_bot 真的在（administrator）。
+ *
+ * 后果：代发进没有目标 bot 的群，那条消息没人接，于是 38 次代发无回执。
+ * 而冷却/PENDING 按 chatId 计，所以它会在每个群里反复试。
+ *
+ * fail-open：查不动（网络/权限）旵3 true 继续发。否则一次 getChatMember
+ * 故障就会把所有代发全撞停——那是另一种"啥都没有"。
+ */
+async function targetBotInChat(chatId: number, botName: string): Promise<boolean> {
+  const key = IN_CHAT_KEY(chatId, botName);
+  try {
+    const cached = await getRedis().get(key);
+    if (cached === '0') return false;
+    if (cached === '1') return true;
+  } catch { /* cache miss -> 现问 */ }
+
+  try {
+    const { getBot } = await import('../../bot/bot.js');
+    // ⚠️ getChatMember 的 user_id **不吃 @username**（实测 Bad Request:
+    // invalid user_id specified）——它要数字 uid，而这里只有用户名。
+    // 所以先 getChat(@name) 拿 id，再 getChatMember。
+    const api = getBot().api;
+    const info = await api.getChat('@' + botName);
+    const m = await api.getChatMember(chatId, info.id);
+    const status = (m as { status?: string }).status ?? '';
+    const inChat = status !== 'left' && status !== 'kicked';
+    void getRedis().set(key, inChat ? '1' : '0', 'EX', IN_CHAT_TTL_SEC).catch(() => {});
+    return inChat;
+  } catch {
+    logger.debug({ chatId, botName }, 'delegation: target-in-chat check failed, fail-open');
+    return true;
+  }
+}
 /**
  * 未完成代发的回执等待窗口。
  *
@@ -103,6 +153,14 @@ export async function tryDelegateCommand(
     // 已有未完成的代发 → 不并发(回执匹配会乱)
     const existing = await redis.get(PENDING_KEY(chatId));
     if (existing) return { sent: false, text: '上一条代发还在等回执,先等等。' };
+
+    // round 55: **目标 bot 不在这个群就别发**。
+    // 用户原话："这个群里没有那个 bot 也去调用，结果啥都没有还天天调用"。
+    // 今天 18 次代发里 5 个目标不在群（uzumaru_geoip_bot 在 4 个群 left；
+    // KairoClaw_bot 在 3 个群里 2 个 left）——发进去没人接，就是 38 次无回执的来源。
+    if (!(await targetBotInChat(chatId, bot))) {
+      return { sent: false, text: `${bot} 不在这个群里,代发了也没人接。` };
+    }
 
     const cleanArgs = (args || '').trim().slice(0, 120);
     const text = `${cmd}@${bot}${cleanArgs ? ' ' + cleanArgs : ''}`;
