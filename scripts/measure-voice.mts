@@ -39,7 +39,20 @@ if (dayIdx >= 0) {
   const raw = (argv[sinceIdx + 1] ?? '00:00').trim();
   if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
     const [datePart, timePart = '00:00'] = raw.split(/\s+/);
-    cutoff = Date.parse(`${datePart}T${timePart.padStart(8, '0').slice(0, 8)}Z`);
+    // round 93：**修 round 51 自己的 bug。**
+    //
+    // 原来写 `timePart.padStart(8,'0').slice(0,8)`——那是把 'HH:MM' 当
+    // 'HH:MM:SS' 右补零，但 padStart 是**左**补：'11:21'.padStart(8,'0')
+    // = '00011:21'，slice(0,8) 不变，Date.parse 得 NaN → fallback 到
+    // `${datePart}T00:00:00Z`（全天）。
+    //
+    // 我 round 51 验的是 '2026-09-22 00:00'（timePart 长度 5 但已经是
+    // '00:00'，padStart 无操作）——恰好绕过了。
+    //
+    // 现在：按 : 拆，缺的段补 0，再拼成 HH:MM:SS。
+    const [hh = '0', mm = '0', ss = '0'] = timePart.split(':');
+    const hms = `${hh.padStart(2, '0')}:${mm.padStart(2, '0')}:${ss.padStart(2, '0')}`;
+    cutoff = Date.parse(`${datePart}T${hms}Z`);
     if (!Number.isFinite(cutoff)) cutoff = Date.parse(`${datePart}T00:00:00Z`);
   } else {
     const [h = '0', m = '0'] = raw.split(':');
@@ -211,6 +224,15 @@ console.log(P(`   想看"少说话"有没有生效：react 涨 + reply 跌 才�
 console.log();
 console.log(P(`③ 重复回复率      ${dupRate.toFixed(1)}%   多出 ${extra} / 首气泡 ${first}`));
 console.log(P(`   同一锚点被回 >1 次的: ${[...anchor.values()].filter((v) => v > 1).length} 个；最惨的被回 ${Math.max(0, ...anchor.values())} 次。`));
+// round 93：**③ 的分母也要守。** round 92 我自己犯了 compare 判过的那条罪：
+// deploy 前后对比，前 343 条带锚 / 后 3 条，就报"后 0 组重复 = 修好了"。
+// 没有分母的 0 和没有分母的 100% 一样不是证据。
+// 判据在工具里（round 31 给 compare 建的）不在我脑子里——所以搬过来。
+const anchored = [...anchor.values()].reduce((a, b) => a + b, 0);
+if (anchored < 20) {
+  console.log(P(`   ⚠️ 带锚发送只有 ${anchored} 条 —— “同一锚点被回 N 次”这行的 0 不算数。`));
+  console.log(P(`      没有分母的 0 和没有分母的 100% 一样不是证据。等样本 >=20 再读。`));
+}
 console.log(P(`   (同任务内分句去重 dropped duplicate anchor ${dupAnchorDropped} 次是正常工作的，不算重复。)`));
 console.log();
 console.log(P(`④ 撞名守卫        拦下 ${collision} 次`));
