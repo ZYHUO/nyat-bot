@@ -2685,3 +2685,29 @@ Meta heart: pass       13157 次
 
 **顺带又一处"没查就下结论"**：round 149 我把两个独立的失败源说成同一个。
 这次是查了落点才发现。
+
+---
+
+## doc-references 认仓根文件了：这个守卫四次红，两次是因为 AGENTS.md/README.md（round 151）
+
+这个守卫（round 37-39 建的）到现在红过四次，全是"作者写了不存在的路径示例"：
+
+| 轮 | 写进去的 |
+|---|---|
+| 37-39 | 别人写烂的引用 |
+| 146 | `src/does/not-exist-xyz.ts`、`skills-MISSING.md` |
+| 150 | `AGENTS.md` |
+| **151** | **同一个原因再犯一次，所以修守卫本身** |
+
+`referenceExists` 只查 `src/ docs/ prompts/ skills/ packages/ tests/ data/ scripts/`，
+**仓根的 `AGENTS.md` / `README.md` 一律判不存在**——而文档里最常引用的正是它们。
+
+修：加一行 `existsSync(name)`（仓根解析）。副作用是 `.env.example` / `package.json`
+这类顶文件也自动合法，那本来就对。
+
+**双向验过**：塞一个真不存在的 `NOPE-ROOT.md` → 红；写 `AGENTS.md` → 绿。
+
+### 教训的形状
+
+前三次我都改文档绕开（"别用反引号包路径"），第四次才修守卫。
+**绕开第三次就该意识到：不是作者的问题，是守卫的清单漏了一层。**

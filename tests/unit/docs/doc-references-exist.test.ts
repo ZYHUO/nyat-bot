@@ -66,7 +66,15 @@ function extractPaths(md: string): string[] {
 function referenceExists(ref: string): boolean {
   if (ref.includes('/')) return existsSync(ref);
   const name = ref;
-  return existsSync(`src/${name}`)
+  // round 151: **repo-root bare filenames count too.** Before this,
+  // `AGENTS.md` / `README.md` written in a doc were always judged missing —
+  // this guard went red four times on "the author wrote a path example that
+  // does not exist" (round 37-39 twice, round 146, round 150), and twice the
+  // cause was exactly a repo-root file. One existsSync(name) fixes it; the
+  // side effect is that any top-level file (.env.example / package.json)
+  // becomes legal, which was already correct.
+  return existsSync(name)
+    || existsSync(`src/${name}`)
     || existsSync(`docs/${name}`)
     || existsSync(`prompts/task/${name}`)
     || existsSync(`prompts/system/${name}`)
