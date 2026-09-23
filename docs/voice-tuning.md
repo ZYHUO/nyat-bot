@@ -2622,3 +2622,38 @@ Round 147 抓 deep-reflection 35%。这轮把它放回时间轴：
 
 **Round 143 我说"原因未定论，等 23:00 cron"——现在有答案了：不是我的污染，
 是 09-20 以来的持续高 exhausted。** 那 5 个点里有一部分是我的，但底色是这个。
+
+---
+
+## exhausted 的报错方清单：心流 2699 + shadow 1654 是前两位（round 149）
+
+Round 148 定位了 exhausted 的起点（09-19 起跳）。这轮按"谁在报错"拆
+（日志的 `msg` 是调用方的消息，不是统一的"exhausted"）：
+
+```
+全窗口（09-15 → 09-23）：
+  heart LLM failed, fail-closed pass        2699  ← 心流说不出话
+  shadow decision THREW (silent)            1654  ← 影子决策静默失败
+  post-task follow-up batch failed           756
+  deep-reflection: LLM failed                589  ← round 147 那个 35%
+  Vision failed, returning placeholder       583
+  Meta LLM failed                            337
+  CodeAct LLM failed                         233
+  Knowledge sync: AI call failed             220
+```
+
+**心流自己占 2699**（约占全部 7775 的 35%），加 shadow 1654 = 58%。
+所以这个问题的第一后果就是用户抱怨的"融不进去"——心流说不出话。
+
+而 Vision 583、Knowledge 220、deep-reflection 589 都是**后台批任务**
+在同一个池子里抢 label，互相把对方拖进冷却。
+
+### 一个之前没注意到的事实
+
+`shadow decision THREW (counted as silent)` 1654 次——
+**影子决策失败被当成"沉默"计数**。这意味着 `Meta pass` 里有 1654 次
+不是"选择不说"，是"崩了但记成不说"。这和 round 116/117 拆出来的
+262 次 fail-closed 是**两个不同来源**，都要从 pass 里扣。
+
+（`measure:voice` 的 ② 现在只拆了 `llm_failed`/`parse_failed`，
+没拆 shadow THREW —— 那 1654 次仍算在正常 pass 里。）
