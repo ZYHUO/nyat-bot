@@ -14,8 +14,11 @@ describe('measure:voice 的 react 计数', () => {
   const SRC = 'scripts/measure-voice.mts';
 
   it('accepts both log names', () => {
+    // round 142：只查**未注释的**代码行。注释掉的 `// if (m === 'heart:...`
+    // 仍含该字符串，查全文字符串的话删掉代码测试还是绿。
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).toContain("m === 'heart: reacted' || m === 'Meta heart: reacted'");
+    const codeLines = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+    expect(codeLines.some((l) => l.includes("m === 'heart: reacted' || m === 'Meta heart: reacted'"))).toBe(true);
   });
 
   it('comment explains why (so nobody trims it later)', () => {

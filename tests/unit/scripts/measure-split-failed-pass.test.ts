@@ -19,9 +19,13 @@ describe('measure:voice 的 failed-pass 拆分', () => {
   });
 
   it('② 单独报一行（不并入正常 pass 的百分比）', () => {
+    // round 141/142：只查**未注释的** console.log 行。
+    // 第一版只过滤 console.log —— 而把输出行注释掉后那行
+    // 仍是 `//console.log(...)`，照样含 'console.log'，测试还是绿。
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).toContain('次 pass 是 LLM 失败 fail-closed');
-    expect(s).toContain('真实"选择不说"要扣掉这部分');
+    const outLines = s.split('\n').filter((l) => !l.trimStart().startsWith('//') && l.includes('console.log'));
+    expect(outLines.some((l) => l.includes('次 pass 是 LLM 失败 fail-closed'))).toBe(true);
+    expect(outLines.some((l) => l.includes('要扣掉这部分'))).toBe(true);
   });
 
   it('③ 分母含 failedPass（不能只除 actTotal）', () => {
