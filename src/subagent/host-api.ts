@@ -1246,6 +1246,30 @@ export function createHostApi(
               }
               // 闸放过这一片了 → 同任务的后续分片不再问（round 71）
               gatePassed = true;
+              // round 89（修 round 89）：短窗口内重复锚点闸，**必须在 sendMessage 之前**。
+              //
+              // 第一版把它放在了 `textSent += 1` 之后——那时消息已经发出去了，
+              // throw 只是让 markMessageAnswered 不执行，反而破坏了记账。
+              // 静态复查才发现：`const messageId = await sendMessage(...)` 在上面 200 行处。
+              //
+              // 只查**首气泡**的锚点——后续分句不带引用，不构成"又回了一次"。
+              if (i === 0 && firstReplyTo && firstReplyTo > 0) {
+                const stamped = await answeredTimestamps(chatId, firstReplyTo).catch(() => [] as number[]);
+                const nowSec = Math.floor(Date.now() / 1000);
+                const recent = stamped.filter((t) => nowSec - t <= REPEAT_ANCHOR_WINDOW_SEC).length;
+                if (recent >= REPEAT_ANCHOR_MAX) {
+                  logger.warn(
+                    { chatId, anchor: firstReplyTo, recent, windowSec: REPEAT_ANCHOR_WINDOW_SEC, preview: (parts[0] ?? '').slice(0, 50) },
+                    'sendText: 同一锚点短时间内已回过 — 拦下（别刷同一条）',
+                  );
+                  incrCounter('send_repeat_anchor_total', { chat: chatId });
+                  throw new Error(
+                    `未发送：这条消息你 ${Math.round((nowSec - stamped[stamped.length - 1]!) / 60)} 分钟内才回过，` +
+                    `连着回同一条会显得在刷屏。要么说点新的，要么就让这条过去。`,
+                  );
+                }
+              }
+
               const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
               if (messageId > 0) {
                 void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
@@ -1474,25 +1498,6 @@ export function createHostApi(
             lastDeliveryKind = kind;
             if (kind === 'final') finalSent = true;
             else intermediateSent = true;
-
-            // round 89：短窗口内重复锚点闸（见上面 REPEAT_ANCHOR_WINDOW_SEC 的注释）。
-            // 只查**首气泡**的锚点——后续分句不带引用，不构成"又回了一次"。
-            if (firstReplyTo && firstReplyTo > 0) {
-              const stamped = await answeredTimestamps(chatId, firstReplyTo).catch(() => [] as number[]);
-              const nowSec = Math.floor(Date.now() / 1000);
-              const recent = stamped.filter((t) => nowSec - t <= REPEAT_ANCHOR_WINDOW_SEC).length;
-              if (recent >= REPEAT_ANCHOR_MAX) {
-                logger.warn(
-                  { chatId, anchor: firstReplyTo, recent, windowSec: REPEAT_ANCHOR_WINDOW_SEC, preview: (parts[0] ?? '').slice(0, 50) },
-                  'sendText: 同一锚点短时间内已回过 — 拦下（别刷同一条）',
-                );
-                incrCounter('send_repeat_anchor_total', { chat: chatId });
-                throw new Error(
-                  `未发送：这条消息你 ${Math.round((nowSec - stamped[stamped.length - 1]!) / 60)} 分钟内才回过，` +
-                  `连着回同一条会显得在刷屏。要么说点新的，要么就让这条过去。`,
-                );
-              }
-            }
 
             const answeredIds = new Set<number>();
             // Only mark after successful send — never a stale fromModel id.

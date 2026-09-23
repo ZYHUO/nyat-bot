@@ -43,7 +43,7 @@ describe('重复锚点闸', () => {
 
   it('⑤ 只查首气泡的锚点（后续分句不带引用，不构成"又回一次"）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).toContain('if (firstReplyTo && firstReplyTo > 0) {');
+    expect(s).toContain('if (i === 0 && firstReplyTo && firstReplyTo > 0) {');
   });
 
   it('⑥ 窗口只有 3 分钟（隔很久再回同一条是合理的——有人追问）', () => {
@@ -56,5 +56,26 @@ describe('重复锚点闸', () => {
   it('⑦ markMessageAnswered 仍在发送后跑（账本要继续记）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
     expect(s).toContain('markMessageAnswered(chatId, mid)');
+  });
+
+  it('⑧ 闸在 sendMessage 之前（round 89 修：第一版放在 textSent+=1 之后，消息已发出）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    const gateIdx = s.indexOf('answeredTimestamps(chatId, firstReplyTo)');
+    const sendIdx = s.indexOf('const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId)');
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(sendIdx).toBeGreaterThan(-1);
+    expect(gateIdx, '闸必须在 sendMessage 之前').toBeLessThan(sendIdx);
+  });
+
+  it('⑨ 闸之后 markMessageAnswered 仍在（记账继续）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    const gateIdx = s.indexOf('answeredTimestamps(chatId, firstReplyTo)');
+    const markIdx = s.indexOf('markMessageAnswered(chatId, mid)');
+    expect(gateIdx).toBeLessThan(markIdx);
+  });
+
+  it('⑩ 只查首气泡（i === 0）', () => {
+    const s = fs.readFileSync(SRC, 'utf8');
+    expect(s).toContain('if (i === 0 && firstReplyTo && firstReplyTo > 0) {');
   });
 });
