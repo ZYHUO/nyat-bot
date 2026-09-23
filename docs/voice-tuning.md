@@ -446,3 +446,25 @@ src/meta/dispatch-gate.ts         1 处   ← 但那是 no_action 分支（没�
 全天 1.9% 是因为多数重复发生在 Subagent 路径（mark 覆盖到的那部分）；
 心流路径一旦重复就完全没拦。**这不是"修完了"，是一个待补的缺口。**
 修它要动发送公共出口（`src/bot/sender/telegram.ts`）。**round 52 已经修了**；那时还没动手。
+
+---
+
+## react=0 的真因：Meta 路径不认 act=react（round 54）
+
+北京 12:19 拿到大样本，**react 第一次非零（9 次，n=596）**，why 都合理
+（"笑死，欲火焚身可还行"、"测速满血，赞一个喵"）。但表情一个都没发：
+`heart: reacted` 和 `Model-chosen reaction sent` 都是 0 条。
+
+定位：`'Heart decision'` 日志唯一来源是 `decision.ts:394`，
+调用它的是 `heart.ts:236`（pipeline 路径）和 `heart-adapter.ts:206`（Meta 路径）。
+**heart-adapter.ts 只判 wait 和 pass，act=react 落到默认分支被丢掉。**
+
+而 Meta 是现在的主路径（`group_chats_processed` 105 vs legacy 7）。
+所以 9 次 react 全在 Meta 上被判了、然后静默丢弃。
+
+round 8 我说"机制已接"——只接了 pipeline 那条，没接生产真正走的 Meta。
+这和 round 4（只接读不接写）、round 19/26（只修 2 处漏 5 处）是同一形状：
+**改了 A 路径就宣布做完，而生产走 B 路径。**
+
+待补：`heart-adapter.ts` 的 react 分支（`reactToMessage` + `recordDecision` +
+返回 silence）。
