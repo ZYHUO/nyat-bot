@@ -80,6 +80,16 @@ Vitest, `globals: true`, tests mirror `src/` under `tests/unit/`.
 - **Test-vs-production isolation is enforced, not optional**: under `VITEST`, `getRedis()` rewrites the URL to **db 0** and `getDb()` forces **`:memory:`** — `env.ts` loads the real `.env` via dotenv, so without this an unmocked dynamic import writes production (2026-08-21: a test fixture landed in the master's DM context and the bot repeated it as fact). **Mock the direct behavior module** (e.g. `weather.js`), not just its deps — `vi.mock(env.js)` does not reliably propagate through deep dynamic-import chains (observed: real env leaked through, a live fetch fired). If a test fails on `:memory:` "no such table", that test was secretly touching prod — mock it properly.
 - A flaky pattern exists: the **first full `vitest run` right after editing src** occasionally reports one spurious failure that never reproduces on immediate rerun (suspected transform-cache timing). Rerun before believing it; three green runs = clean.
 
+- ⚠️ **`npx vitest run tests/unit/meta` (the directory alone) reports 2 false failures**
+  — `bookkeeping-hooks.test.ts` ③ `bot 群消息 → 查代发回执` and ④
+  `一个 hook 抛错不影响其他 hook`. They are **not a regression**: the same two files
+  pass on the full suite (`npm run test` → 534 files / 4130 passed), and pass when run
+  as individual files. Diagnosed round 92/93 by `git stash -u` (fails on clean HEAD too)
+  and by running the full suite (green). The mock of `tryHandleDelegationReceipt` only
+  takes effect when some *other* file has imported that module first. So verify meta
+  changes with the full suite or a single file — never with the bare directory, or you
+  will chase a regression that is not yours (the mistake this repo keeps making).
+
 ## Reading the production effect of a change
 
 `npx tsx scripts/session-report.mts [days]` prints one table covering the things this
