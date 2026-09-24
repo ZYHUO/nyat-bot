@@ -410,6 +410,26 @@ not "be careful" — it is **name the three faces before calling a guard done**,
 each one with a different instrument: replay the criterion (behaviour), grep the log at
 the level it's actually written (observability), grep for a second copy (call sites).
 
+### A guard that reads an archive you will legitimately update must not pin its numbers
+
+**And a guard that reads a file you will legitimately edit must not pin that file's
+numbers.** Round 148 built a guard asserting `known-issues.md` contains `1100`; round 154
+edited the ledger for a good reason (cleaning escapes) and the guard went red. Round 112
+had already taught "a guard pinning production counts will go stale" — this is the second
+form of the same disease, and it is the one I had not seen: **the guard reads an archive
+that its owner is supposed to update.**
+
+The test is one question: *will I change the file this guard reads, for a reason that is
+not a regression?*
+- **yes** (a measured table, a baseline ledger) → the guard may only check **shape**
+  ("this row exists", "the timestamp matches `MM-DD HH:MM`"), never a value
+- **no** (a schema, a script's logic) → pinning is right, and `package-json-intact`'s
+  `toBe(25)` is the model: it exists to make you stop and confirm adding a dep
+
+Note the two look identical ("it pins a number") and behave oppositely. Auditing all
+eight doc-reading guards took one round (round 155) and found exactly one wrong — the
+one built seven rounds earlier.
+
 **Corollary that paid for itself (round 68): when you write a rule down, ask in the same
 breath "what is its over-executed form?"** Six of this file's ten rules turned out to
 have a boundary; two were actually over-executed before the boundary was found:
