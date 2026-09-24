@@ -2,6 +2,35 @@
 
 Guidance for any AI coding agent working in this repository. Concise and tool-agnostic; for depth go to `CLAUDE.md` (Claude-specific notes) and `docs/` (subsystem design docs).
 
+## Rule index
+
+Round 216: the rules below grew to sixteen and ended up scattered over six sections.
+This index is the single entry point — **check it before adding a seventeenth.**
+
+| # | rule | section |
+|---|---|---|
+| 1 | multi-line text: real newlines, never `\n` escapes | Writing Chinese into files |
+| 2 | write Chinese directly, never `\uXXXX`; read it back after | Writing Chinese into files |
+| 3 | commit messages with Chinese + backticks: `-F file`, never `-m` | Writing Chinese into files |
+| 4 | a string that is syntax *in that file* will break it — ask what it is there | Writing Chinese into files |
+| 5 | grep proves the *string* is absent, not the *thing* | Writing Chinese into files |
+| 6 | before comparing two numbers, ask what makes them equal | Cross-checking two numbers |
+| 7 | "no problem" needs a second number | Cross-checking two numbers |
+| 8 | the second number must share the denominator | Cross-checking two numbers |
+| 9 | a number on a subset you named is a hypothesis, not a finding | Cross-checking two numbers |
+| 10 | never extrapolate a number you did not read | Cross-checking two numbers |
+| 11 | a guard reading an archive you will edit must not pin its numbers | guard rules (Adding a feature) |
+| 12 | a guard cannot enforce freshness — three layers each own one job | guard rules (Adding a feature) |
+| 13 | a guard grepping a *pattern* can match itself | Adding a feature |
+| 14 | shape rules get guards; action rules only get procedures or accepted recurrence | Rules that only work if you remember them |
+| 15 | a guard checking a shape is weaker than one checking a relationship — tamper it | Adding a feature |
+| 16 | a self-running tool must not depend on the process that caused the problem | tamper-audit section |
+
+Sections: [Writing Chinese into files](#writing-chinese-into-files-and-commit-messages) ·
+[Cross-checking two numbers](#cross-checking-two-numbers-confirm-they-should-be-equal-first) ·
+[Adding a feature](#adding-a-feature--the-path-that-actually-works) ·
+[Rules that only work if you remember them](#rules-that-only-work-if-you-remember-them)
+
 ## What this is
 
 NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot: a humanlike reply engine running a per-chat cognition loop (Turn Actor / Heart), optional Meta+Subagent+CodeAct orchestration (`META_SUBAGENT_ENABLED`), long-term vector memory, person modeling, and a large feature surface (checkin, gacha, DM relay, stickers, learning, crons, dream-journal). TypeScript, Node ≥22, **ESM** (`"type": "module"`).
