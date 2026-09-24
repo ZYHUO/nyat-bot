@@ -180,6 +180,23 @@ run that from a script with `PATH=/opt/node22/bin` prepended, or the child proce
 Node 26, crashes on `better-sqlite3` before reaching your check, and reports exit 1 with
 no ✗ lines — which reads exactly like "no failures found".
 
+**A guard that greps for a *pattern* can match itself — one that reads an *artifact* cannot.**
+When you write a grep-style guard, first ask whether the thing it searches contains the
+guard's own source. Round 128 learned this the hard way: `no-unexplained-skip.test.ts`
+has the strings `.skip(` and `it.todo(` in its own doc comment, so its first run went
+red on *itself*. The fix is one line (`grep -v <own filename>`), but the reusable
+distinction is deeper than "does the glob include tests/":
+
+```
+checks an artifact (AGENTS.md, dist/, docs/)  → the guard is not in the artifact → safe
+checks a pattern   (code shapes under tests/)  → the guard has that pattern too  → self-exclude
+```
+
+So the default for any guard grepping `tests/` is **to exclude itself from the start** —
+do not wait for the first red to discover it. And note the direction of the surprise:
+a self-referential guard that *fires* is good news (it proves the guard runs), whereas
+one you silently loosened until it passed green tells you nothing.
+
 The last three are the ones people skip. History in this repo: `canSpeakActively()` had
 exactly one reference — its own definition; `releasePressure` (the L0 integrator's main
 drain) was never called; the join-screen's `extractJoinerName` was imported from the wrong
