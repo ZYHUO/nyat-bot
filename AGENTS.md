@@ -547,6 +547,40 @@ And corollary from rounds 83-85: **if you scheduled it and never scheduled it, t
 estimate was probably wrong — try it once before escalating it to a plan.**
 
 
+## Rules that only work if you remember them
+
+Two kinds of rule exist, and the difference decides whether they hold:
+
+| kind | example | what enforces it |
+|---|---|---|
+| **shape** | "no `\uXXXX` literal in `src/`", "table rows have equal pipe counts" | a **guard** — it goes red without you remembering |
+| **action** | "use `write`/`edit`, not a python heredoc", "ask what this string is *in this file*" | **nothing** — it works only while you are thinking about it |
+
+This session wrote the action-kind rule four separate times and then broke the same rule
+four more times:
+
+```
+round 61 "use write/edit"      → round 118/154 wrote escapes via heredoc anyway
+round 2  "write Chinese direct" → round 151-154 shipped 415 escapes in src/
+round 156 "metacharacter rule"  → round 171 closed a comment with a slash-star pair again
+round 149 "don't build the guard with the method it guards"
+                                 → round 175 wrote a wrong character *while
+                                   documenting* the wrong-character rule
+```
+
+**The reason is not forgetfulness — it is attention.** Writing a doc about a mistake
+spends the attention budget on explaining the mistake, not on avoiding it. A disease with
+two threads cannot be caught by a single-threaded mind.
+
+So the question at write-time is: **is this rule a shape or an action?**
+- **shape** → make it a guard; it will enforce itself
+- **action** → either make it a *procedure* (a step that runs before commit), or record
+  that it *will* recur and budget for the retry
+
+Saying "I'll be careful next time" is neither. Of this session's 14 rules, 6 became
+guards, 2 became procedures, and 6 stayed pure discipline — **every one of the four
+repeat offenses above lives in the last group.**
+
 ### A locating tool fails in three directions — all three are "the test was fine, the tool was blind"
 
 `scripts/tamper-audit.mts` breaks a guard's own target and checks the test goes red.
