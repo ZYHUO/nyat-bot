@@ -124,21 +124,43 @@ describe('AGENTS.md 的 markdown 配对（round 156/157）', () => {
     expect(hits, `有 ${hits} 行含 ****（插入时和锚点行首的 ** 撞了）`).toBe(0);
   });
 
-  it('每个连续表格块内各行管道数一致（round 157：表格断行会静默错位）', () => {
-    const lines = fs.readFileSync('AGENTS.md', 'utf8').split('\n');
-    const bad: string[] = [];
-    let block: string[] = [];
+  /** round 158: 行内代码里的 | 不是分隔符。round 157 第一版数原始管道，
+   *  拿到 voice-tuning.md 上会假红（`split('|')` 和 `\| round NN \|` 都在行内代码里）。
+   *  先剥掉行内代码再数——这正是 round 144 那条：判据形状要比损伤形状精确。 */
+  const stripInlineCode = (l: string): string => l.replace(/`[^`]*`/g, 'X');
+
+  const tableBlocksOf = (file: string): Array<{ head: string; pipes: number[] }> => {
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    const out: Array<{ head: string; pipes: number[] }> = [];
+    let cur: number[] = [];
+    let head = '';
+    let inFence = false;
     const flush = (): void => {
-      if (block.length < 2) { block = []; return; }
-      const counts = new Set(block.map((l) => l.split('|').length));
-      if (counts.size > 1) bad.push(`块头「${block[0]!.slice(0, 40)}」管道数 ${[...counts].join('/')}`);
-      block = [];
+      if (cur.length >= 2 && new Set(cur).size > 1) out.push({ head, pipes: [...cur] });
+      cur = [];
     };
     for (const l of lines) {
-      if (l.startsWith('|')) block.push(l);
-      else flush();
+      if (l.trimStart().startsWith('```')) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      if (l.startsWith('|')) {
+        const n = stripInlineCode(l).split('|').length;
+        if (cur.length === 0) head = l.slice(0, 40);
+        cur.push(n);
+      } else flush();
     }
     flush();
+    return out;
+  };
+
+  it('每个连续表格块内各行管道数一致（round 157：表格断行会静默错位）', () => {
+    const bad = tableBlocksOf('AGENTS.md')
+      .map((b) => `AGENTS.md 块头「${b.head}」管道数 ${b.pipes.join('/')}`);
+    expect(bad, '这些表格块内行列数不一致：\n  ' + bad.join('\n  ')).toEqual([]);
+  });
+
+  it('voice-tuning.md 同样查（round 158：它才是我主要写字的地方，6800+ 行）', () => {
+    const bad = tableBlocksOf('docs/voice-tuning.md')
+      .map((b) => `voice-tuning.md 块头「${b.head}」管道数 ${b.pipes.join('/')}`);
     expect(bad, '这些表格块内行列数不一致：\n  ' + bad.join('\n  ')).toEqual([]);
   });
 });
