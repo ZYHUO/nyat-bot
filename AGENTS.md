@@ -378,8 +378,24 @@ Three separate times this session a guard's counter read 0 and the natural readi
 | 201 | delegation arg guard | the fallback condition (`/[\u4e00-\u9fa5\w]{2,}/` on recent human messages) is almost always true in a busy group, so the guard could never fire — 36 real candidates |
 
 **Before trusting a zero, replay the guard's own criterion against the log and see
-whether the scenario occurred.** If it did and the counter is still 0, the guard — or
-its observability — is the bug, not the traffic.
+whether the scenario occurred.** If it did
+and the counter is still 0, the guard — or its observability — is the bug, not the traffic.
+
+**The zero now has four readings, and only the first is bad news:**
+
+| reading | what it means | round |
+|---|---|---|
+| **invisible** | it fires but logs at `debug`, or the value lives in a field you did not read | 185/191 |
+| **unreplayable** | the log exists but lacks the field the criterion needs | 194 |
+| **no sample** | the guard needs N occurrences that have not happened yet — **ask how many it needs** | 141/142 |
+| **fixed** | it stopped firing because the behaviour it guarded stopped recurring | 142 |
+
+The fourth is the expensive one to miss: rounds 96→142 chased a "silent" guard across
+three wrong hypotheses (leak, insufficient uptime, sample) before measuring that the
+process had been alive 39 min with 59 sends — enough sample — and concluding the
+guard was quiet **because it had worked**. Two thresholds got swapped along the way
+(2h is the zombie sweep's, 6-sends is topic-word's), which is round 194's rule again:
+two numbers both present, answering different questions.
 
 The general shape: a guard has three faces, and fixing one leaves the other two:
 

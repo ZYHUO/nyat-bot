@@ -59,6 +59,23 @@ describe('AGENTS.md 结构', () => {
     expect(dups, '这些长行出现了两次：\n  ' + dups.join('\n  ')).toEqual([]);
   });
 
+  it('②b 也没有"部分重复"——round 143 被这条救了（②只比整行）', () => {
+    // round 143: 我插入时 anchor 是一个超过一行的句子，执行残留被留下——
+    // 它和原行不相等（一个完整、一个只是尾部），所以 ② 比整行比不出来。
+    // 形状判据：**某行是另一个更长行的严格后缀**。这个形状几乎不会有合法情况
+    // （否则只检查"句子重复"，那会误伤合法引用——如 scripts/tamper-audit 被两条规矩提到）。
+    const bodies = bodyLines();
+    const bad: string[] = [];
+    for (const l of bodies) {
+      const t = l.trimEnd();
+      if (Buffer.byteLength(t) < 20) continue;
+      const longer = bodies.filter((o) => o !== l && o.endsWith(t) && o.length > t.length);
+      if (longer.length) bad.push(t.slice(0, 60));
+    }
+    expect(bad, '这些行是另一行的尾部剧情（round 143 那种残留）:\n  ' + bad.join('\n  ')).toEqual([]);
+  });
+
+
   it('③ 另四份也没有重复长行（round 88 拉宽）', () => {
     for (const f of ALL_DOCS.slice(1)) {
       const seen = new Map<string, number>();
