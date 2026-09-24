@@ -28,10 +28,10 @@ function passesNoLatency(): boolean { return true; }
 
 describe('跨账号兜底（accountFallback）', () => {
   const MIN_ACCOUNTS = 3;
-  const sf = { endpoint: 'https://api.stepfun.com/step_plan/v1', apiKeys: ['4QeT2Y7YCtBsetxxW4AIH8Wtllg2bp8uQAotRNx6KdQbY8FVejrnnriP5NguMbvdu'] };
+  const sf = { endpoint: 'https://api.stepfun.com/step_plan/v1', apiKeys: ['sf-think-placeholder-not-a-real-key'] };
   const sf2 = { endpoint: 'https://api.stepfun.com/step_plan/v1', apiKeys: ['ANOTHERKEY123456'] };
-  const lf = { endpoint: 'https://ai.lfree.org/bot/mzP1H6xgvi1J/v1', apiKeys: ['skQ5OMHhH1vy455mQVVOYoNRg24CrSklGk8jjDGqVkM1Y6VGmA'] };
-  const km = { endpoint: 'https://api.kimi.com/coding/v1', apiKeys: ['sk-kimi-a2x3FFvAeszdt540ek6zyi1epDbkbTefXZby2kkDePI0lg5zklqzJHCcUSUYwSOe'] };
+  const lf = { endpoint: 'https://ai.lfree.org/bot/mzP1H6xgvi1J/v1', apiKeys: ['lfree-placeholder-not-a-real-key'] };
+  const km = { endpoint: 'https://api.kimi.com/coding/v1', apiKeys: ['kimi-placeholder-not-a-real-key'] };
   const profile = { maxMedianLatencyMs: 8000 };
 
   it('① 一筛把慢的跨账号候选挡掉（延迟门槛本身没错）', () => {
