@@ -8281,3 +8281,57 @@ freshness → 表头时间戳本身，告诉读者数字多旧
 **那句话是回答"它 pin 一个数"的，不可能跟在 freshness 后面。**
 
 **判据：插完后读一遍新节和它的前后各一段。** 只看新节不够（新节自己是通的）。
+
+---
+
+## 给 round 38 那条规矩做成工序：gate:log（round 184）
+
+Round 176 说「6 条纯自觉」。这轮挑一条做成工序——挑的是 **round 38 立的
+「没读到的门禁不算过」**，因为它的复发代价最高（那次我报了一个从未观测的 101/107）。
+
+### 做了什么
+
+```
+npm run gate:log -- tests/unit/docs
+→ logs/gate-evidence.log 追加三行（typecheck / lint / tests 的实际输出行）
+```
+
+**只记真的跑出来、真的读到的行。** 超时或退出码非零就记 `exit=N` + 实际错误行，不记数字。
+
+### 写了四遍才对
+
+```
+第 1 遍：UNDICI 告警行混进输出      → typecheck/lint 显示"(Use node --trace-warnings …)"
+第 2 遍：tsc/eslint 成功时输出为空   → 显示"(no matching line)"——**这比错更糟**
+第 3 遍：加空输出判定，但 npm 的 `> nyat-bot@1.0.0 lint` 回显算非空 → "output present but no key line"
+第 4 遍：把 stderr 噪声 + npm 回显都扣掉 → "clean (exit 0, no error lines)"
+```
+
+**第 2 遍是最值得记的**：它把"干净"记成了"(no matching line)"——
+而 round 38 那个事故正是**把"没读到"当"过了"**。
+我做了一个治那个病的工序，第 2 版自己复现了那个病。
+
+**修法不是"加个 if"，是把判定拆开**：
+```
+有错误行     → 记那些行
+只有回显/噪声 → clean (exit 0, no error lines)
+有别的输出   → 记前 60 字符，不猜
+```
+
+### 验红
+
+往一个测试里加必然失败的断言 → 日志记
+`exit=1 × round 184 验红 11ms | ⎯⎯⎯ Failed Tests 1 ⎯⎯⎯ | Test Files 1 failed | 8 passed (9)`
+
+**"× 那一行"是关键**：它证明记的是 vitest 真打印的失败行，不是我总结的数字。
+
+### 归档（这轮是 round 176 那条的第一次落地）
+
+```
+round 176: action 类规矩要么做成工序、要么承认复发
+round 184: 第一次做成工序——而做成工序的过程本身要按同一条规矩验
+          （第 2 版工序复现了它治的病）
+```
+
+**这和 round 149（守卫用被防的方法建）是同族第三次**：
+治「没读到当过了」的工序，第 2 版自己把「没读到」显示成不明不白的一句。
