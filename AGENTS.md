@@ -4,27 +4,37 @@ Guidance for any AI coding agent working in this repository. Concise and tool-ag
 
 ## Rule index
 
-Round 216: the rules below grew to sixteen and ended up scattered over six sections.
-This index is the single entry point — **check it before adding a seventeenth.**
+Round 216/222: the rules grew past sixteen and ended up scattered over six sections,
+so round 219 audited the guards and found four rules the index had missed.
+This index is the single entry point — **check it before adding a twenty-first.**
 
-| # | rule | section |
-|---|---|---|
-| 1 | multi-line text: real newlines, never `\n` escapes | Writing Chinese into files |
-| 2 | write Chinese directly, never `\uXXXX`; read it back after | Writing Chinese into files |
-| 3 | commit messages with Chinese + backticks: `-F file`, never `-m` | Writing Chinese into files |
-| 4 | a string that is syntax *in that file* will break it — ask what it is there | Writing Chinese into files |
-| 5 | grep proves the *string* is absent, not the *thing* | Writing Chinese into files |
-| 6 | before comparing two numbers, ask what makes them equal | Cross-checking two numbers |
-| 7 | "no problem" needs a second number | Cross-checking two numbers |
-| 8 | the second number must share the denominator | Cross-checking two numbers |
-| 9 | a number on a subset you named is a hypothesis, not a finding | Cross-checking two numbers |
-| 10 | never extrapolate a number you did not read | Cross-checking two numbers |
-| 11 | a guard reading an archive you will edit must not pin its numbers | guard rules (Adding a feature) |
-| 12 | a guard cannot enforce freshness — three layers each own one job | guard rules (Adding a feature) |
-| 13 | a guard grepping a *pattern* can match itself | Adding a feature |
-| 14 | shape rules get guards; action rules only get procedures or accepted recurrence | Rules that only work if you remember them |
-| 15 | a guard checking a shape is weaker than one checking a relationship — tamper it | Adding a feature |
-| 16 | a self-running tool must not depend on the process that caused the problem | tamper-audit section |
+| # | rule | guard? | section |
+|---|---|---|---|
+| 1 | multi-line text: real newlines, never `\n` escapes | — (action) | Writing Chinese into files |
+| 2 | write Chinese directly, never `\uXXXX`; read it back after | ✅ `no-unicode-escapes-in-src` | Writing Chinese into files |
+| 3 | commit messages with Chinese + backticks: `-F file`, never `-m` | — (action) | Writing Chinese into files |
+| 4 | a string that is syntax *in that file* will break it | ✅ `agent-rules-index` (markdown pairing) | Writing Chinese into files |
+| 5 | grep proves the *string* is absent, not the *thing* | — (action) | Writing Chinese into files |
+| 6 | before comparing two numbers, ask what makes them equal | — (semantic) | Cross-checking two numbers |
+| 7 | "no problem" needs a second number | — (semantic) | Cross-checking two numbers |
+| 8 | the second number must share the denominator | — (semantic) | Cross-checking two numbers |
+| 9 | a number on a subset you named is a hypothesis | — (semantic) | Cross-checking two numbers |
+| 10 | never extrapolate a number you did not read | ✅ `gate:log` writes what it saw | Cross-checking two numbers |
+| 11 | a guard reading an archive you edit must not pin its numbers | ✅ `objective-status-freshness` (shape only) | guard rules (Adding a feature) |
+| 12 | a guard cannot enforce freshness — three layers own one job each | ✅ same guard, deliberately shape-only | guard rules (Adding a feature) |
+| 13 | a guard grepping a *pattern* can match itself | ✅ `agent-rules-index` self-excludes | Adding a feature |
+| 14 | shape rules get guards; action rules get procedures | — (this table is the index) | Rules that only work if you remember them |
+| 15 | a shape guard is weaker than a relationship guard — tamper it | ✅ `tamper:audit --src` | Adding a feature |
+| 16 | a self-running tool must not depend on the process that caused the problem | ✅ `no-tamper-leftovers` + `tamper-recovery-works` | tamper-audit section |
+| 17 | check this index before adding an eighteenth | — (this index) | Rule index |
+| 18 | never wrap a path-shaped example in backticks | ✅ `doc-references-exist` | Docs section |
+| 19 | a flag that is ON by default must have a reader | ✅ `no-dead-switches` | Adding a feature |
+| 20 | a hard skip needs a stated reason | ✅ `no-unexplained-skip` | Testing conventions |
+
+**The rules without guards are all semantic or action rules (round 176) — that is the
+expected split, not a gap. (Round 222: this line used to say "10 have guards, 10 do not";
+the count was hand-tallied, so a new row would silently make it false. A summary number
+in an index must be counted by a script, or written without a number.)**
 
 Sections: [Writing Chinese into files](#writing-chinese-into-files-and-commit-messages) ·
 [Cross-checking two numbers](#cross-checking-two-numbers-confirm-they-should-be-equal-first) ·
