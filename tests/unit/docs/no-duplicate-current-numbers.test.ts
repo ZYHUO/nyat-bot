@@ -18,7 +18,7 @@ import * as fs from 'node:fs';
 
 const SRC = 'docs/OBJECTIVE-STATUS.md';
 const SNAP = 'round 196';
-const PAT = /(拦住|拦到过|\u8df3\u8fc7|\u89e6\u53d1)\s*(\d+)\s*\u6b21/g;
+const PAT = /(拦住|拦到过|跳过|触发)\s*(\d+)\s*次/g;
 
 describe('no two copies of a current number', () => {
   it('the gate-count section is labelled a snapshot, not current', () => {
@@ -29,10 +29,10 @@ describe('no two copies of a current number', () => {
 
   it('the table header says snapshot, not "latest" (latest reads as current)', () => {
     const s = fs.readFileSync(SRC, 'utf8');
-    expect(s).toContain('round 196 \u5feb\u7167');
+    expect(s).toContain('round 196 快照');
     // sentinel: the header 最新证据 must not come back — it reads as
     // "current", and round 47/48 was exactly this header + two hand-copied numbers.
-    expect(s).not.toContain('\u6700\u65b0\u8bc1\u636e');
+    expect(s).not.toContain('最新证据');
   });
 
   it('every guard number outside the table carries a round or snapshot tag', () => {
@@ -42,7 +42,7 @@ describe('no two copies of a current number', () => {
       PAT.lastIndex = 0;
       if (!PAT.test(l)) return;
       if (l.trimStart().startsWith('|')) return;
-      if (l.includes('\u5feb\u7167') || /round \d+/.test(l)) return;
+      if (l.includes('快照') || /round \d+/.test(l)) return;
       if (l.trimStart().startsWith('#') || l.trimStart().startsWith('>')) return;
       bad.push(`L${i + 1}: ${l.slice(0, 70)}`);
     });

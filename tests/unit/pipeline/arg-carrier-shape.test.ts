@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  * （usage_syntax 有占位且 args 空），其中 /geo 空参 20 条——而闸的日志 0 次。
  *
  * 根因是第三个条件：
- *   `if (/[\u4e00-\u9fa5\w]{2,}/.test(t)) return true;`
+ *   `if (/[一-龥\w]{2,}/.test(t)) return true;`
  * 群聊里最近 6 条人类消息几乎总有两个以上中文字符 → 这个函数恒 true → 闸永不拦。
  *
  * 现在：占位写 `<IP或域名>` 只认 IP/域名；认不出形状 → fail-open。

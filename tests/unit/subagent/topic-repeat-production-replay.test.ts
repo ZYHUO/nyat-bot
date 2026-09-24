@@ -44,7 +44,7 @@ function myRound41Replay(sends: Row[]): number {
     const out: string[] = [];
     for (let i = 0; i < t.length - 1; i++) {
       const b = t.slice(i, i + 2);
-      if (/[\u4e00-\u9fa5]{2}/.test(b)) out.push(b);
+      if (/[一-龥]{2}/.test(b)) out.push(b);
     }
     return out;
   };
