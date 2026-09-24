@@ -19,7 +19,7 @@
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 3 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 32 | 19 | 19 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 18 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
-| `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 25 | 10 | 7 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
+| `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 26 | 11 | 8 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 20 | Turn Actor + Agentic planner + 中期记忆 |
 | `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 45 | 18 | 17 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 51 | 21 | 18 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
@@ -30,15 +30,15 @@
 
 | | |
 |---|---|
-| total_keys | 497 |
-| bool_flags | 217 |
-| on_in_prod | 189 |
-| set_in_env | 322 |
+| total_keys | 498 |
+| bool_flags | 218 |
+| on_in_prod | 190 |
+| set_in_env | 323 |
 | dead_no_reader | 5 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
-**217 个布尔旗标里，生产实际开着 189 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
+**218 个布尔旗标里，生产实际开着 190 个。** 这张表的意义就在于那一段：开着的东西才是要审计的对象。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -58,7 +58,7 @@
 | flag | 段 | .env | 测试里怎么用 |
 |---|---|---|---|
 
-## 生产开着的旗标（189 个）
+## 生产开着的旗标（190 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
@@ -183,6 +183,7 @@
 | self | `MOOD_TUNE_ENABLED` | false | true | 心情/精力 → humanizer 参数调制 (Opus 评审: 随机性不该是 IID; 累/被怼时回复更短更敷衍, 心情好时更活泼)。合并序: 群风格 < mood-tune < 运营 override < ASI self-tune。 | pipeline/stages/deliver.ts |
 | self | `OWN_HISTORY_RETRIEVAL_ENABLED` | false | true | 机制5: bot 自己的历史发言语义检索(Opus 评审: 翻旧账/自洽能力)。 检索本群与当前话题相关的自发言, 作为独立参考块注入(不进 merged)。 | pipeline/context/retriever.ts |
 | self | `RELATIONSHIP_ASYMMETRY_ENABLED` | false | true | 好感非对称动力学 (Opus 评审: 信任慢升快降 —— 伤害一次掉很多, 修复要几十次正交互)。开启后正 delta × UP(慢), 负 delta × DOWN(快)。 | tracking/relationship.ts |
+| self | `SEND_LOG_FULL_TEXT` | false | true | round 206: host sendText 日志里附全文（不只是 80 字 preview）。  为什么值得一个 flag：round 204 量到全文不在日志里（parts 是分片数、 preview 截断），于是"前言不搭后语"只能拿 40 字做单边判断。 round 205 量过成本：只 | subagent/host-api.ts |
 | self | `TIMING_GATE_FAIL_CLOSED` | false | true | P2-E 解析失败方向:true = fail-closed 按 no_action 处理(MaiBot 语义:宁可 沉默不插嘴;direct 已在上游 bypass;强债务转保护性 wait)。llm_call_failed (网络)仍 fail-open。与仓库约定一致:行为变化默认关,.env | pipeline/timing/gate.ts |
 | self | `TIMING_GATE_HISTORY_ENABLED` | false | true | P1-D gate 有状态化:把最近 5 次真实 LLM 决策注入 gate prompt(对齐 MaiBot gate 与 planner 共享历史、看得到自己过往节奏判断)。 | pipeline/timing/gate.ts |
 | self | `TIMING_WAIT_HINT_ENABLED` | false | true | P2-F wait 到点回访时注入 [等待结束] 提示(仅 TURN_WAIT_RESUME_ENABLED 路径)。 | pipeline/stages/deliver.ts |

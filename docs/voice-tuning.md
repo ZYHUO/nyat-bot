@@ -10011,3 +10011,113 @@ round 212: 156 条 · 0 重合 119（76.3%）
 
 把这个数和它的三个限制写进 `known-issues`（第 3 档那行）——
 现在那里还写着 round 199/200 的"读错了"，该更新成有数字的状态。
+
+---
+
+## CodeAct LLM failed 621 次：全天分布、三种错误，而它和"多次回复"是同一族（round 213）
+
+11:33 生产日志出现 `CodeAct LLM failed`。查它——**621 次，全天都在**。
+
+### 三种错误
+
+```
+'All labels exhausted'          234 次（38%）
+'Failed a…'（连接失败）          178 次（29%）
+'HTTP 401'                       39 次（6%）
+其余                             170 次
+```
+
+### 按小时
+
+```
+0时 4 · 1时 1 · 7时 2 · 8时 7 · 9时 5 · 10时 12 · 11时 26 · 12时 28
+13时 26 · 14时 31 · 15时 66 · 16时 50 · 17时 41 · 18时 50 · 19时 21
+20时 90 · 21时 78 · 22时 33 · 23时 50
+```
+
+**群醒着的时候一直在失败，20-21 时最密（168 次）。**
+
+### 它和用户原始诉求的关系
+
+```
+「多次回复的 bug」→ 我修了 task burst 闸（拦同一个任务连发）
+而 CodeAct 失败是**另一条连发路径**：
+  任务失败 → failsafe 兜底回复 → 或者重试 → 用户看到多条
+```
+
+**而 session-report 第 2c 段（cron 产出率）正是治这个的**——
+它把失败行和成功行配对。**但 `CodeAct LLM failed` 不在那些行里**。
+
+### 归档
+
+```
+621 次 / 天，其中 38% 是 All labels exhausted
+而 round 11 立的台账里：heart LLM failed 143 次/天、57% 是 All labels exhausted
+→ 两条路径都在烧同一个瓶颈（label 池耗尽）
+```
+
+**而 `All labels exhausted` 我 round 34 立过台账**：1656 → 598 次/天。
+现在 CodeAct 这条单独占 234 次。
+
+### 下一轮
+
+把 `CodeAct LLM failed` 加进 session-report 的失败统计——
+它现在只统计 heart 那条路径，CodeAct 是**第二个出口**。
+这正是 round 84 立的「三个出口都要数」（2024 年那条规矩的第 N 次应用）。
+
+---
+
+## 而 session-report 其实有 CodeAct 那行——只是它数的是「任务崩」不是「LLM 失败」（round 214）
+
+Round 213 我说「session-report 不统计 CodeAct 失败」。这轮查——**我说错了一半**。
+
+### 实测
+
+```ts
+const PAIRS: Array<[string, string | null, string]> = [
+  ['CodeAct job failed', 'CodeAct task start', 'CodeAct 任务'],
+```
+
+**它有那行**（round 130 立的，注释说「CodeAct 任务崩溃率必须有个出口」）。
+
+### 但它数的不是 `CodeAct LLM failed`
+
+```
+PAIRS 里配的字符串：'CodeAct job failed'
+而日志里的字符串：'CodeAct LLM failed'
+```
+
+**两个不同的串。** 而 round 213 我 grep 的是 `CodeAct LLM failed` → 0 命中 → 我说"没统计"。
+
+**真相**：
+```
+'CodeAct job failed'    = 任务级崩溃（BullMQ job failed）
+'CodeAct LLM failed'    = 单次 LLM 调用失败（turn 0 就超时/401/labels exhausted）
+```
+
+**一个任务可以 LLM 失败多次而不崩**（重试/兜底），所以后者是前者的**上游**，
+而 session-report 只数下游。
+
+### 归档：这是 round 179 那个「入口不对」的又一次
+
+```
+round 179: 我以为 tamper-audit 选点错了 → 实际是入口不对
+round 214: 我以为 session-report 没有 CodeAct 统计 → 实际是它统计另一个口径
+```
+
+**而我 round 213 那个 grep 是「用我关心的字符串去搜」**——
+这正是 round 191 立的定位四方向里那条：**工具看着给你答案，但那个答案回答的是别的问题。**
+
+### 修法
+
+```
+在 PAIRS 里加一行：['CodeAct LLM failed', null, 'CodeAct LLM 失败']
+（null = 成功路径没有对应日志，只报失败数——round 96 立的规矩）
+```
+
+**而 `null` 的选择是对的**：LLM 成功没有单独的日志行（它只在任务完成时出现），
+所以配对会造出一个假比率。
+
+### 下一轮
+
+加这一行，然后看它和 `All labels exhausted`（heart 那条 574 次）是不是同一个瓶颈。

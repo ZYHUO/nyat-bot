@@ -570,6 +570,11 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     // ok 那一路用 'CodeAct task start' 自己兜（没有单独的完成日志），
     // 崩溃 = start - 未崩，用下面的 cNoFail 之外的算法算。
     ['CodeAct job failed', 'CodeAct task start', 'CodeAct 任务'],
+    // round 214: LLM 失败和任务崩溃是两件事——一个任务可以 LLM 失败多次
+    // 而不崩（重试/兜底）。round 213 量到 621 次/天（38% 是 All labels exhausted），
+    // 而任务崩溃只有上面那行。成功路径没有对应日志（LLM 成功不独立打行），
+    // 所以配 null ——否则会造出假比率（round 96 立的规矛）。
+    ['CodeAct LLM failed', null, 'CodeAct LLM 失败'],
     ['dreaming output unparseable', 'dreaming consolidated', 'dreaming 整合'],
     ['distill output unparseable', 'episode distilled', 'episode 蒸馏'],
     // 三个出口都要数：失败 / 判过不用接 / 派发了续答。
