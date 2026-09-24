@@ -451,10 +451,10 @@ Round 136 立了第四类处置：**量现状 → 记数字 → 说明为什么�
 
 | 项 | 基线 | 量于 | 什么时候该立守卫 |
 |---|---|---|---|
-| `voice-tuning.md` 带覆盖面词的行数 | **47** | round 136 | 掉到 < 20（新结论在丢覆盖面） |
+| `voice-tuning.md` 带覆盖面词的行数 | **47** | round 136 | 掉到 < 20（round 224 试过重跑，判据不可考，无法直接比）（新结论在丢覆盖面） |
 | `AGENTS.md` 完全相同的长行 | **0** | round 131 | > 0（已有守卫 `agent-rules-index` ② 盯着，这条只是基线） |
 | `docs/` 五份的重复长行 | **0** | round 88 | > 0（同上，守卫已覆盖） |
-| `incrCounter` 旁无 `logger.info` 的 | **13**（完全没有 info， round 138 复查） / **19**（仅有 debug， round 95 口径） | round 95 / 138 | 任一口径涨到 > 30 就立；**降不需要立**（那是好消息） |
+| `incrCounter` 旁无 `logger.info` 的 | **13**（完全没有 info， round 138 复查） / **19**（仅有 debug， round 95 口径） | round 95 / 138 | 任一口径涨到 > 30 就立（round 224 重跑得 57，但判据不同，不能当同一个数）；**降不需要立**（那是好消息） |
 | default-true 但无 reader 的旗标 | **0 / 41** | round 118 | > 0（`no-dead-switches` 已覆盖） |
 | 硬 skip（`it.skip`）无原因的 | **0** | round 128 | > 0（`no-unexplained-skip` 已覆盖） |
 | `/tmp/tamper-audit-backup*` 残留 | **0** | round 115 | > 0（`recoverLeftovers` 会还原；若决定不再跑 tamper-audit，先看这个） |
