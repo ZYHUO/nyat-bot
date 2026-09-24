@@ -84,4 +84,9 @@ console.log(`窗口 ${DAYS} 天 · bot 回复 ${hits.length} 条 · 每条对前
 console.log(`  与前文 0 bigram 重合：${zero} 条（${(zero / hits.length * 100).toFixed(1)}%）`);
 console.log(`  重合数分布：${Object.entries(dist).map(([k, v]) => `${k}:${v}`).join('  ')}`);
 console.log('  （单边判据：0 重合只能说明"开头与前文无关"，不能证明整条不搭）');
+// round 210/211：**这个数偏高**。"前 N 条人话"是按 msg==='message in' 取的，
+// 而那条日志不带 isBot/botClass（分类在 ingress 的 bot-classifier，round 211 搬不过来）。
+// 所以广播 bot 的话也算进了分母——bot 回复和它 0 重合是正常的。
+// 修法是给 message in 加 bot 标记，但那只服务一个量具的精度，所以先写明限制。
+console.log('  ⚠️ 偏高：分母含其他 bot 的消息（message in 无 bot 标记，round 211）');
 void withFullText;
