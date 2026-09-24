@@ -56,6 +56,8 @@ describe('测试文件不得有反斜杠-u 转义字面量', () => {
 
   it('台账记了存量基线（round 137：基线数字要有家）', () => {
     const ki = fs.readFileSync('docs/known-issues.md', 'utf8');
-    expect(ki, 'known-issues 里没记这个基线').toContain('34 处');   // round 154: 现值 9 个 / 34 处
+// round 155: 查“台账里有这一行”，不查具体数字——数字会随清理变（round 154 红过一次）。
+    // 这样仍能抓到“台账被删了那行”，但不会因正当更新而红。
+    expect(ki, 'known-issues 里没记这个基线（那一行被删了？）').toContain('含反斜杠-u 转义字面量的测试文件');
   });
 });

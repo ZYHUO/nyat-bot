@@ -6784,3 +6784,58 @@ round 154: 守卫钉**台账数字**（1100）→ 随台账更新变红
 判据：**守卫读的文件，我会不会因为正当理由改它？**
 - 会 → 只能查形状/存在，不能查具体值（或者接受它会红，把红当"提醒同步"）
 - 不会 → 可以钉具体值
+
+---
+
+## 审「档案守卫」：8 个里 3 个钉了会被正当更新的文档（round 155）
+
+Round 154 立了判据「守卫读的文件我会不会因正当理由改它」。这轮审全部。
+
+```
+读文档/配置的守卫 8 个：
+  known-issues              读 voice-tuning.md README.md      钉值 0
+  landing-page-links        读 README.md                     钉值 0
+  objective-status-freshness 读 OBJECTIVE-STATUS.md ×6        钉值 0
+  objective-tools-exist     读 package.json OBJECTIVE-STATUS 钉值 0
+  no-tamper-leftovers       读 tamper-audit.mts              钉值 1
+  no-unicode-escapes-in-tests 读 known-issues.md              钉值 2
+  package-json-intact       读 package.json ×2              钉值 3
+  process-handlers          读 src/index.ts                  钉值 1
+```
+
+### 按判据分三档
+
+| 守卫 | 读的文件会被正当更新吗 | 钉值对吗 |
+|---|---|---|
+| `objective-status-freshness` | **会**（每 20 轮跟实测） | ✅ 全查形状（时间戳格式、非零、覆盖面词）——**0 个钉值** |
+| `no-unicode-escapes-in-tests` | **会**（台账数字随清理变） | ⚠️ 2 个钉值（round 154 刚红过一次） |
+| `package-json-intact` | **会**（加依赖/脚本） | ✅ **但这是刻意的**（round 113：结构承诺，要逼你确认） |
+| `no-tamper-leftovers` | 不会（脚本逻辑） | ✅ 钉 1 个（`readdirSync` 存在性）合理 |
+| `process-handlers` | 不会（src 逻辑） | ✅ 合理 |
+
+### 结论：**只有一个真问题，就是我自己刚建的那个**
+
+```
+no-unicode-escapes-in-tests 的 2 个钉值：
+  ① toBeLessThanOrEqual(9)    ← 文件数基线，会随清理降
+  ② toContain('34 处')        ← 台账现值，round 154 已红过一次
+```
+
+**而 `package-json-intact` 的 3 个钉值是对的**——那是 round 113 立的「结构承诺」：
+加依赖时必须人确认，所以硬编让它逼你。
+
+按 round 154 的判据，这两个文件「会不会被正当理由改」的答案**相反**：
+```
+package.json    加依赖 → 改 → 但那是要你停下来的信号  → 钉（对）
+known-issues.md 清转义 → 改 → 那是正常进度，不是信号  → 不该钉
+```
+
+### 修：只留一个钉，另一个改查形状
+
+```
+toBeLessThanOrEqual(9)  →  留（它是"不得新增"的硬线， round 154 定的）
+toContain('34 处')       →  改成 toContain('含反斜杠-u 转义字面量的测试文件')
+                            （查"台账里有这一行"，不查具体数字）
+```
+
+**这样它仍然能抓到「台账被删了那行」，但不会因数字变化而红。**
