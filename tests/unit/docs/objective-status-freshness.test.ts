@@ -57,6 +57,18 @@ describe('OBJECTIVE-STATUS 数据表的时间戳一致', () => {
     // 备注不能再是"拦 0 次只能读作没机会"（那已过期）
     expect(row!).not.toContain('\u62e2 0 \u6b21');
   });
+
+  it('④b 所有五行的计数列都不能没有数字（round 146：把④扩到全部行）', () => {
+    // round 145 审出来：④只覆盖 topic-word 一行，另四行还是硬编计数值。
+    // 那条不需要把计数列也改成正则（round 145：同行里可以两种数并存），
+    // 但至少要**没有一行完全没有数字**——那是表格退化的信号。
+    const lines = fs.readFileSync('docs/OBJECTIVE-STATUS.md', 'utf8').split('\n');
+    const hi = lines.findIndex((l) => l.startsWith('| \u95f8 |'));
+    const rows = lines.slice(hi + 2).filter((l) => l.startsWith('| '));
+    expect(rows.length, '\u95f8\u884c\u5c11\u4e8e 5').toBeGreaterThanOrEqual(5);
+    const empty = rows.filter((r) => !/\d/.test(r.split('|')[2] ?? ''));
+    expect(empty, '\u8fd9\u4e9b\u884c\u7684\u8ba1\u6570\u5217\u6ca1\u6709\u4efb\u4f55\u6570\u5b57\uff1a\n  ' + empty.join('\n  ')).toEqual([]);
+  });
 });
 
 describe('文档数字必须带覆盖面（round 121）', () => {
