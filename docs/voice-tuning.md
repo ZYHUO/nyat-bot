@@ -7224,3 +7224,51 @@ await transform(code, { loader: 'ts', format: 'esm' });
 
 **这条比守卫本身更通用**：以后想加"检查 X 好不好"的守卫时，
 先问「我要验的是它的语法还是它的行为」——**后者才需要真跑**。
+
+---
+
+## 本轮新机制的守卫覆盖：4 个里只有 1 个被 verify-deploy 钉住（round 165）
+
+Round 164 立了「语法 vs 行为」。这轮反过来审：**我这轮 session 加的新机制，
+有多少被门禁钉住了。**
+
+```
+机制                                      verify-deploy  verify-integration
+logProcessBootContext（boot context 日志）     1（有）            0
+sweepStaleAgentTasks（僵尸清扫）              0（无）            0
+reportProcessLifetime（寿命量纸）              0（无）            0
+recoverLeftovers（tamper 还原）               0（无）            0
+```
+
+**4 个新机制只有 1 个被钉。** 而那 3 个没钉的理由不一样：
+
+| 机制 | 为什么没钉 | 该补吗 |
+|---|---|---|
+| `sweepStaleAgentTasks` | 它在 cron 里，bundle 里只有 `'agent sweep: stale running-task indexes scanned'` 这个串 | **该**——和 boot context 同样形状 |
+| `reportProcessLifetime` | 同理，串是 `'process lifetime: short …'` | **该** |
+| `recoverLeftovers` | 它在 `scripts/` 不在 `src/`，**不进 bundle** | 不该用 verify-deploy；该用单元测试 |
+
+### 所以补两条 bundle 钉子
+
+```
+['stale agent sweep health log', 'agent sweep: stale running-task indexes scanned'],
+['process lifetime 量纸', 'process lifetime: short'],
+```
+
+**为什么值得**：round 66 的事故根因是「改坏了但 bundle 里看不出来」。
+这三个机制全是「治病」的——它们不工作我也不会立刻知道
+（sweep 不出声 = 它在跑还是没跑，round 110 才补上健康日志）。
+
+**钉子至少保证"它在产物里"。**
+
+### 归档
+
+```
+新机制的门禁覆盖要逐个数，不能假设"我加了测试就算钉住了"。
+本轮 4 个机制：1 个有钉子、2 个该有、1 个不该用钉子（该用单测）。
+```
+
+而 `recoverLeftovers` 那条是 round 115/117 的延伸：
+**scripts/ 里的机制本来就不进 bundle**，它的可验性靠单元测试——
+而我 round 117 立的 `no-tamper-leftovers.test.ts` 只守 `src/`/`dist/`，
+没守"recoverLeftovers 本身还能跑"。
