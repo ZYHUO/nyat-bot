@@ -8514,3 +8514,60 @@ npm run gate:log -- tests/unit/docs tests/unit/scripts
 
 **所以：保持手动跑 + 日志三态可辨。** 这个决定本身值得记——
 不是所有规矩都该做成自动钩子。
+
+---
+
+## gate:log 写的文件被 gitignore：证据只在本地，重启/换机会丢（round 188）
+
+Round 187 第一次用它。这轮查「那个证据文件会被提交吗」——**不会**。
+
+```
+$ git check-ignore -v logs/gate-evidence.log
+.gitignore:8:logs/	logs/gate-evidence.log
+```
+
+`logs/` 整目录被 ignore（`app.log` 在里面，那是生产日志，不该进 git）。
+所以 `gate-evidence.log` 只活在本地。
+
+### 这算问题吗
+
+**算一个，但不该用"提进 git"修。**
+
+```
+修法 A：把 gate-evidence.log 加进 git
+  → 它每轮增长，几周后就是几千行噪声
+  → 而且它是**本机**的门禁历史，对 clone 这个仓库的人没意义
+  → 更糟：它会被我的每次 commit 带进 diff，-review 成本上升
+
+修法 B：接受它本地-only，但在 commit message 里**贴那几行**
+  → round 38 立的"gate output is part of the evidence, paste the line you saw"
+  → 而 round 169 立的"自报边界"保证我不会把没贴的写成贴了
+```
+
+**选 B。** 而 round 187 已经是这么做的（commit message 里引用了 10:40-10:41 那六行）。
+
+### 归档：证据有三个家，各有寿命
+
+```
+logs/gate-evidence.log  本机、全历史、不跟着代码走     （工序侧）
+commit message          跟着代码走、永久、只有关键行   （人读侧）
+docs/OBJECTIVE-STATUS.md 跟着代码走、每 20 轮汇总      （下游读者侧）
+```
+
+**三者不是重复，是三种不同的读取场景。**
+
+而 round 38 那条原话说的是「paste the line you actually saw」——
+**它本来的设计就是"贴进 commit"，不是"存成文件"**。
+我 round 184 做成 gate:log 时默认要"落盘"，落盘才发现它和
+生产日志同目录会被一起 ignore。
+
+### 归档（这条比上面更根本）
+
+```
+做成工序时问一句：它写的东西该进 git 吗？
+  该进 → 放 repo 内（docs/、tests/）
+  不该 → 放 repo 外，并且**接受"证据只在 commit message 里"**
+```
+
+**而"只在 commit message 里"不弱**——它跟着代码走、review 时可见、
+且不会腐烂。round 187 那个 commit 就是它自己的第一批证据。
