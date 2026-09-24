@@ -5345,3 +5345,52 @@ void sweepStaleAgentTasks().catch(() => {});
 cron 21 文件 148 过 · build ok · verify-deploy 88/88
 重启 health 200 · **启动后立刻打出 sweep 健康日志** · 去掉启动调用验过 4 红
 ```
+
+---
+
+## 审「复发防护自身」：四个里三个只在自己被触发时才跑（round 115）
+
+Round 114 让 sweep 启动即扫。这轮把同一条规矩审到我全部的复发防护上：
+
+| 防护 | 治什么 | 什么时候跑 | 自身可验吗 |
+|---|---|---|---|
+| `recoverLeftovers()` | tamper-audit 被 SIGKILL 后的源码残留 | **只有再跑 tamper-audit 时** | ❌ |
+| `sweepStaleAgentTasks()` | 僵尸长任务 | 启动 + 每小时 | ✅（round 114） |
+| `no-tamper-leftovers.test.ts` | ZZ_ 标记 | `npm run test` | ✅（测试性质如此） |
+| `JSON.parse` 自检 | package.json 结构 | 测试 transform 时 | ⚠️ 部分是（报的是 esbuild 错） |
+
+### `recoverLeftovers` 的盲区比 sweep 那个更严重
+
+```
+sweep 的盲区：重启后第一个小时不扫（1 小时窗口）
+recoverLeftovers 的盲区：**这个 session 再也不跑 tamper-audit，残留就一直在**
+```
+
+而它的存在理由是 round 66 那个事故——源码被留坏、提交、上线 15 轮。
+**如果残留发生在"我决定不再跑那个脚本"之后，它会一直躺到生产。**
+
+### 但这一轮我不加新机制
+
+理由：`/tmp` 现在**没有残留**，而残留的产生条件是「跑 tamper-audit 时被 SIGKILL」——
+harness 的 60s 上限还在，所以只要我还在用它，`recoverLeftovers` 就还有机会跑。
+**加一个"进程启动时扫 /tmp"的机制，是治一个当前不存在的病**（round 67 那条：
+自愈的不用改；这次连"自愈"都算不上，是"触发条件还会再来"）。
+
+**真正的风险点不是代码，是我的习惯**：哪天我决定"tamper-audit 用完了"，
+残留就再没机会被还原。所以这条写进 known-issues 而不是加代码：
+
+```
+若某轮之后不再跑 scripts/tamper-audit.mts，先确认 /tmp/tamper-audit-backup*
+为空；否则残留源码永远不会被 recoverLeftovers 还原（round 66 的事故会重演）。
+```
+
+### 归档：复发防护的"自身可验性"分三级
+
+```
+A 每次启动都跑 + 打日志      → sweep（round 114 达成）
+B 只在被触发时跑             → recoverLeftovers（可用性依赖调用方）
+C 只在测试里跑               → 文档/结构守卫（这是设计，不是缺陷）
+```
+
+**B 级不是缺陷，但它要求"调用方一定会再来"**——这个前提要显式写下来，
+否则它是个隐性依赖。
