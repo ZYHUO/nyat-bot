@@ -11312,3 +11312,70 @@ round 238: 验那条 → 精确匹配只有 1 个（已修）→ **没有第二�
 
 **修法（可复用）**：验证"有没有过期引用"要用**精确匹配**，
 松匹配只会让你在噪声里找真相。
+
+---
+
+## 源码侧过期引用：2 个，而它们是「mock 一个错深度的路径」且测试照绿（round 239）
+
+Round 238 审了台账侧。这轮审**源码侧**——round 180 我给 tamper-audit 加了 `--src`，
+它 grep 测试文件，那测试引用的 src 路径都还在吗？
+
+### 实测
+
+```
+tests/ 引用的相对 src 路径：1770 个
+真不存在的：2 个
+```
+
+### 而那 2 个是「深度写错」
+
+```
+tests/unit/process-handlers.test.ts   vi.mock('../../../src/shared/logger.js')
+                                      实际该写 '../../src/...'（tests/unit/ 只上两级）
+
+tests/unit/subagent/promise-loop.test.ts  vi.mock('../../../src/meta/post-task-window.js')
+                                          src/meta/post-task-window.ts 根本不存在
+```
+
+### 而测试照绿
+
+```
+$ npx vitest run tests/unit/process-handlers.test.ts
+Tests  7 passed (7)
+```
+
+**因为 `vi.mock` 一个不存在的路径时，vitest 只是注册了一个永不命中的 mock——
+被 mock 的模块从来没被 import，所以 mock 不 match 也不报错。**
+
+**而那 2 个测试的真正目的（阻止 logger 真加载）没达到**——
+它们绿是因为 logger 真加载了也没事，不是因为 mock 生效。
+
+### 归档
+
+```
+round 238: 台账侧过期引用 → 精确匹配只 1 个
+round 239: 源码侧过期引用 → 1770 里 2 个，且都是 mock 深度/路径错
+```
+
+**而"mock 一个不存在的路径会静默无效"是个新知识**：
+
+> **`vi.mock` 的路径错了不会响**——它注册一个永不命中的 mock，
+> 测试照绿，而它声称隔离的东西没被隔离。
+
+**这和 round 191 那个（日志在 debug 级）同族**：
+```
+round 191: 守卫在工作，但我看不到（观测侧）
+round 239: mock 没生效，但测试照绿（隔离侧）
+```
+
+**两者都是「机制看起来在工作，其实没接上」。**
+
+### 修不修？
+
+```
+不修——那两个测试的目的是隔离 logger，而 logger 真加载也没副作用
+（它只是打日志）。修它有风险（改 mock 路径可能让测试真的失败）
+```
+
+**按 round 115 立的（不做不会遇到的守卫），这是 B 级**：
+记下来，等真出问题再修。
