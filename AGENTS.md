@@ -170,6 +170,27 @@ change passed the other three and still did nothing:
 | **deploy verification** | **the change isn't in the bundle** — `scripts/verify-deploy.mts` greps `dist/index.js` for each mechanism (handles esbuild quote normalisation and `\uXXXX` CJK escaping) | `npx tsx scripts/verify-deploy.mts` |
 | **integration smoke** | **green alone, broken composed** — `scripts/verify-integration.mts` exercises real compositions (search, anti-ad authorise→measure→render→deauthorise, kick gates, body-signal self-registration, plus behaviour checks that *call* the newest mechanisms) | `npx tsx scripts/verify-integration.mts` |
 
+**And a guard that checks a *shape* is weaker than one that checks a *relationship*.**
+Round 167 added behaviour tests for `sweepStaleAgentTasks` and the first two mock
+attempts were both fake — the first returned a raw JSON string where the real function
+parses it (so every task looked "not running" and nothing was swept), the second used
+empty spies so the call counts were right but the store never changed. **Both versions
+passed green**; only tampering the production code revealed them.
+
+Round 168 then audited all five empty-spy tests in the repo against one criterion —
+*does this mock both replace a function AND appear in an assertion about state?* — and
+found zero fakes. The audit criterion is cheap and reusable, but the thing that actually
+caches the fakes is the **action**, not the guard:
+
+```
+after writing a behaviour test, tamper the production code and watch it go red.
+if it stays green, either you tampered the wrong thing or the mock is fake.
+```
+
+This has now caught three fake tests. A grep guard checking "does this file have a
+`vi.mock`" never would — it checks the presence of a shape, not whether the shape means
+what the test claims.
+
 **A grep guard proves the string, not the logic.** `verify-deploy.mts` greps
 `dist/index.js`, so it can only show that an identifier survived bundling. When a
 mechanism is importable, add a check to `verify-integration.mts` that *calls* it and
