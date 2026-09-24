@@ -58,3 +58,19 @@ describe('OBJECTIVE-STATUS 数据表的时间戳一致', () => {
     expect(row!).not.toContain('\u62e2 0 \u6b21');
   });
 });
+
+describe('文档数字必须带覆盖面（round 121）', () => {
+  it('⑤ 表头写清"全日志实测"这类覆盖面（不写 = 读的人不知道是全部还是一条）', () => {
+    const lines = fs.readFileSync('docs/OBJECTIVE-STATUS.md', 'utf8').split('\n');
+    const header = lines.find((l) => l.startsWith('| 闸 |'));
+    expect(header).toBeDefined();
+    expect(header!, '\u8868\u5934\u6ca1\u5199\u8986\u76d6\u9762\uff08\u5168\u65e5\u5fd7\u5b9e\u6d4b / \u5feb\u7167\uff09').toMatch(/全日志实测|快照/);
+  });
+
+  it('⑥ 说明段也写覆盖面，且与表头一致', () => {
+    const lines = fs.readFileSync('docs/OBJECTIVE-STATUS.md', 'utf8').split('\n');
+    const hi = lines.findIndex((l) => l.startsWith('| 闸 |'));
+    const above = lines.slice(Math.max(0, hi - 10), hi).join('\n');
+    expect(above).toMatch(/全日志实测|快照/);
+  });
+});
