@@ -8460,3 +8460,57 @@ round 186: 工序自己会退化 → 立守卫；而立守卫时又犯了 round 
 ```
 规矩（r38）→ 工序（r184/185）→ 守卫（r186）
 ```
+
+---
+
+## gate:log 第一次真正用在一轮里：证据从「我手写」变成「文件里有」（round 187）
+
+Round 186 立了守卫。这轮第一次**在实际 commit 前**用它。
+
+### 跑法
+
+```
+npm run gate:log -- tests/unit/docs tests/unit/scripts
+```
+
+### 落盘的证据
+
+```
+2026-09-24 10:40  typecheck   running... / clean (exit 0, no error lines)
+2026-09-24 10:40  lint        running... / clean (exit 0, no error lines)
+2026-09-24 10:41  tests       running... / Test Files 24 passed (24) | Tests 121 passed (121)
+```
+
+**三对全在 = 这一页完整。** 而这三轮的门禁数字来自 vitest 真打印的行，不是我总结的。
+
+### 这和前 186 轮的报法有什么不同
+
+```
+以前：跑门禁 → 我 grep 一行 → 手写进 commit message
+      风险：round 38 那次我报了一个从未观测的 101/107
+现在：跑 gate:log → 文件里有实际行 → commit message 引用它
+      风险：只剩"我引错了行号"（比"编一个数"难犯得多）
+```
+
+**关键不在"更准"，在"可复核"**：下一个人（或下个 session 的我）能
+`tail logs/gate-evidence.log` 看到和我当时一样的行。**而手写的那版只有我见过。**
+
+### 归档：这一轮的门禁报告就是它自己的第一批用户
+
+```
+本轮 commit 的门禁段不再是"实测：xxx"而是
+"证据在 logs/gate-evidence.log 10:40-10:41 那六行"
+```
+
+而这也让 round 169 立的「自报边界」有了落点：
+以前我说"未跑全量 test"只能靠字；现在**日志里没有全量那一行就是没跑**。
+
+### 下一步
+
+`gate:log` 现在是每轮可选的。要不要做成 pre-commit 钩子？
+—— 不。理由：harness 60s cap 下，钩子跑 gate:log（本身要 40s+）
+会被杀，而 round 185 已证明被杀会留下 `running` 无结果。
+**那会让我每轮都看到半页，然后学会忽略它**（round 112 那条路）。
+
+**所以：保持手动跑 + 日志三态可辨。** 这个决定本身值得记——
+不是所有规矩都该做成自动钩子。
