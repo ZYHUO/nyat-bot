@@ -7908,3 +7908,74 @@ round 156 "metacharacter rule"  → round 171 closed a comment with a slash-star
 我写 `**/` 进一个 md 文件时，没问「这个字符串在 markdown 里是什么」。
 
 **而它在 round 177 的答案是：它同时是代码块内容 + 一个未配对的粗体标记。**
+
+---
+
+## tamper:audit 建了 120 轮没用过一次：它的选点范围和我实际要验的相反（round 178）
+
+Round 177 闭环了「形状守卫抓动作错」。这轮反过来问 round 176 那 6 条纯自觉：
+**有没有能做成工序的？**
+
+最高价值一条是 round 53 立的「写完行为测试必须 tumper 生产代码看它红」——
+它救过我 **5 次**（round 53 的 3 个假守卫 + round 167 的 2 版假 mock）。
+
+### 而我早就为它建了工具
+
+```
+package.json: "tamper:audit": "tsx scripts/tamper-audit.mts --changed"
+```
+
+### 实测：它帮不上我真正要做的验红
+
+```
+$ npm run tamper:audit
+nothing to audit (pass test files, or --changed)
+```
+
+看源码：
+
+```ts
+if (args[0] === '--changed') {
+  files = git status --porcelain...filter(p => p.endsWith('.test.ts'))
+}
+```
+
+**它自动选点的对象是「未提交的 .test.ts」，然后去 tumper 那些测试自己的断言目标。**
+
+**而 round 167/171 我要做的是：tumper src/ 里的生产代码，看测试红。**
+方向相反：
+
+```
+tamper-audit 做的：给定一个测试 → tumper 它断言的东西
+我要的          ：给定一段新 src → 找一个会因它变化的测试 → tumper src
+```
+
+### 所以 5 次救我的全是**手工** tumper
+
+```
+round 167: cp src → 删 waiting_user 边界 → 跑测试 → cp 还原
+round 171: cp src → 往 scheduler 塞 CJK 转义 → 跑守卫 → cp 还原
+round 157: cp AGENTS.md → 吃一个 ** → 跑守卫 → cp 还原
+```
+
+**tamper-audit 这个工具 120 轮来从未参与过一次行为测试验红。**
+
+### 归档：工具的选点错了，比没工具更隐蔽
+
+```
+没工具 → 我知道没有，会手工做
+有工具但选点不对 → 我会以为"有工具兜底"，于是不手工做 → 反而没验
+```
+
+**这正是 round 115 那个「B 级机制」的判定该抓的**：
+我当时审 `recoverLeftovers` 说「它有明确触发条件所以不是缺陷」，
+但没说「**它的触发条件和我真正需要它触发的场合不重合**」。
+
+**教训：验收一个工具 = 跑一次它、看它是否真能覆盖我要的那个场合。**
+不是"它有这个功能"就算有。
+
+### 下一轮
+
+把 tamper-audit 加一个 `--src <file>` 模式：给一个 src 文件，找出引用它的测试，
+tumper 一个关键行，跑测试看红。
+**如果做不到，就承认它只能做"守卫自审"，把 round 53 那条标成"永久靠自觉"。**
