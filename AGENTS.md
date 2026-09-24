@@ -6,7 +6,7 @@ Guidance for any AI coding agent working in this repository. Concise and tool-ag
 
 Round 216/222: the rules grew past sixteen and ended up scattered over six sections,
 so round 219 audited the guards and found four rules the index had missed.
-This index is the single entry point — **check it before adding a twenty-first.**
+This index is the single entry point — **check it before adding a twenty-third.**
 
 | # | rule | guard? | section |
 |---|---|---|---|
@@ -30,6 +30,8 @@ This index is the single entry point — **check it before adding a twenty-first
 | 18 | never wrap a path-shaped example in backticks | ✅ `doc-references-exist` | Docs section |
 | 19 | a flag that is ON by default must have a reader | ✅ `no-dead-switches` | Adding a feature |
 | 20 | a hard skip needs a stated reason | ✅ `no-unexplained-skip` | Testing conventions |
+| 21 | re-measure an old baseline only after reading its criterion | — (action) | Cross-checking two numbers |
+| 22 | notes go in the description column, never in an anchor column | ✅ `baseline-ledger-format` | Writing a table row |
 
 **The rules without guards are all semantic or action rules (round 176) — that is the
 expected split, not a gap. (Round 222: this line used to say "10 have guards, 10 do not";
@@ -453,6 +455,27 @@ the line you actually saw** rather than the number you expected. If the line is 
 there, neither is the evidence.
 
 
+
+## Writing a table row: put notes in the description column, never in an anchor column
+
+Round 225 wrote a note into the ledger's 「量于」 column — `round 136 (round 224 tried
+to re-measure, criterion now unknown)` — and the guard went red, because that column
+is pinned to the shape `| round NN |`.
+
+Round 226 then audited all thirteen other places a table cell carries a parenthetical,
+and found every one of them sits in a column that is *meant* to be prose — the gate
+table's "what it catches", the rule table's "example", the ledger's condition column.
+
+So the rule is not "notes go in the condition column" (round 225's first, too-narrow
+version) but:
+
+```
+anchor column   → a guard pins its shape (`round NN`, an exact count) → no prose
+description column → free text by design                        → prose is fine
+```
+
+**Which column is which is decided by whether a guard pins it** — the same test as
+round 176's shape/action split, applied to table columns instead of rules.
 
 ## Docs: never wrap a path-shaped example in backticks
 
