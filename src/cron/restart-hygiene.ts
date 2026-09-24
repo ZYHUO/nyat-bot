@@ -96,6 +96,18 @@ export async function sweepStaleAgentTasks(): Promise<{ cleared: string[]; check
   } catch (err) {
     logger.warn({ err }, 'sweepStaleAgentTasks failed (non-fatal)');
   }
+  // round 110: **健康时也要打一行**。
+  //
+  // 原来只在清了东西时才打 warn——那意味着"扫描 0 次"和
+  // "从没跑过"一样。而这个摧拦就是 round 102-106 那个死亢任务的防纷，
+  // 如果它自己没跑，我上一轮根本知道不了。
+  //
+  // 频率：小时级（24 行/天），不到喷雾的程度。
+  logger.info({
+    checked,
+    cleared: cleared.length,
+    detail: cleared.join(' | ') || '(nothing to clear)',
+  }, 'agent sweep: stale running-task indexes scanned');
   return { cleared, checked };
 }
 

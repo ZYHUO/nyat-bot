@@ -72,3 +72,26 @@ describe('残留活动任务清扫', () => {
     expect(c.some((l) => l.includes('sweepStaleAgentTasks'))).toBe(true);
   });
 });
+
+describe('sweep 的健康日志（round 110）', () => {
+  it('⑧ 健康时也打 info（否则"扫了 0 次"和"从没跑过"分不清）', () => {
+    const s = fs.readFileSync('src/cron/restart-hygiene.ts', 'utf8');
+    // 必须在 return 之前，且带 checked/cleared 两个字段
+    const i = s.indexOf('agent sweep: stale running-task indexes scanned');
+    expect(i, '健康日志不在').toBeGreaterThan(-1);
+    const before = s.slice(Math.max(0, i - 400), i);
+    expect(before).toContain('logger.info');
+    expect(before).toContain('checked');
+    expect(before).toContain('cleared');
+    // 且在 return { cleared, checked } 之前（不是死代码）
+    const ret = s.indexOf('return { cleared, checked }', i);
+    expect(ret, '日志写在 return 之后 = 死代码').toBeGreaterThan(i);
+  });
+
+  it('⑨ 频率是小时级（不能变成刷屏）', () => {
+    const s = fs.readFileSync('src/cron/scheduler.ts', 'utf8');
+    const i = s.indexOf('stale-agent-sweep');
+    const line = s.slice(i, s.indexOf('\n', i));
+    expect(line).toMatch(/everySec: 3600/);
+  });
+});
