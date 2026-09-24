@@ -553,6 +553,25 @@ Note the two look identical ("it pins a number") and behave oppositely. Auditing
 eight doc-reading guards took one round (round 155) and found exactly one wrong — the
 one built seven rounds earlier.
 
+**And "it looks wired up" is the most expensive false green in this repo.** Five separate
+mechanisms this session were present, syntactically valid, and did nothing — and no
+typecheck or lint caught any of them:
+
+| round | what looked wired | why it was inert |
+|---|---|---|
+| 64 | a counter field | never initialised, so it stayed 0 |
+| 108 | an `else if` | unreachable inside the block it sat in |
+| 191 | another `else if` | the chain had been broken above it |
+| 201 | a guard's condition | too wide to ever be false, so it never fired |
+| 239 | a `vi.mock` | pointed at a path that does not exist, so the mock never matched — and the test passed anyway |
+
+The family shares one shape: **the code is there, the tests are green, and the connection
+is missing.** So the check that matters is not "does it exist" (typecheck answers that)
+but "does it fire" — replay the criterion against a real log, tamper the source and watch
+the guard go red, or grep for the second call site. Round 176's shape/action split says
+this is an *action* rule: there is no guard for "is this wired", only a habit of asking.
+
+
 **And a guard cannot enforce freshness, so do not try — three layers each own one job.**
 `objective-status-freshness.test.ts` checks that the table's header timestamp appears in
 the paragraph above it, and that no second "round NNN snapshot" label survives. It does
