@@ -29,6 +29,8 @@ const deployMs = lastDeployMs();
 interface LogStats {
   inbound: number;
   heartDecision: number;
+  // round 202: act 分布。四个 act 各多少条。
+  actReply: number; actWait: number; actPass: number; actReact: number;
   heartFailed: number;
   emptyResponse: number;
   truncRetry: number;
@@ -105,7 +107,9 @@ function lastDeployMs(): number {
 
 function readLog(): LogStats {
   const st: LogStats = {
-    inbound: 0, heartDecision: 0, heartFailed: 0, emptyResponse: 0, truncRetry: 0,
+    inbound: 0, heartDecision: 0,
+    actReply: 0, actWait: 0, actPass: 0, actReact: 0,
+    heartFailed: 0, emptyResponse: 0, truncRetry: 0,
     allExhausted: 0, metaEvents: 0, legacyExits: 0, legacyDenoise: 0,
     legacyReplyEngine: 0, structuralIgnore: 0, semanticDenoise: 0, keepAddressed: 0,
     envelopeBlock: 0, budgetBlock: 0, gapBlock: 0, sendBudgetEnd: 0,
@@ -170,7 +174,17 @@ function readLog(): LogStats {
     if (msg !== 'Meta path: asleep' && AWAKE_MARKERS.has(msg)) {
       st.lastAwakeMs = Math.max(st.lastAwakeMs, t);
     }
-    if (msg === 'Heart decision') { st.heartDecision++; if (t >= deployMs) st.afterHeartDecision++; }
+    if (msg === 'Heart decision') {
+      st.heartDecision++; if (t >= deployMs) st.afterHeartDecision++;
+      // round 202: 按 act 拆。四个 act 都有定义（decision.ts 的 HeartAct）。
+      // round 201 发现 wait（"该接但不是现在"）全日志只 30 次，而它才是
+      // "该不该接"的直接判断——只报总数看不出来。
+      const a = String(d.act ?? '');
+      if (a === 'reply') st.actReply++;
+      else if (a === 'wait') st.actWait++;
+      else if (a === 'pass') st.actPass++;
+      else if (a === 'react') st.actReact++;
+    }
     // round 181：影子决策。THREW = 崩了（fail-closed 成沉默）；
     // core shadow compare = 真的比了一次（有产出）。
     else if (msg === 'shadow decision THREW (counted as silent)') { st.shadowThrew++; }
@@ -488,6 +502,12 @@ console.log('');
 
 console.log('── 2. 心流健康 ──');
 console.log(`  心流裁决                      ${st.heartDecision}`);
+// round 202: act 分布（round 201 立的）。**四个数一起报**——round 191/201 都证了
+// 单看一个会误读：wait 降可能是 pass 涨，pass 占大头多半是"没被叫到的闲聊"。
+// 分母写清楚：是"心流裁决总数"，不是"被叫到的消息数"（那个数现在没拆）。
+const actSum = st.actReply + st.actWait + st.actPass + st.actReact;
+console.log(`    act: reply ${st.actReply} / wait ${st.actWait} / pass ${st.actPass} / react ${st.actReact}`
+  + `   (wait 占 ${pct(st.actWait, Math.max(1, actSum))} of ${actSum} 个裁出 act 的)`);
 console.log(`  LLM 失败 (fail-closed)        ${st.heartFailed}  ${pct(st.heartFailed, st.heartDecision)}     （分母=心流裁决 ${st.heartDecision} 次）部署后 ${st.afterHeartFailed}`);
 console.log(`    ├─ All labels exhausted     ${st.allExhausted}  ${pct(st.allExhausted, Math.max(1, st.heartFailed))} of failures`);
 console.log(`    └─ 空正文                   ${st.emptyResponse}`);
