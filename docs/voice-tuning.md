@@ -10165,3 +10165,51 @@ r214  grep "CodeAct LLM failed" in report → nothing → "没统计"（它统�
 ```
 
 **这是 round 156/177 那两次插入损坏之后，第一次零损坏的插入。**
+
+---
+
+## AGENTS.md 25 节、而规矩散在 6 个节里：该有一张索引（round 216）
+
+Round 215 立了第 16 条。这轮盘点——**规矩已经多到找不到**。
+
+### 实测结构
+
+```
+AGENTS.md 25 节
+而"规矩"类的内容散在 6 个节里：
+  L251  Writing Chinese into files and commit messages   （第 1-5 条）
+  L317  Cross-checking two numbers                       （第 6-8 条）
+  L418  Docs: never wrap a path-shaped example in backticks
+  L589  Rules that only work if you remember them         （形状 vs 动作）
+  L160  Adding a feature — the path that actually works   （四道闸 + grep 三条）
+  L154  Before you commit
+```
+
+**而 L160 那节里有三条 grep 相关规矩**（"A grep guard proves the string"、
+"greps for a pattern can match itself"、"grep for what you think it's called"），
+**它们和 L251 的第 5 条是同一条**——我 round 215 把它加进了 L251，而 L160 已有两条同类。
+
+### 问题
+
+```
+我想查"grep 相关规矩"→ 要读 L160 和 L251 两处
+而 round 215 我加的时候不知道 L160 已有两条
+```
+
+**这正是 round 47 那个「同一结论两处」的翻版**——只不过那次是数字，这次是规矩。
+
+### 修法：不合并（合并有丢内容风险），加一张索引
+
+在 AGENTS.md 顶部（"What this is" 之后）加一节 `## Rule index`，
+列 16 条规矩 + 各自所在节。**这样查的人（包括我）先看索引。**
+
+**而不合并的理由**：
+```
+三条 grep 规矩的侧重点不同（string vs logic / pattern vs artifact /
+你以为的名字 vs 真名字），合并会丢掉差异
+而索引不丢内容，只解决"找不到"
+```
+
+### 下一轮
+
+写那张索引（16 条，每条一行：编号 + 一句话 + 所在节）。
