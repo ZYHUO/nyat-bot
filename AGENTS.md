@@ -311,6 +311,29 @@ three different windows (all log / 3 days / current window) and were being read 
 
 A number without its denominator is not a finding. It is a shape that looks like one.
 
+### And if you *know* the evidence is incomplete, do not ship the number anyway
+
+Round 133 computed "3 of 23 guards have ever caught something" from **one** document
+(`voice-tuning.md`) and shipped it — while explicitly noting in the same round that
+commits and test output were also evidence. Round 134 redid it across four sources:
+**9 of 16**. The first pass had missed the guard that caught this session's worst
+incident (`no-tamper-leftovers`, round 66) purely because the log described it in
+prose without naming the file.
+
+The conclusion survived by luck — 3 and 9 point the same direction. But the *process*
+was wrong, and had the true number been 0 the same reasoning would have produced the
+opposite conclusion, backed by a statistic that looked rigorous.
+
+**Rule: a number computed on a subset you already named is not a finding — it is a
+hypothesis with a decimal point.** Either widen the evidence in the same round, or
+write "3 of 16 *in voice-tuning only*; commits/known-issues not yet searched" and
+leave it at that. The second is smaller and true; the first is bigger and false.
+
+This is round 194's rule (a second number must share the denominator) in its third
+form: the number can be right, the denominator can be right, and the **coverage** can
+still be wrong.
+
+
 ### Do not extrapolate a number you did not read
 
 Round 38 caught itself writing "deploy check 101/107" in a commit message when the
