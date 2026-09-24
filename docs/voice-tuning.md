@@ -9896,3 +9896,67 @@ round 66 立的 denoise 有"非会话 bot 名单"吗？
 **下一轮**：查 L0 denoise 怎么认广播 bot，把同一个判据搬进 coherence-probe。
 **如果搬不了，就在报告里写明"前 5 条含其他 bot 的消息"这个限制**——
 而 round 186 立的：量不出精确值时报"unverified"而不是给一个偏的数。
+
+---
+
+## 搬判据失败：bot 分类在 ingress 里，而 message in 日志不带它（round 211）
+
+Round 210 定的下一轮。去搬 L0 denoise 的判据——**发现搬不了**。
+
+### 接线结果
+
+```
+src/bot/handlers/message.ts  有 fm.isBot / fm.botClass（来自 bot-classifier.ts）
+src/pipeline/pipeline.ts:144  isDenoiseBot = BOT_DENOISE_ENABLED &&
+                                (botClass === 'ad' || 'verify' || 'echo')
+```
+
+**分类发生在 ingress 层**（Telegram 原始消息里认），**而 `message in` 日志不带这两个字段**：
+
+```
+message in 的字段：level/time/pid/hostname/chatId/messageId/uid/isEdit/preview/msg
+```
+
+**没有 `isBot`、没有 `botClass`。**
+
+### 所以 round 210 那个修法做不了
+
+```
+我原计划：把 L0 的判据搬进 coherence-probe
+实际：判据的输入（isBot/botClass）不在日志里
+```
+
+### 三条路
+
+```
+① 给 message in 日志加 isBot/botClass 字段（同 round 206 的做法，一个 flag）
+② 在 coherence-probe 里按 username 黑名单硬编（uzumaru_geoip_bot…）
+   → 硬编名单会腐烂，且我不知道全名单
+③ 在报告里写明"前 5 条含其他 bot 的消息"这个限制
+```
+
+**选 ③**——理由：
+
+```
+① 是对的，但它是第二次为"分析"改生产日志路径（round 206 刚做过一次）。
+   而 round 206 那个至少回答了"bot 说了什么"；这个只服务一个量具的分母精度。
+② 硬编名单 = round 58 那个"wrong string"病（名单会变，而测试不会响）
+③ 零成本、且 round 186 立的正是这个：量不出精确值时报 unverified
+```
+
+### 归档
+
+```
+round 210: 发现分母混了 bot
+round 211: 想搬判据 → 输入不在日志里 → 选"写明限制"而不是改生产
+```
+
+**而这比 round 206 那次理智**：round 205 我量到 0.06 MB 就直接加了 flag；
+这轮我先问「这个字段服务什么」，发现它只服务一个量具的分母精度，
+**那就该用"写明限制"而不是"改生产"**。
+
+**同一条规矩（量成本再决定）在两个方向上都成立了**：
+```
+成本低 + 服务核心诉求（连贯性）→ 加字段（round 206）
+成本低 + 只服务一个量具精度     → 写明限制（round 211）
+```
