@@ -180,7 +180,7 @@ passed green**; only tampering the production code revealed them.
 Round 168 then audited all five empty-spy tests in the repo against one criterion —
 *does this mock both replace a function AND appear in an assertion about state?* — and
 found zero fakes. The audit criterion is cheap and reusable, but the thing that actually
-caches the fakes is the **action**, not the guard:
+catches the fakes is the **action**, not the guard:
 
 ```
 after writing a behaviour test, tamper the production code and watch it go red.
@@ -267,6 +267,27 @@ codepoint turned 吱 into 咚 and the prompt shipped it).
 **3. Commit messages with Chinese + backticks + braces: use `-F file`, never `-m`.**
 `git commit -m "中文 + \`code\` + ${x} + {}"` breaks bash quoting (round 179, and many
 times before). Write the message to a temp file and `git commit -F /tmp/msg.txt`.
+
+**And a string that is syntax in the file you are writing it into will break that file.**
+Three rounds in this session each lost a round to the same disease, and only the third
+one named it:
+
+| round | file | the string | what it closed |
+|---|---|---|---|
+| 128 | a `.test.ts` doc comment | `` `.skip(` `` | the skip itself — the guard grepped *itself* |
+| 156 | `AGENTS.md` | `**` | the bold span of the paragraph I was inserting into |
+| 171 | a `.test.ts` block comment | `src/**/*.ts` | the comment — esbuild read the rest as code |
+
+The shape is identical each time: **I wrote text containing a metacharacter without
+treating it as one.** The fix costs nothing and prevents all three —
+
+```
+before writing a string into a file, ask: what is this string IN THIS FILE?
+```
+
+Concretely: in a `.ts` block comment, `*/` and `**/` are terminators; in markdown, `**`
+is emphasis; in a test file, `.skip(` is control flow. So write `src/` + `**` + `/*.ts`
+as `src/**` separate from `/*`, or describe it in words instead.
 
 Rule 2's corollary applies to all three: **after any non-trivial text write, read the
 result back**. A syntax error is loud, which is the good case; the bad case is the one
