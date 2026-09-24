@@ -172,3 +172,53 @@ round 126: 538 文件 / 4156 passed
 **面向上**：`verify-deploy` 本轮没重跑（round 110 是 88/88，
 而这两轮只改了 docs 和测试，没动 src）——按 round 38 规矩，
 没观测到的不写成观测过，所以这里标"未重跑"而不是"88/88"。
+
+---
+
+## round 127：查那 4 个 skip（round 126 留下的问题）
+
+Round 126 实测 `4156 passed | 4 skipped`。按 round 126 自己立的
+「全量轮次才能发现悄悄死掉的测试」，**skip 就是最常见的死法**——这轮回查那 4 个。
+
+```
+结论：4 个 skip 全是 skipIf（环境探测），不是被人为 it.skip 的：
+  tests/unit/sandbox/terminal-bwrap.test.ts  3 个 —— skipIf(!HAS_BWRAP_RUNTIME)
+  tests/unit/nyatdb/native-scaffold.test.ts  1 个 —— skipIf(!nativeReady)
+
+唯一一个硬 skip：
+  tests/unit/pipeline/heart-infra-failure.test.ts:353
+  it.skip("engagement 硬阈:obligationStrong 强债务豁免 → 心流照常裁决")
+  原因（代码注释）：Flaky when co-run with other pipeline files
+                    (hangs on CI/local full batch)
+```
+
+### 这个硬 skip 是个真问题，但比看起来的小
+
+它测的是「obligationStrong 强债务豁免」——一个**硬阈值**行为。
+它被 skip 的原因是自己会挂起并拖垮整批。
+
+**处置：不修，但记**。理由：
+
+1. 它不是我 session 加的（round 100 前就在）
+2. 修它要重写那个用例的 mock 形状，而它挂起的根因
+   （"co-run with other pipeline files"）本身就说明它的 mock 有泄漏
+3. **修它的风险 > 它守着的价值**：一个测试挂了比一个测试被 skip 更糟
+   （round 112 立的：假警报会让人学会忽略守卫）
+
+**但给它一个复查条件**（按 round 124 的格式）：
+
+```
+何时值得修：当同文件的其它用例也开始 flaky，
+            或 obligationStrong 的阈值被改动时（那时它守的东西变了，
+            过期的 skip 比没有测试更危险）
+```
+
+### 归档：skip 分三种，只有一种要立刻动
+
+```
+skipIf(环境不满足)  → 正确设计（bwrap 没装就不测 bwrap）
+it.skip(flaky)     → 记原因 + 复查条件，别当不存在
+it.todo(没写)      → 视为不存在，应该删
+```
+
+**全仓现在：2 个 skipIf 合理 + 1 个 it.skip 有原因有条件。没有 it.todo。**
