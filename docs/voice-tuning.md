@@ -9839,3 +9839,60 @@ round 209: 但第一条恰好是短回复，preview/text 相同 → 基线还不
 **我倾向后者**：不用等，报两个口径（preview 基线 / text 基线），
 而这正是 round 193 立的（两个数必须同分母才能比）——
 **两个口径不同分母，所以分开报、不混。**
+
+---
+
+## coherence-probe 的口径漏洞：它把**别的 bot 的话**也当"人话"了（round 210）
+
+Round 209 说可分开报——但 text 样本只有 1 条（分母 1，分开报没意义）。
+这轮换审脚本本身的口径。
+
+### 发现的漏洞
+
+```
+coherence-probe 取"前 5 条同群人话"：
+  rows.filter(x => x.from === 'human' && x.chatId === r.chatId)
+
+而 'human' 的判定是 msg === 'message in'
+```
+
+**`message in` 的字段**：
+
+```
+level/time/pid/hostname/chatId/messageId/uid/isEdit/preview/msg
+```
+
+**没有任何"这是不是 bot"的字段。**
+
+**而 round 66 那个广播 bot（uzumaru_geoip_bot）天天在群里发消息**——
+它的话也算进了"前 5 条人话"。
+
+### 后果
+
+```
+如果前 5 条里有一条是广播 bot 的 JSON/广告，
+bot 的回复和它 0 bigram 重合是**正常的**（本来就不该接它）
+→ 这会**推高**"0 重合"的比例
+→ 也就是说 round 207 那个 76.3% 可能偏高
+```
+
+### 归档：这是 round 133 那个覆盖面错误的新形态
+
+```
+round 133: 只查一个文档就下结论（漏证据源）
+round 210: 只按 msg==='message in' 取人话（**漏了一个排除条件**）
+```
+
+**而它的方向是"让数字更难看"**——和 round 189 那个（让数字更好看）相反，
+但都是同一个错：分母里混了不该在的东西。
+
+### 修法
+
+```
+message in 日志里没有 bot 标记 → 从别处判
+round 66 立的 denoise 有"非会话 bot 名单"吗？
+```
+
+**下一轮**：查 L0 denoise 怎么认广播 bot，把同一个判据搬进 coherence-probe。
+**如果搬不了，就在报告里写明"前 5 条含其他 bot 的消息"这个限制**——
+而 round 186 立的：量不出精确值时报"unverified"而不是给一个偏的数。
