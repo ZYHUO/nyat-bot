@@ -25,6 +25,7 @@ jump straight to **🚀 Quick start** further down this README.
 
 ## Contents
 
+- [致谢](#致谢)
 - [v1.1 — the second audit cycle (2026-09-22)](#v11--the-second-audit-cycle-2026-09-22)
 - [Why this exists](#why-this-exists)
 - [What it does now](#what-it-does-now)
@@ -140,6 +141,10 @@ regenerated, not hand-edited — if you change a flag, re-run it rather than tru
 figure above.)
 
 </div>
+
+## 致谢
+
+感谢赞助商 **ForZTN** 对项目服务器的支持，感谢。
 
 ---
 
