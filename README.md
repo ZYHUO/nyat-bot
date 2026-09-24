@@ -2191,6 +2191,9 @@ host 侧上限在操作手册的第 3 桡）。
 [`docs/OBJECTIVE-STATUS.md`](docs/OBJECTIVE-STATUS.md)——那是同一件事的另一半：
 哪些问题有数字、数字是多少、哪些决定需要人拍板。两份合起来是完整答卷。
 
+那张表是**每 20 轮实测一次**的快照（表头时间戳是最后一次实测的时刻，不是实时值）；
+要最新值跑 `npx tsx scripts/session-report.mts`——它读同一份 `logs/app.log`。
+
 **正在进行的事**在 [`docs/plan-reply-behaviour.md`](docs/plan-reply-behaviour.md)
 （2026-09-23 起：修"不会用别的 bot"和"说话太应激"，含根因、每步的实装位置和验收）。
 
