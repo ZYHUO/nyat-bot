@@ -141,3 +141,34 @@ Round 121 立了「分清没想到和验不了」，round 123 应用它时发现
 
 **只有一行不可验**（第 4 行）。其余四行都可能因为"别的机制成熟"而变成可验
 ——round 123 那条就是第 5 行的近亲（一个能验了，一个还不能）。
+
+---
+
+## round 126 全量门禁实测（距 round 100 已 26 轮）
+
+| 闸 | 结果 |
+|---|---|
+| `npm run typecheck` | **0 error** |
+| `npm run lint` | **0 error** |
+| `npm run build` | ok（452ms） |
+| `npm run test` | **538 文件 / 4156 passed / 4 skipped**，0 FAIL |
+| `npm run verify:deploy` | **88/88**（round 110 实测，本轮未重跑） |
+| 服务 | active / health 200 |
+
+**与 round 100 对比**：
+
+```
+round 100: 535 文件 / 4134 passed
+round 126: 538 文件 / 4156 passed
+```
+
+**+3 文件 / +22 测试**——这 26 轮加的：
+- `known-issues-scheduled.test.ts`（4 条，round 123）
+- `stale-agent-sweep.test.ts`（9→11 条，round 106/114）
+- `objective-status-freshness.test.ts`（+2 条覆盖面，round 121）
+
+**没有一个是为了凑数**：每条都能说出它防什么、都验过能红。
+
+**面向上**：`verify-deploy` 本轮没重跑（round 110 是 88/88，
+而这两轮只改了 docs 和测试，没动 src）——按 round 38 规矩，
+没观测到的不写成观测过，所以这里标"未重跑"而不是"88/88"。
