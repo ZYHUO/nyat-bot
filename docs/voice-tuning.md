@@ -7272,3 +7272,43 @@ recoverLeftovers（tamper 还原）               0（无）            0
 **scripts/ 里的机制本来就不进 bundle**，它的可验性靠单元测试——
 而我 round 117 立的 `no-tamper-leftovers.test.ts` 只守 `src/`/`dist/`，
 没守"recoverLeftovers 本身还能跑"。
+
+---
+
+## recoverLeftovers 的守卫：4 条，验过红（round 166）
+
+Round 165 审出 `recoverLeftovers`（scripts/ 里的机制）没有守卫——
+它是 round 66 那起事故（15 轮）的唯一防复发，而 `no-tamper-leftovers`
+只守「有没有残留」，没守「**还原机制本身还能工作**」。
+
+这轮补 4 条：
+
+```
+① 脚本里有 recoverLeftovers 且被启动时调用
+② 备份第一行写真路径（否则下次启动认不回去）
+③ 扫 /tmp/tamper-audit-backup* 这个前缀
+④ 写回用 writeFileSync(orig, body) 而不是 copyFileSync
+```
+
+**④ 是最重要的一条**：round 66 之前我用 `copyFileSync`，而备份带头注释——
+拷回去会把 `// tamper-audit-original: ...` 那行也拷进源码。
+**验红**：换成 `copyFileSync(bak, orig)` → 2 条红。
+
+### 归档：防复发机制要分两个问题
+
+```
+round 117 no-tamper-leftovers  →  "有没有残留"   （守 src//dist/）
+round 166 tamper-recovery-works →  "还原还能工作吗"（守 scripts/）
+```
+
+**这两个是不同的。** 只守前者，会出现「残留还在、但还原坏了」——
+那比没有还原更危险，因为日志会说"扫过了"。
+
+### 顺带：为什么不用真造备份文件来验
+
+本来想造一个假备份、调 `recoverLeftovers` 看它还原。
+没做——因为 `recoverLeftovers` 是模块内函数，不导出，
+要真验得改脚本导出它（为测试改生产代码，round 115 那种）。
+
+**所以改用"形状守卫"**：钉住四个关键事实。
+这比行为验证弱，但足以防"有人改坏了形状"。
