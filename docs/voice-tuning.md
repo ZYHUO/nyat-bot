@@ -7312,3 +7312,52 @@ round 166 tamper-recovery-works →  "还原还能工作吗"（守 scripts/）
 
 **所以改用"形状守卫"**：钉住四个关键事实。
 这比行为验证弱，但足以防"有人改坏了形状"。
+
+---
+
+## sweep 的行为验证：5 条，而我的 mock 前两版都是假的（round 167）
+
+Round 166 说「形状守卫比行为弱」。这轮补行为——`sweepStaleAgentTasks` 是导出的，能真调。
+
+### 五个场景
+
+```
+① 形态 A：running 且 age>2h → 改 failed + 解索引     （真僵尸）
+② 边界：waiting_user 且 age 99h → 不清              （round 67 的边界）
+③ 边界：running 但 age 30min → 不清                 （别削掉在跑的长任务）
+④ 形态 B：hash 里没有该 task → 删索引               （纯死键）
+⑤ 空索引 → checked 0 cleared 0 不抛
+```
+
+**验红**：拿掉 `waiting_user` 边界 → 2 条红。
+
+### 但前两版 mock 都是假的
+
+**第一版**：`loadCodeActTask` mock 直接返回 **JSON 字符串**。
+→ 真的会 `JSON.parse`，我的不 parse → `t.status` 是 `undefined`
+→ `undefined !== 'running'` → **continue** → 全不清。
+现象：`checked 1, cleared 0`——**看着像"没有僵尸"，其实是 mock 坏了。**
+
+**第二版**：`unregisterAgentChat` / `persistCodeActTask` 用空 spy。
+→ 调用计数对，但 `fake.store` 没变 → `expect(get(KEY)).toBeNull()` 失败。
+**那是我 mock 太弱，不是代码错。**
+
+### 归档：mock 的保真度比覆盖率重要
+
+```
+一个假 mock 会让测试绿着，而它绿的理由和代码无关。
+round 191 那个"日志在 debug 级"是同族：**看着在工作，其实验的是别的东西**。
+```
+
+**我这两版假 mock 的现象都是"绿"**——第一版甚至绿得义正言辞
+（checked 1 cleared 0 完全可以是"没僵尸"）。
+**如果不是我手工 tumper 了 waiting_user 边界去验红**，
+这两版假 mock 会一直躺着。
+
+### 一条可复用的判据
+
+```
+写完行为测试，必须**反向 tumper 生产代码**看它红。
+ tumper 了不红 → 要么 tumper 的不是判据、要么 mock 是假的。
+ round 53 立的规矩，这轮第三次救回一个假测试。
+```
