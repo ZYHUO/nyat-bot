@@ -5800,3 +5800,45 @@ Round 127 把 skip 分成三种，这轮立守卫防第四种「无原因的新 
 ```
 把 heart-infra-failure 的 // Flaky when co-run... 注释删掉 → ②红（这里是①）
 ```
+
+---
+
+## 审 grep 类守卫的自指：4 个里 1 个会命中自己，已修 3 处（round 129）
+
+Round 128 立的「grep 类守卫要问会不会命中自己」。这轮审全部 4 个：
+
+| 守卫 | grep/读的范围 | 包含自己吗 | 处置 |
+|---|---|---|---|
+| `no-tamper-leftovers` | `src/` + `dist/index.js` | **否**（不含 tests/） | 安全 |
+| `no-unexplained-skip` | `tests/unit` | **是** | 已排除（round 128） |
+| `agent-rules-index` | `AGENTS.md` 等指名文件 | 否 | 安全 |
+| `objective-status-freshness` | `docs/OBJECTIVE-STATUS.md` | 否 | 安全 |
+
+**只有 1 个真的会命中，而它正是唯一一个 grep `tests/` 目录的**——
+因为其他三个读的都是「被检查的语言」而不是「检查者自己的语言」。
+
+### 这暴露一个规律
+
+```
+守卫会不会自指，取决于它 grep 的范围包不包含 tests/。
+  grep src/  → 守卫在 tests/，不会自指
+  grep tests/ → 守卫也在 tests/，会自指
+```
+
+**所以规矩可以更具体**：
+> 以后凡是 grep `tests/` 的守卫，**默认加一行排除自己**，
+> 不要等第一次跑红才发现。
+
+### 顺带：为什么其他三个不需要
+
+它们读的是**产物**（`AGENTS.md`、`dist/`、docs），而守卫自己是**检查者**。
+只有 `no-unexplained-skip` 检查的是「代码模式」而不是「产物内容」，
+所以它的检查集里天然有自己。
+
+```
+检查产物   → 检查者不在产物里 → 不自指
+检查模式   → 检查者也有模式   → 自指，必须排除
+```
+
+**这个二分比"范围包含 tests/"更根本**：如果哪天我加一个读 `src/` 的守卫，
+而它的检查逻辑恰好以字符串形式存在于某个 `.ts` 里，那也会自指。
