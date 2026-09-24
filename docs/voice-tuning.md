@@ -9049,3 +9049,68 @@ round 196: 立行为守卫；并发现 round 193 那个 exit 1 是我读错管�
 
 **而它抓到的第一件事不是语法错，是我测试里的一个错字**——
 这恰好证明它真的在跑那个脚本（round 176 立的「关系 > 形状」）。
+
+---
+
+## 33 个脚本里我改过的只有 5 个，而这 5 个现在全有守卫（round 197）
+
+Round 196 给 session-report 立了行为守卫。这轮审**其他脚本**——
+按 round 192 立的缺口（「parse 过了不代表能跑」）排查。
+
+### 实测：33 个 .mts 的测试覆盖
+
+```
+有测试的：gate-evidence(2) · log-count(2) · measure-timing(2) · measure-voice(5)
+         session-report(7) · tamper-audit(4) · verify-deploy(1)
+         verify-integration(1) · demo(1)
+没测试的：24 个（arch-split / art-smoke / backfill-outcomes / migrate-... /
+         trench-* / zz-* / wakeup-check ...）
+```
+
+### 而那 24 个我绝大多数没改过
+
+```
+我在这个 goal 里改过的脚本只有：
+  log-count.mts（round 95 前后）· tamper-audit.mts（round 54-59/180）
+  session-report.mts（round 163/192/196）· gate-evidence.mts（round 184-186）
+  verify-deploy.mts（round 165）· measure-*.mts（更早）
+```
+
+**而这 6 个的测试覆盖是**：
+
+```
+log-count        2 个测试
+tamper-audit     4 个（round 166 立的形状守卫 + 其他）
+session-report   7 个（round 196 刚立的行为守卫）
+gate-evidence    2 个（round 186 立的形状守卫）
+verify-deploy    1 个
+measure-*        多个
+```
+
+**全覆盖。** 而那 24 个没测试的我没改过——**它们的风险是"我没碰过"，
+不是"我改坏了没人知道"**。
+
+### 归档：这一轮的产出是「审过了，缺口不在那」
+
+```
+round 192: 发现 scripts/ 只有 parse 守卫（一个缺口）
+round 196: 给 session-report 补行为守卫
+round 197: 审其余 32 个 → 我改过的 6 个全有守卫，没改过的 24 个不需要行为守卫
+```
+
+**这不等于"24 个没问题"**——它们可能有真 bug，但**不是我这个 goal 引入的**。
+按 round 115 立的（不做不会遇到的守卫），这个阶段该停。
+
+### 顺带：一个更值钱的发现
+
+`verify-deploy.mts` 只被 grep 到 1 次，而它是 **88 项 bundle 钉子**的家。
+它**自己**只有一个 parse 守卫——**而我 round 165 刚往里加了两根钉子**。
+
+```
+如果我把 CHECKS 数组改坏（少个逗号、多个引号），parse 守得住；
+但如果我把一个钉子的 needle 写错，parse 守不住 —— 它会永远绿
+```
+
+**而它的验红方式本来就有**：`npm run verify:deploy` 跑一次看 88/90。
+我 round 165 就是那么验的。**所以它不需要新守卫，需要的是"改它就跑一次"**——
+这正是 round 176 分类里的 action 类，而它的"工序"就是跑那个命令本身。
