@@ -164,3 +164,63 @@ describe('AGENTS.md 的 markdown 配对（round 156/157）', () => {
     expect(bad, '这些表格块内行列数不一致：\n  ' + bad.join('\n  ')).toEqual([]);
   });
 });
+
+describe('voice-tuning.md 的标题结构（round 159 手工查过，round 160 立守卫）', () => {
+  const headingsOf = (file: string): Array<{ level: number; line: number; text: string }> => {
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    const out: Array<{ level: number; line: number; text: string }> = [];
+    let inFence = false;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i]!;
+      if (l.trimStart().startsWith('```')) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      const m = /^(#{1,6}) (.+)$/.exec(l);
+      if (m) out.push({ level: m[1]!.length, line: i + 1, text: m[2]! });
+    }
+    return out;
+  };
+
+  it('标题层级不跳跃（H2 直接跳到 H4）', () => {
+    const bad: string[] = [];
+    let prev = 0;
+    for (const h of headingsOf('docs/voice-tuning.md')) {
+      if (prev && h.level > prev + 1) bad.push(`L${h.line} H${prev}→H${h.level}「${h.text.slice(0, 30)}」`);
+      prev = h.level;
+    }
+    expect(bad, '这些标题跳过了层级：\n  ' + bad.join('\n  ')).toEqual([]);
+  });
+
+  it('没有重复的 ## 节标题（round 160：只查 H2——H3 是结构性标签）', () => {
+    // round 160: 第一版查所有层级，被「结论」「教训」「后果」这类
+    // 结构性 H3 标签误伤（它们在不同轮次里合法重复）。
+    // round 47 那个病是"同一结论写两遍"——那对应 H2（每轮的结论节）。
+    const seen = new Map<string, number>();
+    const bad: string[] = [];
+    for (const h of headingsOf('docs/voice-tuning.md')) {
+      if (h.level !== 2) continue;
+      const t = h.text.trim();
+      if (seen.has(t)) bad.push(`L${seen.get(t)} 与 L${h.line}：「${t.slice(0, 40)}」`);
+      else seen.set(t, h.line);
+    }
+    expect(bad, '这些 ## 节标题出现了两次：\n  ' + bad.join('\n  ')).toEqual([]);
+  });
+
+  it('没有空节（有标题没内容，round 160 修正了边界）', () => {
+    // round 160: 第一版用"到下一个标题（任意层级）"算 body，
+    // 于是「## X」紧跟「### Y」被判成空节。真实边界是
+    // 下一个**同级或更高级**标题。
+    const lines = fs.readFileSync('docs/voice-tuning.md', 'utf8').split('\n');
+    const hs = headingsOf('docs/voice-tuning.md');
+    const bad: string[] = [];
+    for (let k = 0; k < hs.length; k++) {
+      const cur = hs[k]!;
+      let to = lines.length;
+      for (let j = k + 1; j < hs.length; j++) {
+        if (hs[j]!.level <= cur.level) { to = hs[j]!.line - 1; break; }
+      }
+      const body = lines.slice(cur.line, to).filter((l) => l.trim() !== '');
+      if (body.length === 0) bad.push(`L${cur.line}「${cur.text.slice(0, 40)}」`);
+    }
+    expect(bad, '这些标题下没有内容：\n  ' + bad.join('\n  ')).toEqual([]);
+  });
+});
