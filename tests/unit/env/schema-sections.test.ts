@@ -49,8 +49,9 @@ describe('env schema 拆段', () => {
     //       + 1（AI_MAX_INFLIGHT_PER_MODEL，round 198 的在飞上限）。
     // 加旗标时这个数会变——
     // 那时该做的是重新核对，而不是把这个数字改大。
-    expect(all.length).toBe(497);
-    expect(new Set(all).size).toBe(497);
+    // round 206: 497 → 498（加了 SEND_LOG_FULL_TEXT）
+    expect(all.length).toBe(498);
+    expect(new Set(all).size).toBe(498);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });

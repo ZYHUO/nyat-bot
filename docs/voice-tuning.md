@@ -9620,3 +9620,57 @@ round 205: 量到 0.06 MB → **该直接做**，不该等拍板
 
 **按 AGENTS.md：新 flag 默认 OFF。但这次 OFF 的理由不是"怕花钱"，
 是"怕改生产路径"——所以验红要覆盖"flag 关时行为不变"。**
+
+---
+
+## 加全文字段：一个 flag、三处改动，而守卫立刻教我更新 key 数（round 206）
+
+Round 205 定的：直接加。做了。
+
+### 改了三处
+
+```
+① src/env-sections/self.ts  加 SEND_LOG_FULL_TEXT: booleanFromEnv.default(false)
+② src/subagent/host-api.ts  日志里 ...(env().SEND_LOG_FULL_TEXT ? { text: part } : {})
+③ tests/unit/env/schema-sections.test.ts  497 → 498
+```
+
+### 守卫立刻红
+
+```
+× ① 键集合：无丢失、无新增 → expected 498 to be 497
+```
+
+**这正是 AGENTS.md 立的规矩**（「the number moves as flags are added/retired —
+re-count, don't guess」）。我没猜，跑了一次守卫拿到 498。
+
+### 关键设计：`...()` 展开而不是直接字段
+
+```ts
+...(env().SEND_LOG_FULL_TEXT ? { text: part } : {}),
+```
+
+**flag 关时日志里根本没有 `text` 键**，而不是 `text: undefined`。
+这样：
+```
+flag 关 → 日志和改之前逐字节一致（可验）
+flag 开 → 多一个 text 键
+```
+
+**而「flag 关时行为不变」正是 round 205 说要验的**——用展开语法让它天然成立。
+
+### 归档
+
+```
+round 204: 全文不在日志里（发现约束）
+round 205: 量到成本 0.06 MB（推翻"要拍板"）
+round 206: 加字段（flag 默认 OFF，展开语法保证关时零变化）
+```
+
+**而这条线是 round 198「两条诉求不可量化」的第一条实质突破**：
+下一个部署后，`host sendText` 会带全文，那时能离线算 bigram 分布。
+
+### 下一轮
+
+写离线分析脚本（读 app.log，对每条 reply 算它和前 5 条人话的 bigram 重合数）。
+**这次不需要 flag——它只读日志。**

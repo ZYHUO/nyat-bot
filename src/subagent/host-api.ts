@@ -1223,6 +1223,11 @@ export function createHostApi(
                     // 从日志就能按 taskId 聚合，不需要另找一条路。
                     taskId: opts.taskId ?? null,
                     preview: part.slice(0, 80),
+                    // round 206: 全文。round 204/205 量过：只给带 taskId 的发送加，
+                    // 每条约 360 字节、全日志 189 条 = 0.06 MB（现有 app.log 的 0.07%）。
+                    // 没有它，"前言不搭后语"只能拿 40 字 preview 做单边判断
+                    // （能证伪"完全无关"，不能证明"连贯"）。
+                    ...(env().SEND_LOG_FULL_TEXT ? { text: part } : {}),
                   },
                   'host sendText',
                 );

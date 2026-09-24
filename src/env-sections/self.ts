@@ -91,4 +91,15 @@ export const selfSection = {
   // "想起某人三天没出现")。开启后世界状态会带 absentUsers,
   // 决策模型可选 remember_user 动作。
   UNIFIED_TICK_ABSENT_USERS_ENABLED: booleanFromEnv.default(false),
+
+  // round 206: host sendText 日志里附全文（不只是 80 字 preview）。
+  //
+  // 为什么值得一个 flag：round 204 量到全文不在日志里（parts 是分片数、
+  // preview 截断），于是"前言不搭后语"只能拿 40 字做单边判断。
+  // round 205 量过成本：只给带 taskId 的发送加，每条约 360 字节、
+  // 全日志 189 条 = 0.06 MB（现有 app.log 的 0.07%）。
+  //
+  // 为什么默认 OFF：不是怕花钱，是"改生产日志路径"本身要谨慎
+  // （round 66：改坏了不会响）。验红覆盖"关时行为不变"。
+  SEND_LOG_FULL_TEXT: booleanFromEnv.default(false),
 };
