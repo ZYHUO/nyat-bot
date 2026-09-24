@@ -450,9 +450,15 @@ if (st.inbound > 0 && (st.interruptAddressed + st.interruptBackground) > 0) {
   const per100 = ((st.interruptAddressed + st.interruptBackground) / st.inbound * 100).toFixed(1);
   const bgShare = (st.interruptBackground / (st.interruptAddressed + st.interruptBackground) * 100).toFixed(0);
   console.log('');
-  console.log(`Interrupt 打断：共 ${st.interruptAddressed + st.interruptBackground} 条 `
+  // round 192: 四个数放同一行（round 191 立的）。之前入站量在
+  // 上一行（"编辑重播占入站"），读的人要往上扫一行才拿得到第四个数
+  // ——而 round 191 证了"\u6ca1\u6709\u4e00\u4e2a\u6570\u80fd\u5355\u72ec\u8bfb"。
+  const totalInt = st.interruptAddressed + st.interruptBackground;
+  console.log(`Interrupt 打断：共 ${totalInt} 条 `
     + `· 每百条入站 ${per100} 条`
-    + ` · background 占 ${bgShare}%（${st.interruptBackground}/${st.interruptAddressed + st.interruptBackground}）`);
+    + ` · background 占 ${bgShare}%（${st.interruptBackground}/${totalInt}）`
+    + ` · 入站 ${st.inbound} 条`
+    + ` · addressed ${st.interruptAddressed} / background ${st.interruptBackground}`);
   console.log('    (口径：background = 无关群话被长任务当成对自己的打断。round 107: 它是群密度的函数，'
     + '别看 bare 计数。)');
 }

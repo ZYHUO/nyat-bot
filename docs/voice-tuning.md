@@ -8759,3 +8759,57 @@ OBJECTIVE-STATUS 的 interrupt 行现在写的是三个数
 ### 下一轮
 
 把「四个数一起」写进 OBJECTIVE-STATUS 的备注（现在只有三个）。
+
+---
+
+## 四个数并一行：而我删重复行时又删漏了一个括号（round 192）
+
+Round 191 立了「四个数一起」。这轮把 session-report 的 Interrupt 行并齐。
+
+### 第一次改出重复
+
+我在旧行前面插了新行，但**旧行没删**——结果输出里 `background 占 57%（47/82）` 出现两次。
+
+```
+Interrupt 打断：共 82 条 · 每百条入站 0.3 条 · ... · addressed 35 / background 47
+  · background 占 57%（47/82）     ← 重复的尾巴
+```
+
+### 删重复行时又删漏一个括号
+
+我删了那行重复的尾巴，但它是以 `+ \`…\`)` 结尾的——**`);` 一起被删了**：
+
+```
+ERROR: Expected ")" but found "console"   (session-report.ts:462)
+```
+
+**这是 round 163 那个病的同族第三次**：
+```
+round 163: python 插入漏一个 if (rate < 0.15) {
+round 192: python 删行删掉一个 );       ← 同一次编辑的两个动作
+```
+
+### 抓它的还是 session-report 自己跑挂
+
+和 round 163 一样——**不是守卫**。`all-scripts-parse` 守卫只管**语法**，
+而这次语法确实坏了、它应该抓到……让我验一下它为什么没抓。
+
+（先记：这次是 `npx tsc` 报出来的——scripts/ 不在 tsc include 里，
+所以 tsc 也不该报。报它的是 tsx 自己。）
+
+### 归档
+
+```
+round 163: 会话报告抓到的语法错（漏 if）
+round 192: 同一个文件、同一个编辑模式（漏右括号）
+```
+
+**同一个文件、同一类编辑，隔了 30 轮又犯一次。** 而 `scripts/` 没有**行为级**守卫
+（`all-scripts-parse` 只 parse，parse 过了不代表能跑）。
+
+**修法（可做的）**：给 `all-scripts-parse` 之外再加一条——
+**跑一次 `session-report.mts` 看它退出码 0**。但那要几十秒、会打 LLM 之外的 IO。
+折中：只在 gate:log 里跑 `scripts/session-report.mts --help` 之类？
+
+**更干脆的修法**：这次已经修好，而**根因是我用 python 做"删一行"这种细活**。
+round 61 立的「多行用 write/edit」正是治这个——我该用 edit 工具删那一行。
