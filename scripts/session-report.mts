@@ -507,7 +507,7 @@ console.log(`  心流裁决                      ${st.heartDecision}`);
 // 分母写清楚：是"心流裁决总数"，不是"被叫到的消息数"（那个数现在没拆）。
 const actSum = st.actReply + st.actWait + st.actPass + st.actReact;
 console.log(`    act: reply ${st.actReply} / wait ${st.actWait} / pass ${st.actPass} / react ${st.actReact}`
-  + `   (wait 占 ${pct(st.actWait, Math.max(1, actSum))} of ${actSum} 个裁出 act 的)`);
+  + `   (wait 占 ${pct(st.actWait, Math.max(1, actSum))} of ${actSum}; round 203: 每条 Heart decision 都带 act，所以 actSum == 心流裁决数)`);
 console.log(`  LLM 失败 (fail-closed)        ${st.heartFailed}  ${pct(st.heartFailed, st.heartDecision)}     （分母=心流裁决 ${st.heartDecision} 次）部署后 ${st.afterHeartFailed}`);
 console.log(`    ├─ All labels exhausted     ${st.allExhausted}  ${pct(st.allExhausted, Math.max(1, st.heartFailed))} of failures`);
 console.log(`    └─ 空正文                   ${st.emptyResponse}`);
