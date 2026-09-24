@@ -1,29 +1,29 @@
 import { logger } from '../shared/logger.js';
 
 /**
- * round 85\uff1a**\u8fdb\u7a0b\u536b\u751f\u544a\u8b66**\u2014\u2014\u628a"\u91cd\u542f\u5f88\u9891"\u53d8\u6210\u4e00\u4e2a\u53ef\u89c1\u7684\u4fe1\u53f7\u3002
+ * round 85：**进程卫生告警**——把"重启很频"变成一个可见的信号。
  *
- * round 63 \u53ea\u5728\u542f\u52a8\u65f6\u6253\u4e00\u53e5\u8bdd\uff08\u8bf4\u660e\u8fdb\u7a0b\u5185\u95f8\u5728\u8fd9\u91cc\u6e05\u96f6\uff09\uff0c
- * \u90a3\u53ea\u89e3\u51b3\u4e86"\u4e0b\u4e00\u4e2a\u770b\u65e5\u5fd7\u7684\u4eba\u77e5\u9053\u4e3a\u4ec0\u4e48\u95f8\u53ef\u80fd\u662f 0"\u3002
- * round 84 \u6392\u671f\u65f6\u53d1\u73b0\u5b83\u8 fd8\u8fd8\u8fd8\u8fd8\u8fd8\u8fd8\u8fd8\u8fd8\u8fd8\u8fd8\u4e0d\u8d81\uff08\u5dee\u7684\u53ea\u662f\u8f6e\u6b21\uff09\u2014\u2014\u90a3\u8fd9\u8f6e\u505a\u3002
+ * round 63 只在启动时打一句话（说明进程内闸在这里清零），
+ * 那只解决了"下一个看日志的人知道为什么闸可能是 0"。
+ * round 84 排期时发现它其实不贵（差的只是轮次）——那这轮做。
  *
- * \u5224\u636e\uff08round 44 \u91cf\u7684\uff09\uff1a09-22..23 \u91cd\u542f 111 \u6b21\uff0c\u5e73\u5747\u8fdb\u7a0b\u5bff\u547d 21 \u5206\u949f\uff0cp50 \u53ea\u6709 7 \u5206\u949f\u3002
- * \u800c\u82e5\u5e72\u95f8\u7684\u5224\u636e\u72b6\u6001\u662f\u8fdb\u7a0b\u5185 Map\uff08\u5982 recentBotTextsByChat\uff09\uff0c
- * \u8981\u7b79\u6ee9 6 \u6761\u81ea\u5df1\u53d1\u7684\u8bdd\u624d\u5f00\u59cb\u5224\u2014\u2014\u5f00\u53d1\u671f\u57fa\u672c\u7b79\u4e0d\u6ee9\u3002
+ * 判据（round 44 量的）：09-22..23 重启 111 次，平均进程寿命 21 分钟，p50 只有 7 分钟。
+ * 而若干闸的判据状态是进程内 Map（如 recentBotTextsByChat），
+ * 要攒满 6 条自己发的话才开始判——开发期基本攒不满。
  *
- * \u505a\u4ec0\u4e48\uff1a**\u6bcf\u5c0f\u65f6\u6570\u4e00\u6b21\u672c\u8fdb\u7a0b\u542f\u52a8\u4ee5\u6765\u7684\u5fe7\u547d**\u3002
- * \u8fd9\u4e0d\u662f\u544a\u8b66\uff08\u544a\u8b66\u4f1a\u544a\u8170\uff09\uff0c\u662f**\u4e00\u4e2a\u6058\u5143\u7d44\u53ef\u8bfb\u7684\u91cf\u7eb8\u5ea6**\u3002
- * \u5f53\u4ed6\u77ed\u4e8e 15 \u5206\u949f\uff0c\u8bf4\u660e\u8fd9\u6bb5\u65f6\u95f4\u91cc\u8fdb\u7a0b\u5185\u95f8\u6c38\u8fdc\u7b79\u4e0d\u6ee9\u7a97\u53e3\u2014\u2014
- * \u90a3\u4e48\u6b64\u65f6"\u95f8\u62e2 0 \u6b21"\u4e00\u5f8b\u8bfb\u4f5c"\u6ca1\u673a\u4f1a"\u3002
+ * 做什么：**每小时数一次本进程启动以来的寿命**。
+ * 这不是告警（告警会告腰），是**一个组件可读的量纸带**。
+ * 当它短于 15 分钟，说明这段时间里进程内闸永远攒不满窗口——
+ * 那么此时"闸拦 0 次"一律读作"没机会"。
  */
 
-/** \u8fd9\u4e2a\u8fdb\u7a0b\u542f\u52a8\u7684\u65f6\u95f4\u6233\uff08\u6bcf\u6b21\u91cd\u542f\u90fd\u4f1a\u53d8\uff09\u3002 */
+/** 这个进程启动的时间戳（每次重启都会变）。 */
 const bootedAtSec = Math.floor(Date.now() / 1000);
 
-/** \u4f4e\u4e8e\u8fd9\u4e2a\u5fe9\u547d\u5c31\u8bf4"\u8fdb\u7a0b\u5185\u95f8\u7b79\u4e0d\u6ee9\u7a97\u53e3"\u3002 */
+/** 低于这个寿命就说"进程内闸攒不满窗口"。 */
 const SHORT_LIVED_SEC = 15 * 60;
 
-/** \u591a\u4e45\u8bb0\u4e00\u6b21\u3002 */
+/** 多久记一次。 */
 const EVERY_SEC = 3600;
 
 let lastLogSec = 0;
@@ -38,13 +38,13 @@ export async function logProcessBootContext(): Promise<void> {
 }
 
 /**
- * \u6bcf\u5c0f\u65f6\u5457\u4e00\u6b21\u7684\u751f\u547d\u91cf\u7eb8\u3002\u7531 cron \u8c03\u5ea6\u5668\u8c03\u3002
+ * 每小时喘一次的生命量纸。由 cron 调度器调。
  *
- * \u4e0d\u5b58 Redis\u3001\u4e0d\u67e5\u72b6\u6001\u2014\u2014\u5b83\u53ea\u770b\u81ea\u5df1\u8fd9\u4e2a\u8fdb\u7a0b\u6d3b\u4e86\u591a\u4e45\u3002
- * \u90a3\u4e2a\u6570\u5b57\u5df2\u7ecf\u8db3\u591f\u56de\u7b54"\u8fdb\u7a0b\u5185\u95f8\u73b0\u5728\u662f\u4e0d\u662f\u76f2\u7684"\u3002
+ * 不存 Redis、不查状态——它只看自己这个进程活了多久。
+ * 那个数字已经足够回答"进程内闸现在是不是盲的"。
  */
 /**
- * round 105: **残留活动任务索引的自慈摧拦。**
+ * round 105: **残留活动任务索引的自愈摧拦。**
  *
  * Round 102-105 的故事：CodeAct job `stalled more than allowable limit` 失败，
  * 但 `xxb:codeact:tasks` hash 里 status 还是 `running`、`xxb:agent:active-chat:{chat}`
@@ -59,7 +59,7 @@ export async function logProcessBootContext(): Promise<void> {
  *   - hash 里已经没有了的索引（纯死键）也清
  *
  * 为什么 2 小时：CodeAct 单段任务预算 30 轮/120s（CLAUDE.md），
- * 即使拖成长任务也是分段续跑＠120s 的数十倍仍然安全。
+ * 即使拖成长任务也是分段续跑，120s 的数十倍仍然安全。
  */
 const STALE_TASK_SEC = 2 * 3600;
 
@@ -99,10 +99,10 @@ export async function sweepStaleAgentTasks(): Promise<{ cleared: string[]; check
   // round 110: **健康时也要打一行**。
   //
   // 原来只在清了东西时才打 warn——那意味着"扫描 0 次"和
-  // "从没跑过"一样。而这个摧拦就是 round 102-106 那个死亢任务的防纷，
+  // "从没跑过"一样。而这个摧拦就是 round 102-106 那个僵尸任务的防复发，
   // 如果它自己没跑，我上一轮根本知道不了。
   //
-  // 频率：小时级（24 行/天），不到喷雾的程度。
+  // 频率：小时级（24 行/天），不到刷屏的程度。
   logger.info({
     checked,
     cleared: cleared.length,
