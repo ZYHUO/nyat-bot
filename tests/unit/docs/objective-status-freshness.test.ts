@@ -49,11 +49,11 @@ describe('OBJECTIVE-STATUS 数据表的时间戳一致', () => {
     expect(oldWay, `还有 ${oldWay.length} \u5904\u8bf4"round 196 \u7684\u5feb\u7167"\u2014\u2014\u548c\u8868\u5934\u51b2\u7a81`).toEqual([]);
   });
 
-  it('④ topic-word 行的数字和备注不自相矛盾（round 91 起它响了 2 次）', () => {
+  it('④ topic-word 行的数字和备注不自相矛盾（round 91 起它响了）', () => {
     const s = fs.readFileSync('docs/OBJECTIVE-STATUS.md', 'utf8');
     const row = s.split('\n').find((l) => l.startsWith('| \u8bdd\u9898\u8bcd\u590d\u7528'));
     expect(row, '找不到话题词复用行').toBeDefined();
-    expect(row!).toContain('\u62e2 2 \u6b21');
+    expect(row!).toMatch(/\u62e2 [1-9]\d* \u6b21/);   // round 111: 数字随生产计数走，但不许回 0
     // 备注不能再是"拦 0 次只能读作没机会"（那已过期）
     expect(row!).not.toContain('\u62e2 0 \u6b21');
   });
