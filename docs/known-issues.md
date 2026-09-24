@@ -89,6 +89,7 @@ deep-reflection 产出率 35% 的机制。**—那会回到 403 死循环。
 | 给 judge 链加第 4 个账号 | 三账号同时限流（stepfun RPM≈10）；heart LLM failed 143 次/天，57% 是 exhausted | 要多一个 provider key |
 | 反广告要不要真启用 | 现在 0 群授权、纯空转 | 要群主授权（`/antiad on`） |
 | **`REPEAT_ANCHOR_MAX` 2→1** | 全天 25 组"同一锚点 3 分钟内回两次"（round 123） | 咽掉 25 条第二句，其中约一半是该说的追问/回呛/安抚（round 124）**注：round 132 修了双签后这笔账才准**—双签时 Meta 路径实际按 MAX=1 跑、legacy 按 MAX=2，两条路径口径不一致 |
+| 给“集中雪去”/“前言不搭后语”立个趋势量 | **现在 0**——两者都要 LLM 判断，没有硬信号（round 198） | 每天 N 次 cheap judge（N取决于你肯芵多少 LLM 花费）；judge 假阳性眼见（round 130） |
 | 「点名 + 钩子」当心流判据 | **假设已验崩**（4% vs 3%，round 101）——别做 | — |
 
 ## 我做过但**无效**的（别再试）
