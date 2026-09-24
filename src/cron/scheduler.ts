@@ -49,6 +49,14 @@ export function startCronJobs(deps?: CronDeps): void {
   reg({ name: 'model-check', everySec: 5 * 60, run: runModelCheck });
   // round 85：进程忩命量纸（每小时一行，不存状态不告警）
   reg({ name: 'process-lifetime', everySec: 3600, run: async () => { reportProcessLifetime(); } });
+  // round 114: **启动后立即执行一次摧拦**——不等第一个小时。
+  //
+  // round 110 给 sweep 加了健康日志，但它还是每小时才一次；
+  // 重启后的第一个小时里日志是空的（round 191 那个块的又一种形态）。
+  // 而这个摧拦防的是 round 102-106 那个死亢任务４5 小时收打断）——
+  // **死亢往往就是在频繁重启期间重生的**，所以启动时就该扫一漠。
+  // 代价：一次 KEYS + 若干 HGET（索引数量级，不是消息级）。
+  void sweepStaleAgentTasks().catch(() => {});
   // round 105: **残留活动任务索引的自慈摧拦**——round 102-104 那个 5 小时的死任任务。
   // 放在同一个 1h tick 上（残留不急），不额外开一个调度。
   reg({ name: 'stale-agent-sweep', everySec: 3600, run: async () => { await sweepStaleAgentTasks(); } });

@@ -95,3 +95,23 @@ describe('sweep 的健康日志（round 110）', () => {
     expect(line).toMatch(/everySec: 3600/);
   });
 });
+
+
+describe('sweep 在启动时也跑一次（round 114）', () => {
+  it('⑩ startCronJobs 里直接调 sweepStaleAgentTasks（不等第一个小时）', () => {
+    const s = fs.readFileSync('src/cron/scheduler.ts', 'utf8');
+    const c = s.split('\n').filter((l) => !l.trimStart().startsWith('//'));
+    // 注册之外还要有一次裸调用
+    const calls = c.filter((l) => l.includes('sweepStaleAgentTasks()'));
+    expect(calls.length, `只有 ${calls.length} 处调用（需要 ≥2：注册 + 启动）`).toBeGreaterThanOrEqual(2);
+  });
+
+  it('⑪ 它不能抛（void + catch，否则拖垮启动链）', () => {
+    const s = fs.readFileSync('src/cron/scheduler.ts', 'utf8');
+    // round 114: 第一片用 lastIndexOf 找到了 reg 行里的子串。
+    // 改成找带 `void ` 的那一行本身。
+    const line = s.split('\n').find((l) => /\bvoid\s+sweepStaleAgentTasks/.test(l));
+    expect(line, '找不到启动时的 void 调用').toBeDefined();
+    expect(line!).toMatch(/void\s+sweepStaleAgentTasks\(\)\.catch/);
+  });
+});
