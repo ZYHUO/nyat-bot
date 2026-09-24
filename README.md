@@ -1,3 +1,9 @@
+## 致谢
+
+感谢赞助商 **ForZTN** 对项目服务器的支持，感谢。
+
+---
+
 <div align="center">
 
 # 🐱 NyatBot
@@ -141,12 +147,6 @@ regenerated, not hand-edited — if you change a flag, re-run it rather than tru
 figure above.)
 
 </div>
-
-## 致谢
-
-感谢赞助商 **ForZTN** 对项目服务器的支持，感谢。
-
----
 
 ## Why this exists
 
