@@ -404,8 +404,8 @@ function compare(
   let ties = 0;
   const differences: number[] = [];
   for (const caseId of caseIds) {
-    const baseline = outcomes.get(`${caseId}\u0000${baselineVariantId}`);
-    const variant = outcomes.get(`${caseId}\u0000${variantId}`);
+    const baseline = outcomes.get(`${caseId} ${baselineVariantId}`);
+    const variant = outcomes.get(`${caseId} ${variantId}`);
     if (!baseline || !variant || baseline.status === 'blocked' || variant.status === 'blocked') continue;
     comparable++;
     const baselineSuccess = baseline.status === 'verified' ? 1 : 0;
@@ -581,7 +581,7 @@ export async function runPairedReplayEvaluation(options: PairedEvaluationOptions
       } catch {
         outcome = { status: 'blocked', falseSuccess: false, humanIntervention: false, repairAttempts: 0, metrics: {}, errorCode: 'executor_error' };
       }
-      outcomes.set(`${experimentCase.id}\u0000${variant.id}`, outcome);
+      outcomes.set(`${experimentCase.id} ${variant.id}`, outcome);
       pairedCases.push({
         caseId: experimentCase.id,
         variantId: variant.id,
@@ -595,7 +595,7 @@ export async function runPairedReplayEvaluation(options: PairedEvaluationOptions
 
   const aggregates = variants.map((variant) => aggregate(
     variant,
-    cases.map((experimentCase) => outcomes.get(`${experimentCase.id}\u0000${variant.id}`)!).filter(Boolean),
+    cases.map((experimentCase) => outcomes.get(`${experimentCase.id} ${variant.id}`)!).filter(Boolean),
   ));
   const baselineVariantId = variants[0]!.id;
   const comparisons = variants.slice(1).map((variant) => compare(

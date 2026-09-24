@@ -464,7 +464,7 @@ async function humanMessageCarriesArg(
   // 而闸的日志出现 0 次。原因就是原来第三个条件太宽：
   //
   //   // 任何 >=2 字的非纯标点串
-  //   if (/[\u4e00-\u9fa5\w]{2,}/.test(t)) return true;
+  //   if (/[一-龥\w]{2,}/.test(t)) return true;
   //
   // 群聊里最近 6 条人类消息几乎总有两个以上中文字符，于是这个函数几乎
   // 恒为 true——**闸永远不拦**。

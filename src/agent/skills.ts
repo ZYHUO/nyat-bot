@@ -142,7 +142,7 @@ function bigramsOf(query: string): string[] {
     const t = w.trim();
     if (/^[\w.-]{2,}$/.test(t)) out.push(t);
   }
-  for (const run of cleaned.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+  for (const run of cleaned.match(/[一-鿿]{2,}/g) ?? []) {
     for (let i = 0; i + 2 <= run.length; i++) out.push(run.slice(i, i + 2));
   }
   return [...new Set(out)].slice(0, 24);

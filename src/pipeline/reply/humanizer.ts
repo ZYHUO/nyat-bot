@@ -194,7 +194,7 @@ function shouldSkipTypo(char: string, text: string, idx: number): boolean {
     // Fullwidth forms (punctuation)
     if (cp >= 0xFF00 && cp <= 0xFFEF) return true;
     // ASCII punctuation
-    if (/[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E]/.test(c)) return true;
+    if (/[!-/:-@[-`{-~]/.test(c)) return true;
     // General punctuation (… etc)
     if (cp >= 0x2000 && cp <= 0x206F) return true;
     // Whitespace

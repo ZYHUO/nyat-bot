@@ -72,7 +72,7 @@ export function nameShapeNote(name: string): string {
   const t = String(name ?? '').trim();
   if (!t) return '空名字';
   const hasSpace = /\s/.test(t);
-  const hasCJK = /[\u4e00-\u9fff]/.test(t);
+  const hasCJK = /[一-鿿]/.test(t);
   const alnumOnly = /^[A-Za-z0-9_.-]+$/.test(t);
   const bits: string[] = [`${t.length} 字符`];
   if (hasCJK) bits.push('含中文');
