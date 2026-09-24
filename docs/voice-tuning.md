@@ -10942,3 +10942,66 @@ $ git log -1 --format=%s
 规矩多一条（读回覆盖 commit message）
 而 round 229 那个错标题留在 git log 里，由这轮注明
 ```
+
+---
+
+## 「读回覆盖 commit message」做成工序失败：那一步在 commit **之后**（round 231）
+
+Round 230 立的规矩。这轮想把它做成工序——**发现做不到**。
+
+### 我想做的
+
+```
+在 gate:log 里加一条：commit 前打印 git log -1 --format=%s
+```
+
+### 但时序不对
+
+```
+gate:log 跑在 commit 之前（它是门禁证据）
+而 git log -1 在 commit 之前是**上一条** commit 的标题
+→ 我读到的永远是上轮的，不是这轮刚要提交的
+```
+
+**这正是 round 66 那条（别依赖进程活着）的一个变体**：
+```
+我想验的东西在我要验的动作之后才存在
+```
+
+### 三条路
+
+```
+① pre-commit 钩子：能读到**将要提交的** message
+   → 但 harness 60s cap 下钩子会被杀（round 187 已判定不做钩子）
+② commit 后立刻 git log -1 读一遍
+   → 能读到，但那时已提交——**不过还能 amend**（未 push 时）
+③ 只在我 push 前读
+   → 已 push 就晚了（round 230 正是 push 后才发现）
+```
+
+**选 ② 的变体**：`commit` 和 `push` 分成两步，中间读一次标题。
+
+```
+git commit -F /tmp/msg   →  git log -1 --format=%s 读一遍  →  发现错就 amend
+→  push
+```
+
+**而 amend 未 push 的 commit 是安全的**（round 189 那条只管"已离开机器的"）。
+
+### 归档
+
+```
+round 230: 立"读回覆盖 commit message"
+round 231: 想做工序 → 时序不对（gate:log 在 commit 前）→
+           改成"commit 后 push 前读一次，错就 amend"
+```
+
+**而这条比"立规矩"可靠**——因为它卡在一个**时间窗**里
+（commit 后、push 前），而不依赖我记得。
+
+### 净结果
+
+```
+规矩落成了工序（虽然不是自动的）
+而 round 230 那个错标题仍然永久——它证明这个时间窗的价值
+```
