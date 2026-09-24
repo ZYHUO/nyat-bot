@@ -268,6 +268,25 @@ codepoint turned 吱 into 咚 and the prompt shipped it).
 `git commit -m "中文 + \`code\` + ${x} + {}"` breaks bash quoting (round 179, and many
 times before). Write the message to a temp file and `git commit -F /tmp/msg.txt`.
 
+**And when you grep for what you think something is called, you find nothing and conclude
+it does not exist.** Four times this session the same shape cost a round:
+
+```
+round 179  grep "tamper-audit picks src"  → nothing → "its target is backwards"
+          (it was right; the *entry point* was wrong)
+round 200  grep "keepAddressed in src/"   → nothing → "the gate is dead"
+          (it lives in heart/decision.ts under a different name)
+round 214  grep "CodeAct LLM failed" in session-report → nothing → "not tracked"
+          (it tracks 'CodeAct job failed' — the downstream event)
+```
+
+**The grep proves the string is absent, not that the thing is.** Before writing
+"X doesn't exist", either read the file that would own X, or say "no match for
+`<exact string>`" and leave the conclusion open.
+
+The cheap version of this: `grep -rl` a *directory* rather than `grep -r` a phrase —
+a directory with zero hits is much stronger evidence than a phrase with zero hits.
+
 **And a string that is syntax in the file you are writing it into will break that file.**
 Three rounds in this session each lost a round to the same disease, and only the third
 one named it:
