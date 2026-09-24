@@ -79,6 +79,7 @@ deep-reflection 产出率 35% 的机制。**—那会回到 403 死循环。
 后台批任务的 backoff 连急过 reply 主链。两难的双方都有记录，而我不知道哪个 label 适合。
 （round 80/81 的教训：`SMART_GROUP_AUTO_ASSIGN` 会屏蔽 `.env` 手动链，所以手动加 backup 可能又被旁路。）
 
+| chronicle 里“抓到了 X”的声称 | **最近 20 节 14 次（round 233 量）** | round 233 | 其中至少 1 次是编造的（round 232：写了“当场抓到轮次错”而那次标题零错）。回溯验证成本高于价值，所以只在**新写时**当场确认 |
 ## 第 3 档：需要人拍板的设计选择
 
 表里的 `round NN` 即量测时刻（第 NN 轮量的）；要最新值跑 `npx tsx scripts/session-report.mts`——它读同一份 `logs/app.log`。本节的数字是**量**出来的（有新鲜度），不是**决定**出来的（不过期）。
