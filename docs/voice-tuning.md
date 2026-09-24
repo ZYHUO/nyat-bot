@@ -8041,3 +8041,84 @@ npx tsx scripts/tamper-audit.mts --src src/cron/restart-hygiene.ts
 → grep 出所有 SRC/import 指向它的测试 → 逐个跑现在的流程
 ```
 入口从「测试」扩成「测试或 src」。
+
+---
+
+## 加 `--src` 入口，并抓出一个 120 轮的 bug：还原会永久留下一行注释（round 180）
+
+Round 179 定的：给 tamper-audit 加反向入口。这轮做了——**顺便抓出一个老 bug**。
+
+### 加了什么
+
+```
+npx tsx scripts/tamper-audit.mts --src src/cron/restart-hygiene.ts
+=== --src src/cron/restart-hygiene.ts: 4 test(s) reference it ===
+  tests/unit/cron/process-lifetime.test.ts
+  tests/unit/cron/stale-agent-sweep.test.ts
+  tests/unit/cron/stale-agent-sweep-behaviour.test.ts
+  tests/unit/cron/restart-hygiene.test.ts
+```
+
+**4 个测试，两种引用形状都要认**：
+```
+const SRC = 'src/...'         （形状守卫型，全仓 43 个）
+vi.mock('../../src/...')     （行为测试型，无 SRC 常量）
+```
+
+**第二种是我最需要的**（round 167 那个行为测试就是它），而 round 178/179 我两次都没提到它。
+
+### 跑出来的结果
+
+```
+process-lifetime.test.ts          SKIP (behavioural — 正确)
+stale-agent-sweep.test.ts         RED  ← tumper 的是 export async function sweepStaleAgentTasks
+stale-agent-sweep-behaviour.ts    SKIP (behavioural — 正确)
+restart-hygiene.test.ts           SKIP
+```
+
+**1 RED 3 SKIP，而且 SKIP 的理由是"行为测试、tumper 保证来自模块本身被调用"**——
+那条注释 round 56 就写了，**它是对的**：行为测试的验红本来就得 tumper src 让它崩，
+而这工具 tumper 的是测试自己断言的字面量，对行为测试无用。
+
+### 而跑完发现：src 里多了一行注释
+
+```
+git status: M src/cron/restart-hygiene.ts
++ // tamper-audit-original: src/cron/restart-hygiene.ts
+```
+
+### 根因：`finally` 里用 `copyFileSync(backup, t.src)`
+
+```ts
+// 备份时（round 66 立的）：
+fs.writeFileSync(backup, '// tamper-audit-original: …\n' + 原内容)
+// 还原时：
+fs.copyFileSync(backup, t.src)   ← 把那行注释也拷回去了！
+```
+
+**而 `recoverLeftovers()` 用的是 `writeFileSync(slice(1))`——那条是对的。**
+两条还原路径不一致，一条去头、一条不去。
+
+**后果：每跑一次 tamper-audit，被审的 src 就永久多一行注释。**
+而 lint 不报、typecheck 不报（它在文件头，是合法注释）。
+
+### 修
+
+`finally` 也改成 `readFileSync(backup).split('\n').slice(1).join('\n')` + `writeFileSync`。
+修完跑两次：**src 干净、幂等**。
+
+### 归档：这是「两条路径做同一件事，只有一条对」的第 3 次
+
+```
+round 173: key 写在 shard 循环内（两处拷贝，一处漏）
+round 192/198: 两个 SECTION_ORDER
+round 180: 两个还原路径（finally 拷贝 / recoverLeftovers 切头）
+```
+
+**共性：同一个意图有两份实现，而它们各自演化。**
+round 66 我为了 SIGKILL 加了 `recoverLeftovers`（正确切头），
+但没回头改 `finally`——**因为 `finally`「看起来一直工作」**：
+它确实还原了内容，只是多带一行注释，而不报错。
+
+**能抓到这个，纯粹是因为我这轮第一次真正跑这个工具。**
+（round 178 我说它"120 轮没用过"——那正是它能藏一个 120 轮 bug 的原因。）

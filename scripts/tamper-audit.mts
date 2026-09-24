@@ -223,14 +223,49 @@ function runOne(testFile: string): Result {
       detail: `tampered ${t.needle.slice(0, 30)} in ${t.src}`,
     };
   } finally {
-    fs.copyFileSync(backup, t.src);
+    // round 180: 不能用 copyFileSync——备份的第一行是
+    // `// tamper-audit-original: <path>`（round 66 加的，为了让下次
+    // 启动的 recoverLeftovers 能识别）。copy 回去会把那行注释
+    // **一并留在源文件里**，lint 不报、typecheck 不报（它在文件头），
+    // 所以每跑一次就多一行——round 180 这轮就这样白白多了一行。
+    // recoverLeftovers 用的是 writeFileSync(slice(1))，那才对。
+    const restored = fs.readFileSync(backup, 'utf8').split('\n').slice(1).join('\n');
+    fs.writeFileSync(t.src, restored);
     fs.unlinkSync(backup);
   }
 }
 
 const args = process.argv.slice(2);
 let files: string[] = [];
-if (args[0] === '--changed') {
+
+// round 180: **--src <file>** —— 反向入口。
+//
+// Round 178 我以为它选点错了（要 tumper src 而它收 test），round 179 读 pickTarget
+// 发现它 tumper 的正是 SRC 指向的 src/——**方向是对的，缺的是入口**：
+// 我手上有的是"我刚改的 src/X.ts"，而它要的是"tests/.../X.test.ts"。
+// 中间那步（哪个测试覆盖它）得我脑子记。
+//
+// 这一步补上：grep 出所有指向该 src 的测试（两种引用形状都要认）：
+//   const SRC = 'src/...'         （形状守卫型测试，43 个）
+//   vi.mock('../../src/...')     （行为测试型，无 SRC 常量）
+// 两种都要——round 167 那个行为测试就是后一种，而它恰是最需要 tumper 的。
+if (args[0] === '--src') {
+  const target = args[1]!;
+  if (!fs.existsSync(target)) { console.error(`no such file: ${target}`); process.exit(2); }
+  // 取得模块路径（去掉 .ts），那是测试通过 .js 寻址它的方式
+  const mod = target.replace(/\.ts$/, '');
+  const hits = execSync(
+    `grep -rl "'[^']*${mod.replace(/^src\//, '')}" tests/ --include='*.test.ts' || true`,
+    { encoding: 'utf8' }).split('\n').filter((l) => l.trim() !== '');
+  files = [...new Set(hits)].filter((f) => fs.existsSync(f) && f.endsWith('.test.ts'));
+  console.log(`=== --src ${target}: ${files.length} test(s) reference it ===`);
+  if (files.length === 0) {
+    console.log('  (none — this src has no test that names it; nothing to audit)');
+    process.exit(0);
+  }
+  for (const f of files) console.log(`  ${f}`);
+  console.log('');
+} else if (args[0] === '--changed') {
   const out = execSync('git status --porcelain', { encoding: 'utf8' });
   files = out.split('\n').map((l) => l.slice(3).trim())
     .filter((p) => p.endsWith('.test.ts') && fs.existsSync(p));
