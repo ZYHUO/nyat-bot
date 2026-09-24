@@ -385,6 +385,27 @@ The two rules with no over-executed form:
 `-F` for commit messages (its boundary is *shape*, not universality) and
 "never extrapolate a number you did not read" (there is no cheaper direction).
 
+### Auditing a fix sometimes means *not* writing one — and recording why
+
+Three times this session the audit ended in "no change", and each time the value was
+the boundary it produced:
+
+| round | what I audited | why no change |
+|---|---|---|
+| 67 | `learner-gate`'s `finally` | the leak self-heals (Redis lock has a TTL, in-process Set dies on reboot) — sweeping at startup would be state that treats a disease it cannot catch |
+| 113 | `package-json-intact`'s `toBe(25)` | a **structural commitment** should be hard-pinned (it forces a human to confirm adding a dep); only **production readings** should be shape-matched |
+| 115 | `recoverLeftovers()` | its trigger (SIGKILL mid-audit) is still live, so it will run again; a startup sweep of `/tmp` would treat a currently-absent disease |
+
+**The reusable form:** before adding a guard, ask *what value changed means I must do
+something?*
+- **yes** (a dep was added, a flag count moved) → hard-pin, so it forces you
+- **no** (a production counter grew) → shape-match, so it does not cry wolf
+
+And: a mechanism that only runs **when triggered** (B-grade in the round-115 audit)
+is not a defect — but write down "its caller must come back" as an explicit
+dependency, or it becomes a silent one. The case that would bite: deciding
+"tamper-audit is done" while a `/tmp/tamper-audit-backup*` still holds your source.
+
 ### A "known issue" that never got a round number was never going to get fixed
 
 Three times in a row (rounds 83, 84, 85) I picked a `待排期` item off
