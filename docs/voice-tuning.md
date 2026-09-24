@@ -9732,3 +9732,61 @@ round 207: 拿到一个免费数字（76.3% 0 重合 + 4% 有 3+ 重合）
 
 1. 把 SEND_LOG_FULL_TEXT 开起来（.env），让分析用全文而不是 40 字 preview
 2. 重跑这个脚本，看 76.3% 会变多少——**那才是真实基线**
+
+---
+
+## 开 flag 部署：进程 env 有了、dist 有了，但群里还没新发送（round 208）
+
+Round 207 定的下一轮。做了三步。
+
+### ① .env 加 flag
+
+```
+SEND_LOG_FULL_TEXT=true
+```
+
+### ② build + verify-deploy + 重启
+
+```
+build          ok
+verify-deploy  90/90
+service        active · health 200
+```
+
+### ③ 验它真生效（三个证据）
+
+```
+进程 env：SEND_LOG_FULL_TEXT=true    ✓（/proc/<pid>/environ）
+dist     ：2 处引用                  ✓（grep dist/index.js）
+日志     ：带 text 字段的 0 / 5932   ← 还没新发送
+```
+
+**前两个是"代码到了"，第三个是"跑过了"——而第三个还没发生。**
+
+### 归档：这正是 round 38 那条的三态
+
+```
+代码到了（dist/env）      = 它在产物里
+跑过了（日志有 text 字段） = 它真的执行了
+两者之间隔着一次真实发送
+```
+
+**而我现在只能报前两态。** 这比"部署成功"诚实——
+`health 200` 只说明服务活着，不说明新代码路径被走过。
+
+### 下一轮
+
+等群有新发送后重跑 `coherence-probe.mts`。**而它会自动用 text 字段**
+（脚本里 `typeof d.text === 'string' ? d.text : preview`）。
+
+**而如果群里长时间没发送**，那就等——这不值得为它造轮询。
+
+### 顺带：一个诚实的风险
+
+```
+flag 开着会一直多写 360 字节/条
+而我 round 205 量的是 0.06 MB / 189 条
+如果 bot 之后发得更多，那个比例会涨——但仍在 1% 量级
+```
+
+**所以它不需要"量够就关"的逻辑。**
