@@ -10316,3 +10316,55 @@ docs 4 过、doc-references-exist 4 过
 ```
 
 **这是连续第三次零损坏插入**（r215/r217/r218）——round 157 立的守卫 + round 172 立的元字符规矩，合起来把"插入 AGENTS.md"这个动作从 50% 损坏率降到 0。
+
+---
+
+## 16 条规矩的守卫覆盖盘点：8 个守卫只覆盖了 4.5 条（round 219）
+
+Round 218 立了索引。这轮审「该有守卫却没有的」。
+
+### 实测：8 个守卫
+
+```
+no-unicode-escapes-in-src      → 覆盖第 2 条（src 里不得有 CJK 转义）
+agent-rules-index              → 覆盖第 4 条的一半（markdown 配对/重复/表格）
+doc-references-exist           → 覆盖「文档路径别进反引号」（没编进 16 条！）
+no-tamper-leftovers            → 覆盖第 16 条（不得有 ZZ_ 残留）
+objective-status-freshness     → 覆盖第 11/12 条（只查形状）
+no-dead-switches               → 覆盖「旗标无 reader」（也没编进 16 条）
+no-unexplained-skip            → 覆盖「硬跳无原因」（也没编进）
+all-scripts-parse              → 覆盖「scripts/ 语法」（round 192 立的）
+```
+
+### 所以实情是
+
+```
+16 条里被守卫覆盖的：第 2、4、11（一半）、12（一半）、16 条 = 4.5 条
+另有 3 个守卫覆盖的规矩没进索引（doc-references / no-dead-switches / no-unexplained-skip）
+```
+
+**两个漏洞**：
+
+```
+① 索引漏了 3 条有守卫的规矩 → 我 round 216 盘点时漏了它们
+② 16 条里 11.5 条没有守卫 → 其中大部分是"该没有"（动作类），
+   但第 6-10 条（对数/分母/覆盖面）全是"语义判断"，守卫做不了
+```
+
+### 归档：索引该包含"有守卫的规矩"
+
+```
+我 round 218 建索引时只列了"我写下来的 16 条"，
+而漏了 3 条"有守卫但没写进正文"的：
+  · 文档路径别进反引号（doc-references-exist，round 37 起）
+  · 旗标 default-ON 必须有 reader（no-dead-switches）
+  · 硬 skip 必须有原因（no-unexplained-skip）
+```
+
+**这三条恰恰是最该进索引的**——因为它们有守卫，是 16 条里最可靠的那批。
+
+### 下一轮
+
+把索引从 16 条扩到 19 条（补那 3 条），并按「有无守卫」加一列。
+**而那一列会让 round 176 那个分类变成可见的**——
+现在"形状 vs 动作"只活在正文里，索引上看不出。
