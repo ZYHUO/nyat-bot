@@ -7454,3 +7454,41 @@ round 167: sweep 的前两版假 mock（返回裸字符串 / 空 spy）
 但这正是 round 38 那条（没读到的门禁不算过）想防的延伸：
   我该在 commit 里写清"未跑全量 test"，而不是让它看起来像全跑过。
 ```
+
+---
+
+## 补跑全量：4186 过 / 0 败，还了 round 169 的债（round 170）
+
+Round 169 只改了 AGENTS.md，没跑全量 test，在 commit 里自报「未跑」。
+**这轮把债还了。**
+
+```
+Test Files  544 passed (544)
+Tests       4186 passed | 4 skipped (4190)
+失败        0
+Duration   ~193s
+```
+
+**和 round 126 基线对比**：
+
+```
+round 126: 538 文件 / 4156 passed / 4 skipped
+round 170: 544 文件 / 4186 passed / 4 skipped
+```
+
+**差 6 个文件 / 30 条测试**——正是本 session 新加的那些守卫
+（markdown 配对、标题结构、脚本 parse、tamper 还原、sweep 行为）。
+
+### 归档：这轮的价值是「0 败」这两个字
+
+```
+一个 session 加了 6 个守卫、改了 20+ 个文件、清了 1506 处转义、
+修了 1 个换行拆断的表格、改了 session-report 的 3 个占比——
+全量仍然是 0 败。
+```
+
+**这不是运气。** 每一轮都跑了对应的子集（docs+rules+lint+typecheck），
+而全量只是那些子集的并集。**但"并集"这个词本身就是假设**——
+round 92/93 的 meta 目录假红正是"单独跑 ≠ 全量跑"的教训。
+
+**所以全量该跑就跑，别用"我每轮都跑了子集"替代。**
