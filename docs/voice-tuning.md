@@ -7183,3 +7183,44 @@ esbuild 报 `Unexpected "}"`。**如果我没跑 `npm run tamper:audit` 之外�
 
 **这条闭环值得记**：round 162 我立在文档里，round 163 审出 3 个违例、
 全修了。**规矩不落到工具上就只是愿望。**
+
+---
+
+## 脚本 parse 守卫：第一版判据用错了（import 会有副作用）（round 164）
+
+Round 163 说「脚本语法坏没有守卫」。这轮补。
+
+### 第一版用 `import()` —— 错了
+
+```
+log-count.mts → exit 2（它本来就会 process.exit(2) 打 usage）
+verify-deploy 之类 → 会真去打 API
+```
+
+**parse 检查不该有副作用。** 而我这 33 个脚本里至少两类有：
+（1）无参数时 `process.exit(2)`；（2）import 就真干活。
+
+### 第二版用 `esbuild.transform` —— 对
+
+```ts
+await transform(code, { loader: 'ts', format: 'esm' });
+```
+
+**纯解析、无副作用、100ms 跑完 33 个。**
+
+**验红**：往 log-count 追加 `if (unclosed {` → 报
+`scripts/log-count.mts: L92 Expected ")" but found "{"` ← 连行号都有。
+
+### 归档：检查"能不能跑"和"能不能解析"是两件事
+
+```
+能不能解析 → esbuild.transform（便宜、无副作用）
+能不能跑   → 真跑（贵、有副作用，只在必要时）
+```
+
+我第一版把两者混了，**用"能不能 import"当"能不能 parse"**。
+而 round 163 那个语法错恰恰只需要 parse 就能抓到——
+不需要跑。
+
+**这条比守卫本身更通用**：以后想加"检查 X 好不好"的守卫时，
+先问「我要验的是它的语法还是它的行为」——**后者才需要真跑**。
