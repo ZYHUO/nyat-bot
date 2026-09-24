@@ -110,3 +110,35 @@ describe('AGENTS.md 结构', () => {
     }
   });
 });
+
+describe('AGENTS.md 的 markdown 配对（round 156/157）', () => {
+  it('粗体标记 ** 总数为偶（round 156 我插入时吃掉过一个）', () => {
+    const text = fs.readFileSync('AGENTS.md', 'utf8');
+    const n = (text.match(/\*\*/g) ?? []).length;
+    expect(n % 2, `** 出现 ${n} 次（奇数 = 有一个粗体没闭合）`).toBe(0);
+  });
+
+  it('没有 **** （两个粗体撞在一起的痕迹）', () => {
+    const text = fs.readFileSync('AGENTS.md', 'utf8');
+    const hits = text.split('\n').filter((l) => l.includes('****')).length;
+    expect(hits, `有 ${hits} 行含 ****（插入时和锚点行首的 ** 撞了）`).toBe(0);
+  });
+
+  it('每个连续表格块内各行管道数一致（round 157：表格断行会静默错位）', () => {
+    const lines = fs.readFileSync('AGENTS.md', 'utf8').split('\n');
+    const bad: string[] = [];
+    let block: string[] = [];
+    const flush = (): void => {
+      if (block.length < 2) { block = []; return; }
+      const counts = new Set(block.map((l) => l.split('|').length));
+      if (counts.size > 1) bad.push(`块头「${block[0]!.slice(0, 40)}」管道数 ${[...counts].join('/')}`);
+      block = [];
+    };
+    for (const l of lines) {
+      if (l.startsWith('|')) block.push(l);
+      else flush();
+    }
+    flush();
+    expect(bad, '这些表格块内行列数不一致：\n  ' + bad.join('\n  ')).toEqual([]);
+  });
+});
