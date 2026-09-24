@@ -472,6 +472,26 @@ Note the two look identical ("it pins a number") and behave oppositely. Auditing
 eight doc-reading guards took one round (round 155) and found exactly one wrong — the
 one built seven rounds earlier.
 
+**And a guard cannot enforce freshness, so do not try — three layers each own one job.**
+`objective-status-freshness.test.ts` checks that the table's header timestamp appears in
+the paragraph above it, and that no second "round NNN snapshot" label survives. It does
+*not* check that the timestamp is recent. Round 182 nearly added that check — and it
+would have been wrong: the table is refreshed every 20 rounds by convention (round 111),
+so a "must be < 2h old" guard would go red on a **schedule**, which is how a guard gets
+learned to be ignored (round 112).
+
+So freshness is handled by the layer that *can* handle it, and the guard stays a shape check:
+
+```
+shape     → a guard  ("timestamp is mentioned", "no zero", "a coverage word is present")
+cadence   → a rule   ("the table follows production, every 20 rounds")
+freshness → the header timestamp itself, which tells the reader how old the numbers are
+```
+
+The distinction that makes this work: **a stale number that says how old it is is not a
+lie.** A number claiming "measured" that was invented is (round 189). If the header says
+10:26, a reader can judge; if it says nothing, they cannot.
+
 **Corollary that paid for itself (round 68): when you write a rule down, ask in the same
 breath "what is its over-executed form?"** Six of this file's ten rules turned out to
 have a boundary; two were actually over-executed before the boundary was found:
