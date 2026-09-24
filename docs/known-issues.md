@@ -89,7 +89,8 @@ deep-reflection 产出率 35% 的机制。**—那会回到 403 死循环。
 | 给 judge 链加第 4 个账号 | 三账号同时限流（stepfun RPM≈10）；heart LLM failed 143 次/天，57% 是 exhausted | 要多一个 provider key |
 | 反广告要不要真启用 | 现在 0 群授权、纯空转 | 要群主授权（`/antiad on`） |
 | **`REPEAT_ANCHOR_MAX` 2→1** | 全天 25 组"同一锚点 3 分钟内回两次"（round 123） | 咽掉 25 条第二句，其中约一半是该说的追问/回呛/安抚（round 124）**注：round 132 修了双签后这笔账才准**—双签时 Meta 路径实际按 MAX=1 跑、legacy 按 MAX=2，两条路径口径不一致 |
-| 给“集中雪去”/“前言不搭后语”立个趋势量 | **现在 0**——两者都要 LLM 判断，没有硬信号（round 198） | 每天 N 次 cheap judge（N取决于你肯芵多少 LLM 花费）；judge 假阳性眼见（round 130）。**已有免费基线（round 207/212）**：`npx tsx scripts/coherence-probe.mts` 量到 bot 回复开头与前 5 条同群人话 0 bigram 重合的占 76.3%（156 条，两轮复跑同值=稳）。**三个限制**：① 单边（0 重合≠不搭，接上话题不一定要重复用词）② 偏高（分母含其他 bot，message in 无 bot 标记，round 211）③ 时机侧另有 wait 率 0.2-0.3%（round 201/202） |
+| SEND_LOG_FULL_TEXT 到底要不要留 | **round 206 加的，到 round 220 零增量**——14 条 text 样本全部 <20 字，而 preview 截断 80 字，所以两者完全相同。意味着我 round 204 的假设（“不搭发生在长回复中段”）被证虚 | 保留（成本可忽），但若 30 天仍无长回复就关掉；真正该量的是 `coherence-probe` 的 0 重合率 |
+| 给"难融入话题"/"前言不搭后语"立个趋势量 | **已有免费基线（round 212/220）**：`coherence-probe.mts` 量到 0 bigram 重合稳定在 76.3%，另有 wait 率 0.2-0.3%（round 201/202）。三个限制：单边 / 分母含其他 bot / 短回复无中段 | 要精确值就得给 message in 加 bot 标记（round 211 判定不值） |
 | 「点名 + 钩子」当心流判据 | **假设已验崩**（4% vs 3%，round 101）——别做 | — |
 
 ## 我做过但**无效**的（别再试）
