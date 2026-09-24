@@ -466,8 +466,11 @@ if (st.inbound > 0 && db.sends > 0) {
   }
 }
 if (db.sendsPrev > 0) {
+  // round 163: 占比必须配两个绝对值（round 162）。原来只印了
+  // sendsPrev（变化率的分母端），_分子端要去上面找。
   console.log(`  上一个等长窗口                ${db.sendsPrev}` +
-    `   ${db.sends <= db.sendsPrev ? '↓' : '↑'} ${pct(Math.abs(db.sends - db.sendsPrev), db.sendsPrev)}`);
+    `   ↓ ${pct(Math.abs(db.sends - db.sendsPrev), db.sendsPrev)}`
+    + `  （本窗口 ${db.sends} → ${db.sendsPrev}）`);
   console.log('    （注：这个对比跨过库清理/重启时会虚高，只作参考；看上面那个比率。）');
 }
 console.log(`  包络拦截 (L1 Wall)           ${st.envelopeBlock}`);
@@ -479,7 +482,7 @@ console.log('');
 
 console.log('── 2. 心流健康 ──');
 console.log(`  心流裁决                      ${st.heartDecision}`);
-console.log(`  LLM 失败 (fail-closed)        ${st.heartFailed}  ${pct(st.heartFailed, st.heartDecision)}   部署后 ${st.afterHeartFailed}`);
+console.log(`  LLM 失败 (fail-closed)        ${st.heartFailed}  ${pct(st.heartFailed, st.heartDecision)}     （分母=心流裁决 ${st.heartDecision} 次）部署后 ${st.afterHeartFailed}`);
 console.log(`    ├─ All labels exhausted     ${st.allExhausted}  ${pct(st.allExhausted, Math.max(1, st.heartFailed))} of failures`);
 console.log(`    └─ 空正文                   ${st.emptyResponse}`);
 console.log(`  发现会截断的 label             ${st.truncRetry}   部署后 ${st.afterTruncRetry}   （每个只记第一次，不刷屏）`);
@@ -510,8 +513,11 @@ console.log('── 2b. topic-scan 抽取率（低产 = LLM 在空转）──')
     console.log('  窗口内没有 Topic scan tick');
   } else {
     const rate = chats > 0 ? observed / chats : 0;
-    console.log(`  tick ${ticks} 次｜扫群 ${chats}｜抽出标签 ${observed}  ${pct(observed, chats)}`);
-    if (chats > 0 && rate < 0.15) {
+    // round 163: 分母是**群数**不是消息数（round 193 同病）。上面那行
+    // "扫群 9400" 容易读成扫了 9400 条消息。明硬写。
+    console.log(`  tick ${ticks} 次｜扫群 ${chats} 个群｜抽出标签 ${observed}  ${pct(observed, chats)}`
+      + `  （分母=群数不是消息数）`);
+    if (rate < 0.15) {
       console.log('  ⚠️  低于 15% —— 要么群真的冷清，要么 LLM 在空转。看日志里的');
       console.log('      "claude: 空正文"（思维链吃光 max_tokens）与 topic-scan 的低产告警。');
       console.log('      2026-09-21 实测：修 maxTokens 之前 4.5%（2040 扫 / 91 抽），');
