@@ -2,16 +2,16 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 
 /**
- * round 92: **\u5206\u6876\u8981\u6709\u65e5\u5fd7\u884c\uff0c\u4e0d\u80fd\u53ea\u6709 counter\u3002**
+ * round 92: **分桶要有日志行，不能只有 counter。**
  *
- * Round 91 \u5b9e\u6d4b\uff1a`agent_interrupt_addressed_total=3` / `background=6`
- * \u5728 /metrics \u91cc\u786e\u5b9e\u6709\u503c\uff0c\u4f46 `grep "interrupt triage" logs/app.log` = 0 \u884c\u3002
+ * Round 91 实测：`agent_interrupt_addressed_total=3` / `background=6`
+ * 在 /metrics 里确实有值，但 `grep "interrupt triage" logs/app.log` = 0 行。
  *
- * \u539f\u56e0\uff1around 177 \u53ea\u5728\u90a3\u4e2a dispatch \u70b9\u8c03\u4e86 incrCounter\uff0c**\u6ca1\u6253\u65e5\u5fd7**\u3002\u800c
- * counter \u662f\u8fdb\u7a0b\u5185\u7684\uff08round 73 banner \u5199\u7740\u91cd\u542f\u5f52\u96f6\uff09\u2014\u2014\u91cd\u542f\u540e\u4e00\u5207\u5747\u8868\u3002
+ * 原因：round 177 只在那个 dispatch 点调了 incrCounter，**没打日志**。而
+ * counter 是进程内的\uff08round 73 banner 写着重启归零\uff09——重启后一切均表。
  *
- * \u8fd9\u5c31\u662f round 63/64 \u5f00\u59cb\u5f52\u7684\u90a3\u4e2a\u5751\u7684\u7b2c 5 \u6b21\uff08
- * debug \u7ea7\u4e0d\u53ef\u89c1 / \u5b57\u6bb5\u4e0d\u5bf9 / \u8c03\u7528\u70b9\u6ca1\u63a5\u4e0a / \u5199\u8fdb\u53bb\u4e86\u4f46\u6ca1\u65e5\u5fd7\uff09\u3002
+ * 这就是 round 63/64 开始归的那个坑的第 5 次\uff08
+ * debug 级不可见 / 字段不对 / 调用点没接上 / 写进去了但没日志\uff09。
  */
 
 const SRC = 'src/meta/session.ts';

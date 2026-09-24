@@ -2,17 +2,17 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 
 /**
- * round 105: **\u6b8b\u7559\u7684\u6d3b\u52a8\u4efb\u52a1\u7d22\u5f15\u8981\u6709\u81ea\u6148\u6467\u62e6\u3002**
+ * round 105: **残留的活动任务索引要有自慈摧拦。**
  *
- * \u6545\u4e8b\uff08round 102-105\uff09\uff1aCodeAct job `stalled more than allowable limit` \u5931\u8d25\uff0c
- * \u4f46 hash \u91cc status \u8fd8\u662f running\u3001active-chat \u7d22\u5f15\u8fd8\u5728\u2014\u2014
- * 5 \u5c0f\u65f6\u91cc 23 \u6765\u7fa4\u6d88\u606f\u88ab\u5f53\u6210 interrupt\uff0818 \u6761 background\uff09\u3002
+ * 故事\uff08round 102-105\uff09：CodeAct job `stalled more than allowable limit` 失败，
+ * 但 hash 里 status 还是 running、active-chat 索引还在——
+ * 5 小时里 23 来群消息被当成 interrupt\uff0818 条 background\uff09。
  *
- * Round 103 \u4fee\u7684\u662f"\u672a\u6765\u7684 failed \u8981\u6e05"\uff0c\u5df2\u7ecf\u574f\u6389\u7684\u6ca1\u4eba\u7ba1\u3002
- * \u8fd9\u4e2a\u6467\u62e6\u8865\u90a3\u4e00\u534a\uff0b\u800c\u4e14\u987a\u4fbf\u6cbb\u53e6\u5916\u4e00\u79cd\u5f62\u6001\uff08hash \u5148\u8fc7\u671f\u3001\u7d22\u5f15\u540e\u8fc7\u671f\uff09\u3002
+ * Round 103 修的是"未来的 failed 要清"，已经坏掉的没人管。
+ * 这个摧拦补那一半\uff0b而且顺便治另外一种形态\uff08hash 先过期、索引后过期\uff09。
  *
- * \u6700\u91cd\u8981\u7684\u8fb9\u754c\uff1a**`waiting_user` \u4e0d\u80fd\u6e05**\u2014\u2014\u5b83\u5408\u6cd5\u5730\u5728\u7b49\u4eba\uff0c
- * \u53ef\u80fd\u7b49\u5f88\u4e45\u3002round 67 \u90a3\u6761\uff08\u4e0d\u8981\u6cbb\u4e0d\u4f1a\u53d1\u751f\u7684\u75c5\uff09\u5728\u8fd9\u91cc\u540c\u6837\u9002\u7528\u3002
+ * 最重要的边界：**`waiting_user` 不能清**——它合法地在等人，
+ * 可能等很久。round 67 那条\uff08不要治不会发生的病\uff09在这里同样适用。
  */
 
 const SRC = 'src/cron/restart-hygiene.ts';

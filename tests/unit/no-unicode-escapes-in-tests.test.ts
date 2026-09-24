@@ -50,12 +50,12 @@ describe('测试文件不得有反斜杠-u 转义字面量', () => {
       if (countEscapes(f) > 0) offenders.push(f);
     }
     // 存量 13 个文件。这条不要求清零，但不得新增。
-    expect(offenders.length, '比 round 148 记的 13 个多，有新增：\n  ' + offenders.join('\n  '))
-      .toBeLessThanOrEqual(13);
+    expect(offenders.length, '比 round 154 记的 9 个多，有新增：\n  ' + offenders.join('\n  '))
+      .toBeLessThanOrEqual(9);   // round 154: 从 13 清到 9
   });
 
   it('台账记了存量基线（round 137：基线数字要有家）', () => {
     const ki = fs.readFileSync('docs/known-issues.md', 'utf8');
-    expect(ki, 'known-issues 里没记这个基线').toContain('1100');
+    expect(ki, 'known-issues 里没记这个基线').toContain('34 处');   // round 154: 现值 9 个 / 34 处
   });
 });
