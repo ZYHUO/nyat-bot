@@ -11425,3 +11425,42 @@ round 240: 新节落点在 148 段中 → 我读回抓到（语义）
 
 **而 round 189 立的「读前后各一段」两次都抓到了它**——那条规矩是这个 goal 里
 最省的动作规矩之一（成本一次 read，防的是不可逆的语义错位）。
+
+---
+
+## 索引 23 条 + header 推到 twenty-fourth：而"第 17 条"那句还写着 eighteenth（round 241）
+
+Round 240 立了第 23 条。这轮把它加进索引——**发现两处序数词过时**。
+
+### 实测
+
+```
+header：  "check it before adding a twenty-third"  ← 该是 twenty-fourth
+第 17 条： "check this index before adding an eighteenth"  ← 还写着 eighteenth
+```
+
+**第 17 条那句从我 round 218 立它起就没更新过**——而我 round 222/228/241 三次
+推 header 时都没看它。
+
+### 归档：这是「同一事实有两个副本」的第 N 次
+
+```
+header 里的"N+1"
+第 17 条里的"N+1"
+```
+
+**两个副本说同一件事（索引该在加新条目前查）**，而我每次只改一个。
+
+**修法（可复用）**：这种"N+1"的句子**只写一处**，另一处引用它
+（「见 header」）。而我已经在 round 47/216/226 立过「同一结论两处」三次——
+这次是它的最小形态：**一个数字的两个副本**。
+
+### 净结果
+
+```
+header 推到 twenty-fourth
+第 17 条改成"check this index before adding the next rule"（不带数字）
+```
+
+**不带数字的那版永远不会过时**——这正是 round 222 立的
+「汇总数字要么脚本数要么别写」的同一个修法。

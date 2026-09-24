@@ -6,7 +6,7 @@ Guidance for any AI coding agent working in this repository. Concise and tool-ag
 
 Round 216/222: the rules grew past sixteen and ended up scattered over six sections,
 so round 219 audited the guards and found four rules the index had missed.
-This index is the single entry point — **check it before adding a twenty-third.**
+This index is the single entry point — **check it before adding a twenty-fourth.**
 
 | # | rule | guard? | section |
 |---|---|---|---|
@@ -26,12 +26,13 @@ This index is the single entry point — **check it before adding a twenty-third
 | 14 | shape rules get guards; action rules get procedures | — (this table is the index) | Rules that only work if you remember them |
 | 15 | a shape guard is weaker than a relationship guard — tamper it | ✅ `tamper:audit --src` | Adding a feature |
 | 16 | a self-running tool must not depend on the process that caused the problem | ✅ `no-tamper-leftovers` + `tamper-recovery-works` | tamper-audit section |
-| 17 | check this index before adding an eighteenth | — (this index) | Rule index |
+| 17 | check this index before adding the next rule | — (this index) | Rule index |
 | 18 | never wrap a path-shaped example in backticks | ✅ `doc-references-exist` | Docs section |
 | 19 | a flag that is ON by default must have a reader | ✅ `no-dead-switches` | Adding a feature |
 | 20 | a hard skip needs a stated reason | ✅ `no-unexplained-skip` | Testing conventions |
 | 21 | re-measure an old baseline only after reading its criterion | — (action) | Cross-checking two numbers |
 | 22 | notes go in the description column, never in an anchor column | ✅ `baseline-ledger-format` | Writing a table row |
+| 23 | "it looks wired up" is the most expensive false green — ask if it *fires* | — (action) | guard rules (Adding a feature) |
 
 **The rules without guards are all semantic or action rules (round 176) — that is the
 expected split, not a gap. (Round 222: this line used to say "10 have guards, 10 do not";
