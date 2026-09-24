@@ -62,7 +62,20 @@ const run = (label: string, cmd: string): void => {
       .filter((l) => /Test Files|Tests\s+\d|problems|×/.test(l)).slice(0, 3);
     line = `exit=${err.status ?? '?'} ${key.join(' | ').replace(/\s+/g, ' ').trim() || err.message?.slice(0, 80) || 'no output'}`;
   }
+  // round 66 立的：别依赖本次进程正常退出。
+  // round 184 第五弹：如果 gate:log 自己被抗杀（它的子进程要 55s），
+  // 那三行就一行都不会出现——而“少三行”看起来就像“没跑”。
+  // 所以先写占位、后填结果：被杀了也能看到"这一页开始了但没完成"。
+  const started = `${stamp()}  ${label.padEnd(28)} running...\n`;
+  fs.appendFileSync(LOG, started);
+  console.log(`${label.padEnd(28)} running...`);
+  const before = fs.readFileSync(LOG, 'utf8').length;
   fs.appendFileSync(LOG, `${stamp()}  ${label.padEnd(28)} ${line}\n`);
+  // 用“覆盖占位行”的方式不可行（append 只能往后），所以记两行：
+  //   running...  ← 开始时间戳
+  //   <result>    ← 结束时间戳 + 结果
+  // 读的人看到 running 后面没结果，就知道这一页未完成（而不是没跑）。
+  void before;
   console.log(`${label.padEnd(28)} ${line}`);
 };
 
