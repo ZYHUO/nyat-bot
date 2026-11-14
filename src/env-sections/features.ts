@@ -20,6 +20,12 @@ export const featuresSection = {
   // 独立受限视频解码工具未安装时保持关闭；不复用仅支持音频的TTS二进制。
   VIDEO_FRAME_FALLBACK_ENABLED: booleanFromEnv.default(false),
   VIDEO_FFMPEG_PATH: z.string().default(''),
+  // Explicit opt-in to isolated replicas; failed replicas never use the legacy local decoder.
+  VIDEO_REMOTE_ENABLED: booleanFromEnv.default(false),
+  VIDEO_REMOTE_ENDPOINTS: z.string().default('').transform(value => value.split(',').map(item => item.trim()).filter(Boolean)),
+  VIDEO_REMOTE_TOKEN: z.string().default(''),
+  VIDEO_REMOTE_DECODER_SHA256: z.string().default(''),
+  VIDEO_REMOTE_TIMEOUT_MS: z.coerce.number().int().min(100).max(20_000).default(20_000),
   // ── StepFun 全网搜索（2026-09-20 起作为**主路由**）────────────────
   // 原 4 条 fallback 链（Gemini grounding / new-api grok / SearxNG / DDG）整体保留为
   // 后备，但默认走 stepfun 的 POST /v1/search：一次请求拿 title/snippet/content/time，

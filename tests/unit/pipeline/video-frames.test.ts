@@ -1,13 +1,18 @@
 import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { cfg, spawnMock, mkdirMock, writeMock, removeMock } = vi.hoisted(() => ({
-  cfg: { VIDEO_FRAME_FALLBACK_ENABLED: true, VIDEO_FFMPEG_PATH: '/restricted/bin/ffmpeg', VIDEO_MAX_DURATION_SEC: 300 },
+const { cfg, remote, spawnMock, mkdirMock, writeMock, removeMock } = vi.hoisted(() => ({
+  cfg: { VIDEO_FRAME_FALLBACK_ENABLED: true, VIDEO_FFMPEG_PATH: '/restricted/bin/ffmpeg', VIDEO_MAX_DURATION_SEC: 300,
+    VIDEO_REMOTE_ENABLED: false, VIDEO_REMOTE_ENDPOINTS: ['http://127.0.0.1:3042', 'http://127.0.0.1:3041'],
+    VIDEO_REMOTE_TOKEN: 'synthetic-remote-video-token-with-32chars', VIDEO_REMOTE_DECODER_SHA256: 'a'.repeat(64), VIDEO_REMOTE_TIMEOUT_MS: 20000 },
+  remote: vi.fn(),
   spawnMock: vi.fn(), mkdirMock: vi.fn(), writeMock: vi.fn(), removeMock: vi.fn(),
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => cfg }));
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 vi.mock('node:fs/promises', () => ({ mkdtemp: mkdirMock, writeFile: writeMock, rm: removeMock }));
+vi.mock('../../../src/pipeline/video-frames-remote.js', () => ({ remoteVideoFrames: remote }));
 import { extractVideoFrames } from '../../../src/pipeline/video-frames.js';
 
 const png = (): Buffer => {
@@ -32,17 +37,29 @@ const output = (bytes: Buffer) => () => {
 };
 beforeEach(() => {
   vi.clearAllMocks(); cfg.VIDEO_FRAME_FALLBACK_ENABLED = true; cfg.VIDEO_FFMPEG_PATH = '/restricted/bin/ffmpeg'; cfg.VIDEO_MAX_DURATION_SEC = 300;
+  cfg.VIDEO_REMOTE_ENABLED = false; remote.mockReset();
   mkdirMock.mockResolvedValue('/private/video-test'); writeMock.mockResolvedValue(undefined); removeMock.mockResolvedValue(undefined);
   spawnMock.mockImplementation((_binary: string, args: string[]) => output(args.includes('-of') ? metadata() : png())());
 });
 
 describe('bounded video frame extraction', () => {
+  it('routes the actual enabled entry to isolated replicas and never falls back to the legacy subprocess', async () => {
+    cfg.VIDEO_REMOTE_ENABLED = true;
+    const bytes = Buffer.from('synthetic input'), signal = new AbortController().signal;
+    const frames = [{ png: png(), atSeconds: 0 }]; remote.mockResolvedValueOnce(frames);
+    expect(await extractVideoFrames(bytes, signal)).toEqual(frames);
+    expect(remote).toHaveBeenCalledWith(bytes, expect.objectContaining({ endpoints: cfg.VIDEO_REMOTE_ENDPOINTS,
+      identity: { protocol: 'nyat-video-frames-v1', decoderSha256: cfg.VIDEO_REMOTE_DECODER_SHA256 }, signal }));
+    remote.mockRejectedValueOnce(new Error('both replicas unavailable'));
+    await expect(extractVideoFrames(bytes)).rejects.toThrow('both replicas unavailable');
+    expect(spawnMock).not.toHaveBeenCalled(); expect(writeMock).not.toHaveBeenCalled();
+  });
   it('uses private bounded bytes, exact resource limits and only sampled PNG output', async () => {
     const input = Buffer.from('already-downloaded-video');
     const result = await extractVideoFrames(input);
     expect(result.map(frame => frame.atSeconds)).toEqual([0, 3, 6]);
     expect(result.every(frame => frame.png.equals(png()))).toBe(true);
-    expect(writeMock).toHaveBeenCalledWith('/private/video-test/input.bin', input, { mode: 0o600 });
+    expect(writeMock).toHaveBeenCalledWith(join('/private/video-test', 'input.bin'), input, { mode: 0o600 });
     expect(spawnMock).toHaveBeenCalledTimes(4);
     for (const [binary, args, options] of spawnMock.mock.calls) {
       expect(binary).toBe('/usr/bin/prlimit');

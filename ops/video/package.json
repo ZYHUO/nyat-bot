@@ -1,0 +1,7 @@
+{
+  "name": "nyat-video-compute-runtime",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "description": "Standalone bundled byte-only decoder; no npm runtime dependencies"
+}

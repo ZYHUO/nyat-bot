@@ -49,12 +49,17 @@ vi.mock('../../../src/ai/fallback.js', () => ({
 }));
 const extractFramesMock = vi.fn(async () => [{ png: Buffer.from('sample-frame'), atSeconds: 0 }]);
 vi.mock('../../../src/pipeline/video-frames.js', () => ({ extractVideoFrames: (...args: unknown[]) => extractFramesMock(...args) }));
+const availability = vi.fn();
+vi.mock('../../../src/platform/onebot-media.js', () => ({ resolveOneBotMedia: async () => ({
+  bytes: FAKE_MP4, mimeType: 'video/mp4', fileName: 'synthetic.mp4', assertAvailable: availability,
+}) }));
 
 const { describeMultimodal } = await import('../../../src/pipeline/multimodal.js');
 const { formatMessage } = await import('../../../src/pipeline/formatter.js');
 
 beforeEach(() => {
   vi.clearAllMocks();
+  availability.mockReset();
   envValues.VIDEO_DESCRIBE_ENABLED = true;
   envValues.VIDEO_MAX_DURATION_SEC = 300;
   envValues.VIDEO_FRAME_FALLBACK_ENABLED = false;
@@ -183,6 +188,19 @@ describe('describeMultimodal · 视频', () => {
     extractFramesMock.mockRejectedValueOnce(new Error('invalid media'));
     expect(await describeMultimodal(videoMsg() as never)).toBe('[视频（12 秒）]');
     expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps source recall authority on the host and refuses a frame result recalled during computation', async () => {
+    envValues.VIDEO_FRAME_FALLBACK_ENABLED = true;
+    callWithFallbackMock.mockRejectedValueOnce(new Error('video route unavailable'));
+    extractFramesMock.mockImplementationOnce(async () => {
+      availability.mockImplementation(() => { throw Error('source_recalled'); });
+      return [{ png: Buffer.from('sample-frame'), atSeconds: 0 }];
+    });
+    const out = await describeMultimodal(videoMsg({ videoFileId: 'qq-media:synthetic' }) as never, -123);
+    expect(out).toBe('[视频（12 秒）]');
+    expect(extractFramesMock).toHaveBeenCalledOnce();
+    expect(callWithFallbackMock).toHaveBeenCalledOnce(); // No vision request after recall.
   });
 });
 

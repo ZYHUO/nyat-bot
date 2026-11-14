@@ -14,7 +14,7 @@
  *   ③ 每个段文件都被 env.ts import 了（加了文件忘了接 = 那一整段静默消失）
  */
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const SECTION_DIR = 'src/env-sections';
@@ -61,8 +61,9 @@ describe('env schema 拆段', () => {
     // 2026-11-15: independently counted 546 schema keys across 13 sections,
     // including pending intent, life-project (two) and background publication.
     // Parsed default objects omit 19 optional keys and are not this denominator.
-    expect(all.length).toBe(546);
-    expect(new Set(all).size).toBe(546);
+    // Five isolated video replica controls; standalone server settings are not bot keys.
+    expect(all.length).toBe(551);
+    expect(new Set(all).size).toBe(551);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -76,6 +77,11 @@ describe('env schema 拆段', () => {
     expect(parsed.CORE_V2_ENABLED).toBe(true);                 // core
     expect(parsed.AGENT_TASK_SEND_BUDGET).toBe(6);             // meta
     expect(parsed.VIDEO_DESCRIBE_ENABLED).toBe(true);          // features
+    expect(parsed.VIDEO_REMOTE_ENABLED).toBe(false);
+    expect(parsed.VIDEO_REMOTE_ENDPOINTS).toEqual([]);
+    expect(parsed.VIDEO_REMOTE_TOKEN).toBe('');
+    expect(parsed.VIDEO_REMOTE_DECODER_SHA256).toBe('');
+    expect(parsed.VIDEO_REMOTE_TIMEOUT_MS).toBe(20_000);
     expect(parsed.NYATOS_BUDGET_MAX_ACTS).toBe(6);             // life
     expect(parsed.PROACTIVE_ACTIVATED_AT_SEC).toBe(0);         // cognition
     expect(parsed.META_ACTIVATED_AT_SEC).toBe(0);              // meta (disabled until explicitly activated)
@@ -135,7 +141,7 @@ describe('env schema 拆段', () => {
   it('③ 每个段文件都被 env.ts import（加了文件忘了接 = 整段静默消失）', () => {
     const src = readFileSync('src/env.ts', 'utf8');
     for (const f of sectionFiles()) {
-      const name = f.split('/').pop()!.replace('.ts', '');
+      const name = basename(f, '.ts');
       expect(src, `env.ts 没有 import ${name}Section`).toContain(`from './env-sections/${name}.js'`);
       expect(src, `env.ts 没有 spread ${name}Section`).toContain(`...${name}Section,`);
     }

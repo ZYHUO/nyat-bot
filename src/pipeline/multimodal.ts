@@ -17,12 +17,12 @@ async function downloadTelegramFile(
   fileId: string,
   signal: AbortSignal = AbortSignal.timeout(30_000),
   chatId?: number,
-): Promise<{ buffer: ArrayBuffer; mimeType: string; filePath: string } | null> {
+): Promise<{ buffer: ArrayBuffer; mimeType: string; filePath: string; assertAvailable?: () => void } | null> {
   try {
     if (fileId.startsWith('qq-media:')) {
       const { resolveOneBotMedia } = await import('../platform/onebot-media.js');
       const media = await resolveOneBotMedia(fileId, chatId, { signal, maxBytes: MAX_MEDIA_BYTES });
-      return { buffer: Uint8Array.from(media.bytes).buffer, mimeType: media.mimeType, filePath: media.fileName };
+      return { buffer: Uint8Array.from(media.bytes).buffer, mimeType: media.mimeType, filePath: media.fileName, assertAvailable: media.assertAvailable };
     }
     const bot = getBot();
     // grammY's declaration still names abort-controller; Node 22's native signal
@@ -377,6 +377,7 @@ async function describeVideo(
   }
 
   try {
+    downloaded.assertAvailable?.();
     const base64 = Buffer.from(downloaded.buffer).toString('base64');
     const mimeType = videoMimeFromPath(downloaded.filePath, downloaded.mimeType);
 
@@ -399,10 +400,11 @@ async function describeVideo(
       maxTimeoutMs: env().VIDEO_DESCRIBE_TIMEOUT_MS,
     });
 
+    downloaded.assertAvailable?.();
     const text = result.content.trim();
     if (!text) {
       logger.info({ fileId, label: result.label }, 'Video description empty — placeholder used');
-      return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId);
+      return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId, downloaded.assertAvailable);
     }
     // 成功也记一笔：没有它，"这个功能到底跑过没有"只能靠翻 textContent。
     logger.info(
@@ -413,18 +415,21 @@ async function describeVideo(
   } catch {
     logger.warn({ fileId }, 'Video description failed');
     // 失败同样用中性占位——别把群友发的视频误读成 bot 出了故障。
-    return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId);
+    return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId, downloaded.assertAvailable);
   }
 }
 
 async function describeVideoFrameFallback(
-  buffer: ArrayBuffer, label: string, durationSec: number | undefined, chatId?: number,
+  buffer: ArrayBuffer, label: string, durationSec: number | undefined, chatId?: number, assertAvailable?: () => void,
 ): Promise<string> {
   const placeholder = `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
   if (!env().VIDEO_FRAME_FALLBACK_ENABLED) return placeholder;
   try {
     const { extractVideoFrames } = await import('./video-frames.js');
+    assertAvailable?.();
     const frames = await extractVideoFrames(new Uint8Array(buffer));
+    // A source recalled while a remote replica ran must not reach the model.
+    assertAvailable?.();
     const result = await callWithFallback({
       usage: 'vision', chatId,
       messages: [{ role: 'user', content: [
@@ -434,6 +439,7 @@ async function describeVideoFrameFallback(
       maxTokens: env().VIDEO_DESCRIBE_MAX_TOKENS,
       maxTimeoutMs: Math.min(30_000, env().VIDEO_DESCRIBE_TIMEOUT_MS),
     });
+    assertAvailable?.();
     const text = result.content.trim();
     if (!text) return placeholder;
     logger.info({ label: result.label, frames: frames.length }, 'Video frame fallback described');

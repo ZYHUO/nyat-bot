@@ -3,6 +3,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { env } from '../env.js';
+import { remoteVideoFrames } from './video-frames-remote.js';
+import { videoIdentity } from '../compute/video-contract.js';
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
@@ -69,6 +71,11 @@ interface ProbeInfo {
 export async function extractVideoFrames(bytes: Uint8Array, callerSignal?: AbortSignal): Promise<VideoFrame[]> {
   const cfg = env();
   if (!cfg.VIDEO_FRAME_FALLBACK_ENABLED) throw new VideoFrameError('video_frames_disabled');
+  if (cfg.VIDEO_REMOTE_ENABLED) {
+    return remoteVideoFrames(bytes, { endpoints: cfg.VIDEO_REMOTE_ENDPOINTS, token: cfg.VIDEO_REMOTE_TOKEN,
+      identity: videoIdentity(cfg.VIDEO_REMOTE_DECODER_SHA256), timeoutMs: cfg.VIDEO_REMOTE_TIMEOUT_MS,
+      maxDurationSec: Math.min(300, cfg.VIDEO_MAX_DURATION_SEC), signal: callerSignal });
+  }
   const binary = cfg.VIDEO_FFMPEG_PATH;
   if (!binary || !isAbsolute(binary) || !binary.endsWith('/ffmpeg')) throw new VideoFrameError('video_frames_not_configured');
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_INPUT_BYTES) throw new VideoFrameError('video_frames_input_limit');

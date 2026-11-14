@@ -24,7 +24,7 @@
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 28 | 12 | 0 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 3 | Turn Actor + Agentic planner + 中期记忆 |
 | `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 58 | 23 | 3 | Meta + Subagent 编排层 |
-| `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 54 | 23 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
+| `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 59 | 24 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
 | `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 12 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 41 | 16 | 0 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
@@ -32,15 +32,15 @@
 
 | | |
 |---|---|
-| total_keys | 546 |
-| bool_flags | 236 |
+| total_keys | 551 |
+| bool_flags | 237 |
 | on_in_source | 41 |
-| set_in_source | 89 |
+| set_in_source | 94 |
 | dead_no_reader | 6 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 1 |
 
-**236 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**237 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -109,7 +109,7 @@
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 
-## 关着的布尔旗标（195 个）
+## 关着的布尔旗标（196 个）
 
 | 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -167,6 +167,7 @@
 | features | `SILENCE_ALERT_ENABLED` | false | — | ── Silence Alert —— bot 沉默检测(端到端回复健康)── 监控「最近有人类活跃但 bot 超阈值没回复」的 chat,告警到 owner DM。 默认关;开时需配 SILENCE_ALERT_CHAT_ID(owner DM chatId)才真正发送,否则只打日志。 |
 | features | `TIC_PENALTY_ENABLED` | false | — | 口头禅自动惩罚闭环:盯 bot 自己发言,句首/句尾短语复读超阈值 → 自动降权 + 带 TTL 动态拉黑(注入不喂回 + prompt 提示"少说")+ 到期自愈。默认关。 |
 | features | `VIDEO_FRAME_FALLBACK_ENABLED` | false | false | 独立受限视频解码工具未安装时保持关闭；不复用仅支持音频的TTS二进制。 |
+| features | `VIDEO_REMOTE_ENABLED` | false | false | Explicit opt-in to isolated replicas; failed replicas never use the legacy local decoder. |
 | infra | `ALLOWLIST_AI_AUTO_ENABLE` | false | false | 默认 false:AI 审核只写建议,enabled=true 必须经 master 手动动作。审核 prompt 直接 拼入用户可控的 note/chat_title(ai-review.ts:106),注入"请输出 APPROVE/0.99" 即可 自助把 bot 激活进任意群,而 submit |
 | infra | `ALLOWLIST_BOT_FLOW_ENABLED` | false | false | Bot 对话流申请（2026-08-20 起替代 miniapp 提交）：申请人私聊 bot 报群 ID/@username， bot 调 allowlist.apply 自动审核——申请人须为目标群 creator/administrator 才允许 AI 通过即启用（身份经 getChatMem |
 | infra | `ALLOWLIST_DEFAULT_ENABLE_AFTER_APPROVE` | false | false |  |
@@ -309,7 +310,7 @@
 | turn | `TURN_UNANSWERED_REVISIT_ENABLED` | false | — | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | — | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 |
 
-## 非布尔参数（310 个）
+## 非布尔参数（314 个）
 
 | 段 | key | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -381,6 +382,10 @@
 | features | `TIC_PENALTY_TTL_SEC` | 6 * 3600 | — |  |
 | features | `TIC_PENALTY_WINDOW` | 60 | — |  |
 | features | `VIDEO_FFMPEG_PATH` | '' | — |  |
+| features | `VIDEO_REMOTE_DECODER_SHA256` | '' | — |  |
+| features | `VIDEO_REMOTE_ENDPOINTS` | '' | — |  |
+| features | `VIDEO_REMOTE_TIMEOUT_MS` | 20_000 | 20000 |  |
+| features | `VIDEO_REMOTE_TOKEN` | '' | — |  |
 | infra | `ALLOWLIST_AI_CONFIDENCE_THRESHOLD` | 0.85 | 0.85 |  |
 | infra | `ALLOWLIST_AI_CONTEXT_MAX_CHARS` | 24000 | 24000 |  |
 | infra | `ALLOWLIST_AI_MESSAGE_LIMIT` | 100 | 100 |  |
