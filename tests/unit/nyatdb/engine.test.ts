@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import { Page } from '../../../packages/nyatdb/src/format/page.js';
 import { PageType } from '../../../packages/nyatdb/src/format/constants.js';
 import { RECALL_DIM } from '../../../packages/nyatdb/src/format/codec.js';
 import { chatAppendFromFormatted, unpackChatLogRow } from '../../../packages/nyatdb/src/chat-log.js';
+import { CompactMsgIndex, saveMsgIndex } from '../../../packages/nyatdb/src/index/msg-index.js';
 
 describe('NyatDB page format', () => {
   it('slotted insert + crc round-trip', () => {
@@ -50,6 +51,86 @@ describe('NyatDB production primitives', () => {
     expect(db2.chatRecent(-100, 5).map((m) => m.messageId)).toEqual([26, 27, 28, 29, 30]);
     db2.verify();
     db2.close();
+  });
+
+  it('WAL-only new pages recover exact chat ownership on the first open without a ghost scope zero', () => {
+    dir = mkdtempSync(join(tmpdir(), 'nyatdb-wal-scope-'));
+    NyatDb.open({ path: dir }).close();
+    const writing = NyatDb.open({ path: dir, syncEvery: 1 });
+    for (const chatId of [-300, -400]) writing.chatAppend(chatId, {
+      messageId: 51, ts: 1, uid: 7, role: 'user', text: `private:${chatId}`,
+    });
+    writing.close({ skipCheckpoint: true });
+    const recovered = NyatDb.open({ path: dir });
+    try {
+      expect(recovered.stats().chats).toBe(2);
+      expect(recovered.chatRecent(0, 1)).toEqual([]);
+      expect(recovered.chatGet(0, 51)).toBeNull();
+      for (const chatId of [-300, -400]) {
+        expect(recovered.chatRecent(chatId, 5).map(row => row.text)).toEqual([`private:${chatId}`]);
+        expect(recovered.chatGet(chatId, 51)?.text).toBe(`private:${chatId}`);
+      }
+    } finally { recovered.close(); }
+  });
+
+  it.each([false, true])('WAL revisions preserve append order, not timestamps, and repeated recovery is idempotent (heap flushed=%s)', flushed => {
+    dir = mkdtempSync(join(tmpdir(), 'nyatdb-wal-edits-'));
+    NyatDb.open({ path: dir }).close();
+    const originalMeta = readFileSync(join(dir, 'ENGINE.json'));
+    const originalIndex = readFileSync(join(dir, 'snap/msg.idx'));
+    const writing = NyatDb.open({ path: dir, syncEvery: 1 });
+    writing.chatAppend(-300, { messageId: 51, ts: 200, uid: 7, role: 'user', text: 'first-version' });
+    writing.chatAppend(-300, { messageId: 51, ts: 100, uid: 7, role: 'user', text: 'edited-version' });
+    const wal = readFileSync(join(dir, 'wal/redo.wal'));
+    writing.close({ skipCheckpoint: !flushed });
+    if (flushed) {
+      // Crash boundary after heap flush, before checkpoint metadata/index/WAL rotation.
+      writeFileSync(join(dir, 'ENGINE.json'), originalMeta);
+      writeFileSync(join(dir, 'snap/msg.idx'), originalIndex);
+      writeFileSync(join(dir, 'wal/redo.wal'), wal);
+    }
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const recovered = NyatDb.open({ path: dir });
+      try {
+        expect(recovered.chatGet(-300, 51)?.text).toBe('edited-version');
+        expect(recovered.chatRecent(-300, 10).map(row => row.text)).toEqual(['edited-version', 'first-version']);
+        expect(recovered.stats().indexed).toBe(1);
+        expect(recovered.chatRecent(0, 1)).toEqual([]);
+      } finally { recovered.close({ skipCheckpoint: true }); }
+    }
+  });
+
+  it('a stale secondary-index location cannot read a page owned by another scope', () => {
+    dir = mkdtempSync(join(tmpdir(), 'nyatdb-index-scope-'));
+    const writing = NyatDb.open({ path: dir });
+    writing.chatAppend(-300, { messageId: 51, ts: 1, uid: 7, role: 'user', text: 'private-source' });
+    writing.close();
+    const meta = JSON.parse(readFileSync(join(dir, 'ENGINE.json'), 'utf8')) as { checkpointLsn: string };
+    const stale = new CompactMsgIndex(); stale.set(0, 51, 5, 0);
+    saveMsgIndex(dir, stale, BigInt(meta.checkpointLsn));
+    const recovered = NyatDb.open({ path: dir });
+    try {
+      expect(recovered.chatGet(0, 51)).toBeNull();
+      expect(recovered.chatGetBatch(0, [51])).toEqual([null]);
+      expect(recovered.chatRecent(0, 1)).toEqual([]);
+      expect(recovered.chatRecent(-300, 1)[0]!.text).toBe('private-source');
+    } finally { recovered.close({ skipCheckpoint: true }); }
+  });
+
+  it('new writes after WAL recovery receive fresh LSNs and survive another crash', () => {
+    dir = mkdtempSync(join(tmpdir(), 'nyatdb-wal-continued-'));
+    NyatDb.open({ path: dir }).close();
+    for (let iteration = 1; iteration <= 3; iteration++) {
+      const writing = NyatDb.open({ path: dir, syncEvery: 1 });
+      writing.chatAppend(-300, { messageId: iteration, ts: iteration, uid: 7, role: 'user', text: `durable-${iteration}` });
+      writing.close({ skipCheckpoint: true });
+    }
+    const recovered = NyatDb.open({ path: dir });
+    try {
+      expect(recovered.chatRecent(-300, 10).map(row => row.text)).toEqual(['durable-1', 'durable-2', 'durable-3']);
+      for (let id = 1; id <= 3; id++) expect(recovered.chatGet(-300, id)?.text).toBe(`durable-${id}`);
+      expect(recovered.chatRecent(0, 1)).toEqual([]);
+    } finally { recovered.close(); }
   });
 
   it('hotDel / impulseAck / chatTrimKeepLast', () => {

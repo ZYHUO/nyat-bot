@@ -387,6 +387,80 @@ db.chatAppend(-200,{{messageId:41,ts:2,uid:8,role:'user',text:'OTHER_PRIVATE_CAN
         with self.assertRaisesRegex(drill.DrillError, 'command_failed'):
             drill.execute(probe, self.work, 30)
 
+    def test_real_probe_accepts_exact_legacy_scopes_revisions_and_uncheckpointed_wal(self):
+        node = os.environ.get('NYATBOT_TEST_NODE') or shutil.which('node')
+        self.assertIsNotNone(node)
+        engine = (ROOT / 'packages/nyatdb/src/engine.ts').as_uri()
+        loader = (ROOT / 'node_modules/tsx/dist/loader.mjs').as_uri()
+        bundle = self.work / 'probe.mjs'
+        build = 'import {build} from ' + json.dumps((ROOT / 'node_modules/esbuild/lib/main.js').as_uri()) + ';' + \
+            'await build({entryPoints:[' + json.dumps(str(ROOT / 'scripts/restore-nyatdb-probe.mts')) + '],outfile:' + \
+            json.dumps(str(bundle)) + ',bundle:true,platform:"node",format:"esm",target:"node22"});'
+        subprocess.run([node, '--input-type=module', '-e', build], cwd=ROOT, check=True, capture_output=True, timeout=30)
+        for name, body, chats in [
+            ('revisions', '''
+db.chatAppend(0,{messageId:41,ts:20,uid:7,role:'user',text:'PRIVATE_OLD_REVISION'});
+db.chatAppend(0,{messageId:41,ts:10,uid:8,role:'assistant',text:'PRIVATE_NEW_REVISION_OLDER_TIMESTAMP'});
+db.chatAppend(-(2**56),{messageId:41,ts:21,uid:7,role:'user',text:'PRIVATE_EXACT_TOPIC_SCOPE'});
+db.chatAppend(-200,{messageId:41,ts:22,uid:7,role:'user',text:'PRIVATE_OTHER_SCOPE'});
+db.close();''', 3),
+            ('wal-only', '''
+db.close();db=NyatDb.open({path});
+db.chatAppend(-300,{messageId:51,ts:1,uid:7,role:'user',text:'PRIVATE_WAL_ONLY'});
+db.close({skipCheckpoint:true});''', 1),
+        ]:
+            with self.subTest(name=name):
+                database = self.work / name
+                code = f'import {{NyatDb}} from {json.dumps(engine)}; const path={json.dumps(str(database))};let db=NyatDb.open({{path}});' + body
+                made = subprocess.run([node, '--import', loader, '--input-type=module', '-e', code], cwd=ROOT, capture_output=True, timeout=30)
+                self.assertEqual(made.returncode, 0, made.stderr.decode(errors='replace'))
+                output = drill.execute([node, str(bundle), str(database)], self.work, 30)
+                result = json.loads(output)
+                self.assertTrue(result['ok']); self.assertTrue(result['emptyScopeChecked'])
+                self.assertEqual(result['sampledChats'], chats)
+                self.assertGreaterEqual(result['sampledMessages'], chats)
+                self.assertNotIn(b'PRIVATE_', output)
+
+    def test_real_probe_rejects_precision_loss_corruption_and_wrong_scope_index(self):
+        node = os.environ.get('NYATBOT_TEST_NODE') or shutil.which('node')
+        self.assertIsNotNone(node)
+        loader = (ROOT / 'node_modules/tsx/dist/loader.mjs').as_uri()
+        engine = (ROOT / 'packages/nyatdb/src/engine.ts').as_uri()
+        page = (ROOT / 'packages/nyatdb/src/format/page.ts').as_uri()
+        index = (ROOT / 'packages/nyatdb/src/index/msg-index.ts').as_uri()
+        bundle = self.work / 'probe.mjs'
+        build = 'import {build} from ' + json.dumps((ROOT / 'node_modules/esbuild/lib/main.js').as_uri()) + ';' + \
+            'await build({entryPoints:[' + json.dumps(str(ROOT / 'scripts/restore-nyatdb-probe.mts')) + '],outfile:' + \
+            json.dumps(str(bundle)) + ',bundle:true,platform:"node",format:"esm",target:"node22"});'
+        subprocess.run([node, '--input-type=module', '-e', build], cwd=ROOT, check=True, capture_output=True, timeout=30)
+        for name, mutation in [
+            ('precision', 'p.buf.writeBigInt64LE(9007199254740993n,32);p.recomputeCrc();'),
+            ('crc', 'p.buf[100]^=1;'),
+            ('foreign-index', '''const index=new CompactMsgIndex();index.set(-100,41,6,0);index.set(-200,41,6,0);
+saveMsgIndex(path,index,BigInt(JSON.parse(readFileSync(join(path,'ENGINE.json'),'utf8')).checkpointLsn));'''),
+            ('ghost-scope-index', '''const index=new CompactMsgIndex();index.set(-100,41,5,0);index.set(-200,41,6,0);index.set(0,41,5,0);
+saveMsgIndex(path,index,BigInt(JSON.parse(readFileSync(join(path,'ENGINE.json'),'utf8')).checkpointLsn));'''),
+        ]:
+            with self.subTest(name=name):
+                database = self.work / name
+                code = f'''import {{NyatDb}} from {json.dumps(engine)};import {{Page}} from {json.dumps(page)};
+import {{CompactMsgIndex,saveMsgIndex}} from {json.dumps(index)};
+import {{readFileSync,writeFileSync}} from 'node:fs';import {{join}} from 'node:path';
+const path={json.dumps(str(database))};const db=NyatDb.open({{path}});
+db.chatAppend(-100,{{messageId:41,ts:1,uid:7,role:'user',text:'PRIVATE_SYNTHETIC'}});
+db.chatAppend(-200,{{messageId:41,ts:2,uid:8,role:'user',text:'PRIVATE_FOREIGN_SCOPE'}});db.close();
+const file=join(path,'heap.ndb');const bytes=readFileSync(file);const p=new Page(bytes.subarray(5*4096,6*4096));
+{mutation}writeFileSync(file,bytes);'''
+                made = subprocess.run([node, '--import', loader, '--input-type=module', '-e', code], cwd=ROOT, capture_output=True, timeout=30)
+                self.assertEqual(made.returncode, 0, made.stderr.decode(errors='replace'))
+                before = {p.name: drill.backup.digest(p) for p in database.iterdir() if p.is_file()}
+                result = subprocess.run([node, str(bundle), str(database)], cwd=self.work, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, b'')
+                self.assertEqual(result.stderr, b'nyatdb_restore_probe_failed\n')
+                if name in ('precision', 'crc'):
+                    self.assertEqual(before, {p.name: drill.backup.digest(p) for p in database.iterdir() if p.is_file()})
+
 
 if __name__ == '__main__':
     unittest.main()
