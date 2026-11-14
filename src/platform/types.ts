@@ -31,7 +31,8 @@ export type MessageSegment =
   | { type: 'mention-all' }
   | { type: 'reply'; message: MessageRef }
   // Media is an opaque platform asset reference, never a local path to open.
-  | { type: 'image' | 'voice' | 'file'; assetRef: string }
+  | { type: 'image' | 'voice' | 'video' | 'file'; assetRef: string;
+      url?: string; fileName?: string; fileSize?: number; mimeType?: string }
   | { type: 'unsupported'; platformType: string };
 
 export interface NormalizedMessage {

@@ -26,6 +26,7 @@ import { buildJournalCapabilityNote } from '../subagent/capability-prompt.js';
 import { checkCodeActActivation } from '../subagent/activation-policy.js';
 import { isConversationOwner } from '../platform/owner-context.js';
 import { isMentioningSelf } from '../pipeline/judge/rules.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
 
 const META_SYSTEM = `你是啾咪囝的 Meta Agent（当前会话编排）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
@@ -477,6 +478,8 @@ async function autoDispatchL0(
 
   for (const [chatId, siblings] of l0ByChat) {
     const withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
+    const qqChat = isPlatformInternalId(chatId);
+    if (qqChat) withIds.sort((a, b) => a.createdAt - b.createdAt || (a.messageId ?? 0) - (b.messageId ?? 0));
     // 长时间/进行中 Agent 任务：该 chat 有活跃任务 → 消息走 interrupt（执行器
     // 每轮开头排入 history，模型实时响应；硬停词立即终止），不重复 dispatch，
     // 避免同 chat 并发/重复回复。P1 起不再依赖 AGENT_LOOP_ENABLED —— 单段任务
@@ -491,7 +494,8 @@ async function autoDispatchL0(
           // 没人排,消息等于被吞。确认任务仍在 running/queued 才路由。
           const { loadCodeActTask } = await import('../subagent/task-store.js');
           const agentTask = await loadCodeActTask(agentTaskId);
-          if (agentTask && (agentTask.status === 'running' || agentTask.status === 'queued' || agentTask.status === 'waiting_user')) {
+          if (agentTask && (!qqChat || agentTask.chatId === chatId)
+            && (agentTask.status === 'running' || agentTask.status === 'queued' || agentTask.status === 'waiting_user')) {
             if (agentTask.waitingForUser || agentTask.status === 'waiting_user') {
               agentTask.waitingForUser = false;
               agentTask.waitingReason = undefined;
@@ -553,6 +557,9 @@ async function autoDispatchL0(
                 'agent: message routed to running long task as interrupt',
               );
             }
+            // This QQ batch has already reached the existing task. Do not let
+            // Meta see it again or enqueue a second task after the interrupt.
+            if (qqChat) skipChatIds?.add(chatId);
             continue;
           }
         }
@@ -571,7 +578,7 @@ async function autoDispatchL0(
     // Heart pile-on: if CodeAct busy or bot just spoke, drop heart: items
     // (mark answered) so the next tick doesn't fire a near-duplicate reply.
     // L0/@ siblings still dispatch normally.
-    const heartOnly = siblings.every((s) => s.reason.includes('heart:'));
+    const heartOnly = siblings.every((s) => s.layer !== 'L0' && s.reason.includes('heart:'));
     if (heartOnly && (await shouldSuppressHeartAutoDispatch(chatId))) {
       try {
         const { markMessageAnswered } = await import('./answered.js');

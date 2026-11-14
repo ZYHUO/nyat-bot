@@ -11,6 +11,7 @@ import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { unwrapPromptEnvelope, looksLikePromptEnvelope } from '../../shared/message-text.js';
 import { unpackChatLogRow, getNyatDb, chatAppendFromFormatted } from '../../nyatdb/index.js';
+import { filterRecalledOneBotMessages } from '../../platform/onebot-notices.js';
 
 const CTX_PREFIX = 'xxb:ctx:';
 const MEMBERS_PREFIX = 'xxb:members:';
@@ -361,7 +362,7 @@ export async function getRecent(chatId: number, count: number, threadId?: number
     redisPeekSkip.has(chatId) &&
     !env().NYATDB_REDIS_MIRROR
   ) {
-    return fromNyat.slice(-count);
+    return filterRecalledOneBotMessages(chatId, fromNyat.slice(-count));
   }
 
   // 取满 CONTEXT_MAX_LENGTH 只为给 mergeRecentWithRedis 补 NyatDB 空洞。NyatDB 读关闭时
@@ -393,12 +394,12 @@ export async function getRecent(chatId: number, count: number, threadId?: number
         .expire(ctxKey(chatId, threadId), CTX_TTL)
         .catch(() => {});
     }
-    return merged;
+    return filterRecalledOneBotMessages(chatId, merged);
   }
 
   if (fromRedis.length > 0) {
     backfillNyatFromRedis(chatId, fromRedis, threadId);
-    return fromRedis.slice(-count);
+    return filterRecalledOneBotMessages(chatId, fromRedis.slice(-count));
   }
   return [];
 }

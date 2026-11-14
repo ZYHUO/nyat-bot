@@ -133,7 +133,7 @@ describe('processMedia · 其他媒体', () => {
       replyTo: { uid: 222, messageId: 5, imageFileId: 'RIMG' } as never,
     });
     await processMedia(f);
-    expect(mocks.describeImage).toHaveBeenCalledWith('RIMG', '这个多少钱');
+    expect(mocks.describeImage).toHaveBeenCalledWith('RIMG', '这个多少钱', undefined);
     expect(f.textContent).toBe('这个多少钱\n[图片: 回复里的图]');
   });
 });

@@ -9,7 +9,7 @@ const f = vi.hoisted(() => ({
   held: new Map<string, string>(), holdWrite: vi.fn(), compareDelete: vi.fn(), end: vi.fn(),
   cfg: {
     CODEACT_BANNED_WORDS: [], AGENT_TASK_SEND_BUDGET: 4, AGENT_LOOP_ENABLED: true,
-    AGENT_MAX_SEGMENTS: 4, CODEACT_USAGE: 'test', MEMORY_SENSITIVE_CHAT_IDS: [],
+    AGENT_MAX_SEGMENTS: 4, CODEACT_USAGE: 'test', MEMORY_SENSITIVE_CHAT_IDS: [], ONEBOT_MEDIA_ENABLED: false,
   },
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.cfg }));
@@ -20,6 +20,7 @@ vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({
   hsetnx: f.holdWrite, eval: f.compareDelete,
 }) }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { throw new Error('unexpected DB access'); } }));
+vi.mock('../../../src/platform/onebot-notices.js', () => ({ isOneBotMessageRecalled: () => false }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: f.llm }));
 vi.mock('../../../src/sandbox/codeact/runner.js', () => ({ executeIsolatedCode: f.isolated }));
 vi.mock('../../../src/subagent/activation-policy.js', () => ({ checkCodeActActivation: () => ({ allowed: true }), holdCodeActTask: vi.fn() }));
@@ -48,7 +49,8 @@ vi.mock('../../../src/knowledge/sticker/store.js', () => ({ getReadyStickersByIn
 vi.mock('../../../src/tracking/person-identity.js', () => ({ getPersonIdentity: () => null, buildCrossGroupInjection: () => '' }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent: vi.fn(async () => []), addAssistant: f.addAssistant }));
 vi.mock('../../../src/pipeline/reply/anti-repeat.js', () => ({ checkNearDuplicate: async () => ({ isNearDuplicate: false }) }));
-vi.mock('../../../src/pipeline/reply/segmenter.js', () => ({ REPLY_SPLIT_CHAR_THRESHOLD: 1000, segmentReply: (text: string) => ({ segments: [text] }) }));
+vi.mock('../../../src/pipeline/reply/segmenter.js', () => ({ REPLY_SPLIT_CHAR_THRESHOLD: 1000, segmentReply: (text: string) => ({ segments: [text] }), calculateTypingDelay: () => 0 }));
+vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({ buildCodeActIdentityPrompt: () => 'synthetic identity' }));
 vi.mock('../../../src/sandbox/paths.js', () => ({ resolveSandboxRoot: () => '/sandbox' }));
 vi.mock('../../../src/bot/bot.js', () => ({ getBotUid: () => 2 ** 52 + 1, getBotDisplayName: () => 'Bot' }));
 vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage: f.sends, sendChatAction: vi.fn(async () => {}), sendSticker: vi.fn(), reactToMessage: vi.fn() }));
@@ -242,5 +244,38 @@ describe('QQ unknown delivery closes the actual host and executor', () => {
     expect(duplicate).not.toHaveBeenCalled();
     finish();
     await first;
+  });
+
+  it('routes a QQ failsafe through the same unquoted two-bubble host and counts each confirmed receipt', async () => {
+    f.llm.mockRejectedValueOnce(new Error('synthetic model failure'))
+      .mockResolvedValueOnce({ content: '这一部分还没处理完。\n需要再检查原因。' });
+    f.sends.mockResolvedValue(anchor + 1);
+    const current = task();
+    await runCodeActTask(current);
+    expect(f.sends.mock.calls.map(call => call[2])).toEqual([undefined, undefined]);
+    expect(current.sendsUsed).toBe(2);
+    expect(current.resultSummary).toBe('failsafe_plain_reply');
+    expect(f.answered).toHaveBeenCalledWith(chatId, anchor);
+  });
+
+  it.each([2, 3])('does not bypass the three-bubble lifetime budget in a failsafe when %i were already used', async (sendsUsed) => {
+    f.llm.mockRejectedValueOnce(new Error('synthetic model failure'))
+      .mockResolvedValueOnce({ content: '第一部分尚未完成。\n第二部分也要再看。' });
+    f.sends.mockResolvedValue(anchor + 1);
+    const current = { ...task(), sendsUsed };
+    await runCodeActTask(current);
+    expect(f.sends).not.toHaveBeenCalled();
+    expect(current.sendsUsed).toBe(sendsUsed);
+    expect(current).toMatchObject({ status: 'failed', resultSummary: 'failed_silent' });
+  });
+
+  it('does not use a direct fallback send to evade the QQ text length policy', async () => {
+    f.llm.mockRejectedValueOnce(new Error('synthetic model failure'))
+      .mockResolvedValueOnce({ content: '字'.repeat(280) });
+    f.sends.mockResolvedValue(anchor + 1);
+    const current = task();
+    await runCodeActTask(current);
+    expect(f.sends).not.toHaveBeenCalled();
+    expect(current).toMatchObject({ status: 'failed', resultSummary: 'failed_silent' });
   });
 });

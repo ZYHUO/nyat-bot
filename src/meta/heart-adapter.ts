@@ -1,5 +1,6 @@
-// Meta-path Heart gate: passive (non-L0) messages ask Heart whether to speak,
-// then elevate to Attention for Meta/CodeAct. Direct/@ still skip Heart.
+// Meta-path Heart gate: passive messages ask whether to speak. Opt-in QQ
+// addressed batches also ask which response fits, retaining direct priority
+// when Heart chooses text. Other direct interactions keep their existing route.
 
 import type { FormattedMessage } from '../shared/types.js';
 import { env } from '../env.js';
@@ -27,12 +28,13 @@ import { getSelfActSummary, renderSelfActSummary } from '../tracking/self-histor
 import { nextSelfWake, renderPendingWake } from '../agent/cognitive-clock.js';
 import { findUnrepairedActs, renderUnrepairedActs } from '../tracking/repair.js';
 import { incrCounter } from '../metrics/registry.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
 export interface MetaHeartResult {
   verdict: MetaHeartVerdict;
-  /** Layer to ingest when allow (always L1 for heart-elevated). */
+  /** Passive text elevates to L1; addressed QQ text retains L0 priority. */
   layer: AttentionLayer;
   reason: string;
   pressureBoost?: number;
@@ -44,8 +46,8 @@ function waitAnchorKey(chatId: number): string {
 }
 
 /**
- * Heart decide for Meta ingress. Call only for non-direct / non-L0 group messages.
- * - reply → allow as L1 (reason heart:…) so Meta gap-fill can dispatch
+ * Heart decision for passive or explicitly opted-in addressed QQ group input.
+ * - reply → L1 for passive input, L0 for addressed QQ input (reason heart:…)
  * - wait → Meta wait-anchor + silence (resume re-ingests)
  * - pass / budget / cooldown → silence
  */
@@ -54,9 +56,16 @@ export async function evaluateMetaHeart(opts: {
   formatted: FormattedMessage;
   layer: AttentionLayer;
   cognitiveAnchorEventId?: string;
+  /** Authenticated QQ group addressing, including an earlier bubble in this batch. */
+  addressed?: boolean;
+  ongoingFollowup?: boolean;
+  batchMessages?: FormattedMessage[];
+  signal?: AbortSignal;
 }): Promise<MetaHeartResult> {
   const e = env();
   const { chatId, formatted, layer } = opts;
+  const addressed = !!opts.addressed && chatId < 0 && isPlatformInternalId(chatId);
+  if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
 
   if (!e.HEART_ENABLED) {
     // No Heart: preserve prior Meta policy (L2 drop handled by caller).
@@ -75,7 +84,7 @@ export async function evaluateMetaHeart(opts: {
   // that finish after the first elevate but before CodeAct speaks.
   try {
     const { shouldSuppressMetaHeartElevate } = await import('./heart-refractory.js');
-    if (await shouldSuppressMetaHeartElevate(chatId)) {
+    if (!addressed && await shouldSuppressMetaHeartElevate(chatId)) {
       const { isCodeActBusy } = await import('../subagent/task-store.js');
       const busy = await isCodeActBusy(chatId).catch(() => false);
       const reason = busy ? 'heart_busy' : 'heart_refractory';
@@ -109,7 +118,7 @@ export async function evaluateMetaHeart(opts: {
   const continuation = tstate !== undefined && isInContinuation(tstate);
 
   // 自发言环：即便在 continuation 免检窗也硬拦（否则刚回完又对下一条被动消息连珠炮）。
-  if (isBotMonologueTrail(recentMessages, botUid, 8, formatted.messageId)) {
+  if (!addressed && isBotMonologueTrail(recentMessages, botUid, 8, formatted.messageId)) {
     logger.info(
       { chatId, messageId: formatted.messageId },
       'Meta heart: bot monologue trail — silence',
@@ -118,7 +127,7 @@ export async function evaluateMetaHeart(opts: {
   }
 
   let cooldownRemainingMs = 0;
-  if (!continuation) {
+  if (!continuation && !addressed) {
     try {
       cooldownRemainingMs = await getGateCooldownRemainingMs(chatId, tstate);
     } catch {
@@ -211,10 +220,15 @@ export async function evaluateMetaHeart(opts: {
     botUid,
     botName: getBotDisplayName(chatId),
     selfState,
+    addressed,
+    ongoingFollowup: addressed && opts.ongoingFollowup,
+    signal: opts.signal,
     lastSpokeSecAgo,
     cognitiveWorkspaceHint,
     ...(selfHistory ? { selfHistory } : {}),
     burstNote: [
+      opts.batchMessages && opts.batchMessages.length > 1
+        ? `(同一会话刚连续收到 ${opts.batchMessages.length} 条消息，★ 是这批最后一句；结合整批内容做一次决定，不要只答第一句。)` : undefined,
       engagementNote,
       // The fact the dispatch gate used to act on. Handing it to the model here
       // is what makes HEART_COOLDOWN_AS_FACT / HEART_DECIDES_TIMING possible:
@@ -224,6 +238,13 @@ export async function evaluateMetaHeart(opts: {
         : undefined,
     ].filter(Boolean).join('\n') || undefined,
   });
+  if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
+  if (isPlatformInternalId(chatId)) {
+    const { isOneBotMessageRecalled } = await import('../platform/onebot-notices.js');
+    if ((opts.batchMessages ?? [formatted]).some(message => isOneBotMessageRecalled(chatId, message.messageId))) {
+      return { verdict: 'silence', layer, reason: 'heart_anchor_recalled' };
+    }
+  }
 
   void import('../pipeline/heart/mind.js')
     .then(({ noteThought }) => noteThought(chatId, heart.why))
@@ -244,12 +265,14 @@ export async function evaluateMetaHeart(opts: {
     const { pickReactionEmoji } = await import('../pipeline/reactions.js');
     const emoji = heart.emoji ?? pickReactionEmoji('neutral');
     let sent = false;
+    let deliveryUnknown = false;
     if (emoji) {
       try {
         const { reactToMessage } = await import('../bot/sender/telegram.js');
         sent = await reactToMessage(chatId, formatted.messageId, emoji);
       } catch (err) {
-        logger.debug({ err, chatId }, 'Meta heart reactToMessage failed');
+        deliveryUnknown = !!err && typeof err === 'object' && 'delivery' in err && err.delivery === 'unknown';
+        if (!isPlatformInternalId(chatId)) logger.debug({ err, chatId }, 'Meta heart reactToMessage failed');
       }
     }
     if (sent) {
@@ -259,6 +282,16 @@ export async function evaluateMetaHeart(opts: {
         .catch(() => { /* telemetry never breaks */ });
       // react 是出口：副作用已做完，让 Meta 当成静默。
       return { verdict: 'silence', layer: 'L1', reason: `heart_react:${heart.why}` };
+    }
+    if (isPlatformInternalId(chatId)) {
+      // A QQ reaction decision is not permission to send a different message.
+      // In particular, a timeout can mean the reaction already reached QQ.
+      // End this event without retry, text fallback, or a text refractory arm;
+      // subsequent independent messages can ask Heart again normally.
+      const reason = deliveryUnknown ? 'heart_react_unknown' : 'heart_react_undelivered';
+      logger.warn({ chatId, messageId: formatted.messageId, reason }, 'Meta heart: reaction ended without text fallback');
+      incrCounter(deliveryUnknown ? 'meta_react_unknown_total' : 'meta_react_undelivered_total', { chat: chatId });
+      return { verdict: 'silence', layer: 'L1', reason };
     }
     // 发不出去（够不着的消息/权限）——别坐实“点过”。
     // 落到下面的 wait 分支让它继续被当条消息对待。
@@ -278,7 +311,7 @@ export async function evaluateMetaHeart(opts: {
         waitAnchorKey(chatId),
         JSON.stringify({
           chatId,
-          layer: 'L1',
+          layer: addressed ? 'L0' : 'L1',
           reason: `heart:${heart.why || 'wait'}`,
           messageId: formatted.messageId,
           userId: formatted.uid,
@@ -287,6 +320,12 @@ export async function evaluateMetaHeart(opts: {
           pressure: 70,
           createdAt: Date.now(),
           payload: {
+            ...(opts.batchMessages && opts.batchMessages.length > 1 ? { qqBatch: opts.batchMessages.map(message => ({
+              messageId: message.messageId, userId: message.uid, textPreview: (message.textContent || '').slice(0, 200),
+              username: message.username, fullName: message.fullName,
+              ...(message.replyTo ? { replyTo: { messageId: message.replyTo.messageId, uid: message.replyTo.uid,
+                fullName: message.replyTo.fullName, textSnippet: (message.replyTo.textSnippet || '').slice(0, 200) } } : {}),
+            })) } : {}),
             username: formatted.username || undefined,
             fullName: formatted.fullName || undefined,
             heartPath: heart.path,
@@ -369,9 +408,19 @@ export async function evaluateMetaHeart(opts: {
     return { verdict: 'silence', layer, reason: `heart_pass:${heart.why}` };
   }
 
+  // Addressed QQ questions have already been judged by Heart. Preserve their
+  // direct priority through Attention instead of running a second passive gate.
+  if (addressed) return { verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`, path: heart.path };
+
   // reply — NX arm so only one parallel Heart elevate wins; losers silence.
   try {
-    const { armMetaHeartRefractory } = await import('./heart-refractory.js');
+    const { armMetaHeartRefractory, shouldSuppressMetaHeartDispatch } = await import('./heart-refractory.js');
+    // A QQ Heart call can outlive the shorter arm window. Recheck live work and
+    // confirmed replies after the model returns, before claiming a new arm.
+    if (isPlatformInternalId(chatId) && await shouldSuppressMetaHeartDispatch(chatId)) {
+      logger.info({ chatId, messageId: formatted.messageId, reason: 'heart_refractory' }, 'Meta heart: late reply suppressed');
+      return { verdict: 'silence', layer: 'L1', reason: 'heart_refractory' };
+    }
     if (!(await armMetaHeartRefractory(chatId))) {
       logger.info(
         { chatId, messageId: formatted.messageId },

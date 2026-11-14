@@ -16,8 +16,14 @@ const MAX_MEDIA_BYTES = MAX_AUDIO_BYTES;
 async function downloadTelegramFile(
   fileId: string,
   signal: AbortSignal = AbortSignal.timeout(30_000),
+  chatId?: number,
 ): Promise<{ buffer: ArrayBuffer; mimeType: string; filePath: string } | null> {
   try {
+    if (fileId.startsWith('qq-media:')) {
+      const { resolveOneBotMedia } = await import('../platform/onebot-media.js');
+      const media = await resolveOneBotMedia(fileId, chatId, { signal, maxBytes: MAX_MEDIA_BYTES });
+      return { buffer: Uint8Array.from(media.bytes).buffer, mimeType: media.mimeType, filePath: media.fileName };
+    }
     const bot = getBot();
     // grammY's declaration still names abort-controller; Node 22's native signal
     // implements the same runtime cancellation contract used by its HTTP client.
@@ -76,10 +82,10 @@ function audioFormatFromMime(mime: string): string {
   return sub;
 }
 
-async function describeAudio(fileId: string, label: string): Promise<string> {
+async function describeAudio(fileId: string, label: string, chatId?: number): Promise<string> {
   if (!env().AUDIO_TRANSCRIBE_ENABLED) return `[${label}]`;
   const signal = AbortSignal.timeout(30_000);
-  const downloaded = await downloadTelegramFile(fileId, signal);
+  const downloaded = await downloadTelegramFile(fileId, signal, chatId);
   // 下不动(多半文件太大)≠ 内容不存在:文件已在群里、别人收得到。用中性占位,
   // 别写"无法下载"——否则 bot 会把别的 bot 发来的歌/语音误读成"失败了"。
   if (!downloaded) return `[${label}]`;
@@ -126,8 +132,9 @@ async function describeDocument(
   fileId: string,
   mimeType: string | undefined,
   fileName: string | undefined,
+  chatId?: number,
 ): Promise<string> {
-  const downloaded = await downloadTelegramFile(fileId);
+  const downloaded = await downloadTelegramFile(fileId, undefined, chatId);
   if (!downloaded) return '[文档]'; // 下不动≠不存在;中性占位,别误导成失败
 
   const effectiveMime = mimeType ?? downloaded.mimeType;
@@ -345,6 +352,7 @@ async function describeVideo(
   fileId: string,
   durationSec: number | undefined,
   label: string,
+  chatId?: number,
 ): Promise<string> {
   const maxSec = env().VIDEO_MAX_DURATION_SEC;
   // 时长已知且超限 → 不下白下载（Telegram 侧下载 + base64 都要花钱）。
@@ -353,7 +361,7 @@ async function describeVideo(
     return `[${label}（${durationSec} 秒，超过 ${maxSec} 秒不上传）]`;
   }
 
-  const downloaded = await downloadTelegramFile(fileId);
+  const downloaded = await downloadTelegramFile(fileId, undefined, chatId);
   // 下不动（多半太大）≠ 内容不存在。中性占位，别误导成失败。
   if (!downloaded) {
     // 2026-09-21：这个出口**一条日志都没有**。于是"下载失败"和"没收到过视频"
@@ -394,7 +402,7 @@ async function describeVideo(
     const text = result.content.trim();
     if (!text) {
       logger.info({ fileId, label: result.label }, 'Video description empty — placeholder used');
-      return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+      return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId);
     }
     // 成功也记一笔：没有它，"这个功能到底跑过没有"只能靠翻 textContent。
     logger.info(
@@ -402,10 +410,39 @@ async function describeVideo(
       'Video described',
     );
     return `[${label}内容：${text}]`;
-  } catch (err) {
-    logger.warn({ fileId, err }, 'Video description failed');
+  } catch {
+    logger.warn({ fileId }, 'Video description failed');
     // 失败同样用中性占位——别把群友发的视频误读成 bot 出了故障。
-    return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+    return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId);
+  }
+}
+
+async function describeVideoFrameFallback(
+  buffer: ArrayBuffer, label: string, durationSec: number | undefined, chatId?: number,
+): Promise<string> {
+  const placeholder = `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  if (!env().VIDEO_FRAME_FALLBACK_ENABLED) return placeholder;
+  try {
+    const { extractVideoFrames } = await import('./video-frames.js');
+    const frames = await extractVideoFrames(new Uint8Array(buffer));
+    const result = await callWithFallback({
+      usage: 'vision', chatId,
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: `以下是同一段视频按时间顺序抽取的${frames.length}张画面。仅根据可见画面描述人物、物体、场景和文字，3句以内，用中文。没有提供音轨，不要推断语音或声响，也不要声称看过完整视频。采样时间（秒）：${frames.map(frame => frame.atSeconds.toFixed(2)).join('、')}。` },
+        ...frames.map(frame => ({ type: 'image' as const, image: `data:image/png;base64,${frame.png.toString('base64')}` })),
+      ] }],
+      maxTokens: env().VIDEO_DESCRIBE_MAX_TOKENS,
+      maxTimeoutMs: Math.min(30_000, env().VIDEO_DESCRIBE_TIMEOUT_MS),
+    });
+    const text = result.content.trim();
+    if (!text) return placeholder;
+    logger.info({ label: result.label, frames: frames.length }, 'Video frame fallback described');
+    return `[${label}采样画面：${text}]`;
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+      && /^video_frames_[a-z_]+$/.test(error.code) ? error.code : 'video_frames_failed';
+    logger.info({ code }, 'Video frame fallback unavailable');
+    return placeholder;
   }
 }
 
@@ -413,15 +450,15 @@ async function describeVideo(
  * Describe any multimodal content in a message (audio, voice, document, video).
  * Returns a descriptive string to inject into context, or null if none.
  */
-export async function describeMultimodal(formatted: FormattedMessage): Promise<string | null> {
+export async function describeMultimodal(formatted: FormattedMessage, chatId?: number): Promise<string | null> {
   const parts: string[] = [];
 
   // Voice message (highest priority — user is speaking)
   if (formatted.voiceFileId) {
-    const desc = await describeAudio(formatted.voiceFileId, '语音消息');
+    const desc = await describeAudio(formatted.voiceFileId, '语音消息', chatId);
     parts.push(desc);
   } else if (formatted.audioFileId) {
-    const desc = await describeAudio(formatted.audioFileId, '音频');
+    const desc = await describeAudio(formatted.audioFileId, '音频', chatId);
     parts.push(desc);
   }
 
@@ -431,6 +468,7 @@ export async function describeMultimodal(formatted: FormattedMessage): Promise<s
       formatted.documentFileId,
       formatted.documentMimeType,
       formatted.documentFileName,
+      chatId,
     );
     parts.push(desc);
   }
@@ -439,7 +477,7 @@ export async function describeMultimodal(formatted: FormattedMessage): Promise<s
   if (formatted.videoFileId || formatted.videoNoteFileId) {
     const fileId = formatted.videoFileId ?? formatted.videoNoteFileId!;
     const label = formatted.videoNoteFileId ? '圆形视频' : '视频';
-    parts.push(await describeVideo(fileId, formatted.videoDurationSec, label));
+    parts.push(await describeVideo(fileId, formatted.videoDurationSec, label, chatId));
   }
 
   if (parts.length === 0) return null;

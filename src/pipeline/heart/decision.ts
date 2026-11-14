@@ -27,6 +27,7 @@ import { getReflection } from '../../tracking/outcome.js';
 import { isMentioningSelf } from '../judge/rules.js';
 import { getBotIdentity } from '../../bot/bot.js';
 import type { SelfState } from './self-state.js';
+import { isPlatformInternalId } from '../../platform/identity-store.js';
 
 export type HeartAct = 'reply' | 'wait' | 'pass' | 'react';
 
@@ -63,6 +64,9 @@ export interface HeartInput {
    */
   selfHistory?: string;
   signal?: AbortSignal;
+  /** Verified protocol addressing for the complete QQ input batch. */
+  addressed?: boolean;
+  ongoingFollowup?: boolean;
 }
 
 /**
@@ -111,7 +115,7 @@ function llmFailedDecision(
 ): HeartDecision {
   let act: HeartAct = 'pass';
   let why = 'llm_failed';
-  if (env().HEART_LLM_FAIL_KEEP_ADDRESSED && isAddressedToBot(input.message, input.botUid, input.chatId)) {
+  if (input.addressed || (env().HEART_LLM_FAIL_KEEP_ADDRESSED && isAddressedToBot(input.message, input.botUid, input.chatId))) {
     act = 'wait';
     why = 'llm_failed_keep_addressed';
     incrCounter('heart_llm_fail_keep_addressed_total', { chat: input.chatId });
@@ -269,9 +273,13 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
       .replace(/\{persona_core\}/g, personaCore || `${input.botName} 是群聊里的猫娘成员`)
       .replace(/\{self_state\}/g, input.selfState.narration)
       .replace(/\{learned_rules\}/g, learnedRules);
+    if (e.META_QQ_MENTION_HEART_ENABLED && input.chatId < 0 && isPlatformInternalId(input.chatId)) {
+      systemPrompt += '\n\n[当前QQ群回应规则——覆盖前文的点名必回约束]\n被 @、被引用或被叫名字表示对方在叫你本人，但不构成必须文字回复的命令。对真实提问、请求和需要确认的指令优先 reply；需要等后文时 wait；招呼、玩笑、已经回应过或无需文字的接话可以 react 或 pass。不得仅因被点名就机械生成文字。以上规则替代前文与之冲突的点名禁令；其他安全、隐私与身份规则继续适用。';
+    }
   } catch (err) {
     logger.warn({ err }, 'heart prompt load failed, fail-closed pass');
     const latencyMs = Math.round(performance.now() - start);
+    if (input.addressed) return llmFailedDecision(input, latencyMs);
     return { act: 'pass', path: 'chat', why: 'prompt_load_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 
@@ -315,7 +323,12 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
           : '除非人家追加了新内容,否则再回一遍就是在重复自己。'}`
     : '';
 
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}${answeredLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  const addressedLine = input.addressed
+    ? input.ongoingFollowup
+      ? '\n[宿主事实] 这批中至少一条来自本会话正在处理任务的发送者，也可能混有其他群友的消息。按各条的发送者判断哪些内容补充或修正当前任务，相关内容优先 reply 交回现有任务，需要等后文时 wait；无关闲聊仍可 react/pass。不要把最新一句的发送者自动当成任务发起者，不要重复启动同一个任务。'
+      : '\n[协议事实] 这批消息里有人直接 @ 你、叫你的名字或引用你的消息，是在叫你本人。结合整批内容判断：真实提问、请求和需要确认的指令优先 reply，需等后文时 wait；招呼、玩笑或无需文字的接话可以 react/pass。被提及不等于必须发一条文字。'
+    : '';
+  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}${answeredLine}${addressedLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
 
   let raw: string;
   try {
@@ -390,6 +403,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   }
   const latencyMs = Math.round(performance.now() - start);
   if (!parsed) {
+    if (input.addressed) return llmFailedDecision(input, latencyMs);
     // H0 hybrid fail-soft:parse 失败 ≠ 没听懂。旧行为 fail-closed pass 直接吞回复,
     // 与 llm_failed 的 defer/judge 兜底不对称 —— 同一条消息因"吐脏 JSON"还是
     // "链路挂了"走不同命运。parse_failed 进同一条 hybrid 路径:defer 预算内重评,

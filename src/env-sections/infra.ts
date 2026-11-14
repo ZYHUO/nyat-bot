@@ -24,9 +24,13 @@ export const infraSection = {
   // QQ via an explicitly configured OneBot v11 forward WebSocket client.
   // Off until the external QQ client has been installed and logged in.
   ONEBOT_ENABLED: booleanFromEnv.default(false),
+  ONEBOT_MEDIA_ENABLED: booleanFromEnv.default(false),
+  // NapCat reports group files twice; prefer the normal message's real ID.
+  ONEBOT_GROUP_FILE_SOURCE: z.enum(['message', 'notice']).default('message'),
   ONEBOT_WS_URL: z.string().default('ws://127.0.0.1:3001/'),
   ONEBOT_ACCESS_TOKEN: z.string().default(''),
   ONEBOT_ACCOUNT_ID: z.string().default(''),
+  ONEBOT_DISPLAY_NAME: z.string().max(64).default(''),
   ONEBOT_OWNER_ID: z.string().default(''),
   ONEBOT_ALLOWED_GROUP_IDS: z.string().default(''),
   ONEBOT_ALLOWED_USER_IDS: z.string().default(''),

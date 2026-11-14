@@ -826,7 +826,7 @@ export async function generateReply(
     if (imgFileId) {
       try {
         const { fetchImageDataUrl } = await import('../vision.js');
-        const dataUrl = await fetchImageDataUrl(imgFileId);
+        const dataUrl = await fetchImageDataUrl(imgFileId, chatId);
         if (dataUrl) {
           for (let i = messages.length - 1; i >= 0; i--) {
             const m = messages[i]!;

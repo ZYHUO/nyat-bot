@@ -38,6 +38,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   db = new Database(':memory:');
   db.exec(readFileSync('migrations/0118_platform_identity.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0120_onebot_notices.sql', 'utf8'));
   mocks.getDb.mockReturnValue(db);
   chatId = getOrCreateConversationId(group);
   client.send.mockReset().mockResolvedValue(receipt);
@@ -121,7 +122,7 @@ describe('OneBot outbound boundary', () => {
 
   it('fails closed for unsupported sender methods before reading files or obtaining the Telegram bot', async () => {
     const calls = [
-      () => sender.reactToMessage(chatId, 1, '👍'), () => sender.sendPoll(chatId, 'q', ['a', 'b']),
+      () => sender.sendPoll(chatId, 'q', ['a', 'b']),
       () => sender.forwardMessage(chatId, 1, 1), () => sender.forwardMessage(1, chatId, 1),
       () => sender.muteMember(chatId, 1, 1), () => sender.kickMember(chatId, 1),
       () => sender.unmuteMember(chatId, 1), () => sender.pinMessage(chatId, 1),

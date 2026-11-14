@@ -6,6 +6,14 @@ import { createOneBotCodec } from './onebot.js';
 import type { OneBotSendCommand } from './onebot.js';
 import { PlatformBoundaryError } from './types.js';
 import type { MessageRef, NormalizedMessage, PlatformAction } from './types.js';
+import { decodeOneBotRequest } from './onebot-requests.js';
+import type { NormalizedOneBotRequest } from './onebot-requests.js';
+import type { OneBotTransferTransport } from './onebot-media-stream.js';
+import { uploadOneBotFile, sanitizeOneBotFileName } from './onebot-media-stream.js';
+import type { OneBotMediaKind } from './onebot-media-stream.js';
+import { decodeOneBotNotice } from './onebot-notices.js';
+import type { NormalizedOneBotNotice } from './onebot-notices.js';
+import { decodeOneBotFileNotice } from './onebot-file-notice.js';
 
 export type OneBotDelivery = 'not_sent' | 'unknown' | 'rejected';
 export class OneBotClientError extends Error {
@@ -38,7 +46,7 @@ const DEFAULT_LIMITS: Readonly<OneBotClientLimits> = Object.freeze({
   heartbeatIntervalMs: 15_000, pongTimeoutMs: 5_000,
   reconnectBaseMs: 500, reconnectMaxMs: 30_000, maxReconnectAttempts: 8,
   reconnectResetAfterMs: 60_000,
-  maxPayloadBytes: 256 * 1024, maxOutboundBytes: 64 * 1024,
+  maxPayloadBytes: 256 * 1024, maxOutboundBytes: 96 * 1024,
   maxPendingRequests: 32, maxQueuedMessages: 32, maxFramesPerSecond: 120, maxSegments: 64,
 });
 
@@ -59,6 +67,13 @@ export interface OneBotClientOptions {
   accountId: string;
   /** Must settle or honor abort. A hung handler retains its single slot across reconnects. */
   onMessage: (message: NormalizedMessage, context: { signal: AbortSignal }) => void | Promise<void>;
+  onRequest?: (request: NormalizedOneBotRequest, context: { signal: AbortSignal }) => void | Promise<void>;
+  onNotice?: (notice: NormalizedOneBotNotice, context: { signal: AbortSignal }) => void | Promise<void>;
+  onIdentity?: (identity: { accountId: string; displayName: string }) => void;
+  /** Keep opaque media references for the host registry; disabled codecs still expose placeholders. */
+  mediaEnabled?: boolean;
+  /** Choose one group-file representation; NapCat emits both with different IDs. */
+  groupFileSource?: 'message' | 'notice';
   onState?: (snapshot: OneBotClientSnapshot) => void;
   onDiagnostic?: (code: string) => void;
   limits?: Partial<OneBotClientLimits>;
@@ -78,8 +93,14 @@ interface PendingRequest {
   reject: (error: OneBotClientError) => void;
   timer: ReturnType<typeof setTimeout>;
   sideEffect: boolean;
+  onFrame?: (data: unknown) => boolean;
+  cleanup?: () => void;
+  mediaFrames?: number;
+  mediaBytes?: number;
 }
-interface QueuedMessage { message: NormalizedMessage; signal: AbortSignal; }
+type QueuedMessage = { message: NormalizedMessage; signal: AbortSignal }
+  | { request: NormalizedOneBotRequest; signal: AbortSignal }
+  | { notice: NormalizedOneBotNotice; signal: AbortSignal };
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : null;
@@ -144,6 +165,11 @@ export class OneBotClient {
   private handlingMessage = false;
   private frameWindowAt = 0;
   private framesInWindow = 0;
+  // Wire budgets are separate from the decoder's decoded-file limit. A normal
+  // 10 MiB download has > 120 valid frames and must not trip the event limiter.
+  private readonly mediaWindow: Array<{ at: number; bytes: number }> = [];
+  private mediaWindowBytes = 0;
+  private mediaWindowHead = 0;
 
   constructor(
     private readonly options: OneBotClientOptions,
@@ -155,6 +181,9 @@ export class OneBotClient {
       throw new OneBotClientError('invalid_access_token');
     }
     this.token = options.accessToken;
+    if (options.groupFileSource !== undefined && !['message', 'notice'].includes(options.groupFileSource)) {
+      throw new OneBotClientError('invalid_group_file_source');
+    }
     this.codec = createOneBotCodec(options.accountId);
     this.limits = makeLimits(options.limits);
   }
@@ -215,6 +244,110 @@ export class OneBotClient {
     await this.request('delete_msg', { message_id: Number(id) }, true);
   }
 
+  async react(message: MessageRef, emoji: string): Promise<void> {
+    conversationKey(message.conversation);
+    if (accountKey(message.conversation) !== accountKey(this.codec.account)) throw new OneBotClientError('wrong_account');
+    const id = integerId(message.id, false);
+    const points = [...emoji.replaceAll(String.fromCodePoint(0xfe0f), '')];
+    if (id === null || !Number.isSafeInteger(Number(id)) || points.length !== 1 ||
+      !/^\p{Extended_Pictographic}$/u.test(points[0]!)) throw new OneBotClientError('unsupported_reaction');
+    await this.request('set_msg_emoji_like', { message_id: Number(id), emoji_id: String(points[0]!.codePointAt(0)), set: true }, true);
+  }
+
+  async sendMedia(input: { conversation: MessageRef['conversation']; kind: OneBotMediaKind; bytes: Buffer;
+    fileName: string; caption?: string; replyTo?: MessageRef; beforeSend?: () => void }): Promise<MessageRef> {
+    if (!this.options.mediaEnabled) throw new OneBotClientError('media_disabled');
+    const conversation = { ...input.conversation };
+    const kind = input.kind;
+    const beforeSend = input.beforeSend;
+    const fileName = sanitizeOneBotFileName(input.fileName);
+    if (!['image', 'voice', 'video', 'file'].includes(kind) || !Buffer.isBuffer(input.bytes) || !input.bytes.length ||
+      input.bytes.length > (kind === 'file' ? 50 : 10) * 1024 * 1024) throw new OneBotClientError('invalid_media');
+    const bytes = Buffer.from(input.bytes);
+    // Reuse the text codec's strict account, numeric destination and reply validation.
+    let command: OneBotSendCommand;
+    try {
+      command = this.codec.encode({ action: 'send', conversation, segments: [
+        ...(input.replyTo ? [{ type: 'reply' as const, message: input.replyTo }] : []),
+        { type: 'text', text: input.caption?.slice(0, 1000) ?? '' },
+      ] });
+    } catch { throw new OneBotClientError('invalid_outbound_media'); }
+    const scope = this.connectionScope;
+    let path: string;
+    try {
+      const transport = this.mediaTransport();
+      const upload = await uploadOneBotFile(bytes, fileName, transport, {
+        maxBytes: kind === 'file' ? 50 * 1024 * 1024 : 10 * 1024 * 1024,
+        timeoutMs: 120000,
+      });
+      if (scope?.signal.aborted || scope !== this.connectionScope) throw new OneBotClientError('media_connection_changed');
+      path = upload.filePath;
+    } catch { throw new OneBotClientError('media_upload_failed'); }
+    const message = command.params.message.filter(segment => segment.type !== 'text' || segment.data['text']);
+    message.push({ type: kind === 'voice' ? 'record' : kind,
+      data: { file: path, ...(kind === 'file' ? { name: fileName } : {}) } });
+    try { beforeSend?.(); } catch { throw new OneBotClientError('media_send_cancelled'); }
+    const data = object(await this.request(command.action, { ...command.params, message }, true));
+    const id = integerId(data?.['message_id'], false);
+    if (id === null) throw new OneBotClientError('invalid_send_receipt', 'unknown');
+    return { conversation, id };
+  }
+
+  private requireAccount(accountId: string): void {
+    if (accountId !== this.codec.account.accountId) throw new OneBotClientError('wrong_account');
+  }
+
+  async setFriendAddRequest(input: { accountId: string; flag: string; approve: boolean; remark?: string }): Promise<void> {
+    this.requireAccount(input.accountId);
+    if (!input.flag || input.flag.length > 2048 || typeof input.approve !== 'boolean') throw new OneBotClientError('invalid_request');
+    await this.request('set_friend_add_request', { flag: input.flag, approve: input.approve,
+      ...(input.remark ? { remark: input.remark.slice(0, 100) } : {}) }, true);
+  }
+
+  async setGroupAddRequest(input: { accountId: string; flag: string; subType: 'add' | 'invite'; approve: boolean; reason?: string }): Promise<void> {
+    this.requireAccount(input.accountId);
+    if (!input.flag || input.flag.length > 2048 || !['add', 'invite'].includes(input.subType) || typeof input.approve !== 'boolean') {
+      throw new OneBotClientError('invalid_request');
+    }
+    await this.request('set_group_add_request', { flag: input.flag, sub_type: input.subType, approve: input.approve,
+      ...(input.reason ? { reason: input.reason.slice(0, 200) } : {}) }, true);
+  }
+
+  async getGroupMemberInfo(input: { accountId: string; groupId: string; userId: string }): Promise<{ role: 'owner' | 'admin' | 'member' }> {
+    this.requireAccount(input.accountId);
+    for (const id of [input.groupId, input.userId]) {
+      if (!integerId(id, true) || !Number.isSafeInteger(Number(id))) throw new OneBotClientError('invalid_member');
+    }
+    const data = object(await this.request('get_group_member_info', {
+      group_id: Number(input.groupId), user_id: Number(input.userId), no_cache: true,
+    }, false));
+    const role = data?.['role'];
+    if (integerId(data?.['user_id'], true) !== input.userId || integerId(data?.['group_id'], true) !== input.groupId ||
+      (role !== 'owner' && role !== 'admin' && role !== 'member')) throw new OneBotClientError('invalid_member_receipt');
+    return { role };
+  }
+
+  /** This capability is host-only. It exposes no arbitrary OneBot action to a model. */
+  mediaTransport(): OneBotTransferTransport {
+    const scope = this.connectionScope;
+    if (!scope || this.state !== 'ready') throw new OneBotClientError('not_ready');
+    const signalFor = (signal?: AbortSignal) => signal ? AbortSignal.any([scope.signal, signal]) : scope.signal;
+    return {
+      request: (action, params, options) => {
+        if (!['upload_file_stream', 'get_image', 'get_record', 'get_file', 'get_group_file_url', 'get_private_file_url'].includes(action)) {
+          return Promise.reject(new OneBotClientError('unsupported_media_action'));
+        }
+        return this.request(action, params, false, false, { signal: signalFor(options?.signal) });
+      },
+      streamAction: (action, params, options) => {
+        if (!['download_file_stream', 'download_file_record_stream', 'download_file_image_stream'].includes(action)) {
+          return Promise.reject(new OneBotClientError('unsupported_media_action'));
+        }
+        return this.request(action, params, false, false, { signal: signalFor(options.signal), onFrame: options.onFrame });
+      },
+    };
+  }
+
   private diagnostic(code: string): void {
     try { this.options.onDiagnostic?.(code); } catch { /* Diagnostic consumers cannot break transport cleanup. */ }
   }
@@ -236,6 +369,7 @@ export class OneBotClient {
     this.lastHeartbeatAt = null;
     this.frameWindowAt = Date.now();
     this.framesInWindow = 0;
+    this.mediaWindow.length = 0; this.mediaWindowHead = 0; this.mediaWindowBytes = 0;
     let socket: WebSocket;
     try {
       socket = this.socketFactory(this.endpoint, {
@@ -275,6 +409,12 @@ export class OneBotClient {
         this.disconnected(socket, 'identity_mismatch', false);
         return;
       }
+      const rawName = data?.['nickname'];
+      const name = typeof rawName === 'string' ? rawName.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64) : '';
+      if (name) {
+        this.options.onIdentity?.({ accountId: this.codec.account.accountId,
+          displayName: name });
+      }
       this.readyAt = Date.now();
       this.setState('ready');
       if (this.stopped || this.socket !== socket) return;
@@ -313,6 +453,7 @@ export class OneBotClient {
     this.messages.length = 0;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       pending.reject(new OneBotClientError(code, pending.sideEffect ? 'unknown' : 'not_sent'));
     }
     this.pending.clear();
@@ -337,7 +478,9 @@ export class OneBotClient {
     this.reconnectTimer.unref();
   }
 
-  private request(action: string, params: unknown, sideEffect: boolean, authenticating = false): Promise<unknown> {
+  private request(action: string, params: unknown, sideEffect: boolean, authenticating = false,
+    options: { signal?: AbortSignal; onFrame?: (data: unknown) => boolean } = {}): Promise<unknown> {
+    if (options.signal?.aborted) return Promise.reject(new OneBotClientError('request_aborted'));
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN ||
       (this.state !== 'ready' && !(authenticating && this.state === 'authenticating'))) {
@@ -352,10 +495,19 @@ export class OneBotClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(echo)) return;
+        cleanup();
         reject(new OneBotClientError('request_timeout', sideEffect ? 'unknown' : 'not_sent'));
       }, this.limits.requestTimeoutMs);
       timer.unref();
-      this.pending.set(echo, { resolve, reject, timer, sideEffect });
+      const abort = () => {
+        if (!this.pending.delete(echo)) return;
+        clearTimeout(timer);
+        cleanup();
+        reject(new OneBotClientError('request_aborted', sideEffect ? 'unknown' : 'not_sent'));
+      };
+      const cleanup = () => options.signal?.removeEventListener('abort', abort);
+      this.pending.set(echo, { resolve, reject, timer, sideEffect, onFrame: options.onFrame, cleanup });
+      options.signal?.addEventListener('abort', abort, { once: true });
       try {
         socket.send(frame, (error?: Error) => {
           if (error) this.disconnected(socket, 'send_transport_failed');
@@ -376,8 +528,27 @@ export class OneBotClient {
     return true;
   }
 
+  private admitMediaFrame(socket: WebSocket, pending: PendingRequest, bytes: number): boolean {
+    const now = Date.now();
+    while (this.mediaWindowHead < this.mediaWindow.length && now - this.mediaWindow[this.mediaWindowHead]!.at >= 1000) {
+      this.mediaWindowBytes -= this.mediaWindow[this.mediaWindowHead++]!.bytes;
+    }
+    if (this.mediaWindowHead >= 1024) {
+      this.mediaWindow.splice(0, this.mediaWindowHead); this.mediaWindowHead = 0;
+    }
+    const totalFrames = (pending.mediaFrames ?? 0) + 1;
+    const totalBytes = (pending.mediaBytes ?? 0) + bytes;
+    if (totalFrames > 4098 || totalBytes > 96 * 1024 * 1024 ||
+      this.mediaWindow.length - this.mediaWindowHead >= 2048 || this.mediaWindowBytes + bytes > 128 * 1024 * 1024) {
+      this.disconnected(socket, 'media_stream_limit'); return false;
+    }
+    pending.mediaFrames = totalFrames; pending.mediaBytes = totalBytes;
+    this.mediaWindow.push({ at: now, bytes }); this.mediaWindowBytes += bytes;
+    return true;
+  }
+
   private receive(socket: WebSocket, data: RawData, binary: boolean): void {
-    if (!this.admitFrame(socket)) return;
+    if (socket !== this.socket || this.stopped) return;
     const length = Array.isArray(data) ? data.reduce((sum, part) => sum + part.byteLength, 0) : data.byteLength;
     if (binary || length > this.limits.maxPayloadBytes) {
       this.disconnected(socket, binary ? 'binary_frame_refused' : 'payload_limit'); return;
@@ -388,6 +559,10 @@ export class OneBotClient {
       frame = object(JSON.parse(buffer.toString()));
     } catch { this.disconnected(socket, 'invalid_json'); return; }
     if (!frame) { this.disconnected(socket, 'invalid_frame'); return; }
+    const pending = typeof frame['echo'] === 'string' ? this.pending.get(frame['echo']) : undefined;
+    if (pending?.onFrame && frame['status'] === 'ok' && frame['retcode'] === 0) {
+      if (!this.admitMediaFrame(socket, pending, length)) return;
+    } else if (!this.admitFrame(socket)) return;
     if (Object.hasOwn(frame, 'echo')) { this.receiveResponse(frame); return; }
     // No event is buffered before the login API proves this is the intended account.
     if (this.state !== 'ready') { this.diagnostic('event_before_identity'); return; }
@@ -401,16 +576,48 @@ export class OneBotClient {
       return;
     }
     try {
+      if (frame['post_type'] === 'request') {
+        if (!this.options.onRequest) return;
+        const request = decodeOneBotRequest(frame, this.codec.account.accountId);
+        if (!request) return;
+        if (this.messages.length >= this.limits.maxQueuedMessages) { this.diagnostic('message_queue_limit'); return; }
+        this.messages.push({ request, signal: this.connectionScope!.signal });
+        void this.drainMessages();
+        return;
+      }
+      if (frame['post_type'] === 'notice' && this.options.mediaEnabled) {
+        if (frame['notice_type'] === 'group_upload' && (this.options.groupFileSource ?? 'message') !== 'notice') return;
+        const message = decodeOneBotFileNotice(frame, this.codec.account);
+        if (message) {
+          if (this.messages.length >= this.limits.maxQueuedMessages) { this.diagnostic('message_queue_limit'); return; }
+          this.messages.push({ message, signal: this.connectionScope!.signal });
+          void this.drainMessages();
+          return;
+        }
+      }
+      if (frame['post_type'] === 'notice' && this.options.onNotice) {
+        const notice = decodeOneBotNotice(frame, this.codec.account.accountId);
+        if (notice) {
+          if (this.messages.length >= this.limits.maxQueuedMessages) { this.diagnostic('message_queue_limit'); return; }
+          this.messages.push({ notice, signal: this.connectionScope!.signal });
+          void this.drainMessages();
+          return;
+        }
+      }
       if (Array.isArray(frame['message']) && frame['message'].length > this.limits.maxSegments) {
         this.diagnostic('segment_limit'); return;
       }
       const message = this.codec.normalize(frame);
       if (!message) return;
       if (message.segments.length > this.limits.maxSegments) { this.diagnostic('segment_limit'); return; }
+      if (this.options.mediaEnabled && this.options.groupFileSource === 'notice' && message.ref.conversation.conversationKind === 'group') {
+        message.segments = message.segments.filter(segment => segment.type !== 'file');
+        if (!message.segments.length) return;
+      }
       // Preserve accompanying text and an explicit unsupported placeholder. Do not
       // turn untrusted media URLs into network/file capabilities at this boundary.
-      message.segments = message.segments.map(segment =>
-        ['image', 'voice', 'file'].includes(segment.type)
+      if (!this.options.mediaEnabled) message.segments = message.segments.map(segment =>
+        ['image', 'voice', 'video', 'file'].includes(segment.type)
           ? { type: 'unsupported' as const, platformType: segment.type } : segment);
       if (this.messages.length >= this.limits.maxQueuedMessages) {
         this.diagnostic('message_queue_limit'); return;
@@ -425,8 +632,19 @@ export class OneBotClient {
     if (typeof frame['echo'] !== 'string') { this.diagnostic('unmatched_response'); return; }
     const pending = this.pending.get(frame['echo']);
     if (!pending) { this.diagnostic('unmatched_response'); return; }
+    if (pending.onFrame && frame['status'] === 'ok' && frame['retcode'] === 0) {
+      try { if (!pending.onFrame(frame['data'])) return; }
+      catch {
+        this.pending.delete(frame['echo']);
+        clearTimeout(pending.timer);
+        pending.cleanup?.();
+        pending.reject(new OneBotClientError('invalid_media_stream'));
+        return;
+      }
+    }
     this.pending.delete(frame['echo']);
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     if (frame['status'] === 'ok' && frame['retcode'] === 0) {
       pending.resolve(frame['data']);
     } else {
@@ -445,7 +663,11 @@ export class OneBotClient {
         const next = this.messages.shift();
         if (!next) break;
         if (next.signal.aborted) continue;
-        try { await this.options.onMessage(next.message, { signal: next.signal }); }
+        try {
+          if ('request' in next) await this.options.onRequest?.(next.request, { signal: next.signal });
+          else if ('notice' in next) await this.options.onNotice?.(next.notice, { signal: next.signal });
+          else await this.options.onMessage(next.message, { signal: next.signal });
+        }
         catch { this.diagnostic('message_handler_failed'); }
       }
     } finally { this.handlingMessage = false; }

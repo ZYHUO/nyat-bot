@@ -12,7 +12,7 @@ vi.mock('../../../src/shared/logger.js', () => ({ logger: { error: vi.fn(), warn
 
 import { getOrCreateConversationId, getOrCreateUserId, PLATFORM_INTERNAL_ID_BASE } from '../../../src/platform/identity-store.js';
 import { isConversationOwner } from '../../../src/platform/owner-context.js';
-import { getPlatformBotIdentity } from '../../../src/platform/account-context.js';
+import { getPlatformBotIdentity, registerPlatformBotName } from '../../../src/platform/account-context.js';
 import { buildMasterIdentityBlock, masterShortHint } from '../../../src/shared/master-identity.js';
 import { isMaster } from '../../../src/admin/auth.js';
 import { evaluateRules, isMentioningSelf } from '../../../src/pipeline/judge/rules.js';
@@ -30,6 +30,29 @@ const group = { platform: 'qq' as const, accountId: '80001', idNamespace: 'qq-nu
   conversationKind: 'group' as const, id: '60001' };
 
 describe('QQ identity stays scoped through core and persona recognition', () => {
+  it('uses the configured self name and keeps verified login names as account-scoped aliases', () => {
+    const chatId = getOrCreateConversationId(group);
+    const other = getOrCreateConversationId({ ...group, accountId: '80002' });
+    const clear = registerPlatformBotName('80001', 'craftol');
+    try {
+      expect(getPlatformBotIdentity(chatId, ['xxb', '啾咪囝', '啾咪'], '啾咪囝')).toMatchObject({
+        displayName: '啾咪囝', nicknames: ['啾咪囝', 'craftol', 'xxb', '啾咪'],
+      });
+      expect(getPlatformBotIdentity(chatId, ['xxb'])!.displayName).toBe('craftol');
+      expect(getPlatformBotIdentity(other, ['xxb'])!.nicknames).not.toContain('craftol');
+    } finally { clear(); }
+    expect(getPlatformBotIdentity(chatId, ['xxb'])!.displayName).toBe('xxb');
+  });
+
+  it('does not let cleanup of an old login erase the current account identity', () => {
+    const chatId = getOrCreateConversationId(group);
+    const old = registerPlatformBotName('80001', 'previous');
+    const current = registerPlatformBotName('80001', 'current');
+    old();
+    try { expect(getPlatformBotIdentity(chatId, [])!.displayName).toBe('current'); }
+    finally { current(); }
+  });
+
   it('allocates self in the current account and does not use the same QQ number in another account', () => {
     const chatId = getOrCreateConversationId(group);
     const otherChatId = getOrCreateConversationId({ ...group, accountId: '80002' });

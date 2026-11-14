@@ -9,6 +9,9 @@ import { accountKey, conversationKey, messageKey } from './identity.js';
 import { getOrCreateConversationId, getOrCreateMessageId, getOrCreateUserId } from './identity-store.js';
 import { PlatformBoundaryError } from './types.js';
 import type { NormalizedMessage } from './types.js';
+import { registerOneBotMedia } from './onebot-media.js';
+import { assertOneBotMediaUrl } from './onebot-media-policy.js';
+import { getPlatformBotIdentity } from './account-context.js';
 
 export function parseOneBotIds(text: string): Set<string> {
   const ids = text.split(',').map(id => id.trim()).filter(Boolean);
@@ -34,15 +37,18 @@ export function oneBotToCoreUpdate(message: NormalizedMessage, recent: readonly 
   const entities: MessageEntity[] = [];
   let text = '';
   let reply: Message['reply_to_message'];
+  const media: Partial<Pick<Message, 'photo' | 'voice' | 'video' | 'document'>> = {};
   for (const segment of message.segments) {
     switch (segment.type) {
       case 'text': text += segment.text; break;
       case 'mention': {
         if (accountKey(segment.user) !== accountKey(conversation)) throw new PlatformBoundaryError('wrong_account', 'Mention crosses accounts');
         const id = getOrCreateUserId(segment.user);
-        const label = `@${id}`;
+        const self = segment.user.id === conversation.accountId;
+        const name = self ? getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [], env().ONEBOT_DISPLAY_NAME)?.displayName : undefined;
+        const label = `@${name ?? id}`;
         entities.push({ type: 'text_mention', offset: text.length, length: label.length, user: {
-          id, is_bot: segment.user.id === conversation.accountId, first_name: segment.user.id,
+          id, is_bot: self, first_name: name ?? segment.user.id,
         } });
         text += label;
         break;
@@ -65,9 +71,20 @@ export function oneBotToCoreUpdate(message: NormalizedMessage, recent: readonly 
         break;
       }
       case 'mention-all': text += '[QQ 全体成员提及]'; break;
-      case 'image': text += '[QQ 图片：当前适配器未提供可读取内容]'; break;
-      case 'voice': text += '[QQ 语音：当前适配器未提供可读取内容]'; break;
-      case 'file': text += '[QQ 文件：当前适配器未提供可读取内容]'; break;
+      case 'image': case 'voice': case 'video': case 'file': {
+        if (!/^qq-media:[0-9a-f-]{36}$/.test(segment.assetRef)) {
+          text += `[QQ ${segment.type}：媒体内容不可读取]`;
+          break;
+        }
+        const file = { file_id: segment.assetRef, file_unique_id: segment.assetRef,
+          ...(segment.fileSize === undefined ? {} : { file_size: segment.fileSize }) };
+        if (segment.type === 'image') media.photo ??= [{ ...file, width: 1, height: 1 }];
+        if (segment.type === 'voice') media.voice ??= { ...file, duration: 0, mime_type: 'audio/mpeg' };
+        if (segment.type === 'video') media.video ??= { ...file, width: 1, height: 1, duration: 0 };
+        if (segment.type === 'file') media.document ??= { ...file, file_name: segment.fileName ?? 'attachment.bin', mime_type: segment.mimeType };
+        text += `[QQ 附件 ${segment.type}${segment.fileName ? ' ' + segment.fileName : ''}；引用 ${segment.assetRef}]`;
+        break;
+      }
       case 'unsupported': text += `[QQ 未解析消息段：${segment.platformType.slice(0, 40)}]`; break;
     }
   }
@@ -79,11 +96,12 @@ export function oneBotToCoreUpdate(message: NormalizedMessage, recent: readonly 
       ? { id: chatId, type: 'private', first_name: message.senderName || conversation.id }
       : { id: chatId, type: 'group', title: `QQ ${conversation.id}` },
     from: { id: uid, is_bot: false, first_name: message.senderName || message.sender.id },
-    text, entities, ...(reply ? { reply_to_message: reply } : {}),
+    text, entities, ...media, ...(reply ? { reply_to_message: reply } : {}),
   } };
 }
 
-export async function ingestOneBotMessage(message: NormalizedMessage, context: { signal: AbortSignal }): Promise<void> {
+export async function ingestOneBotMessage(message: NormalizedMessage, context: { signal: AbortSignal },
+  handleCommand?: (message: NormalizedMessage, context: { signal: AbortSignal }) => Promise<boolean>): Promise<void> {
   const config = env();
   if (!config.ONEBOT_ENABLED || context.signal.aborted) return;
   const chat = message.ref.conversation;
@@ -95,12 +113,30 @@ export async function ingestOneBotMessage(message: NormalizedMessage, context: {
   if (message.timestampMs < config.META_ACTIVATED_AT_SEC * 1000 || message.timestampMs > Date.now() + 300000) return;
   const chatId = getOrCreateConversationId(chat);
   const recent = message.segments.some(part => part.type === 'reply') ? await getRecent(chatId, 100) : [];
-  const update = oneBotToCoreUpdate(message, recent);
   if (context.signal.aborted) return;
   const key = 'xxb:onebot:received:' + createHash('sha256').update(messageKey(message.ref)).digest('hex');
   // Fail closed on Redis failure. Claim before dispatch: no automatic replay of
   // an event whose handler may already have performed external side effects.
   if (await getRedis().set(key, '1', 'EX', 86400, 'NX') !== 'OK') return;
   if (context.signal.aborted) return;
+  if (handleCommand && await handleCommand(message, context)) return;
+  const segments = [];
+  for (const segment of message.segments) {
+    if (context.signal.aborted) return;
+    if (config.ONEBOT_MEDIA_ENABLED && (segment.type === 'image' || segment.type === 'voice' || segment.type === 'video' || segment.type === 'file')) {
+      try {
+        let url: string | undefined;
+        const candidate = segment.url ?? (/^https?:\/\//i.test(segment.assetRef) ? segment.assetRef : undefined);
+        if (candidate) {
+          try { url = assertOneBotMediaUrl(candidate).href; } catch { /* A valid asset can still use the authenticated stream. */ }
+        }
+        const handle = await registerOneBotMedia({ message: message.ref, kind: segment.type,
+          assetId: /^https?:\/\//i.test(segment.assetRef) ? undefined : segment.assetRef,
+          url, fileName: segment.fileName, fileSize: segment.fileSize, mimeType: segment.mimeType });
+        segments.push({ ...segment, assetRef: handle, url: undefined });
+      } catch { segments.push({ type: 'unsupported' as const, platformType: `${segment.type}（媒体不可用）` }); }
+    } else segments.push(segment);
+  }
+  const update = oneBotToCoreUpdate({ ...message, segments }, recent);
   await ingestChatUpdate(update);
 }

@@ -17,6 +17,9 @@ import { z } from 'zod';
 import { booleanFromEnv } from './_shared.js';
 
 export const featuresSection = {
+  // 独立受限视频解码工具未安装时保持关闭；不复用仅支持音频的TTS二进制。
+  VIDEO_FRAME_FALLBACK_ENABLED: booleanFromEnv.default(false),
+  VIDEO_FFMPEG_PATH: z.string().default(''),
   // ── StepFun 全网搜索（2026-09-20 起作为**主路由**）────────────────
   // 原 4 条 fallback 链（Gemini grounding / new-api grok / SearxNG / DDG）整体保留为
   // 后备，但默认走 stepfun 的 POST /v1/search：一次请求拿 title/snippet/content/time，

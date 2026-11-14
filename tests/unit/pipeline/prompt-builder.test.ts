@@ -42,12 +42,15 @@ describe('Prompt Builder', () => {
     _resetPromptCache();
   });
 
-  it('QQ CodeAct persona uses scoped owner and advertises only its text compatibility route', () => {
+  it('QQ CodeAct persona identifies its own aliases and uses the scoped capability list', () => {
     const prompt = buildCodeActIdentityPrompt(undefined, -(2 ** 52 + 10));
     expect(prompt).toContain('QQ scoped owner identity');
     expect(prompt).toContain('宿主路由到 QQ');
     expect(prompt).not.toContain('当前 env：');
     expect(prompt).not.toContain('stickers.pick + sendSticker');
+    expect(prompt).toContain('"name":"啾咪囝"');
+    expect(prompt).toContain('"aliases":["啾咪囝","啾咪"]');
+    expect(prompt).toContain('不等于必须逐条发文字回复');
   });
 
   describe('buildSystemPrompt', () => {

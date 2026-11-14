@@ -4,10 +4,15 @@ import {
 } from './identity-store.js';
 import type { ConversationRef, MessageRef, MessageSegment, PlatformAction } from './types.js';
 import { PlatformBoundaryError, UnsupportedCapabilityError } from './types.js';
+import type { OneBotMediaKind } from './onebot-media-stream.js';
+import { getOneBotGroupNoticeState, isOneBotMessageRecalled } from './onebot-notices.js';
 
 export interface OneBotSender {
   send(action: PlatformAction): Promise<MessageRef>;
   delete(message: MessageRef): Promise<void>;
+  react?: (message: MessageRef, emoji: string) => Promise<void>;
+  sendMedia?: (input: { conversation: ConversationRef; kind: OneBotMediaKind; bytes: Buffer;
+    fileName: string; caption?: string; replyTo?: MessageRef; beforeSend?: () => void }) => Promise<MessageRef>;
 }
 
 export class PlatformOutboundError extends PlatformBoundaryError {
@@ -51,6 +56,25 @@ function resolveSender(chatId: number): { conversation: ConversationRef; client:
   return { conversation, client };
 }
 
+function assertCanSend(chatId: number): void {
+  try {
+    const state = getOneBotGroupNoticeState(chatId);
+    if (state?.present === false || state?.muted || state?.wholeGroupMuted) throw new PlatformOutboundError('onebot_chat_unavailable');
+  } catch (error) {
+    if (error instanceof PlatformOutboundError) throw error;
+    throw new PlatformOutboundError('onebot_chat_state_unavailable');
+  }
+}
+
+function assertNotRecalled(chatId: number, messageId: number): void {
+  try {
+    if (isOneBotMessageRecalled(chatId, messageId)) throw new PlatformOutboundError('onebot_message_recalled');
+  } catch (error) {
+    if (error instanceof PlatformOutboundError) throw error;
+    throw new PlatformOutboundError('onebot_chat_state_unavailable');
+  }
+}
+
 function validateSegments(segments: readonly MessageSegment[], conversation: ConversationRef): void {
   if (!segments.length) throw new PlatformOutboundError('empty_platform_message');
   let replies = 0;
@@ -73,6 +97,7 @@ function validateSegments(segments: readonly MessageSegment[], conversation: Con
 
 /** Send once. Unknown delivery errors propagate unchanged; this layer never retries. */
 export async function sendPlatformSegments(chatId: number, segments: readonly MessageSegment[]): Promise<number> {
+  assertCanSend(chatId);
   const { conversation, client } = resolveSender(chatId);
   validateSegments(segments, conversation);
   const receipt = await client.send({ action: 'send', conversation, segments });
@@ -95,12 +120,13 @@ export async function sendPlatformText(chatId: number, text: string, replyToId?:
   if (!conversation) throw new PlatformOutboundError('not_onebot_conversation');
   const segments: MessageSegment[] = [];
   if (replyToId !== undefined) {
+    assertNotRecalled(chatId, replyToId);
     if (!Number.isSafeInteger(replyToId) || replyToId <= 0) throw new PlatformOutboundError('invalid_platform_reply');
     const message = findMessageRef(chatId, replyToId);
     if (!message || conversationKey(message.conversation) !== conversationKey(conversation)) {
       throw new PlatformOutboundError('unresolved_platform_reply');
     }
-    segments.push({ type: 'reply', message });
+    if (!message.id.startsWith('file:')) segments.push({ type: 'reply', message });
   }
   // Only an explicit, mapped internal mention becomes an action. CQ-looking
   // user text and raw QQ numbers remain text; the codec does not reparse it.
@@ -130,6 +156,40 @@ export async function deletePlatformMessage(chatId: number, messageId: number): 
     throw new PlatformOutboundError('unresolved_platform_message');
   }
   await client.delete(message);
+}
+
+export async function reactPlatformMessage(chatId: number, messageId: number, emoji: string): Promise<boolean> {
+  assertCanSend(chatId);
+  const { conversation, client } = resolveSender(chatId);
+  const message = Number.isSafeInteger(messageId) ? findMessageRef(chatId, messageId) : null;
+  if (!message || conversationKey(message.conversation) !== conversationKey(conversation)) throw new PlatformOutboundError('unresolved_platform_message');
+  assertNotRecalled(chatId, messageId);
+  if (!client.react) throw new PlatformOutboundError('onebot_reaction_unavailable');
+  await client.react(message, emoji);
+  return true;
+}
+
+export async function sendPlatformMedia(chatId: number, kind: OneBotMediaKind, bytes: Buffer, fileName: string,
+  opts: { caption?: string; replyToId?: number; beforeSend?: () => void } = {}): Promise<number> {
+  assertCanSend(chatId);
+  const { conversation, client } = resolveSender(chatId);
+  if (!client.sendMedia) throw new PlatformOutboundError('onebot_media_unavailable');
+  const replyTo = opts.replyToId === undefined ? undefined : findMessageRef(chatId, opts.replyToId) ?? undefined;
+  if (opts.replyToId !== undefined && (!replyTo || conversationKey(replyTo.conversation) !== conversationKey(conversation))) {
+    throw new PlatformOutboundError('unresolved_platform_reply');
+  }
+  if (opts.replyToId !== undefined) assertNotRecalled(chatId, opts.replyToId);
+  const receipt = await client.sendMedia({ conversation, kind, bytes, fileName, caption: opts.caption,
+    replyTo: replyTo?.id.startsWith('file:') ? undefined : replyTo,
+    beforeSend: () => {
+      assertCanSend(chatId);
+      if (opts.replyToId !== undefined) assertNotRecalled(chatId, opts.replyToId);
+      opts.beforeSend?.();
+    } });
+  try {
+    if (conversationKey(receipt.conversation) !== conversationKey(conversation) || !receipt.id.trim()) throw new Error('wrong_receipt');
+    return getOrCreateMessageId(receipt);
+  } catch { throw new PlatformOutboundError('onebot_receipt_unavailable', 'unknown'); }
 }
 
 export function rejectUnsupportedPlatformAction(chatId: number, action: string): void {

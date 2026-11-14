@@ -9,6 +9,11 @@ function key(chatId: number, messageId: number): string {
   return `xxb:meta:answered:${chatId}:${messageId}`;
 }
 
+/** Accept both legacy boolean marks and the current comma-separated timestamps. */
+function hasAnsweredMarker(raw: string | null | undefined): boolean {
+  return typeof raw === 'string' && raw !== '' && raw !== '0';
+}
+
 /** Mark a user message as already replied-to (anti double-reply). */
 export async function markMessageAnswered(chatId: number, messageId: number): Promise<void> {
   const mid = Math.floor(Number(messageId));
@@ -100,7 +105,7 @@ export async function isMessageAnswered(chatId: number, messageId: number): Prom
     // 于是 `marks and detects answered quotes` 立刻红。
     // 判据放宽成"有值就算回过了"：'1'（旧格式）和时间戳列表都算。
     const raw = await getRedis().get(key(chatId, mid));
-    return raw !== null && raw !== '' && raw !== '0';
+    return hasAnsweredMarker(raw);
   } catch {
     return false;
   }
@@ -134,7 +139,7 @@ export async function batchMessagesAnswered(
     const answered = new Set<string>();
     for (let i = 0; i < valid.length; i++) {
       const entry = valid[i];
-      if (entry && vals[i] === '1') answered.add(`${entry.chatId}:${entry.mid}`);
+      if (entry && hasAnsweredMarker(vals[i])) answered.add(`${entry.chatId}:${entry.mid}`);
     }
     return answered;
   } catch {

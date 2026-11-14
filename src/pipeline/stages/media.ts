@@ -8,7 +8,7 @@ import { describeImage, describeImageCached, describeStickerCached } from "../vi
 import { describeMultimodal } from "../multimodal.js";
 import { logger } from "../../shared/logger.js";
 
-export async function processMedia(formatted: FormattedMessage): Promise<void> {
+export async function processMedia(formatted: FormattedMessage, chatId?: number): Promise<void> {
   const hasMedia = !!(
     formatted.imageFileId ||
     formatted.sticker ||
@@ -21,7 +21,7 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
   if (hasMedia) {
     await Promise.all([
       formatted.imageFileId
-        ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId, formatted.textContent?.trim() || undefined)
+        ? describeImageCached(formatted.imageFileId, formatted.imageFileUniqueId, formatted.textContent?.trim() || undefined, chatId)
             .then((d) => {
               if (!d) return;
               formatted.imageDescriptions = [d];
@@ -44,12 +44,12 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
             .catch((err) => logger.warn({ err }, "Vision failed, continuing"))
         : Promise.resolve(),
       formatted.sticker
-        ? describeStickerCached(formatted.sticker.fileId, formatted.sticker.fileUniqueId)
+        ? describeStickerCached(formatted.sticker.fileId, formatted.sticker.fileUniqueId, chatId)
             .then((d) => { if (d && d !== "[图片]") (formatted.sticker as { description?: string }).description = d; })
             .catch((err) => logger.warn({ err }, "Sticker description failed, continuing"))
         : Promise.resolve(),
       (formatted.audioFileId || formatted.voiceFileId || formatted.documentFileId || formatted.videoFileId || formatted.videoNoteFileId)
-        ? describeMultimodal(formatted)
+        ? describeMultimodal(formatted, chatId)
             .then((d) => { if (d) formatted.textContent = (formatted.textContent ? formatted.textContent + "\n" + d : d).trim(); })
             .catch((err) => logger.warn({ err }, "Multimodal processing failed, continuing"))
         : Promise.resolve(),
@@ -63,7 +63,7 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
       formatted.documentMimeType = formatted.replyTo.documentMimeType;
       formatted.documentFileName = formatted.replyTo.documentFileName;
       try {
-        const desc = await describeMultimodal(formatted);
+        const desc = await describeMultimodal(formatted, chatId);
         if (desc) {
           formatted.textContent = (formatted.textContent ? formatted.textContent + "\n" + desc : desc).trim();
         }
@@ -74,7 +74,7 @@ export async function processMedia(formatted: FormattedMessage): Promise<void> {
     } else if (formatted.replyTo.imageFileId) {
       try {
         // 用户回复一张图说话(如"这个多少钱")→ 问题聚焦描述,别给泛泛概述
-        const description = await describeImage(formatted.replyTo.imageFileId, formatted.textContent?.trim() || undefined);
+        const description = await describeImage(formatted.replyTo.imageFileId, formatted.textContent?.trim() || undefined, chatId);
         if (description) {
           formatted.imageDescriptions = [description];
           // **也要进 textContent**。round 34 只修了上面的直接发图那一支，

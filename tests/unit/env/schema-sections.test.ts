@@ -54,9 +54,10 @@ describe('env schema 拆段', () => {
     //             499 → 501（GOAL_CLOSE_OBSERVE_ENABLED / GOAL_CLOSE_OBSERVE_HOURS，goal 待关闭观察期）
     //             501 → 502（CODEACT_WEB_FETCH_TO_FILE_ENABLED，沙盒无网络，宿主侧带数据进来）
     // Includes this rollout's transport/runtime settings; independently recounted.
-    // 522 includes 10 OneBot connection and account settings; checked against all section keys.
-    expect(all.length).toBe(522);
-    expect(new Set(all).size).toBe(522);
+    // Independently recounted after QQ pre-Heart batching, addressing and display-name controls.
+    // Recounted all section keys and verified uniqueness for this rollout.
+    expect(all.length).toBe(533);
+    expect(new Set(all).size).toBe(533);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -73,9 +74,56 @@ describe('env schema 拆段', () => {
     expect(parsed.NYATOS_BUDGET_MAX_ACTS).toBe(6);             // life
     expect(parsed.PROACTIVE_ACTIVATED_AT_SEC).toBe(0);         // cognition
     expect(parsed.META_ACTIVATED_AT_SEC).toBe(0);              // meta (disabled until explicitly activated)
+    expect(parsed.META_DIRECT_COALESCE_MS).toBe(0);            // opt-in direct-message batching
+    expect(parsed.META_DIRECT_COALESCE_MAX_MS).toBe(2000);
+    expect(parsed.META_QQ_HEART_REFRACTORY_MS).toBe(0);
+    expect(parsed.META_HEART_REFRACTORY_MS).toBe(45_000);
+    expect(parsed.META_QQ_GROUP_COALESCE_MS).toBe(0);
+    expect(parsed.META_QQ_GROUP_COALESCE_MAX_MS).toBe(4000);
+    expect(parsed.META_QQ_MENTION_HEART_ENABLED).toBe(false);
+    expect(parsed.ONEBOT_DISPLAY_NAME).toBe('');
+    expect(parsed.ONEBOT_MEDIA_ENABLED).toBe(false);
+    expect(parsed.ONEBOT_GROUP_FILE_SOURCE).toBe('message');
     expect(parsed.AUDIO_TRANSCRIBE_API_MODE).toBe('chat');     // infra compatibility default
     expect(parsed.TTS_PYTHON_PATH).toBe('python3');            // life
     expect(parsed.TTS_FFMPEG_PATH).toBe('ffmpeg');             // life
+  });
+
+  it('direct-burst windows parse explicit values and reject unbounded or invalid delays', async () => {
+    const { parseEnv } = await import('../../../src/env.js');
+    const required = { BOT_TOKEN: 'x', REDIS_URL: 'redis://127.0.0.1:6379/5' };
+    const parsed = parseEnv({ ...required, META_DIRECT_COALESCE_MS: '800', META_DIRECT_COALESCE_MAX_MS: '2000' });
+    expect(parsed.META_DIRECT_COALESCE_MS).toBe(800);
+    expect(parsed.META_DIRECT_COALESCE_MAX_MS).toBe(2000);
+    for (const value of ['-1', 'NaN', '30001']) {
+      expect(() => parseEnv({ ...required, META_DIRECT_COALESCE_MS: value })).toThrow();
+    }
+    expect(() => parseEnv({ ...required, META_DIRECT_COALESCE_MAX_MS: '0' })).toThrow();
+  });
+
+  it('group files select exactly one representation, never an ambiguous both mode', async () => {
+    const { parseEnv } = await import('../../../src/env.js');
+    expect(parseEnv({ BOT_TOKEN: 'x', ONEBOT_GROUP_FILE_SOURCE: 'notice' }).ONEBOT_GROUP_FILE_SOURCE).toBe('notice');
+    for (const value of ['both', '', 'auto']) expect(() => parseEnv({ BOT_TOKEN: 'x', ONEBOT_GROUP_FILE_SOURCE: value })).toThrow();
+  });
+
+  it('QQ cooldown is opt-in and does not change the Telegram default', async () => {
+    const { parseEnv } = await import('../../../src/env.js');
+    const parsed = parseEnv({ BOT_TOKEN: 'x', META_QQ_HEART_REFRACTORY_MS: '10000' });
+    expect(parsed.META_QQ_HEART_REFRACTORY_MS).toBe(10_000);
+    expect(parsed.META_HEART_REFRACTORY_MS).toBe(45_000);
+    for (const value of ['-1', 'NaN', '1.5']) expect(() => parseEnv({ BOT_TOKEN: 'x', META_QQ_HEART_REFRACTORY_MS: value })).toThrow();
+  });
+
+  it('QQ pre-decision windows and addressed discretion parse explicit bounded settings', async () => {
+    const { parseEnv } = await import('../../../src/env.js');
+    const parsed = parseEnv({ BOT_TOKEN: 'x', META_QQ_GROUP_COALESCE_MS: '1500',
+      META_QQ_GROUP_COALESCE_MAX_MS: '4000', META_QQ_MENTION_HEART_ENABLED: 'true' });
+    expect(parsed.META_QQ_GROUP_COALESCE_MS).toBe(1500);
+    expect(parsed.META_QQ_GROUP_COALESCE_MAX_MS).toBe(4000);
+    expect(parsed.META_QQ_MENTION_HEART_ENABLED).toBe(true);
+    for (const value of ['-1', 'NaN', '30001']) expect(() => parseEnv({ BOT_TOKEN: 'x', META_QQ_GROUP_COALESCE_MS: value })).toThrow();
+    expect(() => parseEnv({ BOT_TOKEN: 'x', META_QQ_GROUP_COALESCE_MAX_MS: '0' })).toThrow();
   });
 
   it('③ 每个段文件都被 env.ts import（加了文件忘了接 = 整段静默消失）', () => {

@@ -13,10 +13,11 @@ import { getRedis } from '../../db/redis.js';
 import { incrCounter } from '../../metrics/registry.js';
 import {
   deletePlatformMessage, platformChatAction, platformConversation,
-  rejectUnsupportedPlatformAction, sendPlatformText,
+  rejectUnsupportedPlatformAction, sendPlatformText, sendPlatformMedia, reactPlatformMessage,
 } from '../../platform/outbound.js';
 import { assertTelegramPayload } from '../../platform/telegram-guard.js';
 import { UnsupportedCapabilityError } from '../../platform/types.js';
+import { env } from '../../env.js';
 
 const MAX_RETRIES = 3;
 
@@ -32,7 +33,7 @@ const BASE_BACKOFF_MS = 1000;
 
 /** React to a message with a single emoji (Telegram setMessageReaction). Best-effort. */
 export async function reactToMessage(chatId: number, messageId: number, emoji: string): Promise<boolean> {
-  rejectUnsupportedPlatformAction(chatId, 'reactions');
+  if (platformConversation(chatId)) return reactPlatformMessage(chatId, messageId, emoji);
   assertTelegramPayload({ chat_id: chatId, message_id: messageId });
   try {
     const bot = getBot();
@@ -570,7 +571,15 @@ export async function sendSticker(
   chatId: number,
   stickerId: string,
 ): Promise<number> {
-  rejectUnsupportedPlatformAction(chatId, 'stickers');
+  if (platformConversation(chatId)) {
+    if (!env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('stickers');
+    const { resolveOneBotMedia } = await import('../../platform/onebot-media.js');
+    const file = await resolveOneBotMedia(stickerId, chatId);
+    if (!file.mimeType.startsWith('image/')) throw new UnsupportedCapabilityError('nonimage sticker');
+    const messageId = await sendPlatformMedia(chatId, 'image', file.bytes, file.fileName, { beforeSend: file.assertAvailable });
+    recordSpeech(); recordBotReply(chatId);
+    return messageId;
+  }
   assertTelegramPayload({ chat_id: chatId, sticker: stickerId });
   return withRetry(async () => {
     const bot = getBot();
@@ -589,8 +598,9 @@ export async function sendFile(
   filePath: string,
   opts: { caption?: string; replyToId?: number; messageThreadId?: number; filename?: string } = {},
 ): Promise<{ messageId: number }> {
-  rejectUnsupportedPlatformAction(chatId, 'files');
-  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
+  const qq = platformConversation(chatId);
+  if (qq && !env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('files');
+  if (!qq) assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
   const { InputFile } = await import('grammy');
   const { readFile, stat } = await import('node:fs/promises');
   const { basename } = await import('node:path');
@@ -601,6 +611,11 @@ export async function sendFile(
 
   const buffer = await readFile(filePath);
   const filename = opts.filename ?? basename(filePath);
+  if (qq) {
+    const messageId = await sendPlatformMedia(chatId, 'file', buffer, filename, opts);
+    recordSpeech(); recordBotReply(chatId);
+    return { messageId };
+  }
   const bot = getBot();
   const anchor =
     typeof opts.replyToId === 'number' && Number.isFinite(opts.replyToId) && opts.replyToId > 0
@@ -630,8 +645,9 @@ export async function sendPhoto(
   filePath: string,
   opts: { caption?: string; replyToId?: number; messageThreadId?: number } = {},
 ): Promise<{ messageId: number }> {
-  rejectUnsupportedPlatformAction(chatId, 'photos');
-  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
+  const qq = platformConversation(chatId);
+  if (qq && !env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('photos');
+  if (!qq) assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
   const { InputFile } = await import('grammy');
   const { readFile, stat } = await import('node:fs/promises');
   const { basename } = await import('node:path');
@@ -641,6 +657,11 @@ export async function sendPhoto(
   if (fstat.size > 10 * 1024 * 1024) throw new Error(`sendPhoto: too large (${fstat.size} bytes)`);
 
   const buffer = await readFile(filePath);
+  if (qq) {
+    const messageId = await sendPlatformMedia(chatId, 'image', buffer, basename(filePath), opts);
+    recordSpeech(); recordBotReply(chatId);
+    return { messageId };
+  }
   const bot = getBot();
   const anchor =
     typeof opts.replyToId === 'number' && Number.isFinite(opts.replyToId) && opts.replyToId > 0
@@ -667,9 +688,14 @@ export async function sendPhoto(
 export async function sendVoice(
   chatId: number,
   oggBuffer: Buffer,
-  opts: { replyToId?: number; messageThreadId?: number } = {},
+  opts: { replyToId?: number; messageThreadId?: number; beforeSend?: () => void } = {},
 ): Promise<{ messageId: number }> {
-  rejectUnsupportedPlatformAction(chatId, 'voice');
+  if (platformConversation(chatId)) {
+    if (!env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('voice');
+    const messageId = await sendPlatformMedia(chatId, 'voice', oggBuffer, 'voice.ogg', opts);
+    recordSpeech(); recordBotReply(chatId);
+    return { messageId };
+  }
   assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
   const { InputFile } = await import('grammy');
   const bot = getBot();

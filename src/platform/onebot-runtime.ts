@@ -3,12 +3,19 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { OneBotClient } from './onebot-client.js';
 import { ingestOneBotMessage, parseOneBotIds } from './onebot-ingress.js';
-import { clearOneBotSender, registerOneBotSender } from './outbound.js';
+import { clearOneBotSender, registerOneBotSender, sendPlatformText } from './outbound.js';
 import { PlatformBoundaryError } from './types.js';
+import { OneBotRequestService } from './onebot-requests.js';
+import { getOrCreateConversationId } from './identity-store.js';
+import { setOneBotMediaTransport } from './onebot-media.js';
+import { ingestOneBotNotice } from './onebot-notices.js';
+import { registerPlatformBotName } from './account-context.js';
 
 let client: OneBotClient | undefined;
 let registeredAccount: string | undefined;
 let acceptingMessages = false;
+let clearMedia: (() => void) | undefined;
+let clearIdentity: (() => void) | undefined;
 
 export function validateOneBotConfig(config: Env): void {
   if (!config.ONEBOT_ENABLED) return;
@@ -44,17 +51,36 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
   const next = new OneBotClient({
     endpoint: config.ONEBOT_WS_URL, accessToken: config.ONEBOT_ACCESS_TOKEN,
     accountId: config.ONEBOT_ACCOUNT_ID,
+    mediaEnabled: config.ONEBOT_MEDIA_ENABLED,
+    groupFileSource: config.ONEBOT_GROUP_FILE_SOURCE,
     limits: {
       requestTimeoutMs: config.ONEBOT_ACTION_TIMEOUT_MS,
       heartbeatIntervalMs: config.ONEBOT_HEARTBEAT_INTERVAL_MS,
       reconnectBaseMs: config.ONEBOT_RECONNECT_DELAY_MS,
       reconnectMaxMs: Math.max(30000, config.ONEBOT_RECONNECT_DELAY_MS),
     },
-    onMessage: async (message, context) => { if (acceptingMessages) await ingestOneBotMessage(message, context); },
+    onMessage: async (message, context) => {
+      if (acceptingMessages) await ingestOneBotMessage(message, context, async (event, scope) => {
+        const result = await requests.handleCommand(event, scope);
+        if (result.reply && !scope.signal.aborted) {
+          await sendPlatformText(getOrCreateConversationId(event.ref.conversation), result.reply);
+        }
+        return result.handled;
+      });
+    },
+    onRequest: (request, context) => { if (acceptingMessages) requests.record(request, context); },
+    onNotice: async (notice, context) => { if (acceptingMessages) await ingestOneBotNotice(notice, context); },
+    onIdentity: identity => {
+      clearIdentity?.();
+      clearIdentity = registerPlatformBotName(identity.accountId, identity.displayName);
+    },
     onState: state => logger.info({ ...state, acceptMessages }, 'OneBot connection state'),
     onDiagnostic: code => logger.warn({ code }, 'OneBot protocol event'),
   });
+  const requests = new OneBotRequestService({ accountId: config.ONEBOT_ACCOUNT_ID, ownerId: config.ONEBOT_OWNER_ID,
+    enabled: config.ONEBOT_ENABLED, activatedAtMs: config.META_ACTIVATED_AT_SEC * 1000, transport: next });
   registerOneBotSender(next, config.ONEBOT_ACCOUNT_ID);
+  if (config.ONEBOT_MEDIA_ENABLED) clearMedia = setOneBotMediaTransport(config.ONEBOT_ACCOUNT_ID, () => next.mediaTransport());
   registeredAccount = config.ONEBOT_ACCOUNT_ID;
   client = next;
   // QQ connectivity must not stop Telegram. The authenticated monitor exposes
@@ -65,6 +91,10 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
 export function stopOneBotRuntime(): void {
   pauseOneBotIngress();
   client?.stop();
+  clearMedia?.();
+  clearMedia = undefined;
+  clearIdentity?.();
+  clearIdentity = undefined;
   if (registeredAccount) clearOneBotSender(registeredAccount);
   client = undefined;
   registeredAccount = undefined;
@@ -80,7 +110,13 @@ export function getOneBotRuntimeStatus() {
     enabled: env().ONEBOT_ENABLED,
     ...(client?.snapshot() ?? { state: 'stopped', pendingRequests: 0, queuedMessages: 0, handlingMessage: false, reconnectAttempts: 0, lastHeartbeatAt: null }),
     protocol: 'onebot-v11-forward-ws',
-    supported: ['text', 'mention', 'reply', 'delete'],
-    unavailable: ['media-content', 'reaction', 'poll', 'moderation', 'forward', 'typing'],
+    supported: ['text', 'mention', 'reply', 'delete', 'reaction-send', 'friend-requests', 'group-requests', 'member-notices', 'recall',
+      ...(env().ONEBOT_MEDIA_ENABLED ? ['image', 'voice', 'video', 'file', 'text-file'] : [])],
+    unavailable: [...(env().ONEBOT_MEDIA_ENABLED ? [] : ['media-content']), 'poll', 'edit', 'moderation', 'forward', 'typing', 'telegram-sticker-id'],
+    reactionFeedback: 'upstream-dependent-unverified',
+    groupFileSource: env().ONEBOT_GROUP_FILE_SOURCE,
+    cadence: { directQuietMs: env().META_DIRECT_COALESCE_MS, directMaxMs: env().META_DIRECT_COALESCE_MAX_MS,
+      groupQuietMs: env().META_QQ_GROUP_COALESCE_MS, groupMaxMs: env().META_QQ_GROUP_COALESCE_MAX_MS,
+      heartRefractoryMs: env().META_QQ_HEART_REFRACTORY_MS, mentionsUseHeart: env().META_QQ_MENTION_HEART_ENABLED },
   };
 }

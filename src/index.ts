@@ -410,6 +410,8 @@ async function main(): Promise<void> {
       // 新消息持续打断→replan→起新 LLM 生成,30s 必然等不完。
       step('cron');
       pauseOneBotIngress();
+      const { closeQqHeartBatches } = await import('./meta/qq-heart-batch.js');
+      closeQqHeartBatches();
       stopCronJobs();
       stopMetaLoop();
       // 关机广播先于 stopBot:中止全部在飞主回合生成(actor 收到 Shutdown

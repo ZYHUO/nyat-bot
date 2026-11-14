@@ -37,7 +37,7 @@ describe('OneBot minimal codec', () => {
     ]);
   });
 
-  it('retains media as opaque references and exposes unsupported segment kinds', () => {
+  it('retains media including video as opaque references', () => {
     const message = codec.normalize({ ...groupEvent, message: [
       { type: 'image', data: { file: 'platform-asset' } },
       { type: 'record', data: { file: 'voice-asset' } },
@@ -46,7 +46,7 @@ describe('OneBot minimal codec', () => {
     ] })!;
     expect(message.segments).toEqual([
       { type: 'image', assetRef: 'platform-asset' }, { type: 'voice', assetRef: 'voice-asset' },
-      { type: 'file', assetRef: 'file-asset' }, { type: 'unsupported', platformType: 'video' },
+      { type: 'file', assetRef: 'file-asset' }, { type: 'video', assetRef: 'unhandled' },
     ]);
   });
 

@@ -21,6 +21,7 @@ import { startGame, stopGame } from "../games/manager.js";
 import { createGuessNumberGame } from "../games/guess-number.js";
 import { getRedis } from '../../db/redis.js';
 import { incrCounter } from '../../metrics/registry.js';
+import { isConversationOwner } from '../../platform/owner-context.js';
 
 // ── Extracted helper 2: Mute command intercepts ─────────────────────
 
@@ -83,6 +84,10 @@ export async function dispatchCommand(
     // 群聊关键词追踪(addWatch)已于 2026-08-19 删除——NL 路由把普通对话
     // 误判成追踪命令（「诺亚帮你留意着」→ 抓到句子碎片当关键词）。
     if (chatId <= 0) return false;
+    if (chatId !== formatted.uid || formatted.isBot || formatted.isAnonymous || !isConversationOwner(chatId, formatted.uid)) {
+      await sender.sendDirect(chatId, '这个命令仅限本平台主人私聊使用喵~', formatted.messageId);
+      return true;
+    }
     const { createGoal } = await import("../../agent/goals.js");
     const id = createGoal(
       { topic: arg, origin: "master", chatId },

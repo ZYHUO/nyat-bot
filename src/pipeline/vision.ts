@@ -12,8 +12,14 @@ import { getStickerDescription, storeAnalysisResult } from '../knowledge/sticker
 /** 下载 Telegram 图片为 data URL(静态图;webm/tgs 返回 null)。供描述/识图/回复直读复用。 */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
-async function downloadStaticImage(fileId: string): Promise<{ dataUrl: string | null; animated: boolean }> {
+async function downloadStaticImage(fileId: string, chatId?: number): Promise<{ dataUrl: string | null; animated: boolean }> {
   const signal = AbortSignal.timeout(30_000);
+  if (fileId.startsWith('qq-media:')) {
+    const { resolveOneBotMedia } = await import('../platform/onebot-media.js');
+    const media = await resolveOneBotMedia(fileId, chatId, { signal, maxBytes: MAX_IMAGE_BYTES });
+    if (!media.mimeType.startsWith('image/')) return { dataUrl: null, animated: false };
+    return { dataUrl: `data:${media.mimeType};base64,${media.bytes.toString('base64')}`, animated: false };
+  }
   const bot = getBot();
   // grammY pins the abort-controller type, but accepts native Node 22 signals.
   const file = await bot.api.getFile(fileId, signal as unknown as Parameters<typeof bot.api.getFile>[1]);
@@ -60,8 +66,8 @@ async function downloadStaticImage(fileId: string): Promise<{ dataUrl: string | 
   return { dataUrl: `data:${mimeType};base64,${base64}`, animated: false };
 }
 
-export async function fetchImageDataUrl(fileId: string): Promise<string | null> {
-  try { return (await downloadStaticImage(fileId)).dataUrl; }
+export async function fetchImageDataUrl(fileId: string, chatId?: number): Promise<string | null> {
+  try { return (await downloadStaticImage(fileId, chatId)).dataUrl; }
   catch {
     // Telegram download errors can include the credential-bearing file URL.
     logger.warn({ fileId }, 'Image download failed');
@@ -80,9 +86,9 @@ export interface StickerEmotion {
  * 识图分析一张贴纸的情绪(供常驻贴纸入库)。走视觉模型,返回结构化情绪标签 +
  * mood_map + 是否适配猫娘人设 + 描述。失败返回 null。emoji 不作参考(全靠看图)。
  */
-export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmotion | null> {
+export async function analyzeStickerEmotion(fileId: string, chatId?: number): Promise<StickerEmotion | null> {
   try {
-    const dataUrl = await fetchImageDataUrl(fileId);
+    const dataUrl = await fetchImageDataUrl(fileId, chatId);
     if (!dataUrl) return null;
     const prompt =
       'Label this sticker for a cute catgirl bot\'s sticker library. Look ONLY at the image — ignore any emoji. ' +
@@ -133,9 +139,9 @@ export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmot
  * @param question 用户发图时附带的话(P2 问题聚焦):通用描述常常漏掉用户真正问的
  *  细节(截图问"多少钱"→ 描述只说"一张截图")。带上它让描述覆盖相关内容。
  */
-export async function describeImage(fileId: string, question?: string): Promise<string> {
+export async function describeImage(fileId: string, question?: string, chatId?: number): Promise<string> {
   try {
-    const { dataUrl, animated } = await downloadStaticImage(fileId);
+    const { dataUrl, animated } = await downloadStaticImage(fileId, chatId);
     if (animated) return '[动态贴纸]';
     if (!dataUrl) return '[图片]';
 
@@ -197,15 +203,16 @@ function saveImageDescription(fileUniqueId: string, description: string): void {
  * 带 question 的问题聚焦描述**不进缓存**:它是针对当次提问定制的,缓存会让
  * 同一张图下次被问到别的内容时读到答非所问的旧描述。
  */
-export async function describeImageCached(fileId: string, fileUniqueId?: string, question?: string): Promise<string> {
+export async function describeImageCached(fileId: string, fileUniqueId?: string, question?: string, chatId?: number): Promise<string> {
   const q = question?.trim();
-  if (!fileUniqueId || q) return describeImage(fileId, q);
+  // An opaque QQ handle is conversation-scoped; a global cache cannot authorize it.
+  if (fileId.startsWith('qq-media:') || !fileUniqueId || q) return describeImage(fileId, q, chatId);
   const cached = getImageDescription(fileUniqueId);
   if (cached) {
     logger.debug({ fileUniqueId }, 'Image description cache hit');
     return cached;
   }
-  const description = await describeImage(fileId);
+  const description = await describeImage(fileId, undefined, chatId);
   if (description && description !== '[图片]') {
     try { saveImageDescription(fileUniqueId, description); }
     catch (err) { logger.warn({ err, fileUniqueId }, 'Failed to cache image description'); }
@@ -218,7 +225,8 @@ export async function describeImageCached(fileId: string, fileUniqueId?: string,
  * Checks description cache first; falls back to vision model if not found.
  * Never reads sticker emoji for description.
  */
-export async function describeStickerCached(fileId: string, fileUniqueId: string): Promise<string> {
+export async function describeStickerCached(fileId: string, fileUniqueId: string, chatId?: number): Promise<string> {
+  if (fileId.startsWith('qq-media:')) return describeImage(fileId, undefined, chatId);
   // Check cache
   const cached = getStickerDescription(fileUniqueId);
   if (cached) {
@@ -227,7 +235,7 @@ export async function describeStickerCached(fileId: string, fileUniqueId: string
   }
 
   // No cache — call vision model
-  const description = await describeImage(fileId);
+  const description = await describeImage(fileId, undefined, chatId);
 
   // Store in cache (only if we got a real description)
   if (description && description !== '[图片]') {

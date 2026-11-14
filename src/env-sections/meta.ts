@@ -36,18 +36,29 @@ export const metaSection = {
   // Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。
   META_TICK_MS: z.coerce.number().int().positive().default(5000),
   /**
-   * L0/L1 Attention 合并静默窗：群聊在最后一条进队后还要再等这么久才让 Meta flush。
+   * 被动群聊 L1/L2 Attention 合并静默窗：最后一条进队后再等这么久才让 Meta flush。
    * 这是 Meta 路径的「连发→一回」节奏（不是 TIMING_TALK_VALUE / gate wait）。
-   * L0 含昵称点名仍立刻 ingest；@ / 回 bot 可走 timing hard-bypass。
+   * L0 私聊/点名使用独立的 META_DIRECT_COALESCE_MS；不受此长窗口影响。
    * hold 到期会 kick 一次 metaTick，不完全依赖 META_TICK_MS。
    * 0 = 关闭。默认 2800ms。
    */
   META_L0_COALESCE_MS: z.coerce.number().int().nonnegative().default(2800),
+  // 私聊/@/回复 bot 的短连发合并窗，QQ/TG 共用。默认 0 保留原有快速响应。
+  META_DIRECT_COALESCE_MS: z.coerce.number().int().nonnegative().max(30_000).default(0),
+  // 开启短窗时，持续连发也最多等这么久（从第一条未处理消息计），不延长忙任务重排。
+  META_DIRECT_COALESCE_MAX_MS: z.coerce.number().int().positive().max(30_000).default(2000),
   /**
    * Heart 插话不应期(ms)：bot 刚回过 / CodeAct 占用时，被动消息不再 elevate、也不再 auto-dispatch heart:。
    * 防群里同一话题连珠炮（三连赖账）。L0/@/回 bot 不受影响。0 = 关闭。默认 45s。
    */
   META_HEART_REFRACTORY_MS: z.coerce.number().int().nonnegative().default(45_000),
+  /** QQ 群被动接话的独立不应期(ms)。0 = 继承通用配置；不影响 Telegram 或直接追问。 */
+  META_QQ_HEART_REFRACTORY_MS: z.coerce.number().int().nonnegative().default(0),
+  /** QQ 群在 Heart 判断前合并输入；0 关闭。独立于 Telegram 的 Attention 窗口。 */
+  META_QQ_GROUP_COALESCE_MS: z.coerce.number().int().nonnegative().max(30_000).default(0),
+  META_QQ_GROUP_COALESCE_MAX_MS: z.coerce.number().int().positive().max(30_000).default(4000),
+  /** QQ 群定向招呼也让 Heart 选择文字/表情/等待；命令与私聊保持原入口。 */
+  META_QQ_MENTION_HEART_ENABLED: booleanFromEnv.default(false),
   /**
    * Meta 路径 defer 延迟重评：canDefer=true 传给 runTimingGate，让冷却/talk-value
    * 短路层产出 deferOnly 决策，再由 scheduleMetaDeferReeval 排 Redis ZSET 延迟重评，

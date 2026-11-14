@@ -25,7 +25,7 @@ describe('isolated CodeAct runtime prompt', () => {
   });
 
   it('applies to the final collected system text, including self-play overrides', () => {
-    expect(executor).toContain("staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId)))");
+    expect(executor).toContain("staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId), task.chatId))");
     expect(executor).toContain('methods: codeActMethodsForChat(task.chatId)');
     expect(executor).toContain('selectCodeActCapabilities(host, opts.methods ?? CODEACT_CAPABILITY_METHODS)');
     const rendered = buildCodeActSystemPrompt('扮演一个爱思考的猫。\n使用 art.draw 画图。\n使用 telegram.sendText 回复。');
@@ -48,5 +48,16 @@ describe('isolated CodeAct runtime prompt', () => {
     expect(META_CAPABILITY_METHODS).toContain('journal.tryWrite');
     expect(sub + meta).not.toContain('telegram.sendToChat');
     expect(sub + meta).not.toContain('bot 有权限');
+  });
+
+  it('adds concise optional-quote guidance only for an explicitly QQ task, even without media', () => {
+    const methods = ['telegram.sendText', 'runtime.endTask'];
+    const qq = buildCodeActSystemPrompt('', methods, 2 ** 52 + 1);
+    expect(qq).toContain('省略 replyTo 就是不引用');
+    expect(qq).toContain('不必每轮两条');
+    expect(qq).toContain('按真实气泡累计');
+    expect(qq).not.toContain('telegram.sendTextFile');
+    expect(buildCodeActSystemPrompt('', methods, -100123)).not.toContain('QQ 接话');
+    expect(buildCodeActSystemPrompt('', methods)).not.toContain('QQ 接话');
   });
 });

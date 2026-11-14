@@ -262,6 +262,18 @@ import { getExecutionAudit } from '../agent/execution-audit.js';
 import { saveTaskEvidence } from '../agent/task-evidence-store.js';
 
 export async function runCodeActTask(task: DispatchTask): Promise<void> {
+  if (isPlatformInternalId(task.chatId)) {
+    const { isOneBotMessageRecalled } = await import('../platform/onebot-notices.js');
+    const ids = [...(task.quoteMessageIds ?? []), ...(task.relatedQuoteIds ?? []),
+      ...(task.pendingUserInput ?? []).flatMap(input => input.messageId === undefined ? [] : [input.messageId])];
+    if (ids.some(id => isOneBotMessageRecalled(task.chatId, id))) {
+      task.status = 'failed';
+      task.resultSummary = 'failed_qq_message_recalled';
+      task.waitingForUser = false;
+      await persistCodeActTask(task);
+      return;
+    }
+  }
   const activation = checkCodeActActivation(task);
   if (!activation.allowed) {
     await holdCodeActTask(task, activation.reason);
@@ -359,7 +371,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // AGENT_MAX_SEGMENTS 默认 10，所以真实上限是 60 条/任务。
   //
   // 修法：sendsUsed 记在 task 上跨段累计，每段只发"剩余的额度"。
-  const sendBudget = isSelfPlay || isGoalCheck ? 1 : env().AGENT_TASK_SEND_BUDGET;
+  const sendBudget = isSelfPlay || isGoalCheck ? 1 : Math.min(env().AGENT_TASK_SEND_BUDGET, isPlatformInternalId(task.chatId) ? 3 : Number.POSITIVE_INFINITY);
   const sendLeft = (): number => Math.max(0, sendBudget - (task.sendsUsed ?? 0));
 
   const host = createHostApi(task.chatId, {
@@ -443,7 +455,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const loopEnabled = env().AGENT_LOOP_ENABLED;
 
   const { prompt, manifest } = await engine.assemble([
-    staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId))),
+    staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId), task.chatId)),
     staticText('sub-identity', identity),
     ephemeralText('sub-master', masterBlock),
     ephemeralText('sub-permanent', permanent ? `## 永久知识\n${permanent}` : ''),
@@ -964,10 +976,18 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           }
           if (text && !closed) {
             try {
-              const { sendMessage } = await import('../bot/sender/telegram.js');
-              await withCodeActDeliveryIntent(task.id, task.chatId, () => sendMessage(task.chatId, text, task.quoteMessageIds?.[0]));
+              if (isPlatformInternalId(task.chatId)) {
+                // QQ fallback is still a task reply: no forced quote, budget or
+                // length bypass, and no second send after an unknown receipt.
+                await host.telegram.sendText(text);
+              } else {
+                const { sendMessage } = await import('../bot/sender/telegram.js');
+                await withCodeActDeliveryIntent(task.id, task.chatId, () => sendMessage(task.chatId, text, task.quoteMessageIds?.[0]));
+              }
             } catch (error) {
-              if (isUnknownPlatformDelivery(task.chatId, error)) await closeUnknownDelivery('failsafe_delivery_unknown');
+              if (isUnknownPlatformDelivery(task.chatId, error)) {
+                if (!deliveryUnknown) await closeUnknownDelivery('failsafe_delivery_unknown');
+              }
               else if (isPlatformInternalId(task.chatId)) throw error;
               /* ultimate fallback */
             }

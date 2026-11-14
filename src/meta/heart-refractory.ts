@@ -7,9 +7,26 @@
 import { env } from '../env.js';
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
+import { findConversationRef, isPlatformInternalId } from '../platform/identity-store.js';
 
 function armKey(chatId: number): string {
   return `xxb:meta:heart_arm:${chatId}`;
+}
+
+/** Zero keeps the existing policy; only a verified QQ group gets an override. */
+function refractoryPolicy(chatId: number): { ms: number; qqOverride: boolean } {
+  const e = env();
+  if (e.META_QQ_HEART_REFRACTORY_MS > 0 && chatId < 0 && isPlatformInternalId(chatId)) {
+    try {
+      const ref = findConversationRef(chatId);
+      if (ref?.platform === 'qq' && ref.conversationKind === 'group') {
+        return { ms: e.META_QQ_HEART_REFRACTORY_MS, qqOverride: true };
+      }
+    } catch {
+      // Missing identity storage must never relax the existing cooldown.
+    }
+  }
+  return { ms: e.META_HEART_REFRACTORY_MS, qqOverride: false };
 }
 
 /**
@@ -19,11 +36,15 @@ function armKey(chatId: number): string {
  * @returns false if another Heart already armed this chat (caller should silence).
  */
 export async function armMetaHeartRefractory(chatId: number): Promise<boolean> {
-  const ms = env().META_HEART_REFRACTORY_MS;
+  const { ms, qqOverride } = refractoryPolicy(chatId);
   if (ms <= 0 || chatId >= 0) return true;
   try {
-    const ttlSec = Math.max(5, Math.ceil(ms / 1000) + 5);
-    const ok = await getRedis().set(armKey(chatId), String(Date.now()), 'EX', ttlSec, 'NX');
+    // Keep Telegram's historical padding. QQ's explicit shorter policy uses
+    // its actual millisecond window; busy + the latest confirmed text still
+    // protect an active task and the time after it speaks.
+    const ok = qqOverride
+      ? await getRedis().set(armKey(chatId), String(Date.now()), 'PX', Math.max(5000, ms), 'NX')
+      : await getRedis().set(armKey(chatId), String(Date.now()), 'EX', Math.max(5, Math.ceil(ms / 1000) + 5), 'NX');
     return ok === 'OK';
   } catch (err) {
     logger.debug({ err, chatId }, 'armMetaHeartRefractory failed');
@@ -49,7 +70,7 @@ async function isCodeActBusySafe(chatId: number): Promise<boolean> {
 }
 
 async function isRecentBotReply(chatId: number): Promise<boolean> {
-  const refractoryMs = env().META_HEART_REFRACTORY_MS;
+  const refractoryMs = refractoryPolicy(chatId).ms;
   if (refractoryMs <= 0) return false;
   try {
     const { getChatState } = await import('../pipeline/timing/chat-runtime.js');

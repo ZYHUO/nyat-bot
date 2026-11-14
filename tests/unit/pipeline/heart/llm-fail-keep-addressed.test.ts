@@ -63,6 +63,7 @@ vi.mock('../../../../src/bot/bot.js', () => ({
 
 const { heartDecision, isAddressedToBot } = await import('../../../../src/pipeline/heart/decision.js');
 import type { FormattedMessage } from '../../../../src/shared/types.js';
+import { loadCachedPrompt } from '../../../../src/shared/config.js';
 
 const netError = (): Error => new TypeError('fetch failed');
 
@@ -82,6 +83,8 @@ const baseInput = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   callModelMock.mockReset();
   envValues.HEART_LLM_FAIL_KEEP_ADDRESSED = true;
+  envValues.META_QQ_MENTION_HEART_ENABLED = false;
+  vi.mocked(loadCachedPrompt).mockReturnValue('x {bot_name} {persona_core} {self_state}');
 });
 
 describe('isAddressedToBot', () => {
@@ -124,6 +127,43 @@ describe('isAddressedToBot', () => {
 });
 
 describe('心流 LLM 失败时的保句闸', () => {
+  it.each([
+    { chatId: QQ_CHAT, enabled: true, override: true },
+    { chatId: QQ_CHAT, enabled: false, override: false },
+    { chatId: -123, enabled: true, override: false },
+  ])('scopes the system-level addressing override: $chatId / enabled=$enabled', async ({ chatId, enabled, override }) => {
+    envValues.META_QQ_MENTION_HEART_ENABLED = enabled;
+    vi.mocked(loadCachedPrompt).mockReturnValue('点名你的（@你/回复你/叫你名字）永远不许 pass。');
+    callModelMock.mockResolvedValue({ content: '{"act":"pass","path":"chat","why":"自然听着"}', tokenUsage: { prompt: 1, completion: 1, total: 2 }, model: 'm', label: 'l', latencyMs: 1 });
+    await heartDecision(baseInput({ chatId }));
+    const messages = callModelMock.mock.calls[0]![1] as Array<{ role: string; content: string }>;
+    const system = messages.find(message => message.role === 'system')!.content;
+    expect(system.includes('[当前QQ群回应规则')).toBe(override);
+    if (override) {
+      expect(system).toContain('以上规则替代前文与之冲突的点名禁令');
+      expect(system).toContain('可以 react 或 pass');
+      expect(system).toContain('真实提问、请求和需要确认的指令优先 reply');
+    }
+  });
+  it('preserves authenticated addressing from an earlier QQ bubble when the final bubble has no name', async () => {
+    envValues.HEART_LLM_FAIL_KEEP_ADDRESSED = false;
+    callModelMock.mockRejectedValue(netError());
+    const decision = await heartDecision(baseInput({ chatId: QQ_CHAT, botUid: QQ_SELF, addressed: true }));
+    expect(decision.act).toBe('wait');
+  });
+
+  it.each(['prompt', 'invalid-json'] as const)('keeps addressed QQ input on %s failure', async failure => {
+    if (failure === 'prompt') vi.mocked(loadCachedPrompt).mockImplementation(() => { throw new Error('fixture'); });
+    callModelMock.mockResolvedValue({ content: 'invalid', tokenUsage: { prompt: 1, completion: 1, total: 2 }, model: 'm', label: 'l', latencyMs: 1 });
+    expect((await heartDecision(baseInput({ chatId: QQ_CHAT, botUid: QQ_SELF, addressed: true }))).act).toBe('wait');
+  });
+
+  it('states protocol addressing while permitting a non-text response', async () => {
+    callModelMock.mockResolvedValue({ content: '{"act":"react","path":"chat","why":"打招呼","emoji":"👍"}', tokenUsage: { prompt: 1, completion: 1, total: 2 }, model: 'm', label: 'l', latencyMs: 1 });
+    expect((await heartDecision(baseInput({ chatId: QQ_CHAT, botUid: QQ_SELF, addressed: true }))).act).toBe('react');
+    expect(JSON.stringify(callModelMock.mock.calls)).toContain('被提及不等于必须发一条文字');
+    expect(JSON.stringify(callModelMock.mock.calls)).toContain('真实提问、请求');
+  });
   it('keeps a QQ internal self mention on model failure, with the current chat identity', async () => {
     callModelMock.mockRejectedValue(netError());
     const d = await heartDecision(baseInput({ chatId: QQ_CHAT, botUid: QQ_SELF,

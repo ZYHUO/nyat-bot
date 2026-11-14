@@ -40,23 +40,23 @@ export async function createBot(): Promise<Bot> {
 }
 
 export function getBotUid(chatId?: number): number {
-  return getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [])?.uid ?? _botUid;
+  return getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [], env().ONEBOT_DISPLAY_NAME)?.uid ?? _botUid;
 }
 
 export function getBotUsername(chatId?: number): string {
-  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? []);
+  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [], env().ONEBOT_DISPLAY_NAME);
   if (identity) return identity.username;
   return _botUsername || env().BOT_USERNAME;
 }
 
 export function getBotDisplayName(chatId?: number): string {
-  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? []);
+  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [], env().ONEBOT_DISPLAY_NAME);
   if (identity) return identity.displayName;
   return _botDisplayName || env().BOT_NICKNAMES[0] || getBotUsername();
 }
 
 export function getBotIdentity(chatId?: number): { uid: number; username: string; displayName: string; nicknames: string[] } {
-  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? []);
+  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [], env().ONEBOT_DISPLAY_NAME);
   if (identity) return identity;
   const username = getBotUsername();
   const displayName = getBotDisplayName();

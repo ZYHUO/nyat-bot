@@ -11,7 +11,10 @@ import { isEchoOf } from '../shared/echo-text.js';
 import { findTopicRepeat } from './topic-repeat.js';
 import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
 import { isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
+import { createQQAttachmentApi } from './qq-attachments.js';
+import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
+import { createQQBubbleBudget, planQQTextBubbles, resolveQQReplyAnchor } from './qq-delivery-policy.js';
 
 /**
  * round 89：**同一锚点短时间内重复回复要拦。**
@@ -134,7 +137,7 @@ function persistBotDeliveryEvent(input: {
   try {
     const result = appendCognitiveEvent({
       type: 'bot_delivery',
-      source: 'telegram',
+      source: isPlatformInternalId(input.chatId) ? 'host' : 'telegram',
       scope: input.taskId
         ? { visibility: 'task', taskId: input.taskId, chatId: input.chatId }
         : { visibility: 'chat', chatId: input.chatId },
@@ -142,6 +145,7 @@ function persistBotDeliveryEvent(input: {
       dedupeKey: `delivery:${input.taskId ?? input.chatId}:${input.messageId}`,
       ...(input.cognitiveAnchorEventId ? { causationId: input.cognitiveAnchorEventId } : {}),
       fact: {
+        platform: isPlatformInternalId(input.chatId) ? 'qq' : 'telegram',
         chatId: input.chatId,
         messageId: input.messageId,
         taskId: input.taskId ?? null,
@@ -291,6 +295,8 @@ export interface HostApi {
     sendFile: (path: string, caption?: string) => Promise<{ messageId: number }>;
     /** 把沙盒里的图片当**照片**发（内联显示，发图首选；文档/代码文件才用 sendFile）。 */
     sendPhoto: (path: string, caption?: string) => Promise<{ messageId: number }>;
+    readFile?: (handle: string) => Promise<{ fileName: string; mimeType: string; text: string; truncated: boolean }>;
+    sendTextFile?: (name: string, text: string) => Promise<{ messageId: number }>;
     /** Synthesize + send a voice message (TTS). Falls back to {skipped} when TTS disabled. */
     sendVoice: (text: string) => Promise<{ messageId: number } | { skipped: true; reason: string }>;
     /**
@@ -682,6 +688,7 @@ export function createHostApi(
   let crossSends = 0;
   let goalAdded = false;
   const maxTextSends = opts.maxTextSends ?? 2;
+  const qqTextBudget = isPlatformInternalId(chatId) ? createQQBubbleBudget(maxTextSends) : undefined;
   const maxFileSends = opts.maxFileSends ?? Number.POSITIVE_INFINITY;
   const pendingBookkeeping: Promise<unknown>[] = [];
   /** In-flight telegram/web ops — models often forget `await` before endTask. */
@@ -770,6 +777,8 @@ export function createHostApi(
   const assertOpen = () => {
     if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
     if (opts.isClosed?.()) throw new Error('host_closed');
+    if (isPlatformInternalId(chatId) && [opts.defaultReplyTo, ...(opts.quoteIds ?? []), ...(opts.relatedQuoteIds ?? [])]
+      .some(id => id !== undefined && isOneBotMessageRecalled(chatId, id))) throw new Error('qq_message_recalled');
   };
 
   const sendWithDeliveryGuard = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -1145,7 +1154,9 @@ export function createHostApi(
             // become multiple bubbles; only the first carries reply-to.
             const maxLen = chatId > 0 ? 280 : 160;
             let parts: string[] = [clean];
-            try {
+            if (qqTextBudget) {
+              parts = planQQTextBubbles(clean);
+            } else try {
               const { segmentReply, REPLY_SPLIT_CHAR_THRESHOLD } = await import(
                 '../pipeline/reply/segmenter.js'
               );
@@ -1166,6 +1177,14 @@ export function createHostApi(
             } else if (parts.length > 1) {
               logger.debug({ chatId, parts: parts.length, chars: clean.length }, 'host sendText preserving segmented text for sender sharding');
             }
+
+            const qqReplyTo = qqTextBudget
+              ? resolveQQReplyAnchor(replyToMessageId, [opts.defaultReplyTo, ...(opts.quoteIds ?? [])].filter((id): id is number => id !== undefined))
+              : undefined;
+            // Reserve all planned bubbles before any transport call. Concurrent
+            // guest calls cannot each spend the same remaining task allowance.
+            const qqReservation = qqTextBudget?.reserve(parts.length);
+            try {
 
             // Past gate: finish even if task closes (model often skips await before endTask).
             let lastMessageId = 0;
@@ -1198,7 +1217,7 @@ export function createHostApi(
               // 分句：仅首条带 reply_to；后续默认不带。另一次 sendText 若显式传 messageId 才 quote（特别许愿）。
               // 同一任务里，同一条消息只允许被引用一次。第二次起再传同一个 id
               // （显式或 fallback）一律不引用——不然就是两条回复戳同一个人。
-              const wanted = parseMsgId(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo);
+              const wanted = qqTextBudget ? qqReplyTo : (parseMsgId(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo));
               const alreadyAnchored = wanted !== undefined && repliedAnchors.has(wanted);
               if (i === 0 && alreadyAnchored) {
                 logger.info(
@@ -1229,7 +1248,7 @@ export function createHostApi(
               // 兜底只在**首气泡**生效（分句后续条仍不带，避免连环引用）；
               // 模型显式传的仍然优先；本任务已回过的锚点仍去重。
               const replyTo = i === 0 && !alreadyAnchored
-                ? (resolveReplyTo(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo))
+                ? (qqTextBudget ? qqReplyTo : (resolveReplyTo(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo)))
                 : undefined;
               if (i === 0 && replyTo) repliedAnchors.add(replyTo);
               if (i === 0) firstReplyTo = replyTo;
@@ -1419,6 +1438,11 @@ export function createHostApi(
 
               const messageId = await sendWithDeliveryGuard(() => sendMessage(chatId, part, replyTo, opts.messageThreadId));
               if (messageId > 0) {
+                if (qqReservation) {
+                  qqReservation.acknowledge();
+                  textSent++;
+                  try { opts.onSend?.(); } catch { /* A bookkeeping failure never resends an acknowledged bubble. */ }
+                }
                 void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
                 // Nyat Trench L0：说出口了 → 抽走 85% 气压。
                 //
@@ -1651,9 +1675,11 @@ export function createHostApi(
                 .catch((err) => logger.debug({ err, chatId }, 'host memorize assistant failed'));
             }
 
-            textSent += 1;
-            // 跨段预算：立刻通报 executor，别等段末（段末可能永远不到）。
-            try { opts.onSend?.(); } catch { /* 记账失败不能挡住发送 */ }
+            if (!qqReservation) {
+              textSent += 1;
+              // Telegram retains its existing per-call budget; QQ charges each ACK above.
+              try { opts.onSend?.(); } catch { /* 记账失败不能挡住发送 */ }
+            }
             lastDeliveryKind = kind;
             if (kind === 'final') finalSent = true;
             else intermediateSent = true;
@@ -1695,6 +1721,7 @@ export function createHostApi(
             const pacingSuffix =
               env().SEND_PACING_FACT_ENABLED && gapSec !== null ? buildPacingAckSuffix(gapSec) : '';
             return makeSendAck(`text_sent#${lastMessageId}${pacingSuffix}`, lastMessageId);
+            } finally { qqReservation?.release(); }
           })(),
         );
       },
@@ -1904,11 +1931,15 @@ export function createHostApi(
               const ogg = await synthesizeVoice(clean.slice(0, 500));
               if (!ogg) return { skipped: true as const, reason: 'tts_disabled' };
               await sendChatAction(chatId, 'record_voice', opts.messageThreadId);
-              const { messageId } = await tgSendVoice(chatId, ogg, {
+              const { messageId } = await sendWithDeliveryGuard(() => tgSendVoice(chatId, ogg, {
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
-              });
+                beforeSend: assertOpen,
+              }));
               if (messageId > 0) {
+                fileSent++;
+                persistBotDeliveryEvent({ chatId, messageId, taskId: opts.taskId, kind: 'voice',
+                  replyToMessageId: opts.defaultReplyTo, cognitiveAnchorEventId: opts.cognitiveAnchorEventId });
                 await track(
                   import('../pipeline/context/manager.js')
                     .then(({ addAssistant }) =>
@@ -1916,9 +1947,13 @@ export function createHostApi(
                     )
                     .catch((err) => logger.debug({ err, chatId }, 'host addAssistant voice failed')),
                 );
+                for (const id of new Set([opts.defaultReplyTo, ...(opts.relatedQuoteIds ?? [])])) {
+                  if (id && id > 0) await markMessageAnswered(chatId, id).catch(() => undefined);
+                }
               }
               return { messageId };
             } catch (err) {
+              if (isUnknownPlatformDelivery(chatId, err)) throw err;
               logger.warn({ err, chatId }, 'host sendVoice failed — fall back to text');
               return { skipped: true as const, reason: 'tts_error' };
             }
@@ -1927,7 +1962,7 @@ export function createHostApi(
       },
       react(messageId: number, emoji: string) {
         assertOpen();
-        return trackInflight(reactToMessage(chatId, messageId, emoji));
+        return trackInflight(sendWithDeliveryGuard(() => reactToMessage(chatId, messageId, emoji)));
       },
       sendPoll(question: string, options: string[]) {
         assertOpen();
@@ -3166,6 +3201,26 @@ export function createHostApi(
       },
     },
   };
+  if (isPlatformInternalId(chatId) && env().ONEBOT_MEDIA_ENABLED) {
+    const attachments = createQQAttachmentApi({ chatId, replyToId: opts.defaultReplyTo,
+      assertOpen, guard: sendWithDeliveryGuard, maxSends: Math.min(maxFileSends, 4),
+      delivered: async (messageId, description) => {
+        fileSent++;
+        persistBotDeliveryEvent({ chatId, messageId, taskId: opts.taskId, kind: 'attachment',
+          replyToMessageId: opts.defaultReplyTo, cognitiveAnchorEventId: opts.cognitiveAnchorEventId });
+        const { addAssistant } = await import('../pipeline/context/manager.js');
+        await addAssistant(chatId, { textContent: description, messageId }, opts.messageThreadId);
+        for (const id of new Set([opts.defaultReplyTo, ...(opts.relatedQuoteIds ?? [])])) {
+          if (id && id > 0) await markMessageAnswered(chatId, id);
+        }
+      },
+    });
+    for (const [name, fn] of Object.entries(attachments)) {
+      Object.defineProperty(api.telegram, name, { configurable: true, enumerable: true,
+        value: (...args: unknown[]) => trackInflight(Reflect.apply(fn, attachments, args) as Promise<unknown>) });
+    }
+    api.telegram.sendSticker = (handle: string) => trackInflight(attachments.sendPhoto(handle));
+  }
   // Runtime stays synchronous. All tool receipts originate from host-returned results.
   for (const key of Object.keys(api) as (keyof HostApi)[]) {
     if (key === 'runtime') continue;

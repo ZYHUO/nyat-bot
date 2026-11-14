@@ -2,6 +2,7 @@ import { env } from '../env.js';
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
 import type { AttentionItem, AttentionLayer } from './types.js';
+import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
 
 const REDIS_KEY = 'xxb:meta:attention';
 const MAX = 500;
@@ -10,12 +11,20 @@ const MAX_AGE_MS = 30 * 60_000;
 
 /** Kick metaTick when coalesce quiet window ends (don't wait full META_TICK_MS). */
 let coalesceWakeTimer: ReturnType<typeof setTimeout> | null = null;
+let coalesceWakeAt = 0;
 
 function scheduleCoalesceWake(delayMs: number): void {
   const ms = Math.max(50, Math.ceil(delayMs));
+  const wakeAt = Date.now() + ms;
+  // This timer is shared across chats. A passive chat's quiet window must not
+  // postpone another chat's direct wake (nor may a steady stream of L0 reset
+  // its 50 ms deadline forever). flush() rechecks each chat's own quiet window.
+  if (coalesceWakeTimer && coalesceWakeAt <= wakeAt) return;
   if (coalesceWakeTimer) clearTimeout(coalesceWakeTimer);
+  coalesceWakeAt = wakeAt;
   coalesceWakeTimer = setTimeout(() => {
     coalesceWakeTimer = null;
+    coalesceWakeAt = 0;
     void import('./loop.js')
       .then(({ metaTick }) => metaTick())
       .catch(() => {});
@@ -23,6 +32,12 @@ function scheduleCoalesceWake(delayMs: number): void {
   if (typeof coalesceWakeTimer === 'object' && coalesceWakeTimer && 'unref' in coalesceWakeTimer) {
     (coalesceWakeTimer as NodeJS.Timeout).unref?.();
   }
+}
+
+function directCoalesceWindow(): { quietMs: number; maxMs: number } {
+  const config = env();
+  const maxMs = config.META_DIRECT_COALESCE_MAX_MS ?? 2000;
+  return { quietMs: Math.min(config.META_DIRECT_COALESCE_MS ?? 0, maxMs), maxMs };
 }
 
 /** Atomic claim: LRANGE + DEL in one Lua script (no cross-process gap). */
@@ -107,23 +122,6 @@ export class AttentionAccumulator {
       }
     }
     const item = buildItem(partial);
-    // round 4（新 goal）：**L0 直呼立刻 kick 一次 metaTick，不等 META_TICK_MS 栅格。**
-    //
-    // 2026-09-22 用户报 4-6s + 10-16s + 3-4s 叠加迟钝。七天实测段①
-    // （message in → Heart decision）P50 8.2s，构成：
-    //   Heart decision 自己 4.8s + reflect 1.2s + **等 tick 最多 5s**。
-    // round 1 我让 L0 跳过了 `META_L0_COALESCE_MS=2800` 的 hold，但**栅格还在**——
-    // flush 只发生在 `startMetaLoop` 的 `setInterval(META_TICK_MS=5000)` 上，
-    // 没有"这条消息很急，现在就 flush"的通道。等于修了一半。
-    //
-    // 现在补上：L0（DM / @ / 回 bot / 叫昵称）ingest 后立刻排一次 tick。
-    // 用 `scheduleCoalesceWake(0)` 而不是直接 `metaTick()`——它有去重
-    // （clearTimeout 旧的）、有 unref（不拖住进程退出），且 50ms 下限给了
-    // 同一批连到的几条消息一个极短合并机会（连发第三条不会各 kick 一次）。
-    //
-    // L2 不 kick：那种是"看看要不要接话"，等栅格更接近人的行为，
-    // 而且实测 114/119 条入站都是 L2，全 kick 等于没有栅格。
-    if (item.layer === 'L0') scheduleCoalesceWake(0);
     try {
       await this.persistPush(item);
     } catch (err) {
@@ -131,6 +129,10 @@ export class AttentionAccumulator {
       this.local.push(item);
       if (this.local.length > MAX) this.local.splice(0, this.local.length - MAX);
     }
+    // Direct messages schedule their own wake instead of waiting for the full
+    // Meta interval. Optional short batching applies to both QQ and Telegram;
+    // zero retains the existing 50 ms fast path. Wake only after persistence.
+    if (item.layer === 'L0') scheduleCoalesceWake(directCoalesceWindow().quietMs);
     return item;
   }
 
@@ -197,6 +199,8 @@ export class AttentionAccumulator {
     }
 
     let droppedAnswered = 0;
+    let droppedRecalled = 0;
+    const unreadRecallState: AttentionItem[] = [];
     const fresh: AttentionItem[] = [];
     const toCheck: Array<{ chatId: number; messageId: number }> = [];
     for (const it of notStale) {
@@ -213,19 +217,42 @@ export class AttentionAccumulator {
         /* fail-open: keep all */
       }
     }
-    for (const it of notStale) {
+    for (const candidate of notStale) {
+      let it = candidate;
       if (answeredSet && it.messageId && it.messageId > 0) {
         if (answeredSet.has(`${it.chatId}:${it.messageId}`)) {
           droppedAnswered += 1;
           continue;
         }
       }
+      try {
+        if (it.messageId && isOneBotMessageRecalled(it.chatId, it.messageId)) {
+          droppedRecalled += 1;
+          continue;
+        }
+        const quote = it.payload?.['replyTo'];
+        if (quote && typeof quote === 'object' && 'messageId' in quote && typeof quote.messageId === 'number' &&
+          isOneBotMessageRecalled(it.chatId, quote.messageId)) {
+          // A copied quote is content too: do not revive it through a queued
+          // Attention payload after the shared context reader has removed it.
+          it = { ...it, payload: { ...it.payload, replyTo: undefined } };
+        }
+      } catch {
+        // The Redis claim already consumed the item. Preserve it for retry,
+        // but never dispatch when the QQ recall store cannot be checked.
+        unreadRecallState.push(it);
+        continue;
+      }
       fresh.push(it);
     }
-    if (droppedStale || droppedAnswered) {
+    if (unreadRecallState.length) {
+      logger.warn({ held: unreadRecallState.length }, 'Attention recall state unavailable — holding for retry');
+      scheduleCoalesceWake(1000);
+    }
+    if (droppedStale || droppedAnswered || droppedRecalled) {
       logger.info(
-        { droppedStale, droppedAnswered, kept: fresh.length },
-        'Attention flush dropped stale/answered',
+        { droppedStale, droppedAnswered, droppedRecalled, kept: fresh.length },
+        'Attention flush dropped stale/answered/recalled',
       );
     }
 
@@ -233,71 +260,57 @@ export class AttentionAccumulator {
       (a, b) => b.pressure - a.pressure || a.createdAt - b.createdAt,
     );
 
-    // Coalesce: group chats still receiving L0/L1 stay in Redis until quiet.
+    // Keep each chat's burst independent. Direct batching has both a quiet
+    // window and a maximum age; a continuous stream cannot postpone it forever.
+    // Original timestamps survive busy requeue, so retries do not restart it.
     const coalesceMs = env().META_L0_COALESCE_MS;
-    let ready = sorted;
-    let held: AttentionItem[] = [];
-    if (coalesceMs > 0) {
-      const latestAt = new Map<number, number>();
+    const directWindow = directCoalesceWindow();
+    const directBursts = new Map<number, { first: number; latest: number }>();
+    if (directWindow.quietMs > 0) {
       for (const it of sorted) {
-        if (it.chatId > 0) continue; // DM: no hold
-        if (it.layer === 'L1_CALLBACK') continue;
-        // round 1（新 goal）：**L0 direct 也不 hold。**
-        //
-        // 2026-09-22 用户报："消息从发出到bot收到4-6s、bot反应10-16s、发出去3-4s，
-        // 叠加起来显得迟钝、前言不搭后语"。实测三段：
-        //   发布 1.5s（不是4-6s）· 收到→任务启动 P50 12.7s · 任务→首条发出 P50 14s
-        // 段1 那 12.7s = Heart decide 4.8s + reflect 1.2s + dispatch 0.9s + **合并窗 2.8s** +
-        // 其余排队。
-        //
-        // 合并窗（META_L0_COALESCE_MS=2800）本来的目的是"连发→一回"：群里一口气
-        // 刷三条，别回三条。但那对**用户直接找 bot**（@/回 bot/叫昵称）是纯亏——
-        // 人家在等你答，你却又等了 2.8 秒。DM 早就豁免了（上一行），
-        // 群里的 direct 却要陪跑，而注释里写的"@ / 回 bot 可走 timing hard-bypass"
-        // 指的是 dispatch-gate 的节奏闸，**不是这个 attention 合并窗**——两回事。
-        //
-        // 连发合并仍然对 L2（被动消息）生效：那种确实是"看看要不要接话"，
-        // 等一批再判更接近人的行为。
-        if (it.layer === 'L0') continue;
-        const t = it.createdAt || 0;
-        latestAt.set(it.chatId, Math.max(latestAt.get(it.chatId) ?? 0, t));
+        if (it.layer !== 'L0') continue;
+        const previous = directBursts.get(it.chatId);
+        directBursts.set(it.chatId, {
+          first: Math.min(previous?.first ?? it.createdAt, it.createdAt),
+          latest: Math.max(previous?.latest ?? it.createdAt, it.createdAt),
+        });
       }
-      const hot = new Set<number>();
-      for (const [cid, t] of latestAt) {
-        if (now - t < coalesceMs) hot.add(cid);
+    }
+    const directDeadlines = new Map([...directBursts].map(([chatId, burst]) => [
+      chatId, Math.min(burst.latest + directWindow.quietMs, burst.first + directWindow.maxMs),
+    ]));
+    const passiveLatest = new Map<number, number>();
+    if (coalesceMs > 0) {
+      for (const it of sorted) {
+        if (it.chatId > 0 || it.layer === 'L0' || it.layer === 'L1_CALLBACK') continue;
+        passiveLatest.set(it.chatId, Math.max(passiveLatest.get(it.chatId) ?? 0, it.createdAt));
       }
-      if (hot.size) {
-        ready = [];
-        held = [];
-        let wakeIn = Number.POSITIVE_INFINITY;
-        for (const it of sorted) {
-          // hold 判据和上面 latestAt 的收集必须**同一套**：只 hold L2。
-          // 第一版这里写的是 `(L0 || L1)`，而上面已经不收 L0 了——
-          // 两处不一致的话，L0 数据在 latestAt 里没有，但 hold 判据仍认它，
-          // 行为会随"群里同时有没有 L2"漂移。round 1 修。
-          const hold =
-            hot.has(it.chatId) &&
-            it.chatId < 0 &&
-            (it.layer === 'L2' || it.layer === 'L1');
-          if (hold) held.push(it);
-          else ready.push(it);
-        }
-        for (const cid of hot) {
-          const t = latestAt.get(cid) ?? now;
-          wakeIn = Math.min(wakeIn, coalesceMs - (now - t));
-        }
-        if (held.length) {
-          logger.info(
-            { held: held.length, hotChats: hot.size, coalesceMs, wakeInMs: wakeIn },
-            'Attention coalesce hold (waiting for quiet)',
-          );
-          if (Number.isFinite(wakeIn) && wakeIn > 0) scheduleCoalesceWake(wakeIn + 30);
-        }
+    }
+    const ready: AttentionItem[] = [];
+    const held: AttentionItem[] = [];
+    let wakeIn = Number.POSITIVE_INFINITY;
+    for (const it of sorted) {
+      // A direct burst brings that chat's passive context with it, rather than
+      // letting an older passive item dispatch separately while L0 is held.
+      // Task callbacks never wait for user typing.
+      const deadline = it.layer === 'L1_CALLBACK' ? undefined
+        : directDeadlines.get(it.chatId) ?? (it.layer !== 'L0' && passiveLatest.has(it.chatId)
+          ? passiveLatest.get(it.chatId)! + coalesceMs : undefined);
+      if (deadline !== undefined && deadline > now) {
+        held.push(it);
+        wakeIn = Math.min(wakeIn, deadline - now);
+      } else {
+        ready.push(it);
       }
+    }
+    if (held.length) {
+      logger.info({ held: held.length, coalesceMs, directCoalesceMs: directWindow.quietMs, wakeInMs: wakeIn },
+        'Attention coalesce hold (waiting for quiet)');
+      scheduleCoalesceWake(wakeIn);
     }
 
     const picked = ready.slice(0, n);
-    const remain = [...ready.slice(n), ...held];
+    const remain = [...ready.slice(n), ...held, ...unreadRecallState];
 
     if (remain.length) {
       try {
@@ -353,5 +366,8 @@ export function getAttentionAccumulator(): AttentionAccumulator {
 }
 
 export function _resetAttentionAccumulator(): void {
+  if (coalesceWakeTimer) clearTimeout(coalesceWakeTimer);
+  coalesceWakeTimer = null;
+  coalesceWakeAt = 0;
   _acc = null;
 }

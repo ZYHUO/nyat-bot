@@ -12,7 +12,7 @@ export type OneBotSendCommand =
   | { action: 'send_private_msg'; params: { user_id: number; message: OneBotSegment[] } };
 
 export const ONEBOT_MINIMAL_CAPABILITIES: PlatformCapabilities = Object.freeze({
-  inboundSegments: Object.freeze(['text', 'mention', 'mention-all', 'reply', 'image', 'voice', 'file', 'unsupported'] as const),
+  inboundSegments: Object.freeze(['text', 'mention', 'mention-all', 'reply', 'image', 'voice', 'video', 'file', 'unsupported'] as const),
   outboundSegments: Object.freeze(['text', 'mention', 'reply'] as const),
   actions: Object.freeze(['send'] as const),
 });
@@ -90,8 +90,16 @@ function normalizeSegment(raw: unknown, conversation: ConversationRef): MessageS
       return { type: 'reply', message: { conversation, id: numericId(data['id'], 'reply.id', false) } };
     case 'image':
     case 'record':
+    case 'video':
     case 'file':
-      return { type: type === 'record' ? 'voice' : type, assetRef: opaqueId(data['file'] ?? data['url'], 'media asset') };
+      return { type: type === 'record' ? 'voice' : type, assetRef: opaqueId(data['file_id'] ?? data['file'] ?? data['url'], 'media asset'),
+        ...(typeof data['url'] === 'string' && data['url'].length <= 4096 ? { url: data['url'] } : {}),
+        ...(typeof data['name'] === 'string' ? { fileName: data['name'].slice(0, 255) }
+          : type === 'file' && typeof data['file_id'] === 'string' && typeof data['file'] === 'string'
+            ? { fileName: data['file'].slice(0, 255) } : {}),
+        ...(Number.isSafeInteger(Number(data['file_size'] ?? data['size'])) && Number(data['file_size'] ?? data['size']) >= 0
+          ? { fileSize: Number(data['file_size'] ?? data['size']) } : {}),
+      };
     default:
       // Preserve the unsupported kind for callers to report/skip; do not invent text.
       return { type: 'unsupported', platformType: type };

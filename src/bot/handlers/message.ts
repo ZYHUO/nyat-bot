@@ -34,6 +34,8 @@ import {
   messageHasMedia,
 } from '../../meta/bookkeeping.js';
 import { appendTelegramMessageEvent } from '../../agent/cognitive-events.js';
+import { enqueueQqHeartBatch } from '../../meta/qq-heart-batch.js';
+import type { QqHeartCandidate } from '../../meta/qq-heart-batch.js';
 
 /** Shared ingress after each platform has authenticated, filtered and mapped its event. */
 export async function ingestChatUpdate(update: Update): Promise<void> {
@@ -147,7 +149,11 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     // - slash 命令(如 /checkin)有自己的 handler 路径,不走 Meta 回复回路 → 不算 direct
     // - bot 睡眠期 @bot 会进 sleep-queue,早晨 catch-up 补回 → 不记 direct(有兜底机制)
     const isSlashCommand = directKind === 'command';
-    const direct = !isSlashCommand && (isDM(chatId) || directKind !== null);
+    const qqDiscretion = chatId < 0 && isPlatformInternalId(chatId)
+      && env().META_QQ_MENTION_HEART_ENABLED && env().HEART_ENABLED && isMetaSubagentChat(chatId);
+    // Heart may deliberately react/pass to a QQ greeting; do not turn that
+    // valid decision into a "mandatory text reply missing" silence alert.
+    const direct = !isSlashCommand && !qqDiscretion && (isDM(chatId) || directKind !== null);
     if (direct) {
       void import('../../tracking/reply-activity.js')
         .then(async ({ recordHumanMessage }) => {
@@ -177,6 +183,10 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     });
     const isDirect = directKind !== null;
     const rawText = msg.text ?? msg.caption ?? '';
+    const qqGroup = chatId < 0 && isPlatformInternalId(chatId);
+    const qqHeartConfigured = qqGroup && heartRoute(env(), chatId) === 'heart';
+    const qqBatchEnabled = qqHeartConfigured && env().META_QQ_GROUP_COALESCE_MS > 0;
+    const qqAddressedHeart = qqHeartConfigured && env().META_QQ_MENTION_HEART_ENABLED && isDirect && directKind !== 'command';
 
     // Fall through BEFORE Meta bookkeeping to avoid duplicate Redis/Qdrant writes.
     if (metaNeedsLegacyPipeline(chatId, rawText, isDirect)) {
@@ -222,7 +232,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
 
         // Post-task 发酵窗口:人类群消息额外缓冲进窗口(附加式,不影响下方任何闸门)。
         // 放在 mute/sleep/heart 之前——被这些闸门丢掉的非 direct 消息恰恰是窗口要捞的。
-        if (fm.role === 'user' && !fm.isBot) {
+        if (fm.role === 'user' && !fm.isBot && !qqBatchEnabled) {
           try {
             const { ingestIncomingPostTask } = await import('../../subagent/post-task-window.js');
             ingestIncomingPostTask(chatId, {
@@ -359,7 +369,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         //
         // Same-speaker burst: 正在回这个人的 L0 / CodeAct 占线时，后续无 @ 气泡
         // 也升 L0（否则 Heart busy 会把「钱包还有多少」整句丢掉）。
-        if (!isDirect && layerDec.layer !== 'L0' && userId && userId > 0) {
+        if (!qqBatchEnabled && !isDirect && layerDec.layer !== 'L0' && userId && userId > 0) {
           try {
             const { shouldForceSameSpeakerL0, markSpeakerBurst } = await import(
               '../../meta/speaker-burst.js'
@@ -410,7 +420,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
           }
         }
 
-        if (!isDirect && layerDec.layer !== 'L0') {
+        if (qqAddressedHeart || (!isDirect && layerDec.layer !== 'L0')) {
           const { env } = await import('../../env.js');
           // Nyat Trench Phase 1 预备：Meta heart 是这个仓库实际在做抑制的那一层
           // （实测 12,009 次判定只放行 7.7%，而影子想 speak 85.6%）。
@@ -491,15 +501,24 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
           }
 
           if (heartPath === 'heart') {
-            void (async () => {
+            const processHeartBatch = async (batch: QqHeartCandidate[], signal: AbortSignal): Promise<void> => {
+              const anchor = batch[batch.length - 1]!;
+              const directlyAddressed = batch.some(item => item.addressed);
+              const ongoingFollowup = !directlyAddressed && batch.some(item => item.ongoingFollowup);
+              const addressed = directlyAddressed || ongoingFollowup;
               try {
                 const { evaluateMetaHeart } = await import('../../meta/heart-adapter.js');
                 const heart = await evaluateMetaHeart({
                   chatId,
-                  formatted: fm,
-                  layer: layerDec.layer,
-                  cognitiveAnchorEventId,
+                  formatted: anchor.formatted,
+                  layer: anchor.layer,
+                  cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
+                  addressed,
+                  ongoingFollowup,
+                  batchMessages: batch.map(item => item.formatted),
+                  signal,
                 });
+                if (signal.aborted) return;
                 if (heart.verdict !== 'allow') {
                   // Silence decided by the heart (cooldown / engagement / pass /
                   // refractory). Recording it lets the shadow comparison ask the
@@ -525,48 +544,58 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
                 const elevBoost = heart.pressureBoost ?? 0;
 
                 const basePressure = elevLayer === 'L0' ? 100 : elevLayer === 'L1' ? 70 : 30;
-                await getAttentionAccumulator().ingestAsync({
-                  chatId,
-                  layer: elevLayer,
-                  reason: elevReason,
-                  messageId,
-                  userId,
-                  textPreview,
-                  pressure: basePressure + elevBoost,
-                  messageThreadId: fm.messageThreadId,
-                  cognitiveAnchorEventId,
-                  payload: {
-                    username: fm.username || undefined,
-                    fullName: fm.fullName || undefined,
-                    heartPath: heart.path,
-                    ...(fm.replyTo
-                      ? {
-                          replyTo: {
-                            messageId: fm.replyTo.messageId,
-                            uid: fm.replyTo.uid,
-                            fullName: fm.replyTo.fullName,
-                            textSnippet: (fm.replyTo.textSnippet ?? '').slice(0, 200),
-                          },
-                        }
-                      : {}),
-                  },
-                });
+                for (const item of batch) {
+                  if (signal.aborted) return;
+                  const message = item.formatted;
+                  await getAttentionAccumulator().ingestAsync({
+                    chatId,
+                    layer: elevLayer,
+                    reason: elevReason,
+                    messageId: message.messageId,
+                    userId: message.uid,
+                    textPreview: (message.textContent || '').slice(0, 200),
+                    pressure: basePressure + elevBoost,
+                    messageThreadId: message.messageThreadId,
+                    cognitiveAnchorEventId: item.cognitiveAnchorEventId,
+                    payload: {
+                      username: message.username || undefined,
+                      fullName: message.fullName || undefined,
+                      heartPath: heart.path,
+                      ...(message.replyTo
+                        ? { replyTo: {
+                          messageId: message.replyTo.messageId,
+                          uid: message.replyTo.uid,
+                          fullName: message.replyTo.fullName,
+                          textSnippet: (message.replyTo.textSnippet ?? '').slice(0, 200),
+                        } }
+                        : {}),
+                    },
+                  });
+                }
                 logger.info(
                   { chatId, messageId, layer: elevLayer, reason: elevReason },
                   'Meta attention ingested (heart)',
                 );
               } catch (err) {
+                if (signal.aborted) return;
+                if (qqGroup) {
+                  // Model failures are handled as wait by Heart. An unrelated
+                  // infrastructure error (including recall storage) must not
+                  // turn unverified QQ input into a forced text task.
+                  logger.warn({ chatId, messageId: anchor.formatted.messageId }, 'QQ Heart batch unavailable; no text fallback');
+                  return;
+                }
                 // Infra failure ≠ Heart "pass". Fail-open once into Attention so the
                 // msg isn't silently lost; gap-fill may still dispatch.
                 logger.warn({ err, chatId, messageId }, 'Meta heart path failed — soft ingest');
                 try {
                   await getAttentionAccumulator().ingestAsync({
                     chatId,
-                    layer: 'L1',
+                    layer: addressed ? 'L0' : 'L1',
                     reason: 'heart:infra_fail',
-                    messageId,
-                    userId,
-                    textPreview,
+                    messageId: anchor.formatted.messageId,
+                    userId: anchor.formatted.uid,
+                    textPreview: (anchor.formatted.textContent || '').slice(0, 200),
                     pressure: 55,
                     messageThreadId: fm.messageThreadId,
                     cognitiveAnchorEventId,
@@ -589,7 +618,17 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
                   logger.warn({ err: err2, chatId, messageId }, 'Meta heart soft ingest failed');
                 }
               }
-            })();
+            };
+            const candidate: QqHeartCandidate = { chatId, formatted: fm, layer: layerDec.layer,
+              addressed: qqAddressedHeart, cognitiveAnchorEventId };
+            if (qqBatchEnabled && !candidate.addressed && fm.uid > 0) {
+              const { isInFlightCodeActForUser } = await import('../../meta/speaker-burst.js');
+              // This is a same-chat active task for this exact sender, not a
+              // general group continuation or permission for other members.
+              candidate.ongoingFollowup = isInFlightCodeActForUser(chatId, fm.uid);
+            }
+            if (qqBatchEnabled) enqueueQqHeartBatch(candidate, processHeartBatch);
+            else void processHeartBatch([candidate], new AbortController().signal);
             return 'done';
           }
 
@@ -748,7 +787,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         void (async () => {
           try {
             const { processMedia } = await import('../../pipeline/stages/media.js');
-            await processMedia(formatted);
+            await processMedia(formatted, chatId);
           } catch (err) {
             logger.debug({ err, chatId }, 'Meta path: deferred processMedia failed');
           }

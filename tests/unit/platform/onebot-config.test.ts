@@ -32,7 +32,8 @@ describe('OneBot deployment configuration and capability scope', () => {
     const methods = codeActMethodsForChat(-(2 ** 52 + 1));
     expect(methods).toContain('telegram.sendText');
     expect(methods).toContain('telegram.sendFinal');
-    for (const absent of ['telegram.sendVoice', 'telegram.sendSticker', 'telegram.react', 'telegram.sendPoll', 'allowlist.approve']) {
+    expect(methods).toContain('telegram.react');
+    for (const absent of ['telegram.sendVoice', 'telegram.sendSticker', 'telegram.sendPoll', 'allowlist.approve']) {
       expect(methods).not.toContain(absent);
       expect(buildCodeActSystemPrompt(`Use ${absent} now.`, methods)).not.toContain(absent);
     }

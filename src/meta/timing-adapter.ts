@@ -30,6 +30,7 @@ import { scheduleMetaDeferReeval } from './defer.js';
 import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
 import { createHash } from 'node:crypto';
 import { checkCodeActActivation } from '../subagent/activation-policy.js';
+import { findMessageRef, isPlatformInternalId } from '../platform/identity-store.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
@@ -109,6 +110,33 @@ export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> 
   }
   try {
     const { getAttentionAccumulator } = await import('./attention.js');
+    const rawBatch = anchor.payload?.['qqBatch'];
+    if (isPlatformInternalId(chatId) && Array.isArray(rawBatch)) {
+      // This is host-written metadata, but never trust it to change scope or
+      // invent quote identities after a delayed replay.
+      for (const entry of rawBatch.slice(0, 32)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const item = entry as Record<string, unknown>;
+        if (typeof item.messageId !== 'number' || !Number.isSafeInteger(item.messageId)
+          || !findMessageRef(chatId, item.messageId)) continue;
+        const quote = item.replyTo && typeof item.replyTo === 'object' ? item.replyTo as Record<string, unknown> : undefined;
+        const replyTo = quote && typeof quote.messageId === 'number' && Number.isSafeInteger(quote.messageId)
+          && findMessageRef(chatId, quote.messageId) ? {
+            messageId: quote.messageId, uid: typeof quote.uid === 'number' ? quote.uid : 0,
+            fullName: typeof quote.fullName === 'string' ? quote.fullName : undefined,
+            textSnippet: typeof quote.textSnippet === 'string' ? quote.textSnippet.slice(0, 200) : undefined,
+          } : undefined;
+        await getAttentionAccumulator().ingestAsync({
+          chatId, layer: anchor.layer, reason: `wait_resume:${anchor.reason}`,
+          messageId: item.messageId,
+          userId: typeof item.userId === 'number' && Number.isSafeInteger(item.userId) ? item.userId : undefined,
+          textPreview: typeof item.textPreview === 'string' ? item.textPreview.slice(0, 200) : undefined,
+          pressure: anchor.pressure, cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
+          payload: { ...anchor.payload, qqBatch: undefined, replyTo, username: item.username, fullName: item.fullName },
+        });
+      }
+      return true;
+    }
     await getAttentionAccumulator().ingestAsync({
       chatId: anchor.chatId,
       layer: anchor.layer,

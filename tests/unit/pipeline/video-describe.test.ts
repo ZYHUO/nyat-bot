@@ -47,6 +47,8 @@ const callWithFallbackMock = vi.fn(async () => ({ content: '两个人在打游�
 vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: (...a: unknown[]) => callWithFallbackMock(...a),
 }));
+const extractFramesMock = vi.fn(async () => [{ png: Buffer.from('sample-frame'), atSeconds: 0 }]);
+vi.mock('../../../src/pipeline/video-frames.js', () => ({ extractVideoFrames: (...args: unknown[]) => extractFramesMock(...args) }));
 
 const { describeMultimodal } = await import('../../../src/pipeline/multimodal.js');
 const { formatMessage } = await import('../../../src/pipeline/formatter.js');
@@ -55,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   envValues.VIDEO_DESCRIBE_ENABLED = true;
   envValues.VIDEO_MAX_DURATION_SEC = 300;
+  envValues.VIDEO_FRAME_FALLBACK_ENABLED = false;
   fetchMock.mockResolvedValue({
     ok: true,
     arrayBuffer: async () => FAKE_MP4.buffer.slice(FAKE_MP4.byteOffset, FAKE_MP4.byteOffset + FAKE_MP4.byteLength),
@@ -151,6 +154,35 @@ describe('describeMultimodal · 视频', () => {
     const out = await describeMultimodal({ messageId: 1, uid: 2, textContent: 'hi' } as never);
     expect(out).toBeNull();
     expect(callWithFallbackMock).not.toHaveBeenCalled();
+  });
+
+  it('native video failure falls back to sampled images with explicit visual-only context', async () => {
+    envValues.VIDEO_FRAME_FALLBACK_ENABLED = true;
+    callWithFallbackMock.mockRejectedValueOnce(new Error('video route unavailable'))
+      .mockResolvedValueOnce({ content: '画面中有一只红色小球。', label: 'vision', model: 'vision-model' } as never);
+    const out = await describeMultimodal(videoMsg() as never, -123);
+    expect(out).toBe('[视频采样画面：画面中有一只红色小球。]');
+    expect(extractFramesMock).toHaveBeenCalledTimes(1);
+    const arg = callWithFallbackMock.mock.calls[1]![0] as never as { usage: string; chatId: number; messages: Array<{ content: Array<{ type: string; text?: string; image?: string }> }> };
+    expect(arg.usage).toBe('vision'); expect(arg.chatId).toBe(-123);
+    expect(arg.messages[0]!.content[0]!.text).toContain('没有提供音轨');
+    expect(arg.messages[0]!.content[1]!.image).toBe('data:image/png;base64,' + Buffer.from('sample-frame').toString('base64'));
+  });
+
+  it('frame fallback is not called when disabled or the native video succeeds', async () => {
+    callWithFallbackMock.mockRejectedValueOnce(new Error('video failed'));
+    expect(await describeMultimodal(videoMsg() as never)).toBe('[视频（12 秒）]');
+    envValues.VIDEO_FRAME_FALLBACK_ENABLED = true;
+    expect(await describeMultimodal(videoMsg() as never)).toContain('[视频内容：');
+    expect(extractFramesMock).not.toHaveBeenCalled();
+  });
+
+  it('empty native response can fall back, while decoder refusal preserves the placeholder', async () => {
+    envValues.VIDEO_FRAME_FALLBACK_ENABLED = true;
+    callWithFallbackMock.mockResolvedValueOnce({ content: '', label: 'video', model: 'video' } as never);
+    extractFramesMock.mockRejectedValueOnce(new Error('invalid media'));
+    expect(await describeMultimodal(videoMsg() as never)).toBe('[视频（12 秒）]');
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
   });
 });
 

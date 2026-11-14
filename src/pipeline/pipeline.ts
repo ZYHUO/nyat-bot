@@ -87,7 +87,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     // 2. Media stage — vision / sticker / multimodal / replyTo attachments
     const tmedia = performance.now();
-    await processMedia(formatted);
+    await processMedia(formatted, job.chatId);
     if (formatted.imageFileId || formatted.sticker || formatted.audioFileId ||
         formatted.voiceFileId || formatted.documentFileId || formatted.videoFileId ||
         formatted.videoNoteFileId) {

@@ -11,6 +11,8 @@ const tryClaimQuote = vi.fn(async () => true);
 const tryMarkCodeActActive = vi.fn(async () => true);
 const allQuotesAnswered = vi.fn(async () => false);
 const isMetaSubagentChat = vi.fn(() => true);
+const suppressHeartDispatch = vi.fn(async (_chatId: number) => false);
+const markMessageAnswered = vi.fn(async (_chatId: number, _messageId: number) => undefined);
 
 vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: (...args: unknown[]) => callWithFallback(...args),
@@ -28,13 +30,13 @@ vi.mock('../../../src/subagent/task-store.js', () => ({
 vi.mock('../../../src/meta/answered.js', () => ({
   allQuotesAnswered: (...args: unknown[]) => allQuotesAnswered(...args),
   isMessageAnswered: vi.fn(async () => false),
-  markMessageAnswered: vi.fn(async () => undefined),
+  markMessageAnswered: (chatId: number, messageId: number) => markMessageAnswered(chatId, messageId),
 }));
 vi.mock('../../../src/meta/flags.js', () => ({
   isMetaSubagentChat: (...args: unknown[]) => isMetaSubagentChat(...args),
 }));
 vi.mock('../../../src/meta/heart-refractory.js', () => ({
-  shouldSuppressMetaHeartDispatch: vi.fn(async () => false),
+  shouldSuppressMetaHeartDispatch: (chatId: number) => suppressHeartDispatch(chatId),
 }));
 vi.mock('../../../src/bot/bot.js', () => ({
   getBotUid: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 2 ** 52 + 11 : 999001,
@@ -42,6 +44,13 @@ vi.mock('../../../src/bot/bot.js', () => ({
 vi.mock('../../../src/platform/owner-context.js', () => ({
   isConversationOwner: (chatId: number, uid: number) => chatId === -(2 ** 52 + 10)
     ? uid === 2 ** 52 + 12 : uid === 6251541967,
+}));
+vi.mock('../../../src/shared/master-identity.js', () => ({
+  buildMasterIdentityBlock: () => 'synthetic owner identity', masterShortHint: () => 'synthetic owner',
+}));
+vi.mock('../../../src/context-engine/index.js', () => ({
+  getContextEngine: () => ({ assemble: async () => ({ prompt: 'synthetic scoped context', manifest: { cacheHitRatio: 0 } }) }),
+  staticText: vi.fn(), ephemeralText: vi.fn(), volatileText: vi.fn(), deltaText: vi.fn(),
 }));
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
@@ -80,6 +89,26 @@ describe('L0 autoDispatch before Meta LLM', () => {
     tryClaimQuote.mockResolvedValue(true);
     tryMarkCodeActActive.mockClear();
     tryMarkCodeActActive.mockResolvedValue(true);
+    suppressHeartDispatch.mockReset().mockResolvedValue(false);
+    markMessageAnswered.mockClear();
+  });
+
+  it.each(['L0', 'L1'] as const)('recent-reply suppression applies only to passive Heart, not addressed %s', async layer => {
+    suppressHeartDispatch.mockResolvedValue(true);
+    const chatId = -(2 ** 52 + 10), messageId = 2 ** 52 + 13;
+    await runMetaSession([{
+      id: 'qq-heart-priority', chatId, layer, pressure: layer === 'L0' ? 100 : 70,
+      reason: 'heart:reply', messageId, userId: 2 ** 52 + 12,
+      textPreview: '这是新补充的问题', createdAt: Date.now(),
+    }], []);
+    if (layer === 'L0') {
+      expect(callWithFallback).not.toHaveBeenCalled();
+      expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+      expect(markMessageAnswered).not.toHaveBeenCalled();
+    } else {
+      expect(enqueueCodeActJob).not.toHaveBeenCalled();
+      expect(markMessageAnswered).toHaveBeenCalledWith(chatId, messageId);
+    }
   });
 
   it.each([true, false])('QQ L0 reply ownership uses scoped self instead of Telegram self (%s)', async ownReply => {

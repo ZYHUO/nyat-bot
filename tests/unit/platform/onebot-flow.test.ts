@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   getDb: vi.fn(), getRedis: vi.fn(), enqueue: vi.fn(), event: vi.fn(),
   addMessage: vi.fn(), getRecent: vi.fn(), recordUser: vi.fn(), loop: vi.fn(),
   config: {
-    ONEBOT_ENABLED: true, ONEBOT_ACCOUNT_ID: '42', ONEBOT_OWNER_ID: '99',
+    ONEBOT_ENABLED: true, ONEBOT_ACCOUNT_ID: '42', ONEBOT_OWNER_ID: '99', ONEBOT_DISPLAY_NAME: '啾咪囝',
     ONEBOT_ALLOWED_GROUP_IDS: '', ONEBOT_ALLOWED_USER_IDS: '', MASTER_UID: 99,
     META_SUBAGENT_ENABLED: true, META_SUBAGENT_CHAT_IDS: [] as number[], META_ACTIVATED_AT_SEC: 1,
     CODEACT_ISOLATION_ENABLED: true, META_L0_COALESCE_MS: 0, META_ATTENTION_TOP_N: 20,
@@ -172,6 +172,9 @@ describe('real OneBot codec to shared Meta ingress', () => {
     const identity = getBotIdentity(message.chat.id);
     expect(message.chat.id).toBeLessThan(-PLATFORM_INTERNAL_ID_BASE);
     expect(identity.uid).toBeGreaterThan(PLATFORM_INTERNAL_ID_BASE);
+    expect(identity.displayName).toBe('啾咪囝');
+    expect(message.text).toContain('@啾咪囝');
+    expect(message.text).not.toContain(`@${identity.uid}`);
     expect(message.entities?.[0]).toMatchObject({ type: 'text_mention', offset: '你好😀 '.length, user: { id: identity.uid } });
     expect(detectDirectInteraction(update, { botUid: identity.uid, botUsername: identity.username, botNicknames: identity.nicknames })).toBe('mention');
     await ingestChatUpdate(update);

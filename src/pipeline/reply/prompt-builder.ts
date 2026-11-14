@@ -28,7 +28,7 @@ import { buildRoleHint } from '../../tracking/behavioral-roles.js';
 import { recallEpisodes } from '../../tracking/group-episodes.js';
 import { getExemplars } from '../../learners/dialect-exemplar.js';
 import { currentRiskLevel, buildValveHint } from '../../agent/reverse-valve.js';
-import { getBotUid } from '../../bot/bot.js';
+import { getBotUid, getBotIdentity } from '../../bot/bot.js';
 import { isConversationOwner } from '../../platform/owner-context.js';
 import { isPlatformInternalId } from '../../platform/identity-store.js';
 import { masterShortHint } from '../../shared/master-identity.js';
@@ -117,6 +117,7 @@ export function buildSystemPrompt(userId?: number, _chatId?: number): string {
  */
 export function buildCodeActIdentityPrompt(userId?: number, chatId?: number): string {
   const platformChat = chatId !== undefined && isPlatformInternalId(chatId);
+  const self = platformChat ? getBotIdentity(chatId) : undefined;
   const masterUid = env().MASTER_UID;
   const masterUidHint = platformChat ? masterShortHint(chatId) : masterUid
     ? `主人 uid 以运行时注入为准（当前 env：${masterUid}）；行尾标「主人」的就是主人。`
@@ -126,9 +127,10 @@ export function buildCodeActIdentityPrompt(userId?: number, chatId?: number): st
     loadCachedPrompt('safety/guardrails.md'),
     loadCachedPrompt('style/tone.md'),
     loadCachedPrompt('task/codeact-reply.md'),
+    ...(self ? [`# 当前 QQ 自身身份\n${JSON.stringify({ name: self.displayName, uid: self.uid, aliases: self.nicknames })}\n上述是你自己的会话身份资料；这些名字被提及时是在叫你，不是另一个群友。协议标记的 @ 对象以映射 uid 为准。提及意味着注意这段话，不等于必须逐条发文字回复。`] : []),
     `# CodeAct 输出差异（覆盖「数据包/JSON」旧契约）
 
-你**不**输出 JSON / 协议数据包。${platformChat ? '当前是 QQ 会话；仅通过兼容命名 telegram.sendText 发送文字（宿主路由到 QQ），不支持贴纸、媒体、投票、反应或 Telegram 管理操作。' : '用 `telegram.sendText(纯文本)` 说话；贴纸用 stickers.pick + sendSticker。'}
+你**不**输出 JSON / 协议数据包。${platformChat ? '当前是 QQ 会话；历史 telegram.* 方法名由宿主路由到 QQ。具体可用方法以本轮隔离执行能力清单为准；不要从旧提示词推断额外权限或能力。' : '用 `telegram.sendText(纯文本)` 说话；贴纸用 stickers.pick + sendSticker。'}
 persona 若写「通过数据包完成行动」——对本路径作废。
 
 认人：上下文 \`[…] 名字(@username): … ⟨uid:N⟩\`；认 @/uid 不认嘴。${masterUidHint}
