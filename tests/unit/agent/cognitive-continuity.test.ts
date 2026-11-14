@@ -10,6 +10,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 }));
 
 import { recordMissionProposal } from '../../../src/agent/nyatos-state.js';
+import { appendCognitiveEvent } from '../../../src/agent/cognitive-events.js';
 import {
   checkpointProcess,
   claimDueMissionWakes,
@@ -29,6 +30,40 @@ beforeEach(() => {
 });
 
 afterEach(() => db.close());
+
+describe('complete continuity history', () => {
+  it('keeps the first due mission visible after more than 500 newer proposals', () => {
+    const scope = { visibility: 'chat' as const, chatId: -100 };
+    const now = Math.floor(Date.now() / 1000);
+    let first = '';
+    for (let i = 0; i < 601; i++) {
+      const result = recordMissionProposal({ schema: 'mission_proposal.v1', objective: `mission ${i}`, scope,
+        successChecks: ['verified result'], watchFor: [], budget: { maxAttempts: 1, maxWallClockSec: 600 },
+        status: 'proposed', nextWakeAt: i ? now + 86400 : now - 1 });
+      if (!i) first = result!.eventId;
+    }
+    expect(getMissionContinuity(first, scope)?.missionId).toBe(first);
+    expect(claimDueMissionWakes(now).map(w => w.missionId)).toEqual([first]);
+    expect(claimDueMissionWakes(now)).toEqual([]);
+  });
+  it('does not resurrect consumed wakes when their checkpoint falls beyond 1000 events', () => {
+    const scope = { visibility: 'chat' as const, chatId: -100 };
+    const now = Math.floor(Date.now() / 1000);
+    const wake = requestProcessWake({ processId: 'old', scope, kind: 'observer', reason: 'due', wakeAt: now - 1 })!;
+    checkpointProcess({ processId: 'old', scope, wakeEventId: wake.eventId, status: 'completed', recordedAt: now });
+    for (let i = 0; i < 1001; i++) appendCognitiveEvent({ type: 'cognitive_process_checkpoint', source: 'host', scope,
+      occurredAt: now + i + 1, fact: { value: { processId: `other-${i}`, wakeEventId: `other-${i}`, scope,
+        status: 'completed', recordedAt: now + i + 1, outcomeEventIds: [] } } });
+    expect(listDueProcessWakes(now + 2000)).toEqual([]);
+  });
+  it('a stop in another scope cannot cancel a same-named process', () => {
+    const scope = { visibility: 'chat' as const, chatId: -100 };
+    const now = Math.floor(Date.now() / 1000);
+    const wake = requestProcessWake({ processId: 'shared-name', scope, kind: 'observer', reason: 'due', wakeAt: now - 1 })!;
+    stopProcess({ processId: 'shared-name', scope: { visibility: 'chat', chatId: -200 }, recordedAt: now + 1 });
+    expect(listDueProcessWakes(now + 2).map(w => w.wakeEventId)).toEqual([wake.eventId]);
+  });
+});
 
 describe('cognitive continuity ledger', () => {
   it('wakes a proposed mission once, then requires host evidence to close it', () => {

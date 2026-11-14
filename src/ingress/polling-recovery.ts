@@ -1,6 +1,8 @@
 import type { Bot, PollingOptions } from 'grammy';
 import { GrammyError } from 'grammy';
 import { logger } from '../shared/logger.js';
+import { ownBotPolling } from './polling-lifecycle.js';
+export { cancelBotPollingRetries, drainBotPolling } from './polling-lifecycle.js';
 
 const log = logger.child({ mod: 'polling-recovery' });
 
@@ -26,6 +28,7 @@ export interface StartPollingDeps {
   start: (opts: PollingOptions) => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   exit?: (code: number) => void;
+  signal?: AbortSignal;
 }
 
 /**
@@ -47,11 +50,17 @@ export async function startPollingWithRecovery(
   opts: PollingOptions,
   deps: StartPollingDeps,
 ): Promise<void> {
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => {
+    const done = () => { clearTimeout(timer); deps.signal?.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    deps.signal?.addEventListener('abort', done, { once: true });
+    if (deps.signal?.aborted) done();
+  }));
   const exit = deps.exit ?? ((code: number) => process.exit(code));
   const userOnStart = opts.onStart;
   let attempt = 0;
   for (;;) {
+    if (deps.signal?.aborted) return;
     const isRetry = attempt > 0;
     try {
       await deps.start({
@@ -64,6 +73,7 @@ export async function startPollingWithRecovery(
       });
       return; // stop() 被正常调用，轮询干净退出
     } catch (err) {
+      if (deps.signal?.aborted) return;
       const kind = classifyPollingError(err);
       attempt += 1;
       if (kind === 'unauthorized') {
@@ -80,5 +90,8 @@ export async function startPollingWithRecovery(
 
 /** 给 index.ts 用的薄封装：把真 bot 接进去。 */
 export function startBotPollingWithRecovery(bot: Bot, opts: PollingOptions): void {
-  void startPollingWithRecovery(opts, { start: (o) => bot.start(o) });
+  const runningPolling = ownBotPolling(signal => startPollingWithRecovery(opts, { start: (o) => bot.start(o), signal }));
+  // Keep the original promise for shutdown: a handler still running after
+  // bot.stop() must settle before the database can be declared quiescent.
+  void runningPolling.catch(() => log.error('Polling recovery unexpectedly terminated'));
 }

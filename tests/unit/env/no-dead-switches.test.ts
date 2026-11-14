@@ -91,8 +91,6 @@ const WEAK_ONLY_READERS: ReadonlySet<string> = new Set([
   'TIMING_WAIT_HINT_ENABLED',
   'MOOD_TUNE_ENABLED',
   'TURN_UNANSWERED_REVISIT_ENABLED',
-  // heart-route.ts:72 `if (f.META_HEART_ENABLED) return 'heart'`（f 是参数）
-  'META_HEART_ENABLED',
 ]);
 
 function aliasesIn(src: string): string[] {

@@ -91,6 +91,7 @@ function msg(text: string, messageId = 1) {
 describe('chroma 检索与写入', () => {
   beforeEach(() => {
     Object.assign(envState, {
+      MEMORY_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
       MEMORY_MIN_SCORE: 0, MEMORY_COLLECTION: 'xxb_group_history',
       MEMORY_HYBRID_ENABLED: false, MEMORY_DEDUP_ENABLED: false, MEMORY_DEDUP_THRESHOLD: 0.93,
     });
@@ -148,7 +149,9 @@ describe('chroma 检索与写入', () => {
       searchHits = [hit('x', 0.9)];
       await fresh.searchMemory(CHAT, '查询');
       envState.MEMORY_EMBED_MODEL = 'Xenova/some-other-model';
-      await fresh.searchMemory(CHAT, '再查一次');
+      searchSpy.mockClear();
+      expect(await fresh.searchMemory(CHAT, '再查一次')).toEqual([]);
+      expect(searchSpy).not.toHaveBeenCalled();
       expect(loadedModels).toHaveLength(1);
     });
 
@@ -298,7 +301,7 @@ describe('chroma 检索与写入', () => {
     }
 
     it('私聊记忆可回到其自己的会话，不因private标签失去记忆', async () => {
-      searchHits = [injHit('私聊内容', { chatId: 12345, sourceChatId: 12345, visibility: 'private' })];
+      searchHits = [injHit('私聊内容', { mid: '12345_1', chatId: 12345, sourceChatId: 12345, visibility: 'private' })];
       expect((await searchMemoryForInjection(12345, '查询')).map(m => m.textContent)).toEqual(['私聊内容']);
       expect(searchSpy).toHaveBeenCalledOnce();
     });

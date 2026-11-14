@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DeliveryError } from '../../../src/shared/delivery-result.js';
 import type {
   ChatJob,
   FormattedMessage,
@@ -40,6 +41,13 @@ const mockApplyChatPathPolicy = vi.fn();
 const mockReflectChatPathPolicy = vi.fn();
 const mockAcquireChatLock = vi.fn();
 const mockTransitionToStop = vi.fn();
+const mockMarkAnswered = vi.fn(async () => {});
+const mockUpdateObligation = vi.fn(async () => {});
+vi.mock('../../../src/pipeline/turn/answered-store.js', () => ({
+  markAnswered: (...args: Parameters<typeof mockMarkAnswered>) => mockMarkAnswered(...args),
+  pickRevisitCandidates: vi.fn(async () => []),
+}));
+vi.mock('../../../src/pipeline/turn/obligation-store.js', () => ({ updateObligationState: (...args: Parameters<typeof mockUpdateObligation>) => mockUpdateObligation(...args) }));
 
 const { mockLogger, sendDirect } = vi.hoisted(() => {
   const logger: Record<string, unknown> = {
@@ -566,6 +574,61 @@ describe("processPipeline path branching", () => {
 
     expect(mockReflectChatPathPolicy).not.toHaveBeenCalled();
   });
+
+  it('F01 suppression cannot become assistant history, answered state, obligation completion or fallback', async () => {
+    mockJudge.mockResolvedValue({ action: 'REPLY', replyPath: 'direct', level: 'L1_MICRO', latencyMs: 0 });
+    sendDirect.mockRejectedValueOnce(new DeliveryError({ status: 'suppressed', chatId: -100123,
+      intentId: 'suppressed', revision: 0, plannedPartCount: 1, parts: [], reason: 'duplicate_text' }));
+    await processPipeline(makeJob());
+    expect(mockAddAssistant).not.toHaveBeenCalled();
+    expect(mockMarkAnswered).not.toHaveBeenCalled();
+    expect(mockUpdateObligation).not.toHaveBeenCalled();
+    expect(sendDirect).toHaveBeenCalledTimes(1);
+  });
+
+  it('F01 A ACK / B rejected settles only A; the trigger B is not implicitly answered', async () => {
+    mockJudge.mockResolvedValue({ action: 'REPLY', rule: 'reply_to_self', replyPath: 'direct', level: 'L0_RULE', latencyMs: 0 });
+    mockGenerateReply.mockResolvedValue({ replies: [
+      { replyContent: '给A的回复', targetMessageId: 99, delayMs: 0 },
+      { replyContent: '给B的回复', targetMessageId: 42, delayMs: 0 },
+    ], toolsUsed: [], toolExecutionFailed: false });
+    sendDirect.mockResolvedValueOnce({ messageId: 1001, parts: [{ messageId: 1001, text: 'A实际可见正文', partIndex: 0 }] })
+      .mockRejectedValueOnce(new DeliveryError({ status: 'failed', chatId: -100123, targetMessageId: 42,
+        intentId: 'B', revision: 0, parts: [], plannedPartCount: 1, reason: 'rejected' }));
+    const job = makeJob();
+    job.turnContext = { obligationId: 'need-B', isReplan: true, gateBypass: true, epoch: 1 };
+    await processPipeline(job);
+    expect(mockAddAssistant).toHaveBeenCalledExactlyOnceWith(-100123, { messageId: 1001, textContent: 'A实际可见正文' });
+    expect(mockMarkAnswered).toHaveBeenCalledExactlyOnceWith(-100123, [99]);
+    expect(mockUpdateObligation).not.toHaveBeenCalled();
+    expect(sendDirect).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  it('F01 a complete ACK still settles the triggering obligation', async () => {
+    sendDirect.mockResolvedValueOnce({ messageId: 1003, parts: [{ messageId: 1003, text: '实际回复', partIndex: 0 }] });
+    const job = makeJob();
+    job.turnContext = { obligationId: 'need-trigger', isReplan: true, gateBypass: true, epoch: 1 };
+    await processPipeline(job);
+    expect(mockMarkAnswered).toHaveBeenCalledWith(-100123, [42]);
+    expect(mockUpdateObligation).toHaveBeenCalledWith(-100123, 'need-trigger', 'fulfilled');
+    expect(mockAddAssistant).toHaveBeenCalledWith(-100123, { messageId: 1003, textContent: '实际回复' });
+  });
+
+  it('F01 unknown after one shard saves that ACK, stops later targets and leaves unanswered work open', async () => {
+    mockJudge.mockResolvedValue({ action: 'REPLY', rule: 'reply_to_self', replyPath: 'direct', level: 'L0_RULE', latencyMs: 0 });
+    mockGenerateReply.mockResolvedValue({ replies: [
+      { replyContent: '整段计划不能写入', targetMessageId: 42, delayMs: 0 },
+      { replyContent: '后续目标不能继续发', targetMessageId: 99, delayMs: 0 },
+    ], toolsUsed: [], toolExecutionFailed: false });
+    sendDirect.mockRejectedValueOnce(new DeliveryError({ status: 'unknown', chatId: -100123,
+      intentId: 'partial', revision: 1, plannedPartCount: 2,
+      parts: [{ messageId: 1002, text: '仅确认此前片段', partIndex: 0 }] }));
+    await processPipeline(makeJob());
+    expect(mockAddAssistant).toHaveBeenCalledExactlyOnceWith(-100123, { messageId: 1002, textContent: '仅确认此前片段' });
+    expect(mockMarkAnswered).not.toHaveBeenCalled();
+    expect(mockUpdateObligation).not.toHaveBeenCalled();
+    expect(sendDirect).toHaveBeenCalledTimes(1);
+  }, 15000);
 
   it("puts the chat into STOP when Telegram says the bot lacks send rights", async () => {
     sendDirect.mockRejectedValueOnce(new Error("400: Bad Request: not enough rights to send text messages to the chat"));

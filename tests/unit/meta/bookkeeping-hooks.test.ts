@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { FormattedMessage } from '../../../src/shared/types.js';
+import { drainIngressTasks } from '../../../src/ingress/background.js';
 
 const mocks = vi.hoisted(() => ({
   env: vi.fn(),
@@ -72,6 +73,16 @@ beforeEach(() => {
 });
 
 describe('runMetaBookkeepingHooks · 三个新接的 hook', () => {
+  it('shutdown joins delayed bookkeeping writes rather than only the intake callback', async () => {
+    let release!: () => void; let wrote = false;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    mocks.maybeNetworkBurst.mockImplementationOnce(async () => { await blocked; wrote = true; });
+    runMetaBookkeepingHooks(CHAT, msg());
+    await vi.waitFor(() => expect(mocks.maybeNetworkBurst).toHaveBeenCalledOnce());
+    let clean = false; const drain = drainIngressTasks().then(() => { clean = true; });
+    await Promise.resolve(); expect(clean).toBe(false); expect(wrote).toBe(false);
+    release(); await drain; expect(clean).toBe(true); expect(wrote).toBe(true);
+  });
   it('① bot 的会话型消息 → 触发 peer-reaction', async () => {
     runMetaBookkeepingHooks(CHAT, msg({ isBot: true, uid: 5304501737, botClass: 'chat' as never }));
     await new Promise((r) => setTimeout(r, 10));

@@ -5,11 +5,12 @@
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { Agent } from 'undici';
-import type { AILabel, AICallResult, ContentPart } from './types.js';
+import type { AILabel, AICallResult, ContentPart, AIProviderOptions } from './types.js';
 import { AIError } from '../shared/errors.js';
 import { acquireConcurrency, AI_MAX_CONCURRENCY_PER_ACCOUNT } from './concurrency.js';
 import { mergeAbortSignals, isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
+import { assertBudgetAlive, budgetedProviderFetch, strictBudgetError, strictMaxTokens } from './request-budget.js';
 
 // 仅供**显式标记 insecureTLS 的供应商**(如自签证书的自建端点)使用的 dispatcher:
 // 跳过证书校验。绝不设为全局 dispatcher —— 其它端点(Claude/StepFun 等)照常
@@ -135,7 +136,7 @@ function isReasoningModel(label: AILabel): boolean {
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean },
+  opts: AIProviderOptions,
 ): Promise<AICallResult> {
   // round 75：一行排查用的观测点（debug 级，只在 LOG_LEVEL=debug 时出）。
   //
@@ -152,7 +153,7 @@ async function callClaude(
   const asked = opts.maxTokens ?? 4096;
   // reasoning 模型一律托底下限：**不是**只对撞过的。
   // 上面 isReasoningModel 的注释解释了为什么反应式不够。
-  const needsFloor = isReasoningModel(label) || truncatingLabels.has(label.name);
+  const needsFloor = !opts.beforeProviderRequest && (isReasoningModel(label) || truncatingLabels.has(label.name));
   const budget = needsFloor ? Math.max(asked, REASONING_TOKEN_FLOOR) : asked;
   const first = await callClaudeOnce(label, messages, { ...opts, maxTokens: budget });
 
@@ -165,7 +166,7 @@ async function callClaude(
   //
   // 只在这一种形状下重试（截断且空），加一倍额度、最多一次。别的情况不重试——
   // 内容审查/超时/限流重试没有意义，只会把延迟翻倍。
-  if (first.truncated) {
+  if (first.truncated && !opts.beforeProviderRequest) {
     // 记住这个 label 会截断——之后它的每次调用都直接拿下限，不再先撞一次。
     const firstTime = !truncatingLabels.has(label.name);
     truncatingLabels.add(label.name);
@@ -203,7 +204,7 @@ async function callClaude(
 async function callClaudeOnce(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean },
+  opts: AIProviderOptions,
 ): Promise<{ result: AICallResult; truncated: boolean }> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
@@ -263,7 +264,7 @@ async function callClaudeOnce(
   const claudeTemp = resolveTemperature(label.temperature, opts.temperature);
   if (claudeTemp !== undefined) body['temperature'] = claudeTemp;
 
-  const res = await fetch(`${label.endpoint}/messages`, {
+  const res = await budgetedProviderFetch(label, opts, `${label.endpoint}/messages`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -415,7 +416,7 @@ function sanitizeErrText(raw: string): string {
 async function callOpenAIRaw(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean; signal?: AbortSignal; jsonMode?: boolean },
+  opts: AIProviderOptions & { stream?: boolean },
 ): Promise<AICallResult> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
@@ -446,7 +447,7 @@ async function callOpenAIRaw(
     if (hasJson) body['response_format'] = { type: 'json_object' };
   }
 
-  const res = await fetch(chatUrl, {
+  const res = await budgetedProviderFetch(label, opts, chatUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify(body),
@@ -627,8 +628,12 @@ function stripThinkingBlocks(s: string): string {
 export async function callModel(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean } = {},
+  opts: AIProviderOptions = {},
 ): Promise<AICallResult> {
+  if (opts.beforeProviderRequest) {
+    assertBudgetAlive(opts.signal);
+    opts = { ...opts, maxTokens: strictMaxTokens(opts.maxTokens) };
+  }
   // 客户端并发闸：别把 provider 的限额撞爆（见 concurrency.ts 的实测数据）。
   // 按 (endpoint, apiKey) 分组——同一账号共享额度，不同账号各算各的。
   const cKey = `${label.endpoint}|${label.apiKeys[0] ?? ''}`;
@@ -643,7 +648,7 @@ export async function callModel(
 async function callModelInner(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean } = {},
+  opts: AIProviderOptions = {},
 ): Promise<AICallResult> {
   // MaiBot 借鉴:纯空白片段会让部分供应商返回 400/422(格式错)。
   // 文本消息空白 → 整条丢弃;内容数组里空白 text part → 滤掉该 part,
@@ -684,6 +689,7 @@ async function callModelInner(
     try {
       return await callClaude(label, textMessages, opts);
     } catch (err) {
+      const denied = strictBudgetError(err); if (denied) throw denied;
       throwIfExternallyAborted(label, opts.signal);
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof AIError) throw err;
@@ -721,6 +727,8 @@ async function callModelInner(
     baseURL: label.endpoint,
     apiKey,
     compatibility: 'compatible',
+    ...(opts.beforeProviderRequest ? { fetch: (input: string | URL | Request, init?: RequestInit) =>
+      budgetedProviderFetch(label, opts, input, init ?? {}) } : {}),
   });
 
   try {
@@ -732,6 +740,7 @@ async function callModelInner(
       // 就是不传该字段，实测 dshkimi 这条路走得通）。
       temperature: resolveTemperature(label.temperature, opts.temperature),
       abortSignal: mergeAbortSignals(opts.timeout, opts.signal),
+      ...(opts.beforeProviderRequest ? { maxRetries: 0 } : {}),
     });
 
     const latencyMs = Math.round(performance.now() - start);
@@ -758,6 +767,7 @@ async function callModelInner(
       latencyMs,
     };
   } catch (err) {
+    const denied = strictBudgetError(err); if (denied) throw denied;
     const latencyMs = Math.round(performance.now() - start);
     const message = err instanceof Error ? err.message : String(err);
 

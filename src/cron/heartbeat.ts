@@ -21,6 +21,8 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../db/redis.js';
 import { runWithAiWorkload } from '../ai/workload.js';
+import { claimScheduledRun, finishScheduledRun, getScheduledCompletion, getScheduledRun, renewScheduledRun, startScheduledRun } from './scheduled-runs.js';
+import type { ScheduledClaim } from './scheduled-runs.js';
 
 export type TickTaskOutcome = { status: 'completed' | 'skipped'; reason?: string };
 
@@ -34,6 +36,8 @@ export type TickTask = {
   weeklyAt?: { day: number; hour: number; minute: number };
   /** 任务体。 */
   run: () => Promise<void | TickTaskOutcome>;
+  /** Only audited idempotent tasks may replay after a failed/lost attempt. */
+  retrySafe?: boolean;
 };
 
 const HEARTBEAT_MS = 30_000;
@@ -68,14 +72,17 @@ export function nextTickDueAt(task: TickTask, nowSec: number, lastRunSec: number
   if (task.weeklyAt) {
     const day = new Date((nowSec + 8 * 3600) * 1000).getUTCDay();
     const due = bjTodayAt(task.weeklyAt.hour, task.weeklyAt.minute, nowSec);
-    let days = (task.weeklyAt.day - day + 7) % 7;
-    if (days === 0 && Math.max(lastRunSec, activationEpochSec) >= due) days = 7;
-    return due + days * 86400;
+    // With no registration/completion epoch, do not invent pre-existence work.
+    if (lastRunSec === 0 && activationEpochSec === 0) return due + ((task.weeklyAt.day - day + 7) % 7) * 86400;
+    let latest = due - ((day - task.weeklyAt.day + 7) % 7) * 86400;
+    if (latest > nowSec) latest -= 7 * 86400;
+    return Math.max(lastRunSec, activationEpochSec) < latest ? latest : latest + 7 * 86400;
   }
   return null;
 }
 
 async function getLastRun(name: string): Promise<number> {
+  if (env().DURABLE_CRON_ENABLED) return getScheduledCompletion(name) / 1000;
   try {
     const v = await getRedis().get(LASTRUN_KEY(name));
     return v ? Number(v) : 0;
@@ -106,6 +113,19 @@ async function scan(): Promise<void> {
     const nowSec = Math.floor(Date.now() / 1000);
     for (const task of registry) {
       try {
+        if (env().DURABLE_CRON_ENABLED) {
+          if (_running.has(task.name)) continue;
+          const due = nextTickDueAt(task, nowSec, await getLastRun(task.name), env().PROACTIVE_ACTIVATED_AT_SEC ?? 0);
+          const claim = claimScheduledRun(task.name, due === null ? null : due * 1000, task.retrySafe === true);
+          if (claim) {
+            // Dispatch telemetry must not hold a SQLite claim behind Redis's
+            // offline queue; Redis is not this run's completion authority.
+            try { if (getRedis().status === 'ready') void setLastRun(task.name, nowSec); }
+            catch { /* telemetry cannot prevent a durable claim from starting */ }
+            void safeRunTick(task.name, task.run, claim).catch((err: unknown) => logger.error({ err, name: task.name }, 'Scheduled task start failed'));
+          }
+          continue;
+        }
         if (_running.has(task.name) || !(await isDue(task, nowSec))) continue;
         // 先记 lastRun 再跑:防止任务跑很久期间心跳重入导致双发
         await setLastRun(task.name, nowSec);
@@ -135,6 +155,7 @@ const CRON_TIMEOUT_MS: Record<string, number> = {
 const DEFAULT_CRON_TIMEOUT_MS = 5 * 60_000;
 
 const _running = new Set<string>();
+const activeTasks = new Set<Promise<void>>();
 
 export interface TickRuntimeSnapshot {
   lastStartedAt: number | null;
@@ -173,27 +194,43 @@ function decodeSnapshot(raw: string | null): TickRuntimeSnapshot | null {
   } catch { return null; }
 }
 
-async function safeRunTick(name: string, fn: TickTask['run']): Promise<void> {
+async function safeRunTick(name: string, fn: TickTask['run'], claim?: ScheduledClaim): Promise<void> {
   if (_running.has(name)) return;
+  if (claim && !startScheduledRun(claim)) return;
   _running.add(name);
+  const renewal = claim ? setInterval(() => {
+    try {
+      if (!renewScheduledRun(claim)) logger.error({ name }, 'Scheduled task lease lost; result cannot advance completion');
+    } catch { logger.error({ name }, 'Scheduled task lease renewal failed'); }
+  }, 20_000) : undefined;
+  renewal?.unref();
   const start = performance.now();
   let current: TickRuntimeSnapshot = { lastStartedAt: Date.now(), lastFinishedAt: null, durationMs: null, result: null, reason: null, timedOut: false };
   saveSnapshot(name, current);
   const timeoutMs = CRON_TIMEOUT_MS[name] ?? DEFAULT_CRON_TIMEOUT_MS;
-  const task = Promise.resolve().then(() => runWithAiWorkload('background', fn)).then(
+  const task: Promise<void> = Promise.resolve().then(() => runWithAiWorkload('background', fn)).then(
     (outcome) => {
       current = { ...current, lastFinishedAt: Date.now(), durationMs: Math.round(performance.now() - start),
         result: outcome?.status === 'skipped' ? 'skipped' : 'completed',
         reason: outcome?.reason && SAFE_REASONS.has(outcome.reason) ? outcome.reason : null };
       saveSnapshot(name, current);
+      if (claim) {
+        const transientSkip = outcome?.status === 'skipped' && ['llm_failed', 'empty_output', 'unparsed'].includes(outcome.reason ?? '');
+        finishScheduledRun(claim, transientSkip ? 'failed' : outcome?.status === 'skipped' ? 'skipped' : 'succeeded');
+      }
       logger.debug({ name, durationMs: current.durationMs }, 'Tick task completed');
     },
     (err: unknown) => {
       current = { ...current, lastFinishedAt: Date.now(), durationMs: Math.round(performance.now() - start), result: 'failed' };
       saveSnapshot(name, current);
+      if (claim) finishScheduledRun(claim, 'failed');
       logger.error({ err, name, durationMs: current.durationMs }, 'Tick task failed');
     },
-  ).finally(() => { _running.delete(name); });
+  ).catch((err: unknown) => {
+    // A settlement storage failure leaves the durable run recoverable/unknown.
+    logger.error({ err, name }, 'Scheduled task settlement failed');
+  }).finally(() => { if (renewal) clearInterval(renewal); _running.delete(name); activeTasks.delete(task); });
+  activeTasks.add(task);
   let timer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([task, new Promise<void>((resolve) => {
@@ -216,6 +253,8 @@ export interface TickTaskObservation extends TickRuntimeSnapshot {
   nextRunAt: number | null;
   due: boolean;
   historyAvailable: boolean;
+  durableState?: string;
+  lastCompletedAt?: number | null;
 }
 
 export async function getTickObservations(nowMs = Date.now()): Promise<TickTaskObservation[]> {
@@ -240,13 +279,19 @@ export async function getTickObservations(nowMs = Date.now()): Promise<TickTaskO
     const last = rawLast && Number.isFinite(Number(rawLast)) ? Math.max(0, Number(rawLast)) : 0;
     const saved = decodeSnapshot(rows[index * 2 + 1] ?? null);
     const state = snapshots.get(task.name) ?? saved ?? { lastStartedAt: null, lastFinishedAt: null, durationMs: null, result: null, reason: null, timedOut: false };
-    const dueAt = historyAvailable ? nextTickDueAt(task, Math.floor(nowMs / 1000), last, env().PROACTIVE_ACTIVATED_AT_SEC ?? 0) : null;
+    const durable = env().DURABLE_CRON_ENABLED ? getScheduledRun(task.name) : null;
+    const completedAt = env().DURABLE_CRON_ENABLED ? getScheduledCompletion(task.name) : null;
+    const knownHistory = env().DURABLE_CRON_ENABLED || historyAvailable;
+    let dueAt = knownHistory ? nextTickDueAt(task, Math.floor(nowMs / 1000), completedAt === null ? last : completedAt / 1000, env().PROACTIVE_ACTIVATED_AT_SEC ?? 0) : null;
+    if (durable?.state === 'failed' || durable?.state === 'scheduled') dueAt = durable.available_at / 1000;
+    if (durable && ['claimed', 'started', 'unknown'].includes(durable.state)) dueAt = null;
     return { ...state, name: task.name, registered: true, running: _running.has(task.name),
       schedule: { everySec: task.everySec, dailyAt: task.dailyAt, weeklyAt: task.weeklyAt },
       lastDispatchedAt: last > 0 ? last * 1000 : null,
       nextRunAt: _heartbeat && dueAt !== null ? dueAt * 1000 : null,
       due: !!_heartbeat && dueAt !== null && dueAt * 1000 <= nowMs,
-      historyAvailable,
+      historyAvailable: knownHistory,
+      ...(env().DURABLE_CRON_ENABLED ? { durableState: durable?.state ?? 'not_scheduled', lastCompletedAt: completedAt || null } : {}),
     };
   });
 }
@@ -279,9 +324,15 @@ export function stopHeartbeat(): void {
     _heartbeat = undefined;
   }
   registry.length = 0;
-  _running.clear();
+  // A live async task keeps its overlap lock until it actually settles.
   snapshots.clear();
   logger.info('Tick heartbeat stopped');
+}
+
+/** Stop dispatch, then join real task bodies (not their timeout notifications). */
+export async function drainHeartbeat(): Promise<void> {
+  stopHeartbeat();
+  await Promise.allSettled([...activeTasks]);
 }
 
 /** 测试/诊断:当前注册表。 */

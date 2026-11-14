@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { execSync } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import ts from 'typescript';
 
 // 2026-09-19：`releasePressure`（发言后抽 85% 气压）写好了、单测绿着，
 // 而全仓库唯一引用是注释——积分器因此没有排水路径。这是我这个会话第四次
@@ -28,19 +30,21 @@ const MODULES = [
   'src/agent/impulse-history.ts',
 ];
 
-function srcReferences(name: string): number {
-  const out = execSync(
-    `grep -rn "\\b${name}\\b" ${REPO}/src --include='*.ts' | grep -v "export async function ${name}" | grep -v "export function ${name}" | wc -l`,
-    { encoding: 'utf8' },
-  );
-  return Number(out.trim());
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory()
+    ? sourceFiles(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []);
 }
-
+const sources = sourceFiles(join(REPO, 'src')).map(path => ({ path, text: readFileSync(path, 'utf8') }));
+function srcReferences(name: string): number {
+  const word = new RegExp(`\\b${name}\\b`);
+  return sources.flatMap(({ text }) => text.split('\n')).filter(line =>
+    word.test(line) && !new RegExp(`export (?:async )?function ${name}\\b`).test(line)).length;
+}
 describe('新架构导出的消费方核对', () => {
   it('每个导出都有 src 内的真实调用方（唯一的例外已显式登记）', () => {
     const offenders: string[] = [];
     for (const mod of MODULES) {
-      const src = execSync(`cat ${REPO}/${mod}`, { encoding: 'utf8' });
+      const src = readFileSync(join(REPO, mod), 'utf8');
       const names = [...src.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]!);
       for (const n of names) {
         if (n === 'main' || n === 'default') continue;
@@ -57,7 +61,7 @@ describe('新架构导出的消费方核对', () => {
   });
 
   it('登记的例外确实存在（防止登记项过期后没人发现）', () => {
-    const src = execSync(`cat ${REPO}/src/nyatos/trench.ts`, { encoding: 'utf8' });
+    const src = readFileSync(join(REPO, 'src/nyatos/trench.ts'), 'utf8');
     expect(src).toContain('export async function setThetaForTest');
   });
 });
@@ -80,11 +84,8 @@ describe('新架构旗标的读取方核对', () => {
   it('每个旗标都在 env.ts 之外有真实读取方', () => {
     const offenders: string[] = [];
     for (const f of FLAGS) {
-      const out = execSync(
-        `grep -rn "\\.${f}\\b" ${REPO}/src --include='*.ts' | grep -v "src/env.ts" || true`,
-        { encoding: 'utf8' },
-      );
-      if (!out.trim()) offenders.push(f);
+      const found = sources.some(({ path, text }) => !path.endsWith('env.ts') && new RegExp('\\.' + f + '\\b').test(text));
+      if (!found) offenders.push(f);
     }
     expect(offenders, `这些旗标只有定义、没有读取方：${offenders.join(', ')}`).toEqual([]);
   });
@@ -95,13 +96,13 @@ describe('新架构旗标的读取方核对', () => {
 // 这是这个会话的第五类"孤立正确、系统里缺席"，前四类是函数/字段/渲染/旗标。
 describe('观测日志的轮转', () => {
   it('源码里有大小阈值与 rename（不是无限 append）', () => {
-    const src = execSync(`cat ${REPO}/src/nyatos/trench.ts`, { encoding: 'utf8' });
+    const src = readFileSync(join(REPO, 'src/nyatos/trench.ts'), 'utf8');
     expect(src).toContain('OBSERVATION_MAX_BYTES');
     expect(src).toContain('renameSync(OBSERVATION_LOG');
   });
 
   it('阈值是正数且量级合理（不设为 0 也不设成 1GB）', () => {
-    const src = execSync(`cat ${REPO}/src/nyatos/trench.ts`, { encoding: 'utf8' });
+    const src = readFileSync(join(REPO, 'src/nyatos/trench.ts'), 'utf8');
     const m = src.match(/OBSERVATION_MAX_BYTES\s*=\s*([\d_* ]+)/);
     expect(m).not.toBeNull();
     // 去掉下划线求值（源码写的是 8 * 1024 * 1024）
@@ -111,35 +112,50 @@ describe('观测日志的轮转', () => {
   });
 });
 
-// 账本闭合率：每条 shadow 判定过的消息都该有 live outcome。
-// 2026-09-19 实测只有 77%，缺口是 5 处 return 'done' 分支不记账——
-// 其中两条是真缺口（L2 drop 丢弃、plain attention ingested 不经心流）。
-// 这里锁住"所有终态分支都记账"，防止新增分支再漏。
-describe('live outcome 账本闭合', () => {
-  function unrecordedReturns(rel: string): Array<[number, string]> {
-    const src = execSync(`cat ${REPO}/${rel}`, { encoding: 'utf8' });
-    const lines = src.split('\n');
-    const out: Array<[number, string]> = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (!/return 'done';/.test(lines[i]!)) continue;
-      const ctx = lines.slice(Math.max(0, i - 30), i).join('\n');
-      if (!ctx.includes('noteLiveOutcome(')) {
-        const raw = lines.slice(Math.max(0, i - 25), i).reverse().find((l) => /logger\.(info|debug|warn)/.test(l)) ?? '';
-        // 先判断是不是错误兜底（**用完整行**判断——截断会把 'failed' 切掉），再截断供报错用
-        const isErr = /failed|fail/i.test(raw);
-        out.push([i + 1, isErr ? 'ERROR_PATH' : raw.trim().slice(0, 70)]);
-      }
-    }
-    return out;
-  }
+// Fixed line windows miss asynchronous callbacks and pre-sampling input controls.
+// Actual ingress/timing behavior is exercised in platform/onebot-cadence.test.ts.
+function unrecordedSampledReturns(source: string): number[] {
+  const tree = ts.createSourceFile('message.ts', source, ts.ScriptTarget.Latest, true);
+  let sampledFrom = Infinity;
+  const returns: ts.ReturnStatement[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'noteLiveOutcome') sampledFrom = node.end;
+    if (ts.isReturnStatement(node) && node.expression && ts.isStringLiteral(node.expression) && node.expression.text === 'done') returns.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  const referencesOutcome = (node: ts.Node): boolean => {
+    if (ts.isIdentifier(node) && node.text === 'noteLiveOutcome' && !ts.isVariableDeclaration(node.parent)) return true;
+    return ts.forEachChild(node, child => referencesOutcome(child) || undefined) ?? false;
+  };
+  return returns.filter(node => {
+    if (node.pos < sampledFrom) return false;
+    const parent = node.parent;
+    if (!ts.isBlock(parent)) return true;
+    return !parent.statements.filter(statement => statement.end <= node.pos).some(referencesOutcome);
+  }).map(node => tree.getLineAndCharacterOfPosition(node.getStart()).line + 1);
+}
 
-  it('message.ts 里每个 return done 的分支都记账（错误兜底除外）', () => {
-    const gaps = unrecordedReturns('src/bot/handlers/message.ts');
-    // 允许的例外：纯错误兜底路径（ingest 失败时）——它们在失败前已记过账。
-    const errorOnly = gaps.filter(([, tag]) => tag === 'ERROR_PATH');
-    const real = gaps.filter(([, tag]) => tag !== 'ERROR_PATH');
-    expect(real.map(([ln, tag]) => `line ${ln}: ${tag}`), '这些终态分支不入账').toEqual([]);
-    // 错误兜底仍然要在前文有账
-    expect(errorOnly.length).toBeLessThanOrEqual(2);
+describe('sampled live outcomes', () => {
+  it('sampled terminal branches record or hand off an outcome callback', () => {
+    expect(unrecordedSampledReturns(readFileSync(join(REPO, 'src/bot/handlers/message.ts'), 'utf8'))).toEqual([]);
+  });
+
+  it('does not count pre-sampling controls, comments or a sibling branch as an outcome', () => {
+    const source = `function ingest() {
+      if (pending) { return 'done'; }
+      const noteLiveOutcome = () => {};
+      if (allow) { noteLiveOutcome('spoke'); return 'done'; }
+      if (deny) { /* noteLiveOutcome('silent') */ return 'done'; }
+    }`;
+    expect(unrecordedSampledReturns(source)).toEqual([5]);
+    expect(unrecordedSampledReturns(source.replace("/* noteLiveOutcome('silent') */", "noteLiveOutcome('silent');"))).toEqual([]);
+  });
+
+  it('recognizes asynchronous callback ownership without a fixed line window', () => {
+    expect(unrecordedSampledReturns(`function ingest() {
+      const noteLiveOutcome = () => {};
+      if (qq) { enqueue(candidate, noteLiveOutcome); ${'\n'.repeat(50)} return 'done'; }
+    }`)).toEqual([]);
   });
 });

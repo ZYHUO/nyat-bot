@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatMessage } from '../../../src/pipeline/formatter.js';
+import { createMessageEventIdentity } from '../../../src/shared/event-identity.js';
 
 function makeTgUpdate(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -15,6 +16,15 @@ function makeTgUpdate(overrides: Record<string, unknown> = {}): Record<string, u
 }
 
 describe('formatMessage', () => {
+  it('keeps four host millisecond times separate from the legacy display timestamp', () => {
+    const eventIdentity = createMessageEventIdentity({ ref: { conversation: { platform: 'telegram', accountId: '123',
+      idNamespace: 'telegram', conversationKind: 'group', id: '-1001' }, id: '42' },
+      occurredAt: 100000, editedAt: 200000, receivedAt: 900000, edit: true, updateId: 2, content: 'changed' });
+    const raw = makeTgUpdate({ date: 100, edit_date: 200, text: 'changed' });
+    const formatted = formatMessage({ edited_message: raw.message, __nyatEventIdentity: { ...eventIdentity, processedAt: 901000 } });
+    expect(formatted?.timestamp).toBe(200);
+    expect(formatted?.eventIdentity).toMatchObject({ occurredAt: 100000, editedAt: 200000, receivedAt: 900000, processedAt: 901000 });
+  });
   it('formats a plain text message', () => {
     const msg = formatMessage(makeTgUpdate({ text: 'Hello world' }));
     expect(msg).not.toBeNull();

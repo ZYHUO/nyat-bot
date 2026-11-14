@@ -20,6 +20,8 @@ export const infraSection = {
   // Telegram
   BOT_TOKEN: z.string().min(1, 'BOT_TOKEN is required'),
   BOT_USERNAME: z.string().min(1).default('xxb_bot'),
+  // Roll out after migration; stores complete accepted input and unstarted QQ batches.
+  DURABLE_INGRESS_ENABLED: booleanFromEnv.default(false),
 
   // QQ via an explicitly configured OneBot v11 forward WebSocket client.
   // Off until the external QQ client has been installed and logged in.
@@ -51,6 +53,8 @@ export const infraSection = {
 
   // Cron master switch — read via env() like every other flag (kilo review).
   CRON_ENABLED: booleanFromEnv.default(true),
+  // Durable occurrences and conservative recovery; enable only with migrations applied.
+  DURABLE_CRON_ENABLED: booleanFromEnv.default(false),
 
   // NyatDB — NyatBot-only embedded engine (MemTable+WAL+zstd). Default off.
   NYATDB_ENABLED: booleanFromEnv.default(false),

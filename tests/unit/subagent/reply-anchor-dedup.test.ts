@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
+beforeEach(() => intentRedis.reset());
 
 // 2026-09-19 production: one task answered 「眼熟」with THREE sendText calls and
 // #1 and #3 both carried replyTo=265827. The existing rule ("segmented send:
@@ -29,7 +32,7 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
   addAssistant: vi.fn(async () => undefined),
   getRecent: vi.fn(async () => []),
 }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ set: vi.fn(async () => 'OK') }) }));
+vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ ...intentRedis, set: vi.fn(async () => 'OK') }) }));
 vi.mock('../../../src/meta/timing-adapter.js', () => ({ noteMetaBotReply: vi.fn(async () => undefined) }));
 vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined),
   answeredTimestamps: vi.fn(async () => [] as number[]) }));

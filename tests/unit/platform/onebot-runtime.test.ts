@@ -28,7 +28,7 @@ vi.mock('../../../src/platform/onebot-media.js', () => ({
   setOneBotMediaTransport: f.media, registerOneBotMedia: vi.fn(() => { throw new Error('No media fixture'); }),
 }));
 
-import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, getOneBotRuntimeStatus, getOneBotGroupDirectory } from '../../../src/platform/onebot-runtime.js';
+import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, drainOneBotRecovery, getOneBotRuntimeStatus, getOneBotGroupDirectory } from '../../../src/platform/onebot-runtime.js';
 import { getOrCreateConversationId } from '../../../src/platform/identity-store.js';
 import { sendPlatformText } from '../../../src/platform/outbound.js';
 
@@ -87,6 +87,17 @@ afterEach(async () => {
 });
 
 describe('OneBot runtime request and ingress integration', () => {
+  it('joins admitted runtime messages before clearing ingress while leaving sender usable', async () => {
+    let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+    f.core.mockImplementationOnce(async () => { await blocked; });
+    await ready(); emit(messageEvent(300, 'first')); emit(messageEvent(301, 'queued second'));
+    await vi.waitFor(() => expect(getOneBotRuntimeStatus().queuedMessages).toBe(1));
+    let clean = false; const drain = drainOneBotRecovery().then(() => { clean = true; });
+    await Promise.resolve(); expect(clean).toBe(false);
+    release(); await drain; expect(f.core).toHaveBeenCalledTimes(2);
+    emit(messageEvent(302, 'after pause')); await new Promise(resolve => setTimeout(resolve, 20));
+    expect(f.core).toHaveBeenCalledTimes(2); expect(getOneBotRuntimeStatus().state).toBe('ready');
+  });
   it('exposes a typed read-only directory only for the current authenticated runtime account', async () => {
     await expect(getOneBotGroupDirectory('42')).rejects.toMatchObject({ code: 'directory_unavailable' });
     await ready(false);

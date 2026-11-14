@@ -9,11 +9,13 @@
  * 这里锁的是：409 → 退避后原地重开轮询；401 → 明确 exit(1)；正常返回 → 不重试。
  */
 import { describe, it, expect, vi } from 'vitest';
-import { GrammyError } from 'grammy';
+import { Bot, GrammyError } from 'grammy';
 import {
   startPollingWithRecovery,
   classifyPollingError,
   backoffMs,
+  startBotPollingWithRecovery,
+  drainBotPolling,
 } from '../../../src/ingress/polling-recovery.js';
 
 vi.mock('../../../src/shared/logger.js', () => {
@@ -56,6 +58,37 @@ describe('backoffMs', () => {
 });
 
 describe('startPollingWithRecovery', () => {
+  it('joins actual grammY middleware after bot.stop has already returned', async () => {
+    const app = new Bot('123:synthetic', { botInfo: { id: 123, is_bot: true, first_name: 'synthetic', username: 'fixture_bot',
+      can_join_groups: true, can_read_all_group_messages: true, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false } });
+    let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+    const handler = vi.fn(async () => { await blocked; });
+    app.on('message', handler);
+    app.api.config.use(async (_previous, method, payload) => {
+      if (method === 'deleteWebhook') return { ok: true, result: true };
+      if (method === 'getUpdates') return { ok: true, result: (payload as { offset: number }).offset > 1 ? [] : [
+        { update_id: 1, message: { message_id: 1, date: 1, chat: { id: 9, type: 'private', first_name: 'fixture' }, text: 'synthetic' } },
+      ] };
+      throw new Error('unexpected synthetic API');
+    });
+    startBotPollingWithRecovery(app, {});
+    try {
+      await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+      await app.stop();
+      let clean = false; const drain = drainBotPolling().then(() => { clean = true; });
+      await Promise.resolve(); expect(clean).toBe(false);
+      release(); await drain; expect(clean).toBe(true);
+    } finally { release(); await drainBotPolling(); }
+  });
+  it('shutdown interrupts recovery backoff and never starts another polling owner', async () => {
+    vi.useFakeTimers(); const start = vi.fn(async () => { throw grammy409(); });
+    try {
+      startBotPollingWithRecovery({ start } as unknown as Bot, {});
+      await vi.advanceTimersByTimeAsync(1);
+      await drainBotPolling(); await vi.advanceTimersByTimeAsync(60_000);
+      expect(start).toHaveBeenCalledOnce();
+    } finally { await drainBotPolling(); vi.useRealTimers(); }
+  });
   it('409 两次后恢复 → start 被调 3 次、退避 3s/6s、onStart 照常触发、不 exit', async () => {
     const onStart = vi.fn();
     const sleep = vi.fn(async () => {});

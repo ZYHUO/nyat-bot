@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { execSync } from 'node:child_process';
+import { afterAll, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
+import { reportFixture } from '../../helpers/log-script.js';
 
 /**
  * round 248: **和 kimi 讨论后落地的裁决 + 数据。**
@@ -26,19 +26,20 @@ import * as fs from 'node:fs';
  */
 
 const PROBE = 'scripts/coherence-probe.mts';
+const fixture = reportFixture();
+afterAll(() => fixture.cleanup());
 
 const runProbe = (days: number): string => {
-  try {
-    return execSync(`npx tsx ${PROBE} ${days}`, { encoding: 'utf8', timeout: 300_000, stdio: 'pipe' });
-  } catch (e) {
-    return String((e as { stdout?: string }).stdout ?? '');
-  }
+  const result = fixture.run(PROBE, [String(days)]);
+  expect(result.code, result.err).toBe(0);
+  return result.out;
 };
 
-describe('round 248 裁决：量具降级为漂移检测器，绝对值不报告', () => {
+describe('round 248 裁决：量具降级为漂移检测器，绝对值不报告', { timeout: 30_000 }, () => {
   it('探针仍在、仍能跑（降级不是删掉）', () => {
     const out = runProbe(3);
-    expect(out).toContain('bot 回复');
+    expect(out).toContain('bot 回复 2 条');
+    expect(out).toContain('0 bigram 重合：1 条（50.0%）');
   });
 
   it('探针输出带单边判据的告诫（不许当绝对结论读）', () => {

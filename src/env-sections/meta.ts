@@ -21,6 +21,10 @@ export const metaSection = {
   // 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback,
   // 不再走 BullMQ message/turn-actor 直通(避免双回复)。详见 docs/meta-subagent/。
   META_SUBAGENT_ENABLED: booleanFromEnv.default(false),
+  // Host-owned sender/thread lanes and fixed draft revisions; opt-in rollout.
+  META_PENDING_INTENT_ENABLED: booleanFromEnv.default(false),
+  // Separate background checking from evidence-gated publication; explicit rollout.
+  BACKGROUND_PUBLICATION_ENABLED: booleanFromEnv.default(false),
   // 灰度 chatId 列表(逗号分隔)。空 = META_SUBAGENT_ENABLED 时对所有 chat 生效。
   META_SUBAGENT_CHAT_IDS: z
     .string()

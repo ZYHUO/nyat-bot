@@ -8,9 +8,12 @@ import type { AttentionItem } from './types.js';
 import { checkCodeActActivation } from '../subagent/activation-policy.js';
 import type { CodeActActivationReason } from '../subagent/activation-policy.js';
 import { holdMetaScopeInput, inspectMetaCallback } from './input-scope.js';
+import { getStartupOwnership, ownsMetaLoop } from '../startup/ownership.js';
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
+let stopping = false;
+let activeTick: Promise<void> | null = null;
 // Keep a failed archive write in-process for retry; it must never become runnable
 // Attention with a fresh timestamp. Deployment also archives the original queues.
 const pendingHolds = new Map<string, { kind: 'callback' | 'defer'; raw: string; chatId: number; reason: CodeActActivationReason }>();
@@ -43,9 +46,22 @@ async function allowReplay(kind: 'callback' | 'defer', input: { chatId: number; 
 }
 
 export async function metaTick(): Promise<void> {
+  if (stopping) return;
+  if (!ownsMetaLoop(getStartupOwnership())) return;
   if (ticking) return;
   if (!env().META_SUBAGENT_ENABLED) return;
   ticking = true;
+  const work = runMetaTick();
+  activeTick = work;
+  try {
+    await work;
+  } finally {
+    if (activeTick === work) activeTick = null;
+    ticking = false;
+  }
+}
+
+async function runMetaTick(): Promise<void> {
   let flushed: AttentionItem[] = [];
   try {
     const state = getGlobalState();
@@ -88,6 +104,7 @@ export async function metaTick(): Promise<void> {
             layer: d.layer,
             reason: `defer_replay:${d.reason}`,
             messageId: d.messageId,
+            pendingIntent: d.pendingIntent, messageThreadId: d.messageThreadId,
             userId: d.userId,
             textPreview: d.textPreview,
             pressure: d.pressure,
@@ -116,13 +133,12 @@ export async function metaTick(): Promise<void> {
     if (flushed.length) {
       await getAttentionAccumulator().requeue(flushed);
     }
-  } finally {
-    ticking = false;
   }
 }
 
 export function startMetaLoop(): void {
   if (timer) return;
+  stopping = false;
   if (!env().META_SUBAGENT_ENABLED) {
     logger.info('Meta loop not started (META_SUBAGENT_ENABLED=false)');
     return;
@@ -139,8 +155,15 @@ export function startMetaLoop(): void {
 }
 
 export function stopMetaLoop(): void {
+  stopping = true;
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
+}
+
+/** Stop admissions, then wait for the current session and any failure requeue. */
+export async function drainMetaLoop(): Promise<void> {
+  stopMetaLoop();
+  await activeTick;
 }

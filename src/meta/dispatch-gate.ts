@@ -1,3 +1,4 @@
+import type { PendingIntentRef } from './pending-intent.js';
 // ────────────────────────────────────────
 // Meta dispatch 期 timing gate —— 老 pipeline「judge=REPLY 之后、reply 之前」
 // 节奏闸在 meta+subagent 世界的等价物。
@@ -57,6 +58,7 @@ function safeBotNicknames(chatId: number): string[] {
 }
 
 export async function evaluateDispatchGate(opts: {
+  pendingIntent?: PendingIntentRef;
   chatId: number;
   layer: AttentionLayer;
   /** 触发来源（heart:… / meta_llm_dispatch / defer_replay:…），进 anchor/defer 条目。 */
@@ -178,6 +180,7 @@ export async function evaluateDispatchGate(opts: {
             // autoDispatch 的 heartForce 判断（reason.includes('heart:')）才能再接住。
             reason: `dispatch_gate:${opts.reason}`,
             messageId: opts.messageId,
+            pendingIntent: opts.pendingIntent, messageThreadId: opts.messageThreadId,
             userId: opts.userId,
             textPreview: (opts.textPreview ?? '').slice(0, 200),
             pressure: layer === 'L1' ? 60 : 30,
@@ -229,6 +232,7 @@ export async function evaluateDispatchGate(opts: {
           // 同上：保留来源 reason 让 defer 重放能被 autoDispatch 的 heartForce 接住。
           reason: `dispatch_gate:${opts.reason}`,
           messageId: opts.messageId,
+            pendingIntent: opts.pendingIntent, messageThreadId: opts.messageThreadId,
           userId: opts.userId,
           textPreview: (opts.textPreview ?? '').slice(0, 200),
           pressure: layer === 'L1' ? 60 : 30,

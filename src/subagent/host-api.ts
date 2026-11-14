@@ -1,3 +1,7 @@
+import { assertPendingIntentCurrent, confirmPendingIntent } from '../meta/pending-intent.js';
+import { readBackgroundEvidence, proposeBackgroundPublication, type BackgroundRun } from '../agent/background-publication.js';
+import { BACKGROUND_CAPABILITY_METHODS } from './capability-prompt.js';
+import type { PendingIntentRef } from '../meta/pending-intent.js';
 import { incrCounter } from '../metrics/registry.js';
 import { assertOutboundText, assertPublicSearchQuery } from '../shared/outbound-privacy.js';
 import { samePlatformAccount } from '../shared/privacy-scope.js';
@@ -16,6 +20,7 @@ import { isEchoOf } from '../shared/echo-text.js';
 import { findTopicRepeat } from './topic-repeat.js';
 import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
 import { isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
+import { DeliveryError, type DeliveryResult } from '../shared/delivery-result.js';
 import { createQQAttachmentApi } from './qq-attachments.js';
 import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
@@ -479,6 +484,8 @@ export interface HostApi {
     request: (args: { action: string; detail?: string }) => Promise<{ queued: boolean; action: string }>;
   };
   runtime: {
+    readPublicationEvidence: (request: { kind: 'message'; messageId: number }) => ReturnType<typeof readBackgroundEvidence>;
+    proposePublication: (text: string, handles: string[]) => ReturnType<typeof proposeBackgroundPublication>;
     endTask: (summary: string) => void;
     setAcceptance: (checks: AcceptanceCheck[]) => void;
     verifyAcceptance: () => Promise<AcceptanceResult>;
@@ -633,6 +640,8 @@ export function createHostApi(
     relatedQuoteIds?: number[];
     isClosed?: () => boolean;
     taskId?: string;
+    backgroundRun?: BackgroundRun;
+    pendingIntent?: PendingIntentRef;
     /** User target used for prediction calibration dimensions. */
     targetUserId?: number;
     /** Max sendText calls (default 2; work mode may pass 5). */
@@ -707,9 +716,10 @@ export function createHostApi(
    */
   const promiseBackstop = async (): Promise<void> => {
     try {
-      if (!env().PROMISE_LOOP_ENABLED) return;
+      if (!env().PROMISE_LOOP_ENABLED || opts.backgroundRun) return;
       if (goalAdded || crossSends > 0) return;
       if (sentTexts.length === 0) return;
+      assertPendingIntentCurrent(opts.pendingIntent);
       const said = sentTexts.map((t) => t.slice(0, 200)).join('\n');
       const { callWithFallback } = await import('../ai/fallback.js');
       const res = await callWithFallback({
@@ -727,6 +737,7 @@ export function createHostApi(
         maxTimeoutMs: 8_000,
         allowHedge: false,
       });
+      assertPendingIntentCurrent(opts.pendingIntent);
       const m = (res.content || '').match(/\{[\s\S]*\}/);
       if (!m) return;
       let verdict: { promise?: boolean; topic?: string };
@@ -737,7 +748,13 @@ export function createHostApi(
       }
       const topic = String(verdict.topic ?? '').trim().slice(0, 60);
       if (!verdict.promise || !topic) return;
-      const { createGoal } = await import('../agent/goals.js');
+      const [{ createGoal }, { createDebt }] = await Promise.all([
+        import('../agent/goals.js'), import('../agent/cognitive-debts.js'),
+      ]);
+      // A cancelled or superseded promise must not come back as autonomous work.
+      // Both imports finish before this final synchronous source fence/write.
+      assertPendingIntentCurrent(opts.pendingIntent);
+      if (goalAdded || crossSends > 0) return;
       const id = createGoal({
         topic: `兑现承诺: ${topic}`,
         origin: `promise-backstop:${opts.taskId ?? ''}`.slice(0, 64),
@@ -748,7 +765,6 @@ export function createHostApi(
         logger.info({ chatId, goalId: id, topic }, 'promise backstop(llm): goal created from bot own text');
       }
       // Cognitive Debt：承诺同时是一笔未完成认知，goal 兑现/超时前始终可见。
-      const { createDebt } = await import('../agent/cognitive-debts.js');
       createDebt({
         chatId,
         taskId: opts.taskId,
@@ -780,6 +796,9 @@ export function createHostApi(
   const blockedByGate: string[] = [];
 
   const assertOpen = () => {
+    if (opts.pendingIntent && (opts.pendingIntent.chatId !== chatId || opts.pendingIntent.senderId !== opts.targetUserId
+      || opts.pendingIntent.threadId !== (opts.messageThreadId ?? 0))) throw new Error('pending_intent_mismatch');
+    assertPendingIntentCurrent(opts.pendingIntent);
     if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
     if (opts.isClosed?.()) throw new Error('host_closed');
     if (isPlatformInternalId(chatId) && [opts.defaultReplyTo, ...(opts.quoteIds ?? []), ...(opts.relatedQuoteIds ?? [])]
@@ -787,13 +806,22 @@ export function createHostApi(
   };
 
   const sendWithDeliveryGuard = <T>(operation: () => Promise<T>): Promise<T> => {
-    if (!isPlatformInternalId(chatId)) return operation();
     // Already-entered parallel guest calls wait here, then observe the closure
     // from the first uncertain receipt before another external send can begin.
     const pending = deliveryTail.then(async () => {
       assertOpen();
       try {
-        return await withCodeActDeliveryIntent(opts.taskId, chatId, operation);
+        return await withCodeActDeliveryIntent(opts.taskId, chatId, () => {
+          // The durable claim awaits Redis. Input may change while it is being
+          // persisted, including for reactions without a sender callback.
+          try { assertOpen(); }
+          catch (cause) {
+            throw Object.assign(new Error('delivery_fence_changed', { cause }), {
+              code: 'delivery_fence_changed', delivery: 'not_sent' as const,
+            });
+          }
+          return operation();
+        });
       } catch (error) {
         if (isUnknownPlatformDelivery(chatId, error)) {
           deliveryUnknown = true;
@@ -1198,6 +1226,7 @@ export function createHostApi(
             // round 71：同一次 sendText 的分片共享一次过闸结果。
             // 见下面 trench gate 那段的长注释。
             let gatePassed = false;
+            let telegramSendCounted = false;
             // round 173：burst 闸一次调用只判一次（分片豁免），和 gatePassed 同款。
             // 没这个标志时，第 2 片会读到第 1 片 1 秒前写的键 → 自己吞掉自己
             // 的后半句（k3 round 173 实测复现，行为测试 ⑦ 钉住）。
@@ -1442,12 +1471,36 @@ export function createHostApi(
                 }
               }
 
-              const messageId = await sendWithDeliveryGuard(() => sendMessage(chatId, part, replyTo, opts.messageThreadId));
+              let receipt: DeliveryResult | undefined;
+              let sendError: unknown;
+              let returnedId = 0;
+              try {
+                returnedId = await sendWithDeliveryGuard(() => sendMessage(chatId, part, replyTo, opts.messageThreadId,
+                  { ...(opts.taskId ? { intentId: `${opts.taskId}:text:${textSent}:${i}`, revision: opts.pendingIntent?.revision ?? 0 } : {}),
+                    beforeSend: assertOpen,
+                    markAnswered: false, onReceipt: result => { receipt = result; } }));
+              } catch (error) {
+                if (!(error instanceof DeliveryError) && !receipt) throw error;
+                if (error instanceof DeliveryError) receipt = error.result;
+                sendError = error;
+              }
+              const acknowledged = receipt?.parts ?? (returnedId > 0 ? [{ messageId: returnedId, text: part, partIndex: 0 }] : []);
+              // Bookkeeping follows each real platform ACK, including a prefix
+              // acknowledged before a later shard failed. Never store the plan.
+              for (const acknowledgedPart of acknowledged) {
+              const messageId = acknowledgedPart.messageId;
+              confirmPendingIntent(opts.pendingIntent);
+              const part = acknowledgedPart.text;
               if (messageId > 0) {
                 if (qqReservation) {
                   qqReservation.acknowledge();
                   textSent++;
                   try { opts.onSend?.(); } catch { /* A bookkeeping failure never resends an acknowledged bubble. */ }
+                }
+                if (!qqReservation && !telegramSendCounted) {
+                  telegramSendCounted = true;
+                  textSent += 1;
+                  try { opts.onSend?.(); } catch { /* Count the ACK even if a later shard fails. */ }
                 }
                 void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
                 // Nyat Trench L0：说出口了 → 抽走 85% 气压。
@@ -1666,26 +1719,13 @@ export function createHostApi(
                   .catch((err) => logger.debug({ err, chatId }, 'host addAssistant failed')),
               );
               void import('../memory/chroma.js')
-                .then(({ memorizeMessage }) =>
-                  memorizeMessage(chatId, {
-                    role: 'assistant',
-                    uid: 0,
-                    username: '',
-                    fullName: '',
-                    timestamp: Math.floor(Date.now() / 1000),
-                    messageId,
-                    textContent: part,
-                    isForwarded: false,
-                  }),
-                )
+                .then(({ memorizeAcknowledgedDelivery }) => memorizeAcknowledgedDelivery(chatId, acknowledgedPart))
                 .catch((err) => logger.debug({ err, chatId }, 'host memorize assistant failed'));
+              }
+              if (sendError) throw sendError;
+              if (acknowledged.length === 0) throw new Error('delivery_receipt_missing');
             }
 
-            if (!qqReservation) {
-              textSent += 1;
-              // Telegram retains its existing per-call budget; QQ charges each ACK above.
-              try { opts.onSend?.(); } catch { /* 记账失败不能挡住发送 */ }
-            }
             lastDeliveryKind = kind;
             if (kind === 'final') finalSent = true;
             else intermediateSent = true;
@@ -1745,7 +1785,7 @@ export function createHostApi(
             }
             await sendChatAction(chatId, 'typing', opts.messageThreadId);
             try {
-              const messageId = await sendSticker(chatId, id);
+              const messageId = await sendSticker(chatId, id, { beforeSend: assertOpen });
               if (messageId > 0) {
                 await track(
                   import('../pipeline/context/manager.js')
@@ -1802,7 +1842,7 @@ export function createHostApi(
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
-              const { messageId } = await tgSendFile(chatId, target, {
+              const { messageId } = await tgSendFile(chatId, target, { beforeSend: assertOpen,
                 // A caption is user-visible text; strip tool scaffolding like any
                 // other send path.
                 caption: caption
@@ -1875,7 +1915,7 @@ export function createHostApi(
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
-              const { messageId } = await tgSendPhoto(chatId, target, {
+              const { messageId } = await tgSendPhoto(chatId, target, { beforeSend: assertOpen,
                 caption: caption ? String(caption).slice(0, 1000) : undefined,
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
@@ -1997,6 +2037,7 @@ export function createHostApi(
               return { messageId: 0 };
             }
             const { sendPoll } = await import('../bot/sender/telegram.js');
+            assertOpen();
             const messageId = await sendPoll(chatId, q, pollOpts, opts.messageThreadId);
             if (messageId > 0) {
               pollSent = true;
@@ -2041,6 +2082,7 @@ export function createHostApi(
               return { messageId: 0 };
             }
             const { forwardMessage } = await import('../bot/sender/telegram.js');
+            assertOpen();
             const outMessageId = await forwardMessage(tid, fid, mid);
             if (outMessageId > 0) {
               forwardsSent++;
@@ -2111,11 +2153,11 @@ export function createHostApi(
               const target = resolveInsideSandbox(rawPath); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(tid, 'upload_document', opts.messageThreadId);
-              const r = await tgSendFile(tid, target, { caption: clean.slice(0, 1000) });
+              const r = await tgSendFile(tid, target, { beforeSend: assertOpen, caption: clean.slice(0, 1000) });
               messageId = r.messageId;
               deliveredDesc = `[file] ${basename(target)}: ${clean}`;
             } else {
-              messageId = await sendMessage(tid, clean.slice(0, 500));
+              messageId = await sendMessage(tid, clean.slice(0, 500), undefined, undefined, { beforeSend: assertOpen });
             }
             crossSends++;
             // 目标群上下文/记忆/时间线全跟上——说过的话自己得记得。
@@ -2513,13 +2555,14 @@ export function createHostApi(
                 '呜……画摊子翻车了，这张图没画成。换个说法再让我试一次？',
                 opts.defaultReplyTo,
                 opts.messageThreadId,
+                { beforeSend: assertOpen },
               ).catch(() => 0);
               return;
             }
             const { resolveInsideSandbox } = await import('../sandbox/paths.js');
             const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
             const target = resolveInsideSandbox(r.pngPath);
-            const { messageId } = await tgSendPhoto(chatId, target, {
+            const { messageId } = await tgSendPhoto(chatId, target, { beforeSend: assertOpen,
               caption: caption || undefined,
               replyToId: opts.defaultReplyTo,
               messageThreadId: opts.messageThreadId,
@@ -3040,6 +3083,14 @@ export function createHostApi(
       },
     },
     runtime: {
+      readPublicationEvidence(request) {
+        assertOpen(); if (!opts.backgroundRun) throw new Error('background_mode_required');
+        return readBackgroundEvidence(opts.backgroundRun,request);
+      },
+      proposePublication(text, handles) {
+        assertOpen(); if (!opts.backgroundRun) throw new Error('background_mode_required');
+        return proposeBackgroundPublication(opts.backgroundRun,text,handles);
+      },
       setAcceptance(checks) { audit.propose(checks); },
       verifyAcceptance() { return audit.verify(); },
       endTask(summary: string) {
@@ -3049,7 +3100,12 @@ export function createHostApi(
         if (!String(summary).startsWith('failed')) audit.assertCanEnd();
         ended = true;
         // 承诺闭环③ 兜底：说了「等下/我去…」但没立 goal 也没跨群送达 → 自动补 goal。
-        void promiseBackstop();
+        // Join this bounded check before executor terminal settlement. A valid
+        // promise may be recorded while its input is still current; stale or
+        // cancelled input cannot schedule a fresh goal after the task closes.
+        if (!String(summary).startsWith('failed') && summary !== 'user_stopped') {
+          pendingBookkeeping.push(promiseBackstop());
+        }
         opts.onEnd(String(summary ?? '').slice(0, 1000));
       },
       didSendText() {
@@ -3233,6 +3289,21 @@ export function createHostApi(
         value: (...args: unknown[]) => trackInflight(Reflect.apply(fn, attachments, args) as Promise<unknown>) });
     }
     api.telegram.sendSticker = (handle: string) => trackInflight(attachments.sendPhoto(handle));
+  }
+  if (opts.backgroundRun) {
+    // Defense in depth for direct host calls and future guest list mistakes.
+    // Internal runtime bookkeeping stays usable by the executor; guest-visible
+    // mutators and every other namespace are limited to the same read-only list.
+    const allowed = new Set<string>(BACKGROUND_CAPABILITY_METHODS);
+    const blockedRuntime = new Set(['waitForUser','predict','setScratch','clearScratch','rememberThread','scheduleSelfWake','setAcceptance']);
+    for (const [namespace, object] of Object.entries(api)) {
+      for (const name of Object.keys(object)) {
+        if ((namespace === 'runtime' ? blockedRuntime.has(name) : !allowed.has(`${namespace}.${name}`))
+          && typeof (object as Record<string,unknown>)[name] === 'function') {
+          Object.defineProperty(object,name,{configurable:true,enumerable:true,value:() => { throw new Error('background_direct_effect_forbidden'); }});
+        }
+      }
+    }
   }
   // Runtime stays synchronous. All tool receipts originate from host-returned results.
   for (const key of Object.keys(api) as (keyof HostApi)[]) {

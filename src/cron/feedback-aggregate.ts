@@ -157,7 +157,9 @@ export async function runFeedbackAggregate(): Promise<void> {
       }
     }
 
-    if (notes.length > 0) saveSelfNotes(notes);
+    // Global aggregates are candidate observations, not approval to repeat any
+    // chat's content elsewhere. They require a separate host evidence decision.
+    if (notes.length > 0) saveSelfNotes(notes, { origin: 'feedback_aggregate', sourceChatIds: [] });
   } catch (err) {
     // 非关键路径，但别再完全静默——这个 cron 曾经"看着在跑、实际一行没写"，
     // 而唯一的线索就是它自己从不打日志。

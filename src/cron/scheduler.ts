@@ -137,6 +137,7 @@ export function startCronJobs(deps?: CronDeps): void {
   if (env().COGNITIVE_OUTBOX_ENABLED === true) {
     reg({
       name: 'cognitive-outbox',
+      retrySafe: true,
       everySec: 15,
       run: async () => {
         const { drainCognitiveOutbox } = await import('../agent/cognitive-outbox-worker.js');
@@ -148,6 +149,20 @@ export function startCronJobs(deps?: CronDeps): void {
           { workerId: `cron:cognitive:${process.pid}`, batchSize: 50, leaseSec: 90, maxAttempts: 5 },
         );
         if (result.claimed > 0) logger.info({ result }, 'cognitive outbox projection tick');
+      },
+    });
+  }
+
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true) {
+    reg({ name: 'memory-projection', everySec: 15, retrySafe: true,
+      run: async () => {
+        const { drainMemoryProjectionOutbox } = await import('../memory/chroma.js');
+        const { memoryProjectionStats } = await import('../memory/source-store.js');
+        const result = await drainMemoryProjectionOutbox();
+        const backlog = memoryProjectionStats();
+        if (result.claimed > 0 || backlog.failed > 0) logger.info({ result, backlog }, 'memory projection tick');
+        return { status: result.claimed > 0 ? 'completed' : 'skipped',
+          reason: `completed=${result.completed};pending=${backlog.pending};failed=${backlog.failed};oldest=${backlog.oldestPendingAt ?? 'none'}` };
       },
     });
   }
@@ -428,6 +443,7 @@ export function startCronJobs(deps?: CronDeps): void {
   if (env().TASK_EXECUTOR_ENABLED) {
     reg({
       name: 'task-wake',
+      retrySafe: true,
       everySec: 60,
       run: async () => {
         const { wakeDueTasks } = await import('./task-wake.js');
@@ -689,11 +705,12 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
-  // 爱好蒸馏: 每天一次从群友爱好蒸馏 bot 自己的爱好(慢变量)
+  // Scope-bounded sweep; each source refreshes at most once per three days.
   if (env().HOBBY_DISTILL_ENABLED) {
     reg({
       name: 'hobby-distill',
-      dailyAt: { hour: 5, minute: 41 },
+      retrySafe: true,
+      everySec: 3600,
       run: async () => {
         const { distillHobbies } = await import('../tracking/hobbies.js');
         await distillHobbies();

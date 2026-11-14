@@ -65,6 +65,40 @@ afterEach(async () => {
 });
 
 describe('OneBot authenticated forward WebSocket', () => {
+  it.each(['message', 'request', 'notice'] as const)('joins an in-flight %s callback while preserving sender availability', async kind => {
+    const local = await server((socket, request) => reply(socket, request, { message_id: 901 }));
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const handler = vi.fn(async () => { await pending; });
+    const instance = client(local.endpoint, { onMessage: handler, onRequest: handler, onNotice: handler });
+    await instance.start();
+    const frame = kind === 'message' ? event(1) : kind === 'request'
+      ? { post_type: 'request', request_type: 'friend', self_id: 42, user_id: 99, flag: 'synthetic', comment: '', time: 1700000000 }
+      : { post_type: 'notice', notice_type: 'group_recall', self_id: 42, user_id: 99, operator_id: 99, group_id: 123, message_id: 3, time: 1700000000 };
+    local.sockets[0]!.send(JSON.stringify(frame));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    let drained = false;
+    const drain = instance.drainIngress().then(() => { drained = true; });
+    await new Promise(resolve => setTimeout(resolve, 10)); expect(drained).toBe(false);
+    local.sockets[0]!.send(JSON.stringify(event(2)));
+    await expect(instance.send(action())).resolves.toMatchObject({ id: '901' });
+    release(); await drain;
+    expect(handler).toHaveBeenCalledOnce(); expect(drained).toBe(true);
+    expect(instance.snapshot()).toMatchObject({ state: 'ready', handlingMessage: false });
+  });
+  it('drains already admitted queued messages before declaring ingress clean', async () => {
+    const local = await server(); let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const received: string[] = [];
+    const instance = client(local.endpoint, { onMessage: async message => {
+      received.push(message.ref.id); if (received.length === 1) await blocked;
+    } });
+    await instance.start();
+    local.sockets[0]!.send(JSON.stringify(event(1))); local.sockets[0]!.send(JSON.stringify(event(2)));
+    await vi.waitFor(() => expect(instance.snapshot().queuedMessages).toBe(1));
+    const drain = instance.drainIngress(); release(); await drain;
+    expect(received).toEqual(['1', '2']); expect(instance.snapshot().queuedMessages).toBe(0);
+  });
   it('uses a bearer header and bounded parser options; constructor makes no connection', async () => {
     const local = await server();
     const factory = vi.fn<OneBotSocketFactory>((endpoint, options) => new WebSocket(endpoint, options));

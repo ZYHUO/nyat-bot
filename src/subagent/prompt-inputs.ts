@@ -101,7 +101,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     masterBlock,
     permanent,
     roster,
-    selfStateLine,
+    initialSelfStateLine,
     experience,
     skills,
     worldStateBlock,
@@ -191,8 +191,9 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     })(),
     (async () => {
       try {
+        if (env().EMOTION_CONTINUITY_ENABLED) return ''; // compose after the anchored workspace projection
         const { composeSelfState } = await import('../pipeline/heart/self-state.js');
-        const ss = await composeSelfState(chatId);
+        const ss = await composeSelfState(chatId, task.contentDirection);
         return ss?.narration ?? '';
       } catch { return ''; }
     })(),
@@ -425,6 +426,14 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
       } catch { return ''; }
     })(),
   ]);
+
+  let selfStateLine = initialSelfStateLine;
+  if (env().EMOTION_CONTINUITY_ENABLED) {
+    try {
+      const { composeSelfState } = await import('../pipeline/heart/self-state.js');
+      selfStateLine = (await composeSelfState(chatId, anchorText || task.contentDirection)).narration;
+    } catch { /* optional read-only disposition */ }
+  }
 
   // ── systemPrompt 链（同步字符串操作，顺序与原实现逐行一致） ────────────
   // 原顺序：EXECUTOR_SYSTEM → 沙盒可用性注记 → 回复式命令清单替换 →

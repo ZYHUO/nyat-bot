@@ -7,6 +7,7 @@ import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
 import { scopeKey } from '../shared/cognitive-scope.js';
+import { resolveConversationScope } from '../shared/privacy-scope.js';
 import type { CognitiveScope, ScopeVisibility } from '../shared/cognitive-scope.js';
 import type { UpdateLike } from '../shared/types.js';
 
@@ -319,6 +320,19 @@ export function appendCognitiveEvent(input: CognitiveEventInput): AppendCognitiv
         const duplicate = db.prepare('SELECT * FROM cognitive_events WHERE dedupe_key = ?').get(normalized.dedupeKey) as Record<string, unknown> | undefined;
         if (duplicate) return { inserted: false, event: rowToEvent(duplicate) };
       }
+      // Provenance is host-observed at creation time, never repaired on duplicate
+      // reads. A model-supplied label cannot promote its own hypothesis to fact.
+      let factJson = normalized.factJson;
+      if (input.fact?.['hypothesisKind'] === 'self') {
+        const fact = JSON.parse(factJson) as Record<string, unknown>;
+        delete fact['conversationScope'];
+        if (input.source !== 'model' && normalized.chatId !== null) {
+          const source = resolveConversationScope(normalized.chatId);
+          if (source?.accountId) fact['conversationScope'] = source;
+        }
+        factJson = JSON.stringify(fact);
+        if (Buffer.byteLength(factJson, 'utf8') > MAX_FACT_BYTES) throw new Error('self fact exceeds limit');
+      }
       const next = db
         .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM cognitive_events WHERE correlation_id = ?')
         .get(normalized.correlationId) as { next: number };
@@ -342,7 +356,7 @@ export function appendCognitiveEvent(input: CognitiveEventInput): AppendCognitiv
         normalized.causationId,
         normalized.correlationId,
         normalized.dedupeKey,
-        normalized.factJson,
+        factJson,
         createdAt,
       );
       if (outboxEnabled() && hasOutboxTable(db)) {
@@ -370,6 +384,7 @@ export function appendTelegramMessageEvent(input: TelegramMessageEventInput): st
     const updateId = typeof raw['update_id'] === 'number' ? raw['update_id'] : undefined;
     const telegramKey = updateId === undefined ? `${input.chatId}:${input.messageId}` : String(updateId);
     const versionKey = isEdit ? String(telegramMessage?.['edit_date'] ?? telegramKey) : telegramKey;
+    const identity = input.update.__nyatEventIdentity;
     const result = appendCognitiveEvent({
       type: isEdit ? 'message_edited' : 'message_received',
       scope: {
@@ -379,8 +394,8 @@ export function appendTelegramMessageEvent(input: TelegramMessageEventInput): st
       },
       source: platform === 'telegram' ? 'telegram' : 'host',
       occurredAt: input.occurredAt,
-      correlationId: `${platform}:${input.chatId}:${telegramKey}`,
-      dedupeKey: `${platform}:${input.chatId}:${input.messageId}:${isEdit ? `edit:${versionKey}` : `message:${versionKey}`}`,
+      correlationId: identity ? `message:${identity.eventId}` : `${platform}:${input.chatId}:${telegramKey}`,
+      dedupeKey: identity ? `inbound:${identity.eventId}` : `${platform}:${input.chatId}:${input.messageId}:${isEdit ? `edit:${versionKey}` : `message:${versionKey}`}`,
       fact: {
         ...(platform === 'qq' ? { platform } : {}),
         chatId: input.chatId,
@@ -388,6 +403,7 @@ export function appendTelegramMessageEvent(input: TelegramMessageEventInput): st
         userId: input.userId ?? null,
         updateId: updateId ?? null,
         isEdit,
+        ...(identity ? { eventIdentity: identity } : {}),
       },
     });
     return result?.event.id;

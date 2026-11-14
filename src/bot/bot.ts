@@ -5,6 +5,8 @@ import { logger } from '../shared/logger.js';
 import { assertTelegramPayload } from '../platform/telegram-guard.js';
 import { getPlatformBotIdentity } from '../platform/account-context.js';
 import { assertOutboundPayload, assertSameConversationForward } from '../shared/outbound-privacy.js';
+import { installDurablePollingErrorHandler } from '../ingress/durable.js';
+import { cancelBotPollingRetries, drainBotPolling } from '../ingress/polling-lifecycle.js';
 
 let _bot: Bot | undefined;
 let _botUid = 0;
@@ -38,7 +40,7 @@ export async function createBot(): Promise<Bot> {
       'Bot identity fetched',
     );
 
-    _bot.catch((err) => {
+    installDurablePollingErrorHandler(_bot, (err) => {
       logger.error({ err: err.error }, 'Bot error');
     });
   }
@@ -87,10 +89,16 @@ export function tryGetBot(): Bot | undefined {
 
 export async function stopBot(): Promise<void> {
   if (_bot) {
-    await _bot.stop();
+    await stopBotIngress();
     _bot = undefined;
     _botUid = 0;
     _botUsername = '';
     _botDisplayName = '';
   }
+}
+/** Stop and join polling, retaining the API and identity until workers drain. */
+export async function stopBotIngress(): Promise<void> {
+  cancelBotPollingRetries();
+  if (_bot) await _bot.stop();
+  await drainBotPolling();
 }

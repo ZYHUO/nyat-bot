@@ -11,11 +11,16 @@ import {
   checkpointProcess,
   listDueProcessWakes,
   requestProcessWake,
+  hasCurrentProcessWakeSource,
   type CognitiveProcessKind,
   type ProcessWake,
 } from './cognitive-continuity.js';
 import { collectConversationField, deriveInnerStateFromConversationField } from './conversation-field.js';
 import { recordInnerState } from './nyatos-state.js';
+import { hasCurrentEmotionSource, projectInnerStateFromConversationField } from './emotion-continuity.js';
+import { env } from '../env.js';
+import { getCognitiveEvent } from './cognitive-events.js';
+import { lifeProjectForWake } from './life-project.js';
 
 const PROCESS_CADENCE_SEC: Record<CognitiveProcessKind, number> = {
   observer: 15 * 60,
@@ -42,16 +47,24 @@ function nextWakeAt(kind: CognitiveProcessKind, now: number): number {
   return Math.min(4_102_444_800, now + PROCESS_CADENCE_SEC[kind]);
 }
 
-async function projectConversation(wake: ProcessWake): Promise<string[]> {
+async function projectConversation(wake: ProcessWake, now: number): Promise<string[]> {
   if (wake.scope.visibility !== 'chat' || wake.scope.chatId === undefined) return [];
   const recent = await getRecent(wake.scope.chatId, 30);
   const field = await collectConversationField({
     chatId: wake.scope.chatId,
-    recent,
+    recent: env().EMOTION_CONTINUITY_ENABLED ? recent.filter((message) =>
+      message.timestamp <= now && message.timestamp >= now - 3600
+      && hasCurrentEmotionSource(wake.scope.chatId!, message.eventIdentity)) : recent,
     botUid: getBotIdentity(wake.scope.chatId).uid,
+    nowSec: now,
     ...(wake.scope.taskId ? {} : {}),
     asOfEventId: wake.causeEventIds[0],
   });
+  if (env().EMOTION_CONTINUITY_ENABLED) {
+    const recorded = projectInnerStateFromConversationField(field, { causationId: wake.wakeEventId });
+    if (!recorded) throw new Error('inner_state_projection_unavailable');
+    return [recorded.eventId];
+  }
   const state = deriveInnerStateFromConversationField(field);
   const recorded = recordInnerState(state, {
     scope: wake.scope,
@@ -76,12 +89,26 @@ export async function runCognitiveProcessTick(
     rescheduled: 0,
   };
   for (const wake of wakes) {
+    // Only an explicitly operator-activated project gets this bounded driver.
+    // Ordinary model mission proposals retain their existing waiting behavior.
+    const project = lifeProjectForWake(wake);
+    if (project) {
+      try {
+        const { runLifeProjectWake } = await import('./life-project-runner.js');
+        const outcome = await runLifeProjectWake(project, wake, now);
+        if (outcome.status === 'completed') result.completed++;
+        else if (outcome.status === 'waiting') result.waiting++;
+        else result.failed++;
+        if (outcome.outcomeEventId) result.projected++;
+      } catch { result.failed++; }
+      continue;
+    }
     const resumeAt = nextWakeAt(wake.kind, now);
     let status: 'completed' | 'failed' | 'waiting' = 'waiting';
     let outcomeEventIds: string[] = [];
     try {
       if (wake.kind === 'observer' || wake.kind === 'social_mind') {
-        outcomeEventIds = await projectConversation(wake);
+        outcomeEventIds = await projectConversation(wake, now);
         result.projected += outcomeEventIds.length;
         status = 'completed';
       }
@@ -95,6 +122,10 @@ export async function runCognitiveProcessTick(
       result.failed += 1;
     }
 
+    // The account could have changed while collecting context. Do not turn a
+    // rejected old wake into a fresh wake under the new account on retry.
+    if (env().EMOTION_CONTINUITY_ENABLED && wake.scope.visibility === 'chat'
+      && !hasCurrentProcessWakeSource(getCognitiveEvent(wake.wakeEventId))) continue;
     const checkpoint = checkpointProcess({
       processId: wake.processId,
       wakeEventId: wake.wakeEventId,

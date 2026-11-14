@@ -18,12 +18,14 @@
  * 用法：npx tsx scripts/coherence-probe.mts [天数]
  */
 
-import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import { logInput } from './log-input.mts';
 
-const DAYS = Number(process.argv[2] ?? '3');
+const input = logInput(process.argv.slice(2));
+const DAYS = Number(input.args[0] ?? '3');
+if (input.args.length > 1 || !Number.isFinite(DAYS) || DAYS <= 0) throw new Error('invalid_report_window');
 const LOOKBACK = 5;              // 前 5 条人话
-const sinceMs = Date.now() - DAYS * 86_400_000;
+const sinceMs = input.nowMs - DAYS * 86_400_000;
 
 /** 取一段文字的所有中文 bigram（两字组）。 */
 const bigrams = (s: string): Set<string> => {
@@ -36,12 +38,12 @@ const bigrams = (s: string): Set<string> => {
 interface Row { t: number; from: 'bot' | 'human'; text: string; chatId: string }
 
 const rows: Row[] = [];
-for (const line of execSync('cat logs/app.log', { encoding: 'utf8', maxBuffer: 1 << 28 }).split('\n')) {
+for (const line of fs.readFileSync(input.logFile, 'utf8').split('\n')) {
   if (!line.trim()) continue;
   let d: Record<string, unknown>;
   try { d = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
   const t = Number(d.time ?? 0);
-  if (t < sinceMs) continue;
+  if (t < sinceMs || t > input.nowMs) continue;
   const chatId = String(d.chatId ?? '');
   const msg = String(d.msg ?? '');
   if (msg === 'host sendText' && d.taskId) {
@@ -55,7 +57,6 @@ for (const line of execSync('cat logs/app.log', { encoding: 'utf8', maxBuffer: 1
 }
 rows.sort((a, b) => a.t - b.t);
 
-let withFullText = 0;
 const hits: number[] = [];
 for (let i = 0; i < rows.length; i++) {
   const r = rows[i]!;
@@ -89,4 +90,3 @@ console.log('  （单边判据：0 重合只能说明"开头与前文无关"，�
 // 所以广播 bot 的话也算进了分母——bot 回复和它 0 重合是正常的。
 // 修法是给 message in 加 bot 标记，但那只服务一个量具的精度，所以先写明限制。
 console.log('  ⚠️ 偏高：分母含其他 bot 的消息（message in 无 bot 标记，round 211）');
-void withFullText;

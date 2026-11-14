@@ -57,7 +57,7 @@ async function targetBotInChat(chatId: number, botName: string): Promise<boolean
       'SELECT 1 FROM bot_interactions WHERE chat_id = ? AND bot_username = ? LIMIT 1',
     ).get(chatId, botName) as unknown;
     if (row) {
-      void getRedis().set(key, '1', 'EX', IN_CHAT_TTL_SEC).catch(() => {});
+      await getRedis().set(key, '1', 'EX', IN_CHAT_TTL_SEC).catch(() => {});
       return true;
     }
   } catch { /* db 不可用 -> 落到 Telegram */ }
@@ -73,7 +73,7 @@ async function targetBotInChat(chatId: number, botName: string): Promise<boolean
     const m = await api.getChatMember(chatId, info.id);
     const status = (m as { status?: string }).status ?? '';
     const inChat = status !== 'left' && status !== 'kicked';
-    void getRedis().set(key, inChat ? '1' : '0', 'EX', IN_CHAT_TTL_SEC).catch(() => {});
+    await getRedis().set(key, inChat ? '1' : '0', 'EX', IN_CHAT_TTL_SEC).catch(() => {});
     return inChat;
   } catch {
     logger.debug({ chatId, botName }, 'delegation: target-in-chat check failed, fail-open');

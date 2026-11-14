@@ -15,13 +15,18 @@
  * 读数取不到时**明说取不到**，不打印 0——0 和"没有数据"是两件事，
  * 把这个搞混是这个会话反复吃亏的地方。
  */
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
+import { logInput } from './log-input.mts';
 
-const LOG = 'logs/app.log';
-const DB = 'data/xxb.db';
-const DAYS = Number(process.argv[2] ?? 3);
-const sinceMs = Date.now() - DAYS * 86_400_000;
+const input = logInput(process.argv.slice(2));
+const LOG = input.logFile;
+const DB = input.dbFile ?? (input.offline ? undefined : 'data/xxb.db');
+const positional = input.args.filter(arg => arg !== '--kv');
+const DAYS = Number(positional[0] ?? 3);
+if (positional.length > 1 || !Number.isFinite(DAYS) || DAYS <= 0) throw new Error('invalid_report_window');
+const sinceMs = input.nowMs - DAYS * 86_400_000;
+if (input.offline) console.log('离线输入：日志及可选 SQLite / metrics 快照；不连接服务，不代表当前生产状态。');
 /** 部署后的窗口：这一轮的改动都是重启后生效的，混在一起看会看不出效果。 */
 const deployMs = lastDeployMs();
 
@@ -97,7 +102,7 @@ function lastDeployMs(): number {
     for (const line of fd.split('\n')) {
       if (!line.includes('Bot started (polling)')) continue;
       const m = /"time":(\d{13})/.exec(line.slice(0, 80));
-      if (m) last = Math.max(last, Number(m[1]));
+      if (m && Number(m[1]) <= input.nowMs) last = Math.max(last, Number(m[1]));
     }
   } catch {
     /* 读不到就算了，调用方会看到 0 */
@@ -137,7 +142,7 @@ function readLog(): LogStats {
     const m = /"time":(\d{13})/.exec(line.slice(0, 80));
     if (!m) continue;
     const t = Number(m[1]);
-    if (t < sinceMs) continue;
+    if (t < sinceMs || t > input.nowMs) continue;
     if (t >= deployMs) st.afterDeploy++;
     let d: Record<string, unknown>;
     try {
@@ -220,13 +225,14 @@ function readLog(): LogStats {
     else if (msg.includes('send budget exhausted')) st.sendBudgetEnd++;
     // round 64：进程内闸的"机会成本"计数（重启次数 + 发送条数）
     else if (msg === 'Bot started (polling)') st.processRestarts += 1;
-    else if (msg === 'host sendText') st.processSends += 1;
     // round 174：开口维度（只在有 taskId 时才算，所以 round 170 之前的数据为空）
     else if (msg === 'host sendText' && d['taskId']) {
+      st.processSends += 1;
       const tid = String(d['taskId']);
       st.taskCalls.set(tid, (st.taskCalls.get(tid) ?? 0) + 1);
       if (t >= deployMs) st.taskCalls.set(`@${tid}`, (st.taskCalls.get(`@${tid}`) ?? 0) + 1);
     }
+    else if (msg === 'host sendText') st.processSends += 1;
     else if (msg === 'task delivery recorded') {
       const tid = String(d['taskId'] ?? '');
       if (!tid) continue;
@@ -265,8 +271,9 @@ function readDb(): DbStats {
   const out: DbStats = { sends: 0, sendsPrev: 0, asiRows: 0, asiMeasured: 0, outcomes: 0 };
   try {
     // 不走 getDb()（那会连上生产库并跑迁移）；直接只读打开。
+    if (!DB) throw new Error('离线模式未提供 SQLite 快照');
     const db = new Database(DB, { readonly: true, fileMustExist: true });
-    const nowSec = Math.floor(Date.now() / 1000);
+    const nowSec = Math.floor(input.nowMs / 1000);
     const sinceSec = nowSec - DAYS * 86_400;
     out.sends = (db.prepare('SELECT COUNT(*) n FROM self_replies WHERE ts >= ?').get(sinceSec) as { n: number }).n;
     out.sendsPrev = (db.prepare('SELECT COUNT(*) n FROM self_replies WHERE ts >= ? AND ts < ?').get(sinceSec - DAYS * 86_400, sinceSec) as { n: number }).n;
@@ -387,7 +394,7 @@ if (st.windowStart) {
 console.log('');
 
 if (st.lastAwakeMs > 0) {
-  const gapH = (Date.now() - st.lastAwakeMs) / 3_600_000;
+  const gapH = (input.nowMs - st.lastAwakeMs) / 3_600_000;
   const fmtAwake = new Date(st.lastAwakeMs).toISOString().replace('T', ' ').slice(0, 16);
   console.log(`最后一条 awake 处理证据: ${fmtAwake} UTC（${gapH.toFixed(1)} 小时前）`);
   if (gapH > 1) {
@@ -403,8 +410,8 @@ if (st.lastAwakeMs > 0) {
 // Redis 里跨重启不过期（已修，但重启后的几十秒内真失败的 provider 还会重新熔断）。
 // 所以"部署后"那一列在头几分钟里读到的不是稳态，是低谷。
 // 不写这一句，一段刚重启后的糟糕数字会被当成"修复没生效"。
-if (deployMs > 0 && Date.now() - deployMs < 10 * 60_000) {
-  const mins = ((Date.now() - deployMs) / 60_000).toFixed(0);
+if (deployMs > 0 && input.nowMs - deployMs < 10 * 60_000) {
+  const mins = ((input.nowMs - deployMs) / 60_000).toFixed(0);
   console.log(`⚠️  距上次重启才 ${mins} 分钟——"部署后"那一列现在是**重启低谷**，不是稳态`);
   console.log('    （熔断键已改为启动时清理，但真在失败的 provider 几十秒内会重新熔断）。');
   console.log('    想看稳态效果，等 10 分钟以上再跑，或看全窗口那一列。');
@@ -431,7 +438,6 @@ if (st.processRestarts > 0) {
 }
 
 if (deployMs > 0) {
-  const fmt = (t: number): string => new Date(t).toISOString().replace('T', ' ').slice(11, 16);
   console.log(`最近一次部署: ${new Date(deployMs).toISOString().replace('T', ' ').slice(0, 16)} UTC` +
     `（此后 ${st.afterDeploy.toLocaleString()} 行日志 / ${st.afterInbound} 条入站）`);
   if (st.afterInbound === 0) {
@@ -527,7 +533,7 @@ console.log('── 2b. topic-scan 抽取率（低产 = LLM 在空转）──')
     for (const line of fd.split('\n')) {
       if (!line.includes('Topic scan tick')) continue;
       const m = /"time":(\d{13})/.exec(line.slice(0, 80));
-      if (!m || Number(m[1]) < sinceMs) continue;
+      if (!m || Number(m[1]) < sinceMs || Number(m[1]) > input.nowMs) continue;
       let d: Record<string, unknown>;
       try { d = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
       ticks++;
@@ -594,7 +600,7 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     for (const line of fd.split('\n')) {
       if (!line.startsWith('{')) continue;
       const m = /"time":(\d{13})/.exec(line.slice(0, 80));
-      if (!m || Number(m[1]) < sinceMs) continue;
+      if (!m || Number(m[1]) < sinceMs || Number(m[1]) > input.nowMs) continue;
       let d: Record<string, unknown>;
       try { d = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
       const msg = String(d['msg'] ?? '');
@@ -682,7 +688,6 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     const cFail = counts.get('@CodeAct job failed') ?? 0;
     const cAllFail = counts.get('CodeAct job failed') ?? 0;
     if (cStart > 0) {
-      const crashed = cFail / cStart;
       console.log(`  CodeAct 任务            起 ${cStart}｜部署后崩 ${cFail}｜全窗口崩 ${cAllFail}  崩溃率 ${((cAllFail / cStart) * 100).toFixed(0)}%`);
       if (cAllFail / cStart >= 0.5) {
         console.log('    🚨 CodeAct 崩溃率 ≥50%——**所有需要 subagent 的回复都是坏的**。');
@@ -720,9 +725,10 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
 // （不可见 / 不可回放 / 没样本 / 已修好），"未读到"只有一种。
 {
   console.log('── 2e. AGI 维度（学来的东西有没有被用上、证据有没有流动）──');
-  const sinceSec = Math.floor(Date.now() / 1000) - DAYS * 86_400;
+  const sinceSec = Math.floor(input.nowMs / 1000) - DAYS * 86_400;
   const nf = (n: number | null | undefined): string => (n === null || n === undefined ? '未读到' : String(n));
   try {
+    if (!DB) throw new Error('离线模式未提供 SQLite 快照');
     const db = new Database(DB, { readonly: true, fileMustExist: true });
     const q = <T,>(sql: string, ...args: unknown[]): T | null => {
       try { return db.prepare(sql).get(...args) as T; } catch { return null; }
@@ -773,7 +779,7 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
     for (const line of fd.split('\n')) {
       if (!line.startsWith('{')) continue;
       const m = /"time":(\d{13})/.exec(line.slice(0, 80));
-      if (!m || Number(m[1]) < sinceMs) continue;
+      if (!m || Number(m[1]) < sinceMs || Number(m[1]) > input.nowMs) continue;
       const isInj = line.includes('"msg":"learned context injected"');
       const isStart = line.includes('"msg":"CodeAct task start"');
       if (!isInj && !isStart) continue;
@@ -838,8 +844,11 @@ console.log('');
 // 和上面的 after-deploy 列同一个时间范围。
 {
   try {
-    const res = await fetch('http://127.0.0.1:3001/metrics', { signal: AbortSignal.timeout(5000) });
-    const text = await res.text();
+    const text = input.metricsFile ? readFileSync(input.metricsFile, 'utf8') : await (async () => {
+      if (input.offline) throw new Error('offline_metrics_unavailable');
+      const res = await fetch('http://127.0.0.1:3001/metrics', { signal: AbortSignal.timeout(5000) });
+      return res.text();
+    })();
     const byOutcome = new Map<string, number>();
     for (const line of text.split('\n')) {
       const m = /^llm_requests_total\{[^}]*outcome="([^"]+)"\}\s+(\d+)/.exec(line);
@@ -923,7 +932,8 @@ console.log('');
     }
   } catch {
     console.log('── 2d. 实时 LLM 调用（部署后）──');
-    console.log('  读不到 http://127.0.0.1:3001/metrics（METRICS_ENABLED 或端口不对）——跳过。');
+    console.log(input.offline ? '  离线模式未提供可读 metrics 快照——未读到，不是零。'
+      : '  读不到 http://127.0.0.1:3001/metrics（METRICS_ENABLED 或端口不对）——跳过。');
     console.log('');
   }
 }

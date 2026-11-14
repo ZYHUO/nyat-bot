@@ -19,6 +19,7 @@ export const CODEACT_QUEUE_NAME = 'xxb-codeact';
 
 let _queue: Queue<DispatchTask> | undefined;
 let _worker: Worker<DispatchTask> | undefined;
+const failureCleanups = new Set<Promise<void>>();
 
 export function getCodeActQueue(): Queue<DispatchTask> {
   if (!_queue) {
@@ -147,7 +148,7 @@ export function startCodeActWorker(): Worker<DispatchTask> {
     // `clearCodeActActive` 清的是 `xxb:codeact:active:`（isCodeActBusy 用），
     // 而 interrupt 路由读的是 `xxb:agent:active-chat:` — **两个不同的 key**。
     // 所以这里两个都清，并且把任务状态改成 failed（防只清 key 而 task 还写着 running）。
-    void (async () => {
+    const cleanup = (async () => {
       const d = job?.data;
       if (!d || typeof d.chatId !== 'number' || !d.id) return;
       try {
@@ -167,6 +168,8 @@ export function startCodeActWorker(): Worker<DispatchTask> {
         /* 清理失败不要再把 worker 拒了 */
       }
     })();
+    failureCleanups.add(cleanup);
+    void cleanup.finally(() => failureCleanups.delete(cleanup));
   });
   _worker.on('error', (err) => {
     logger.error({ err: err.message }, 'CodeAct worker error');
@@ -176,35 +179,18 @@ export function startCodeActWorker(): Worker<DispatchTask> {
 }
 
 export async function closeCodeActWorker(): Promise<void> {
-  // round 189：**分步日志 + 各自的超时。**
-  //
-  // 实测（全日志 384 次关机）：53 次 forced exit，其中 **48 次卡在这一步**
-  // （最后一条 shutdown step 是 cron），只有 3 次卡在 worker、2 次在 ingress。
-  // 而 round 64 修的是 closeRedis（redis+db 步）——那个步现在一次都没卡过，
-  // 说明**故障搬了家**：`_worker.close()` / `_queue.close()` 会等在飞 job 或
-  // 等一个已经不回的 Redis 连接，整条关机链就停在这儿。
-  //
-  // 代价不只是"重启慢"：forced exit 是 process.exit(1)，systemd 记失败；
-  // 而 index.ts 的注释写明 status=9/KILL 会跳过 WAL checkpoint / token 记账 /
-  // BullMQ 锁释放。所以这一步卡住是在丢数据。
-  //
-  // 分步日志是为了下次能看出是 worker 还是 queue；超时照 round 64 的形状
-  // （赛跑 + 不等就往下走）——关机已经决定了，不应该被一个子系统拖死。
-  const withTimeout = async (name: string, fn: () => Promise<void>): Promise<void> => {
-    try {
-      await Promise.race([fn(), new Promise<void>((r) => setTimeout(r, 5000).unref())]);
-    } catch (err) {
-      logger.debug({ err, name }, 'closeCodeActWorker step failed (non-fatal during shutdown)');
-    }
-  };
+  // A bounded wait that silently succeeds leaves writers alive after DB close.
+  // The process-level deadline exits nonzero; this function only succeeds after
+  // the worker, its failed-job handlers, and the queue have actually settled.
   if (_worker) {
     logger.info({ step: 'codeact-worker' }, 'shutdown step');
-    await withTimeout('worker', () => _worker!.close());
+    await _worker.close();
     _worker = undefined;
   }
+  await Promise.all([...failureCleanups]);
   if (_queue) {
     logger.info({ step: 'codeact-queue' }, 'shutdown step');
-    await withTimeout('queue', () => _queue!.close());
+    await _queue.close();
     _queue = undefined;
   }
 }

@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import { syntheticAiConfig } from '../../helpers/synthetic-ai-config.js';
+afterEach(() => vi.unstubAllEnvs());
 
 /**
  * 不许再出现"写死的 1200 maxTokens"（round 70）。
@@ -34,12 +36,14 @@ describe('调用点不许写死 maxTokens 1200', () => {
     }
   });
 
-  it('② 推理模型的 usage 预算都 >= 4000', () => {
-    const env = fs.readFileSync('.env', 'utf8');
-    const get = (k: string) => Number(env.match(new RegExp('^' + k + '=(\\d+)$', 'm'))?.[1] ?? 0);
-    for (const k of ['AI_USAGE_SUMMARIZE_MAX_TOKENS', 'TIMING_GATE_MAX_TOKENS', 'ASI_RUBRIC_MAX_TOKENS']) {
-      expect(get(k), k).toBeGreaterThanOrEqual(4000);
-    }
+  it('② 已配置推理用途经真实路由保留充足预算', async () => {
+    const config = await syntheticAiConfig();
+    expect(config.getUsage('summarize').maxTokens).toBeGreaterThanOrEqual(4000);
+    expect(config.env().TIMING_GATE_MAX_TOKENS).toBeGreaterThanOrEqual(4000);
+    expect(config.env().ASI_RUBRIC_MAX_TOKENS).toBeGreaterThanOrEqual(4000);
+    expect(config.audit()).toEqual([]);
+    const bad = await syntheticAiConfig({ AI_USAGE_SUMMARIZE_MAX_TOKENS: '1200', TIMING_GATE_MAX_TOKENS: '1200' });
+    expect(bad.audit()).toEqual(expect.arrayContaining(['summarize_reasoning_budget_small', 'timing_reasoning_budget_small']));
   });
 
   it('③ 默认值也不许是 1200（改默认值而不只改 .env：.env gitignored）', () => {

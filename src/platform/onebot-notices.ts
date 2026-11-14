@@ -5,6 +5,7 @@ import { getRedis } from '../db/redis.js';
 import type { FormattedMessage } from '../shared/types.js';
 import { findConversationRef, getOrCreateConversationId, getOrCreateMessageId, getOrCreateUserId, isPlatformInternalId } from './identity-store.js';
 import type { ConversationRef } from './types.js';
+import { hasMemorySourceAuthority, retractMemorySources } from '../memory/source-store.js';
 
 type GroupNoticeKind = 'group_increase' | 'group_decrease' | 'group_admin' | 'group_ban';
 interface NoticeBase { accountId: string; timestampMs: number; userId: string; }
@@ -144,6 +145,9 @@ export async function ingestOneBotNotice(notice: NormalizedOneBotNotice, context
         db.prepare(`INSERT INTO onebot_message_recalls (chat_id, message_id, account_id, recalled_at) VALUES (?, ?, ?, ?)
           ON CONFLICT(chat_id, message_id) DO UPDATE SET recalled_at = MAX(recalled_at, excluded.recalled_at)`)
           .run(chatId, messageId, notice.accountId, notice.timestampMs);
+        if ((config.MEMORY_PROJECTION_OUTBOX_ENABLED === true || hasMemorySourceAuthority()) && messageId !== null) {
+          retractMemorySources([`${chatId}_${messageId}`], now);
+        }
       } else if ('subType' in notice) {
         db.prepare(`INSERT OR IGNORE INTO onebot_group_member_state (account_id, group_id, user_id) VALUES (?, ?, ?)`)
           .run(notice.accountId, notice.groupId, notice.userId);

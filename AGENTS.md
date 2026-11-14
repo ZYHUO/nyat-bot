@@ -210,7 +210,7 @@ change passed the other three and still did nothing:
 | unit tests | the logic is wrong | `npm run test` |
 | **dead-switch guard** | **the flag nobody reads** — `tests/unit/env/no-dead-switches.test.ts` fails if a flag is ON (in `.env` or by default) with zero readers in `src/`+`scripts/`+`packages/` | `npx vitest run tests/unit/env/no-dead-switches.test.ts` |
 | **deploy verification** | **the change isn't in the bundle** — `scripts/verify-deploy.mts` greps `dist/index.js` for each mechanism (handles esbuild quote normalisation and `\uXXXX` CJK escaping) | `npx tsx scripts/verify-deploy.mts` |
-| **integration smoke** | **green alone, broken composed** — `scripts/verify-integration.mts` exercises real compositions (search, anti-ad authorise→measure→render→deauthorise, kick gates, body-signal self-registration, plus behaviour checks that *call* the newest mechanisms) | `npx tsx scripts/verify-integration.mts` |
+| **integration smoke** | **green alone, broken composed** — real compositions with synthetic provider/Redis/SQLite/transport fixtures: search, anti-ad authorise→measure→render→deauthorise, body registration, capability/dispatch gates and QQ ingress. Every listed suite must run and pass; process-level network guard rejects real TCP/UDP, no production `.env` is loaded. This is not a live-provider or real-delivery claim. | `node --import tsx scripts/verify-integration.mts --offline` |
 
 **And a guard that checks a *shape* is weaker than one that checks a *relationship*.**
 Round 167 added behaviour tests for `sweepStaleAgentTasks` and the first two mock
@@ -235,13 +235,15 @@ what the test claims.
 
 **A grep guard proves the string, not the logic.** `verify-deploy.mts` greps
 `dist/index.js`, so it can only show that an identifier survived bundling. When a
-mechanism is importable, add a check to `verify-integration.mts` that *calls* it and
-asserts on the return value — that block exists precisely because a grep-style test kept
+mechanism is importable, add a composition fixture to the explicit suite list in `verify-integration.mts` that *calls* it and
+asserts on the return value — those fixtures exist precisely because a grep-style test kept
 passing after `if (true) break;` was inserted into the very branch it claimed to cover.
 When you add such a check, verify it by breaking the mechanism and watching it fail; and
-run that from a script with `PATH=/opt/node22/bin` prepended, or the child process gets
-Node 26, crashes on `better-sqlite3` before reaching your check, and reports exit 1 with
-no ✗ lines — which reads exactly like "no failures found".
+run `node --import tsx scripts/verify-integration.mts --offline` with the project's Node 22 runtime.
+The launcher uses that same `process.execPath`, a synthetic environment and temporary state;
+missing/skipped tests, child failure or a blocked network attempt fail verification. Bare invocation
+refuses to run. Live provider/account probes require a separately reviewed explicit operation;
+never make this CI command read production `.env`, send platform messages or mutate production Redis.
 
 **A guard that greps for a *pattern* can match itself — one that reads an *artifact* cannot.**
 When you write a grep-style guard, first ask whether the thing it searches contains the

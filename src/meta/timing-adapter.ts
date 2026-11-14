@@ -1,3 +1,4 @@
+import type { PendingIntentRef } from './pending-intent.js';
 // Meta path timing-gate adapter — reuse pipeline timing FSM without Turn Actor.
 // L0 (incl. nickname): allow into Attention immediately — burst batching is
 // META_L0_COALESCE_MS in Attention.flush (quiet window), NOT TIMING_TALK_VALUE
@@ -35,6 +36,8 @@ import { findMessageRef, isPlatformInternalId } from '../platform/identity-store
 export type MetaTimingVerdict = 'allow' | 'silence';
 
 export interface MetaWaitAnchor {
+  pendingIntent?: PendingIntentRef;
+  messageThreadId?: number;
   chatId: number;
   layer: AttentionLayer;
   reason: string;
@@ -129,6 +132,7 @@ export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> 
         await getAttentionAccumulator().ingestAsync({
           chatId, layer: anchor.layer, reason: `wait_resume:${anchor.reason}`,
           messageId: item.messageId,
+          pendingIntent: item.pendingIntent as PendingIntentRef | undefined, messageThreadId: typeof item.messageThreadId === "number" ? item.messageThreadId : undefined,
           userId: typeof item.userId === 'number' && Number.isSafeInteger(item.userId) ? item.userId : undefined,
           textPreview: typeof item.textPreview === 'string' ? item.textPreview.slice(0, 200) : undefined,
           pressure: anchor.pressure, cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
@@ -142,6 +146,7 @@ export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> 
       layer: anchor.layer,
       reason: `wait_resume:${anchor.reason}`,
       messageId: anchor.messageId,
+      pendingIntent: anchor.pendingIntent, messageThreadId: anchor.messageThreadId,
       userId: anchor.userId,
       textPreview: anchor.textPreview,
       pressure: anchor.pressure,
@@ -285,6 +290,7 @@ export async function evaluateMetaTiming(opts: {
           layer,
           reason: decision.reason,
           messageId: formatted.messageId,
+          pendingIntent: formatted.pendingIntent, messageThreadId: formatted.messageThreadId,
           userId: formatted.uid,
           textPreview: (formatted.textContent || '').slice(0, 200),
           pressure: layer === 'L1' ? 60 : 30,
@@ -331,6 +337,7 @@ export async function evaluateMetaTiming(opts: {
         layer,
         reason: decision.reason,
         messageId: formatted.messageId,
+        pendingIntent: formatted.pendingIntent, messageThreadId: formatted.messageThreadId,
         userId: formatted.uid,
         textPreview: (formatted.textContent || '').slice(0, 200),
         pressure: layer === 'L1' ? 60 : 30,

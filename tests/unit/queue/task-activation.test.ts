@@ -1,23 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
 
 let db: Database.Database;
 const { config, queued, search, send, members } = vi.hoisted(() => ({
-  config: { TASK_EXECUTOR_ENABLED: true, TASK_MAX_ROUNDS: 1, PROACTIVE_ACTIVATED_AT_SEC: 1000 },
+  config: { TASK_EXECUTOR_ENABLED: true, TASK_MAX_ROUNDS: 1, PROACTIVE_ACTIVATED_AT_SEC: 1000, BOT_TOKEN: '123:synthetic-test', COGNITIVE_EVENTS_ENABLED: false },
   queued: vi.fn(), search: vi.fn(), send: vi.fn(), members: vi.fn(),
 }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 vi.mock('../../../src/env.js', () => ({ env: () => config }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({}) }));
-vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
+vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('../../../src/pipeline/tools/search.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/pipeline/tools/search.js')>(),
   executeSearchDetailed: search,
 }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: vi.fn(async () => ({ content: '已验证的新任务研究结果，可用于这次测试。' })) }));
-vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage: send }));
+vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessageDetailed: send }));
 vi.mock('../../../src/agent/task-evidence-store.js', () => ({ saveTaskEvidence: vi.fn() }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getGroupMembers: members }));
 vi.mock('bullmq', () => ({ Queue: class { add = queued; }, Worker: class {} }));
@@ -32,20 +31,20 @@ function makeTask(createdAt: number, chatId = -100): number {
   return id;
 }
 function job(taskId: number, chatId = -100) {
-  return { data: { type: 'task_execute', taskId, chatId, ownerUid: 42 } } as never;
+  return { data: { type: 'task_execute', taskId, chatId, ownerUid: 42, wakeGeneration: getTask(taskId)!.wake_generation } } as never;
 }
 
 describe('restored task activation boundaries', () => {
   beforeEach(() => {
     db = new Database(':memory:');
-    db.exec(readFileSync(join(__dirname, '../../../migrations/0065_tasks.sql'), 'utf8'));
+    for (const file of readdirSync('migrations').sort()) if (file.endsWith('.sql')) db.exec(readFileSync('migrations/' + file, 'utf8'));
     vi.clearAllMocks(); config.PROACTIVE_ACTIVATED_AT_SEC = 1000;
     members.mockResolvedValue([{ uid: 42, lastSeen: 1100 }]);
     search.mockResolvedValue({ status: 'ok', provider: 'DDG-Lite',
       results: [{ title: '来源', snippet: '可用于综合的一轮新搜索结果。', url: 'https://example.org/source' }],
       attempts: [{ provider: 'DDG-Lite', status: 'success' }] });
     queued.mockResolvedValue({ id: 'test-job' });
-    send.mockResolvedValue(1);
+    send.mockImplementation(async (chatId, text, _reply, _thread, identity) => ({ status: 'sent', chatId, ...identity, parts: [{ messageId: 1, text, partIndex: 0 }], plannedPartCount: 1 }));
   });
   afterEach(() => db.close());
 
@@ -72,7 +71,7 @@ describe('restored task activation boundaries', () => {
     for (const id of [old, boundary, fresh, inactive]) scheduleWake(id, 900);
     members.mockImplementation(async (chatId: number) => [{ uid: 42, lastSeen: chatId === -100 ? 1100 : 900 }]);
     expect(await wakeDueTasks()).toBe(1);
-    expect(queued).toHaveBeenCalledWith('task_execute', expect.objectContaining({ taskId: fresh, chatId: -100 }));
+    expect(queued).toHaveBeenCalledWith('task_execute', expect.objectContaining({ taskId: fresh, chatId: -100 }), expect.objectContaining({ jobId: expect.any(String) }));
     expect(getTask(old)?.state).toBe('pending');
   });
 
@@ -96,7 +95,7 @@ describe('restored task activation boundaries', () => {
     const id = makeTask(1001);
     expect(await executeTask(job(id))).toContain('已验证的新任务');
     expect(search).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith(-100, expect.stringContaining('已验证的新任务'));
+    expect(send).toHaveBeenCalledWith(-100, expect.stringContaining('已验证的新任务'), undefined, undefined, expect.objectContaining({ beforeSend: expect.any(Function) }));
     expect(getTask(id)?.state).toBe('done');
   });
 });

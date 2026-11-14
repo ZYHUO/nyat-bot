@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { requireSentDelivery } from '../../../src/shared/delivery-result.js';
 
 /**
  * 同群 30 秒内同文本去重（round 60）。
@@ -68,13 +69,10 @@ describe('sendMessage 的同群同文本去重', () => {
     expect(shouldDedup('真话')).toBe(true);
   });
 
-  it('⑤ 返回 -1 表示"跳过"，0 才是"失败"（调用方要能区分）', () => {
-    // sendMessage 的约定：>0 真实 messageId；0=发送失败；-1=去重跳过。
-    // 吞成 0 会让上层重试，正好抵消去重。
-    const DEDUP_SKIPPED = -1;
-    const FAILED = 0;
-    expect(DEDUP_SKIPPED).not.toBe(FAILED);
-    expect(DEDUP_SKIPPED).toBeLessThan(0);
+  it('⑤ 抑制是结构化未发送，不能伪装成数值回执', () => {
+    expect(() => requireSentDelivery({ status: 'suppressed', chatId: -100,
+      intentId: 'duplicate', revision: 0, parts: [], plannedPartCount: 1 }))
+      .toThrow('delivery_suppressed');
   });
 
   it('⑥ TTL 30 秒（超时同文本合理——别人又问了一遍）', () => {

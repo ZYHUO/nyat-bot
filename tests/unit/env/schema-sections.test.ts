@@ -58,8 +58,11 @@ describe('env schema 拆段', () => {
     // Recounted all section keys and verified uniqueness for this rollout.
     // DM_AUTO_PRIVATE retired: a flag cannot grant private-context disclosure.
     // Explicit opt-in binding for the two configured owner identities.
-    expect(all.length).toBe(533);
-    expect(new Set(all).size).toBe(533);
+    // 2026-11-15: independently counted 546 schema keys across 13 sections,
+    // including pending intent, life-project (two) and background publication.
+    // Parsed default objects omit 19 optional keys and are not this denominator.
+    expect(all.length).toBe(546);
+    expect(new Set(all).size).toBe(546);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });

@@ -3,12 +3,13 @@ import type { FormattedMessage } from '../shared/types.js';
 import type { UpdateLike } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
+import { trackIngressTask } from '../ingress/background.js';
 
 /** Fire-and-forget hooks that pipeline used to run before judge. */
 export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMessage): void {
   // DM affinity + pending flush
   if (chatId > 0 && formatted.uid > 0 && !formatted.isBot) {
-    void (async () => {
+    trackIngressTask((async () => {
       try {
         const { markDmEver } = await import('../tracking/dm-state.js');
         markDmEver(formatted.uid);
@@ -20,14 +21,14 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
       } catch (err) {
         logger.debug({ err }, 'Meta: DM affinity hook failed');
       }
-    })();
+    })());
   }
 
   // DM wake poke
   if (chatId > 0 && env().SLEEP_WAKE_ON_DM_ENABLED) {
-    void import('../tracking/sleep.js')
+    trackIngressTask(import('../tracking/sleep.js')
       .then(({ pokeGlobalWake }) => pokeGlobalWake('dm'))
-      .catch(() => {});
+      .catch(() => {}));
   }
 
   // 多 bot 共存：peer reaction + network burst。
@@ -43,7 +44,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
   // 两个 hook 都自带 chat-lock / fatigue / 作息 / 概率门（见各自实现），
   // 且 fire-and-forget，挂在这里不阻塞 ingest。
   if (chatId < 0 && formatted.uid > 0) {
-    void (async () => {
+    trackIngressTask((async () => {
       try {
         const { getBotUid } = await import('../bot/bot.js');
         const botUid = getBotUid(chatId);
@@ -61,7 +62,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
       } catch (err) {
         logger.debug({ err }, 'Meta: peer-reaction / network-burst failed');
       }
-    })();
+    })());
   }
 
   // 代发回执：这条 bot 消息是不是我们代发命令的结果？
@@ -80,7 +81,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
   // 放在 bookkeeping hooks 里（message.ts:212，早于心流裁决和 bot 分类降噪），
   // 这样回执能在被当普通 bot 消息忽略之前被认领。
   if (formatted.isBot && formatted.uid > 0 && chatId < 0 && env().BOT_DELEGATION_ENABLED) {
-    void (async () => {
+    trackIngressTask((async () => {
       try {
         const [{ tryHandleDelegationReceipt }, { getBotUid }] = await Promise.all([
           import('../pipeline/tools/bot-delegation.js'),
@@ -93,7 +94,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
       } catch (err) {
         logger.debug({ err }, 'Meta: delegation receipt check failed (non-critical)');
       }
-    })();
+    })());
   }
 
   // Reply-outcome observation. The legacy pipeline does this in
@@ -102,7 +103,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
   // would never resolve — the self-history facts shown to the model would stay
   // "unknown" forever, and mood/relationship effects would never apply.
   if (env().OUTCOME_TRACKING_ENABLED && formatted.uid > 0 && !formatted.isBot) {
-    void (async () => {
+    trackIngressTask((async () => {
       try {
         const [{ checkOutcome, generateReflection }, { getBotIdentity }, { callWithFallback }] =
           await Promise.all([
@@ -129,7 +130,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
       } catch (err) {
         logger.debug({ err, chatId }, 'Meta: outcome check failed (non-critical)');
       }
-    })();
+    })());
   }
 
   // World facts: record what Telegram reports about this chat (title, type,
@@ -138,9 +139,9 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
   // `world_change`, so `world_entities` stayed empty. Cached for 30 min inside
   // the module, so this is one getChat per chat per half hour, not per message.
   if (env().WORLD_FACTS_ENABLED) {
-    void import('../agent/world-facts.js')
+    trackIngressTask(import('../agent/world-facts.js')
       .then(({ observeAndRecordChatFacts }) => observeAndRecordChatFacts(chatId, true))
-      .catch((err) => logger.debug({ err, chatId }, 'Meta: world facts failed (non-critical)'));
+      .catch((err) => logger.debug({ err, chatId }, 'Meta: world facts failed (non-critical)')));
   }
 }
 

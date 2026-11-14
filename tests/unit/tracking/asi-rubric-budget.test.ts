@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
+import { syntheticAiConfig } from '../../helpers/synthetic-ai-config.js';
+afterEach(() => vi.unstubAllEnvs());
 
 /**
  * ASI rubric 的 maxTokens 必须够 reasoning 模型用（round 69）。
@@ -21,14 +23,16 @@ describe('ASI rubric maxTokens', () => {
     expect(Number(m![1])).toBeGreaterThanOrEqual(8000);
   });
 
-  it('② 与 vision 的量级可比（都是推理模型，别只给一家喂饱）', () => {
-    const env = fs.readFileSync('.env', 'utf8');
-    const vision = Number(env.match(/^AI_USAGE_VISION_MAX_TOKENS=(\d+)$/m)?.[1] ?? 0);
-    const rubric = Number(env.match(/^ASI_RUBRIC_MAX_TOKENS=(\d+)$/m)?.[1] ?? 0);
+  it('② 与合成推理 vision 配置的量级可比，过小和失衡配置均可被审计', async () => {
+    const config = await syntheticAiConfig();
+    const vision = config.getUsage('vision').maxTokens!;
+    const rubric = config.env().ASI_RUBRIC_MAX_TOKENS;
     expect(vision).toBeGreaterThan(0);
     // rubric 该在 vision 的同一量级（vision 32000）
     expect(rubric).toBeGreaterThanOrEqual(8000);
     expect(rubric).toBeLessThanOrEqual(vision * 2);
+    expect((await syntheticAiConfig({ ASI_RUBRIC_MAX_TOKENS: '1200' })).audit()).toContain('asi_reasoning_budget_small');
+    expect((await syntheticAiConfig({ ASI_RUBRIC_MAX_TOKENS: '40000' })).audit()).toContain('asi_vision_budget_ratio');
   });
 
   it('③ .env.example 里有这一项（.env gitignored，示例要能复现）', () => {

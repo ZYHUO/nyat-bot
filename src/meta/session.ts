@@ -1,3 +1,5 @@
+import { pendingIntentEnabled, isTaskInputAuthor, hasUnansweredIntentRevision, inspectPendingIntent } from './pending-intent.js';
+import type { PendingIntentRef } from './pending-intent.js';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { callWithFallback } from '../ai/fallback.js';
@@ -124,6 +126,7 @@ async function interceptDiaryAttention(
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
   },
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
@@ -134,6 +137,7 @@ async function interceptDiaryAttention(
     defaultQuotes: opts.defaultQuotes,
     defaultTargetUserIds: opts.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: opts.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: opts.defaultPendingIntents,
   });
   const journal = api['journal'] as {
     tryWrite: (args?: {
@@ -378,6 +382,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   defaultQuotes: Map<number, number>;
   defaultTargetUserIds: Map<number, number>;
   defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
 } {
   const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
   const chatLayer = new Map<number, AttentionLayer>();
@@ -385,7 +390,16 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   const defaultTargetUserIds = new Map<number, number>();
   const defaultCognitiveAnchorEventIds = new Map<number, string>();
   const anchorOrder = new Map<number, number>();
+  const defaultPendingIntents = new Map<number, PendingIntentRef>();
   for (const a of attention) {
+    if (a.pendingIntent && a.messageId) {
+      // Completion order is not source order: an older Heart can finish after
+      // an edit. Only the current generation may supply a task's fixed fence.
+      const current = inspectPendingIntent(a.pendingIntent);
+      if (current.state === 'pending' && current.currentRevision === a.pendingIntent.revision) {
+        defaultPendingIntents.set(a.messageId, a.pendingIntent);
+      }
+    }
     const prev = chatLayer.get(a.chatId);
     if (!prev || (rank[a.layer] ?? 0) >= (rank[prev] ?? 0)) {
       chatLayer.set(a.chatId, a.layer);
@@ -409,7 +423,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
       }
     }
   }
-  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds };
+  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents };
 }
 
 async function runMetaCode(
@@ -422,6 +436,7 @@ async function runMetaCode(
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
@@ -438,6 +453,7 @@ async function autoDispatchL0(
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
   },
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
@@ -448,6 +464,7 @@ async function autoDispatchL0(
     defaultQuotes: maps?.defaultQuotes,
     defaultTargetUserIds: maps?.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps?.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: maps?.defaultPendingIntents,
   });
   const d = api['dispatch'] as {
     taskToGroup: (
@@ -466,19 +483,22 @@ async function autoDispatchL0(
   };
 
   // One CodeAct per chat — L0 + Heart-elevated L1 (reason heart:… / wait_resume:heart:…).
-  const l0ByChat = new Map<number, AttentionItem[]>();
+  const l0ByChat = new Map<string, AttentionItem[]>();
   for (const a of attention) {
     const heartForce = a.reason.includes('heart:');
     if (a.layer !== 'L0' && !heartForce) continue;
     if (!isMetaSubagentChat(a.chatId)) continue;
     if (skipChatIds?.has(a.chatId)) continue;
-    const list = l0ByChat.get(a.chatId);
+    const key = pendingIntentEnabled() ? a.pendingIntent?.laneKey ?? `${a.chatId}:${a.userId}:${a.messageThreadId ?? 0}` : String(a.chatId);
+    const list = l0ByChat.get(key);
     if (list) list.push(a);
-    else l0ByChat.set(a.chatId, [a]);
+    else l0ByChat.set(key, [a]);
   }
 
-  for (const [chatId, siblings] of l0ByChat) {
-    const withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
+  for (const siblings of l0ByChat.values()) {
+    const chatId = siblings[0]!.chatId;
+    if (pendingIntentEnabled() && skipChatIds?.has(chatId)) { busyChatIds.add(chatId); continue; }
+    let withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
     const qqChat = isPlatformInternalId(chatId);
     if (qqChat) withIds.sort((a, b) => a.createdAt - b.createdAt || (a.messageId ?? 0) - (b.messageId ?? 0));
     // 长时间/进行中 Agent 任务：该 chat 有活跃任务 → 消息走 interrupt（执行器
@@ -494,21 +514,64 @@ async function autoDispatchL0(
           // 活性校验:索引 24h TTL,异常崩溃可能留死索引 —— 死任务的 interrupt
           // 没人排,消息等于被吞。确认任务仍在 running/queued 才路由。
           const { loadCodeActTask } = await import('../subagent/task-store.js');
-          const agentTask = await loadCodeActTask(agentTaskId);
-          if (agentTask && (!qqChat || agentTask.chatId === chatId)
+          let agentTask = await loadCodeActTask(agentTaskId);
+          if (pendingIntentEnabled() && agentTask?.chatId === chatId
+            && (agentTask.waitingForUser || agentTask.status === 'waiting_user')) {
+            const original = agentTask.pendingIntent && inspectPendingIntent(agentTask.pendingIntent);
+            if (!original || !['pending', 'held'].includes(original.state)) {
+              // A cancelled/retired clarification cannot adopt a fresh intent
+              // and resume its old checkpoint. Retire it, then dispatch anew.
+              agentTask.status = 'failed'; agentTask.resultSummary = 'failed_input_superseded';
+              agentTask.waitingForUser = false; agentTask.waitingReason = undefined;
+              agentTask.pendingUserInput = undefined;
+              const { persistCodeActTask, clearCodeActActive } = await import('../subagent/task-store.js');
+              const { clearCheckpoint, unregisterAgentChat } = await import('../agent/checkpoint.js');
+              getGlobalState().putTask(agentTask);
+              await persistCodeActTask(agentTask);
+              await unregisterAgentChat(chatId, agentTask.id);
+              await clearCodeActActive(chatId, agentTask.id);
+              if (agentTask.checkpointKey) await clearCheckpoint(agentTask.checkpointKey);
+              agentTask = null;
+            }
+          }
+          if (agentTask && agentTask.chatId === chatId
             && (agentTask.status === 'running' || agentTask.status === 'queued' || agentTask.status === 'waiting_user')) {
+            if (pendingIntentEnabled()) {
+              withIds = withIds.filter(item => isTaskInputAuthor(agentTask, item));
+              if (!withIds.length) { busyChatIds.add(chatId); continue; }
+              // A running draft keeps its captured revision. Let it close under
+              // its send fence; requeue these inputs for a fresh generation.
+              if (agentTask.pendingIntent && !agentTask.waitingForUser && agentTask.status !== 'waiting_user'
+                && withIds.some(item => item.pendingIntent?.revision !== agentTask.pendingIntent!.revision
+                  || item.pendingIntent.intentId !== agentTask.pendingIntent!.intentId)) {
+                busyChatIds.add(chatId); continue;
+              }
+            }
             if (agentTask.waitingForUser || agentTask.status === 'waiting_user') {
+              if (pendingIntentEnabled()) {
+                withIds = withIds.filter(item => item.pendingIntent?.intentId === agentTask!.pendingIntent?.intentId);
+                if (!withIds.length) { busyChatIds.add(chatId); continue; }
+                const incoming = withIds.reduce((best, item) =>
+                  (item.pendingIntent?.revision ?? 0) > (best.pendingIntent?.revision ?? 0) ? item : best).pendingIntent;
+                const current = incoming && inspectPendingIntent(incoming);
+                if (!current || current.state !== 'pending' || current.currentRevision !== incoming!.revision) {
+                  busyChatIds.add(chatId); continue;
+                }
+                agentTask.pendingIntent = incoming;
+              }
               agentTask.waitingForUser = false;
               agentTask.waitingReason = undefined;
               agentTask.pendingUserInput = withIds.map((s) => ({
                 text: (s.textPreview ?? '').slice(0, 500),
                 from: s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人',
                 messageId: s.messageId,
+                userId: s.userId, messageThreadId: s.messageThreadId,
                 at: Date.now(),
               }));
               agentTask.status = 'queued';
               const { enqueueResumeCodeActJob } = await import('../subagent/queue.js');
               await enqueueResumeCodeActJob(agentTask);
+              getGlobalState().putTask(agentTask);
               logger.info({ chatId, agentTaskId, intercepted: withIds.length }, 'agent: clarification answer resumed waiting task');
             } else {
               for (const s of withIds) {
@@ -533,6 +596,7 @@ async function autoDispatchL0(
                   text: raw.slice(0, 500),
                   from,
                   messageId: s.messageId,
+                  userId: s.userId, messageThreadId: s.messageThreadId,
                   addressed,
                 });
                 incrCounter(
@@ -569,10 +633,16 @@ async function autoDispatchL0(
       }
     }
 
+    const currentIds = pendingIntentEnabled() ? withIds.filter(item => {
+      if (!item.pendingIntent) return false;
+      const current = inspectPendingIntent(item.pendingIntent);
+      return current.state === 'pending' && current.currentRevision === item.pendingIntent.revision;
+    }) : withIds;
     const latest =
-      withIds.length > 0
-        ? withIds.reduce((best, cur) =>
-            (cur.messageId ?? 0) >= (best.messageId ?? 0) ? cur : best,
+      currentIds.length > 0
+        ? currentIds.reduce((best, cur) =>
+            (pendingIntentEnabled() ? (cur.pendingIntent?.revision ?? 0) >= (best.pendingIntent?.revision ?? 0)
+              : (cur.messageId ?? 0) >= (best.messageId ?? 0)) ? cur : best,
           )
         : siblings[0]!;
 
@@ -662,6 +732,7 @@ async function autoDispatchL0(
           layer: latest.layer,
           reason: latest.reason,
           messageId: latest.messageId,
+          pendingIntent: latest.pendingIntent,
           userId: latest.userId,
           textPreview: latest.textPreview,
           messageThreadId: latest.messageThreadId,
@@ -737,14 +808,17 @@ async function requeueBusyL0(
     if (a.messageId && a.messageId > 0) {
       try {
         const { isMessageAnswered } = await import('./answered.js');
-        if (await isMessageAnswered(a.chatId, a.messageId)) continue;
+        if (!hasUnansweredIntentRevision(a.pendingIntent) && await isMessageAnswered(a.chatId, a.messageId)) continue;
       } catch {
         /* fail-open */
       }
       const inflight = state
         .listTasks(a.chatId)
         .filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'waiting_user')
-        .some((t) => t.quoteMessageIds?.includes(a.messageId!));
+        .some((t) => [...(t.quoteMessageIds ?? []), ...(t.relatedQuoteIds ?? []),
+          ...(t.pendingUserInput ?? []).flatMap(input => input.messageId ? [input.messageId] : [])].includes(a.messageId!)
+          && (!pendingIntentEnabled() || (t.pendingIntent?.intentId === a.pendingIntent?.intentId
+            && (t.pendingIntent?.revision ?? -1) >= (a.pendingIntent?.revision ?? 0))));
       if (inflight) continue;
     }
     toRequeue.push(a);
@@ -878,6 +952,7 @@ async function runScopedMetaSession(
     defaultQuotes: maps.defaultQuotes,
     defaultTargetUserIds: maps.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: maps.defaultPendingIntents,
   });
   let codeRan = dispatchedChatIds.size > 0;
 
@@ -1071,6 +1146,7 @@ async function runScopedMetaSession(
         defaultQuotes: metaMaps.defaultQuotes,
         defaultTargetUserIds: metaMaps.defaultTargetUserIds,
         defaultCognitiveAnchorEventIds: metaMaps.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: metaMaps.defaultPendingIntents,
       });
       codeRan = true;
     } catch (err) {

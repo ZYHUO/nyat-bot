@@ -65,7 +65,8 @@ describe('feedback aggregate · 回复结果自画像', () => {
   it('① 高忽略率 → 写"我说的话大部分没人接"，带实测数字', async () => {
     seedOutcomes({ ignored: 80, replied: 10, mentioned: 5 });
     await runFeedbackAggregate();
-    const notes = getActiveSelfNotes(5);
+    const notes = db.prepare('SELECT note, evidence FROM self_model_notes ORDER BY id DESC').all() as { note: string; evidence: string }[];
+    expect(getActiveSelfNotes(5)).toEqual([]); // Aggregate candidates are not host-approved evidence.
     expect(notes.length).toBeGreaterThan(0);
     const top = notes[0]!.note;
     expect(top).toContain('我说的话大部分没人接');

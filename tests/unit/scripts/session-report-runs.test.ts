@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { execSync } from 'node:child_process';
+import { afterAll, describe, expect, it } from 'vitest';
+import { reportFixture } from '../../helpers/log-script.js';
 
 /**
  * round 196: **session-report 能跑，不是只能 parse。**
@@ -23,20 +23,17 @@ import { execSync } from 'node:child_process';
  * 不是报告变慢（仍 4.7s），而是子进程启动开销让总时长过了 5s。
  */
 
-const run = (): { code: number; out: string } => {
-  try {
-    const out = execSync('npx tsx scripts/session-report.mts 1', { encoding: 'utf8', stdio: 'pipe', timeout: 50_000 });
-    return { code: 0, out };
-  } catch (e) {
-    const err = e as { status?: number; stdout?: string };
-    return { code: err.status ?? -1, out: String(err.stdout ?? '') };
-  }
-};
+const fixture = reportFixture();
+afterAll(() => fixture.cleanup());
+const run = () => fixture.run('scripts/session-report.mts', ['1', '--offline', '--metrics-file', fixture.metricsFile]);
 
 describe('session-report 能跑（行为守卫，round 196）', () => {
   it('退出码 0（round 163/192 的语法错都是这里该抓到的）', () => {
     const r = run();
     expect(r.code, `exit=${r.code}\n${r.out.slice(0, 400)}`).toBe(0);
+    expect(r.out).toContain('离线输入');
+    expect(r.out).toContain('总调用 4｜成功 3｜失败 1');
+    expect(r.out).toContain('离线模式未提供 SQLite 快照');
   }, 25_000);
 
   it('含 Interrupt 段且四个数都在一行（round 191/192）', () => {
@@ -46,6 +43,9 @@ describe('session-report 能跑（行为守卫，round 196）', () => {
     for (const frag of ['共', '条', '每百条入站', 'background', '入站 ', 'addressed']) {
       expect(line!, `Interrupt 行缺「${frag}」\n  ${line}`).toContain(frag);
     }
+    expect(line).toContain('addressed 2');
+    expect(line).toContain('background 1');
+    expect(line).toContain('入站 5');
   }, 25_000);
 
   it('含心流 / act 分布 / 编辑重放（我改过的三段都还得在）', () => {
@@ -58,5 +58,7 @@ describe('session-report 能跑（行为守卫，round 196）', () => {
       expect(actLine!, `act 行缺 ${a}\n  ${actLine}`).toContain(a);
     }
     expect(r.out).toContain('编辑重放');
+    expect(r.out).toContain('每任务开口次数:  1次×2');
+    expect(r.out).toContain('任务 2 个｜超过 2 次开口的 0 个');
   }, 25_000);
 });

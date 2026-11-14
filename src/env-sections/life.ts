@@ -17,6 +17,9 @@ import { z } from 'zod';
 import { booleanFromEnv } from './_shared.js';
 
 export const lifeSection = {
+  // An operator must explicitly activate one owner-DM digital project as well.
+  LIFE_PROJECT_ENABLED: booleanFromEnv.default(false),
+  LIFE_PROJECT_ARTIFACT_DIR: z.string().trim().min(1).default('./data/life-projects'),
   // ── Sleep schedule(硬作息门):到点真睡觉,睡觉不闲聊,指令照常 ──
   // 直接交互(@/回 bot/私聊)走升级式吵醒,主人必醒;作息表沿用
   // life-state 的 date-seeded daySchedule(起床 07:00-08:30 / 入睡 23:30-01:00)
@@ -52,6 +55,8 @@ export const lifeSection = {
   // ── Mood drift (Stage E) ──
   // Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。
   MOOD_ENABLED: booleanFromEnv.default(false),
+  // Event-backed, account-scoped inner-state continuity and subtle mood hints.
+  EMOTION_CONTINUITY_ENABLED: booleanFromEnv.default(false),
   // 每小时衰减比例 (0..1)。0.3 = 1 小时后保留 70% 强度
   MOOD_DECAY_RATE_PER_HOUR: z.coerce.number().min(0).max(1).default(0.3),
   // 是否把 mood hint 注入 reply prompt

@@ -25,19 +25,24 @@ describe('queue producer job ids', () => {
     }));
   });
 
-  it('uses dash-delimited ids for edited messages', async () => {
+  it('uses dash-delimited versioned ids and processes two edits in the same second once each', async () => {
     const { enqueue } = await import('../../../src/queue/producer.js');
-
-    const id = await enqueue({
+    const data = {
       type: 'message',
       chatId: -100123,
       messageId: 42,
       isEdit: true,
-    } as never);
+      enqueuedAt: 100000,
+      update: { update_id: 1, edited_message: { message_id: 42, edit_date: 99, text: 'first' } },
+    } as const;
+    const id = await enqueue(data);
+    const second = await enqueue({ ...data, update: { update_id: 2, edited_message: { message_id: 42, edit_date: 99, text: 'second' } } });
+    const replay = await enqueue(data);
 
-    expect(id).toBe('msg--100123-42-edit');
+    expect(id).toMatch(/^msg--100123-42-edit-[a-f0-9]{64}$/);
+    expect(second).not.toBe(id); expect(replay).toBe(id);
     expect(addMock).toHaveBeenCalledWith('message', expect.anything(), expect.objectContaining({
-      jobId: 'msg--100123-42-edit',
+      jobId: id,
     }));
     expect(id).not.toContain(':');
   });

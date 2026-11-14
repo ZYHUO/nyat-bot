@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
 
 const MASTER = 6251541967;
 const GROUP = -1002450361141;
@@ -95,6 +97,7 @@ vi.mock('../../../src/tracking/person-identity.js', () => ({
 }));
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
+    ...intentRedis,
     zrange: (...args: unknown[]) => zrange(...args),
     zrevrange: (...args: unknown[]) => zrange(...args),
     hscan: vi.fn(async () => ['0', []]),
@@ -110,6 +113,7 @@ vi.mock('../../../src/meta/attention.js', () => ({
 
 describe('promise loop (承诺闭环)', () => {
   beforeEach(() => {
+    intentRedis.reset();
     vi.clearAllMocks();
     envBase.PROMISE_LOOP_ENABLED = true;
     envBase.MASTER_UID = MASTER;
@@ -152,7 +156,8 @@ describe('promise loop (承诺闭环)', () => {
     getChat.mockResolvedValue({ id: 7916374789 });
     const r = await api.telegram.sendToChat(7916374789, '券给你喵');
     expect(r.messageId).toBeGreaterThan(0);
-    expect(sendMessage).toHaveBeenCalledWith(7916374789, '券给你喵');
+    expect(sendMessage).toHaveBeenCalledWith(7916374789, '券给你喵', undefined, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function) }));
   });
 
   it('sendToChat: bot not in group → not_member', async () => {
@@ -165,7 +170,8 @@ describe('promise loop (承诺闭环)', () => {
     const { api } = await makeApi();
     const r1 = await api.telegram.sendToChat(GROUP, '七夕快乐喵');
     expect(r1.messageId).toBeGreaterThan(0);
-    expect(sendMessage).toHaveBeenCalledWith(GROUP, '七夕快乐喵');
+    expect(sendMessage).toHaveBeenCalledWith(GROUP, '七夕快乐喵', undefined, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function) }));
     expect(addAssistant).toHaveBeenCalledWith(GROUP, expect.objectContaining({ textContent: '七夕快乐喵' }));
     expect(persistDigest).toHaveBeenCalled();
     await api.telegram.sendToChat(GROUP, '第二条');
@@ -176,7 +182,8 @@ describe('promise loop (承诺闭环)', () => {
     const { api } = await makeApi();
     const r = await api.telegram.sendToChat(GROUP, '七夕券给你喵', 'coupon.png');
     expect(r.messageId).toBe(777);
-    expect(tgSendFile).toHaveBeenCalledWith(GROUP, '/sandbox/coupon.png', { caption: '七夕券给你喵' });
+    expect(tgSendFile).toHaveBeenCalledWith(GROUP, '/sandbox/coupon.png',
+      expect.objectContaining({ caption: '七夕券给你喵', beforeSend: expect.any(Function) }));
     expect(addAssistant).toHaveBeenCalledWith(
       GROUP,
       expect.objectContaining({ textContent: expect.stringContaining('[file] coupon.png') }),
@@ -240,7 +247,7 @@ describe('promise loop (承诺闭环)', () => {
     const { api, onEnd } = await makeApi();
     await api.telegram.sendText('知道啦～那本喵等下去那个群里喊她一声喵');
     api.runtime.endTask('短回完成');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(onEnd).toHaveBeenCalled();
     expect(callWithFallback).toHaveBeenCalled();
     expect(createGoal).toHaveBeenCalledWith(
@@ -260,7 +267,7 @@ describe('promise loop (承诺闭环)', () => {
     await api.telegram.sendText('七夕快乐喵～');
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(createGoal).not.toHaveBeenCalled();
   });
 
@@ -270,7 +277,7 @@ describe('promise loop (承诺闭环)', () => {
     await api.telegram.sendText('那本喵等下去群里喊她喵');
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(createGoal).not.toHaveBeenCalled();
   });
 
@@ -281,7 +288,7 @@ describe('promise loop (承诺闭环)', () => {
     callWithFallback.mockClear();
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(createGoal).not.toHaveBeenCalled();
   });
@@ -293,7 +300,7 @@ describe('promise loop (承诺闭环)', () => {
     callWithFallback.mockClear();
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(createGoal).not.toHaveBeenCalled();
   });

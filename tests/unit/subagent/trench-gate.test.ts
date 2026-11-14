@@ -1,4 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
 
 // 论文 §1.2：`canSpeakActively()` 曾经在全仓库只有一个引用——它自己的定义。
 // 6条/h+90s 实际靠发送后的 fire-and-forget 计数执行，发送前没有任何东西能拦。
@@ -31,13 +33,14 @@ vi.mock('../../../src/memory/chroma.js', () => ({
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
   addAssistant: vi.fn(async () => undefined), getRecent: vi.fn(async () => []),
 }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ set: vi.fn(async () => 'OK') }) }));
+vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ ...intentRedis, set: vi.fn(async () => 'OK') }) }));
 vi.mock('../../../src/meta/timing-adapter.js', () => ({ noteMetaBotReply: vi.fn(async () => undefined) }));
 vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined), answeredTimestamps: vi.fn(async () => [] as number[]) }));
 
 const { createHostApi } = await import('../../../src/subagent/host-api.js');
 
 beforeEach(() => {
+  intentRedis.reset();
   sendMessage.mockClear();
   budgetState.allowed = true;
   budgetState.cooldownLeft = 0;

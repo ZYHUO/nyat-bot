@@ -33,7 +33,7 @@ describe('obligation topic/cancel helpers', () => {
     expect(isObligationCancelMessage(cancel, active)).toBe(false);
   });
 
-  it('cancels when replying to the original obligation anchor', () => {
+  it('quoting an anchor cannot grant another person cancellation authority', () => {
     const active = createReplyObligation({
       chatId: -100,
       message: { role: 'user', uid: 1, username: 'a', fullName: 'A', timestamp: 0, messageId: 9, textContent: '@xxb_bot 帮我看看', isForwarded: false },
@@ -52,6 +52,7 @@ describe('obligation topic/cancel helpers', () => {
       isForwarded: false,
       replyTo: { messageId: 9, uid: 1, fullName: 'A', textSnippet: '帮我看看' },
     };
-    expect(isObligationCancelMessage(cancel, active)).toBe(true);
+    expect(isObligationCancelMessage(cancel, active)).toBe(false);
+    expect(isObligationCancelMessage({ ...cancel, uid: 1 }, active)).toBe(true);
   });
 });

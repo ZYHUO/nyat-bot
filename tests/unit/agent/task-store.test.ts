@@ -1,13 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
 
 let db: Database.Database;
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 // 2026-09-21：maxRounds 未显式传入时读 env().TASK_MAX_ROUNDS（原来是写死的 6）。
-const envValues: Record<string, unknown> = { TASK_EXECUTOR_ENABLED: true, TASK_MAX_ROUNDS: 6 };
+const envValues: Record<string, unknown> = { TASK_EXECUTOR_ENABLED: true, TASK_MAX_ROUNDS: 6, BOT_TOKEN: '123:synthetic-test', COGNITIVE_EVENTS_ENABLED: false };
 vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
 const {
@@ -18,7 +17,7 @@ const {
 
 beforeEach(() => {
   db = new Database(':memory:');
-  db.exec(readFileSync(join(__dirname, '../../../migrations/0065_tasks.sql'), 'utf8'));
+  for (const file of readdirSync('migrations').sort()) if (file.endsWith('.sql')) db.exec(readFileSync('migrations/' + file, 'utf8'));
   envValues.TASK_MAX_ROUNDS = 6;
 });
 

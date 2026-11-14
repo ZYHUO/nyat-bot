@@ -10,6 +10,13 @@ vi.mock('../../../src/db/redis.js', () => ({
     hset: async (k: string, f: string, v: string) => { if (!store.has(k)) store.set(k, new Map()); store.get(k)!.set(f, v); },
     hgetall: async (k: string) => Object.fromEntries(store.get(k) ?? new Map()),
     hdel: async (k: string, ...fs: string[]) => { const m = store.get(k); for (const f of fs) m?.delete(f); },
+    eval: async (script: string, _keys: number, key: string, ...args: string[]) => {
+      if (!script.includes('HGET')) { store.delete('lock:' + key); return 1; }
+      if (store.get(key)?.get(args[0]!) !== args[1]) return 0;
+      if (args[2] === '') store.get(key)!.delete(args[0]!);
+      else store.get(key)!.set(args[0]!, args[2]!);
+      return 1;
+    },
     expire: async () => {},
     set: async (k: string, v: string) => { store.set('lock:' + k, new Map([[v, v]])); return 'OK'; },
     del: async (k: string) => { store.delete('lock:' + k); },
@@ -19,21 +26,24 @@ vi.mock('../../../src/db/redis.js', () => ({
 vi.mock('../../../src/db/sqlite.js', () => {
   const Database = require('better-sqlite3');
   const db = new Database(':memory:');
-  db.exec(`CREATE TABLE self_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, trigger_uid INTEGER DEFAULT 0, trigger_msg_id INTEGER, reply_text TEXT, ts INTEGER, bot_message_id INTEGER, outcome TEXT DEFAULT 'unknown', outcome_at INTEGER)`);
-  db.exec(`CREATE TABLE reply_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, ts INTEGER, trigger_text TEXT, reply_text TEXT, outcome TEXT, signal TEXT, action TEXT)`);
+  const { readFileSync } = require('node:fs');
+  const { resolve } = require('node:path');
+  for (const name of ['0002_phase3', '0018_self_history_relationship', '0112_self_reply_outcomes', '0116_self_reply_task_id', '0121_reply_feedback_events']) {
+    db.exec(readFileSync(resolve('migrations', name + '.sql'), 'utf8'));
+  }
   return { getDb: () => db };
 });
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({ OUTCOME_TRACKING_ENABLED: true, ASI_ENABLED: false, SELF_HISTORY_ENABLED: true, LEARNER_ENABLED: false, MOOD_ENABLED: false, BOT_USERNAME: 'b', BOT_NICKNAMES: [] }),
+  env: () => ({ BOT_TOKEN: '12345:test-only', ASI_SAMPLE_RATE: 0, OUTCOME_TRACKING_ENABLED: true, ASI_ENABLED: false, SELF_HISTORY_ENABLED: true, LEARNER_ENABLED: false, MOOD_ENABLED: false, BOT_USERNAME: 'b', BOT_NICKNAMES: [] }),
 }));
 
 const { recordReply, checkOutcome } = await import('../../../src/tracking/outcome.js');
 const { recordSelfReply } = await import('../../../src/tracking/self-history.js');
 const { getDb } = await import('../../../src/db/sqlite.js');
 
-beforeEach(() => { store.clear(); getDb().exec('DELETE FROM self_replies'); getDb().exec('DELETE FROM reply_outcomes'); });
+beforeEach(() => { store.clear(); getDb().exec('DELETE FROM self_replies'); getDb().exec('DELETE FROM reply_feedback_effects; DELETE FROM reply_feedback_events; DELETE FROM reply_feedback_observations; DELETE FROM reply_outcomes; DELETE FROM outcome_meta'); });
 
-const neutral = { isBot: false, textContent: '随便聊聊' } as never;
+const neutral = { messageId: 1000, uid: 42, isBot: false, textContent: '随便聊聊' };
 
 describe('时间感知的 ignored', () => {
   it('10 分钟外 + 1 条人类消息 → 判 ignored（不再等 5 条）', async () => {
@@ -69,7 +79,7 @@ describe('时间感知的 ignored', () => {
     const chat = -202;
     recordSelfReply(chat, 0, 1, '我说的话', 902);
     await recordReply(chat, 902, 1, 0, '', '我说的话', 'codeact_speak');
-    for (let i = 0; i < 5; i++) await checkOutcome(chat, neutral, 'hunhebi_bot');
+    for (let i = 0; i < 5; i++) await checkOutcome(chat, { ...neutral, messageId: 1000 + i }, 'hunhebi_bot');
     const row = getDb().prepare('select outcome from self_replies where bot_message_id=902').get() as { outcome: string };
     expect(row.outcome).toBe('ignored');
   });

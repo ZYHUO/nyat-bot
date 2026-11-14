@@ -14,7 +14,7 @@ vi.mock('../../../src/env.js', () => ({
   env: () => ({ RELATIONSHIP_ENABLED: true, RELATIONSHIP_INJECT_THRESHOLD: 20 }),
 }));
 
-const { getRelationship, affinityBucket } = await import(
+const { getRelationship, affinityBucket, applyRelationshipEvent } = await import(
   '../../../src/tracking/relationship.js'
 );
 
@@ -101,5 +101,27 @@ describe('relationship affinity time-decay (read-side)', () => {
   it('returns neutral default for an unknown (chat,uid)', () => {
     const state = getRelationship(-100, 999);
     expect(state).toEqual({ affinity: 0, count: 0, bucket: '一般', lastSummary: '' });
+  });
+
+  it('materializes 30 days of decay before negative feedback instead of restoring stale affinity', () => {
+    const hours = 30 * 24;
+    insertRel(-100, 7, 90, nowSec() - hours * 3600);
+    const before = getRelationship(-100, 7).affinity;
+    applyRelationshipEvent(-100, 7, -1.5, 'explicit event', { strict: true });
+    const after = getRelationship(-100, 7);
+    expect(after.affinity).toBeLessThan(before);
+    expect(after.affinity).toBeCloseTo(expectedDecay(90, hours) - 1.5, 3);
+    expect(after.count).toBe(43);
+    const persisted = testDb.prepare('SELECT affinity FROM chat_relationships WHERE chat_id = ? AND uid = ?').get(-100, 7) as { affinity: number };
+    expect(persisted.affinity).toBeCloseTo(after.affinity, 3);
+    applyRelationshipEvent(-100, 7, 1, 'positive event', { strict: true });
+    expect(getRelationship(-100, 7).affinity).toBeCloseTo(after.affinity + 1, 3);
+  });
+
+  it('materializes negative decay before a positive event', () => {
+    insertRel(-100, 9, -80, nowSec() - 60 * 24 * 3600);
+    const before = getRelationship(-100, 9).affinity;
+    applyRelationshipEvent(-100, 9, 1, undefined, { strict: true });
+    expect(getRelationship(-100, 9).affinity).toBeCloseTo(before + 1, 3);
   });
 });

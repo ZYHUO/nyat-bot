@@ -16,7 +16,8 @@ import {
   claimCognitiveCursor,
   releaseCognitiveCursor,
 } from './cognitive-cursor.js';
-import { listCognitiveEvents, type CognitiveEvent } from './cognitive-events.js';
+import type { CognitiveEvent } from './cognitive-events.js';
+import { findCognitiveFact, iterateCognitiveHistory } from './cognitive-history.js';
 import {
   recordKernelActionOutcome,
   scopeFromCognitiveEvent,
@@ -28,9 +29,7 @@ export const KERNEL_RECOVERY_STREAM = 'kernel:recovery';
 
 /** Grace for envelopes whose proposal text could not be read back. */
 const FALLBACK_WALL_CLOCK_SEC = 3600;
-const DEFAULT_LOOKBACK_SEC = 7 * 86400;
 const MAX_SCOPES_PER_SWEEP = 25;
-const MAX_EVENTS_PER_SCOPE = 500;
 const MAX_SETTLEMENTS_PER_SWEEP = 50;
 
 interface StaleAction {
@@ -111,30 +110,31 @@ function createdAtOf(envelope: unknown): number | undefined {
     : undefined;
 }
 
-/** Scopes that recently dispatched an action, most recent first. */
-function candidateScopes(since: number, limit: number): CognitiveScope[] {
-  const events = listCognitiveEvents({
-    type: 'action_envelope_transition',
-    order: 'occurred_at_desc',
-    afterOccurredAt: since,
-    limit,
-  });
-  const scopes: CognitiveScope[] = [];
-  const seen = new Set<string>();
-  for (const event of events) {
-    if (statusOf(event) !== 'dispatched') continue;
+/** Find open dispatches across complete history; closed recent chats cannot starve old work. */
+function candidateScopes(now: number, since?: number): CognitiveScope[] {
+  const closed = new Set<string>();
+  for (const event of iterateCognitiveHistory({ type: 'action_envelope_outcome' })) {
+    const id = envelopeIdOf(event);
+    if (id) closed.add(JSON.stringify([event.scopeKey, id]));
+  }
+  const scopes: CognitiveScope[] = [], seen = new Set<string>();
+  for (const event of iterateCognitiveHistory({ type: 'action_envelope_transition' })) {
+    if (statusOf(event) !== 'dispatched' || (since !== undefined && event.occurredAt < since)) continue;
+    const id = envelopeIdOf(event);
+    if (!id || closed.has(JSON.stringify([event.scopeKey, id]))) continue;
     const scope = scopeFromCognitiveEvent(event);
     let key: string;
-    try {
-      key = scopeKey(scope);
-    } catch {
-      continue;
-    }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    scopes.push(scope);
+    try { key = scopeKey(scope); } catch { continue; }
+    const proposal = findCognitiveFact({ type: 'action_envelope_proposed', scope, path: '$.envelope.id', value: id });
+    // Missing proposals cannot be closed by the kernel; don't let malformed
+    // orphan streams starve verifiable obligations in other scopes.
+    if (!proposal) continue;
+    const envelope = proposal.fact['envelope'];
+    if (now < (createdAtOf(envelope) ?? event.occurredAt) + wallClockSec(envelope)) continue;
+    if (!seen.has(key)) { seen.add(key); scopes.push(scope); }
+    if (scopes.length >= MAX_SCOPES_PER_SWEEP) break;
   }
-  return scopes.slice(0, MAX_SCOPES_PER_SWEEP);
+  return scopes;
 }
 
 /**
@@ -146,24 +146,18 @@ function scanScope(
   scope: CognitiveScope,
   now: number,
 ): { stale: StaleAction[]; lastResolvedId?: string; lastResolvedAt?: number; hasOpen: boolean } {
-  const proposals = listCognitiveEvents({
+  const proposals = [...iterateCognitiveHistory({
     scope,
     type: 'action_envelope_proposed',
-    order: 'occurred_at',
-    limit: MAX_EVENTS_PER_SCOPE,
-  });
-  const transitions = listCognitiveEvents({
+  })];
+  const transitions = [...iterateCognitiveHistory({
     scope,
     type: 'action_envelope_transition',
-    order: 'occurred_at',
-    limit: MAX_EVENTS_PER_SCOPE,
-  });
-  const outcomes = listCognitiveEvents({
+  })];
+  const outcomes = [...iterateCognitiveHistory({
     scope,
     type: 'action_envelope_outcome',
-    order: 'occurred_at',
-    limit: MAX_EVENTS_PER_SCOPE,
-  });
+  })];
 
   const closed = new Set<string>();
   for (const event of outcomes) {
@@ -222,7 +216,7 @@ function scanScope(
     }
     // Inside its host budget: leave it open and stop advancing here.
     hasOpen = true;
-    break;
+    continue;
   }
 
   return {
@@ -251,14 +245,12 @@ export function recoverStaleKernelActions(
   if (!recoveryEnabled()) return result;
 
   const now = options.now ?? nowSec();
-  const lookbackSec = Math.min(
-    DEFAULT_LOOKBACK_SEC,
-    Math.max(60, Math.trunc(options.lookbackSec ?? DEFAULT_LOOKBACK_SEC)),
-  );
+  const since = options.lookbackSec === undefined ? undefined : now - Math.max(60, Math.trunc(options.lookbackSec));
   const owner = options.owner?.trim().slice(0, 120)
     || `kernel-recovery:${process.pid}:${randomUUID().slice(0, 8)}`;
 
-  for (const scope of candidateScopes(now - lookbackSec, MAX_EVENTS_PER_SCOPE)) {
+  for (const scope of candidateScopes(now, since)) {
+    if (result.recovered >= MAX_SETTLEMENTS_PER_SWEEP) break;
     let key: string;
     try {
       key = scopeKey(scope);
@@ -282,8 +274,9 @@ export function recoverStaleKernelActions(
       result.scopesScanned += 1;
       result.openActions += scan.stale.length;
 
+      let allSettled = true;
       for (const action of scan.stale) {
-        if (result.recovered >= MAX_SETTLEMENTS_PER_SWEEP) break;
+        if (result.recovered >= MAX_SETTLEMENTS_PER_SWEEP) { allSettled = false; break; }
         const settled = recordKernelActionOutcome({
           scope,
           envelopeId: action.envelopeId,
@@ -301,7 +294,7 @@ export function recoverStaleKernelActions(
             resent: false,
           },
         });
-        if (!settled) continue;
+        if (!settled) { allSettled = false; continue; }
         result.recovered += 1;
         result.actions.push({
           scopeKey: key,
@@ -313,7 +306,7 @@ export function recoverStaleKernelActions(
       }
 
       // Never advance past an action that is still open and within budget.
-      if (!scan.hasOpen && scan.lastResolvedId !== undefined && scan.lastResolvedAt !== undefined) {
+      if (allSettled && !scan.hasOpen && scan.lastResolvedId !== undefined && scan.lastResolvedAt !== undefined) {
         advanceCognitiveCursor({
           scope,
           stream: KERNEL_RECOVERY_STREAM,

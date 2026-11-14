@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
+import { reportFixture } from '../../helpers/log-script.js';
+const fixture = reportFixture();
+afterAll(() => fixture.cleanup());
 
 /**
  * ② 必须把 LLM 失败的 pass 拆出来（round 117）。
@@ -8,7 +11,7 @@ import * as fs from 'node:fs';
  * 差 254 全是 llm_failed。旧口径把它们算成正常 pass，
  * 于是"它真的在读上下文"这个结论混了 14% 的哑巴。
  */
-describe('measure:voice 的 failed-pass 拆分', () => {
+describe('measure:voice 的 failed-pass 拆分', { timeout: 30_000 }, () => {
   const SRC = 'scripts/measure-voice.mts';
 
   it('① 数 Meta heart: pass 里的 llm_failed', () => {
@@ -38,10 +41,13 @@ describe('measure:voice 的 failed-pass 拆分', () => {
     expect(s).toContain('round 116');
   });
 
-  it('⑤ 实测今天确实有（不是空转）', () => {
-    const { execSync } = require('node:child_process');
-    const out = execSync('npx tsx scripts/measure-voice.mts -- --day=2026-09-23 2>/dev/null', { encoding: 'utf8' });
-    expect(out).toContain('LLM 失败 fail-closed');
+  it('⑤ 合成输入区分两次失败、一条正常pass和独立shadow错误', () => {
+    const result = fixture.run(SRC, ['--day=2026-11-15']);
+    expect(result.code, result.err).toBe(0);
+    expect(result.out).toContain('2 次 pass 是 LLM 失败 fail-closed');
+    expect(result.out).toContain('占 33%');
+    expect(result.out).toContain('pass 1 (25%)');
+    expect(result.out).toContain('1 次影子决策崩掉');
   });
 
   it('⑥ 影子决策的崩掉也数（round 150：它不进 pass，但也没进过任何仪表盘）', () => {

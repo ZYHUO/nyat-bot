@@ -188,7 +188,7 @@ export function recordRelationshipActivity(chatId: number, uid: number): void {
  * 由 applyRelationshipEvent 在 upsert chat_relationships 之后调用 (行已存在);
  * 自身 fail-soft。
  */
-export function accumulateQualityEvent(chatId: number, uid: number, summary: string): void {
+export function accumulateQualityEvent(chatId: number, uid: number, summary: string, options: { strict?: boolean } = {}): void {
   if (!env().RELATIONSHIP_QUANT_ENABLED) return;
   try {
     const delta = QUALITY_DELTAS[mapRelationshipEventToQuality(summary)];
@@ -201,6 +201,7 @@ export function accumulateQualityEvent(chatId: number, uid: number, summary: str
       )
       .run(QUALITY_PENDING_MAX, QUALITY_PENDING_MIN, delta, chatId, uid);
   } catch (err) {
+    if (options.strict) throw err;
     logger.debug({ err, chatId, uid }, 'accumulateQualityEvent failed (non-critical)');
   }
 }

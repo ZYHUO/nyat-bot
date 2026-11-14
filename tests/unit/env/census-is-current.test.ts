@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+const python = process.env.NYATBOT_TEST_PYTHON ?? 'python3';
 
 /**
  * docs/flag-census.md 必须是最新的（round 128）。
@@ -17,12 +18,12 @@ import { join, resolve } from 'node:path';
  * 不读取私密 .env，也不要求其他文件或 HEAD 干净。
  */
 describe('flag-census 是最新的', () => {
-  // census 脚本要扫整个 src/，实测 ~24s，远超默认 5s。
+  // 全仓扫描仍给慢速 CI 留出余量；生成器本身不再启动 grep 子进程。
   it('从公开模板重新生成后与已有文档无 diff', { timeout: 120_000 }, () => {
     const before = fs.readFileSync('docs/flag-census.md', 'utf8');
     let after: string;
     try {
-      execFileSync('python3', ['scripts/flag-census.py', '--env-file', '.env.example'], { stdio: 'ignore' });
+      execFileSync(python, ['scripts/flag-census.py', '--env-file', '.env.example'], { stdio: 'ignore' });
       after = fs.readFileSync('docs/flag-census.md', 'utf8');
     } finally {
       // 生成器失败也必须还原工作区文档。
@@ -51,10 +52,11 @@ interface FixtureCensus {
 function runFixture(args: string[] = [], operatorInput?: string) {
   const directory = fs.mkdtempSync(join(tmpdir(), 'nyat-census-'));
   try {
-    for (const path of ['src/env-sections', 'scripts', 'tests', 'packages', 'docs', 'temp']) {
+    for (const path of ['src/env-sections', 'scripts/lib', 'tests', 'packages', 'docs', 'temp']) {
       fs.mkdirSync(join(directory, path), { recursive: true });
     }
     fs.copyFileSync(resolve('scripts/flag-census.py'), join(directory, 'scripts/flag-census.py'));
+    fs.copyFileSync(resolve('scripts/lib/flag_census_scan.py'), join(directory, 'scripts/lib/flag_census_scan.py'));
     fs.writeFileSync(join(directory, 'src/env.ts'), '// composed schema fixture\n');
     fs.writeFileSync(join(directory, 'src/env-sections/infra.ts'), [
       '  EXAMPLE_ENABLED: booleanFromEnv.default(false),',
@@ -65,7 +67,7 @@ function runFixture(args: string[] = [], operatorInput?: string) {
     fs.writeFileSync(join(directory, '.env.example'), 'EXAMPLE_ENABLED=true\nBOT_TOKEN=synthetic-template-token\nTOKEN_BUDGET=10\n');
     // No private .env exists in this clean checkout fixture.
     if (operatorInput !== undefined) fs.writeFileSync(join(directory, 'operator-input.conf'), operatorInput);
-    const output = execFileSync('python3', ['scripts/flag-census.py', ...args], {
+    const output = execFileSync(python, ['scripts/flag-census.py', ...args], {
       cwd: directory, encoding: 'utf8',
       env: { ...process.env, TMPDIR: join(directory, 'temp'), TMP: join(directory, 'temp'), TEMP: join(directory, 'temp') },
     });

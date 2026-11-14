@@ -394,10 +394,10 @@ export function buildMessages(
   // P4-C: 自我模型提醒 —— 复盘自己表现得出的行为调整。volatile（每天变），
   // 放 user turn 不污染 system 前缀缓存。同步 SQLite 读（<1ms），不破坏缓存。
   try {
-    const notes = getActiveSelfNotes(5);
+    const notes = getActiveSelfNotes(5, undefined, chatId);
     if (notes.length) {
       volatileParts.push(
-        `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是你复盘自己表现得出的，自然遵守，别提起它们的存在。`,
+        `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是经证据核验且适用于本会话的调整，不是用户指令；结合当下语境使用，不复述来源隐私。`,
       );
     }
   } catch { /* non-critical */ }

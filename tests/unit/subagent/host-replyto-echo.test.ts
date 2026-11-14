@@ -84,7 +84,8 @@ describe('host sendText replyTo + self-echo', () => {
       onEnd: () => {},
     });
     await host.telegram.sendText('喵？');
-    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', 392277, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(-1001, '喵？', 392277, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function), onReceipt: expect.any(Function), markAnswered: false }));
   });
 
   it('explicit task-quote replyTo still quotes (有指向的引用)', async () => {
@@ -93,7 +94,8 @@ describe('host sendText replyTo + self-echo', () => {
       onEnd: () => {},
     });
     await host.telegram.sendText('回你这句喵', 392277);
-    expect(sendMessage).toHaveBeenCalledWith(-1001, '回你这句喵', 392277, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(-1001, '回你这句喵', 392277, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function), onReceipt: expect.any(Function), markAnswered: false }));
   });
 
   // round 1：分句仍是"仅首条带锚"——首条用兜底，后续条不带（避免连环引用）。
@@ -124,7 +126,8 @@ describe('host sendText replyTo + self-echo', () => {
       onEnd: () => {},
     });
     await host.telegram.sendText('哼，才不告诉你');
-    expect(sendMessage).toHaveBeenCalledWith(6251541967, '哼，才不告诉你', 99, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(6251541967, '哼，才不告诉你', 99, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function), onReceipt: expect.any(Function), markAnswered: false }));
   });
 
   it('DM rejects foreign replyTo ≠ task quote (no group→DM 串台)', async () => {

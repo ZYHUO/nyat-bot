@@ -1,4 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
 
 /**
  * task 级 burst 闸的**行为**测试（round 171 补）。
@@ -41,6 +43,7 @@ vi.mock('../../../src/nyatos/budget.js', () => ({
 // 所以 burst 闸读不到上次时间，行为测不了）。store 用 Map 冒充。
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
+    ...intentRedis,
     get: async (k: string) => store.get(k) ?? null,
     set: async (k: string, v: string) => { store.set(k, v); return 'OK'; },
     del: async (k: string) => { store.delete(k); return 1; },
@@ -65,7 +68,7 @@ vi.mock('../../../src/meta/answered.js', () => ({
 
 const { createHostApi } = await import('../../../src/subagent/host-api.js');
 
-beforeEach(() => { store.clear(); sendMessage.mockClear(); });
+beforeEach(() => { intentRedis.reset(); store.clear(); sendMessage.mockClear(); });
 
 describe('task 级 burst 闸（行为）', () => {
   it('① 同一任务紧接着第二次开口 → 抛回模型，且没有真的发出去', async () => {
@@ -112,7 +115,7 @@ describe('task 级 burst 闸（行为）', () => {
     expect(store.has('xxb:agent:lastsend:b5')).toBe(true);
   });
 
-  it('⑥ redis 读失败时 fail-open（防变胖的闸不能挡住发送）', async () => {
+  it('⑥ burst 时间戳读取失败可放行，持久发送许可仍须成功', async () => {
     store.set('xxb:agent:lastsend:b6', String(Math.floor(Date.now() / 1000)));
     const redis = await import('../../../src/db/redis.js');
     const spy = vi.spyOn(redis, 'getRedis').mockImplementationOnce(

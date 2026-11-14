@@ -44,7 +44,7 @@ describe('分片共享一次过闸结果', () => {
     // 置位行必须在闸的闭合括号之后、sendMessage 之前
     const setIdx = body.indexOf('gatePassed = true;');
     const gateIdx = body.indexOf('if (chatId < 0 && env().TRENCH_GATE_ENABLED && !gatePassed) {');
-    const sends = [...body.matchAll(/^\s*const messageId = await sendWithDeliveryGuard\(\(\) => sendMessage\(chatId, part, replyTo, opts\.messageThreadId\)\);\s*$/gm)];
+    const sends = [...body.matchAll(/^\s*returnedId = await sendWithDeliveryGuard\(\(\) => sendMessage\(chatId, part, replyTo, opts\.messageThreadId,\s*$/gm)];
     expect(sends).toHaveLength(1);
     const sendIdx = sends[0]!.index;
     expect(gateIdx).toBeGreaterThan(-1);

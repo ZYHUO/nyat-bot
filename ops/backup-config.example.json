@@ -1,0 +1,22 @@
+{
+  "project_root": "/opt/nyatbot",
+  "staging_root": "/opt/nyatbot-backups/daily",
+  "sqlite_path": "/opt/nyatbot/data/xxb.db",
+  "lock_file": "/run/lock/nyatbot-deploy.lock",
+  "shutdown_journal": "/var/lib/nyatbot-backup/writers-stopped.json",
+  "schedule_receipt": "/var/lib/nyatbot-backup/schedule-success.json",
+  "quarantine_root": "/opt/nyatbot-restore-quarantine",
+  "min_free_bytes": 21474836480,
+  "retention": {"enabled": true, "daily": 14, "weekly": 8, "monthly": 12},
+  "release": "REPLACE_WITH_VERIFIED_COMMIT",
+  "embedding": {"model": "REPLACE_WITH_RUNNING_MODEL", "dimensions": 384, "collection": "REPLACE_WITH_RUNNING_COLLECTION"},
+  "writers": [{"unit": "nyatbot.service", "checkpoint_dir": "/opt/nyatbot/data/shutdown-checkpoints"}],
+  "redis": {"binary": "/opt/nyatbot-redis/bin/redis-cli", "host": "127.0.0.1", "port": 16379, "dedicated_instance": true},
+  "qdrant": {"url": "http://127.0.0.1:16333"},
+  "archives": [
+    {"name": "application-data", "path": "/opt/nyatbot/data", "exclude": ["xxb.db", "xxb.db-wal", "xxb.db-shm", "shutdown-checkpoints", "qdrant"]},
+    {"name": "prompts", "path": "/opt/nyatbot/prompts"},
+    {"name": "private-env", "path": "/opt/nyatbot/.env"}
+  ],
+  "drive": {"binary": "/opt/nyatbot-backup/bin/rclone", "config_file": "/etc/nyatbot-backup/rclone.conf", "config_password_file": "/etc/nyatbot-backup/rclone-config-password", "remote": "nyatcrypt:nyatbot"}
+}

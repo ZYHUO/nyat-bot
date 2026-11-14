@@ -21,6 +21,7 @@
 // ────────────────────────────────────────
 
 import { env } from '../env.js';
+import { prepareBackgroundTask } from '../agent/background-publication.js';
 import { logger } from '../shared/logger.js';
 import { getDb } from '../db/sqlite.js';
 import { getRedis } from '../db/redis.js';
@@ -362,19 +363,22 @@ export async function runDreaming(): Promise<DreamingResult> {
     const prompt = loadDreamingPrompt();
 
     const taskId = `dreaming_${nowSec}_${Math.floor(Math.random() * 1e6)}`;
-    await enqueueCodeActJob({
+    await enqueueCodeActJob(prepareBackgroundTask({
       id: taskId,
       // 主人 DM:沙盒/记忆挂靠身份;prompt 里的硬边界约束 sendText 只来这儿。
       // 不带 messageThreadId —— DM 无 forum topic。
       chatId: master,
       contentDirection:
+        env().BACKGROUND_PUBLICATION_ENABLED
+          ? `夜间复盘。没有人在等回复；只读取和反思，有可注册的新来源才提交发布草稿并 endTask("finding")，否则 endTask("no_update")。\n${ctx.text}`
+          :
         `[dreaming] 凌晨做梦任务（特权后台，主人私聊）。\n\n` +
         `${prompt}\n\n` +
         `## 今晚的素材\n${ctx.text}`,
       toneGuidance: '安静、自主，像夜里做梦一样',
       createdAt: Date.now(),
       status: 'queued',
-    });
+    },{kind:'dreaming',key:'dreaming',sinceAt:since * 1000}));
 
     finishRun(runId, Math.floor(Date.now() / 1000), 'done', ctx.tasksReviewed, `dispatched: ${taskId}`);
     logger.info({ runId, taskId, tasksReviewed: ctx.tasksReviewed }, 'dreaming task dispatched');

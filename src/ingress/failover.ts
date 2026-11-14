@@ -105,7 +105,7 @@ export function startBootWatchdog(onReady: () => void, stallMs = 120_000): void 
  * - webhook mode: after RECOVERY_MS → switch back to polling to retry the preferred transport.
  * Switching = flip the Redis flag and exit; systemd restarts into the new mode.
  */
-export function startIngressWatchdog(redis: Redis, mode: IngressMode): void {
+export function startIngressWatchdog(redis: Redis, mode: IngressMode, options: { webhookAvailable?: boolean } = {}): void {
   let switching = false;
 
   const tick = async (): Promise<void> => {
@@ -119,9 +119,10 @@ export function startIngressWatchdog(redis: Redis, mode: IngressMode): void {
         const age = Date.now() - lastOk;
         if (!lastOk || age > STALL_MS) {
           switching = true;
-          log.error({ lastOkAgeMs: lastOk ? age : null }, 'Polling appears stalled — failing over to webhook');
-          await setIngressMode(redis, 'webhook');
-          await redis.set(WEBHOOK_SINCE_KEY, String(Date.now()));
+          const nextMode = options.webhookAvailable === true ? 'webhook' : 'polling';
+          log.error({ lastOkAgeMs: lastOk ? age : null, nextMode }, 'Polling appears stalled — restarting ingress');
+          await setIngressMode(redis, nextMode);
+          if (nextMode === 'webhook') await redis.set(WEBHOOK_SINCE_KEY, String(Date.now()));
           // systemd Restart=always will bring us back up in webhook mode.
           process.exit(0);
         }

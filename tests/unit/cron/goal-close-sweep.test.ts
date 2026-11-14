@@ -9,7 +9,7 @@
  * 锁这几件事：
  *   ① 声称完成 → pending_close，且不占活跃名额（createGoal 能继续立新的）
  *   ② 观察期没满 → 不动
- *   ③ 观察期满 + 期间没人再提 → achieved，且记在 silence_closures / last_evidence='silence'，
+ *   ③ 观察期满 + 期间没人再提 → stale，记在 silence_closures / last_evidence='silence_unverified'，
  *      **不**记进 verified_achievements（不把"没人提"冒充成"被验证"）
  *   ④ 观察期满 + 期间有人再提 → 回 active，起点清空
  *   ⑤ 只有「人」的消息算再提；bot 自己的话、观察期之前的话都不算
@@ -106,17 +106,20 @@ describe('runGoalCloseSweep', () => {
     expect(row(id).status).toBe('pending_close');
   });
 
-  it('③ 观察期满 + 期间没人再提 → achieved，记 silence 而不是 verified', async () => {
+  it('③ 观察期满 + 期间没人再提 → 未验证归档，不能标 achieved', async () => {
     const id = newGoal();
     pending(id, 49);
     recentMsgs = [{ role: 'user', timestamp: NOW - 40 * H, textContent: '今天天气不错' }];
     const r = await runGoalCloseSweep(NOW);
     expect(r.closed).toBe(1);
     const g = row(id);
-    expect(g.status).toBe('achieved');
-    expect(g.last_evidence).toBe('silence');
+    expect(g.status).toBe('stale');
+    expect(g.last_evidence).toBe('silence_unverified');
     expect(g.silence_closures).toBe(1);
     expect(g.verified_achievements).toBe(0);   // 关键：没人提 ≠ 被独立验证
+    expect(goals.listGoals('achieved').some(goal => goal.id === id)).toBe(false);
+    expect((await runGoalCloseSweep(NOW + H)).closed).toBe(0);
+    expect(row(id).silence_closures).toBe(1);
   });
 
   it('④ 观察期满 + 期间有人再提 → 回 active，起点清空', async () => {

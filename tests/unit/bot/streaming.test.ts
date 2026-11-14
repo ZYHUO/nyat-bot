@@ -6,9 +6,13 @@ const mockSendMessage = vi.fn<(chatId: number, text: string, replyToId?: number)
 const mockEditMessage = vi.fn<(chatId: number, messageId: number, text: string) => Promise<void>>();
 
 vi.mock('../../../src/bot/sender/telegram.js', () => ({
-  sendMessage: (...args: Parameters<typeof mockSendMessage>) => mockSendMessage(...args),
+  sendMessageDetailed: async (chatId: number, text: string, replyToId?: number) => ({
+    status: 'sent', intentId: 'stream-test', revision: 0, chatId, plannedPartCount: 1,
+    parts: [{ messageId: await mockSendMessage(chatId, text, replyToId), text, partIndex: 0 }],
+  }),
   editMessage: (...args: Parameters<typeof mockEditMessage>) => mockEditMessage(...args),
 }));
+vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => {}) }));
 
 describe('StreamingSender', () => {
   beforeEach(() => {

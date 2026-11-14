@@ -4,6 +4,7 @@
 
 import type { FormattedMessage } from '../shared/types.js';
 import { env } from '../env.js';
+import { assertInputBatchCurrent } from './pending-intent.js';
 import { logger } from '../shared/logger.js';
 import { getBotDisplayName, getBotUid } from '../bot/bot.js';
 import { heartDecision } from '../pipeline/heart/decision.js';
@@ -66,6 +67,8 @@ export async function evaluateMetaHeart(opts: {
   const { chatId, formatted, layer } = opts;
   const addressed = !!opts.addressed && chatId < 0 && isPlatformInternalId(chatId);
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
+  try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
+  catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
 
   if (!e.HEART_ENABLED) {
     // No Heart: preserve prior Meta policy (L2 drop handled by caller).
@@ -175,7 +178,10 @@ export async function evaluateMetaHeart(opts: {
       }
     })()
     : Promise.resolve(undefined);
-  const selfState = await composeSelfState(chatId);
+  // The recorded event updates the projection before its read-only disposition
+  // is composed; an old prompt snapshot must not lag one event behind.
+  if (e.EMOTION_CONTINUITY_ENABLED) await cognitiveWorkspacePromise;
+  const selfState = await composeSelfState(chatId, formatted.textContent || formatted.captionContent || '');
   const cognitiveWorkspaceHint = await cognitiveWorkspacePromise;
   let lastSpokeSecAgo: number | undefined;
   if (tstate?.lastBotReplyAt) {
@@ -245,6 +251,8 @@ export async function evaluateMetaHeart(opts: {
       return { verdict: 'silence', layer, reason: 'heart_anchor_recalled' };
     }
   }
+  try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
+  catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
 
   void import('../pipeline/heart/mind.js')
     .then(({ noteThought }) => noteThought(chatId, heart.why))
@@ -269,6 +277,8 @@ export async function evaluateMetaHeart(opts: {
     if (emoji) {
       try {
         const { reactToMessage } = await import('../bot/sender/telegram.js');
+        try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
+        catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
         sent = await reactToMessage(chatId, formatted.messageId, emoji);
       } catch (err) {
         deliveryUnknown = !!err && typeof err === 'object' && 'delivery' in err && err.delivery === 'unknown';
@@ -314,6 +324,7 @@ export async function evaluateMetaHeart(opts: {
           layer: addressed ? 'L0' : 'L1',
           reason: `heart:${heart.why || 'wait'}`,
           messageId: formatted.messageId,
+          pendingIntent: formatted.pendingIntent, messageThreadId: formatted.messageThreadId,
           userId: formatted.uid,
           cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
           textPreview: (formatted.textContent || '').slice(0, 200),
@@ -321,7 +332,7 @@ export async function evaluateMetaHeart(opts: {
           createdAt: Date.now(),
           payload: {
             ...(opts.batchMessages && opts.batchMessages.length > 1 ? { qqBatch: opts.batchMessages.map(message => ({
-              messageId: message.messageId, userId: message.uid, textPreview: (message.textContent || '').slice(0, 200),
+              messageId: message.messageId, pendingIntent: message.pendingIntent, messageThreadId: message.messageThreadId, userId: message.uid, textPreview: (message.textContent || '').slice(0, 200),
               username: message.username, fullName: message.fullName,
               ...(message.replyTo ? { replyTo: { messageId: message.replyTo.messageId, uid: message.replyTo.uid,
                 fullName: message.replyTo.fullName, textSnippet: (message.replyTo.textSnippet || '').slice(0, 200) } } : {}),

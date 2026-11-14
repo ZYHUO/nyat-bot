@@ -14,6 +14,8 @@
  *   ③ 额度为 0 时立刻拦（续跑段拿到"剩余额度"可能就是 0）
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
 
 const sendMessage = vi.fn(async () => 42);
 
@@ -36,7 +38,7 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getRecent: vi.fn(async () => []),
 }));
 vi.mock('../../../src/db/redis.js', () => ({
-  getRedis: () => ({ get: async () => null, set: async () => 'OK', del: async () => 1 }),
+  getRedis: () => ({ ...intentRedis, get: async () => null, set: async () => 'OK', del: async () => 1 }),
 }));
 vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => {}),
   answeredTimestamps: vi.fn(async () => [] as number[]) }));
@@ -62,7 +64,34 @@ async function makeApi(opts: { maxTextSends?: number; onSend?: () => void }) {
 
 describe('host sendText 发送预算', () => {
   beforeEach(() => {
+    intentRedis.reset();
     sendMessage.mockClear();
+  });
+
+  it('claims durable intent before transport and clears only its confirmed attempt', async () => {
+    const api = await makeApi({ maxTextSends: 1 });
+    sendMessage.mockImplementationOnce(async () => {
+      const saved = await intentRedis.hget('xxb:codeact:delivery-unknown', 't-budget');
+      expect(saved).not.toBeNull();
+      expect(JSON.parse(saved!)).toMatchObject({ taskId: 't-budget', chatId: GROUP,
+        code: 'delivery_in_flight', attempt: expect.any(String) });
+      return 42;
+    });
+    await api.telegram.sendText('确认成功后再结算这次发送');
+    expect(await intentRedis.hget('xxb:codeact:delivery-unknown', 't-budget')).toBeNull();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('unavailable intent storage is not bypassed by an otherwise available send budget', async () => {
+    const onSend = vi.fn();
+    const api = await makeApi({ maxTextSends: 3, onSend });
+    const failClaim = vi.spyOn(intentRedis, 'hsetnx').mockRejectedValueOnce(new Error('synthetic storage unavailable'));
+    try {
+      await expect(api.telegram.sendText('持久发送许可不可用时不会外发')).rejects.toMatchObject({
+        code: 'delivery_intent_store_unavailable', delivery: 'not_sent',
+      });
+      expect(sendMessage).not.toHaveBeenCalled(); expect(onSend).not.toHaveBeenCalled();
+    } finally { failClaim.mockRestore(); }
   });
 
   it('① 单段内到顶就拦（原行为不能退）', async () => {

@@ -76,6 +76,14 @@ export const memorySection = {
   // 新 collection → 改 MEMORY_COLLECTION 切换 → 旧库保留一周作回滚。
   MEMORY_EMBED_MODEL: z.string().default('Xenova/all-MiniLM-L6-v2'),
   MEMORY_COLLECTION: z.string().default('xxb_group_history'),
+  // Persist source bodies first; retry vector/FTS projections from SQLite.
+  MEMORY_PROJECTION_OUTBOX_ENABLED: booleanFromEnv.default(false),
+  // Trusted private compute origins only; never a model/user-supplied address.
+  MEMORY_REMOTE_EMBED_ENABLED: booleanFromEnv.default(false),
+  MEMORY_REMOTE_EMBED_ENDPOINTS: z.string().default('').transform(value => value.split(',').map(item => item.trim()).filter(Boolean)),
+  MEMORY_REMOTE_EMBED_TOKEN: z.string().default(''),
+  MEMORY_REMOTE_EMBED_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(5000),
+  MEMORY_REMOTE_EMBED_LOCAL_FALLBACK: booleanFromEnv.default(true),
   // 检索相关性下限(0..1)。0 = 不过滤,保持历史行为(纯 topK)。
   // 换模型与调阈值刻意分成两次改动;标定必须用真实语料,别沿用旧模型下的经验值。
   MEMORY_MIN_SCORE: z.coerce.number().min(0).max(1).default(0),

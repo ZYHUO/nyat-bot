@@ -37,9 +37,18 @@ beforeEach(() => {
   mocks.tick.mockImplementation(async () => { mocks.batches.push(await getAttentionAccumulator().flush()); });
   redis = new MetaRedisFixture(); mocks.redis.mockReturnValue(redis);
 });
-afterEach(() => { _resetAttentionAccumulator(); vi.useRealTimers(); });
+afterEach(() => { _resetAttentionAccumulator(); vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe('shared QQ/Telegram Attention cadence', () => {
+  it('persists direct input on ingress-only without locally starting Meta', async () => {
+    vi.stubEnv('XXB_ENABLE_WORKER', 'false');
+    vi.stubEnv('XXB_ENABLE_CRON', 'false');
+    vi.stubEnv('XXB_ENABLE_BOT_INGRESS', 'true');
+    await add(QQ_DM, 901);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mocks.tick).not.toHaveBeenCalled();
+    expect(await getAttentionAccumulator().peek()).toEqual([expect.objectContaining({ messageId: 901 })]);
+  });
   it('passive coalescing cannot postpone a pending direct wake from another chat', async () => {
     await add(QQ_DM, 11);
     await add(-123, 12, 'L1');

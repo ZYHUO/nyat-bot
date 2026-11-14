@@ -20,6 +20,7 @@ import {
   applyHypothesisObservation,
   recordHypothesisCandidate,
 } from "../../../src/agent/hypothesis-updates.js";
+import { appendCognitiveEvent } from "../../../src/agent/cognitive-events.js";
 
 const migration = (name: string): string =>
   readFileSync(`migrations/${name}`, "utf8");
@@ -38,6 +39,8 @@ beforeEach(() => {
     "0104_group_norm_revisions.sql",
     "0105_relationship_revisions.sql",
     "0109_hypothesis_update_audit.sql",
+    "0089_cognitive_events.sql",
+    "0124_self_note_provenance.sql",
   ])
     db.exec(migration(name));
 });
@@ -157,14 +160,19 @@ describe("host-evidence hypothesis gate", () => {
       db.prepare("SELECT norms FROM group_norms WHERE chat_id = -100").get(),
     ).toMatchObject({ norms: JSON.stringify(["先给结论", "短句为主"]) });
 
+    const selfNotes = [{ note: "技术问题先给结论", evidence: "caller acceptance" }];
+    const selfEvent = appendCognitiveEvent({
+      type: "task_observation", scope: { visibility: "global" }, source: "host",
+      fact: { hypothesisKind: "self", selfNoteGlobalApproved: true, notes: selfNotes, evidence: { acceptance: "verified" } },
+    })!.event;
     const self = applyHypothesisObservation({
       kind: "self",
       scope: { visibility: "global" },
       subjectKey: "bot",
       source: "host",
-      sourceEventId: "host-event-self-1",
+      sourceEventId: selfEvent.id,
       evidence: { acceptance: "verified" },
-      notes: [{ note: "技术问题先给结论", evidence: "caller acceptance" }],
+      notes: selfNotes,
     });
     expect(self.accepted).toBe(true);
     expect(
@@ -172,20 +180,20 @@ describe("host-evidence hypothesis gate", () => {
         .prepare(
           "SELECT COUNT(*) AS count FROM self_model_note_evidence WHERE source_event_id = ?",
         )
-        .get("host-event-self-1"),
+        .get(selfEvent.id),
     ).toEqual({ count: 1 });
     expect(
       db
         .prepare(
           "SELECT status, source_event_id FROM hypothesis_update_audit WHERE idempotency_key LIKE ?",
         )
-        .get("%host-event-self-1") as {
+        .get(`%${selfEvent.id}`) as {
         status: string;
         source_event_id: string;
       },
     ).toMatchObject({
       status: "accepted",
-      source_event_id: "host-event-self-1",
+      source_event_id: selfEvent.id,
     });
   });
 });

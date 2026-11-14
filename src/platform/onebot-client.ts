@@ -169,6 +169,8 @@ export class OneBotClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly messages: QueuedMessage[] = [];
   private handlingMessage = false;
+  private ingressPaused = false;
+  private readonly ingressWaiters: Array<() => void> = [];
   private frameWindowAt = 0;
   private framesInWindow = 0;
   // Wire budgets are separate from the decoder's decoded-file limit. A normal
@@ -223,6 +225,15 @@ export class OneBotClient {
     this.dropConnection('stopped');
     this.setState('stopped');
     this.settleStart(new OneBotClientError('stopped'));
+  }
+
+  /** Stop accepting new events while keeping API responses/sender alive. Already
+   * admitted queued handlers finish normally; stopping the socket is not a join. */
+  pauseIngress(): void { this.ingressPaused = true; }
+  async drainIngress(): Promise<void> {
+    this.pauseIngress();
+    if (!this.handlingMessage && !this.messages.length) return;
+    await new Promise<void>(resolve => this.ingressWaiters.push(resolve));
   }
 
   async send(action: PlatformAction): Promise<MessageRef> {
@@ -599,6 +610,7 @@ export class OneBotClient {
       if (status?.['online'] === false || status?.['good'] === false) this.disconnected(socket, 'account_offline');
       return;
     }
+    if (this.ingressPaused) return;
     try {
       if (frame['post_type'] === 'request') {
         if (!this.options.onRequest) return;
@@ -694,6 +706,9 @@ export class OneBotClient {
         }
         catch { this.diagnostic('message_handler_failed'); }
       }
-    } finally { this.handlingMessage = false; }
+    } finally {
+      this.handlingMessage = false;
+      for (const resolve of this.ingressWaiters.splice(0)) resolve();
+    }
   }
 }

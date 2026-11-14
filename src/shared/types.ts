@@ -2,12 +2,18 @@
 // 全局类型定义
 // ────────────────────────────────────────
 
+import type { MessageEventIdentity } from './event-identity.js';
+import type { PendingIntentRef } from '../meta/pending-intent.js';
+
 export interface FormattedMessage {
   role: 'user' | 'assistant' | 'system';
   uid: number;
   username: string;
   fullName: string;
   timestamp: number;
+  /** Source identity and four UTC millisecond times; legacy timestamp remains seconds. */
+  eventIdentity?: MessageEventIdentity;
+  pendingIntent?: PendingIntentRef;
   messageId: number;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
@@ -125,6 +131,8 @@ export interface RetrievedContext {
 // strongly-typed Update and ad-hoc test fixtures while keeping field names
 // statically known at the formatter boundary.
 export interface UpdateLike {
+  /** Trusted host ingress metadata, never accepted from platform JSON verbatim. */
+  __nyatEventIdentity?: MessageEventIdentity;
   update_id?: unknown;
   message?: unknown;
   edited_message?: unknown;

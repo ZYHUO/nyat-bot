@@ -2,10 +2,14 @@
 // processes.  The ledger stores proposals, wake requests, and host outcomes;
 // it never executes a tool or treats model text as proof.
 
-import { appendCognitiveEvent, listCognitiveEvents } from './cognitive-events.js';
+import { appendCognitiveEvent, getCognitiveEvent } from './cognitive-events.js';
+import { iterateCognitiveHistory } from './cognitive-history.js';
 import type { CognitiveEvent, CognitiveEventSource } from './cognitive-events.js';
 import { parseMissionProposal, type MissionProposal } from './nyatos-contracts.js';
 import { scopeKey, type CognitiveScope } from '../shared/cognitive-scope.js';
+import { createHash } from 'node:crypto';
+import { env } from '../env.js';
+import { resolveConversationScope } from '../shared/privacy-scope.js';
 
 export type MissionLifecycle = 'proposed' | 'wake_requested' | 'observed' | 'verified' | 'failed' | 'stopped' | 'expired';
 export type MissionObservationStatus = Exclude<MissionLifecycle, 'proposed'>;
@@ -111,13 +115,8 @@ function valueOf<T>(event: CognitiveEvent, parser: (value: unknown) => T | null)
 function eventForMission(missionId: string, scope?: CognitiveScope): CognitiveEvent | null {
   const normalized = boundedText(missionId, 240);
   if (!normalized) return null;
-  const events = listCognitiveEvents({
-    ...(scope ? { scope } : {}),
-    type: 'mission_proposed',
-    order: 'occurred_at_desc',
-    limit: 500,
-  });
-  return events.find((event) => event.id === normalized) ?? null;
+  const event = getCognitiveEvent(normalized);
+  return event?.type === 'mission_proposed' && (!scope || event.scopeKey === scopeKey(scope)) ? event : null;
 }
 
 function appendMissionEvent(input: {
@@ -144,12 +143,10 @@ function appendMissionEvent(input: {
 }
 
 function latestMissionEvents(scope?: CognitiveScope): CognitiveEvent[] {
-  return listCognitiveEvents({
+  return [...iterateCognitiveHistory({
     ...(scope ? { scope } : {}),
     type: 'mission_observed',
-    order: 'occurred_at_desc',
-    limit: 1000,
-  });
+  })];
 }
 
 function parseMissionObservation(event: CognitiveEvent): MissionObservation | null {
@@ -214,17 +211,17 @@ function latestObservationByMission(scope?: CognitiveScope): Map<string, { event
   const out = new Map<string, { event: CognitiveEvent; value: MissionObservation }>();
   const events = [
     ...latestMissionEvents(scope),
-    ...listCognitiveEvents({
+    ...iterateCognitiveHistory({
       ...(scope ? { scope } : {}),
       type: 'mission_wake_requested',
-      order: 'occurred_at_desc',
-      limit: 1000,
     }),
   ].sort((a, b) => b.occurredAt - a.occurredAt || b.sequence - a.sequence || b.id.localeCompare(a.id));
   for (const event of events) {
     const value = event.type === 'mission_wake_requested' ? parseMissionWake(event) : parseMissionObservation(event);
-    if (!value || !value.missionId || out.has(value.missionId)) continue;
-    out.set(value.missionId, { event, value });
+    if (!value || !value.missionId || event.scopeKey !== scopeKey(value.scope)) continue;
+    const key = JSON.stringify([event.scopeKey, value.missionId]);
+    if (out.has(key)) continue;
+    out.set(key, { event, value });
   }
   return out;
 }
@@ -260,20 +257,20 @@ function missionContinuityFromProposal(
 export function listMissionContinuity(scope?: CognitiveScope, limit = 100): MissionContinuity[] {
   if (scope && !validChatScope(scope)) return [];
   const observations = latestObservationByMission(scope);
-  return listCognitiveEvents({
+  return [...iterateCognitiveHistory({
     ...(scope ? { scope } : {}),
     type: 'mission_proposed',
-    order: 'occurred_at_desc',
-    limit: Math.min(500, Math.max(1, Math.trunc(limit))),
-  })
-    .map((event) => missionContinuityFromProposal(event, observations.get(event.id)))
-    .filter((mission): mission is MissionContinuity => mission !== null);
+  })]
+    .map((event) => missionContinuityFromProposal(event, observations.get(JSON.stringify([event.scopeKey, event.id]))))
+    .filter((mission): mission is MissionContinuity => mission !== null)
+    .sort((a, b) => b.proposedAt - a.proposedAt || b.missionId.localeCompare(a.missionId))
+    .slice(0, Math.max(1, Math.trunc(limit)));
 }
 
 export function getMissionContinuity(missionId: string, scope?: CognitiveScope): MissionContinuity | null {
   const proposal = eventForMission(missionId, scope);
   if (!proposal) return null;
-  const observation = latestObservationByMission(scope).get(proposal.id);
+  const observation = latestObservationByMission(scope).get(JSON.stringify([proposal.scopeKey, proposal.id]));
   return missionContinuityFromProposal(proposal, observation);
 }
 
@@ -364,7 +361,10 @@ export function requestMissionWake(input: {
 /** Claim due mission proposals without executing them. Repeated ticks are idempotent per minute. */
 export function claimDueMissionWakes(now = nowSec(), limit = 20): MissionWake[] {
   const wakes: MissionWake[] = [];
-  for (const mission of listMissionContinuity(undefined, 500).filter((item) => item.due).slice(0, Math.min(100, Math.max(1, Math.trunc(limit))))) {
+  const due = listMissionContinuity(undefined, Number.POSITIVE_INFINITY)
+    .filter(item => !['verified', 'failed', 'stopped', 'expired'].includes(item.status) && (item.nextWakeAt ?? 0) <= now)
+    .sort((a, b) => (a.nextWakeAt ?? a.proposedAt) - (b.nextWakeAt ?? b.proposedAt) || a.missionId.localeCompare(b.missionId));
+  for (const mission of due.slice(0, Math.min(100, Math.max(1, Math.trunc(limit))))) {
     const requested = requestMissionWake({ missionId: mission.missionId, scope: mission.scope, wakeAt: now, reason: 'mission_due' });
     if (!requested?.inserted) continue;
     wakes.push({
@@ -437,11 +437,23 @@ function parseProcessCheckpoint(event: CognitiveEvent): ProcessCheckpoint | null
 
 function processCheckpoints(): Map<string, ProcessCheckpoint> {
   const map = new Map<string, ProcessCheckpoint>();
-  for (const event of listCognitiveEvents({ type: 'cognitive_process_checkpoint', order: 'occurred_at_desc', limit: 1000 })) {
+  for (const event of iterateCognitiveHistory({ type: 'cognitive_process_checkpoint' })) {
     const checkpoint = parseProcessCheckpoint(event);
-    if (checkpoint && !map.has(checkpoint.wakeEventId)) map.set(checkpoint.wakeEventId, checkpoint);
+    if (checkpoint && event.scopeKey === scopeKey(checkpoint.scope)) map.set(checkpoint.wakeEventId, checkpoint);
   }
   return map;
+}
+
+/** The source is a persisted host snapshot, never inferred from today's token. */
+export function hasCurrentProcessWakeSource(event: CognitiveEvent | null): boolean {
+  if (!event || event.type !== 'cognitive_process_wake' || event.source !== 'scheduler'
+    || event.visibility !== 'chat' || event.chatId === null) return false;
+  const target = resolveConversationScope(event.chatId);
+  const source = event.fact['conversationScope'];
+  if (!target?.accountId || !source || typeof source !== 'object' || Array.isArray(source)) return false;
+  const saved = source as Record<string, unknown>;
+  return saved['chatId'] === target.chatId && saved['platform'] === target.platform
+    && saved['accountId'] === target.accountId && saved['conversationKind'] === target.conversationKind;
 }
 
 /** Persist a process wake-up; a lease/checkpoint is required before it is considered consumed. */
@@ -459,14 +471,22 @@ export function requestProcessWake(input: {
   const reason = boundedText(input.reason, 240);
   if (!processId || !reason || !['observer', 'social_mind', 'strategist', 'skeptic', 'memory_curator'].includes(input.kind)) return null;
   const wakeAt = boundedPositive(input.wakeAt, nowSec(), 4_102_444_800);
+  const conversation = input.scope.visibility === 'chat' && input.scope.chatId !== undefined
+    ? resolveConversationScope(input.scope.chatId) : null;
+  if (env().EMOTION_CONTINUITY_ENABLED && input.scope.visibility === 'chat' && !conversation?.accountId) return null;
   const value: ProcessWakeRequest = {
     schema: 'cognitive_process_wake.v1', processId, kind: input.kind, scope: input.scope, wakeAt, reason,
     causeEventIds: uniqueIds(input.causeEventIds),
   };
+  // Account changes must not alias an older wake in the same minute. Keep the
+  // legacy key while continuity is off; new account-bound keys are bounded.
+  const dedupeKey = env().EMOTION_CONTINUITY_ENABLED && conversation?.accountId
+    ? `process-wake:v2:${createHash('sha256').update(JSON.stringify([key, processId, Math.floor(wakeAt / 60), conversation])).digest('hex')}`
+    : `process-wake:${key}:${processId}:${Math.floor(wakeAt / 60)}`;
   const result = appendCognitiveEvent({
     type: 'cognitive_process_wake', source: 'scheduler', scope: input.scope, occurredAt: nowSec(),
-    correlationId: `process:${processId}`, dedupeKey: `process-wake:${key}:${processId}:${Math.floor(wakeAt / 60)}`,
-    fact: { schema: value.schema, value },
+    correlationId: `process:${processId}`, dedupeKey,
+    fact: { schema: value.schema, value, ...(conversation?.accountId ? { conversationScope: conversation } : {}) },
   });
   return result ? { inserted: result.inserted, eventId: result.event.id, wakeAt } : null;
 }
@@ -474,18 +494,21 @@ export function requestProcessWake(input: {
 export function listDueProcessWakes(now = nowSec(), limit = 50): ProcessWake[] {
   const checkpoints = processCheckpoints();
   const stoppedAt = new Map<string, number>();
-  for (const event of listCognitiveEvents({ type: 'cognitive_process_stopped', order: 'occurred_at_desc', limit: 1000 })) {
+  for (const event of iterateCognitiveHistory({ type: 'cognitive_process_stopped' })) {
     const value = event.fact['value'];
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
     const candidate = value as Record<string, unknown>;
     const processId = boundedText(candidate['processId'], 160);
-    if (processId && !stoppedAt.has(processId)) stoppedAt.set(processId, event.occurredAt);
+    if (processId) stoppedAt.set(JSON.stringify([event.scopeKey, processId]), event.occurredAt);
   }
   const out: ProcessWake[] = [];
-  for (const event of listCognitiveEvents({ type: 'cognitive_process_wake', order: 'occurred_at_desc', limit: 1000 })) {
+  for (const event of iterateCognitiveHistory({ type: 'cognitive_process_wake' })) {
     const value = parseProcessWake(event);
-    if (!value || value.wakeAt > now || checkpoints.has(event.id)) continue;
-    if ((stoppedAt.get(value.processId) ?? -1) >= event.occurredAt) continue;
+    if (!value || value.wakeAt > now || event.scopeKey !== scopeKey(value.scope)) continue;
+    if (env().EMOTION_CONTINUITY_ENABLED && value.scope.visibility === 'chat' && !hasCurrentProcessWakeSource(event)) continue;
+    const checkpoint = checkpoints.get(event.id);
+    if (checkpoint && scopeKey(checkpoint.scope) === event.scopeKey && checkpoint.processId === value.processId) continue;
+    if ((stoppedAt.get(JSON.stringify([event.scopeKey, value.processId])) ?? -1) >= event.occurredAt) continue;
     out.push({
       processId: value.processId, kind: value.kind, scope: value.scope, wakeEventId: event.id,
       wakeAt: value.wakeAt, reason: value.reason, causeEventIds: value.causeEventIds,
@@ -509,8 +532,8 @@ export function checkpointProcess(input: {
   const processId = boundedText(input.processId, 160);
   const wakeEventId = boundedText(input.wakeEventId, 240);
   if (!processId || !wakeEventId || !['completed', 'failed', 'waiting'].includes(input.status)) return null;
-  const wakeEvent = listCognitiveEvents({ correlationId: `process:${processId}`, type: 'cognitive_process_wake', limit: 1000 })
-    .find((event) => event.id === wakeEventId);
+  const found = getCognitiveEvent(wakeEventId);
+  const wakeEvent = found?.type === 'cognitive_process_wake' && found.correlationId === `process:${processId}` ? found : null;
   const wakeValue = wakeEvent ? parseProcessWake(wakeEvent) : null;
   if (!wakeValue || scopeKey(wakeValue.scope) !== key || wakeValue.processId !== processId) return null;
   const recordedAt = boundedPositive(input.recordedAt, nowSec(), 4_102_444_800);

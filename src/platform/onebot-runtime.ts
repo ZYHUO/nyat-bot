@@ -11,12 +11,17 @@ import { getOrCreateConversationId } from './identity-store.js';
 import { setOneBotMediaTransport } from './onebot-media.js';
 import { ingestOneBotNotice } from './onebot-notices.js';
 import { registerPlatformBotName } from './account-context.js';
+import { startInboxRecovery } from '../ingress/durable.js';
+import type { NormalizedMessage } from './types.js';
 
 let client: OneBotClient | undefined;
 let registeredAccount: string | undefined;
 let acceptingMessages = false;
+let drainingMessages = false;
 let clearMedia: (() => void) | undefined;
 let clearIdentity: (() => void) | undefined;
+let stopRecovery: (() => Promise<void>) | undefined;
+let recoveryDrain: Promise<void> | undefined;
 
 export function validateOneBotConfig(config: Env): void {
   if (!config.ONEBOT_ENABLED) return;
@@ -49,6 +54,7 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
   if (!config.ONEBOT_ENABLED || client) return;
   validateOneBotConfig(config);
   acceptingMessages = acceptMessages;
+  drainingMessages = false;
   const next = new OneBotClient({
     endpoint: config.ONEBOT_WS_URL, accessToken: config.ONEBOT_ACCESS_TOKEN,
     accountId: config.ONEBOT_ACCOUNT_ID,
@@ -61,7 +67,7 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
       reconnectMaxMs: Math.max(30000, config.ONEBOT_RECONNECT_DELAY_MS),
     },
     onMessage: async (message, context) => {
-      if (acceptingMessages) await ingestOneBotMessage(message, context, async (event, scope) => {
+      if (acceptingMessages || drainingMessages) await ingestOneBotMessage(message, context, async (event, scope) => {
         const result = await requests.handleCommand(event, scope);
         if (result.reply && !scope.signal.aborted) {
           await sendPlatformText(getOrCreateConversationId(event.ref.conversation), result.reply);
@@ -69,8 +75,8 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
         return result.handled;
       });
     },
-    onRequest: (request, context) => { if (acceptingMessages) requests.record(request, context); },
-    onNotice: async (notice, context) => { if (acceptingMessages) await ingestOneBotNotice(notice, context); },
+    onRequest: (request, context) => { if (acceptingMessages || drainingMessages) requests.record(request, context); },
+    onNotice: async (notice, context) => { if (acceptingMessages || drainingMessages) await ingestOneBotNotice(notice, context); },
     onIdentity: identity => {
       clearIdentity?.();
       clearIdentity = registerPlatformBotName(identity.accountId, identity.displayName);
@@ -80,10 +86,18 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
   });
   const requests = new OneBotRequestService({ accountId: config.ONEBOT_ACCOUNT_ID, ownerId: config.ONEBOT_OWNER_ID,
     enabled: config.ONEBOT_ENABLED, activatedAtMs: config.META_ACTIVATED_AT_SEC * 1000, transport: next });
+  if (acceptMessages) stopRecovery = startInboxRecovery('onebot', async entry => {
+    await ingestOneBotMessage(entry.payload as NormalizedMessage, { signal: new AbortController().signal }, async (event, scope) => {
+      const result = await requests.handleCommand(event, scope);
+      if (result.reply && !scope.signal.aborted) await sendPlatformText(getOrCreateConversationId(event.ref.conversation), result.reply);
+      return result.handled;
+    });
+  }, () => acceptingMessages && next.snapshot().state === 'ready');
   registerOneBotSender(next, config.ONEBOT_ACCOUNT_ID);
   if (config.ONEBOT_MEDIA_ENABLED) clearMedia = setOneBotMediaTransport(config.ONEBOT_ACCOUNT_ID, () => next.mediaTransport());
   registeredAccount = config.ONEBOT_ACCOUNT_ID;
   client = next;
+  if (!acceptMessages) next.pauseIngress();
   // QQ connectivity must not stop Telegram. The authenticated monitor exposes
   // readiness separately; a disconnected sender fails without Telegram fallback.
   void next.start().catch(() => logger.error('OneBot initial connection failed; inspect OneBot status'));
@@ -103,7 +117,16 @@ export function stopOneBotRuntime(): void {
 
 /** Leave the sender connected until already running workers have drained. */
 export function pauseOneBotIngress(): void {
+  if (acceptingMessages) drainingMessages = true;
   acceptingMessages = false;
+  client?.pauseIngress();
+  if (stopRecovery) recoveryDrain = stopRecovery();
+  stopRecovery = undefined;
+}
+export async function drainOneBotRecovery(): Promise<void> {
+  pauseOneBotIngress();
+  await Promise.all([recoveryDrain, client?.drainIngress()]);
+  drainingMessages = false;
 }
 
 /** Host-only, read-only directory. A stopped/foreign account is unknown, never empty. */

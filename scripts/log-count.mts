@@ -20,39 +20,40 @@
  * 只把判断所需的三件事堆到一起，让人（我）自己上结论。
  */
 import * as fs from 'node:fs';
+import { logInput } from './log-input.mts';
 
-const needle = process.argv[2];
-const days = Number(process.argv[3] ?? '3');
+const input = logInput(process.argv.slice(2));
+const needle = input.args[0];
+const days = Number(input.args[1] ?? '3');
 if (!needle) {
-  console.error('usage: npx tsx scripts/log-count.mts <substring> [daysBack]');
+  console.error('usage: npx tsx scripts/log-count.mts <substring> [daysBack] [--log-file PATH] [--now ISO]');
   process.exit(2);
 }
+if (input.args.length > 2 || !Number.isFinite(days) || days <= 0) throw new Error('invalid_report_window');
 
-const sinceMs = Date.now() - days * 24 * 3600 * 1000;
+const sinceMs = input.nowMs - days * 24 * 3600 * 1000;
 let hits = 0;
-let lines = 0;
 const perDay = new Map<string, number>();
 let firstTs = 0;
 let lastTs = 0;
 
 const rl = (await import('node:readline')).default.createInterface({
-  input: fs.createReadStream('logs/app.log'),
+  input: fs.createReadStream(input.logFile),
 });
 await new Promise<void>(function (res) {
   rl.on('line', function (l: string) {
-    lines++;
     if (l.indexOf(needle) < 0) return;
     if (!l.startsWith('{')) return;
-    let d: any;
+    let d: { time?: number };
     try { d = JSON.parse(l); } catch { return; }
     if (!d || typeof d !== 'object') return;
     const t = d.time ?? 0;
-    if (t < sinceMs) return;
+    if (t < sinceMs || t > input.nowMs) return;
     hits++;
     const day = new Date(t).toISOString().slice(0, 10);
     perDay.set(day, (perDay.get(day) ?? 0) + 1);
-    if (!firstTs) firstTs = t;
-    lastTs = t;
+    firstTs = firstTs ? Math.min(firstTs, t) : t;
+    lastTs = Math.max(lastTs, t);
   });
   rl.on('close', function () { res(); });
 });
@@ -60,15 +61,15 @@ await new Promise<void>(function (res) {
 // 重启次数（进程内状态每次重置）
 let restarts = 0;
 const rl2 = (await import('node:readline')).default.createInterface({
-  input: fs.createReadStream('logs/app.log'),
+  input: fs.createReadStream(input.logFile),
 });
 await new Promise<void>(function (res) {
   rl2.on('line', function (l: string) {
     if (l.indexOf('Bot started (polling)') < 0) return;
     if (!l.startsWith('{')) return;
-    let d: any;
+    let d: { time?: number };
     try { d = JSON.parse(l); } catch { return; }
-    if (d && (d.time ?? 0) >= sinceMs) restarts++;
+    if (d && (d.time ?? 0) >= sinceMs && (d.time ?? Infinity) <= input.nowMs) restarts++;
   });
   rl2.on('close', function () { res(); });
 });

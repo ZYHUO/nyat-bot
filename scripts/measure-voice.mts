@@ -19,18 +19,22 @@
  */
 import { createReadStream } from 'node:fs';
 import readline from 'node:readline';
+import { logInput } from './log-input.mts';
 
-const argv = process.argv.slice(2);
+const input = logInput(process.argv.slice(2));
+const argv = input.args.flatMap(arg => /^--(?:day|since)=/u.test(arg) ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg]);
 const sinceIdx = argv.indexOf('--since');
 const dayIdx = argv.indexOf('--day');
 
 let cutoff = 0;
+let until = input.nowMs;
 if (dayIdx >= 0) {
   const d = argv[dayIdx + 1] ?? '';
   const start = Date.parse(`${d}T00:00:00Z`);
-  const end = Date.parse(`${d}T23:59:59Z`);
+  const end = start + 86_400_000 - 1;
+  if (!Number.isFinite(start)) throw new Error('invalid_report_day');
   cutoff = start;
-  void end;
+  until = Math.min(until, end);
 } else if (sinceIdx >= 0) {
   // round 51：**支持 `--since 'YYYY-MM-DD HH:MM'`**（跨日切片）。
   // 原来只吃 HH:MM 并默认取今天——于是"昨天同时段 vs 今天同时段"比不了，
@@ -56,13 +60,13 @@ if (dayIdx >= 0) {
     if (!Number.isFinite(cutoff)) cutoff = Date.parse(`${datePart}T00:00:00Z`);
   } else {
     const [h = '0', m = '0'] = raw.split(':');
-    const today = new Date().toISOString().slice(0, 10);
+    const today = new Date(input.nowMs).toISOString().slice(0, 10);
     cutoff = Date.parse(`${today}T${h.padStart(2, '0')}:${m.padStart(2, '0')}:00Z`);
   }
 }
 if (!cutoff) {
   // 默认：今天 UTC 0 点
-  cutoff = Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`);
+  cutoff = Date.parse(`${new Date(input.nowMs).toISOString().slice(0, 10)}T00:00:00Z`);
 }
 
 const P = (s: string) => `  ${s}`;
@@ -106,14 +110,14 @@ const reactedEmoji = new Map<string, number>();
 // 全量一个平均数会把"一个群在刷屏"和"所有群都正常"混成一回事。
 const byChat = new Map<string, { m: number; s: number; edit: number; first: number }>();
 
-const rl = readline.createInterface({ input: createReadStream('logs/app.log'), crlfDelay: Infinity });
+const rl = readline.createInterface({ input: createReadStream(input.logFile), crlfDelay: Infinity });
 for await (const line of rl) {
   if (!line.startsWith('{')) continue;
   let d: Record<string, unknown>;
   try { d = JSON.parse(line); } catch { continue; }
   if (!d || typeof d !== 'object') continue;
   const t = typeof d.time === 'number' ? d.time : 0;
-  if (t < cutoff) continue;
+  if (t < cutoff || t > until) continue;
   const m = String(d.msg ?? '');
   if (m === 'message in') {
     msgs++;
@@ -212,7 +216,7 @@ const dupRate = first > 0 ? (extra * 100 / first) : 0;
 // 旧口径（含编辑）保留在括号里，因为历史数字是那个口径——
 // 但现在它会低估：今天 08:00 前 62% 的"入站"是编辑重放。
 const replyRate = fresh > 0 ? (first * 100 / fresh) : 0;
-const actTotal = act.reply + act.wait + act.pass;
+const actTotal = act.reply + act.wait + act.pass + act.react;
 
 console.log();
 console.log('  心流说话习惯 · 三条判据的量');
@@ -300,7 +304,7 @@ const chatRows = [...byChat.entries()]
   .map(([c, v]) => {
     // round 17：**条/小时**——用户感知的是"它每隔几分钟就说一句"，不是占比。
     // 占比 18.8% 看着收敛，13 条/小时就是每 4.6 分钟一句，群里的人只会觉得吵。
-    const hours = Math.max(0.5, (Date.now() - v.first) / 3_600_000);
+    const hours = Math.max(0.5, (until - v.first) / 3_600_000);
     return { c, m: v.m, s: v.s, fresh: v.m - v.edit, perHour: v.s / hours };
   })
   .filter((r) => r.m >= 20)

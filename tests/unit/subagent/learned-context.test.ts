@@ -95,6 +95,7 @@ describe('buildLearnedContext', () => {
     expect(r.expressionIds).toEqual([7, 9]);
     expect(reinforce).toHaveBeenCalledWith([7, 9]);
     expect(identity.buildCrossGroupInjection).toHaveBeenCalledWith(5, GROUP);
+    expect(selfModel.getActiveSelfNotes).toHaveBeenCalledWith(5, undefined, GROUP);
   });
 
   it('③ DM：群味/方言/norms 不取（它们只对群有意义），自我提醒与跨群身份照常', async () => {
@@ -103,6 +104,7 @@ describe('buildLearnedContext', () => {
     expect(expr.getTopExpressions).not.toHaveBeenCalled();
     expect(dialect.getExemplars).not.toHaveBeenCalled();
     expect(norms.buildNormsBlock).not.toHaveBeenCalled();
+    expect(selfModel.getActiveSelfNotes).toHaveBeenCalledWith(5, undefined, DM);
   });
 
   it('④ 各块仍受自己原有开关约束（总闸只是总闸）', async () => {

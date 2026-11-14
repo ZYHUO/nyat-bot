@@ -1,0 +1,33 @@
+[Unit]
+Description=NyatBot independent embedding compute
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=nyat-embed
+Group=nyat-embed
+WorkingDirectory=/opt/nyat-embedding
+EnvironmentFile=/etc/nyat-embedding/compute.env
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/nyat-embedding
+ExecStart=/opt/node22/bin/node /opt/nyat-embedding/embedding-compute.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nyat-embedding
+UMask=0077
+# Capacity template, not evidence of readiness. Override per measured host RSS.
+MemoryMax=640M
+TasksMax=96
+
+[Install]
+WantedBy=multi-user.target

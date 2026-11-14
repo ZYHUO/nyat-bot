@@ -2,10 +2,11 @@
 
 import { getRedis } from '../db/redis.js';
 import type { DispatchTask } from '../meta/types.js';
+import type { PendingIntentRef } from '../meta/pending-intent.js';
 
 const ACTIVE_KEY = (chatId: number) => `xxb:codeact:active:${chatId}`;
-const QUOTE_CLAIM_KEY = (chatId: number, messageId: number) =>
-  `xxb:meta:quote_claim:${chatId}:${messageId}`;
+const QUOTE_CLAIM_KEY = (chatId: number, messageId: number, intent?: PendingIntentRef) =>
+  `xxb:meta:quote_claim:${chatId}:${messageId}${intent ? `:${intent.intentId}:${intent.revision}` : ''}`;
 const TASK_HASH = 'xxb:codeact:tasks';
 const ACTIVE_TTL_SEC = 180;
 const QUOTE_CLAIM_TTL_SEC = 600;
@@ -28,11 +29,12 @@ export async function tryClaimQuote(
   chatId: number,
   messageId: number,
   taskId: string,
+  intent?: PendingIntentRef,
 ): Promise<boolean> {
   if (!Number.isFinite(messageId) || messageId <= 0) return true;
   try {
     const redis = getRedis();
-    const key = QUOTE_CLAIM_KEY(chatId, messageId);
+    const key = QUOTE_CLAIM_KEY(chatId, messageId, intent);
     const cur = await redis.get(key);
     if (cur === taskId) return true;
     if (cur) return false;
@@ -48,11 +50,12 @@ export async function clearQuoteClaim(
   chatId: number,
   messageId: number,
   taskId: string,
+  intent?: PendingIntentRef,
 ): Promise<void> {
   if (!Number.isFinite(messageId) || messageId <= 0) return;
   try {
     const redis = getRedis();
-    const key = QUOTE_CLAIM_KEY(chatId, messageId);
+    const key = QUOTE_CLAIM_KEY(chatId, messageId, intent);
     const cur = await redis.get(key);
     if (cur === taskId) await redis.del(key);
   } catch {

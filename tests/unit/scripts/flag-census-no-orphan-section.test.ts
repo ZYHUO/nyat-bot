@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 /**
  * flag-census 不能再漏段（round 192）。
@@ -14,11 +14,11 @@ import { execSync } from 'node:child_process';
  * 清单靠人记得补。修法是把段列表改成 glob，加测试钉住"目录里的每一段
  * 都要被统计到"。
  */
-// execSync 跑全仓 grep，24s 量级 —— describe 级放开。
-// 脚本扫全仓 ~25s。跑一次给本文件所有测试共用——每个 it 各跑一次会让整个
-// 文件超过 60s（这个会话第 N 次被自己的测试超时咬到）。
+// 缓存扫描只跑一次，各断言共用结果；不再为每个键启动 grep 子进程。
 let censusOut = '';
-beforeAll(() => { censusOut = execSync('python3 scripts/flag-census.py', { encoding: 'utf8' }); }, 120_000);
+beforeAll(() => {
+  censusOut = execFileSync(process.env.NYATBOT_TEST_PYTHON ?? 'python3', ['scripts/flag-census.py'], { encoding: 'utf8' });
+}, 120_000);
 
 describe('flag-census 不漏段', { timeout: 60000 }, () => {
   const SRC = 'scripts/flag-census.py';

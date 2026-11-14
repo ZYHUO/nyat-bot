@@ -73,7 +73,8 @@ describe('QQ host text bubbles, optional quote and confirmed budget', () => {
   it('preserves Telegram fallback quotation and its existing per-call budget', async () => {
     const api = setup(2, -1001234567890);
     await api.telegram.sendText('Telegram继续使用原来的触发消息引用');
-    expect(f.send).toHaveBeenCalledWith(-1001234567890, expect.any(String), 12345, undefined);
+    expect(f.send).toHaveBeenCalledWith(-1001234567890, expect.any(String), 12345, undefined,
+      expect.objectContaining({ markAnswered: false, onReceipt: expect.any(Function) }));
     expect(f.onSend).toHaveBeenCalledOnce();
   });
   it('rejects oversized content and insufficient whole-reply budget before the first bubble', async () => {

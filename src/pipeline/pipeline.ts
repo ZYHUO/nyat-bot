@@ -576,7 +576,10 @@ export async function processPipeline(job: ChatJob): Promise<void> {
             ),
           ...(job.cognitiveAnchorEventId ? { asOfEventId: job.cognitiveAnchorEventId } : {}),
         });
-        const innerState = deriveInnerStateFromConversationField(conversationField);
+        const { projectInnerStateFromConversationField } = await import('../agent/emotion-continuity.js');
+        const projectedInner = e.EMOTION_CONTINUITY_ENABLED
+          ? projectInnerStateFromConversationField(conversationField, { causationId: job.cognitiveAnchorEventId }) : null;
+        const innerState = projectedInner?.value ?? deriveInnerStateFromConversationField(conversationField);
         const scope = { visibility: 'chat' as const, chatId: job.chatId };
         const capabilitySnapshot = await observeTelegramCapabilitySnapshot({
           scope,
@@ -599,7 +602,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
           innerState,
           capability: capabilitySnapshot,
         });
-        recordInnerState(innerState, {
+        if (!e.EMOTION_CONTINUITY_ENABLED) recordInnerState(innerState, {
           scope: { visibility: 'chat', chatId: job.chatId },
           ...(job.cognitiveAnchorEventId ? { causationId: job.cognitiveAnchorEventId } : {}),
           occurredAt: conversationField.asOf,

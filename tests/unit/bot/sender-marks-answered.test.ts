@@ -40,11 +40,12 @@ describe('sendMessage marks the anchor answered', () => {
     expect(calls).toEqual([]);
   });
 
-  it('③ QQ、Telegram 分片和单片成功路径都标', () => {
+  it('③ QQ、Telegram 分片和单片共用完整 ACK 判据', () => {
     // 三条成功发送路径都必须记录 reply anchor；发送失败不标。
     const fs = require('node:fs') as typeof import('node:fs');
     const src = fs.readFileSync('src/bot/sender/telegram.ts', 'utf8');
     const hits = src.match(/markMessageAnswered\(chatId, replyToId\)/g) ?? [];
-    expect(hits.length).toBe(3);
+    expect(hits.length).toBe(1);
+    expect(src).toContain('parts.length === plannedPartCount');
   });
 });

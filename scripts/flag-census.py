@@ -10,9 +10,9 @@ import glob
 import json
 import os
 import re
-import subprocess
 import tempfile
 from collections import defaultdict
+from lib.flag_census_scan import ReaderIndex
 
 SRC = 'src/env.ts'
 parser = argparse.ArgumentParser(description=__doc__)
@@ -83,7 +83,7 @@ def parse_section(path: str, section: str) -> list[dict]:
 # 改成 glob `src/env-sections/*.ts`（排除 `_shared.ts`，那是共用 helper 不是段），
 # 新段文件一落地就被统计到。SECTION_ORDER 只留作**输出排序**用途。
 flags: list[dict] = []
-_discovered = sorted(glob.glob('src/env-sections/*.ts'))
+_discovered = sorted(path.replace('\\', '/') for path in glob.glob('src/env-sections/*.ts'))
 for path in _discovered:
     sec = os.path.basename(path)[:-3]      # .ts
     if sec.startswith('_'):
@@ -142,18 +142,7 @@ envmap = {k: mask(k, v) for k, v in envmap.items()}
 #   ② const { FLAG } = env()  解构后在闭包里用
 #   ③ process.env.FLAG      脚本/子进程/外部工具读（env.ts 之外）
 # 判定"死"要求 ①②③ 全无命中，且 tests/ 里也没有（tests 里有说明至少有人当它活着）。
-def hits(pattern: str, paths: list[str]) -> list[str]:
-    out = subprocess.run(
-        ['grep', '-rlE', '--include=*.ts', '--include=*.mts', '--include=*.js', pattern, *paths],
-        capture_output=True, text=True,
-    ).stdout.split()
-    # **声明处不算读者**：src/env.ts 和 src/env-sections/*.ts 只是"这个键存在"，
-    # 不是"有人读它"。2026-09-21 拆段后漏了这条，结果 21 个死键一夜之间全变成
-    # "有读者"——因为它们的声明文件自己被当成了读者。
-    return [
-        p for p in out
-        if not p.endswith('src/env.ts') and not p.startswith('src/env-sections/')
-    ]
+reader_index = ReaderIndex()
 
 
 # 读取形态。**五种都要算**——2026-09-21 我据这份清单写过"三个 CORE_* 旗标全是假开关"，
@@ -162,14 +151,7 @@ def hits(pattern: str, paths: list[str]) -> list[str]:
 # bare_word 那一列把它们捞回来了；但叙述还是写错了。现在把 `e.FLAG` / `envShim().FLAG`
 # 显式列出来，不靠运气。
 def readers_of(name: str) -> dict[str, list[str]]:
-    return {
-        'env_getter': hits(rf'env\(\)\.{name}\b', ['src/']),
-        'destructured': hits(rf'\b(e|ev|env0|e0|cfg)\.{name}\b', ['src/']),
-        'env_shim': hits(rf'envShim\(\)\.{name}\b', ['src/']),
-        'bare_word': hits(rf'\b{name}\b', ['src/', 'scripts/', 'packages/']),
-        'process_env': hits(rf'process\.env\.{name}\b|process\.env\[.{{0,4}}{name}', ['src/', 'scripts/']),
-        'tests': hits(rf'\b{name}\b', ['tests/']),
-    }
+    return reader_index.readers_of(name)
 
 
 usage: dict[str, dict[str, list[str]]] = {}
@@ -240,7 +222,7 @@ summary = {
 out = []
 out.append('# Flag census — 全量旗标清单\n')
 out.append('生成方式：`python3 scripts/flag-census.py`（纯静态：逐段读 `src/env-sections/*.ts` 的注释与默认值 '
-           '+ 指定来源文件值 + 五种读法 grep `src/`）。只写清单产物，不读取数据库、进程环境或运行时配置覆盖。\n')
+           '+ 指定来源文件值 + 缓存源码文本的六类正则扫描）。只写清单产物，不读取数据库、进程环境或运行时配置覆盖。\n')
 source_label = '公开模板' if source['kind'] == 'public_template' else '显式指定文件'
 out.append(f"配置来源：{source_label} {json.dumps(source['file'], ensure_ascii=False)}。"
            '默认使用 .env.example；本地运维可用 --env-file 指定其他文件。'
@@ -406,7 +388,7 @@ out.append('|---|---|---|---|')
 for r in sorted(dead, key=lambda x: x['name']):
     out.append(f"| `{r['name']}` | {r['section']} | {r['envval'] or '—'} | {(r['comment'] or '')[:100]} |")
 
-open('docs/flag-census.md', 'w', encoding='utf8').write('\n'.join(out).replace(REDACTED, '&lt;redacted&gt;') + '\n')
+open('docs/flag-census.md', 'w', encoding='utf8', newline='\n').write('\n'.join(out).replace(REDACTED, '&lt;redacted&gt;') + '\n')
 json.dump({'source': source, 'summary': summary, 'rows': rows},
           open(os.path.join(tempfile.gettempdir(), 'flagcensus.json'), 'w', encoding='utf8'), ensure_ascii=False, indent=1)
 

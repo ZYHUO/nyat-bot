@@ -33,6 +33,7 @@ interface BwrapSpec {
   args: string[];
   cwd: string;
   timeoutMs: number;
+  environment: Record<string, string>;
 }
 
 /** 构造 bwrap 启动参数: 命令走 /bin/sh -c(沙盒内), 环境只给最小集。
@@ -40,12 +41,13 @@ interface BwrapSpec {
  * /root/.env 等一律不可见。cwd 是唯一可写绑定; 沙盒内 chdir 到 /sandbox。
  */
 export function buildBwrapSpec(command: string, cwd: string, timeoutMs: number): BwrapSpec {
-  const pathEnv = process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin';
+  const environment = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/sandbox', LANG: 'C.UTF-8' };
   return {
     bin: BWRAP_BIN,
     args: [
       '--unshare-all',       // user/mount/pid/net/ipc/uts 全隔离
       '--die-with-parent',   // bot 崩了不留孤儿进程
+      '--clearenv',          // Namespace isolation alone does not remove host credentials.
       '--ro-bind', '/usr', '/usr',
       '--ro-bind-try', '/usr/local', '/usr/local',
       '--ro-bind', '/bin', '/bin',
@@ -60,13 +62,14 @@ export function buildBwrapSpec(command: string, cwd: string, timeoutMs: number):
       '--proc', '/proc',
       '--dev', '/dev',
       '--chdir', '/sandbox',
-      '--setenv', 'PATH', pathEnv,
+      '--setenv', 'PATH', environment.PATH,
       '--setenv', 'HOME', '/sandbox',
-      '--setenv', 'LANG', 'en_US.UTF-8',
+      '--setenv', 'LANG', environment.LANG,
       '--', '/bin/sh', '-c', command,
     ],
     cwd,
     timeoutMs,
+    environment,
   };
 }
 
@@ -182,6 +185,7 @@ export function executeCommand(command: string, opts?: { timeoutMs?: number }): 
         cwd: spec.cwd,
         timeout: spec.timeoutMs,
         maxBuffer: 1024 * 1024,
+        env: spec.environment,
       }, (err, stdout, stderr) => {
         const durationMs = Date.now() - start;
         if (err && (err as NodeJS.ErrnoException & { killed?: boolean }).killed) {

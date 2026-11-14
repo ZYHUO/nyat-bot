@@ -169,7 +169,15 @@ export interface AICallOptions {
    * 不传的调用点(cron / 后台任务)不计入任何群。
    */
   chatId?: number;
+  /** Host-only durable admission immediately before each real provider request.
+   * Presence opts this call into the bounded background contract: <=2 requests,
+   * <=1200 output tokens/request, <=45s total, no hedge/implicit retry/token uplift.
+   * Throw to refuse. Consumption is never refunded after an uncertain outcome. */
+  beforeProviderRequest?: () => void | Promise<void>;
 }
+
+export type AIProviderOptions = Pick<AICallOptions,
+  'maxTokens' | 'temperature' | 'signal' | 'jsonMode' | 'beforeProviderRequest'> & { timeout?: number };
 
 export interface AICallResult {
   content: string;

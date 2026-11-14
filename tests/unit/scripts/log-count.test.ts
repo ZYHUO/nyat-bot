@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { execSync } from 'node:child_process';
+import { afterAll, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
+import { reportFixture } from '../../helpers/log-script.js';
 
 /**
  * round 74: **从日志 grep 出的数必须带口径**。
@@ -15,43 +15,46 @@ import * as fs from 'node:fs';
  * 以及它不自作主张判断"可以上结论否"（那需要模式语义，这里没有）。
  */
 
-const run = (args: string): string =>
-  execSync(`npx tsx scripts/log-count.mts ${args}`, { encoding: 'utf8', stdio: 'pipe' });
+const fixture = reportFixture();
+afterAll(() => fixture.cleanup());
+const run = (needle: string): string => {
+  const result = fixture.run('scripts/log-count.mts', [needle, '3']);
+  expect(result.code, result.err).toBe(0);
+  return result.out;
+};
 
-describe('log-count 强制带口径', () => {
+describe('log-count 强制带口径', { timeout: 30_000 }, () => {
   it('① 三句口径都在（重启 / 睡期不触发 / 子串无语义）', () => {
-    const out = run("'rejected semantic repeat' 3");
+    const out = run('rejected semantic repeat');
     expect(out).toContain('重启');
     expect(out).toContain('睡期');
     expect(out).toContain('子串匹配');
   });
 
   it('② 报出窗口内的重启次数（进程内状态的清零依据）', () => {
-    const out = run("'rejected semantic repeat' 3");
-    expect(out).toContain('窗口内重启');
+    const out = run('rejected semantic repeat');
+    expect(out).toContain('窗口内重启 1 次');
   });
 
   it('③ 按天分布打出来（单日突增看不出来）', () => {
-    const out = run("'rejected semantic repeat' 3");
-    expect(out).toContain('按天:');
+    const out = run('rejected semantic repeat');
+    expect(out).toContain('按天: 2026-11-15×2');
+    expect(out).toContain('近 3 天）: 2 次');
   });
 
   it('④ 首末命中时间也打（round 130 的教训：时间戳有时比数字重要）', () => {
-    const out = run("'rejected semantic repeat' 3");
-    expect(out).toContain('首末命中');
+    const out = run('rejected semantic repeat');
+    expect(out).toContain('首末命中: 2026-11-15T10:00 → 2026-11-15T10:00');
   });
 
   it('⑤ 0 命中时也照出口径（不能因为没数据就闭嘴）', () => {
-    const out = run("'zzz-no-such-line-zzz' 3");
+    const out = run('zzz-no-such-line-zzz');
     expect(out).toContain('0 次');
     expect(out).toContain('睡期');
   });
 
   it('⑥ 没有参数时报 usage 并以 2 退出（不是静默 0）', () => {
-    let code = 0;
-    try { execSync('npx tsx scripts/log-count.mts', { encoding: 'utf8', stdio: 'pipe' }); }
-    catch (e) { code = (e as { status?: number }).status ?? 1; }
-    expect(code).toBe(2);
+    expect(fixture.run('scripts/log-count.mts', [], false).code).toBe(2);
   });
 
   it('⑦ npm script 指向真实文件（round 62 的同类守卫）', () => {

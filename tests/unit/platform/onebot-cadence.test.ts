@@ -15,6 +15,9 @@ const f = vi.hoisted(() => ({
   getRecent: vi.fn(), addMessage: vi.fn(), noAction: vi.fn(), wait: vi.fn(), tick: vi.fn(),
   sleep: vi.fn(), muted: vi.fn(), react: vi.fn(), busy: vi.fn(), runtime: vi.fn(), suppressed: vi.fn(), running: vi.fn(),
   warning: vi.fn(), counter: vi.fn(), postTask: vi.fn(), speaker: vi.fn(), taskId: vi.fn(), loadTask: vi.fn(), interrupt: vi.fn(), config: {
+    DURABLE_INGRESS_ENABLED: false,
+    META_PENDING_INTENT_ENABLED: false,
+    BOT_TOKEN: '12345:synthetic',
     ONEBOT_ENABLED: true, ONEBOT_ACCOUNT_ID: '42', ONEBOT_OWNER_ID: '99',
     ONEBOT_ALLOWED_GROUP_IDS: '', ONEBOT_ALLOWED_USER_IDS: '', MASTER_UID: 99,
     META_SUBAGENT_ENABLED: true, META_SUBAGENT_CHAT_IDS: [] as number[], META_ACTIVATED_AT_SEC: 1,
@@ -28,6 +31,11 @@ const f = vi.hoisted(() => ({
     TIMING_WAIT_MIN_SEC: 8, BOT_USERNAME: 'fixture_bot', BOT_NICKNAMES: ['fixture-nyat'],
     RATE_LIMIT_PER_MIN: 100, NYATOS_SHADOW_ENABLED: false, TRENCH_DEBT_ATTENTION_ENABLED: false,
   },
+}));
+const shadow = vi.hoisted(() => ({ observe: vi.fn(), outcome: vi.fn() }));
+vi.mock('../../../src/nyatos/shadow.js', () => ({
+  runIngressShadow: shadow.observe, recordLiveOutcome: shadow.outcome,
+  isNyatosShadowChat: (_chatId: number, opts: { enabled: boolean }) => opts.enabled,
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.config }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: f.db }));
@@ -95,7 +103,8 @@ vi.mock('../../../src/agent/agency-wait-dispatch.js', () => ({
 vi.mock('../../../src/meta/defer.js', () => ({ scheduleMetaDeferReeval: async () => false }));
 vi.mock('../../../src/subagent/task-store.js', () => ({ isCodeActBusy: f.busy, loadCodeActTask: f.loadTask }));
 vi.mock('../../../src/agent/checkpoint.js', () => ({ getAgentTaskIdForChat: f.taskId }));
-vi.mock('../../../src/agent/interrupts.js', () => ({ pushInterrupt: f.interrupt }));
+vi.mock('../../../src/agent/interrupts.js', async original => ({
+  ...await original<typeof import('../../../src/agent/interrupts.js')>(), pushInterrupt: f.interrupt }));
 // The real session groups a chat's batch into one dispatch. Capture that final
 // boundary, without creating a CodeAct worker, running model code or sending.
 vi.mock('../../../src/meta/meta-api.js', () => ({ buildMetaApiContext: () => ({ dispatch: { taskToGroup: f.dispatch }, journal: {} }) }));
@@ -118,6 +127,8 @@ import { getAttentionAccumulator, _resetAttentionAccumulator } from '../../../sr
 import { resumeMetaWaitAttention } from '../../../src/meta/timing-adapter.js';
 import { runMetaSession } from '../../../src/meta/session.js';
 import { _resetGlobalState, getGlobalState } from '../../../src/meta/global-state.js';
+import { confirmPendingIntent, settlePendingIntent } from '../../../src/meta/pending-intent.js';
+import { markMessageAnswered } from '../../../src/meta/answered.js';
 
 const codec = createOneBotCodec('42');
 const migration = readFileSync('migrations/0118_platform_identity.sql', 'utf8');
@@ -126,17 +137,17 @@ const context = new Map<number, FormattedMessage[]>();
 const realSetTimeout = globalThis.setTimeout;
 let db: Database.Database;
 let redis: MetaRedisFixture;
-function incoming(platform: 'qq' | 'telegram', id: number, kind: 'group' | 'private' = 'group', direct = false, sender = 99) {
+function incoming(platform: 'qq' | 'telegram', id: number, kind: 'group' | 'private' = 'group', direct = false, sender = 99, text?: string) {
   const normalized = codec.normalize({ post_type: 'message', self_id: 42, user_id: sender, message_type: kind,
     group_id: 123, message_id: id, time: Math.floor(Date.now() / 1000), sender: { nickname: '测试用户' },
-    message: [...(direct ? [{ type: 'at', data: { qq: '42' } }] : []), { type: 'text', data: { text: `刚才说到的这件事 ${id}` } }],
+    message: [...(direct ? [{ type: 'at', data: { qq: '42' } }] : []), { type: 'text', data: { text: text ?? `刚才说到的这件事 ${id}` } }],
   })!;
   const update: Update = platform === 'qq' ? oneBotToCoreUpdate(normalized) : { update_id: id, message: {
     message_id: id, date: Math.floor(Date.now() / 1000), from: { id: 99, first_name: '测试用户', is_bot: false },
     chat: kind === 'group' ? { id: -123, type: 'group', title: '测试群' } : { id: 99, type: 'private', first_name: '测试用户' },
-    text: `刚才说到的这件事 ${id}`,
+    text: text ?? `刚才说到的这件事 ${id}`,
   } };
-  return { chatId: update.message!.chat.id, messageId: update.message!.message_id, userId: update.message!.from!.id,
+  return { update, chatId: update.message!.chat.id, messageId: update.message!.message_id, userId: update.message!.from!.id,
     ingest: () => platform === 'qq' ? ingestOneBotMessage(normalized, { signal: new AbortController().signal }) : ingestChatUpdate(update) };
 }
 async function settleIngress(): Promise<void> {
@@ -148,10 +159,12 @@ async function flushSession(): Promise<void> { await runMetaSession(await getAtt
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-14T12:00:00Z')); vi.clearAllMocks();
   db = new Database(':memory:'); db.pragma('foreign_keys = ON'); db.exec(migration); db.exec(noticeMigration);
+  db.exec(readFileSync('migrations/0125_durable_ingress.sql', 'utf8'));
+  db.exec(readFileSync('migrations/0129_pending_reply_intents.sql', 'utf8'));
   redis = new MetaRedisFixture(); f.db.mockReturnValue(db); f.redis.mockReturnValue(redis); context.clear();
   _resetAttentionAccumulator(); _resetGlobalState();
   _resetQqHeartBatches();
-  Object.assign(f.config, { HEART_ENABLED: true, HEART_DECIDES_TIMING: false, META_L0_COALESCE_MS: 2800,
+  Object.assign(f.config, { NYATOS_SHADOW_ENABLED: false, META_DEFER_ENABLED: false, DURABLE_INGRESS_ENABLED: false, META_PENDING_INTENT_ENABLED: false, HEART_ENABLED: true, HEART_DECIDES_TIMING: false, META_L0_COALESCE_MS: 2800,
     META_HEART_REFRACTORY_MS: 20_000, META_QQ_HEART_REFRACTORY_MS: 0,
     META_QQ_GROUP_COALESCE_MS: 0, META_QQ_GROUP_COALESCE_MAX_MS: 4000, META_QQ_MENTION_HEART_ENABLED: false,
     META_DIRECT_COALESCE_MS: 0, META_DIRECT_COALESCE_MAX_MS: 2000,
@@ -173,6 +186,25 @@ beforeEach(() => {
 afterEach(async () => { closeQqHeartBatches(); await settleIngress(); _resetAttentionAccumulator(); vi.clearAllTimers(); vi.useRealTimers(); db.close(); });
 
 describe.each(['qq', 'telegram'] as const)('%s shared participation and timing', platform => {
+  it.each(['wait', 'no_action'] as const)('records sampled timing %s without claiming delivery', async action => {
+    Object.assign(f.config, { NYATOS_SHADOW_ENABLED: true, HEART_ENABLED: false, META_DEFER_ENABLED: true });
+    f.gate.mockResolvedValue({ action, reason: 'fixture pause', waitSec: 12, shortCircuited: false, latencyMs: 1 });
+    const message = incoming(platform, 98);
+    await message.ingest(); await settleIngress();
+    expect(shadow.observe).toHaveBeenCalledOnce();
+    expect(shadow.outcome).toHaveBeenCalledExactlyOnceWith({ chatId: message.chatId, messageId: message.messageId,
+      outcome: action === 'wait' ? 'wait' : 'silent' });
+    expect(f.dispatch).not.toHaveBeenCalled(); expect(await getAttentionAccumulator().size()).toBe(0);
+  });
+
+  it('does not create unmatched shadow outcomes for pre-sampling input hold controls', async () => {
+    Object.assign(f.config, { NYATOS_SHADOW_ENABLED: true, META_PENDING_INTENT_ENABLED: true });
+    const message = incoming(platform, 99, 'group', false, 99, '先别回复');
+    await message.ingest(); await settleIngress();
+    expect(shadow.observe).not.toHaveBeenCalled(); expect(shadow.outcome).not.toHaveBeenCalled();
+    expect(f.heart).not.toHaveBeenCalled(); expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
   it('accepts an ordinary group message without @, waits for quiet, and dispatches once', async () => {
     const message = incoming(platform, 100);
     await message.ingest(); await settleIngress();
@@ -368,12 +400,14 @@ function enableQqBatch(): void {
   f.config.META_QQ_MENTION_HEART_ENABLED = true;
 }
 
-it('real OneBot WebSocket intake collects three one-second bubbles before one slow Heart decision', async () => {
+it.each([false, true])('real OneBot WebSocket intake collects three one-second bubbles before one slow Heart decision (durable=%s)', async durable => {
   const now = Date.now(); vi.useRealTimers();
   // Keep WebSocket I/O's immediate/microtask queues real while controlling only
   // the debounce clock; faking those queues can stall the TCP handshake itself.
   vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] }); vi.setSystemTime(now);
   enableQqBatch();
+  f.config.DURABLE_INGRESS_ENABLED = durable;
+  f.config.META_PENDING_INTENT_ENABLED = durable;
   let release!: () => void;
   const barrier = new Promise<void>(resolve => { release = resolve; });
   f.heart.mockImplementation(async () => { await barrier; return { act: 'reply', why: '合并听完再接', path: 'chat', latencyMs: 1 }; });
@@ -423,10 +457,63 @@ it('real OneBot WebSocket intake collects three one-second bubbles before one sl
     expect(f.dispatch.mock.calls[0]![1].quotes).toEqual([ids[2]]);
     expect(f.dispatch.mock.calls[0]![1].relatedQuotes).toHaveLength(2);
     expect(new Set(f.dispatch.mock.calls[0]![1].relatedQuotes)).toEqual(new Set(ids.slice(0, 2)));
+    if (durable) {
+      expect(db.prepare('SELECT platform,account_id,revision,state FROM pending_reply_intents').all())
+        .toEqual([{ platform: 'qq', account_id: '42', revision: 3, state: 'pending' }]);
+      expect(db.prepare('SELECT lane,state,COUNT(*) AS n FROM ingress_inbox GROUP BY lane,state ORDER BY lane').all())
+        .toEqual([{ lane: 'onebot', state: 'handler_returned', n: 3 }, { lane: 'qq_heart', state: 'settled', n: 3 }]);
+      const stored = db.prepare("SELECT identity_json,payload_json FROM ingress_inbox WHERE lane='onebot' ORDER BY sequence").all() as Array<{ identity_json: string; payload_json: string }>;
+      expect(stored.map(row => JSON.parse(row.payload_json).segments[0].text)).toEqual(['第一句交代背景', '第二句补充条件', '第三句说明真正的问题']);
+      expect(stored.every(row => JSON.parse(row.identity_json).ref.conversation.accountId === '42')).toBe(true);
+    }
   } finally {
     release(); client.stop(); socket?.terminate();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
+});
+
+it('authenticated QQ hold ignores ordinary max and another sender release, then resumes all own bubbles', async () => {
+  f.config.META_PENDING_INTENT_ENABLED = true;
+  const hold = incoming('qq', 901, 'group', false, 99, '等我发完');
+  await hold.ingest(); await settleIngress();
+  await vi.advanceTimersByTimeAsync(5000);
+  const part = incoming('qq', 902, 'group', false, 99, '前提是两份18元'); await part.ingest(); await settleIngress();
+  const stranger = incoming('qq', 903, 'group', false, 100, '发完了'); await stranger.ingest(); await settleIngress();
+  await vi.advanceTimersByTimeAsync(5000); await settleIngress();
+  expect(f.dispatch.mock.calls.every(call => call[1].targetUserId !== hold.userId)).toBe(true);
+  const release = incoming('qq', 904, 'group', false, 99, '发完了'); await release.ingest(); await settleIngress();
+  await vi.advanceTimersByTimeAsync(60); await settleIngress();
+  const own = f.dispatch.mock.calls.filter(call => call[1].targetUserId === hold.userId);
+  expect(own).toHaveLength(1);
+  expect(own[0]![1]).toMatchObject({ quotes: [release.messageId], relatedQuotes: [hold.messageId, part.messageId] });
+});
+
+it('a QQ cancellation arriving during a slow Heart reaction prevents any reaction or text fallback', async () => {
+  f.config.META_PENDING_INTENT_ENABLED = true;
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  f.heart.mockImplementation(async () => { await barrier; return { act: 'react', emoji: '👍', why: '旧判断', latencyMs: 1 }; });
+  await incoming('qq', 911).ingest(); await settleIngress(); expect(f.heart).toHaveBeenCalledOnce();
+  await incoming('qq', 912, 'group', false, 99, '不用了').ingest(); await settleIngress();
+  release(); await settleIngress(); await vi.advanceTimersByTimeAsync(5000); await settleIngress();
+  expect(f.react).not.toHaveBeenCalled(); expect(f.dispatch).not.toHaveBeenCalled();
+});
+
+it('a Telegram edited_message after the first answer settled enters a fresh Meta generation', async () => {
+  f.config.META_PENDING_INTENT_ENABLED = true;
+  const original = incoming('telegram', 921, 'private'); await original.ingest(); await settleIngress();
+  await vi.advanceTimersByTimeAsync(60); await settleIngress(); expect(f.dispatch).toHaveBeenCalledOnce();
+  const before = context.get(original.chatId)![0]!.pendingIntent!;
+  expect(before).toBeDefined();
+  // Establish a completed first answer, including the real legacy ID marker.
+  confirmPendingIntent(before); settlePendingIntent(before); await markMessageAnswered(original.chatId, original.messageId);
+  await vi.advanceTimersByTimeAsync(1000);
+  await ingestChatUpdate({ update_id: 1921, edited_message: { ...original.update.message!, text: '修正为两份28元', edit_date: Math.floor(Date.now() / 1000) } });
+  await settleIngress(); await vi.advanceTimersByTimeAsync(60); await settleIngress();
+  expect(f.dispatch).toHaveBeenCalledTimes(2); expect(f.legacy).not.toHaveBeenCalled();
+  const after = context.get(original.chatId)!.at(-1)!.pendingIntent!;
+  expect(after.intentId).not.toBe(before.intentId);
+  expect(f.dispatch.mock.calls[1]![1]).toMatchObject({ quotes: [original.messageId], targetUserId: original.userId });
 });
 
 it.each(['pass', 'react', 'reply', 'wait'] as const)('an earlier QQ mention stays addressed across a batch and Heart may %s', async act => {

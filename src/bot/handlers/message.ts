@@ -36,6 +36,12 @@ import {
 import { appendTelegramMessageEvent } from '../../agent/cognitive-events.js';
 import { enqueueQqHeartBatch } from '../../meta/qq-heart-batch.js';
 import type { QqHeartCandidate } from '../../meta/qq-heart-batch.js';
+import { currentIngressIdentity, telegramEventIdentity } from '../../ingress/durable.js';
+import { resolveConversationScope } from '../../shared/privacy-scope.js';
+import type { UpdateLike } from '../../shared/types.js';
+import { processQqHeartBatch } from '../../meta/qq-heart-processor.js';
+import { trackIngressTask } from '../../ingress/background.js';
+import { observePendingIntent, pendingIntentForEvent, pendingIntentEnabled, inspectPendingIntent } from '../../meta/pending-intent.js';
 
 /** Shared ingress after each platform has authenticated, filtered and mapped its event. */
 export async function ingestChatUpdate(update: Update): Promise<void> {
@@ -52,11 +58,34 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
   const messageId = msg.message_id;
   const userId = msg.from?.id;
   const isEdit = !!(update.edited_message ?? update.edited_channel_post);
+  const hostUpdate = update as Update & UpdateLike;
+  const source = currentIngressIdentity();
+  if (source) hostUpdate.__nyatEventIdentity = source;
+  else if (!isPlatformInternalId(chatId)) {
+    const account = resolveConversationScope(chatId)?.accountId;
+    // Never trust an inbound JSON property as host provenance.
+    delete hostUpdate.__nyatEventIdentity;
+    if (account) hostUpdate.__nyatEventIdentity = telegramEventIdentity(update, account) ?? undefined;
+  }
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED) {
+    const sourceMessage = formatMessage(hostUpdate);
+    if (sourceMessage) {
+      const { persistMemorySource } = await import('../../memory/source-store.js');
+      // Store the actual incoming body, before Redis dedup or model enrichment.
+      // AI media descriptions are derived material, not a rewrite of this source.
+      persistMemorySource(chatId, sourceMessage);
+    }
+  }
 
   try {
-    if (await isDuplicate(chatId, messageId, isEdit, msg.edit_date)) return;
+    if (await isDuplicate(chatId, messageId, isEdit, msg.edit_date, hostUpdate.__nyatEventIdentity?.eventId)) return;
   } catch (err) {
     logger.warn({ err, chatId, messageId }, 'Dedup check failed, proceeding');
+  }
+
+  if (pendingIntentEnabled() && isMetaSubagentChat(chatId)) {
+    const input = formatMessage(hostUpdate);
+    if (input) observePendingIntent(chatId, input);
   }
 
   // G8 A/B 基线的分母。**必须记在这里**:原先埋在 processPipeline 入口,但生产
@@ -64,9 +93,9 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
   // 根本不进队列也不进 processPipeline —— 实测决策 38 次而 msg_seen 只有 4,
   // 分母漏掉了主路径。handleUpdate 是四种 Telegram 事件的唯一收口,记在去重之后
   // (重复投递不算"又看见一条")、分流之前,两条路都覆盖得到。
-  void import('../../metrics/social-ledger.js')
+  trackIngressTask(import('../../metrics/social-ledger.js')
     .then(({ recordMessageSeen }) => recordMessageSeen(chatId))
-    .catch(() => { /* telemetry never breaks ingest */ });
+    .catch(() => { /* telemetry never breaks ingest */ }));
 
   // AGI-003: durable metadata-only ingress fact. Keep the id locally so every
   // downstream path reads the same event-anchored snapshot.
@@ -76,7 +105,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     chatId,
     messageId,
     ...(userId && userId > 0 ? { userId } : {}),
-    occurredAt: Math.floor(msg.edit_date ?? msg.date ?? Date.now() / 1000),
+    occurredAt: Math.floor(msg.date ?? Date.now() / 1000),
   });
 
   // 消息入口可观测（2026-08-22「bot 没回复我」排查的教训：入口没有 info 日志，
@@ -132,6 +161,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     update: update,
     enqueuedAt: Date.now(),
     cognitiveAnchorEventId,
+    eventIdentity: hostUpdate.__nyatEventIdentity,
   };
 
   // Silence-alert 数据源:人类消息入站埋点(排除 bot 自己 / 匿名频道)。
@@ -155,25 +185,25 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     // valid decision into a "mandatory text reply missing" silence alert.
     const direct = !isSlashCommand && !qqDiscretion && (isDM(chatId) || directKind !== null);
     if (direct) {
-      void import('../../tracking/reply-activity.js')
+      trackIngressTask(import('../../tracking/reply-activity.js')
         .then(async ({ recordHumanMessage }) => {
           // 睡眠期不记 direct:消息已由 sleep-queue 接管,醒来 catch-up。
           const { isAsleep } = await import('../../tracking/sleep.js');
           if (await isAsleep()) return;
           recordHumanMessage(chatId, { direct: true });
         })
-        .catch(() => {});
+        .catch(() => {}));
     } else {
       // 非 direct 消息也保持 lastHuman 新鲜度(用于 humanStale 判定),但不触发告警。
-      void import('../../tracking/reply-activity.js')
+      trackIngressTask(import('../../tracking/reply-activity.js')
         .then(({ recordHumanMessage }) => recordHumanMessage(chatId))
-        .catch(() => {});
+        .catch(() => {}));
     }
   }
 
   // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
   // Slash / checkin·stats NL → legacy. Gacha/game/DM-relay → Meta ingress intercepts.
-  if (isMetaSubagentChat(chatId) && !isEdit) {
+  if (isMetaSubagentChat(chatId) && (!isEdit || pendingIntentEnabled())) {
     const botIdentity = getBotIdentity(chatId);
     const directKind = detectDirectInteraction(update, {
       botUid: botIdentity.uid,
@@ -198,6 +228,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         logger.debug({ chatId, messageId }, 'Meta path: formatMessage empty, drop');
         return;
       }
+      formatted.pendingIntent = pendingIntentForEvent(formatted.eventIdentity?.eventId);
 
       const finishMeta = async (fm: typeof formatted): Promise<'done' | 'legacy'> => {
         try {
@@ -206,12 +237,12 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         } catch (err) {
           logger.debug({ err, chatId }, 'Meta path: addMessage failed (non-critical)');
         }
-        void import('../../memory/chroma.js')
+        trackIngressTask(import('../../memory/chroma.js')
           .then(({ memorizeMessage }) => memorizeMessage(chatId, fm))
-          .catch(() => {});
-        void import('../../tracking/activity.js')
+          .catch(() => {}));
+        trackIngressTask(import('../../tracking/activity.js')
           .then(({ recordMessage }) => recordMessage(chatId, fm.messageId, fm.uid))
-          .catch(() => {});
+          .catch(() => {}));
         try {
           const { recordUserMessage } = await import('../../tracking/user-profile.js');
           if (fm.role === 'user' && fm.uid > 0) {
@@ -229,6 +260,23 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         }
 
         runMetaBookkeepingHooks(chatId, fm);
+
+        if (pendingIntentEnabled() && fm.role === 'user' && !fm.isBot && !fm.pendingIntent) {
+          logger.warn({ chatId, messageId }, 'Meta input has no authenticated pending-intent source; reply held');
+          return 'done';
+        }
+
+        // Explicit same-author hold/cancel precedes Heart and direct dispatch.
+        // Release re-evaluates this Attention lane; it never sends an old draft.
+        if (pendingIntentEnabled() && fm.pendingIntent) {
+          const pending = inspectPendingIntent(fm.pendingIntent);
+          if (pending.state === 'held' || pending.state === 'cancelled' || fm.pendingIntent.inputControl === 'release') {
+            await getAttentionAccumulator().ingestAsync({ chatId, layer: 'L0', reason: 'pending_input_control',
+              messageId, userId, textPreview: fm.textContent.slice(0, 200), messageThreadId: fm.messageThreadId,
+              cognitiveAnchorEventId, pendingIntent: fm.pendingIntent });
+            return 'done';
+          }
+        }
 
         // Post-task 发酵窗口:人类群消息额外缓冲进窗口(附加式,不影响下方任何闸门)。
         // 放在 mute/sleep/heart 之前——被这些闸门丢掉的非 direct 消息恰恰是窗口要捞的。
@@ -258,7 +306,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
           // Only record for chats the shadow actually observed; otherwise the
           // ledger fills with outcomes that have no matching shadow verdict and
           // the join becomes meaningless.
-          void import('../../nyatos/shadow.js')
+          trackIngressTask(import('../../nyatos/shadow.js')
             .then(({ isNyatosShadowChat, recordLiveOutcome }) => {
               if (!isNyatosShadowChat(chatId, {
                 enabled: env().NYATOS_SHADOW_ENABLED,
@@ -266,10 +314,10 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
               })) return;
               recordLiveOutcome({ chatId, messageId: fm.messageId, outcome });
             })
-            .catch(() => { /* telemetry only */ });
+            .catch(() => { /* telemetry only */ }));
         };
         if (env().NYATOS_SHADOW_ENABLED && fm.role === 'user' && !fm.isBot) {
-          void (async () => {
+          trackIngressTask((async () => {
             try {
               const [{ runIngressShadow }, { getRecent }] = await Promise.all([
                 import('../../nyatos/shadow.js'),
@@ -287,7 +335,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
             } catch (err) {
               logger.debug({ err, chatId }, 'ingress shadow failed (non-critical)');
             }
-          })();
+          })());
         }
 
         if (metaMuteBlocksReply(chatId, fm, isDirect)) {
@@ -342,16 +390,16 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
           // 而这个项目的立场是把这类判断交回给模型。所以改按消息本身算，
           // 让 P 反映"我错过了多少",而不是"规则觉得我该错过多少"。
           if (env().TRENCH_SLEEP_PULSE_ENABLED && !fm.isBot) {
-            void import('../../nyatos/trench.js')
+            trackIngressTask(import('../../nyatos/trench.js')
               .then(({ pulseForUnheard }) => pulseForUnheard(chatId, 0.5))
-              .catch(() => { /* 非关键路径：观测失败不影响睡眠排程 */ });
+              .catch(() => { /* 非关键路径：观测失败不影响睡眠排程 */ }));
             // 定向债：同一个动作再按**发送者**记一笔。标量 P 管速率（不变），
             // 这本账管方向——醒来知道该对谁说。评审 3：无方向的积压醒来后只被
             // 半衰期压平（时钟驱动），有方向则被"还债"驱动（闭环驱动）。
             if (fm.uid > 0) {
-              void import('../../nyatos/debt.js')
+              trackIngressTask(import('../../nyatos/debt.js')
                 .then(({ oweFor }) => oweFor(chatId, fm.uid, 0.5))
-                .catch((err) => logger.warn({ err, chatId, uid: fm.uid }, 'trench debt: record failed'));
+                .catch((err) => logger.warn({ err, chatId, uid: fm.uid }, 'trench debt: record failed')));
             } else {
               logger.warn({ chatId }, 'trench debt: skipped, fm.uid not > 0');
             }
@@ -375,7 +423,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
               '../../meta/speaker-burst.js'
             );
             if (await shouldForceSameSpeakerL0(chatId, userId)) {
-              await getAttentionAccumulator().ingestAsync({
+              await getAttentionAccumulator().ingestAsync({ pendingIntent: fm.pendingIntent,
                 chatId,
                 layer: 'L0',
                 reason: 'same_speaker_burst',
@@ -547,7 +595,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
                 for (const item of batch) {
                   if (signal.aborted) return;
                   const message = item.formatted;
-                  await getAttentionAccumulator().ingestAsync({
+                  await getAttentionAccumulator().ingestAsync({ pendingIntent: message.pendingIntent,
                     chatId,
                     layer: elevLayer,
                     reason: elevReason,
@@ -589,7 +637,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
                 // msg isn't silently lost; gap-fill may still dispatch.
                 logger.warn({ err, chatId, messageId }, 'Meta heart path failed — soft ingest');
                 try {
-                  await getAttentionAccumulator().ingestAsync({
+                  await getAttentionAccumulator().ingestAsync({ pendingIntent: fm.pendingIntent,
                     chatId,
                     layer: addressed ? 'L0' : 'L1',
                     reason: 'heart:infra_fail',
@@ -627,8 +675,8 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
               // general group continuation or permission for other members.
               candidate.ongoingFollowup = isInFlightCodeActForUser(chatId, fm.uid);
             }
-            if (qqBatchEnabled) enqueueQqHeartBatch(candidate, processHeartBatch);
-            else void processHeartBatch([candidate], new AbortController().signal);
+            if (qqBatchEnabled) enqueueQqHeartBatch(candidate, (batch, signal) => processQqHeartBatch(batch, signal, noteLiveOutcome));
+            else trackIngressTask(processHeartBatch([candidate], new AbortController().signal));
             return 'done';
           }
 
@@ -649,12 +697,12 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
               { chatId, messageId, layer: layerDec.layer },
               'Meta heart: BYPASSED (trench grey release)',
             );
-            void (async () => {
+            trackIngressTask((async () => {
               try {
                 // 被旁路掉的裁决记成 wait：让 shadow 对照能看到"心流本来会参一脚",
                 // 而不是假装它没发生过。
                 noteLiveOutcome('wait');
-                await getAttentionAccumulator().ingestAsync({
+                await getAttentionAccumulator().ingestAsync({ pendingIntent: fm.pendingIntent,
                   chatId,
                   layer: layerDec.layer,
                   reason: `trench_bypass_${layerDec.layer}`,
@@ -684,7 +732,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
               } catch (err) {
                 logger.debug({ err, chatId, messageId }, 'trench bypass ingest failed');
               }
-            })();
+            })());
             return 'done';
           }
 
@@ -716,6 +764,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
               { chatId, messageId, layer: layerDec.layer, reason: timing.reason },
               'Meta path: timing gate silence',
             );
+            noteLiveOutcome(/^(wait|defer):/.test(timing.reason) ? 'wait' : 'silent');
             return 'done';
           }
         } catch (err) {
@@ -740,7 +789,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
             .catch(() => 0);
           if (owed > 0) debtBoost = env().TRENCH_DEBT_ATTENTION_BOOST;
         }
-        await getAttentionAccumulator().ingestAsync({
+        await getAttentionAccumulator().ingestAsync({ pendingIntent: fm.pendingIntent,
           chatId,
           layer: layerDec.layer,
           reason: layerDec.reason,
@@ -784,7 +833,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
 
       // Vision/sticker off the grammY hot path — ingest text first when media-heavy.
       if (messageHasMedia(formatted)) {
-        void (async () => {
+        trackIngressTask((async () => {
           try {
             const { processMedia } = await import('../../pipeline/stages/media.js');
             await processMedia(formatted, chatId);
@@ -795,7 +844,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
           if (result === 'legacy') {
             logger.warn({ chatId, messageId }, 'Meta deferred path cannot fall through — drop');
           }
-        })();
+        })());
         return;
       }
 
@@ -847,7 +896,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     if (!isEdit) {
       interruptGeneration(chatId, isDirect ? 'direct_message' : 'new_message');
       if (chatId < 0) {
-        void bumpFocus(chatId, isDirect ? 'direct_interaction' : 'passive_message').catch(() => {});
+        trackIngressTask(bumpFocus(chatId, isDirect ? 'direct_interaction' : 'passive_message').catch(() => {}));
       }
     }
 

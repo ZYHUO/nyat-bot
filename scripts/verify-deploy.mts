@@ -30,6 +30,7 @@ function variants(pattern: string): string[] {
 }
 
 const CHECKS: Array<[string, string]> = [
+  ['旧终端清空宿主环境', '--clearenv'],
   ['独立音频转写协议', 'AUDIO_TRANSCRIBE_API_MODE'],
   ['语音私有运行时', 'TTS_PYTHON_PATH'],
   ['语音 Opus 编码器', 'TTS_FFMPEG_PATH'],
@@ -159,7 +160,7 @@ const CHECKS: Array<[string, string]> = [
   ['tick 选路交还手动链', 'tick: { minTier: "medium", vision: false, video: false, count: 1, respectManualOrder: true }'],
   // goal 待关闭观察期（2026-10-01）：声称完成但无独立证据 → pending_close → 看「有没有人再提」。
   ['goal 观察期决策函数', 'settleUnverifiedCompletion'],
-  ['goal 沉默关闭', 'goal closed by silence'],
+  ['goal 沉默后未验证归档', 'goal archived unverified after silence'],
   ['goal 观察期结算 cron', 'goal-close-sweep'],
   // web.fetchToFile（2026-10-02）：沙盒无网络，宿主侧带数据进来；并修了 fetchUrlPinned 超量不 settle。
   ['web.fetchToFile 宿主实现', 'fetchToSandboxFile'],

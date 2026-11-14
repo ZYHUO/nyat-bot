@@ -1,3 +1,4 @@
+import type { PendingIntentRef } from './pending-intent.js';
 // ────────────────────────────────────────
 // Meta 路径 defer 延迟重评（对齐 pipeline/timing/defer.ts 的 MaiBot 语义）
 // ────────────────────────────────────────
@@ -24,6 +25,8 @@ export const META_DEFER_MAX_DELAY_MS = 600_000;
 
 /** 延迟重评条目——存进 Redis ZSET 的 JSON。 */
 export interface MetaDeferEntry {
+  pendingIntent?: PendingIntentRef;
+  messageThreadId?: number;
   chatId: number;
   /** Original scheduling time in milliseconds; legacy entries without it cannot replay. */
   createdAt?: number;

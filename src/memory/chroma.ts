@@ -1,9 +1,10 @@
+import { getMemoryEmbedder } from './embedding.js';
 // ────────────────────────────────────────
 // 长期记忆向量库客户端 (Qdrant-backed)
 // ────────────────────────────────────────
-// - 写入：fire-and-forget，消息进 pipeline 后异步存入
+// - 写入：投影 outbox 开启时先落权威正文/意图，再异步投影；旧模式仍异步写入
 // - 读取：语义搜索，填 retriever.ts 的 semantic 路
-// - Embedding：@xenova/transformers 本地模型 (384-dim)，无外部 API。模型由
+// - Embedding：@xenova/transformers 384-dim，同模型本地引擎或显式配置的独立计算服务。模型由
 //   MEMORY_EMBED_MODEL 指定 —— 默认的 all-MiniLM-L6-v2 是**英文单语**模型，对中文
 //   实测同义/无关区分度仅 0.14(无关句对 0.72 高于英文同义句对 0.70)，即检索结果
 //   接近随机；paraphrase-multilingual-MiniLM-L12-v2 同为 384 维、区分度 0.56。
@@ -15,9 +16,9 @@
 
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { createHash } from 'node:crypto';
-import { openSync, closeSync, readSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { LRUCache } from 'lru-cache';
+
+
+
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
 import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility, type VisibilityFields } from './visibility.js';
@@ -25,6 +26,12 @@ import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 import { isValidConversationScope, resolveConversationScope, samePlatformAccount } from '../shared/privacy-scope.js';
 import { inspectOwnerMemorySource, resolveOwnerDmReadContext, type OwnerDmReadContext, type OwnerMemoryPrincipal, type OwnerMemoryProvenance } from '../shared/owner-memory-scope.js';
+import { authoritativeMemoryPayload, hasMemorySourceAuthority, persistMemorySource, retractMemorySources } from './source-store.js';
+import { drainMemoryProjections } from './projection-worker.js';
+import type { ConfirmedDeliveryPart } from '../shared/delivery-result.js';
+import { createMessageEventIdentity } from '../shared/event-identity.js';
+import { findMessageRef } from '../platform/identity-store.js';
+import { fromTelegramChatId } from '../platform/identity.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
@@ -39,73 +46,7 @@ export type ScoredMessage = FormattedMessage & VisibilityFields & {
 export type OwnerMemoryHit = ScoredMessage & { sourceChatId: number; ownerRecall: OwnerMemoryProvenance };
 
 const VECTOR_SIZE = 384;
-/**
- * 本地缓存里必须存在的 onnx 权重文件名。`quantized` 是 transformers
- * `from_pretrained` 的默认取值，所以带量化的那份是常规路径；不带量化的留着兜底。
- */
-const EMBED_ONNX_FILES = ['model_quantized.onnx', 'model.onnx'] as const;
-/** onnx 权重是 MB 级二进制；判定"在本地"的下限，防 redirect stub 混进来（见 findEmbedOnnxWeights）。 */
-const EMBED_ONNX_MIN_BYTES = 1_000_000;
-
-/**
- * 权重真的在本地缓存里吗？返回命中的文件名，否则 null。
- *
- * 不能只 `existsSync`：HF 的 307 redirect stub 只有 ~1KB、是 ASCII 文本
- * （`Found. Redirecting to https://us.aws.cdn.hf.co/...`），curl 不带 `-L` 就把它
- * 原样存下来了。把它当"已缓存"塞进 `local_files_only`，只会换来一句读不懂的
- * onnx 解析错，比明说"权重没下载"更难查。所以这里体积 + 头部都验。
- */
-export function findEmbedOnnxWeights(onnxDir: string): string | null {
-  for (const f of EMBED_ONNX_FILES) {
-    const p = join(onnxDir, f);
-    try {
-      if (statSync(p).size < EMBED_ONNX_MIN_BYTES) continue;
-      const fd = openSync(p, 'r');
-      try {
-        const buf = Buffer.alloc(64);
-        const n = readSync(fd, buf, 0, 64, 0);
-        const head = buf.subarray(0, n).toString('latin1');
-        if (/^\s*(?:found\.redirecting|<|<!doctype)/i.test(head)) continue; // redirect stub / HTML 错误页
-      } finally {
-        closeSync(fd);
-      }
-      return f;
-    } catch {
-      continue; // 不存在 / 不可读 → 看下一个
-    }
-  }
-  return null;
-}
-
-/**
- * `pipeline()` 除了 onnx 权重还要读这三个 JSON（configs.js / tokenizers.js）。
- * 2026-09-24 只把权重 curl 进了缓存，chroma.ts 见到权重就上 `local_files_only`，
- * 于是 tokenizer.json 连下载的机会都没了 —— 六天 18,915 次
- * `Memory embedding unavailable`，零次成功。"锁离线"必须以整套文件为条件。
- */
-const EMBED_JSON_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json'] as const;
-
-export function findMissingEmbedJson(modelDir: string): string[] {
-  const missing: string[] = [];
-  for (const f of EMBED_JSON_FILES) {
-    try {
-      const p = join(modelDir, f);
-      if (statSync(p).size === 0) { missing.push(f); continue; }
-      const fd = openSync(p, 'r');
-      try {
-        const buf = Buffer.alloc(16);
-        const n = readSync(fd, buf, 0, 16, 0);
-        const head = buf.subarray(0, n).toString('latin1');
-        if (!/^\s*\{/.test(head)) missing.push(f); // redirect stub / HTML 错误页
-      } finally {
-        closeSync(fd);
-      }
-    } catch {
-      missing.push(f);
-    }
-  }
-  return missing;
-}
+export { findEmbedOnnxWeights, findMissingEmbedJson } from './embedding-weights.js';
 /** 去重查询的硬超时。写入是 fire-and-forget,但仍然跑在消息处理的任务里。 */
 const DEDUP_TIMEOUT_MS = 300;
 /** 混合检索时每一路的超取倍数 —— 融合后才截到 topK,单路取满 topK 会让融合无从选择。 */
@@ -143,114 +84,10 @@ export function midToPointId(mid: string): string {
 // Lazy singletons
 let _client: QdrantClient | undefined;
 let _ready: Promise<QdrantClient> | undefined;
-let _embedder: ((texts: string[]) => Promise<number[][]>) | undefined;
-// Promise singleton: concurrent callers await the same load; errors clear it so next call retries
-let _embedderPromise: Promise<(texts: string[]) => Promise<number[][]>> | undefined;
-
-// Embedding cache. The same text often gets embedded twice within a single
-// pipeline run — once for memorizeMessage (fire-and-forget write), once when
-// searchMemory uses similar query text. Local CPU embedding is ~10-50ms per
-// call, so caching cuts that. TTL keeps memory bounded; LRU drops cold keys.
-const EMBED_CACHE_MAX = 200;
-const EMBED_CACHE_TTL_MS = 5 * 60 * 1000;
-const _embedCache = new LRUCache<string, number[]>({
-  max: EMBED_CACHE_MAX,
-  ttl: EMBED_CACHE_TTL_MS,
-});
-
-// ── Embedder (local, lazy-loaded) ────────────────────────
-
-/**
- * 启动预热:把 ONNX session init(~23MB 量化模型,冷缓存时还要下载)从"第一条文本消息
- * 的关键路径"挪到进程启动期。不预热时每次 systemctl restart 后的第一条消息要当场阻塞
- * 0.5-2s,且 searchMemory 的 500ms 竞速会返回 [] —— 重启后头几条回复静默地完全没有长期记忆。
- */
 export function warmEmbedder(): void {
-  void getEmbedder().catch(() => { /* non-critical; getEmbedder 内部失败会清空 promise 以便重试 */ });
+  void getMemoryEmbedder().catch(() => { /* Lazy loads retry on the next call. */ });
 }
-
-function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
-  if (_embedder) return Promise.resolve(_embedder);
-  if (_embedderPromise) return _embedderPromise;
-
-  _embedderPromise = (async () => {
-    // Dynamic import to avoid blocking startup
-    const { pipeline, env: xenovaEnv } = await import('@xenova/transformers');
-    const modelId = env().MEMORY_EMBED_MODEL;
-
-    // onnx 权重必须已经在本地缓存里。**这是"Memory write failed"洪水的真实源头**：
-    // 库默认 cacheDir 下只落了 config/tokenizer，onnx 权重从没落过盘，于是每次进程
-    // 启动都要去 huggingface.co 重拉 23MB(quantized)。本机 TLS 隧道 5 秒一断，
-    // undici 抛 `terminated: other side closed` / `Body Timeout Error` ——
-    // 2026-09-21 的 2280 条告警里 2270 条是这个，只有 10 条真是 Qdrant upsert。
-    // 权重在本地 ⇒ `local_files_only` 让整条路离线，proxy 再烂也碰不到它。
-    const modelDir = join(xenovaEnv.cacheDir, modelId);
-    const onnxDir = join(modelDir, 'onnx');
-    const localWeightsFile = findEmbedOnnxWeights(onnxDir);
-    const missingJson = findMissingEmbedJson(modelDir);
-    if (!localWeightsFile) {
-      logger.warn(
-        { model: modelId, onnxDir },
-        'Memory embedding weights are NOT in the local cache — embedding will download them (this is what the "Memory write failed" flood actually is). Fix once: npx tsx scripts/fetch-embed-model.mts',
-      );
-    } else if (missingJson.length > 0) {
-      logger.warn(
-        { model: modelId, modelDir, missingJson },
-        'Memory embedding weights are cached but tokenizer/config JSON is missing — staying online so they can download. Fix once: npx tsx scripts/fetch-embed-model.mts',
-      );
-    }
-    const fullyLocal = localWeightsFile !== null && missingJson.length === 0;
-    const extractor = await pipeline('feature-extraction', modelId, {
-      progress_callback: undefined, // suppress download progress logs
-      // 整套文件（权重 + 三个 JSON）都在本地才锁死离线。只看权重就锁，会把缺的
-      // tokenizer.json 也一起锁在门外，每条消息都失败（2026-09-24 → 09-30 就是这样）。
-      ...(fullyLocal ? { local_files_only: true } : {}),
-    });
-    logger.info({ model: modelId, local: fullyLocal }, 'Memory embedder loaded');
-
-    _embedder = async (texts: string[]): Promise<number[][]> => {
-      // key 带长度前缀:两条不同长文本前 512 字符相同就会共享 embedding(review 指出的
-      // 截断碰撞)。长度不同 ⇒ key 必然不同;同长同前缀的残余碰撞概率可忽略。
-      const keys = texts.map((t) => `${t.length}:${t.slice(0, 512)}`);
-      const results: (number[] | null)[] = new Array(keys.length).fill(null);
-      const uncachedIndices: number[] = [];
-
-      // Check cache first
-      for (let i = 0; i < keys.length; i++) {
-        const cached = _embedCache.get(keys[i]!);
-        if (cached) {
-          results[i] = cached;
-        } else {
-          uncachedIndices.push(i);
-        }
-      }
-
-      // Batch-embed all uncached texts in one call
-      if (uncachedIndices.length > 0) {
-        const uncachedTexts = uncachedIndices.map((i) => keys[i]!);
-        for (let j = 0; j < uncachedTexts.length; j++) {
-          const out = await extractor(uncachedTexts[j]!, { pooling: 'mean', normalize: true });
-          const vector = Array.from(out.data as Float32Array);
-          const idx = uncachedIndices[j]!;
-          _embedCache.set(keys[idx]!, vector);
-          results[idx] = vector;
-        }
-      }
-
-      return results as number[][];
-    };
-
-    // 打真实模型名:写死的日志在换模型后会撒谎,而"检索质量变差"最先查的就是这一行。
-    logger.info({ model: modelId, dim: VECTOR_SIZE, collection: collectionName() }, 'Memory embedder loaded');
-    return _embedder;
-  })().catch((err) => {
-    // Clear promise so next call retries
-    _embedderPromise = undefined;
-    throw err;
-  });
-
-  return _embedderPromise;
-}
+const getEmbedder = getMemoryEmbedder;
 
 // ── Qdrant client + collection ───────────────────────────
 
@@ -329,6 +166,10 @@ export async function memorizeMessage(
   if (!sourceScope) return;
   const text = msg.textContent || msg.captionContent || '';
   if (!text.trim() || msg.isBot) return;
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true) {
+    persistMemorySource(chatId, msg, visibilityOverride);
+    return;
+  }
 
   // 装载 embedding / 建 collection / 写 Qdrant 曾经共用一个 try/catch，于是它们全被
   // 记成同一条 `Memory write failed (non-critical)`。后果就是一次彻底的误诊：上面那段
@@ -417,6 +258,22 @@ export async function memorizeMessage(
   } catch (err) {
     logger.warn({ err, chatId, messageId: msg.messageId, stage: 'vector-write' }, 'Memory write failed (non-critical)');
   }
+}
+
+/** Only called inside the actual sender-ACK bookkeeping loop, never for plans or
+ * historical backfills. A normal FormattedMessage cannot grant itself provenance.
+ */
+export async function memorizeAcknowledgedDelivery(chatId: number, part: ConfirmedDeliveryPart): Promise<void> {
+  const scope = resolveConversationScope(chatId);
+  if (!scope?.accountId || !Number.isSafeInteger(part.messageId) || part.messageId <= 0) throw new Error('memory_delivery_identity_unproven');
+  const ref = scope.platform === 'qq' ? findMessageRef(chatId, part.messageId)
+    : { conversation: fromTelegramChatId(scope.accountId, chatId), id: String(part.messageId) };
+  if (!ref) throw new Error('memory_delivery_identity_unmapped');
+  const now = Date.now();
+  await memorizeMessage(chatId, { role: 'assistant', uid: 0, username: '', fullName: '',
+    timestamp: Math.floor(now / 1000), messageId: part.messageId, textContent: part.text, isForwarded: false,
+    eventIdentity: createMessageEventIdentity({ ref, occurredAt: null, receivedAt: now }),
+  });
 }
 
 /**
@@ -597,9 +454,15 @@ async function lexicalPath(
     const byMid = new Map<string, ScoredMessage>();
     for (const p of points) {
       const m = hitToMessage(p as { payload?: Record<string, unknown> | null; score?: number });
-      const mid = (p.payload ?? {})['mid'];
+      const authoritative = authoritativeMemoryPayload((p.payload ?? {}) as Record<string, unknown>);
+      const mid = authoritative?.['mid'];
+      const projectedId = authoritative?.['projectionId'];
       if (m?.sourceChatId === chatId && typeof mid === 'string'
-        && mid === `${chatId}_${m.messageId}`) byMid.set(mid, m);
+        && mid === `${chatId}_${m.messageId}`) {
+        if (typeof projectedId === 'string') {
+          if (p.id === midToPointId(projectedId)) byMid.set(projectedId, m);
+        } else byMid.set(mid, m);
+      }
     }
     const local = rows.map((r) => byMid.get(r.chromaId)).filter((m): m is ScoredMessage => m !== undefined);
     return scrubMemoryHits(local, chatId).kept;
@@ -637,7 +500,8 @@ function applyMinScore<T extends ScoredMessage>(hits: T[], ctx: Record<string, u
 
 /** Qdrant hit → ScoredMessage(带 visibility/sourceChatId);无文本返回 null。 */
 function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: number }): ScoredMessage | null {
-  const meta = (hit.payload ?? {}) as Record<string, unknown>;
+  const meta = authoritativeMemoryPayload((hit.payload ?? {}) as Record<string, unknown>);
+  if (!meta) return null;
   // payload 来自外部存储,不做盲 cast:类型不符时回退默认值,uid 拿不到真实数字就
   // 归 0(与真实 uid=0 无法区分,但 payload 损坏时总好过把一个字符串当 number 用)。
   const asNum = (v: unknown): number | undefined =>
@@ -882,6 +746,12 @@ export async function searchMemoryForInjection(
 /** Delete memory entries by their string id (`${chatId}_${messageId}`). */
 export async function deleteMemories(ids: string[]): Promise<number> {
   if (ids.length === 0) return 0;
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true || hasMemorySourceAuthority()) retractMemorySources(ids);
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true) {
+    // Retraction is immediate at the authority/read boundary; remote deletion is
+    // retryable. Never acknowledge forgetting before the tombstone is durable.
+    return ids.length;
+  }
   try {
     const store = await getStore();
     await store.delete(collectionName(), { points: ids.map(midToPointId), wait: false });
@@ -911,6 +781,40 @@ export async function deleteMemories(ids: string[]): Promise<number> {
     logger.warn({ err, count: ids.length }, 'deleteMemories failed (non-critical)');
     return 0;
   }
+}
+
+/** Registered in the shared heartbeat; no extra timer or independent singleton. */
+export async function drainMemoryProjectionOutbox(batchSize = 10) {
+  return drainMemoryProjections({
+    embed: async text => {
+      const embed = await getEmbedder();
+      const [vector] = await embed([text]);
+      if (!vector || vector.length !== VECTOR_SIZE) throw new Error('embedding_dimension_mismatch');
+      return vector;
+    },
+    upsert: async (source, job, vector) => {
+      const store = await getStore();
+      const body = JSON.parse(source.body_json) as Record<string, unknown>;
+      await store.upsert(job.collection, { wait: true, points: [{ id: midToPointId(job.projection_id), vector,
+        payload: { mid: job.projection_id, sourceId: source.source_id, sourceVersion: source.version,
+          chatId: source.chat_id, sourceChatId: source.chat_id, sourcePlatform: source.platform, sourceAccountId: source.account_id,
+          messageId: source.message_id, uid: body['uid'], role: body['role'], timestamp: body['timestamp'], visibility: source.visibility } }] });
+      // Removing superseded points cannot delete a newer version. A late stale
+      // RPC may leave garbage, but authority-version checks make it unreadable.
+      await store.delete(job.collection, { wait: true, filter: { must: [
+        { key: 'sourceId', match: { value: source.source_id } }, { key: 'sourceVersion', range: { lt: source.version } },
+      ] } });
+      const { recordMemoryCreated } = await import('./importance.js');
+      // Existing recall/protection/forget callers use the logical chat_message
+      // ID, not a versioned projection ID. Keep their ref counts connected.
+      recordMemoryCreated(source.legacy_id, source.chat_id, typeof body['timestamp'] === 'number' ? body['timestamp'] : 0);
+    },
+    remove: async (source, job) => {
+      const store = await getStore();
+      await store.delete(job.collection, { wait: true, filter: { must: [{ key: 'sourceId', match: { value: source.source_id } }] } });
+      await store.delete(job.collection, { wait: true, points: [midToPointId(source.legacy_id)] });
+    },
+  }, batchSize);
 }
 
 export async function isMemoryAvailable(): Promise<boolean> {

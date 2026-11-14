@@ -1,6 +1,7 @@
 // Meta + Subagent shared types (CGM-shaped, nyatbot-hosted)
 
 export type AttentionLayer = 'L0' | 'L1' | 'L1_CALLBACK' | 'L2';
+import type { PendingIntentRef } from './pending-intent.js';
 
 export interface AttentionItem {
   id: string;
@@ -14,6 +15,7 @@ export interface AttentionItem {
   textPreview?: string;
   createdAt: number;
   payload?: Record<string, unknown>;
+  pendingIntent?: PendingIntentRef;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
   /** Durable Telegram event used to anchor workspace/replay reads. */
@@ -24,6 +26,10 @@ import type { AcceptanceContract, AcceptanceResult } from '../agent/task-evidenc
 import type { AuditSnapshot } from '../agent/execution-audit.js';
 
 export interface DispatchTask {
+  /** Set by a host periodic producer, never inferred from model instructions. */
+  executionMode?: 'foreground' | 'background';
+  backgroundOrigin?: import('../agent/background-publication.js').BackgroundOrigin;
+  publicationOutcome?: { state: string; reason: string; proposalId?: string };
   acceptance?: AcceptanceContract;
   assessment?: AcceptanceResult;
   audit?: AuditSnapshot;
@@ -39,6 +45,7 @@ export interface DispatchTask {
   relatedQuoteIds?: number[];
   /** 要回的那个人（用于分人设 persona/{uid}.md）；来自 Attention.userId */
   targetUserId?: number;
+  pendingIntent?: PendingIntentRef;
   trackingKey?: string;
   createdAt: number;
   status: 'queued' | 'running' | 'waiting_user' | 'done' | 'failed';
@@ -46,7 +53,7 @@ export interface DispatchTask {
   waitingForUser?: boolean;
   waitingReason?: string;
   /** User messages received while a task is waiting; injected on resume. */
-  pendingUserInput?: Array<{ text: string; from?: string; messageId?: number; at?: number }>;
+  pendingUserInput?: Array<{ text: string; from?: string; messageId?: number; at?: number; userId?: number; messageThreadId?: number }>;
   /** Long-running Agent loop: current segment (0-based). */
   segment?: number;
   /** checkpoint 在 Redis 里的 key；续跑时据此恢复 history。 */

@@ -96,7 +96,9 @@ describe('OneBot outbound boundary', () => {
     const error = Object.assign(new Error('network 429 retry after 1'), { delivery });
     client.send.mockRejectedValue(error);
     const anchor = getOrCreateMessageId({ conversation: group, id: 'incoming' });
-    await expect(sender.sendMessage(chatId, 'text', anchor)).rejects.toBe(error);
+    await expect(sender.sendMessage(chatId, 'text', anchor)).rejects.toMatchObject({
+      delivery, result: { status: delivery === 'unknown' ? 'unknown' : 'failed', error, parts: [] },
+    });
     expect(client.send).toHaveBeenCalledTimes(1);
     expect(mocks.getBot).not.toHaveBeenCalled();
     expect(mocks.redisSet).not.toHaveBeenCalled();

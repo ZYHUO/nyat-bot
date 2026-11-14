@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { deliveryFailureStatus, requireSentDelivery, type DeliveryIdentity, type DeliveryResult, type ConfirmedDeliveryPart } from '../../shared/delivery-result.js';
 // ────────────────────────────────────────
 // Telegram Sender — API wrapper with retry
 // ────────────────────────────────────────
@@ -361,191 +363,121 @@ export function dedupSkippedCount(): number {
 }
 
 export async function sendMessage(
-  chatId: number,
-  text: string,
-  replyToId?: number,
-  messageThreadId?: number,
+  chatId: number, text: string, replyToId?: number, messageThreadId?: number,
+  options?: Partial<DeliveryIdentity> & { onReceipt?: (result: DeliveryResult) => void; markAnswered?: boolean; beforeSend?: () => void },
 ): Promise<number> {
-  assertOutboundText(text);
-  if (platformConversation(chatId)) {
-    if (messageThreadId !== undefined) throw new UnsupportedCapabilityError('topics');
-    // OneBot owns its receipt semantics. No Telegram fallback, sharding or retry
-    // may run after an unknown-delivery error from this single send attempt.
-    const messageId = await sendPlatformText(chatId, text, replyToId);
-    recordSpeech();
-    recordBotReply(chatId);
-    recordConnectivityWindow(chatId, messageId, Math.floor(Date.now() / 1000));
-    if (replyToId && replyToId > 0) {
-      void import('../../meta/answered.js')
-        .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
-        .catch(() => { /* telemetry never breaks the send path */ });
-    }
-    return messageId;
-  }
-  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: replyToId, message_thread_id: messageThreadId });
-  // round 60：同群同文本 30 秒内去重（见上面 dedupKey 的注释）。
-  const trimmed = text.trim();
-  if (trimmed.length > 0) {
-    try {
-      // ioredis 的 set 重载对 'NX' + 'EX' 组合有类型歧义，用 opts 形式
-      const ok = await getRedis().set(dedupKey(chatId, trimmed), '1', 'EX', DEDUP_TTL_SEC, 'NX');
-      if (ok !== 'OK') {
-        // 最近发过同一句 —— 跳过，但**不返回 0**（0 在调用方语义里是"发送失败"）。
-        // 打点后照常返回一个非零 id 的替代：用 replyToId 或 0 会让上层以为失败而重试。
-        _dedupSkipped += 1;
-        // round 191：**从 debug 提到 info。**
-        //
-        // AGENTS.md round 66 那条坑的第二次：「a debug line is invisible at
-        // LOG_LEVEL=info, which puts the hole straight back」。
-        //
-        // 实测：`LOG_LEVEL=info`，而全日志的 905 条 debug 最后一条在
-        // **09-23 11:03**——这个跳过点一次都没写出来过。
-        // 于是 `scripts/check-gate-evidence.sh` 的「同群同文本去重 跳过 0 次」
-        // 是**读不到，不是没发生**：按闸自己的判据（同群 + 前 4 字 + 30s）回放日志，
-        // 命中 391 次，其中 190 次是同一句的真重复。
-        //
-        // 提到 info 之后这个数才真的可读。计数器本来就有
-        // （send_duplicate_skipped_total），但 Prometheus 只在**本次进程内**
-        // 自增过才导出，重启即清零——跨重启的历史只能靠日志。
-        logger.info({ chatId, chars: trimmed.length }, 'sendMessage: duplicate text within 30s, skipped');
-        incrCounter('send_duplicate_skipped_total', { chat: chatId });
-        return -1;
-      }
-    } catch {
-      // Redis 不可用 → 放行（去重是优化，不是正确性前提）
-    }
-  }
-  const shards = shardMarkdownV2(toMarkdownV2(text));
-  if (shards.length > 1) {
-    logger.info({ chatId, shards: shards.length, chars: text.length }, 'Reply exceeded Telegram limit, sharding');
-    let first = 0;
-    for (let i = 0; i < shards.length; i++) {
-      // 只有第一片挂 reply anchor + topic thread id,其余顺序追加。
-      const id = await sendMarkdownOnce(
-        chatId,
-        shards[i]!,
-        text,
-        i === 0 ? replyToId : undefined,
-        i === 0 ? messageThreadId : undefined,
-      );
-      if (i === 0) first = id;
-    }
-    recordSpeech();
-    recordBotReply(chatId);
-    recordConnectivityWindow(chatId, first, Math.floor(Date.now() / 1000));
-    // 同上：分片路径的第一片也带 anchor，一样要标。
-    if (replyToId && replyToId > 0) {
-      void import('../../meta/answered.js')
-        .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
-        .catch(() => { /* telemetry never breaks the send path */ });
-    }
-    return first;
-  }
-  const messageId = await sendMarkdownOnce(chatId, shards[0]!, text, replyToId, messageThreadId);
-  recordSpeech();
-  recordBotReply(chatId);
-  recordConnectivityWindow(chatId, messageId, Math.floor(Date.now() / 1000));
-  // round 52（新 goal）：**发出去就把锚点标记为"回过"**。
-  //
-  // 这是 round 4 那个病的另一半。round 4 修好了"读"的那端（心流的 prompt 里
-  // 注入"这条你已经回过 N 次"），但 markMessageAnswered 全仓 7 处调用**全在
-  // subagent / gate=no_action 路径上**——心流产出 reply 的主路径一次都没标。
-  // 于是"这条我回过"这个事实对心流下一次决策不可见。
-  //
-  // 今早实测的后果：两条跨任务重复
-  //   -1003821093564:180091  00:09 "认命吧" → 00:17 "熊大熊二都出来了"（隔 8 分钟）
-  //   -1004430867819:13331   00:12 "谁查你岗了" → 00:14 "紧张什么"（隔 2.5 分钟）
-  // 重复率从全天 1.9% 跳到今早 12.5%。
-  //
-  // 放在这里是因为 sendMessage 是所有回复的公共出口（legacy pipeline、
-  // 心流、subagent failsafe 全走它），补一处覆盖全部路径。
-  // 顺序 import：telegram.ts 被 sender 自己引用，顶层 import answered.js
-  // 会成环（answered → redis，不环；但保持和其它非关键路径一致）。
-  if (replyToId && replyToId > 0) {
-    void import('../../meta/answered.js')
-      .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
-      .catch(() => { /* telemetry never breaks the send path */ });
-  }
-  return messageId;
+  const result = await sendMessageDetailed(chatId, text, replyToId, messageThreadId, options);
+  options?.onReceipt?.(result);
+  return requireSentDelivery(result).messageId;
 }
 
-/** 单片发送 + 既有的 anchor / parse 降级逻辑。 */
+/** One logical send, including acknowledged shards when a later shard fails. */
+export async function sendMessageDetailed(
+  chatId: number, text: string, replyToId?: number, messageThreadId?: number,
+  identity?: Partial<DeliveryIdentity> & { beforeSend?: () => void; markAnswered?: boolean },
+): Promise<DeliveryResult> {
+  const base = {
+    intentId: identity?.intentId ?? randomUUID(), revision: identity?.revision ?? 0,
+    chatId, ...(replyToId === undefined ? {} : { targetMessageId: replyToId }),
+    ...(messageThreadId === undefined ? {} : { messageThreadId }),
+  };
+  const parts: ConfirmedDeliveryPart[] = [];
+  let attempted = false;
+  let plannedPartCount = 1;
+  const beforeSend = () => { attempted = false; identity?.beforeSend?.(); attempted = true; };
+  try {
+    assertOutboundText(text);
+    if (!text.trim()) return { ...base, status: 'suppressed', reason: 'empty_text', parts, plannedPartCount: 0 };
+    if (platformConversation(chatId)) {
+      if (messageThreadId !== undefined) throw new UnsupportedCapabilityError('topics');
+      beforeSend();
+      // Preserve OneBot's typed unknown/not_sent errors. Never fall back to Telegram.
+      const messageId = await sendPlatformText(chatId, text, replyToId);
+      if (!Number.isSafeInteger(messageId) || messageId <= 0) throw new Error('invalid_platform_receipt');
+      parts.push({ messageId, text, partIndex: 0 });
+    } else {
+      assertTelegramPayload({ chat_id: chatId, reply_to_message_id: replyToId, message_thread_id: messageThreadId });
+      let duplicate = false;
+      try {
+        duplicate = await getRedis().set(dedupKey(chatId, text.trim()), '1', 'EX', DEDUP_TTL_SEC, 'NX') !== 'OK';
+      } catch { /* Text similarity suppression is best-effort, not a delivery claim. */ }
+      if (duplicate) {
+        _dedupSkipped += 1;
+        // Keep this at info: the gate-evidence reader runs with LOG_LEVEL=info.
+        logger.info({ chatId, chars: text.trim().length }, 'sendMessage: duplicate text within 30s, skipped');
+        incrCounter('send_duplicate_skipped_total', { chat: chatId });
+        return { ...base, status: 'suppressed', reason: 'duplicate_text', parts, plannedPartCount };
+      }
+      const shards = shardMarkdownV2(toMarkdownV2(text));
+      plannedPartCount = shards.length;
+      for (const [partIndex, md] of shards.entries()) {
+        // A rejected shard must fall back to THIS shard, never to the whole plan.
+        const fallback = shards.length === 1 ? text : md.replace(/\\([_*[\]()~`>#+\-=|{}.!\\])/g, '$1');
+        const part = await sendMarkdownOnce(chatId, md, fallback, partIndex === 0 ? replyToId : undefined,
+          messageThreadId, beforeSend);
+        parts.push({ ...part, partIndex });
+      }
+    }
+    return { ...base, status: 'sent', parts, plannedPartCount };
+  } catch (error) {
+    return { ...base, status: deliveryFailureStatus(error, attempted), reason: 'transport_unconfirmed',
+      parts, plannedPartCount, error };
+  } finally {
+    // Metrics/anchor state reflect ACKs, not the planned count or a suppression sentinel.
+    if (parts.length > 0) {
+      recordSpeech(); recordBotReply(chatId);
+      recordConnectivityWindow(chatId, parts[0]!.messageId, Math.floor(Date.now() / 1000));
+      if (identity?.markAnswered !== false && parts.length === plannedPartCount && replyToId && replyToId > 0) {
+        void import('../../meta/answered.js')
+          .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
+          .catch(() => { /* telemetry never breaks the send path */ });
+      }
+    }
+  }
+}
+
+/** Explicit API rejection alone permits a format/anchor fallback; uncertainty never does. */
 async function sendMarkdownOnce(
-  chatId: number,
-  md: string,
-  plainFallback: string,
-  replyToId?: number,
-  messageThreadId?: number,
-): Promise<number> {
+  chatId: number, md: string, plainFallback: string, replyToId?: number,
+  messageThreadId?: number, beforeSend?: () => void,
+): Promise<{ messageId: number; text: string }> {
   return withRetry(async () => {
     const bot = getBot();
-    const anchor =
-      typeof replyToId === 'number' && Number.isFinite(replyToId) && replyToId > 0
-        ? Math.floor(replyToId)
-        : undefined;
-    // Prefer modern reply_parameters; also set deprecated reply_to_message_id for
-    // older Bot API relays that ignore reply_parameters.
-    const replyParams = anchor
-      ? { message_id: anchor, allow_sending_without_reply: true as const }
-      : undefined;
-    const legacyReply = anchor ? { reply_to_message_id: anchor } : {};
-    // Telegram forum topic: only meaningful when > 1 (General topic = 1 = default).
-    const threadId =
-      typeof messageThreadId === 'number' && Number.isFinite(messageThreadId) && messageThreadId > 1
-        ? Math.floor(messageThreadId)
-        : undefined;
-    const threadParam = threadId ? { message_thread_id: threadId } : {};
-
-    try {
-      const result = await bot.api.sendMessage(chatId, md, {
-        parse_mode: 'MarkdownV2',
-        reply_parameters: replyParams,
-        ...legacyReply,
-        ...threadParam,
+    const anchor = typeof replyToId === 'number' && Number.isFinite(replyToId) && replyToId > 0
+      ? Math.floor(replyToId) : undefined;
+    const threadParam = messageThreadId && messageThreadId > 1 ? { message_thread_id: Math.floor(messageThreadId) } : {};
+    const replyParams = anchor ? { message_id: anchor, allow_sending_without_reply: true as const } : undefined;
+    const request = async (content: string, markdown: boolean, withAnchor: boolean) => {
+      beforeSend?.();
+      const result = await bot.api.sendMessage(chatId, content, {
+        ...(markdown ? { parse_mode: 'MarkdownV2' as const } : {}), ...threadParam,
+        ...(withAnchor && anchor ? { reply_parameters: replyParams, reply_to_message_id: anchor } : {}),
       });
-      return result.message_id;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (anchor && (msg.includes('replied message not found') || msg.includes('message to be replied not found'))) {
-        logger.warn({ chatId, replyToId: anchor }, 'sendMessage: reply anchor missing, send plain');
-        try {
-          const result = await bot.api.sendMessage(chatId, md, { parse_mode: 'MarkdownV2', ...threadParam });
-          return result.message_id;
-        } catch {
-          const result = await bot.api.sendMessage(chatId, plainFallback, { ...threadParam });
-          return result.message_id;
+      if (!Number.isSafeInteger(result.message_id) || result.message_id <= 0) throw new Error('invalid_platform_receipt');
+      return { messageId: result.message_id, text: result.text ?? (markdown ? plainFallback : content) };
+    };
+    const parseRejected = (error: unknown): boolean => {
+      const message = error instanceof Error ? error.message : String(error);
+      return message.includes("can't parse entities") || message.includes('ENTITY_BOUNDS_INVALID');
+    };
+    try { return await request(md, true, true); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (anchor && (message.includes('replied message not found') || message.includes('message to be replied not found'))) {
+        try { return await request(md, true, false); }
+        catch (fallbackError) {
+          if (!parseRejected(fallbackError)) throw fallbackError;
+          return request(plainFallback, false, false);
         }
       }
-      if (msg.includes("can't parse entities") || msg.includes('parse')) {
-        // 带上 Telegram 的原话。2026-09-21：这一处原来只有 { chatId }，
-        // 于是"我们的 Markdown 转义哪里写错了"这类问题只能靠猜。
-        // Telegram 的报错会指出具体是哪个字符/实体不合法——那是修转义函数的唯一线索。
-        // 只截 200 字：它通常是一段带偏移量的 JSON。
-        logger.debug(
-          { chatId, tgErr: msg.slice(0, 200) },
-          'MarkdownV2 parse failed, falling back to plain text',
-        );
-        const result = await bot.api.sendMessage(chatId, plainFallback, {
-          reply_parameters: replyParams,
-          ...legacyReply,
-          ...threadParam,
-        });
-        return result.message_id;
+      if (parseRejected(error)) return request(plainFallback, false, true);
+      if (message.includes('too long') || message.includes('MESSAGE_TOO_LONG')) {
+        if (plainFallback.length <= TG_TEXT_LIMIT) return request(plainFallback, false, true);
+        throw error; // Never acknowledge an intentionally truncated planned shard.
       }
-      // "message is too long" 走到这里说明分片没算准(例如上游又拼了内容)。降级:
-      // 去掉 parse_mode 直接发纯文本的前 4096 字符,至少别让用户只收到一句故障文案。
-      if (msg.includes('too long') || msg.includes('MESSAGE_TOO_LONG')) {
-        logger.warn({ chatId, mdLen: md.length }, 'sendMessage: still too long after sharding, sending plain truncated');
-        const result = await bot.api.sendMessage(chatId, plainFallback.slice(0, TG_TEXT_LIMIT), {
-          reply_parameters: replyParams,
-          ...legacyReply,
-          ...threadParam,
-        });
-        return result.message_id;
-      }
-      throw err;
+      throw error;
     }
-  }, 'sendMessage', /* idempotent */ false);
+  }, 'sendMessage', false);
 }
 
 /**
@@ -575,19 +507,23 @@ export async function editMessage(
 export async function sendSticker(
   chatId: number,
   stickerId: string,
+  opts: { beforeSend?: () => void } = {},
 ): Promise<number> {
   if (platformConversation(chatId)) {
     if (!env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('stickers');
     const { resolveOneBotMedia } = await import('../../platform/onebot-media.js');
     const file = await resolveOneBotMedia(stickerId, chatId);
     if (!file.mimeType.startsWith('image/')) throw new UnsupportedCapabilityError('nonimage sticker');
-    const messageId = await sendPlatformMedia(chatId, 'image', file.bytes, file.fileName, { beforeSend: file.assertAvailable });
+    const messageId = await sendPlatformMedia(chatId, 'image', file.bytes, file.fileName, { beforeSend: () => {
+      file.assertAvailable(); opts.beforeSend?.();
+    } });
     recordSpeech(); recordBotReply(chatId);
     return messageId;
   }
   assertTelegramPayload({ chat_id: chatId, sticker: stickerId });
   return withRetry(async () => {
     const bot = getBot();
+    opts.beforeSend?.();
     const result = await bot.api.sendSticker(chatId, stickerId);
     recordBotReply(chatId);
     return result.message_id;
@@ -601,7 +537,7 @@ export async function sendSticker(
 export async function sendFile(
   chatId: number,
   filePath: string,
-  opts: { caption?: string; replyToId?: number; messageThreadId?: number; filename?: string } = {},
+  opts: { caption?: string; replyToId?: number; messageThreadId?: number; filename?: string; beforeSend?: () => void } = {},
 ): Promise<{ messageId: number }> {
   const qq = platformConversation(chatId);
   if (qq && !env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('files');
@@ -632,6 +568,7 @@ export async function sendFile(
       ? Math.floor(opts.messageThreadId)
       : undefined;
 
+  opts.beforeSend?.();
   const result = await bot.api.sendDocument(chatId, new InputFile(buffer, filename), {
     caption: opts.caption ? opts.caption.slice(0, 1000) : undefined,
     reply_parameters: anchor ? { message_id: anchor, allow_sending_without_reply: true as const } : undefined,
@@ -649,7 +586,7 @@ export async function sendFile(
 export async function sendPhoto(
   chatId: number,
   filePath: string,
-  opts: { caption?: string; replyToId?: number; messageThreadId?: number } = {},
+  opts: { caption?: string; replyToId?: number; messageThreadId?: number; beforeSend?: () => void } = {},
 ): Promise<{ messageId: number }> {
   if (opts.caption) assertOutboundText(opts.caption);
   const qq = platformConversation(chatId);
@@ -679,6 +616,7 @@ export async function sendPhoto(
       ? Math.floor(opts.messageThreadId)
       : undefined;
 
+  opts.beforeSend?.();
   const result = await bot.api.sendPhoto(chatId, new InputFile(buffer, basename(filePath)), {
     caption: opts.caption ? opts.caption.slice(0, 1000) : undefined,
     reply_parameters: anchor ? { message_id: anchor, allow_sending_without_reply: true as const } : undefined,
@@ -715,6 +653,7 @@ export async function sendVoice(
       ? Math.floor(opts.messageThreadId)
       : undefined;
 
+  opts.beforeSend?.();
   const result = await bot.api.sendVoice(chatId, new InputFile(oggBuffer, 'voice.ogg'), {
     reply_parameters: anchor ? { message_id: anchor, allow_sending_without_reply: true as const } : undefined,
     message_thread_id: threadId,

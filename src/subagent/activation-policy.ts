@@ -12,6 +12,7 @@ export type CodeActActivationReason =
   | 'meta_disabled' | 'isolation_disabled' | 'invalid_chat' | 'chat_outside_scope'
   | 'invalid_activation_epoch' | 'invalid_created_at' | 'predates_activation'
   | 'task_scope_invalid' | 'task_scope_unavailable'
+  | 'pending_intent_missing' | 'pending_intent_mismatch'
   | 'checkpoint_missing' | 'checkpoint_invalid' | 'checkpoint_unavailable';
 export type CodeActActivationDecision =
   | { allowed: true }
@@ -60,6 +61,11 @@ export async function requireCodeActActivation(task: DispatchTask): Promise<void
 export function checkCodeActTaskActivation(task: DispatchTask): CodeActActivationDecision {
   const activation = checkCodeActActivation(task);
   if (!activation.allowed) return activation;
+  if (env().META_PENDING_INTENT_ENABLED) {
+    if (task.quoteMessageIds?.length && !task.pendingIntent) return { allowed: false, reason: 'pending_intent_missing' };
+    if (task.pendingIntent && (task.pendingIntent.chatId !== task.chatId || task.pendingIntent.senderId !== task.targetUserId
+      || task.pendingIntent.threadId !== (task.messageThreadId ?? 0))) return { allowed: false, reason: 'pending_intent_mismatch' };
+  }
   const scope = inspectMetaTaskScope(task);
   if (scope.status === 'valid') return activation;
   return { allowed: false, reason: scope.status === 'unavailable' ? 'task_scope_unavailable' : 'task_scope_invalid' };

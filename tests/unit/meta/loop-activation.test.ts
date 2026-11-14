@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AttentionItem, SubagentCallback } from '../../../src/meta/types.js';
 import type { MetaDeferEntry } from '../../../src/meta/defer.js';
 
@@ -29,6 +29,7 @@ vi.mock('../../../src/meta/attention.js', () => ({
 import { metaTick } from '../../../src/meta/loop.js';
 
 const epoch = 1_800_000_000_000;
+afterEach(() => vi.unstubAllEnvs());
 const callback = (id: string, createdAt: number, chatId = 42): SubagentCallback => ({
   id, taskId: id, chatId, summary: `synthetic ${id}`, ok: true, createdAt,
 });
@@ -53,6 +54,15 @@ beforeEach(() => {
 });
 
 describe('Meta replay activation boundaries', () => {
+  it('never drains durable work when invoked on an ingress-only process', async () => {
+    vi.stubEnv('XXB_ENABLE_WORKER', 'false');
+    vi.stubEnv('XXB_ENABLE_CRON', 'false');
+    vi.stubEnv('XXB_ENABLE_BOT_INGRESS', 'true');
+    await metaTick();
+    expect(mocks.callbacks).not.toHaveBeenCalled();
+    expect(mocks.defers).not.toHaveBeenCalled();
+    expect(mocks.session).not.toHaveBeenCalled();
+  });
   it('holds old callbacks before attention gets a fresh timestamp and passes current callbacks', async () => {
     const old = callback('old', epoch - 1);
     const current = callback('current', epoch);

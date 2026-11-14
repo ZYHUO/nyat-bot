@@ -510,7 +510,7 @@ export async function generateReply(
       // heartWhy 在场时不再读 mind.lastThought —— 那是同一个念头,
       // [你的念头] 已注入,自我状态里再写一遍是双倍复读(review #14)。
       // 心流分支已拼装过 → 直接复用快照(审计 #38:不再二次取 4 个源)
-      const self = callOpts?.selfState ?? await composeSelfState(chatId);
+      const self = callOpts?.selfState ?? await composeSelfState(chatId, message.textContent || message.captionContent || '');
       const narration = callOpts?.heartWhy ? self.narrationNoThought : self.narration;
       // P1:自我反思(长期回复规律)并入「此刻的你」——两者都是"当下的我"的
       // 底色,语义重叠;合并后不再在静态块顶端单列一块离 CURRENT_MESSAGE 老远。

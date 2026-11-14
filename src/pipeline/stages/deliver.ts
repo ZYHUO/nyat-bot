@@ -5,6 +5,7 @@
 // ────────────────────────────────────────
 
 import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath } from "../../shared/types.js";
+import { DeliveryError, deliveryFailureStatus, type ConfirmedDeliveryPart } from '../../shared/delivery-result.js';
 import { getRecent, addAssistant } from "../context/manager.js";
 import { retrieveContext } from "../context/retriever.js";
 import { runWriterRoute } from "../multiagent/writer-selector.js";
@@ -107,6 +108,7 @@ export interface ChatLockState {
 
 export interface DeliveryTelemetry {
   status: 'sent' | 'silent' | 'failed' | 'blocked' | 'interrupted';
+  deliveryStatus?: 'sent' | 'suppressed' | 'failed' | 'unknown';
   toolCalls?: number;
   replyCount?: number;
 }
@@ -147,6 +149,7 @@ export async function generateAndSendReplies(args: {
     return telemetry;
   };
   let sendPermissionDenied = false;
+  let unconfirmedDelivery: 'suppressed' | 'failed' | 'unknown' | undefined;
   let socialTypingStartedAt: number | undefined;
   let socialPlannedBubbleCount = 0;
   let socialPlannedReactions = 0;
@@ -703,7 +706,26 @@ export async function generateAndSendReplies(args: {
 
 // 9. Send all replies to Telegram
     const t6 = performance.now();
-    const sentMessages: Array<{ messageId: number; text: string }> = [];
+    const sentMessages: Array<{ messageId: number; text: string; targetMessageId?: number }> = [];
+    const completedReplies = new Set<number>();
+    const recordParts = (parts: ConfirmedDeliveryPart[], targetMessageId?: number) => {
+      for (const part of parts) if (Number.isSafeInteger(part.messageId) && part.messageId > 0) {
+        if (!sentMessages.some(item => item.messageId === part.messageId)) {
+          sentMessages.push({ messageId: part.messageId, text: part.text, targetMessageId });
+        }
+      }
+    };
+    const recordSent = (sent: { messageId: number; parts?: ConfirmedDeliveryPart[] }, text: string, targetMessageId?: number) => {
+      if (!Number.isSafeInteger(sent.messageId) || sent.messageId <= 0) {
+        throw new DeliveryError({ status: 'suppressed', intentId: 'legacy-invalid-receipt', revision: 0,
+          chatId: job.chatId, parts: [], plannedPartCount: 1, reason: 'invalid_receipt' });
+      }
+      recordParts(sent.parts ?? [{ messageId: sent.messageId, text, partIndex: 0 }], targetMessageId);
+    };
+    const recordEdit = (messageId: number, text: string) => {
+      const prior = sentMessages.find(item => item.messageId === messageId);
+      if (prior) prior.text = text;
+    };
     // Targets already quote-replied in this burst. A multi-target reply (e.g.
     // [{reply to requester}, {reply to someone else}]) must quote EACH distinct
     // target; only repeat bubbles to an ALREADY-quoted target drop the quote
@@ -845,7 +867,15 @@ export async function generateAndSendReplies(args: {
           ? applyJitter(1.0, humanizerConfig?.jitterFactor ?? 0.2)
           : 1.0;
         await new Promise((resolve) => setTimeout(resolve, ackDelay * 1000));
-        await sender.sendDirect(job.chatId, ackPrefix.prefix).catch(() => {});
+        try {
+          recordSent(await sender.sendDirect(job.chatId, ackPrefix.prefix), ackPrefix.prefix);
+        } catch (error) {
+          if (error instanceof DeliveryError) recordParts(error.result.parts);
+          if (deliveryFailureStatus(error, true) === 'unknown') {
+            unconfirmedDelivery = 'unknown';
+            break;
+          }
+        }
         // Pause between prefix and main content
         await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
         await new Promise((resolve) => setTimeout(resolve, (ackPrefix.delay ?? 1.5) * 1000));
@@ -1016,13 +1046,8 @@ export async function generateAndSendReplies(args: {
         // If sticker-only replacement resolved a sticker, skip text send
         const skipTextSend = stickerOnlyFileId !== undefined && stickerOnlyResult.shouldReplace;
 
-        // 簿记真相(审计 #39b):只有 'edit' 修正最终把气泡改成 originalText;
-        // 'append'(气泡保留错字,后补一个正确字)和 null(故意不改)的屏上
-        // 文本都是 typoedText —— 记录 originalText 会让上下文/outcome 与
-        // 屏幕上的消息不一致。
-        const recordedText = typoResult
-          ? (typoResult.correction === 'edit' ? typoResult.originalText : typoResult.typoedText)
-          : effectiveText;
+        // Start with actual text; a later edit changes history only after ACK.
+        const recordedText = effectiveText;
 
         if (!isStickerOnly && !skipTextSend) {
           if (agencyReplyTransport && replyIdx === 0 && maxPlaceholderMsgId) {
@@ -1034,17 +1059,23 @@ export async function generateAndSendReplies(args: {
             // 无条件 push 会把没送达的回复记成已发送(污染上下文/outcome)。
             const edited = await editMessage(job.chatId, maxPlaceholderMsgId, effectiveText)
               .then(() => true)
-              .catch(() => false);
+              .catch(error => {
+                throw new DeliveryError({ status: deliveryFailureStatus(error, true),
+                  intentId: `placeholder:${maxPlaceholderMsgId}`, revision: 0, chatId: job.chatId,
+                  parts: [], plannedPartCount: 1, reason: 'edit_unconfirmed', error });
+              });
             if (edited) {
+              recordSent({ messageId: maxPlaceholderMsgId }, effectiveText, reply.targetMessageId);
+              completedReplies.add(replyIdx);
               // ── Humanizer: typo correction (placeholder path) ──
               if (typoResult && typoResult.correction === 'edit') {
                 const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
                 await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-                await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText).catch(() => {});
+                await editMessage(job.chatId, maxPlaceholderMsgId, typoResult.originalText)
+                  .then(() => recordEdit(maxPlaceholderMsgId!, typoResult.originalText)).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit (placeholder)');
               }
-              sentMessages.push({ messageId: maxPlaceholderMsgId, text: recordedText });
               // ── Humanizer: typo append (placeholder path — send correct char as follow-up) ──
               if (typoResult && typoResult.correction === 'append' && typoResult.correctChar) {
                 const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
@@ -1052,7 +1083,7 @@ export async function generateAndSendReplies(args: {
                 await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
                 const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
                 if (appendSent.messageId) {
-                  sentMessages.push({ messageId: appendSent.messageId, text: typoResult.correctChar });
+                  recordSent(appendSent, typoResult.correctChar);
                 }
                 logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append (placeholder)');
               }
@@ -1062,18 +1093,22 @@ export async function generateAndSendReplies(args: {
           } else {
             // ── Voice reply (P5): model marked this reply as voice ──
             if (reply.voice === true && e.TTS_ENABLED && !agencyReplyTransport) {
+              let voiceAttempted = false;
               try {
                 const { synthesizeVoice } = await import('../../ai/tts.js');
                 const { sendVoice } = await import('../../bot/sender/telegram.js');
                 const ogg = await synthesizeVoice(effectiveText.slice(0, 500));
                 if (ogg) {
-                  await sendVoice(job.chatId, ogg, { replyToId });
+                  voiceAttempted = true;
+                  const voice = await sendVoice(job.chatId, ogg, { replyToId });
+                  recordSent(voice, `[voice] ${effectiveText.slice(0, 500)}`, reply.targetMessageId);
+                  completedReplies.add(replyIdx);
                   socialDeliveredVoiceCount += 1;
-                  sentMessages.push({ messageId: 0, text: `[voice] ${effectiveText}` });
                   logger.info({ chatId: job.chatId }, 'Voice reply sent');
                   continue;
                 }
               } catch (err) {
+                if (voiceAttempted && deliveryFailureStatus(err, true) === 'unknown') throw err;
                 logger.warn({ err, chatId: job.chatId }, 'Voice synthesis failed — falling back to text');
               }
             }
@@ -1092,7 +1127,9 @@ export async function generateAndSendReplies(args: {
                   }
                   return { messageId: agency.messageId };
                 })()
-              : await sender.sendDirect(job.chatId, effectiveText, replyToId);
+              : await sender.sendDirect(job.chatId, effectiveText, replyToId, { markAnswered: false });
+            recordSent(sent, effectiveText, reply.targetMessageId);
+            completedReplies.add(replyIdx);
             // Mark this target quoted only after a real text reply went out with the quote.
             if (replyToId !== undefined) quotedTargets.add(replyToId);
 
@@ -1107,12 +1144,10 @@ export async function generateAndSendReplies(args: {
               const resendDelay = Math.min(calculateTypingDelay(deleteResend.modifiedText, segmenterConfig), 1.5);
               await new Promise((resolve) => setTimeout(resolve, resendDelay * 1000));
               const resent = await sender.sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
-              sentMessages.push({ messageId: resent.messageId, text: deleteResend.modifiedText });
+              recordSent(resent, deleteResend.modifiedText, reply.targetMessageId);
               logger.debug({ chatId: job.chatId, original: effectiveText, modified: deleteResend.modifiedText }, 'Humanizer: delete-and-resend');
               currentMessageId = resent.messageId;
               currentBaseText = deleteResend.modifiedText;
-            } else {
-              sentMessages.push({ messageId: sent.messageId, text: currentBaseText });
             }
 
             // ── Humanizer: typo correction via edit ──
@@ -1124,7 +1159,8 @@ export async function generateAndSendReplies(args: {
                 const correctionDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
                 await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, correctionDelay * 1000));
-                await editMessage(job.chatId, currentMessageId, typoResult.originalText).catch(() => {});
+                await editMessage(job.chatId, currentMessageId, typoResult.originalText)
+                  .then(() => recordEdit(currentMessageId!, typoResult.originalText)).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, corrected: typoResult.originalText }, 'Humanizer: typo corrected via edit');
               }
             }
@@ -1136,7 +1172,7 @@ export async function generateAndSendReplies(args: {
               await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
               const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
               if (appendSent.messageId) {
-                sentMessages.push({ messageId: appendSent.messageId, text: typoResult.correctChar });
+                recordSent(appendSent, typoResult.correctChar);
               }
               logger.debug({ chatId: job.chatId, typo: effectiveText, appended: typoResult.correctChar }, 'Humanizer: typo append');
             }
@@ -1152,7 +1188,8 @@ export async function generateAndSendReplies(args: {
                   : afterthoughtDelay;
                 await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, afterthoughtDelayJittered * 1000));
-                await editMessage(job.chatId, currentMessageId, afterthought.editedText).catch(() => {});
+                await editMessage(job.chatId, currentMessageId, afterthought.editedText)
+                  .then(() => recordEdit(currentMessageId!, afterthought.editedText)).catch(() => {});
                 logger.debug({ chatId: job.chatId, original: effectiveText, edited: afterthought.editedText }, 'Humanizer: afterthought edit');
               }
             }
@@ -1183,7 +1220,8 @@ export async function generateAndSendReplies(args: {
             recordStickerSent(job.chatId, stickerMsgId, stickerOnlyFileUniqueId, stickerOnlyFileId, stickerOnlyResult.intent);
           }
           if (stickerMsgId) {
-            sentMessages.push({ messageId: stickerMsgId, text: '[sticker]' });
+            recordSent({ messageId: stickerMsgId }, '[sticker]', reply.targetMessageId);
+            completedReplies.add(replyIdx);
           }
         } else if (stickerFileId) {
           const stickerMsgId = await sendSticker(job.chatId, stickerFileId).catch((err) => {
@@ -1197,20 +1235,25 @@ export async function generateAndSendReplies(args: {
           // 审计 #39c:发送失败时不再 push messageId:0 幻影(messageId 0 会
           // 进 addAssistant 污染上下文;上面 sticker-only 分支早就是这个写法)
           if (stickerMsgId) {
-            sentMessages.push({ messageId: stickerMsgId, text: '[sticker]' });
+            recordSent({ messageId: stickerMsgId }, '[sticker]', reply.targetMessageId);
+            completedReplies.add(replyIdx);
           }
         }
 
+        if (!completedReplies.has(replyIdx)) continue;
         _stickerState(job.chatId).repliesSince++;
         try { recordBotReply(job.chatId); } catch { /* non-critical */ }
-        if (job.turnContext?.obligationId) {
-          void updateObligationState(job.chatId, job.turnContext.obligationId, 'fulfilled').catch(() => {});
-        }
         // Persist lastBotReplyAt to timing state (read by proactive-scan); the
         // tracking recordBotReply above does NOT write it, and the timing-gate one
         // is gated off by default.
         void recordTimingBotReply(job.chatId).catch(() => { /* non-critical */ });
       } catch (err) {
+        if (err instanceof DeliveryError) {
+          recordParts(err.result.parts, reply.targetMessageId);
+          unconfirmedDelivery = err.result.status === 'sent' ? 'failed' : err.result.status;
+        } else if (deliveryFailureStatus(err, true) === 'unknown') {
+          unconfirmedDelivery = 'unknown';
+        }
         if (isNoSendPermissionError(err)) {
           sendPermissionDenied = true;
         }
@@ -1218,11 +1261,16 @@ export async function generateAndSendReplies(args: {
           { chatId: job.chatId, targetMessageId: reply.targetMessageId, err },
           "Failed to send reply in multi-reply sequence",
         );
+        if (unconfirmedDelivery === 'unknown') break;
       }
     }
     timings["send"] = Math.round(performance.now() - t6);
 
     if (sentMessages.length === 0) {
+      if (unconfirmedDelivery === 'suppressed' || unconfirmedDelivery === 'unknown') {
+        await releaseHeldChatLock();
+        return finishRouteObservation({ status: unconfirmedDelivery === 'suppressed' ? 'silent' : 'failed', deliveryStatus: unconfirmedDelivery, replyCount: 0 });
+      }
       if (maxPlaceholderMsgId) await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
       if (sendPermissionDenied) {
         throw new Error("SEND_PERMISSION_DENIED");
@@ -1242,7 +1290,7 @@ export async function generateAndSendReplies(args: {
         multiAnchor: job.turnContext?.isMultiAnchorTurn ?? false,
         burstUids: job.turnContext?.burstUids,
         segments: sentMessages.length,
-        targets: replies.map((r) => r.targetMessageId),
+        targets: sentMessages.map(item => item.targetMessageId).filter(Boolean),
         preview: sentMessages.map((s) => s.text).filter(Boolean).join(' ¦ ').slice(0, 200),
       },
       'Reply sent',
@@ -1358,6 +1406,7 @@ export async function generateAndSendReplies(args: {
     // 显式带上 isDeferReplay,否则等于在最该收着的路径上多话。
     if (
       e.TURN_SELF_FOLLOWUP_ENABLED &&
+      !unconfirmedDelivery &&
       job.turnContext &&
       !job.turnContext.isWaitReplay &&
       !job.turnContext.isDeferReplay &&
@@ -1369,15 +1418,17 @@ export async function generateAndSendReplies(args: {
         .catch(() => {});
     }
 
-    // G7: mark every replied-to target (and the trigger itself) as answered
-    if (sentMessages.length > 0) {
-      const answeredIds = Array.from(new Set([
-        formatted.messageId,
-        ...replies.map((r) => r.targetMessageId).filter((id) => id > 0),
-      ]));
-      import("../turn/answered-store.js")
-        .then(({ markAnswered }) => markAnswered(job.chatId, answeredIds))
+    // Only fully acknowledged logical targets settle their own obligations.
+    const answeredIds = Array.from(new Set(replies.map(reply => reply.targetMessageId))).filter(id =>
+      id > 0 && replies.every((reply, index) => reply.targetMessageId !== id || completedReplies.has(index)));
+    if (answeredIds.length > 0) {
+      await import('../turn/answered-store.js').then(({ markAnswered }) => markAnswered(job.chatId, answeredIds)).catch(() => {});
+      await import('../../meta/answered.js')
+        .then(({ markMessageAnswered }) => Promise.all(answeredIds.map(id => markMessageAnswered(job.chatId, id))))
         .catch(() => {});
+    }
+    if (job.turnContext?.obligationId && answeredIds.includes(formatted.messageId)) {
+      await updateObligationState(job.chatId, job.turnContext.obligationId, 'fulfilled').catch(() => {});
     }
 
     // 10. Save ALL sent assistant messages to context (parallel)
@@ -1402,7 +1453,7 @@ export async function generateAndSendReplies(args: {
             botMessageId: sent.messageId,
             targetUserId: formatted.uid,
             triggerMessageId: formatted.messageId,
-            ...(i === 0 && replies[0]?.targetMessageId ? { replyToMessageId: replies[0].targetMessageId } : {}),
+            ...(sent.targetMessageId ? { replyToMessageId: sent.targetMessageId } : {}),
             actionType: judgeResult.action,
           });
         } catch {
@@ -1495,7 +1546,7 @@ export async function generateAndSendReplies(args: {
       deliveredMessageIds: sentMessages.map((message) => message.messageId).filter((messageId) => messageId > 0),
       reactions: replyResult.reactions?.length ?? 0,
     });
-    return finishRouteObservation({ status: 'sent', toolCalls: replyResult.toolsUsed.length, replyCount: sentMessages.length });
+    return finishRouteObservation({ status: 'sent', deliveryStatus: unconfirmedDelivery ?? 'sent', toolCalls: replyResult.toolsUsed.length, replyCount: sentMessages.length });
   } catch (err) {
     if (maxPlaceholderMsgId) {
       await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});

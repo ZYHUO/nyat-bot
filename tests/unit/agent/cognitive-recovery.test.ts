@@ -76,6 +76,38 @@ function propose(id: string, createdAt: number, maxWallClockSec: number): void {
 }
 
 describe('kernel crash recovery', () => {
+  // Thousands of real SQLite event appends intentionally exceed the normal
+  // tiny fixture budget on Windows; keep the full history boundary asserted.
+  it('recovers old and later open actions beyond 500 differently-sized event streams', { timeout: 30_000 }, () => {
+    propose('very-old', 10, 60);
+    dispatch('very-old', 11);
+    for (let i = 0; i < 601; i++) {
+      propose(`closed-${i}`, 100 + i, 60);
+      dispatch(`closed-${i}`, 101 + i);
+      appendCognitiveEvent({ type: 'action_envelope_outcome', source: 'host', scope, occurredAt: 102 + i,
+        correlationId: 'turn-1', fact: { envelopeId: `closed-${i}`, status: 'completed' } });
+      // Extra transitions must not shift entity associations or hide outcomes.
+      appendCognitiveEvent({ type: 'action_envelope_transition', source: 'host', scope, occurredAt: 102 + i,
+        correlationId: 'turn-1', fact: { envelopeId: `closed-${i}`, status: 'candidate' } });
+    }
+    propose('last-open', 1000, 60);
+    dispatch('last-open', 1001);
+    const recovered = recoverStaleKernelActions({ now: 2_000_000, owner: 'complete-history' });
+    expect(recovered.actions.map(a => a.envelopeId).sort()).toEqual(['last-open', 'very-old']);
+    expect(recoverStaleKernelActions({ now: 2_000_001 }).recovered).toBe(0);
+  });
+  it('finds late inserted historical events instead of trusting an occurredAt watermark', () => {
+    propose('first', 200, 60); dispatch('first', 201);
+    expect(recoverStaleKernelActions({ now: 500 }).recovered).toBe(1);
+    propose('late', 100, 60); dispatch('late', 101);
+    expect(recoverStaleKernelActions({ now: 600 }).actions.map(a => a.envelopeId)).toEqual(['late']);
+  });
+  it('does not let a still-live earlier action hide a later stale one', () => {
+    propose('live', 100, 1000); dispatch('live', 101);
+    propose('stale-later', 110, 60); dispatch('stale-later', 111);
+    expect(recoverStaleKernelActions({ now: 500 }).actions.map(a => a.envelopeId)).toEqual(['stale-later']);
+    expect(getCognitiveCursor({ scope, stream: KERNEL_RECOVERY_STREAM })?.eventId ?? null).toBeNull();
+  });
   it('closes a dispatch whose host budget expired, without re-sending it', () => {
     propose('env-old', 100, 60);
     dispatch('env-old', 101);

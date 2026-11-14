@@ -213,6 +213,7 @@ export function buildConversationField(input: {
 export function deriveInnerStateFromConversationField(
   field: ConversationField,
   nowSec = field.asOf,
+  previous?: InnerState,
 ): InnerState {
   const unresolvedCount = field.unresolvedQuestions.length + field.waitingBids.length;
   const hasKnownAddressee = field.addresseeEdges.length > 0;
@@ -238,7 +239,7 @@ export function deriveInnerStateFromConversationField(
       : field.temperature >= 0.65
         ? 'witness'
         : undefined;
-  return {
+  const current: InnerState = {
     schema: 'inner_state.v1',
     attention: Number(attention.toFixed(4)),
     energy: Number(energy.toFixed(4)),
@@ -253,6 +254,26 @@ export function deriveInnerStateFromConversationField(
     ...(currentNeed ? { currentNeed } : {}),
     updatedAt: Number.isSafeInteger(nowSec) && nowSec > 0 ? nowSec : Math.floor(Date.now() / 1000),
   };
+  if (!previous || previous.updatedAt > current.updatedAt) return current;
+  // Inner tendencies change gradually. Elapsed time relaxes them toward a
+  // neutral baseline; a new field observation can shift them without erasing
+  // the whole prior state. This is not a claim about anyone else's feelings.
+  const elapsed = Math.max(0, current.updatedAt - previous.updatedAt);
+  const retained = Math.exp(-elapsed / (6 * 3600));
+  const neutral = { attention: 0.3, energy: 0.65, curiosity: 0.2, connection: 0.5, confidence: 0.45, uncertainty: 0.35 };
+  const observationWeight = field.messagesLastMinute > 0 ? 0.25 : 0.08;
+  for (const key of Object.keys(neutral) as Array<keyof typeof neutral>) {
+    const relaxed = neutral[key] + (previous[key] - neutral[key]) * retained;
+    current[key] = Number(clamp(relaxed + (current[key] - relaxed) * observationWeight).toFixed(4));
+  }
+  // A quiet interval is not evidence that a promise was fulfilled or an
+  // aversion disappeared. Only an explicit recorded replacement can clear it.
+  current.commitments = [...previous.commitments].slice(0, 16);
+  current.aversions = [...previous.aversions].slice(0, 16);
+  if (elapsed < 6 * 3600) {
+    current.wants = [...new Set([...current.wants, ...previous.wants])].slice(0, 16);
+  }
+  return current;
 }
 
 /** Collect bounded observations used by the shadow proposal. */

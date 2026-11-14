@@ -1,6 +1,6 @@
 # Flag census — 全量旗标清单
 
-生成方式：`python3 scripts/flag-census.py`（纯静态：逐段读 `src/env-sections/*.ts` 的注释与默认值 + 指定来源文件值 + 五种读法 grep `src/`）。只写清单产物，不读取数据库、进程环境或运行时配置覆盖。
+生成方式：`python3 scripts/flag-census.py`（纯静态：逐段读 `src/env-sections/*.ts` 的注释与默认值 + 指定来源文件值 + 缓存源码文本的六类正则扫描）。只写清单产物，不读取数据库、进程环境或运行时配置覆盖。
 
 配置来源：公开模板 ".env.example"。默认使用 .env.example；本地运维可用 --env-file 指定其他文件。未填写的键按 schema 默认值统计；以下启用状态仅代表该静态来源，**不代表生产实际状态**。凭据及非布尔、非数字的来源值均已脱敏。
 
@@ -15,32 +15,32 @@
 | 段 | 文件 | 键数 | 布尔 | 来源启用 | 管什么 |
 |---|---|---|---|---|---|
 | `ai` | [`src/env-sections/ai.ts`](../src/env-sections/ai.ts) | 11 | 2 | 0 | TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限 |
-| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 93 | 23 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
-| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 0 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
+| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 95 | 25 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
+| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 37 | 19 | 1 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 3 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 0 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 33 | 19 | 0 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 5 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 28 | 12 | 0 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 3 | Turn Actor + Agentic planner + 中期记忆 |
-| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 56 | 21 | 3 | Meta + Subagent 编排层 |
+| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 58 | 23 | 3 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 54 | 23 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
 | `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 12 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
-| `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 38 | 14 | 0 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
+| `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 41 | 16 | 0 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
 ## 总量
 
 | | |
 |---|---|
-| total_keys | 533 |
-| bool_flags | 227 |
-| on_in_source | 40 |
-| set_in_source | 82 |
+| total_keys | 546 |
+| bool_flags | 236 |
+| on_in_source | 41 |
+| set_in_source | 89 |
 | dead_no_reader | 6 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 1 |
 
-**227 个布尔旗标里，来源文件与 schema 默认值合计启用 40 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**236 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -61,7 +61,7 @@
 |---|---|---|---|
 | `LOOP_POLICY_MAX` | cognition | — | tests/unit/subagent/prompt-inputs.test.ts |
 
-## 来源启用的旗标（40 个）
+## 来源启用的旗标（41 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
@@ -86,6 +86,7 @@
 | infra | `JUDGE_KNOWLEDGE_GROUP` | true | None |  | core/state.ts, pipeline/judge/judge.ts |
 | infra | `JUDGE_KNOWLEDGE_PERMANENT` | true | None |  | core/state.ts, pipeline/judge/judge.ts |
 | infra | `VIDEO_DESCRIBE_ENABLED` | true | None | 视频理解（2026-09-21）。默认开——它跟 audio/PDF 那俩不一样:那两个是"供应商 读不了所以必败"，这个是**真的能跑**。实测 step-5-preview 吃 base64 video_url， 6 秒测试视频准确描述了内容。关掉只退回中性占位（[视频]），不会报错。  为什么 | pipeline/multimodal.ts |
+| memory | `MEMORY_REMOTE_EMBED_LOCAL_FALLBACK` | true | None |  | memory/embedding.ts |
 | meta | `REPLY_HUMANIZER_SAFE_MODE` | true | None |  | pipeline/stages/deliver.ts |
 | meta | `REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED` | true | None | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 （REPLY_MODE_ENABLED / REPLY_ACK_THEN_EXPAND_ENABLED / REPLY_MICRO_REACTION_MAX_CHARS / REPLY_ACK_MAX_CHARS / REPLY_MAX_EXP | pipeline/reply/reply.ts |
 | meta | `TASK_PROGRESS_ENABLED` | true | None | 长任务用户可见阶段通知：运行时负责短确认/保活，失败不影响任务执行。 | agent/task-progress.ts |
@@ -104,11 +105,11 @@
 | timing | `HEART_LLM_FAIL_KEEP_ADDRESSED` | true | None | 心流 LLM 失败时的**保句闸**（2026-09-21 新增的前置功能）。  实测：`heart LLM failed, fail-closed pass` 在日志里 1867 次，占全部心流 裁决（7443 次）的 25%；失败原因 64% 是 "All labels exhausted"（整 | pipeline/heart/decision.ts |
 | timing | `TIMING_GATE_LLM_ENABLED` | true | None | gate 的 LLM 分支开关。false = 所有确定性层原样保留，走到 LLM 之前直接 continue。 实测依据：324 次调用 199 次解析失败(61%)，成功里 124/125 是 no_action （理由清一色同一条规则的改写）。token 占比仅 ~0.2%，省 token 不 | pipeline/timing/gate.ts |
 | timing | `TRENCH_ENVELOPE_ACTIVITY_SCALED` | true | None | 突发上限按群活跃度缩放。对应用户原话："日常都有点过高频率，只有在群友 活跃度高的时候高活跃"。此前上限是扁平常量——冷清群和热聊群共用一个天花板， 于是 Quiet 群里 bot 照样能每小时主动插 20 次。  缩放用宿主**本来就在测**的 xxb:activity:{chatId}（每条入站 | nyatos/envelope.ts |
-| turn | `META_HEART_ENABLED` | true | None | Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。 false = 旁路它的 allow/silence，消息按既有 layer 分 | **无人读** |
+| turn | `META_HEART_ENABLED` | true | None | Nyat Trench Phase 1：Meta heart（meta/heart-adapter.ts）的旁路开关。 它实测是实际做抑制的那层（12,009 次判定只放行 7.7%）；影子想 speak 85.6%。 false = 旁路它的 allow/silence，消息按既有 layer 分 | index.ts |
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 
-## 关着的布尔旗标（187 个）
+## 关着的布尔旗标（195 个）
 
 | 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -172,6 +173,8 @@
 | infra | `ALLOWLIST_ENABLED` | false | false | Allowlist |
 | infra | `ALLOWLIST_REVIEW_ON_JOIN` | false | false | bot 被拉进群 → 立即自动跑一遍 AI 审核（不等申请）。拉群人是群管理才可自动启用。 |
 | infra | `AUDIO_TRANSCRIBE_ENABLED` | false | — | 语音/音频转写:默认关。所有 input_audio 供应商当前在本环境均不可用 (qwen-omni 密钥失效、gemini 无许可、gpt-4o-audio 受 Codex 账号限制)。 关 → describeAudio 直接返回中性占位,不发那通注定失败的调用。 接上可用 audio 模型后 |
+| infra | `DURABLE_CRON_ENABLED` | false | false | Durable occurrences and conservative recovery; enable only with migrations applied. |
+| infra | `DURABLE_INGRESS_ENABLED` | false | false | Roll out after migration; stores complete accepted input and unstarted QQ batches. |
 | infra | `JUDGE_KNOWLEDGE_ENABLED` | false | — |  |
 | infra | `NYATDB_DUAL_WRITE` | false | — |  |
 | infra | `NYATDB_ENABLED` | false | — | NyatDB — NyatBot-only embedded engine (MemTable+WAL+zstd). Default off. |
@@ -189,6 +192,8 @@
 | judge | `TURN_GATE_CONTINUATION` | false | — | P0-A 连续对话免检:gate continue / bot 回复后 N 秒内的后续消息跳过 gate LLM (对齐 MaiBot 连续 Planner 状态)。更新的 wait/no_action 负向决策自动终止免检。 |
 | life | `COGNITIVE_CLOCK_ENABLED` | false | — | 认知时钟：把模型自己的行动结果写进事件账本（own_action_result）， 并允许它记录"下次什么时候再想"（self_scheduled_wake）。 没有前者，模型看不见自己刚做过什么（自激事故的根因）；没有后者， 注意力主权在宿主手里，系统永远是被动应答器。 |
 | life | `CONTROL_DIRECTIVE_ENABLED` | false | — | 控制指令(别理我/别理某人/可以说话了/记住X/忘掉X):typing 前用 LLM 听懂 → 静默执行 + emoji ack,取代旧的 L0 关键词 regex。默认关。 |
+| life | `EMOTION_CONTINUITY_ENABLED` | false | &lt;redacted&gt; | Event-backed, account-scoped inner-state continuity and subtle mood hints. |
+| life | `LIFE_PROJECT_ENABLED` | false | &lt;redacted&gt; | An operator must explicitly activate one owner-DM digital project as well. |
 | life | `MOOD_ENABLED` | false | false | ── Mood drift (Stage E) ── Bot 每个群独立 valence ∈ [-100, 100]，随事件起伏，按时间向 0 衰减。 |
 | life | `MOOD_INJECT_ENABLED` | false | false | 是否把 mood hint 注入 reply prompt |
 | life | `NYATOS_BUDGET_ENABLED` | false | — | ── NyatOS 发言额度：宿主提供的物理节流，但模型可见 ── 2026-09-18 的 54 样本实测：单决策点在 28 分钟内想说 48 次（中位间隔 7 秒）， 即使明确告知"你刚发了 4 条没人回"仍然继续想说。所以旧 cooldown 的第二份 工作——防止自我重复失控——不能交给模型 |
@@ -207,6 +212,8 @@
 | memory | `MEMORY_CROSS_CONTEXT_ENABLED` | false | — | 机制4 跨上下文记忆召回:per-uid 旁路检索(不锁 chatId),返回强制过 visibility scrub(默认带 public + 非私密来源 contextual,private 一律剔除)。 **必须** MEMORY_VISIBILITY_ENABLED 也开才生效(fail-c |
 | memory | `MEMORY_DEDUP_ENABLED` | false | — | 写入侧近重复合并:命中已有近邻时不新增点,改为顶高它的 ref_count (「这件事又被说了一次」语义上是强化,不是复制)。压制「哈哈哈」「+1」这类刷屏。 **阈值必须在换完嵌入模型之后标定** —— 旧的英文单语模型下中文相似度普遍虚高 (无关句对都有 0.72),0.93 在旧向量空间里会命 |
 | memory | `MEMORY_HYBRID_ENABLED` | false | — | 混合检索:向量召回 + FTS5 BM25 词法召回,按 RRF(名次融合)合并。 384 维小模型对专有名词/群内黑话/型号天然弱(jargon-miner 挖的正是这类词), BM25 补的就是这一块。关闭时完全走旧的纯向量路径。默认关。 |
+| memory | `MEMORY_PROJECTION_OUTBOX_ENABLED` | false | — | Persist source bodies first; retry vector/FTS projections from SQLite. |
+| memory | `MEMORY_REMOTE_EMBED_ENABLED` | false | — | Trusted private compute origins only; never a model/user-supplied address. |
 | memory | `MEMORY_VISIBILITY_ENABLED` | false | — | ── DM↔群记忆连结(借鉴 CyberGroupmate 以人为中心统一记忆;docs/dm-group-memory-*.md)── 机制1 隐私 visibility 兜底:记忆/画像跨上下文返回前按 private/contextual/public 逐条 scrub(DM 默认 priva |
 | memory | `METRICS_ENABLED` | false | — | （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标 2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron 已被 unified-tick 取代，后两者描述的机制从未落地 |
 | memory | `OWNER_MEMORY_LINK_ENABLED` | false | — | Explicitly bind MASTER_UID and ONEBOT_OWNER_ID as the same person for owner-DM memory and group-directory reads. Different platform admins must not be |
@@ -218,6 +225,7 @@
 | memory | `SUBAGENT_MEMORY_ENABLED` | false | — | ── CodeAct 自动注入长期记忆 ────────────────────────────── 接在 subagent/executor.ts(真正生成话语的那层),**不是** Meta 编排器 —— Meta 的引擎跨所有会话,其输出经 digest/梦境日记扩散到每个群的 prompt, |
 | memory | `TOPIC_REGISTRY_ENABLED` | false | — | 话题生命周期注册表(借鉴 CGM Topic Registry):cron 抽取各群当前话题 + 注入「当前话题」。默认关。 |
 | meta | `AGENT_LOOP_ENABLED` | false | — | 长时间 Agent 循环：分段续跑 + checkpoint + 上下文压缩。默认关，灰度开。 |
+| meta | `BACKGROUND_PUBLICATION_ENABLED` | false | false | Separate background checking from evidence-gated publication; explicit rollout. |
 | meta | `CODEACT_ISOLATION_ENABLED` | false | — | Generated JavaScript never falls back to execution in the bot process. |
 | meta | `DEBT_AUTO_MATCH_ENABLED` | false | — | Durable cognitive event projection is safe to run without authority; debt creation remains a separate opt-in until its false-positive rate is known. |
 | meta | `DEBT_SEMANTIC_MATCH_ENABLED` | false | — | Optional host-owned semantic ranking after deterministic debt matching. It never resolves debt and is deliberately off until cost/quality is measured. |
@@ -229,6 +237,7 @@
 | meta | `META_DEFER_ENABLED` | false | — |  |
 | meta | `META_DISPATCH_GATE_ENABLED` | false | — |  |
 | meta | `META_INJECT_LEARNED_ENABLED` | false | — |  |
+| meta | `META_PENDING_INTENT_ENABLED` | false | false | Host-owned sender/thread lanes and fixed draft revisions; opt-in rollout. |
 | meta | `META_QQ_MENTION_HEART_ENABLED` | false | false |  |
 | meta | `META_SUBAGENT_ENABLED` | false | — | ── Meta + Subagent (CyberGroupmate-shaped orchestration inside nyatbot) ── 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback, 不再走 BullMQ  |
 | meta | `POST_TASK_WINDOW_ENABLED` | false | — |  |
@@ -300,7 +309,7 @@
 | turn | `TURN_UNANSWERED_REVISIT_ENABLED` | false | — | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | — | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 |
 
-## 非布尔参数（306 个）
+## 非布尔参数（310 个）
 
 | 段 | key | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -468,6 +477,7 @@
 | life | `DM_GREET_AFFINITY_MIN` | 40 | — |  |
 | life | `DM_GREET_MAX_USERS` | 2 | — |  |
 | life | `DM_PROACTIVE_COOLDOWN_HOURS` | 20 | — |  |
+| life | `LIFE_PROJECT_ARTIFACT_DIR` | './data/life-projects' | &lt;redacted&gt; |  |
 | life | `MONITOR_TOKEN` | '' | — | Monitor |
 | life | `MOOD_DECAY_RATE_PER_HOUR` | 0.3 | &lt;redacted&gt; | 每小时衰减比例 (0..1)。0.3 = 1 小时后保留 70% 强度 |
 | life | `MOOD_INJECT_THRESHOLD` | 20 | &lt;redacted&gt; | \|valence\| < 该阈值时不注入 prompt（默认 calm 不打扰） |
@@ -492,6 +502,9 @@
 | memory | `MEMORY_DEDUP_THRESHOLD` | 0.93 | — |  |
 | memory | `MEMORY_EMBED_MODEL` | 'Xenova/all-MiniLM-L6-v2' | — | ── 长期记忆嵌入模型 / collection / 相关性下限 ────────────── 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文 同义 0.7543 / 无关 0.6 |
 | memory | `MEMORY_MIN_SCORE` | 0 | — | 检索相关性下限(0..1)。0 = 不过滤,保持历史行为(纯 topK)。 换模型与调阈值刻意分成两次改动;标定必须用真实语料,别沿用旧模型下的经验值。 |
+| memory | `MEMORY_REMOTE_EMBED_ENDPOINTS` | '' | — |  |
+| memory | `MEMORY_REMOTE_EMBED_TIMEOUT_MS` | 5000 | — |  |
+| memory | `MEMORY_REMOTE_EMBED_TOKEN` | '' | — |  |
 | memory | `MEMORY_SENSITIVE_CHAT_IDS` |  | — | 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 始终私密，不受开关影响。 |
 | memory | `PROFILE_MERGE_CHAT_IDS` |  | — | 合并灰度群列表(逗号分隔 chatId,群为负数),空 = 对所有上下文生效。 |
 | memory | `PROFILE_MERGE_USAGE` | 'summarize' | — | 全局画像合并走哪个便宜模型 usage 路由。 |

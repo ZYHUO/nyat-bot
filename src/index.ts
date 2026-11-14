@@ -8,9 +8,9 @@ import { registerOutboundSecrets } from './shared/outbound-privacy.js';
 import { getConfig } from './shared/config.js';
 import { getRedis, closeRedis } from './db/redis.js';
 import { runMigrations, closeDb } from './db/sqlite.js';
-import { createBot, stopBot } from './bot/bot.js';
+import { createBot, stopBot, stopBotIngress } from './bot/bot.js';
 import { startWorker, closeWorker } from './queue/worker.js';
-import { startTaskWorker } from './queue/task-worker.js';
+import { startTaskWorker, closeTaskWorker } from './queue/task-worker.js';
 import { closeQueue } from './queue/producer.js';
 import { freeEncoder } from './ai/token-counter.js';
 import { initSmartGroup } from './ai/smart-group.js';
@@ -26,18 +26,24 @@ import { isMemoryAvailable, warmEmbedder } from './memory/chroma.js';
 import { callAllowlistReviewModel } from './allowlist/ai-call.js';
 import { configFromEnv, defaultGetRecentContext } from './allowlist/bot-flow.js';
 import type { AllowlistConfig } from './allowlist/types.js';
-import { getStartupOwnership } from './startup/ownership.js';
+import { getStartupOwnership, ownsMetaLoop, assertIngressHttpOwnership } from './startup/ownership.js';
+import { clearShutdownCheckpoint, writeShutdownCheckpoint } from './startup/shutdown-checkpoint.js';
+import { closeHttpServer } from './startup/close-http.js';
 import { getIngressMode, installPollHeartbeat, startIngressWatchdog } from './ingress/failover.js';
 import {
   shouldRegisterBotCommands,
   shouldWarmMemory,
 } from './startup/side-effects.js';
 import { preloadSkills } from './pipeline/tools/registry.js';
-import { startMetaLoop, stopMetaLoop } from './meta/index.js';
+import { startMetaLoop, stopMetaLoop, drainMetaLoop } from './meta/index.js';
 import { startCodeActWorker, closeCodeActWorker } from './subagent/index.js';
 import { getSandboxCapability } from './sandbox/terminal.js';
 import { assertMetaIsolationReady } from './startup/meta-isolation.js';
-import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, validateOneBotConfig } from './platform/onebot-runtime.js';
+import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, drainOneBotRecovery, getOneBotRuntimeStatus, validateOneBotConfig } from './platform/onebot-runtime.js';
+import { durableTelegramMiddleware, IngressNotAcceptedError, startInboxRecovery } from './ingress/durable.js';
+import type { Update } from 'grammy/types';
+import { startQqHeartBatchRecovery } from './meta/qq-heart-batch.js';
+import { processQqHeartBatch } from './meta/qq-heart-processor.js';
 
 import { installGlobalFetchProxy } from './shared/fetch-proxy.js';
 import { startDynamicLogLevel } from './shared/logger.js';
@@ -60,6 +66,10 @@ async function main(): Promise<void> {
 
   // 1. Validate env
   const config = env();
+  const processStartedAt = Date.now();
+  clearShutdownCheckpoint(config.SQLITE_PATH);
+  const ownership = getStartupOwnership();
+  assertIngressHttpOwnership(ownership, config);
   registerOutboundSecrets(Array.from(getProviders().values(), (provider) => provider.apiKey));
   validateOneBotConfig(config);
   logger.info({ nodeEnv: config.NODE_ENV }, 'Environment validated');
@@ -137,6 +147,8 @@ async function main(): Promise<void> {
     logger.info('Allowlist middleware registered');
   }
 
+  bot.use(durableTelegramMiddleware());
+
   // 7. Register member handler
   registerMemberHandler(bot, allowlistConfig);
 
@@ -161,7 +173,14 @@ async function main(): Promise<void> {
 
   registerFeedbackHandler();
 
-  const ownership = getStartupOwnership();
+  const stopTelegramRecovery = ownership.botIngress
+    ? startInboxRecovery('telegram', entry => bot.handleUpdate(entry.payload as Update)) : () => {};
+  if (ownership.botIngress) startQqHeartBatchRecovery(processQqHeartBatch, async () => {
+    if (!env().META_SUBAGENT_ENABLED || !env().HEART_ENABLED || !env().META_HEART_ENABLED || getOneBotRuntimeStatus().state !== 'ready') return false;
+    const { getSleepPhase } = await import('./tracking/sleep.js');
+    return await getSleepPhase() === 'awake';
+  });
+
   startOneBotRuntime(ownership.botIngress);
 
   // 8. Start BullMQ worker
@@ -258,7 +277,7 @@ async function main(): Promise<void> {
           'callback_query', 'inline_query', 'my_chat_member', 'chat_member',
         ],
       });
-      startIngressWatchdog(redis, 'polling');
+      startIngressWatchdog(redis, 'polling', { webhookAvailable: canWebhook });
     }
   } else {
     logger.info({ ownership }, 'Skipping bot ingress startup in non-owner process');
@@ -320,7 +339,7 @@ async function main(): Promise<void> {
   app.route('/monitor/api', monitorApi);
   app.use('/monitor/*', serveStatic({ root: './' }));
 
-  if (config.WEBHOOK_URL && config.WEBHOOK_SECRET) {
+  if (ownership.botIngress && config.WEBHOOK_URL && config.WEBHOOK_SECRET) {
     // Webhook endpoint for Telegram
     app.post('/webhook', async (c) => {
       const incoming = Buffer.from(c.req.header('X-Telegram-Bot-Api-Secret-Token') ?? '');
@@ -332,7 +351,12 @@ async function main(): Promise<void> {
         const update = await c.req.json();
         await bot.handleUpdate(update);
       } catch (err) {
-        logger.error({ err }, 'Error handling webhook update');
+        // grammY wraps middleware exceptions in BotError.error. Only a failed
+        // durable acceptance asks Telegram to redeliver; unknown started work
+        // stays held locally and must not be replayed indefinitely by HTTP.
+        const cause = err && typeof err === 'object' && 'error' in err ? err.error : err;
+        if (cause instanceof IngressNotAcceptedError) return c.json({ ok: false, accepted: false }, 503);
+        logger.error('Error handling webhook update');
       }
       return c.json({ ok: true });
     });
@@ -365,9 +389,7 @@ async function main(): Promise<void> {
 
   // 12.05 Meta+Subagent — Attention/callbacks Redis-backed.
   // Worker (or monolith) runs the loop; ingress-only only writes Redis.
-  if (ownership.worker) {
-    startMetaLoop();
-  } else if (ownership.cron && !ownership.botIngress) {
+  if (ownsMetaLoop(ownership)) {
     startMetaLoop();
   } else if (ownership.botIngress) {
     logger.info({ ownership }, 'Meta loop skipped on ingress-only (Redis Attention → worker)');
@@ -385,6 +407,13 @@ async function main(): Promise<void> {
     logger.info({ ownership }, 'Skipping memory warmup in non-owner process');
   }
 
+  // A worker/cron/HTTP process never enters the Telegram polling onStart callback.
+  // Its successful startup must clear the same watchdog after its roles are wired.
+  if (!ownership.botIngress) {
+    (globalThis as { __markBootReady?: () => void }).__markBootReady?.();
+    logger.info({ ownership }, 'Non-ingress roles initialized');
+  }
+
   // 13. Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -393,13 +422,12 @@ async function main(): Promise<void> {
 
     logger.info({ signal }, 'Shutting down…');
 
-    // Force exit if graceful shutdown hangs. 25s(不是 30s):systemd
-    // TimeoutStopSec=30 也在倒数,必须抢在 SIGKILL 之前自己退出留日志
-    // (status=9/KILL 会跳过 WAL checkpoint / token 记账 / BullMQ 锁释放)。
+    // Deployment sets TimeoutStopSec above this deadline. A timeout is a failed
+    // shutdown and must never produce the checkpoint required by backups.
     const forceTimer = setTimeout(() => {
       logger.error('Forced exit after shutdown timeout');
       process.exit(1);
-    }, 25_000);
+    }, 120_000);
     forceTimer.unref();
 
     // 分步日志:此前 'Shutting down…' 到 'Forced exit' 之间零日志,挂点
@@ -412,8 +440,8 @@ async function main(): Promise<void> {
       // 新消息持续打断→replan→起新 LLM 生成,30s 必然等不完。
       step('cron');
       pauseOneBotIngress();
-      const { closeQqHeartBatches } = await import('./meta/qq-heart-batch.js');
-      closeQqHeartBatches();
+      await stopTelegramRecovery();
+      await drainOneBotRecovery();
       stopCronJobs();
       stopMetaLoop();
       // 关机广播先于 stopBot:中止全部在飞主回合生成(actor 收到 Shutdown
@@ -434,9 +462,13 @@ async function main(): Promise<void> {
       // 用 bot 发消息"的前提不成立)。窗口内到达的消息停在 TG 服务端队列,
       // 重启后原样送达。
       step('ingress');
-      await stopBot();
+      await stopBotIngress();
       step('http+buffers');
-      server?.close();
+      await closeHttpServer(server);
+      const { drainIngressTasks } = await import('./ingress/background.js');
+      await drainIngressTasks();
+      const { drainQqHeartBatches } = await import('./meta/qq-heart-batch.js');
+      await drainQqHeartBatches();
       // Flush user-profile write buffers before closing DB
       try {
         const { _flushAllBuffers } = await import('./tracking/user-profile.js');
@@ -445,8 +477,13 @@ async function main(): Promise<void> {
       // 在飞 job 的 LLM fetch 已被 abort、deliver 睡眠挂了 shutdown 信号
       // → 秒级收尾,worker.close 不再无限期等。
       step('worker');
+      const { drainHeartbeat } = await import('./cron/heartbeat.js');
+      await drainHeartbeat();
+      await drainMetaLoop();
+      await closeTaskWorker();
       await closeCodeActWorker();
       await closeWorker();
+      await stopBot();
       stopOneBotRuntime();
       step('queue');
       await closeQueue();
@@ -456,16 +493,14 @@ async function main(): Promise<void> {
       step('redis+db');
       await closeRedis();
       closeDb();
-      try {
-        const { closeNyatDb } = await import('./nyatdb/index.js');
-        closeNyatDb();
-      } catch {
-        /* ignore */
-      }
+      const { closeNyatDb } = await import('./nyatdb/index.js');
+      closeNyatDb();
       freeEncoder();
+      writeShutdownCheckpoint(config.SQLITE_PATH, processStartedAt);
       logger.info('Shutdown complete');
     } catch (err) {
       logger.error({ err }, 'Error during shutdown');
+      process.exit(1);
     }
     process.exit(0);
   };

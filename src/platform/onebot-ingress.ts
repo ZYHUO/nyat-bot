@@ -12,6 +12,9 @@ import type { NormalizedMessage } from './types.js';
 import { registerOneBotMedia } from './onebot-media.js';
 import { assertOneBotMediaUrl } from './onebot-media-policy.js';
 import { getPlatformBotIdentity } from './account-context.js';
+import { createMessageEventIdentity } from '../shared/event-identity.js';
+import { currentIngressIdentity, runDurableIngress } from '../ingress/durable.js';
+import type { UpdateLike } from '../shared/types.js';
 
 export function parseOneBotIds(text: string): Set<string> {
   const ids = text.split(',').map(id => id.trim()).filter(Boolean);
@@ -90,7 +93,7 @@ export function oneBotToCoreUpdate(message: NormalizedMessage, recent: readonly 
   }
   if (!text.trim() && !reply) throw new PlatformBoundaryError('empty_message', 'QQ event has no usable content');
   if (text.length > 16000) throw new PlatformBoundaryError('message_too_large', 'QQ message exceeds the ingress limit');
-  return { update_id: mid, message: {
+  const update: Update & UpdateLike = { update_id: mid, message: {
     message_id: mid, date: Math.floor(message.timestampMs / 1000),
     chat: conversation.conversationKind === 'private'
       ? { id: chatId, type: 'private', first_name: message.senderName || conversation.id }
@@ -98,6 +101,8 @@ export function oneBotToCoreUpdate(message: NormalizedMessage, recent: readonly 
     from: { id: uid, is_bot: false, first_name: message.senderName || message.sender.id },
     text, entities, ...media, ...(reply ? { reply_to_message: reply } : {}),
   } };
+  update.__nyatEventIdentity = currentIngressIdentity() ?? createMessageEventIdentity({ ref: message.ref, occurredAt: message.timestampMs });
+  return update;
 }
 
 export async function ingestOneBotMessage(message: NormalizedMessage, context: { signal: AbortSignal },
@@ -106,12 +111,34 @@ export async function ingestOneBotMessage(message: NormalizedMessage, context: {
   if (!config.ONEBOT_ENABLED || context.signal.aborted) return;
   const chat = message.ref.conversation;
   if (chat.accountId !== config.ONEBOT_ACCOUNT_ID || message.sender.id === config.ONEBOT_ACCOUNT_ID) return;
+  if (chat.platform !== 'qq' || chat.idNamespace !== 'qq-number' || accountKey(chat) !== accountKey(message.sender)) {
+    throw new PlatformBoundaryError('wrong_account', 'QQ input must preserve the authenticated account');
+  }
+  if (chat.conversationKind === 'private' && chat.id !== message.sender.id) {
+    throw new PlatformBoundaryError('wrong_private_peer', 'Private sender must match the conversation peer');
+  }
   const allowed = parseOneBotIds(chat.conversationKind === 'group' ? config.ONEBOT_ALLOWED_GROUP_IDS : config.ONEBOT_ALLOWED_USER_IDS);
   if (allowed.size > 0 && !allowed.has(chat.id)) return;
   // Reject pre-activation imports and invalid future timestamps, not ordinary
   // delayed messages delivered after a brief reconnect.
   if (message.timestampMs < config.META_ACTIVATED_AT_SEC * 1000 || message.timestampMs > Date.now() + 300000) return;
   const chatId = getOrCreateConversationId(chat);
+  if (config.DURABLE_INGRESS_ENABLED) {
+    const identity = createMessageEventIdentity({ ref: message.ref, occurredAt: message.timestampMs });
+    // Capture the original normalized input before quote lookup, media handles,
+    // Redis dedup or commands. Recovery rechecks the same authorization above.
+    await runDurableIngress({ lane: 'onebot', chatId, identity, payload: message }, async (_source, acceptedPayload) => {
+      await processOneBotMessage(acceptedPayload as NormalizedMessage, context, handleCommand);
+    });
+    return;
+  }
+  await processOneBotMessage(message, context, handleCommand);
+}
+
+async function processOneBotMessage(message: NormalizedMessage, context: { signal: AbortSignal },
+  handleCommand?: (message: NormalizedMessage, context: { signal: AbortSignal }) => Promise<boolean>): Promise<void> {
+  const config = env();
+  const chatId = getOrCreateConversationId(message.ref.conversation);
   const recent = message.segments.some(part => part.type === 'reply') ? await getRecent(chatId, 100) : [];
   if (context.signal.aborted) return;
   const key = 'xxb:onebot:received:' + createHash('sha256').update(messageKey(message.ref)).digest('hex');

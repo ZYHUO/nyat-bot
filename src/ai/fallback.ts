@@ -2,7 +2,9 @@
 // Fallback chain + hedged request
 // ────────────────────────────────────────
 
-import type { AICallOptions, AICallResult } from './types.js';
+import type { AICallOptions, AICallResult, AIProviderOptions } from './types.js';
+import { assertBudgetAlive, requestBudgetError, strictBudgetError, strictMaxTokens,
+  STRICT_AI_DEADLINE_MS, STRICT_AI_MAX_REQUESTS, withinBudgetSignal } from './request-budget.js';
 import { callModel } from './provider.js';
 import { getUsage, getLabel } from './labels.js';
 import { emitLlmResult, emitLlmError } from './events.js';
@@ -115,6 +117,27 @@ async function callModelWithinLeaseTimeout(
 }
 
 export async function callWithFallback(options: AICallOptions): Promise<AICallResult> {
+  if (!options.beforeProviderRequest) return callWithFallbackInner(options);
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), STRICT_AI_DEADLINE_MS);
+  timer.unref();
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
+  let consumed = 0;
+  const beforeProviderRequest = async () => {
+    assertBudgetAlive(signal);
+    if (consumed >= STRICT_AI_MAX_REQUESTS) throw requestBudgetError('EXHAUSTED');
+    consumed++; // Synchronous reservation also bounds concurrent admission.
+    await options.beforeProviderRequest!(); // Durable driver CAS; no refund, including unknown outcomes.
+    assertBudgetAlive(signal);
+  };
+  try {
+    assertBudgetAlive(signal);
+    return await withinBudgetSignal(callWithFallbackInner({ ...options, signal, beforeProviderRequest,
+      maxTokens: strictMaxTokens(options.maxTokens), allowHedge: false, waitIfCooling: false }), signal);
+  } finally { clearTimeout(timer); }
+}
+
+async function callWithFallbackInner(options: AICallOptions): Promise<AICallResult> {
   const usage = getUsage(options.usage);
   const manualNames = [usage.label, ...usage.backups];
 
@@ -150,6 +173,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     // H4.2: usage 级 jsonMode 默认（judge/summarize 已开）——调用方显式值优先，
     // 未传时跟 usage 走。根治 stepfun 系脏 JSON（gate 529/norms 6-9/tick 同因）。
     jsonMode: options.jsonMode ?? usage.jsonMode,
+    ...(options.beforeProviderRequest ? { beforeProviderRequest: options.beforeProviderRequest } : {}),
   };
 
   const errors: Error[] = [];
@@ -173,6 +197,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   );
 
   for (let i = 0; i < smartOrderedNames.length; i++) {
+    if (options.beforeProviderRequest) assertBudgetAlive(options.signal);
     const labelName = smartOrderedNames[i]!;
 
     // Skip label already tried as a hedge
@@ -249,6 +274,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       void recordSmartGroupResult(labelName, result.latencyMs, true);
       return result;
     } catch (err) {
+      const denied = strictBudgetError(err);
+      if (denied) throw denied;
+      if (options.beforeProviderRequest) assertBudgetAlive(options.signal);
       errors.push(err instanceof Error ? err : new Error(String(err)));
 
       // External abort (turn interrupt) — don't fallback, surface immediately.
@@ -394,7 +422,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   // maxTimeoutMs 的延迟敏感路径（heart/gate）不等——它们本来就该快速失败。
   // `waitIfCooling` 让后台批任务覆盖"有 maxTimeoutMs/signal 就不等"的默认——
   // 它们不怕等，却因为设了那两条而被排除在这个重试之外。
-  const mayWait = options.waitIfCooling || (!options.maxTimeoutMs && !options.signal);
+  const mayWait = !options.beforeProviderRequest && (options.waitIfCooling || (!options.maxTimeoutMs && !options.signal));
   // 被在飞上限挡下时没有剩余冷却可参照：占坑的请求通常几秒内跑完，等一小会再试一次。
   // 只对**明确声明不怕等**的调用方（waitIfCooling）开放——默认路径（没有 maxTimeoutMs/signal
   // 的调用也算 mayWait）保持原行为，不因为这条改动多等；延迟敏感路径照旧立刻失败。
@@ -470,16 +498,16 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
  *  hedge 共用同一逻辑,修 codex #1:原来 hedge 直接用 callOpts、丢了 per-label 覆盖)。 */
 function attemptOptsFor(
   label: ReturnType<typeof getLabel>,
-  callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  callOpts: AIProviderOptions,
   maxTimeoutMs: number | undefined,
-): { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } {
+): AIProviderOptions {
   if (label.timeout === undefined && label.maxTokens === undefined) return callOpts;
   return {
     ...callOpts,
     timeout: label.timeout === undefined
       ? callOpts.timeout
       : (maxTimeoutMs !== undefined ? Math.min(label.timeout, maxTimeoutMs) : label.timeout),
-    maxTokens: label.maxTokens ?? callOpts.maxTokens,
+    maxTokens: callOpts.beforeProviderRequest ? strictMaxTokens(callOpts.maxTokens) : label.maxTokens ?? callOpts.maxTokens,
   };
 }
 
@@ -487,7 +515,7 @@ async function hedgedCall(
   primaryLabel: ReturnType<typeof getLabel>,
   hedgeLabel: ReturnType<typeof getLabel>,
   messages: AICallOptions['messages'],
-  callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  callOpts: AIProviderOptions,
   hedgeDelayMs: number,
   cooldown: CooldownTracker,
   rejectEmpty: boolean,

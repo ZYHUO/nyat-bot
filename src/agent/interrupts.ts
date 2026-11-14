@@ -29,6 +29,8 @@ export interface AgentInterrupt {
   //
   // 缺省 undefined = 旧数据/未判定，消费方按"未知"处理，不当成寻址。
   addressed?: boolean;
+  userId?: number;
+  messageThreadId?: number;
 }
 
 export async function pushInterrupt(

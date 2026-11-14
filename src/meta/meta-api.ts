@@ -1,3 +1,5 @@
+import { assertPendingIntentCurrent, pendingIntentEnabled, hasUnansweredIntentRevision } from './pending-intent.js';
+import type { PendingIntentRef } from './pending-intent.js';
 import { randomUUID } from "node:crypto";
 import { logger } from "../shared/logger.js";
 import { getGlobalState } from "./global-state.js";
@@ -53,6 +55,7 @@ export function buildMetaApiContext(opts?: {
   defaultTargetUserIds?: Map<number, number>;
   /** Default durable message event per chat (from Attention). */
   defaultCognitiveAnchorEventIds?: Map<number, string>;
+  defaultPendingIntents?: Map<number, PendingIntentRef>;
 }): Record<string, unknown> {
   const state = getGlobalState();
   const inferredCandidates = new Set([
@@ -329,7 +332,7 @@ export function buildMetaApiContext(opts?: {
 
       try {
         const { allQuotesAnswered } = await import("./answered.js");
-        if (await allQuotesAnswered(cid, quotes)) {
+        if (!quotes.some(id => hasUnansweredIntentRevision(opts?.defaultPendingIntents?.get(id))) && await allQuotesAnswered(cid, quotes)) {
           // Already answered — unclaim so gap-fill can still dispatch a
           // *different* (unanswered) L0 in the same chat this session.
           unclaim();
@@ -356,6 +359,7 @@ export function buildMetaApiContext(opts?: {
             layer,
             reason: "meta_llm_dispatch",
             messageId: quotes[0],
+            pendingIntent: quotes[0] ? opts?.defaultPendingIntents?.get(quotes[0]) : undefined,
             userId: args.targetUserId,
             textPreview: args.contentDirection.slice(0, 200),
             messageThreadId: args.messageThreadId,
@@ -390,7 +394,16 @@ export function buildMetaApiContext(opts?: {
         )
         .filter((n) => Number.isFinite(n) && n > 0 && !quotes.includes(n));
 
+      const pendingIntent = quoteId ? opts?.defaultPendingIntents?.get(quoteId) : undefined;
+      if (pendingIntentEnabled() && quotes.length && !pendingIntent) { unclaim(); return { taskId: 'pending_intent_missing' }; }
+      if (pendingIntentEnabled() && pendingIntent) {
+        if (pendingIntent.chatId !== cid || (args.targetUserId !== undefined && pendingIntent.senderId !== args.targetUserId)
+          || pendingIntent.threadId !== (args.messageThreadId ?? 0)) { unclaim(); return { taskId: 'pending_intent_mismatch' }; }
+        try { assertPendingIntentCurrent(pendingIntent); }
+        catch { unclaim(); return { taskId: "pending_intent_changed" }; }
+      }
       const task: DispatchTask = {
+        pendingIntent,
         id: randomUUID(),
         chatId: cid,
         contentDirection: sanitizeContentDirection(
@@ -428,7 +441,7 @@ export function buildMetaApiContext(opts?: {
         if (!quoteId) return;
         try {
           const { clearQuoteClaim } = await import("../subagent/task-store.js");
-          await clearQuoteClaim(cid, quoteId, task.id);
+          await clearQuoteClaim(cid, quoteId, task.id, task.pendingIntent);
         } catch {
           /* quote claim cleanup is best effort */
         }
@@ -439,7 +452,7 @@ export function buildMetaApiContext(opts?: {
         const { tryClaimQuote, tryMarkCodeActActive } =
           await import("../subagent/task-store.js");
         const quoteId = quotes[0] ?? 0;
-        if (quoteId > 0 && !(await tryClaimQuote(cid, quoteId, task.id))) {
+        if (quoteId > 0 && !(await tryClaimQuote(cid, quoteId, task.id, task.pendingIntent))) {
           unclaim();
           observeDecision(
             "skipped",

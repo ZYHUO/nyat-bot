@@ -9,8 +9,8 @@
 // 两段式：executor 把「声称完成」的 goal 置为 pending_close（goals.requestGoalClose），这里在观察期满后
 // 看世界的反应——观察期内该 goal 所在的聊天里，有没有**人**又提起这个话题：
 //   · 有 → 说明事情没真了结（或又起了波澜）→ 回 active，goal 继续被跟进
-//   · 没有 → 沉默即认可 → achieved（last_evidence='silence'，silence_closures++，
-//            与 verified_achievements 分开记账，不把「没人再提」冒充成「被独立验证」）
+//   · 没有 → stale（last_evidence='silence_unverified'，silence_closures++）。
+//            沉默只释放活跃名额，不证明成果达成，不能写 achieved。
 //
 // 局限，写在这里让下一个人别把它读成"理解"：
 //   · 判据是字符 bigram 重叠（goals.mentionsGoalTopic），不是语义；
@@ -80,11 +80,11 @@ export async function runGoalCloseSweep(nowSec = Math.floor(Date.now() / 1000)):
         logger.info({ goalId: g.id, topic: g.topic.slice(0, 40) }, 'goal reopened: topic mentioned again during close observation');
       } else {
         getDb().prepare(
-          `UPDATE goals SET status = 'achieved', last_evidence = 'silence', silence_closures = silence_closures + 1,
+          `UPDATE goals SET status = 'stale', last_evidence = 'silence_unverified', silence_closures = silence_closures + 1,
              updated_at = ? WHERE id = ? AND status = 'pending_close'`,
         ).run(nowSec, g.id);
         result.closed++;
-        logger.info({ goalId: g.id, topic: g.topic.slice(0, 40) }, 'goal closed by silence: no one raised it during observation');
+        logger.info({ goalId: g.id }, 'goal archived unverified after silence');
       }
     }
   } catch (err) {

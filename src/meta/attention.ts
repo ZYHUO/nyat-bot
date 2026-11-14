@@ -4,6 +4,8 @@ import { logger } from '../shared/logger.js';
 import type { AttentionItem, AttentionLayer } from './types.js';
 import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
 import { holdMetaScopeInput, inspectMetaAttention } from './input-scope.js';
+import { getStartupOwnership, ownsMetaLoop } from '../startup/ownership.js';
+import { pendingIntentEnabled, inspectPendingIntent, hasUnansweredIntentRevision } from './pending-intent.js';
 
 const REDIS_KEY = 'xxb:meta:attention';
 const MAX = 500;
@@ -15,6 +17,8 @@ let coalesceWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let coalesceWakeAt = 0;
 
 function scheduleCoalesceWake(delayMs: number): void {
+  // Ingress persists work for the owning process; it may not start a second Meta.
+  if (!ownsMetaLoop(getStartupOwnership())) return;
   const ms = Math.max(50, Math.ceil(delayMs));
   const wakeAt = Date.now() + ms;
   // This timer is shared across chats. A passive chat's quiet window must not
@@ -113,11 +117,13 @@ export class AttentionAccumulator {
 
   async ingestAsync(
     partial: Omit<AttentionItem, 'id' | 'createdAt' | 'pressure'> & { pressure?: number },
+    options?: { requireDurable?: boolean },
   ): Promise<AttentionItem | null> {
     const original = buildItem(partial);
     const scope = inspectMetaAttention(original);
     if (scope.status !== 'valid') {
       const held = scope.status === 'invalid' && await holdMetaScopeInput('attention', original, scope.reason);
+      if (!held && options?.requireDurable) throw new Error('attention_scope_not_persisted');
       if (!held) { this.local.push(original); scheduleCoalesceWake(1000); }
       return null;
     }
@@ -125,21 +131,23 @@ export class AttentionAccumulator {
     if (partial.messageId && partial.messageId > 0) {
       try {
         const { isMessageAnswered } = await import('./answered.js');
-        if (await isMessageAnswered(partial.chatId, partial.messageId)) {
+        if (!hasUnansweredIntentRevision(partial.pendingIntent) && await isMessageAnswered(partial.chatId, partial.messageId)) {
           logger.info(
             { chatId: partial.chatId, messageId: partial.messageId },
             'Attention skip ingest (already answered)',
           );
           return null;
         }
-      } catch {
+      } catch (err) {
+        if (options?.requireDurable) throw err;
         /* fail-open */
       }
     }
     const item = scope.value;
     try {
-      await this.persistPush(item);
+      await this.persistPush(item, options?.requireDurable);
     } catch (err) {
+      if (options?.requireDurable) throw err;
       logger.warn({ err }, 'Attention Redis push failed — keeping local only');
       this.local.push(item);
       if (this.local.length > MAX) this.local.splice(0, this.local.length - MAX);
@@ -151,13 +159,14 @@ export class AttentionAccumulator {
     return item;
   }
 
-  private async persistPush(item: AttentionItem): Promise<void> {
+  private async persistPush(item: AttentionItem, requireDurable = false): Promise<void> {
     const redis = getRedis();
-    await redis
+    const result = await redis
       .multi()
       .lpush(REDIS_KEY, JSON.stringify(item))
       .ltrim(REDIS_KEY, 0, MAX - 1)
       .exec();
+    if (requireDurable && (!result || result.some(([error]) => error))) throw new Error('attention_redis_transaction_failed');
   }
 
   async size(): Promise<number> {
@@ -213,8 +222,14 @@ export class AttentionAccumulator {
         continue;
       }
       if (now - (it.createdAt || 0) > MAX_AGE_MS) {
-        droppedStale += 1;
-        continue;
+        let explicitHold = false;
+        if (pendingIntentEnabled() && it.pendingIntent) {
+          try {
+            const intent = inspectPendingIntent(it.pendingIntent);
+            explicitHold = intent.state === 'held' || (intent.state === 'pending' && now - intent.changedAt <= MAX_AGE_MS);
+          } catch { unreadScopeState.push(it); continue; }
+        }
+        if (!explicitHold) { droppedStale += 1; continue; }
       }
       notStale.push(scope.value);
     }
@@ -240,8 +255,17 @@ export class AttentionAccumulator {
     }
     for (const candidate of notStale) {
       let it = candidate;
+      if (pendingIntentEnabled() && it.pendingIntent) {
+        try {
+          if (it.pendingIntent.chatId !== it.chatId || it.pendingIntent.senderId !== it.userId
+            || it.pendingIntent.threadId !== (it.messageThreadId ?? 0)) continue;
+          const intent = inspectPendingIntent(it.pendingIntent);
+          if (intent.state === 'cancelled' || intent.state === 'settled' || intent.state === 'stale') continue;
+          if (intent.state === 'held') { unreadScopeState.push(it); continue; }
+        } catch { unreadScopeState.push(it); continue; }
+      }
       if (answeredSet && it.messageId && it.messageId > 0) {
-        if (answeredSet.has(`${it.chatId}:${it.messageId}`)) {
+        if (answeredSet.has(`${it.chatId}:${it.messageId}`) && !hasUnansweredIntentRevision(it.pendingIntent)) {
           droppedAnswered += 1;
           continue;
         }
@@ -286,12 +310,14 @@ export class AttentionAccumulator {
     // Original timestamps survive busy requeue, so retries do not restart it.
     const coalesceMs = env().META_L0_COALESCE_MS;
     const directWindow = directCoalesceWindow();
-    const directBursts = new Map<number, { first: number; latest: number }>();
+    const lane = (it: AttentionItem): string => pendingIntentEnabled()
+      ? it.pendingIntent?.laneKey ?? `${it.chatId}:${it.userId ?? 'unknown'}:${it.messageThreadId ?? 0}` : String(it.chatId);
+    const directBursts = new Map<string, { first: number; latest: number }>();
     if (directWindow.quietMs > 0) {
       for (const it of sorted) {
         if (it.layer !== 'L0') continue;
-        const previous = directBursts.get(it.chatId);
-        directBursts.set(it.chatId, {
+        const previous = directBursts.get(lane(it));
+        directBursts.set(lane(it), {
           first: Math.min(previous?.first ?? it.createdAt, it.createdAt),
           latest: Math.max(previous?.latest ?? it.createdAt, it.createdAt),
         });
@@ -300,11 +326,13 @@ export class AttentionAccumulator {
     const directDeadlines = new Map([...directBursts].map(([chatId, burst]) => [
       chatId, Math.min(burst.latest + directWindow.quietMs, burst.first + directWindow.maxMs),
     ]));
-    const passiveLatest = new Map<number, number>();
+    const passiveLatest = new Map<string, number>();
+    const passiveFirst = new Map<string, number>();
     if (coalesceMs > 0) {
       for (const it of sorted) {
         if (it.chatId > 0 || it.layer === 'L0' || it.layer === 'L1_CALLBACK') continue;
-        passiveLatest.set(it.chatId, Math.max(passiveLatest.get(it.chatId) ?? 0, it.createdAt));
+        passiveLatest.set(lane(it), Math.max(passiveLatest.get(lane(it)) ?? 0, it.createdAt));
+        passiveFirst.set(lane(it), Math.min(passiveFirst.get(lane(it)) ?? it.createdAt, it.createdAt));
       }
     }
     const ready: AttentionItem[] = [];
@@ -315,8 +343,9 @@ export class AttentionAccumulator {
       // letting an older passive item dispatch separately while L0 is held.
       // Task callbacks never wait for user typing.
       const deadline = it.layer === 'L1_CALLBACK' ? undefined
-        : directDeadlines.get(it.chatId) ?? (it.layer !== 'L0' && passiveLatest.has(it.chatId)
-          ? passiveLatest.get(it.chatId)! + coalesceMs : undefined);
+        : directDeadlines.get(lane(it)) ?? (it.layer !== 'L0' && passiveLatest.has(lane(it))
+          ? Math.min(passiveLatest.get(lane(it))! + coalesceMs, pendingIntentEnabled()
+            ? passiveFirst.get(lane(it))! + Math.max(coalesceMs, 4000) : Infinity) : undefined);
       if (deadline !== undefined && deadline > now) {
         held.push(it);
         wakeIn = Math.min(wakeIn, deadline - now);
@@ -330,8 +359,22 @@ export class AttentionAccumulator {
       scheduleCoalesceWake(wakeIn);
     }
 
-    const picked = ready.slice(0, n);
-    const remain = [...ready.slice(n), ...held, ...unreadRecallState, ...unreadScopeState];
+    // Old source bubbles stay useful context, but only a lane containing its
+    // newest revision can dispatch. A late Heart result cannot bless stale text.
+    const eligible = pendingIntentEnabled() ? ready.filter(it => {
+      if (!it.pendingIntent) return true;
+      try {
+        const current = inspectPendingIntent(it.pendingIntent);
+        return current.state === 'pending' && ready.some(sibling => sibling.pendingIntent?.intentId === it.pendingIntent!.intentId
+          && sibling.pendingIntent.revision === current.currentRevision);
+      } catch {
+        // CLAIM_ALL has already removed this item from Redis. Retain it below
+        // when the final scope read fails, rather than losing accepted input.
+        return false;
+      }
+    }) : ready;
+    const picked = eligible.slice(0, n);
+    const remain = [...eligible.slice(n), ...ready.filter(it => !eligible.includes(it)), ...held, ...unreadRecallState, ...unreadScopeState];
 
     if (remain.length) {
       try {

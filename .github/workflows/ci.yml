@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/onebot-qq]
   pull_request:
-    branches: [main]
+    branches: [main, codex/onebot-qq]
   workflow_dispatch:
 
 jobs:
@@ -32,6 +32,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test
+      - run: node --import tsx scripts/verify-integration.mts --offline
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests/ops -p 'test_*.py' -v
 
   build:
     name: Build
@@ -45,3 +50,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: node --import tsx scripts/verify-deploy.mts

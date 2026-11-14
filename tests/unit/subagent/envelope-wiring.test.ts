@@ -1,4 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
 
 // 这个会话里反复出现的失败形态是"接上了但没接在活的那条路上"。
 // envelope iva已单测，这里要证明的是 **host-api 真的会调它**。
@@ -26,13 +28,13 @@ const envMock = { TRENCH_GATE_ENABLED: false, CODEACT_BANNED_WORDS: [] };
 vi.mock('../../../src/env.js', () => ({ env: () => envMock }));
 vi.mock('../../../src/memory/chroma.js', () => ({ searchMemory: vi.fn(async () => []), searchMemoryByUser: vi.fn(async () => []), memorizeMessage: vi.fn(async () => undefined) }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ addAssistant: vi.fn(async () => undefined), getRecent: vi.fn(async () => []) }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ set: vi.fn(async () => 'OK') }) }));
+vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ ...intentRedis, set: vi.fn(async () => 'OK') }) }));
 vi.mock('../../../src/meta/timing-adapter.js', () => ({ noteMetaBotReply: vi.fn(async () => undefined) }));
 vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined),
   answeredTimestamps: vi.fn(async () => [] as number[]) }));
 
 const { createHostApi } = await import('../../../src/subagent/host-api.js');
-beforeEach(() => { sendMessage.mockClear(); checkEnvelope.mockClear(); spendEnvelope.mockClear(); checkEnvelope.mockImplementation(async () => ({ ok: true, mode: 'off' })); });
+beforeEach(() => { intentRedis.reset(); sendMessage.mockClear(); checkEnvelope.mockClear(); spendEnvelope.mockClear(); checkEnvelope.mockImplementation(async () => ({ ok: true, mode: 'off' })); });
 
 describe('host-api 真的会调 envelope', () => {
   it('每次 sendText 都检查包络', async () => {

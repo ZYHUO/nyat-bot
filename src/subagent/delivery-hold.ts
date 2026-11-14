@@ -1,5 +1,6 @@
 import { getRedis } from '../db/redis.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
+import { isUnknownDelivery } from '../shared/delivery-result.js';
 import { randomUUID } from 'node:crypto';
 
 export const DELIVERY_UNKNOWN_SUMMARY = 'failed_delivery_unknown_no_retry';
@@ -24,8 +25,10 @@ export async function withCodeActDeliveryIntent<T>(
   chatId: number,
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (!isPlatformInternalId(chatId)) return operation();
-  if (!taskId) throw new CodeActDeliveryError('qq_delivery_task_required', 'not_sent');
+  if (!taskId) {
+    if (isPlatformInternalId(chatId)) throw new CodeActDeliveryError('qq_delivery_task_required', 'not_sent');
+    return operation(); // Legacy non-task callers have no replayable CodeAct identity.
+  }
   const intent = JSON.stringify({ taskId, chatId, at: Date.now(), code: 'delivery_in_flight', attempt: randomUUID() });
   let claimed: number;
   try { claimed = await getRedis().hsetnx(DELIVERY_HOLD_KEY, taskId, intent); }
@@ -56,10 +59,11 @@ export async function withCodeActDeliveryIntent<T>(
   return result;
 }
 
-/** Only trusted transport errors at a QQ send boundary can close a task. */
+/** Only structured transport/intent errors at a send boundary close a task. */
 export function isUnknownPlatformDelivery(chatId: number, error: unknown): boolean {
-  return isPlatformInternalId(chatId) && error !== null && typeof error === 'object'
-    && 'delivery' in error && error.delivery === 'unknown';
+  return isUnknownDelivery(error) || (error !== null && typeof error === 'object'
+    && 'delivery' in error && error.delivery === 'unknown'
+    && (isPlatformInternalId(chatId) || error instanceof CodeActDeliveryError));
 }
 
 /** No TTL: an old BullMQ payload must not become sendable after its task hash expires. */
@@ -68,7 +72,7 @@ export async function holdUnknownCodeActDelivery(taskId: string, chatId: number,
   await getRedis().hsetnx(DELIVERY_HOLD_KEY, taskId, JSON.stringify({ taskId, chatId, at: Date.now(), code: safeCode }));
 }
 
-/** Redis failure is deliberately not fail-open for a replayable QQ task. */
+/** Redis failure is deliberately not fail-open for a replayable task. */
 export async function isCodeActDeliveryHeld(taskId: string): Promise<boolean> {
   return (await getRedis().hget(DELIVERY_HOLD_KEY, taskId)) !== null;
 }

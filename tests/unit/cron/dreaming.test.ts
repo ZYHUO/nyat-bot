@@ -10,6 +10,8 @@ const mockEnv = {
   DREAMING_ENABLED: true,
   MASTER_UID: 7624515600,
   RELATIONSHIP_QUANT_ENABLED: false,
+  BACKGROUND_PUBLICATION_ENABLED: false,
+  BOT_TOKEN: '12345:synthetic',
 };
 
 vi.mock('../../../src/env.js', () => ({
@@ -60,6 +62,7 @@ function initSchema(db: Database.Database): void {
     'migrations/0018_self_history_relationship.sql',
     'migrations/0068_dreaming.sql',
     'migrations/0069_relationship_quant.sql',
+    'migrations/0131_background_publications.sql',
   ];
   for (const m of migrations) {
     db.exec(readFileSync(resolve(process.cwd(), m), 'utf-8'));
@@ -111,6 +114,7 @@ beforeEach(() => {
   testDb = new Database(':memory:');
   initSchema(testDb);
   mockEnv.DREAMING_ENABLED = true;
+  mockEnv.BACKGROUND_PUBLICATION_ENABLED = false;
   mockEnv.MASTER_UID = 7624515600;
   mockEnv.RELATIONSHIP_QUANT_ENABLED = false;
   redisMock.hgetall.mockClear();
@@ -170,6 +174,15 @@ describe('runDreaming guards', () => {
 });
 
 describe('runDreaming dispatch', () => {
+  it('registers the actual periodic task as background when deferred publication is enabled', async () => {
+    mockEnv.BACKGROUND_PUBLICATION_ENABLED = true;
+    const result = await runDreaming();
+    expect(result.status).toBe('done'); expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+    const task = enqueueCodeActJob.mock.calls[0]![0] as unknown as {id:string;executionMode:string;contentDirection:string;backgroundOrigin:{kind:string}};
+    expect(task).toMatchObject({executionMode:'background',backgroundOrigin:{kind:'dreaming'}});
+    expect(task.contentDirection).not.toContain('特权后台');
+    expect(testDb.prepare('SELECT state FROM background_checks WHERE task_id=?').get(task.id)).toEqual({state:'pending'});
+  });
   it('dispatches one CodeAct task to master DM with [dreaming] marker + inline prompt', async () => {
     const r = await runDreaming();
     expect(r.status).toBe('done');

@@ -20,6 +20,7 @@ import { isWithinActiveHours } from './active-hours.js';
 import { classifyCognitiveRoute, shouldApplyCognitiveRoute, type CognitiveRoutingDecision } from '../agent/cognitive-routing.js';
 import { getLatestTelegramMessageEventId } from '../agent/cognitive-events.js';
 import { checkProactiveActivation } from './activation-policy.js';
+import { prepareBackgroundTask } from '../agent/background-publication.js';
 
 // The global planner can choose a different destination, so it cannot receive
 // DM or sensitive-group content. Those chats keep their own scoped Meta context.
@@ -1267,12 +1268,15 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       const { enqueueCodeActJob } = await import('../subagent/queue.js');
       const planText = a.plan.length ? `\n计划:\n${a.plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}` : '';
-      await enqueueCodeActJob({
+      await enqueueCodeActJob(prepareBackgroundTask({
         id: `selfplay_${now}_${Math.floor(Math.random() * 1e6)}`,
         // chatId 仍用主人：沙盒/记忆挂靠身份；host 层 maxText/File=1，
         // 做完有意思可以给主人分享一句(+一个产物文件)，没意思就安静结束（2026-08-19 自主性修复）。
         chatId: e.MASTER_UID,
         contentDirection:
+          e.BACKGROUND_PUBLICATION_ENABLED
+            ? `自主检查：${a.idea}${planText}。没有人在等回复；只读取和检查。有新的已注册来源时提交发布草稿并 endTask("finding")；没有则 endTask("no_update")。`
+            :
           `[selfplay] 自主行动：${a.idea}${planText}\n` +
           `没有人在等你。专心做完，做完了自己评判：` +
           `有意思/值得给主人看 → sendText 分享一句（最多一条；有产物文件可 sendFile 一个），然后 runtime.endTask("做了什么/学到什么")。` +
@@ -1280,7 +1284,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         toneGuidance: '自主、专注、做完再说',
         createdAt: Date.now(),
         status: 'queued',
-      });
+      },{kind:'self_play',key:'self_play',sinceAt:now * 1000}));
       await redis.set(SELFPLAY_LAST_KEY, String(now));
       // Phase 3 satiate：自玩已派出 → autonomy 抑制（防连着开新坑）
       try {
@@ -1313,7 +1317,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         if (!targetChat) return;
         if (!(await checkProactiveActivation(targetChat, { nowSec: now })).allowed) return;
         const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
-        if (!(await tryAcquireProactiveSlot(targetChat, 'unified-tick-goal'))) return;
+        if (!e.BACKGROUND_PUBLICATION_ENABLED && !(await tryAcquireProactiveSlot(targetChat, 'unified-tick-goal'))) return;
         // 派发即占坑，避免下个 tick 同一 goal 再入队（真正 finding 仍由 executor 终态覆盖）。
         recordCheck(goal.id, null);
         // 记账：这是 tick 自己的选择。check_goal 是当前最高频的自发动作
@@ -1325,10 +1329,13 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           goalId: goal.id,
         }).catch(() => undefined);
         const { enqueueCodeActJob } = await import('../subagent/queue.js');
-        await enqueueCodeActJob({
+        await enqueueCodeActJob(prepareBackgroundTask({
           id: `goal_${goal.id}_${now}_${Math.floor(Math.random() * 1e6)}`,
           chatId: targetChat,
           contentDirection:
+            e.BACKGROUND_PUBLICATION_ENABLED
+              ? `持续检查目标 ${goal.id}：「${goal.topic}」。${subtaskContext}只读检查；有已注册同会话来源的真实新版本才能提交发布草稿并 endTask("finding")。没有可证明变化就 endTask("no_update")；失败也不自动外发。`
+              :
             `[goal:${goal.id}] 持续关注：「${goal.topic}」。` +
             `用 web.search 搜一下最新进展，或翻看最近聊天里有没有相关话题。` +
             (goal.last_finding ? `上次发现：${goal.last_finding}。` : `这是第一次检查。`) +
@@ -1342,8 +1349,8 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
           status: 'queued',
-        });
-        await markProactiveSent(targetChat, 'unified-tick-goal');
+        },{kind:'goal',key:String(goal.id),sinceAt:(goal.last_check_at ?? goal.created_at) * 1000}));
+        if (!e.BACKGROUND_PUBLICATION_ENABLED) await markProactiveSent(targetChat, 'unified-tick-goal');
         logger.info({ goalId: goal.id, topic: goal.topic.slice(0, 60) }, 'unified tick: goal check dispatched');
       } catch (err) {
         logger.warn({ err, goalId: a.goalId }, 'unified tick: check_goal failed');
