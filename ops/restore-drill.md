@@ -12,7 +12,7 @@
 
 ```sh
 /opt/nyatbot-python/bin/python3.12 -I /opt/nyatbot-backup/app/scripts/restore-drill.py \
-  --config /opt/nyatbot-backup/config.json \
+  --config /etc/nyatbot-backup/config.json \
   --run-id nyatbot-20261114T160000Z-abcdef123456
 ```
 
@@ -20,12 +20,12 @@
 
 ## 验证顺序与成功含义
 
-1. 从 crypt 远端先读取 manifest 和 COMPLETE，再将整代下载到新的空目录。校验封存时间、manifest SHA、精确文件集合、各文件 SHA/大小；云端缺失或下载失败即失败，不使用本机原备份补齐。下载完成再校验一次 manifest/COMPLETE，防止代号内容中途变化。
+1. 从 crypt 远端先读取 manifest 和 COMPLETE，再将整代下载到新的空目录。传输使用单并发、每秒一次请求、有限重试和 7200 秒总超时，处理真实遇到的 Drive 每分钟配额限制。校验封存时间、manifest SHA、精确文件集合、各文件 SHA/大小；最终下载失败即失败，不使用本机原备份补齐。下载完成再校验一次 manifest/COMPLETE，防止代号内容中途变化。
 2. 检查解包空间及 tar 路径/类型，调用控制器的 verify/restore_to_quarantine。所有恢复副本与云下载副本均保留，不覆盖既有目录，不执行归档内的代码。
 3. SQLite 运行完整性、外键检查，迁移列表与 manifest 完全比较，重新计算备份水位并比较。stdout 仅返回计数与水位 hash，不返回业务记录。
 4. 在额外工作副本上启动独立 Redis（默认 loopback 26379），等待 RDB 校验与加载完成；确认监听 socket 属于本次启动的 PID，统计恢复实例的 DB 数和 key 数。原 manifest 没有逐 DB 的冻结 key 数，因此这一项是加载证明，不声称与备份前在线 key 数相等。
 5. 在额外存储目录启动独立 Qdrant（默认 loopback 27333/27334），通过重复 snapshot 参数恢复所有集合。比较完整集合清单、dense/sparse 向量配置和冻结的精确 point count；从已校验的 metadata 重建缺失 aliases，再比较全部 aliases。生产 Qdrant 完全不参与这些 HTTP 操作。新备份在停写窗口调用 CountRequest 的 exact=true，将结果保存为 metadata.exactCounts。旧代缺少这个字段时，仍验证加载、结构和恢复后的计数，但回执 pointsMatched=null，明确没有冻结精确计数可供比较。存在但不完整或类型错误的 exactCounts 必须失败，不能退回旧模式。
-6. 再复制一份 NyatDB，独立 bundle 用 verifyOnOpen 加全页 CRC 检查打开；从实际 chat 页提取 scope，最多取三个会话、各三条记录验证 recent/get 一致，并验证不存在的 scope 不返回数据。检查的聊天正文不出进程。全页完整性验证与抽样索引验证是两个不同保证，不能将抽样描述为逐条业务恢复验收。
+6. 再复制一份 NyatDB，独立 bundle 先校验原始全部页的 CRC、页号和会话键精度，防止打开后的 checkpoint 掩盖损坏。旧内部 topic 键可以超过安全整数范围，但必须能精确往返 i64；不能当作 Telegram/QQ 用户编号检查。仅对这份额外副本重放 WAL、checkpoint 并重开，再验证全部持久索引的页、slot、会话和消息归属。从实际页选择最多三个有记录的会话、各三条记录，确认 recent 和 point 结果各自对应同会话同 ID 的真实物理版本；合法编辑的旧版本不要求与 point 最新版本相等，也不按时间戳推断追加顺序。另选择已证明不存在的 scope 做负向查询，不固定假设 0 为空。正文不出进程。全页、全索引归属和抽样业务读取是不同保证，不将抽样描述为逐条业务恢复验收。
 
 Redis 和 Qdrant 均只有私有 loopback 端口及每次生成的认证信息；配置中的生产端口、重复或已占用端口会提前拒绝。确认 /proc socket inode 属于本次 Popen PID 后才接受健康或数据响应，防止竞争绑定后误验生产服务。
 
@@ -33,7 +33,7 @@ Qdrant v1.18 的 [CollectionInfo 定义](https://api.qdrant.tech/v-1-18-x/api-re
 
 ## 回执、故障与清理
 
-stdout 和新工作目录下的 RESTORE_DRILL.json 只含聚合回执：状态、阶段、runId、校验值、计数、时间与 childrenStopped。任何阶段异常都退出非零；原始异常内容不进入回执。已经完成的阶段保留，未执行阶段不能被标为成功。
+stdout 和新工作目录下的 RESTORE_DRILL.json 只含聚合回执：状态、阶段、runId、校验值、计数、时间与 childrenStopped。任何阶段异常都退出非零；原始异常内容不进入回执。下载失败或超时的 stderr 仅存入本次私有工作目录的独占 0600 日志，最多 1 MiB，不记录命令、环境或配置导出的 stdout。已经完成的阶段保留，未执行阶段不能被标为成功。
 
 正常完成、异常、SIGTERM 或 SIGINT 都只关闭本次 Popen 子进程：先 terminate 和有限等待，必要时 kill 并等待；不按名称杀进程、不调用生产 systemd、不清除旧备份或本次恢复数据。SIGKILL/主机断电无法执行 Python finally，此工具不声称能自动清理这种情况；运维应在独立 service/cgroup 中运行，并检查遗留进程、目录和端口后再演练。未知投递记录保留原状态，后续人工核对独立于本工具。
 
