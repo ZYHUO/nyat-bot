@@ -41,9 +41,11 @@ describe('package.json 结构完好', () => {
     expect(Object.keys(pkg).sort()).toEqual(expected);
   });
 
-  it('③ dependencies 25 个 / devDependencies 12 个（round 61 差点归零）', () => {
-    expect(Object.keys(pkg['dependencies'] as object).length).toBe(25);
-    expect(Object.keys(pkg['devDependencies'] as object).length).toBe(12);
+  it('③ dependencies 26 个 / devDependencies 13 个（新增 OneBot ws 及类型声明）', () => {
+    expect(Object.keys(pkg['dependencies'] as object).length).toBe(26);
+    expect(Object.keys(pkg['devDependencies'] as object).length).toBe(13);
+    expect((pkg['dependencies'] as Record<string, string>)['ws']).toBe('^8.23.0');
+    expect((pkg['devDependencies'] as Record<string, string>)['@types/ws']).toBe('^8.18.2');
   });
 
   it('④ workspaces 与 engines 还在', () => {

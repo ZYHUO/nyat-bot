@@ -94,7 +94,7 @@ export async function evaluateMetaHeart(opts: {
     recentMessages = [formatted];
   }
 
-  const botUid = getBotUid() || 0;
+  const botUid = getBotUid(chatId) || 0;
   const nowSec = Math.floor(Date.now() / 1000);
   const messagesLast5Min = recentMessages.filter((m) => nowSec - (m.timestamp || 0) < 300).length;
 
@@ -209,7 +209,7 @@ export async function evaluateMetaHeart(opts: {
     message: formatted,
     recentMessages,
     botUid,
-    botName: getBotDisplayName(),
+    botName: getBotDisplayName(chatId),
     selfState,
     lastSpokeSecAgo,
     cognitiveWorkspaceHint,
@@ -348,8 +348,8 @@ export async function evaluateMetaHeart(opts: {
     try {
       const text = String(formatted.textContent ?? '');
       const { getBotUid, getBotIdentity } = await import('../bot/bot.js');
-      const toBot = formatted.replyTo?.uid === getBotUid();
-      const called = getBotIdentity().nicknames.some((n) => n && text.includes(n));
+      const toBot = formatted.replyTo?.uid === getBotUid(chatId);
+      const called = getBotIdentity(chatId).nicknames.some((n) => n && text.includes(n));
       if ((toBot || called) && text.trim()) {
         const { noteMissed } = await import('./missed.js');
         await noteMissed(chatId, {

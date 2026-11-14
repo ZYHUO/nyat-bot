@@ -40,12 +40,11 @@ describe('sendMessage marks the anchor answered', () => {
     expect(calls).toEqual([]);
   });
 
-  it('③ 分片路径和单片路径都标（两条 return 各一处）', () => {
-    // telegram.ts 的 sendMessage 有两条 return：shards.length > 1 的 first，
-    // 和单片的 messageId。两处都要有同一个 if 块。
+  it('③ QQ、Telegram 分片和单片成功路径都标', () => {
+    // 三条成功发送路径都必须记录 reply anchor；发送失败不标。
     const fs = require('node:fs') as typeof import('node:fs');
     const src = fs.readFileSync('src/bot/sender/telegram.ts', 'utf8');
     const hits = src.match(/markMessageAnswered\(chatId, replyToId\)/g) ?? [];
-    expect(hits.length).toBe(2);
+    expect(hits.length).toBe(3);
   });
 });

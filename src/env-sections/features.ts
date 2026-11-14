@@ -57,6 +57,9 @@ export const featuresSection = {
   STEPFUN_SEARCH_CATEGORY: z.string().default(''),
 
   CODEACT_WEB_SEARCH_ENABLED: booleanFromEnv.default(true),
+  // web.fetchToFile(url, path)：宿主侧（SSRF 守卫全沿用）抓取文本类资源并写进沙盒目录。
+  // 沙盒本身仍无网络（bwrap --unshare-all，有意为之）。默认关；见 sandbox/fetch-to-file.ts。
+  CODEACT_WEB_FETCH_TO_FILE_ENABLED: booleanFromEnv.default(false),
   // Subagent host pixiv/linux.sb 只读工具。默认关，按灰度开。
   CODEACT_PIXIV_ENABLED: booleanFromEnv.default(false),
   CODEACT_LINUXSB_ENABLED: booleanFromEnv.default(false),

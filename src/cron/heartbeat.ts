@@ -20,6 +20,9 @@
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../db/redis.js';
+import { runWithAiWorkload } from '../ai/workload.js';
+
+export type TickTaskOutcome = { status: 'completed' | 'skipped'; reason?: string };
 
 export type TickTask = {
   name: string;
@@ -30,7 +33,7 @@ export type TickTask = {
   /** 每周北京时间(0=周日..6=周六)。 */
   weeklyAt?: { day: number; hour: number; minute: number };
   /** 任务体。 */
-  run: () => Promise<void>;
+  run: () => Promise<void | TickTaskOutcome>;
 };
 
 const HEARTBEAT_MS = 30_000;
@@ -38,23 +41,38 @@ const LASTRUN_KEY = (name: string) => `xxb:tick:lastrun:${name}`;
 
 const registry: TickTask[] = [];
 let _heartbeat: NodeJS.Timeout | undefined;
+let _initialScan: NodeJS.Timeout | undefined;
 let _scanning = false;
 
-/** 北京时间的「当天 h:m」对应的 epoch 秒。 */
-function bjTodayAt(hour: number, minute: number): number {
-  const now = Date.now();
-  // 北京 = UTC+8,无 DST,直接算
-  const bjNow = now + 8 * 3600_000;
-  const bjMidnight = Math.floor(bjNow / 86400_000) * 86400_000;
-  return Math.floor((bjMidnight + (hour * 3600 + minute * 60) * 1000) / 1000);
+/** Return the UTC epoch seconds for a Beijing wall-clock time on today's date. */
+function bjTodayAt(hour: number, minute: number, nowSec: number): number {
+  const dayStart = Math.floor((nowSec + 8 * 3600) / 86400) * 86400 - 8 * 3600;
+  return dayStart + hour * 3600 + minute * 60;
 }
 
-/** 北京时间现在星期几(0=周日)与当天已过秒数。 */
-function bjNowParts(): { day: number; secOfDay: number } {
-  const bj = Date.now() + 8 * 3600_000;
-  const day = new Date(bj).getUTCDay();
-  const secOfDay = Math.floor((bj % 86400_000) / 1000);
-  return { day, secOfDay };
+/** Shared by dispatch and monitoring; overdue daily jobs retain their due time. */
+export function nextTickDueAt(task: TickTask, nowSec: number, lastRunSec: number, activationEpochSec = 0): number | null {
+  if (task.everySec !== undefined) {
+    if (lastRunSec > 0) return lastRunSec + task.everySec;
+    if (activationEpochSec > 0) {
+      // First activation spreads background work without inventing last-run evidence.
+      const hash = [...task.name].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 0);
+      return activationEpochSec + Math.min(task.everySec, 30 + hash % 900);
+    }
+    return nowSec;
+  }
+  if (task.dailyAt) {
+    const due = bjTodayAt(task.dailyAt.hour, task.dailyAt.minute, nowSec);
+    return Math.max(lastRunSec, activationEpochSec) < due ? due : due + 86400;
+  }
+  if (task.weeklyAt) {
+    const day = new Date((nowSec + 8 * 3600) * 1000).getUTCDay();
+    const due = bjTodayAt(task.weeklyAt.hour, task.weeklyAt.minute, nowSec);
+    let days = (task.weeklyAt.day - day + 7) % 7;
+    if (days === 0 && Math.max(lastRunSec, activationEpochSec) >= due) days = 7;
+    return due + days * 86400;
+  }
+  return null;
 }
 
 async function getLastRun(name: string): Promise<number> {
@@ -77,32 +95,8 @@ async function setLastRun(name: string, ts: number): Promise<void> {
 
 /** 判断任务是否到期。返回 true = 该跑了。 */
 async function isDue(task: TickTask, nowSec: number): Promise<boolean> {
-  const last = await getLastRun(task.name);
-
-  if (task.everySec !== undefined) {
-    // 间隔任务:last=0(从未跑过/Redis 丢)→ 立即跑,让新任务尽快生效
-    if (last === 0) return true;
-    return nowSec - last >= task.everySec;
-  }
-
-  if (task.dailyAt) {
-    const dueAt = bjTodayAt(task.dailyAt.hour, task.dailyAt.minute);
-    // 已过定点时刻,且今天没跑过(last < dueAt)→ 补跑
-    return nowSec >= dueAt && last < dueAt;
-  }
-
-  if (task.weeklyAt) {
-    const { day, secOfDay } = bjNowParts();
-    if (day !== task.weeklyAt.day) return false;
-    const dueSec = task.weeklyAt.hour * 3600 + task.weeklyAt.minute * 60;
-    if (secOfDay < dueSec) return false;
-    // 本周窗口已开;last 落在本周窗口开启之前(或从未跑)→ 跑
-    // 窗口开启时刻 = 今天定点;last < 那个时刻 = 这周还没跑过
-    const dueAt = bjTodayAt(task.weeklyAt.hour, task.weeklyAt.minute);
-    return last < dueAt;
-  }
-
-  return false;
+  const next = nextTickDueAt(task, nowSec, await getLastRun(task.name), env().PROACTIVE_ACTIVATED_AT_SEC ?? 0);
+  return next !== null && next <= nowSec;
 }
 
 async function scan(): Promise<void> {
@@ -112,7 +106,7 @@ async function scan(): Promise<void> {
     const nowSec = Math.floor(Date.now() / 1000);
     for (const task of registry) {
       try {
-        if (!(await isDue(task, nowSec))) continue;
+        if (_running.has(task.name) || !(await isDue(task, nowSec))) continue;
         // 先记 lastRun 再跑:防止任务跑很久期间心跳重入导致双发
         await setLastRun(task.name, nowSec);
         void safeRunTick(task.name, task.run);
@@ -142,38 +136,119 @@ const DEFAULT_CRON_TIMEOUT_MS = 5 * 60_000;
 
 const _running = new Set<string>();
 
-async function safeRunTick(name: string, fn: () => Promise<void>): Promise<void> {
-  if (_running.has(name)) {
-    logger.warn({ name }, 'Tick task already running, skipping');
-    return;
+export interface TickRuntimeSnapshot {
+  lastStartedAt: number | null;
+  lastFinishedAt: number | null;
+  durationMs: number | null;
+  result: 'completed' | 'skipped' | 'failed' | null;
+  reason: string | null;
+  timedOut: boolean;
+}
+
+const snapshots = new Map<string, TickRuntimeSnapshot>();
+const STATUS_KEY = (name: string) => `xxb:tick:status:${name}`;
+const SAFE_REASONS = new Set(['disabled', 'no_evidence', 'cooldown', 'model_skip', 'empty_output', 'unparsed', 'llm_failed', 'not_due']);
+
+function saveSnapshot(name: string, value: TickRuntimeSnapshot): void {
+  snapshots.set(name, value);
+  try {
+    const redis = getRedis();
+    if (redis.status === 'ready') void redis.set(STATUS_KEY(name), JSON.stringify(value), 'EX', 40 * 86400).catch(() => {});
   }
+  catch { /* Runtime metadata is best effort; a telemetry failure must not suppress the job. */ }
+}
+
+/** Explicit field projection: persisted metadata and errors never escape verbatim. */
+function decodeSnapshot(raw: string | null): TickRuntimeSnapshot | null {
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(raw) as Record<string, unknown>;
+    const num = (k: string) => typeof d[k] === 'number' && Number.isFinite(d[k]) && Number(d[k]) >= 0 ? Number(d[k]) : null;
+    return {
+      lastStartedAt: num('lastStartedAt'), lastFinishedAt: num('lastFinishedAt'), durationMs: num('durationMs'),
+      result: d.result === 'completed' || d.result === 'skipped' || d.result === 'failed' ? d.result : null,
+      reason: typeof d.reason === 'string' && SAFE_REASONS.has(d.reason) ? d.reason : null,
+      timedOut: d.timedOut === true,
+    };
+  } catch { return null; }
+}
+
+async function safeRunTick(name: string, fn: TickTask['run']): Promise<void> {
+  if (_running.has(name)) return;
   _running.add(name);
   const start = performance.now();
+  let current: TickRuntimeSnapshot = { lastStartedAt: Date.now(), lastFinishedAt: null, durationMs: null, result: null, reason: null, timedOut: false };
+  saveSnapshot(name, current);
   const timeoutMs = CRON_TIMEOUT_MS[name] ?? DEFAULT_CRON_TIMEOUT_MS;
-  // 锁只在 fn() 真正 settle 时释放,不在超时时释放:超时只记告警,锁握到
-  // fn 结束,下个心跳因锁在被正常跳过(防后台任务并发双发)。
-  const task = fn().then(
-    () => { logger.debug({ name, durationMs: Math.round(performance.now() - start) }, 'Tick task completed'); },
-    (err) => { logger.error({ err, name, durationMs: Math.round(performance.now() - start) }, 'Tick task failed'); },
+  const task = Promise.resolve().then(() => runWithAiWorkload('background', fn)).then(
+    (outcome) => {
+      current = { ...current, lastFinishedAt: Date.now(), durationMs: Math.round(performance.now() - start),
+        result: outcome?.status === 'skipped' ? 'skipped' : 'completed',
+        reason: outcome?.reason && SAFE_REASONS.has(outcome.reason) ? outcome.reason : null };
+      saveSnapshot(name, current);
+      logger.debug({ name, durationMs: current.durationMs }, 'Tick task completed');
+    },
+    (err: unknown) => {
+      current = { ...current, lastFinishedAt: Date.now(), durationMs: Math.round(performance.now() - start), result: 'failed' };
+      saveSnapshot(name, current);
+      logger.error({ err, name, durationMs: current.durationMs }, 'Tick task failed');
+    },
   ).finally(() => { _running.delete(name); });
-
   let timer: NodeJS.Timeout | undefined;
   try {
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`Tick task ${name} timed out after ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-    });
-    await Promise.race([task, timeout]);
-  } catch {
-    logger.warn(
-      { name, timeoutMs },
-      'Tick task exceeded timeout (仍在后台跑,锁保持到结束,不会并发起同名任务)',
-    );
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+    await Promise.race([task, new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        current = { ...current, timedOut: true };
+        saveSnapshot(name, current);
+        logger.warn({ name, timeoutMs }, 'Tick task exceeded timeout; overlap lock retained');
+        resolve();
+      }, timeoutMs);
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+export interface TickTaskObservation extends TickRuntimeSnapshot {
+  name: string;
+  registered: true;
+  running: boolean;
+  schedule: { everySec?: number; dailyAt?: { hour: number; minute: number }; weeklyAt?: { day: number; hour: number; minute: number } };
+  lastDispatchedAt: number | null;
+  nextRunAt: number | null;
+  due: boolean;
+  historyAvailable: boolean;
+}
+
+export async function getTickObservations(nowMs = Date.now()): Promise<TickTaskObservation[]> {
+  const tasks = [...registry];
+  if (!tasks.length) return [];
+  let rows: (string | null)[] = [];
+  let historyAvailable = false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const redis = getRedis();
+    if (redis.status === 'ready') {
+      rows = await Promise.race([
+        redis.mget(...tasks.flatMap((task) => [LASTRUN_KEY(task.name), STATUS_KEY(task.name)])),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('history unavailable')), 1000); }),
+      ]);
+      historyAvailable = true;
+    }
+  } catch { /* Show unknown history rather than block the monitor on Redis retries. */ }
+  finally { if (timer) clearTimeout(timer); }
+  return tasks.map((task, index) => {
+    const rawLast = rows[index * 2];
+    const last = rawLast && Number.isFinite(Number(rawLast)) ? Math.max(0, Number(rawLast)) : 0;
+    const saved = decodeSnapshot(rows[index * 2 + 1] ?? null);
+    const state = snapshots.get(task.name) ?? saved ?? { lastStartedAt: null, lastFinishedAt: null, durationMs: null, result: null, reason: null, timedOut: false };
+    const dueAt = historyAvailable ? nextTickDueAt(task, Math.floor(nowMs / 1000), last, env().PROACTIVE_ACTIVATED_AT_SEC ?? 0) : null;
+    return { ...state, name: task.name, registered: true, running: _running.has(task.name),
+      schedule: { everySec: task.everySec, dailyAt: task.dailyAt, weeklyAt: task.weeklyAt },
+      lastDispatchedAt: last > 0 ? last * 1000 : null,
+      nextRunAt: _heartbeat && dueAt !== null ? dueAt * 1000 : null,
+      due: !!_heartbeat && dueAt !== null && dueAt * 1000 <= nowMs,
+      historyAvailable,
+    };
+  });
 }
 
 // ── 对外 API ────────────────────────────────────────────────────────────────
@@ -191,19 +266,21 @@ export function registerTickTask(task: TickTask): void {
 export function startHeartbeat(): void {
   if (_heartbeat) return;
   // 首扫延迟 5s:等服务初始化(Redis/bot)就绪
-  setTimeout(() => { void scan(); }, 5_000);
+  _initialScan = setTimeout(() => { _initialScan = undefined; void scan(); }, 5_000);
   _heartbeat = setInterval(() => { void scan(); }, HEARTBEAT_MS);
   logger.info({ heartbeatMs: HEARTBEAT_MS, tasks: registry.length }, 'Tick heartbeat started');
 }
 
 /** 停止心跳(测试/关停用)。 */
 export function stopHeartbeat(): void {
+  if (_initialScan) { clearTimeout(_initialScan); _initialScan = undefined; }
   if (_heartbeat) {
     clearInterval(_heartbeat);
     _heartbeat = undefined;
   }
   registry.length = 0;
   _running.clear();
+  snapshots.clear();
   logger.info('Tick heartbeat stopped');
 }
 

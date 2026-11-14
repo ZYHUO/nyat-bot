@@ -20,6 +20,13 @@ export const selfSection = {
   // ── AGI Level 4 P4-B: 好奇心目标追踪（常驻）───────────────────────────
   // 把「值得持续关注的事」固化为 goal，unified-tick 周期性 CodeAct 查进展并汇报。
   GOAL_MAX_ACTIVE: z.coerce.number().int().positive().default(20),
+  // goal 的「待关闭」观察期（默认关）：证据门要 assessment=verified 才能关 goal，但 goal 检查任务
+  // 多半不发消息、没有 Echo 可观测，于是模型说「已完成」goal 也永远 active，占着名额
+  // （54 次 max active reached）。开启后：声称完成 → pending_close（不占名额）→ 观察期满，
+  // 若期间群里没人再提这个话题 → achieved（last_evidence='silence'，与 verified 分开记账）；
+  // 有人再提 → 回 active。不放宽证据门，不让模型自评。见 cron/goal-close-sweep.ts。
+  GOAL_CLOSE_OBSERVE_ENABLED: booleanFromEnv.default(false),
+  GOAL_CLOSE_OBSERVE_HOURS: z.coerce.number().int().min(1).max(24 * 14).default(48),
   // ── AGI Level 4 P4-C: 自我模型（常驻）────────────────────────────────
   // 每天凌晨复盘自己 24h 的回复表现 → ≤5 条自我认知注入回复 prompt。
   SELF_REFLECT_USAGE: z.string().default('judge'),
@@ -27,7 +34,9 @@ export const selfSection = {
   // 决策合并：一次 tick 一次 LLM 决定干什么（关心主人/群冒泡/自玩/查goal/安静），
   // 执行保留旧 cron 的执行器。已取代 idle/proactive-scan/thinker/self-play/goal-check。
   UNIFIED_TICK_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
-  UNIFIED_TICK_USAGE: z.string().default('judge'),
+  // 默认 'tick'（独立链，见 ai/labels.ts 的 tick 条目）：原来的 'judge' 与回复链共用 spacebunny，
+  // 在飞上限一满自主决策就 llm_failed（797 次里 794 次）。要退回旧行为把它设回 judge。
+  UNIFIED_TICK_USAGE: z.string().default('tick'),
   UNIFIED_TICK_HOUR_START: z.coerce.number().int().min(0).max(23).default(8),
   UNIFIED_TICK_HOUR_END: z.coerce.number().int().min(0).max(23).default(23),
   // 两次 self-play 的最小间隔（tick 内 self_play 动作的冷却否决）

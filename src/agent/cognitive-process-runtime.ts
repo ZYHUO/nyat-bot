@@ -48,7 +48,7 @@ async function projectConversation(wake: ProcessWake): Promise<string[]> {
   const field = await collectConversationField({
     chatId: wake.scope.chatId,
     recent,
-    botUid: getBotIdentity().uid,
+    botUid: getBotIdentity(wake.scope.chatId).uid,
     ...(wake.scope.taskId ? {} : {}),
     asOfEventId: wake.causeEventIds[0],
   });

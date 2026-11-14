@@ -1,9 +1,10 @@
 /**
  * grounding.ts — 启发式触发 / 脱敏 / Redis 存取 / 无证据丢弃 / 限流。
- * Redis 手 mock（Map -backed），executeSearch / callWithFallback mock。
+ * Redis 手 mock（Map -backed），typed search / callWithFallback mock。
  */
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { WebSearchOutcome } from '../../../src/pipeline/tools/search.js';
 
 // env flags per-test mutable
 const envState = { GROUNDING_ENABLED: true, GROUNDING_USAGE: 'judge' };
@@ -29,8 +30,9 @@ const redisMock = {
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 
 const executeSearch = vi.fn();
-vi.mock('../../../src/pipeline/tools/search.js', () => ({
-  executeSearch: (...args: unknown[]) => executeSearch(...args),
+vi.mock('../../../src/pipeline/tools/search.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/pipeline/tools/search.js')>(),
+  executeSearchDetailed: (...args: unknown[]) => executeSearch(...args),
 }));
 
 const callWithFallback = vi.fn();
@@ -46,7 +48,11 @@ import {
   takeGroundingBlock,
 } from '../../../src/meta/grounding.js';
 
-const EVIDENCE = '关于"新政策"的搜索结果：\n该政策确有其事，已于上月发布。\n来源：某新闻网';
+const EVIDENCE: WebSearchOutcome = {
+  status: 'ok', provider: 'DDG-Lite',
+  results: [{ title: '政策公告', snippet: '该政策已于上月发布。', url: 'https://example.org/policy' }],
+  attempts: [{ provider: 'DDG-Lite', status: 'success' }],
+};
 
 describe('looksFactualQuestion heuristic', () => {
   it('accepts question with ？', () => {
@@ -139,15 +145,31 @@ describe('maybeStartGrounding / takeGrounding', () => {
     expect(q).toContain('什么补贴是真的吗');
   });
 
-  it('stores nothing when search has no evidence', async () => {
-    executeSearch.mockResolvedValue('没有找到与"xxx"相关的结果。');
+  it.each(['empty', 'unavailable'] as const)('never summarizes or stores %s outcomes, even with stray text/results', async (status) => {
+    executeSearch.mockResolvedValue({ ...EVIDENCE, status, answer: '搜索不可用：blocked。' });
     await maybeStartGrounding({ chatId: -100, messageId: 8, text: '某地昨天是不是地震了？' });
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(await takeGrounding(-100, 8)).toBeNull();
+  });
 
-    executeSearch.mockResolvedValue('搜索失败: boom');
+  it('requires source rows even for an ok status', async () => {
+    executeSearch.mockResolvedValue({ ...EVIDENCE, results: [], answer: '没有引用的答案不是证据' });
     await maybeStartGrounding({ chatId: -100, messageId: 9, text: '某地昨天是不是又地震了？' });
+    expect(callWithFallback).not.toHaveBeenCalled();
     expect(await takeGrounding(-100, 9)).toBeNull();
+  });
+
+  it('keeps a host-written partial-search warning outside the LLM digest', async () => {
+    executeSearch.mockResolvedValue({ ...EVIDENCE, attempts: [
+      { provider: 'SearxNG', status: 'failed', code: 'timeout' }, ...EVIDENCE.attempts,
+    ] });
+    await maybeStartGrounding({ chatId: -100, messageId: 9, text: '这次发布的新政策是什么？' });
+    const digest = await takeGrounding(-100, 9);
+    expect(digest).toContain('部分搜索来源未能完成查询');
+    expect(digest).toContain('未作独立事实核验');
+    expect(digest).toContain('该新政策确有其事');
+    expect(JSON.stringify(callWithFallback.mock.calls[0])).toContain('https://example.org/policy');
+    expect(JSON.stringify(callWithFallback.mock.calls[0])).not.toContain('timeout');
   });
 
   it('stores nothing when LLM returns empty digest', async () => {

@@ -28,6 +28,8 @@ const envBase: Record<string, unknown> = {
   POST_TASK_WINDOW_ENABLED: false,
   MEMORY_CROSS_CONTEXT_ENABLED: false,
   MEMORY_VISIBILITY_ENABLED: false,
+  MEMORY_SENSITIVE_CHAT_IDS: [],
+  DM_AUTO_PRIVATE: true,
   DIGEST_PERSIST_ENABLED: true,
   GOAL_MAX_ACTIVE: 20,
 };
@@ -108,6 +110,7 @@ describe('promise loop (承诺闭环)', () => {
     vi.clearAllMocks();
     envBase.PROMISE_LOOP_ENABLED = true;
     envBase.MASTER_UID = MASTER;
+    envBase.MEMORY_SENSITIVE_CHAT_IDS = [];
     let mid = 100;
     sendMessage.mockImplementation(async () => ++mid);
     createGoal.mockReturnValue(42);
@@ -197,6 +200,27 @@ describe('promise loop (承诺闭环)', () => {
     envBase.PROMISE_LOOP_ENABLED = false;
     const r2 = await api.goals.add('另一件事');
     expect(r2.reason).toBe('promise_loop_disabled');
+  });
+
+  it('goals.add: even a master-DM task cannot schedule its content in another chat', async () => {
+    const { api } = await makeApi();
+    expect(await api.goals.add('private task', GROUP)).toEqual({ goalId: null, reason: 'goal_target_chat_mismatch' });
+    expect(await api.goals.add('invalid target', 0)).toEqual({ goalId: null, reason: 'goal_target_chat_mismatch' });
+    expect(createGoal).not.toHaveBeenCalled();
+    expect(await api.goals.add('same chat follow-up', MASTER)).toEqual({ goalId: 42, reason: 'created' });
+    expect(createGoal).toHaveBeenCalledWith(expect.objectContaining({ chatId: MASTER }), 20);
+  });
+
+  it('chat/member lookup never returns metadata from a sensitive source', async () => {
+    envBase.MEMORY_SENSITIVE_CHAT_IDS = [GROUP];
+    dbAll.mockReturnValue([{ chat_id: GROUP, uid: 7, username: 'private_marker', full_name: 'private name', sender_tag: null }]);
+    const { api } = await makeApi();
+    const chats = await api.chats.find('乐乐猫');
+    const members = await api.members.find('private_marker');
+    expect(Array.isArray(chats) ? chats : []).toEqual([]);
+    expect(Array.isArray(members) ? members : []).toEqual([]);
+    expect(getChatMember).not.toHaveBeenCalled();
+    expect(getChat).not.toHaveBeenCalled();
   });
 
   it('backstop: LLM judges unfulfilled promise → auto goal on endTask', async () => {

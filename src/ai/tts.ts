@@ -20,6 +20,7 @@ import { logger } from '../shared/logger.js';
 
 /** Per-command timeout. Short replies synthesize in ~1-3s; this is a safe ceiling. */
 const TTS_CMD_TIMEOUT_MS = 15_000;
+const MAX_STDERR_CHARS = 8192;
 
 /**
  * Synthesize `text` into an OGG/Opus buffer suitable for Telegram `sendVoice`.
@@ -45,7 +46,7 @@ export async function synthesizeVoice(text: string, voice?: string): Promise<Buf
   try {
     // 1. edge-tts → MP3
     await runCmd(
-      'python3',
+      cfg.TTS_PYTHON_PATH,
       ['-m', 'edge_tts', '--voice', useVoice, '--text', clean, '--write-media', mp3Path],
       TTS_CMD_TIMEOUT_MS,
     );
@@ -53,17 +54,22 @@ export async function synthesizeVoice(text: string, voice?: string): Promise<Buf
     // 2. ffmpeg → OGG/Opus (Telegram voice requirement: OggS + Opus codec).
     //    `-application voip` tunes the Opus encoder for speech.
     await runCmd(
-      'ffmpeg',
-      ['-y', '-i', mp3Path, '-c:a', 'libopus', '-b:a', '64k', '-application', 'voip', oggPath],
+      cfg.TTS_FFMPEG_PATH,
+      ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', mp3Path,
+        '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '64k',
+        '-application', 'voip', '-f', 'ogg', oggPath],
       TTS_CMD_TIMEOUT_MS,
     );
 
     const buf = await readFile(oggPath);
-    if (buf.length === 0) throw new Error('TTS produced an empty audio file');
+    const opusHeaderAt = buf.indexOf('OpusHead', 4, 'ascii');
+    if (buf.length < 47 || buf.subarray(0, 4).toString('ascii') !== 'OggS' || opusHeaderAt < 0 || opusHeaderAt > 512) {
+      throw new Error('TTS output is not an OGG/Opus audio file');
+    }
     return buf;
   } finally {
     // Best-effort cleanup of the temp dir; never let it throw.
-    rm(dir, { recursive: true, force: true }).catch(() => {});
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -90,28 +96,38 @@ export async function maybeSynthesizeVoice(text: string, voice?: string): Promis
 /** Spawn a command, resolve on exit code 0, reject on non-zero/error/timeout. */
 function runCmd(cmd: string, args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], shell: false, windowsHide: true });
     let stderr = '';
+    let finished = false;
+    let timedOut = false;
+    let killGrace: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (killGrace) clearTimeout(killGrace);
+      if (error) reject(error); else resolve();
+    };
     child.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
+      stderr = (stderr + d.toString()).slice(-MAX_STDERR_CHARS);
     });
-
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+      timedOut = true;
+      try { child.kill('SIGKILL'); }
+      catch { finish(new Error(`${cmd} timed out and could not be terminated`)); return; }
+      // Usually close follows immediately. Wait for it before deleting the
+      // temporary files; keep a bound if a broken child never emits close.
+      if (!finished) killGrace = setTimeout(() => finish(new Error(`${cmd} timed out after ${timeoutMs}ms`)), 1000);
     }, timeoutMs);
-
     child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`Failed to spawn ${cmd}: ${err.message}`));
+      finish(new Error(`Failed to spawn ${cmd}: ${err.message.slice(0, 500)}`));
     });
-
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
+      if (timedOut) finish(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+      else if (code === 0) finish();
       else {
-        const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-        reject(new Error(`${cmd} exited with code ${code}${detail}`));
+        const detail = stderr ? `: ${stderr.slice(-500)}` : '';
+        finish(new Error(`${cmd} exited with code ${code}${detail}`));
       }
     });
   });

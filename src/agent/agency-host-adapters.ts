@@ -63,7 +63,7 @@ export const observeFromHost: AgencyObserve = async (
       const { slimSingleMessage } = await import('../pipeline/context/slim.js');
       const { getBotUid } = await import('../bot/bot.js');
       const recent = await getRecent(chatId, 12);
-      const botUid = getBotUid() || 0;
+      const botUid = getBotUid(chatId) || 0;
       return { data: recent.map((m) => slimSingleMessage(m, botUid)) };
     }
     if (target === 'chat.summary') {

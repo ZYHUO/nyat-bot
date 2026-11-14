@@ -5,6 +5,10 @@
 
 ## Flags（默认全关，行为与改造前一致）
 
+启用前必须通过实际服务用户的 OS 隔离检查，见 [执行隔离边界](./ISOLATION.md)。
+当前 173 的非 root 服务无法建立 user namespace，META 与 CODEACT_ISOLATION 均保持关闭。
+下面的历史开关示例不能替代隔离预检；缺失隔离时生成代码不会在宿主进程执行。
+
 ```bash
 META_SUBAGENT_ENABLED=true
 META_SUBAGENT_CHAT_IDS=          # 空=全群启用

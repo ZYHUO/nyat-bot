@@ -1,7 +1,5 @@
-// Meta CodeAct sandbox — in-process vm, orchestration APIs only (no TG send).
-
-import { Script, createContext, type Context } from 'node:vm';
-import { logger } from '../shared/logger.js';
+import { executeIsolatedCode } from '../sandbox/codeact/runner.js';
+import { META_CAPABILITY_METHODS, selectCodeActCapabilities } from '../sandbox/codeact/capabilities.js';
 
 export interface MetaSandboxResult {
   output: string;
@@ -10,59 +8,20 @@ export interface MetaSandboxResult {
 }
 
 export class MetaSandbox {
-  private readonly context: Context;
-  private readonly logs: string[] = [];
+  /** Compatibility facade; generated code always goes through OS isolation. */
+  constructor(private readonly api: Record<string, unknown>, private readonly timeoutMs = 30_000) {}
 
-  constructor(api: Record<string, unknown>, timeoutMs = 30_000) {
-    const logs = this.logs;
-    const consoleProxy = {
-      log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-      warn: (...args: unknown[]) => logs.push('[warn] ' + args.map(String).join(' ')),
-      error: (...args: unknown[]) => logs.push('[error] ' + args.map(String).join(' ')),
-    };
-
-    const globals: Record<string, unknown> = {
-      console: consoleProxy,
-      JSON,
-      Math,
-      Date,
-      Array,
-      Object,
-      Map,
-      Set,
-      Promise,
-      String,
-      Number,
-      Boolean,
-      RegExp,
-      ...api,
-    };
-
-    this.context = createContext(globals, {
-      name: 'MetaSandbox',
-    });
-    // stash timeout for execute
-    (this as unknown as { _timeoutMs: number })._timeoutMs = timeoutMs;
-  }
-
-  execute(code: string): MetaSandboxResult {
-    this.logs.length = 0;
-    const timeoutMs = (this as unknown as { _timeoutMs: number })._timeoutMs ?? 30_000;
+  async execute(code: string): Promise<MetaSandboxResult> {
     try {
-      const wrapped = `"use strict";\n${code}`;
-      const script = new Script(wrapped, { filename: 'meta-codeact.js' });
-      const result = script.runInContext(this.context, { timeout: timeoutMs, displayErrors: true });
-      const output =
-        result === undefined || result === null
-          ? this.logs.join('\n')
-          : typeof result === 'string'
-            ? result
-            : JSON.stringify(result, null, 2);
-      return { output: output || '(no output)', error: false, logs: [...this.logs] };
+      const { value, logs } = await executeIsolatedCode(code, selectCodeActCapabilities(this.api, META_CAPABILITY_METHODS), {
+        timeoutMs: this.timeoutMs,
+      });
+      const output = value === undefined || value === null ? logs.join('\n')
+        : typeof value === 'string' ? value : JSON.stringify(value);
+      return { output: output || '(no output)', error: false, logs };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.debug({ err: msg }, 'Meta sandbox execution error');
-      return { output: msg, error: true, logs: [...this.logs] };
+      return { output: msg, error: true, logs: [] };
     }
   }
 }

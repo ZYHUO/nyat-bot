@@ -60,11 +60,21 @@ describe('重复锚点闸', () => {
 
   it('⑧ 闸在 sendMessage 之前（round 89 修：第一版放在 textSent+=1 之后，消息已发出）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
-    const gateIdx = s.indexOf('answeredTimestamps(chatId, firstReplyTo)');
-    const sendIdx = s.indexOf('const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId)');
+    const start = s.indexOf('sendText(text:');
+    const end = s.indexOf('sendFinal(text:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = s.slice(start, end);
+    const gateIdx = body.indexOf('answeredTimestamps(chatId, firstReplyTo)');
+    // Match the actual send call inside this sendText body, not a wrapper's
+    // definition or a comment elsewhere in the module.
+    const sends = [...body.matchAll(/^\s*const messageId = await sendWithDeliveryGuard\(\(\) => sendMessage\(chatId, part, replyTo, opts\.messageThreadId\)\);\s*$/gm)];
+    expect(sends).toHaveLength(1);
+    const sendIdx = sends[0]!.index;
     expect(gateIdx).toBeGreaterThan(-1);
     expect(sendIdx).toBeGreaterThan(-1);
     expect(gateIdx, '闸必须在 sendMessage 之前').toBeLessThan(sendIdx);
+    expect(sendIdx).toBeLessThan(body.indexOf('markMessageAnswered(chatId, mid)'));
   });
 
   it('⑨ 闸之后 markMessageAnswered 仍在（记账继续）', () => {

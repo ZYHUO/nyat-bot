@@ -23,11 +23,10 @@ export async function runBotCommandLearn(): Promise<void> {
     logger.warn({ err }, 'bot-command-scan: discover failed');
     return;
   }
-  const botUid = getBotUid();
   let total = 0;
   for (const chatId of chatIds) {
     try {
-      total += await learnChatBotCommands(chatId, botUid);
+      total += await learnChatBotCommands(chatId, getBotUid(chatId));
     } catch (err) {
       logger.debug({ err, chatId }, 'bot-command-scan: chat failed');
     }

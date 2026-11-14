@@ -64,6 +64,22 @@ describe('meta defer (Redis ZSET)', () => {
       expect(parsed.chatId).toBe(-1001);
       expect(parsed.deferCount).toBe(1);
       expect(parsed.reason).toBe('cooldown_defer');
+      expect(parsed.createdAt).toBeGreaterThan(Date.now() - 1_000);
+      expect(parsed.createdAt).toBeLessThanOrEqual(Date.now());
+    });
+
+    it('preserves the original scheduling time when deferring again', async () => {
+      const { scheduleMetaDeferReeval } = await import('../../../src/meta/defer.js');
+      await scheduleMetaDeferReeval({
+        chatId: -1001,
+        entry: { chatId: -1001, layer: 'L1', reason: 'again', createdAt: 1_700_000_000_000 },
+        deferCount: 1,
+        retryAfterMs: 10_000,
+        reason: 'again',
+      });
+      const stored = JSON.parse(zadd.mock.calls[0]![2] as string);
+      expect(stored.createdAt).toBe(1_700_000_000_000);
+      expect(stored.deferCount).toBe(2);
     });
 
     it('returns false when budget exhausted', async () => {

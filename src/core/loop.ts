@@ -12,6 +12,7 @@
 // ────────────────────────────────────────
 
 import { l0Rule } from '../pipeline/judge/judge.js';
+import { isMentioningSelf } from '../pipeline/judge/rules.js';
 import { microJudge } from '../pipeline/judge/micro.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { getBotUid, getBotIdentity } from '../bot/bot.js';
@@ -71,10 +72,7 @@ function detectDirectInteraction(
   botNicknames: string[],
 ): { mentioned: boolean; repliedToBot: boolean } {
   const text = message.textContent || message.captionContent || '';
-  const lower = text.toLowerCase();
-  const mentioned =
-    lower.includes(`@${botUsername.toLowerCase()}`) ||
-    botNicknames.some((n) => n && lower.includes(n.toLowerCase()));
+  const mentioned = isMentioningSelf(text, botUsername, botNicknames, botUid);
   return {
     mentioned,
     // replyTo 只有 messageId 没有 uid 时保守判 false（防把路人回复当@我）
@@ -85,8 +83,8 @@ function detectDirectInteraction(
 export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult> {
   const e = env();
   void e;
-  const botUid = getBotUid();
-  const botIdentity = getBotIdentity();
+  const botUid = getBotUid(input.chatId);
+  const botIdentity = getBotIdentity(input.chatId);
 
   // ── assembleState（只读，fail-soft） ──
   let state: CoreState | undefined;

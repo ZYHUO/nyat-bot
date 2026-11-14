@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let db: Database.Database;
+const envMock = vi.hoisted(() => ({ CORE_BLACKBOARD_ENABLED: true }));
+vi.mock('../../../../src/env.js', () => ({ env: () => envMock }));
 vi.mock('../../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -17,6 +19,7 @@ import {
 import { writeEntry, readEntry, setEntryStatus } from '../../../../src/core/blackboard/store.js';
 
 beforeEach(() => {
+  envMock.CORE_BLACKBOARD_ENABLED = true;
   db = new Database(':memory:');
   db.exec(readFileSync('migrations/0084_core_blackboard.sql', 'utf8'));
   _resetSnapshotForTest();
@@ -43,6 +46,18 @@ describe('snapshot isolation', () => {
   it('非 receipt 条目 L1 本来就有读权', () => {
     const r = writeEntry({ kind: 'proposal', author: 'l1', content: '{}', chatId: -100 });
     expect(visibleToL1(readEntry(r.id!))).toBe(true);
+  });
+
+  it('总闸关闭时已完成 receipt 也不能经读取路径暴露给 L1', () => {
+    const r = writeEntry({ kind: 'execution_receipt', author: 'l2', content: '{}', chatId: -100 });
+    expect(r.ok).toBe(true);
+    expect(setEntryStatus(r.id!, 'consumed')).toBe(true);
+    envMock.CORE_BLACKBOARD_ENABLED = false;
+    expect(readEntry(r.id!)).toBeNull();
+    expect(visibleToL1(readEntry(r.id!))).toBe(false);
+    expect(db.prepare('SELECT status FROM core_blackboard WHERE id = ?').get(r.id!)).toEqual({
+      status: 'consumed',
+    });
   });
 
   it('快照是冻结拷贝，后续 belief 变化不影响快照', () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { sanitizeContentDirection } from '../../../src/shared/message-text.js';
 import {
   buildL0ContentDirection,
   filterAttentionForMetaLlm,
@@ -9,6 +10,22 @@ import {
 } from '../../../src/meta/reply-context.js';
 
 describe('reply-context', () => {
+  it.each([true, false])('keeps host-verified owner identity through dispatch truncation (self reply=%s)', self => {
+    const messageId = 2 ** 52 + 13;
+    const options = {
+      who: `uid:${2 ** 52 + 12}`, messageId, textPreview: '帮我看看',
+      replyTo: { messageId: 2 ** 52 + 14, fullName: 'speaker', textSnippet: 'previous message' },
+      replyToIsSelf: self,
+    };
+    const owner = sanitizeContentDirection(buildL0ContentDirection({ ...options,
+      masterHint: '对方是本会话已核验的主人：亲近但不跪，在本会话能力与权限内执行，蠢了照样嫌弃。',
+    }), messageId);
+    expect(owner).toContain('本会话已核验的主人');
+    expect(owner.includes(`回复你的 #${2 ** 52 + 14}`)).toBe(self);
+    const ordinary = sanitizeContentDirection(buildL0ContentDirection(options), messageId);
+    expect(ordinary).not.toContain('本会话已核验的主人');
+  });
+
   it('detects bare @ pings', () => {
     expect(isBarePingText('@hunhebi_bot')).toBe(true);
     expect(isBarePingText('@hunhebi_bot~')).toBe(true);

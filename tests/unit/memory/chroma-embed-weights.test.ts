@@ -69,7 +69,7 @@ vi.mock('@qdrant/js-client-rest', () => ({
   },
 }));
 
-const { findEmbedOnnxWeights } = await import('../../../src/memory/chroma.js');
+const { findEmbedOnnxWeights, findMissingEmbedJson } = await import('../../../src/memory/chroma.js');
 
 const MODEL = envState.MEMORY_EMBED_MODEL;
 const CHAT = -100;
@@ -83,6 +83,13 @@ function makeFakeOnnx(root: string, file = 'model_quantized.onnx'): void {
   const dir = join(root, MODEL, 'onnx');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, file), Buffer.concat([Buffer.from([0x08, 0x01, 0x12, 0x00]), Buffer.alloc(2 * 1024 * 1024, 0x7f)]));
+}
+
+/** pipeline() 还要读的三个 JSON（config / tokenizer / tokenizer_config）。 */
+function makeFakeJson(root: string, files = ['config.json', 'tokenizer.json', 'tokenizer_config.json']): void {
+  const dir = join(root, MODEL);
+  mkdirSync(dir, { recursive: true });
+  for (const f of files) writeFileSync(join(dir, f), '{"ok":true}');
 }
 
 const tmps: string[] = [];
@@ -139,15 +146,42 @@ describe('findEmbedOnnxWeights —— "已在本地"的判定', () => {
   });
 });
 
+describe('findMissingEmbedJson —— 三个 JSON 齐不齐', () => {
+  it('齐 → []；缺 tokenizer.json → 只报它；redirect stub → 也算缺', () => {
+    const root = tmp();
+    makeFakeJson(root);
+    expect(findMissingEmbedJson(join(root, MODEL))).toEqual([]);
+    rmSync(join(root, MODEL, 'tokenizer.json'));
+    expect(findMissingEmbedJson(join(root, MODEL))).toEqual(['tokenizer.json']);
+    writeFileSync(join(root, MODEL, 'tokenizer.json'), 'Found. Redirecting to https://cdn');
+    expect(findMissingEmbedJson(join(root, MODEL))).toEqual(['tokenizer.json']);
+  });
+});
+
 describe('getEmbedder 的离线装载', () => {
-  it('⑥ 权重在本地 → pipeline 收到 local_files_only:true', async () => {
+  it('⑥ 权重 + 三个 JSON 都在本地 → pipeline 收到 local_files_only:true', async () => {
     const root = tmp();
     makeFakeOnnx(root);
+    makeFakeJson(root);
     cacheDir = root;
     const { memorizeMessage: fresh } = await importFresh();
     await fresh(CHAT, msg(1));
     expect(pipelineCalls.at(-1)).toMatchObject({ local_files_only: true });
     expect(upsertSpy).toHaveBeenCalledTimes(1); // 装载没被打断，写入照常
+  });
+
+  it('⑧ 权重在、tokenizer.json 缺 → 不能锁离线（2026-09-24→30 六天零成功就是锁了）', async () => {
+    const root = tmp();
+    makeFakeOnnx(root);
+    makeFakeJson(root, ['config.json', 'tokenizer_config.json']);
+    cacheDir = root;
+    const { memorizeMessage: fresh } = await importFresh();
+    await fresh(CHAT, msg(3));
+    expect(pipelineCalls.at(-1)).not.toHaveProperty('local_files_only');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ missingJson: ['tokenizer.json'] }),
+      expect.stringContaining('scripts/fetch-embed-model.mts'),
+    );
   });
 
   it('⑦ 权重不在本地 → 不带 local_files_only，并告警指明出路', async () => {

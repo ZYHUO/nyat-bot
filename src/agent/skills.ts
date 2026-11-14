@@ -10,6 +10,7 @@
 // ────────────────────────────────────────
 
 import { getDb } from '../db/sqlite.js';
+import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 
 export type SkillTier = 'small' | 'big';
@@ -86,6 +87,39 @@ export function recordSkillVerifiedUse(ids: number[], evidence: 'verified' | 'fa
     for (const id of ids) stmt.run(ts, id);
   } catch (err) {
     logger.warn({ err }, 'recordSkillVerifiedUse failed');
+  }
+}
+
+/** 记下某任务的 prompt 里注入了哪些 skill——证据延迟到达时按它记功（见 recordSkillVerifiedUseForTask）。 */
+export function recordSkillInjections(taskId: string, skillIds: number[]): void {
+  if (!taskId || !skillIds.length) return;
+  try {
+    const stmt = getDb().prepare(
+      `INSERT OR IGNORE INTO task_skill_injections (task_id, skill_id, created_at) VALUES (?, ?, ?)`,
+    );
+    const ts = Math.floor(Date.now() / 1000);
+    for (const id of skillIds) stmt.run(taskId, id, ts);
+  } catch (err) {
+    logger.debug({ err, taskId }, 'recordSkillInjections failed (non-critical)');
+  }
+}
+
+/**
+ * 任务的 host 证据被升成 verified 后，给它当时注入的 skill 记一次 verified use。
+ * 受 SKILL_VERIFIED_USE_ENABLED 约束（与 executor 里同步路径同一个开关）。
+ */
+export function recordSkillVerifiedUseForTask(taskId: string): number {
+  try {
+    if (env().SKILL_VERIFIED_USE_ENABLED !== true) return 0;
+    const ids = (getDb()
+      .prepare(`SELECT skill_id FROM task_skill_injections WHERE task_id = ?`)
+      .all(taskId) as Array<{ skill_id: number }>).map((r) => r.skill_id);
+    if (!ids.length) return 0;
+    recordSkillVerifiedUse(ids, 'verified');
+    return ids.length;
+  } catch (err) {
+    logger.debug({ err, taskId }, 'recordSkillVerifiedUseForTask failed (non-critical)');
+    return 0;
   }
 }
 

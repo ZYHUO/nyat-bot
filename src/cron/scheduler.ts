@@ -108,6 +108,18 @@ export function startCronJobs(deps?: CronDeps): void {
     },
   });
 
+  // Goal 待关闭观察期结算（默认关）：观察期满后看「群里有没有人再提」决定真关还是回 active。
+  if (env().GOAL_CLOSE_OBSERVE_ENABLED) {
+    reg({
+      name: 'goal-close-sweep',
+      everySec: 1800,
+      run: async () => {
+        const { runGoalCloseSweep } = await import('./goal-close-sweep.js');
+        await runGoalCloseSweep();
+      },
+    });
+  }
+
   // Debt sweep — 认知债务过期/到期扫描 + 预测误差摘要（CSR，默认关）
   if (env().DEBT_SWEEP_ENABLED) {
     reg({
@@ -516,7 +528,7 @@ export function startCronJobs(deps?: CronDeps): void {
     },
   });
 
-  // Dream journal — multi slot (北京时间,逗号分隔); model WRITE/SKIP; append entries
+  // DREAM_JOURNAL_CRON uses UTC; heartbeat dailyAt uses Beijing time.
   if (env().DREAM_JOURNAL_ENABLED) {
     const slots = env()
       .DREAM_JOURNAL_CRON.split(',')
@@ -524,7 +536,7 @@ export function startCronJobs(deps?: CronDeps): void {
       .filter(Boolean);
     let any = false;
     for (const djCron of slots) {
-      const at = parseCronToDaily(djCron);
+      const at = parseCronToDaily(djCron, 8);
       if (!at) {
         logger.warn({ expr: djCron }, 'Invalid DREAM_JOURNAL_CRON entry, skipped');
         continue;
@@ -534,8 +546,13 @@ export function startCronJobs(deps?: CronDeps): void {
         name: `dream-journal:${at.hour}:${at.minute}`,
         dailyAt: at,
         run: async () => {
-          const { runDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
-          await runDreamJournal({ slot: inferDreamSlot() });
+          const { tryWriteDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
+          const result = await tryWriteDreamJournal({ slot: inferDreamSlot() });
+          if (result.wrote) return { status: 'completed' as const };
+          if (result.reason === 'llm_failed') throw new Error('Diary model call failed');
+          const reason = result.reason === 'no_evidence' || result.reason === 'cooldown'
+            ? result.reason : 'model_skip';
+          return { status: 'skipped' as const, reason };
         },
       });
     }
@@ -753,7 +770,7 @@ export { isStarted };
 // ── cron 表达式兼容解析(迁移期 .env 里还是 cron 写法) ────────────────────
 
 /** 把简单 cron 表达式解析成「每天 h:m」;解析不了返回 null。 */
-function parseCronToDaily(expr: string): { hour: number; minute: number } | null {
+export function parseCronToDaily(expr: string, utcOffsetHours = 0): { hour: number; minute: number } | null {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return null;
   const [min, hour, dom, mon, dow] = parts;
@@ -762,7 +779,7 @@ function parseCronToDaily(expr: string): { hour: number; minute: number } | null
   const m = Number(min);
   const h = Number(hour);
   if (m > 59 || h > 23) return null;
-  return { hour: h, minute: m };
+  return { hour: ((h + utcOffsetHours) % 24 + 24) % 24, minute: m };
 }
 
 /** 把简单 cron 表达式解析成间隔分钟数;解析不了返回 null。 */

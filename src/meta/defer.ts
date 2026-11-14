@@ -25,6 +25,8 @@ export const META_DEFER_MAX_DELAY_MS = 600_000;
 /** 延迟重评条目——存进 Redis ZSET 的 JSON。 */
 export interface MetaDeferEntry {
   chatId: number;
+  /** Original scheduling time in milliseconds; legacy entries without it cannot replay. */
+  createdAt?: number;
   layer: AttentionLayer;
   reason: string;
   messageId?: number;
@@ -69,6 +71,7 @@ export async function scheduleMetaDeferReeval(args: {
   const fireAt = Date.now() + delayMs;
   const stored: MetaDeferEntry = {
     ...args.entry,
+    createdAt: args.entry.createdAt ?? Date.now(),
     deferCount: args.deferCount + 1,
   };
   const member = JSON.stringify(stored);

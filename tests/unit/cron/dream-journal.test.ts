@@ -84,9 +84,10 @@ describe('dream-journal', () => {
     const path = await runDreamJournal({ slot: 'bedtime' });
     expect(path).toBeTruthy();
     const { readFile } = await import('node:fs/promises');
-    const body = await readFile(dreamJournalPath(), 'utf8');
+    const body = await readFile(dreamJournalPath(undefined, { sourceChatId: 7624515600 }), 'utf8');
     expect(body).toContain('本喵');
-    expect(body.startsWith('# ')).toBe(true);
+    expect(body.startsWith('<!-- nyatbot-journal-source:v1:7624515600 -->')).toBe(true);
+    expect(body).toMatch(/^# /m);
     expect(body).toMatch(/^## /m);
   });
 

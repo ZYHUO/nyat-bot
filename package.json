@@ -64,6 +64,7 @@
     "sharp": "^0.32.6",
     "tiktoken": "^1.0.21",
     "undici": "^6.27.0",
+    "ws": "^8.23.0",
     "zod": "^3.25.34"
   },
   "devDependencies": {
@@ -71,6 +72,7 @@
     "@types/fast-levenshtein": "^0.0.4",
     "@types/node": "^22.20.1",
     "@types/node-cron": "^3.0.11",
+    "@types/ws": "^8.18.2",
     "chromadb": "^3.4.3",
     "eslint": "^9.39.5",
     "prettier": "^3.9.6",

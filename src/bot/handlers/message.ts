@@ -1,5 +1,7 @@
 import { getBotUid } from '../../bot/bot.js';
 import type { Bot, Context } from 'grammy';
+import type { Update } from 'grammy/types';
+import { isPlatformInternalId } from '../../platform/identity-store.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import { isDM } from '../../shared/chat.js';
@@ -33,8 +35,9 @@ import {
 } from '../../meta/bookkeeping.js';
 import { appendTelegramMessageEvent } from '../../agent/cognitive-events.js';
 
-async function handleUpdate(ctx: Context): Promise<void> {
-  const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
+/** Shared ingress after each platform has authenticated, filtered and mapped its event. */
+export async function ingestChatUpdate(update: Update): Promise<void> {
+  const msg = update.message ?? update.edited_message ?? update.channel_post ?? update.edited_channel_post;
   if (!msg) return;
 
   // Skip forum topic service messages (topic created/edited/closed/reopened) — no user content.
@@ -46,7 +49,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
   const chatId = msg.chat.id;
   const messageId = msg.message_id;
   const userId = msg.from?.id;
-  const isEdit = !!(ctx.editedMessage ?? ctx.editedChannelPost);
+  const isEdit = !!(update.edited_message ?? update.edited_channel_post);
 
   try {
     if (await isDuplicate(chatId, messageId, isEdit, msg.edit_date)) return;
@@ -66,7 +69,8 @@ async function handleUpdate(ctx: Context): Promise<void> {
   // AGI-003: durable metadata-only ingress fact. Keep the id locally so every
   // downstream path reads the same event-anchored snapshot.
   const cognitiveAnchorEventId = appendTelegramMessageEvent({
-    update: ctx.update,
+    platform: isPlatformInternalId(chatId) ? 'qq' : 'telegram',
+    update: update,
     chatId,
     messageId,
     ...(userId && userId > 0 ? { userId } : {}),
@@ -123,7 +127,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
     chatId,
     messageId,
     isEdit,
-    update: ctx.update,
+    update: update,
     enqueuedAt: Date.now(),
     cognitiveAnchorEventId,
   };
@@ -133,10 +137,10 @@ async function handleUpdate(ctx: Context): Promise<void> {
   // direct = DM/私聊、@bot、昵称、回复 bot、命令 —— 这类消息 bot 必须接,
   // 群聊普通消息不记 direct(决定不插话是正常行为,不触发沉默告警)。
   if (userId && msg.from && !msg.from.is_bot && userId !== 1087968824) {
-    const directKind = detectDirectInteraction(ctx.update, {
-      botUid: getBotIdentity().uid,
-      botUsername: getBotIdentity().username,
-      botNicknames: getBotIdentity().nicknames,
+    const directKind = detectDirectInteraction(update, {
+      botUid: getBotIdentity(chatId).uid,
+      botUsername: getBotIdentity(chatId).username,
+      botNicknames: getBotIdentity(chatId).nicknames,
       editByContentOnly: true,
     });
     // 沉默告警只关心「bot 必须接话」的消息:
@@ -164,8 +168,8 @@ async function handleUpdate(ctx: Context): Promise<void> {
   // Meta+Subagent path: feed Attention; skip legacy reply path (avoid double reply).
   // Slash / checkin·stats NL → legacy. Gacha/game/DM-relay → Meta ingress intercepts.
   if (isMetaSubagentChat(chatId) && !isEdit) {
-    const botIdentity = getBotIdentity();
-    const directKind = detectDirectInteraction(ctx.update, {
+    const botIdentity = getBotIdentity(chatId);
+    const directKind = detectDirectInteraction(update, {
       botUid: botIdentity.uid,
       botUsername: botIdentity.username,
       botNicknames: botIdentity.nicknames,
@@ -179,7 +183,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
       logger.info({ chatId, messageId }, 'Meta path: slash/checkin-stats → legacy pipeline');
       // fall through
     } else {
-      const formatted = formatMessage(ctx.update);
+      const formatted = formatMessage(update);
       if (!formatted) {
         logger.debug({ chatId, messageId }, 'Meta path: formatMessage empty, drop');
         return;
@@ -266,7 +270,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
                 chatId,
                 message: fm,
                 recent,
-                botUid: getBotIdentity().uid,
+                botUid: getBotIdentity(chatId).uid,
                 enabled: env().NYATOS_SHADOW_ENABLED,
                 chatIds: env().NYATOS_SHADOW_CHAT_IDS,
               });
@@ -306,7 +310,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
           formatted: fm,
           isDirect,
           layer: layerDec.layer === 'L1_CALLBACK' ? 'L1' : layerDec.layer,
-          update: ctx.update,
+          update: update,
           messageId,
         });
         if (sleep === 'silent' || sleep === 'queued') {
@@ -437,7 +441,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
           // 修法不是加规则，是把宿主已经算出的那个事实（botClass）在本路径也算出来，
           // 并按 BOT_DENOISE_ENABLED 尊重它。verify/ad/echo 三类是"非对话型 bot"，
           // 宿主据此不烧心流；其余照旧。
-          if (fm.isBot && Number(fm.uid ?? 0) !== getBotUid() && chatId < 0) {
+          if (fm.isBot && Number(fm.uid ?? 0) !== getBotUid(chatId) && chatId < 0) {
             // bot 消息的两道闸（结构 + 语义）抽在 meta-bot-gate.ts —— 单一来源、可单测。
             // 内联在闭包里那段没有任何测试能碰到，round 1 的"验证 bot 被回复 6 次"
             // 就是这个缺口的结果。详细理由见那个文件顶部。
@@ -767,8 +771,8 @@ async function handleUpdate(ctx: Context): Promise<void> {
   }
 
   if (isTurnActorChat(chatId)) {
-    const botIdentity = getBotIdentity();
-    const directKind = detectDirectInteraction(ctx.update, {
+    const botIdentity = getBotIdentity(chatId);
+    const directKind = detectDirectInteraction(update, {
       botUid: botIdentity.uid,
       botUsername: botIdentity.username,
       botNicknames: botIdentity.nicknames,
@@ -776,7 +780,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
     });
     const isDirect = directKind !== null;
 
-    const formatted = formatMessage(ctx.update);
+    const formatted = formatMessage(update);
     const activeObligationId = await getActiveObligationId(chatId);
     const activeObligation = activeObligationId ? await getObligation(chatId, activeObligationId) : null;
     const isCancel =
@@ -816,7 +820,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
       !/[。.!?！？…~〜)）」』"”\]】]$/.test(msgTextRaw);
 
     await appendPending({
-      update: ctx.update,
+      update: update,
       chatId,
       messageId,
       enqueuedAt: Date.now(),
@@ -847,4 +851,15 @@ export function registerMessageHandlers(bot: Bot): void {
   bot.on('edited_message', handleUpdate);
   bot.on('channel_post', handleUpdate);
   bot.on('edited_channel_post', handleUpdate);
+}
+
+async function handleUpdate(ctx: Context): Promise<void> {
+  // Telegram identifiers fit in 52 bits. Reserved internal IDs only enter via
+  // the authenticated platform gateway, never from a Telegram update.
+  const msg = ctx.message ?? ctx.editedMessage ?? ctx.channelPost ?? ctx.editedChannelPost;
+  if (msg && [msg.chat.id, msg.from?.id, msg.message_id].some(id => id !== undefined && isPlatformInternalId(id))) {
+    logger.warn('Rejected Telegram update with reserved platform identifier');
+    return;
+  }
+  await ingestChatUpdate(ctx.update);
 }

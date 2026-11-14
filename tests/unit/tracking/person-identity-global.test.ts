@@ -50,6 +50,8 @@ beforeEach(() => {
   initSchema(testDb);
   groupsByUid.clear();
   dmsByUid.clear();
+  envValues['MEMORY_VISIBILITY_ENABLED'] = true;
+  envValues['MEMORY_SENSITIVE_CHAT_IDS'] = [];
 });
 
 describe('getUserContexts(机制2:群 ∪ DM)', () => {
@@ -116,14 +118,50 @@ describe('全局画像 setGlobalProfile / getGlobalProfile(机制2 schema)', () 
 describe('buildCrossGroupInjection(机制3:全局画像优先 + 群内 scrub 私聊来源)', () => {
   const fresh = () => Math.floor(Date.now() / 1000);
 
-  it('有全局画像 → 优先注入结构化全局印象(可注群,safe-by-construction)', () => {
+  it('只有共享群来源的全局画像可注入另一个群', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, ?, ?, 2, ?)')
       .run('原始印象', GROUP_A, fresh());
-    setGlobalProfile(42, { traits: ['毒舌'], interests: ['猫'], commStyle: '短句', relationToBot: '老熟人', stablePatterns: [], sourceContextIds: [GROUP_A, DM], confidence: 0.8 });
+    setGlobalProfile(42, { traits: ['毒舌'], interests: ['猫'], commStyle: '短句', relationToBot: '老熟人', stablePatterns: [], sourceContextIds: [GROUP_A, -1003], confidence: 0.8 });
     const out = buildCrossGroupInjection(42, GROUP_B);
     expect(out).toContain('别的地方也认识');
     expect(out).toContain('毒舌');
     expect(out).toContain('老熟人');
+  });
+
+  it('开启 visibility 也不能把 DM 提炼物注入群，回退到有共享来源的原始印象', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, ?, ?, 2, ?)')
+      .run('群里公开的印象', GROUP_A, fresh());
+    setGlobalProfile(42, { traits: ['来自私聊的秘密'], interests: [], commStyle: '', relationToBot: '', stablePatterns: [], sourceContextIds: [GROUP_A, DM], confidence: 0.8 });
+    for (const enabled of [true, false]) {
+      envValues['MEMORY_VISIBILITY_ENABLED'] = enabled;
+      const out = buildCrossGroupInjection(42, GROUP_B);
+      expect(out).toContain('群里公开的印象');
+      expect(out).not.toContain('来自私聊的秘密');
+    }
+  });
+
+  it('混合摘要只可回到其私密来源，不可进入另一个私聊', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, NULL, ?, 2, ?)')
+      .run(GROUP_A, fresh());
+    setGlobalProfile(42, { traits: ['私聊来源事实'], interests: [], commStyle: '', relationToBot: '', stablePatterns: [], sourceContextIds: [GROUP_A, DM], confidence: 0.8 });
+    expect(buildCrossGroupInjection(42, DM)).toContain('私聊来源事实');
+    expect(buildCrossGroupInjection(42, 43)).toBeNull();
+  });
+
+  it('来源缺失或包含敏感群的全局摘要不会跨出', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, NULL, ?, 2, ?)')
+      .run(GROUP_A, fresh());
+    envValues['MEMORY_SENSITIVE_CHAT_IDS'] = [-1009];
+    for (const sources of [[], [-1009], [0]]) {
+      setGlobalProfile(42, { traits: ['不能证明可共享'], interests: [], commStyle: '', relationToBot: '', stablePatterns: [], sourceContextIds: sources, confidence: 0.8 });
+      expect(buildCrossGroupInjection(42, GROUP_B)).toBeNull();
+    }
+  });
+
+  it('原始 impression 来源缺失时不会跨群注入', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, ?, NULL, 2, ?)')
+      .run('来源不明的旧摘要', fresh());
+    expect(buildCrossGroupInjection(42, GROUP_B)).toBeNull();
   });
 
   it('无全局画像 + impression 来自 DM(私密)+ 注入进群 → scrub 掉(返回 null)', () => {

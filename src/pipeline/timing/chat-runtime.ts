@@ -258,7 +258,7 @@ export async function handleWaitResume(args: {
       const { resumeMetaWaitAttention } = await import('../../meta/timing-adapter.js');
       const resumed = await resumeMetaWaitAttention(chatId);
       if (resumed) {
-        logger.info({ chatId, anchorMessageId: waitResume?.anchorMessageId }, 'wait-resume → Meta Attention');
+        logger.info({ chatId, anchorMessageId: waitResume?.anchorMessageId }, 'wait-resume handled by Meta');
         return;
       }
     } catch (err) {

@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import { resolveReplyPath } from "../../shared/types.js";
+import { isPlatformInternalId } from '../../platform/identity-store.js';
 import type {
   FormattedMessage,
   JudgeResult,
@@ -60,9 +61,13 @@ export function isMentioningSelf(
   text: string,
   botUsername: string,
   botNicknames: string[],
+  botUid?: number,
 ): boolean {
   const lower = text.toLowerCase();
-  if (lower.includes(`@${botUsername.toLowerCase()}`)) return true;
+  if (botUsername && lower.includes(`@${botUsername.toLowerCase()}`)) return true;
+  // QQ's typed @ segment is rendered as its isolated internal UID by ingress.
+  if (botUid !== undefined && Number.isSafeInteger(botUid) && botUid > 0 && isPlatformInternalId(botUid)
+    && new RegExp(`@${botUid}(?!\\d)`).test(text)) return true;
   for (const nick of botNicknames) {
     if (!nick) continue;
     const nickLower = nick.toLowerCase();
@@ -136,7 +141,7 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   if (msg.isBot && msg.uid !== botUid) {
     // Only consider replying if bot mentions us or replies to us
     if (
-      !isMentioningSelf(text, botUsername, botNicknames) &&
+      !isMentioningSelf(text, botUsername, botNicknames, botUid) &&
       !isReplyToSelf(msg, botUid)
     ) {
       return makeResult("IGNORE", "bot_message");
@@ -193,7 +198,7 @@ export function evaluateRules(ctx: RuleContext): JudgeResult | null {
   }
 
   // 4. Direct @self or nickname mention → REPLY
-  if (isMentioningSelf(text, botUsername, botNicknames)) {
+  if (isMentioningSelf(text, botUsername, botNicknames, botUid)) {
     // mute/unmute/记住/忘掉 关键词触发已下线 → directive.ts(回复前 LLM 指令分类)。
     return makeResult("REPLY", "mention_self", { skipPathResolution: true });
   }

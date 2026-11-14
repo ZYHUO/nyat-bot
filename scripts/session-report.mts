@@ -715,6 +715,86 @@ console.log('── 2c. cron 产出率（跑了但什么都没产出 = 静默失
   console.log('     dreaming 805 次 0%、distiller 473/73=13%、post-task 失败 2104 次、');
   console.log('     topic-scan 2040 次调用只抽 91 个标签（4.5%）。全是"跑了但什么都没产出"。');
 
+// ── 2e. AGI 维度（2026-10-01）──────────────────────────────────────────────
+// 每行写清「分子 / 分母 / 窗口」。读不到的写"未读到"，不写 0——0 有四种读法
+// （不可见 / 不可回放 / 没样本 / 已修好），"未读到"只有一种。
+{
+  console.log('── 2e. AGI 维度（学来的东西有没有被用上、证据有没有流动）──');
+  const sinceSec = Math.floor(Date.now() / 1000) - DAYS * 86_400;
+  const nf = (n: number | null | undefined): string => (n === null || n === undefined ? '未读到' : String(n));
+  try {
+    const db = new Database(DB, { readonly: true, fileMustExist: true });
+    const q = <T,>(sql: string, ...args: unknown[]): T | null => {
+      try { return db.prepare(sql).get(...args) as T; } catch { return null; }
+    };
+
+    // A2 · 任务证据：assessment 分布，以及其中由 host 观测（Echo）升级的比例
+    const ev = q<{ n: number; v: number; f: number; echo: number }>(
+      `SELECT COUNT(*) n,
+              SUM(assessment = 'verified') v,
+              SUM(assessment = 'failed') f,
+              SUM(reasons LIKE '%host_echo:%') echo
+         FROM task_evidence WHERE updated_at >= ?`, sinceSec);
+    console.log(`  A2 任务证据   verified ${nf(ev?.v)}｜failed ${nf(ev?.f)}｜其中 host_echo 升级 ${nf(ev?.echo)}  /  窗口内 task_evidence ${nf(ev?.n)} 行（近 ${DAYS} 天）`);
+
+    // A2 · 分母：发出去且带 task_id 的消息，以及其中已结算的
+    const sr = q<{ n: number; withTask: number; settled: number }>(
+      `SELECT COUNT(*) n, SUM(task_id IS NOT NULL) withTask,
+              SUM(task_id IS NOT NULL AND outcome <> 'unknown') settled
+         FROM self_replies WHERE ts >= ?`, sinceSec);
+    console.log(`  A2 可追溯发送 带 task_id ${nf(sr?.withTask)}（已结算 ${nf(sr?.settled)}）  /  窗口内 self_replies ${nf(sr?.n)} 条`);
+    if (sr && sr.withTask === 0) {
+      console.log('     ↑ 带 task_id 为 0 且 migration 0116 之前的发送没有该列：先确认已重启过且部署后有过发送，再读这个 0。');
+    }
+
+    // A2 · 经验库口径：episodes outcome 分布（09-05 之后曾一条 done 都没有）
+    const ep = q<{ n: number; d: number; f: number }>(
+      `SELECT COUNT(*) n, SUM(outcome = 'done') d, SUM(outcome = 'failed') f FROM episodes WHERE created_at >= ?`, sinceSec);
+    console.log(`  A2 经验复盘   done ${nf(ep?.d)}｜failed ${nf(ep?.f)}  /  窗口内 episodes ${nf(ep?.n)}`);
+
+    // A2 · 技能：verified_use_count 非零的 skill 数，和 skills 总数
+    const sk = q<{ n: number; used: number; vsum: number }>(
+      `SELECT COUNT(*) n, SUM(verified_use_count > 0) used, SUM(verified_use_count) vsum FROM skills WHERE archived = 0`);
+    console.log(`  A2 技能记功   有 verified use 的 skill ${nf(sk?.used)}（累计 ${nf(sk?.vsum)} 次）  /  在库 skill ${nf(sk?.n)}`);
+    const sk2 = q<{ n: number }>(`SELECT COUNT(*) n FROM skills WHERE created_at >= ?`, sinceSec);
+    console.log(`  A2 技能新增   窗口内新增 ${nf(sk2?.n)} 个（09-05 之后曾停摆）`);
+    db.close();
+  } catch (err) {
+    console.log(`  （SQLite 没读到：${err instanceof Error ? err.message : String(err)}——上面一律读作"未读到"，不是 0）`);
+  }
+
+  // A1 · 学习产物注入：「learned context injected」次数 / 同窗口 CodeAct task start。
+  // 自己扫一遍日志（2c 的 counts 是局部变量，且只记 PAIRS 里的串）；全窗口与部署后各一列，
+  // 因为 A1 是 flag 控制的，全窗口会把"开之前"的 0 混进来。
+  try {
+    let inj = 0, starts = 0, injPost = 0, startsPost = 0;
+    const parts = new Map<string, number>();
+    const fd = readFileSync(LOG, 'utf8');
+    for (const line of fd.split('\n')) {
+      if (!line.startsWith('{')) continue;
+      const m = /"time":(\d{13})/.exec(line.slice(0, 80));
+      if (!m || Number(m[1]) < sinceMs) continue;
+      const isInj = line.includes('"msg":"learned context injected"');
+      const isStart = line.includes('"msg":"CodeAct task start"');
+      if (!isInj && !isStart) continue;
+      const post = Number(m[1]) >= deployMs;
+      if (isStart) { starts++; if (post) startsPost++; continue; }
+      inj++; if (post) injPost++;
+      try {
+        const d = JSON.parse(line) as { parts?: string[] };
+        for (const p of d.parts ?? []) parts.set(p, (parts.get(p) ?? 0) + 1);
+      } catch { /* 单行坏了不影响计数 */ }
+    }
+    const pct = (a: number, b: number): string => (b > 0 ? `（${((a / b) * 100).toFixed(1)}%）` : '');
+    console.log(`  A1 学习产物注入 全窗口 ${inj} / ${starts}${pct(inj, starts)}｜部署后 ${injPost} / ${startsPost}${pct(injPost, startsPost)}   （分子 = learned context injected，分母 = CodeAct task start）`);
+    if (parts.size) console.log(`     各块命中: ${[...parts.entries()].map(([k, v]) => `${k} ${v}`).join('｜')}`);
+    if (startsPost > 0 && injPost === 0) {
+      console.log('     ↑ 部署后为 0：先核对 .env 的 META_INJECT_LEARNED_ENABLED 是否已开（此脚本不读 .env）；开了仍为 0 才是五个读侧都没内容。');
+    }
+  } catch { console.log('  A1 学习产物注入 未读到（日志读不到）'); }
+  console.log('');
+}
+
 // ── 机器可读输出（给 scripts/xcheck-report.mts 当左端用）─────────────────
 // 人看的排版里有 ├─、｜、百分比、全角空格，任何外部解析器都是脆的。
 // 所以这里让报告自己吐一份 key=value：xcheck 拿它和"直接 grep 日志"对，

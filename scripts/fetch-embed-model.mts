@@ -22,9 +22,15 @@ import { env as transformersEnv } from '@xenova/transformers';
 
 const MODEL = process.env.MODEL ?? 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
 const CHECK_ONLY = process.argv.includes('--check');
-const ONNX_DIR = join(transformersEnv.cacheDir, MODEL, 'onnx');
+const MODEL_DIR = join(transformersEnv.cacheDir, MODEL);
+const ONNX_DIR = join(MODEL_DIR, 'onnx');
 /** 带量化的那份是 `from_pretrained` 的默认取值，也就是我们要的那份；另一份只是兜底。 */
 const FILES = ['model_quantized.onnx', 'model.onnx'];
+/**
+ * pipeline() 除权重外还读这三个 JSON。2026-09-24 只抓了权重，chroma.ts 见权重即锁
+ * `local_files_only`，tokenizer.json 就再没机会下载 —— 六天 18,915 次失败、零次成功。
+ */
+const JSON_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json'];
 const MIN_BYTES = 1_000_000;
 
 /** 与 chroma.ts 的 findEmbedOnnxWeights 同一套口径：体积 + 头部都不是 redirect stub / HTML。 */
@@ -33,6 +39,15 @@ function usable(p: string): boolean {
     if (statSync(p).size < MIN_BYTES) return false;
     const head = readFileSync(p).subarray(0, 64).toString('latin1');
     return !/^\s*(?:found\.redirecting|<|<!doctype)/i.test(head);
+  } catch {
+    return false;
+  }
+}
+
+function jsonUsable(p: string): boolean {
+  try {
+    if (statSync(p).size === 0) return false;
+    return /^\s*\{/.test(readFileSync(p).subarray(0, 16).toString('latin1'));
   } catch {
     return false;
   }
@@ -50,9 +65,12 @@ function curl(args: string[]): Promise<number> {
   });
 }
 
-async function fetchOne(file: string): Promise<void> {
-  const url = `https://huggingface.co/${MODEL}/resolve/main/onnx/${file}`;
-  const dest = join(ONNX_DIR, file);
+async function fetchOne(file: string, kind: 'onnx' | 'json' = 'onnx'): Promise<void> {
+  const url = kind === 'onnx'
+    ? `https://huggingface.co/${MODEL}/resolve/main/onnx/${file}`
+    : `https://huggingface.co/${MODEL}/resolve/main/${file}`;
+  const dest = kind === 'onnx' ? join(ONNX_DIR, file) : join(MODEL_DIR, file);
+  const ok = kind === 'onnx' ? usable : jsonUsable;
   const proxy = findProxy();
   const base = ['-sS', '-L', '-C', '-', '-o', dest, url]; // -L 必须有：不带它会把 307 redirect 文本页存下来
   if (proxy) base.unshift('-x', proxy);
@@ -63,10 +81,10 @@ async function fetchOne(file: string): Promise<void> {
     ['--connect-timeout', '20', '--speed-time', '30', '--speed-limit', '1024', '--max-time', '1800'],
   ];
   let code = 1;
-  for (let i = 0; i < attempts.length && !usable(dest); i++) {
+  for (let i = 0; i < attempts.length && !ok(dest); i++) {
     code = await curl([...base, ...attempts[i]!]);
   }
-  if (!usable(dest)) {
+  if (!ok(dest)) {
     throw new Error(
       `没能把 ${file} 抓到 ${dest}（curl exit ${code}）。多半是出口/proxy 现在不可用。手工试：\n` +
       `    curl -sS -L${proxy ? ` -x '${proxy}'` : ''} -o '${dest}' '${url}'`,
@@ -81,6 +99,7 @@ async function main(): Promise<void> {
 
   const have = FILES.filter((f) => usable(join(ONNX_DIR, f)));
   const junk = FILES.filter((f) => existsSync(join(ONNX_DIR, f)) && !usable(join(ONNX_DIR, f)));
+  const missingJson = JSON_FILES.filter((f) => !jsonUsable(join(MODEL_DIR, f)));
 
   if (CHECK_ONLY) {
     if (have.length === 0) {
@@ -90,10 +109,19 @@ async function main(): Promise<void> {
       );
       process.exit(1);
     }
+    if (missingJson.length) {
+      console.error(
+        `✗ 权重在，但缺 ${missingJson.join(', ')} —— chroma.ts 不会锁离线，每次启动仍要联网。`,
+        `修：npx tsx scripts/fetch-embed-model.mts`,
+      );
+      process.exit(1);
+    }
     if (junk.length) console.log(`（留意：${junk.join(', ')} 在磁盘上但不是合法权重）`);
-    console.log(`✓ embedding 权重齐了：${have.join(', ')}，memory 路径可离线`);
+    console.log(`✓ embedding 权重 + tokenizer/config 齐了：${have.join(', ')}，memory 路径可离线`);
     return;
   }
+
+  for (const f of missingJson) await fetchOne(f, 'json');
 
   if (have.length === 0) {
     console.log(`\n一个可用的权重都没有，开始下载：`);
@@ -105,6 +133,8 @@ async function main(): Promise<void> {
 
   const final = FILES.filter((f) => usable(join(ONNX_DIR, f)));
   if (final.length === 0) throw new Error('下载完仍然没有可用权重');
+  const stillMissing = JSON_FILES.filter((f) => !jsonUsable(join(MODEL_DIR, f)));
+  if (stillMissing.length) throw new Error(`下载完仍缺 ${stillMissing.join(', ')}`);
   console.log(`\n完成。重启 xxb-ts 后 chroma.ts 会给 pipeline 传 local_files_only=true，此后不再联网。`);
 }
 

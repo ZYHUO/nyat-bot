@@ -62,6 +62,7 @@ vi.mock('../../../src/env.js', () => ({
     SKILL_CONSOLIDATE_ENABLED: false,
     HOBBY_DISTILL_ENABLED: false,
     RSS_MONITOR_ENABLED: false,
+    ...envOverrides,
   }),
 }));
 
@@ -82,6 +83,7 @@ const { getTickRegistry } = await import(
 
 describe('CronScheduler(tick 心跳版)', () => {
   beforeEach(() => {
+    for (const key of Object.keys(envOverrides)) delete envOverrides[key];
     envOverrides['CRON_ENABLED'] = true;
     stopCronJobs();
   });
@@ -97,6 +99,16 @@ describe('CronScheduler(tick 心跳版)', () => {
     // 无条件任务基线 ≥15(flag 偶发漂移时不要把 CI 钉死在精确数)
     expect(getTickRegistry().length).toBeGreaterThanOrEqual(15);
     expect(isStarted()).toBe(true);
+  });
+
+  it('maps diary UTC slots to Beijing heartbeat times', () => {
+    envOverrides['DREAM_JOURNAL_ENABLED'] = true;
+    envOverrides['DREAM_JOURNAL_CRON'] = '0 23 * * *,0 15 * * *';
+    startCronJobs();
+    const diary = getTickRegistry().filter((task) => task.name.startsWith('dream-journal:'));
+    expect(diary.map((task) => task.dailyAt)).toEqual([
+      { hour: 7, minute: 0 }, { hour: 23, minute: 0 },
+    ]);
   });
 
   it('should not register jobs twice', () => {

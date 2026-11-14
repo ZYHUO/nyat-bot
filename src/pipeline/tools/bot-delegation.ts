@@ -401,7 +401,7 @@ export async function maybeRegisterTypedDelegation(chatId: number, text: string,
   if (!m) return;
   const cmd = m[1]!.toLowerCase();
   const bot = m[2]!;
-  if (bot.toLowerCase() === getBotUsername().toLowerCase()) return; // 别认成自己
+  if (bot.toLowerCase() === getBotUsername(chatId).toLowerCase()) return; // 别认成自己
   try {
     const redis = getRedis();
     if (await redis.get(PENDING_KEY(chatId))) return; // 已有 pending,不覆盖

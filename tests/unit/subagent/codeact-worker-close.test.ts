@@ -47,22 +47,22 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: (...a: unknown[]) => loggerInfoMock(...a), warn: vi.fn(), error: vi.fn() },
 }));
 
-// 必须真的入队一次，才会把模块级的 _worker / _queue 建起来。
+// Directly create the queue and worker under test; shutdown does not require
+// dispatching an authorized task or mutating its durable state.
 import {
   closeCodeActWorker,
-  enqueueCodeActJob,
+  getCodeActQueue,
   startCodeActWorker,
 } from '../../../src/subagent/queue.js';
 
-let seq = 0;
-beforeEach(async () => {
+beforeEach(() => {
   workerCloseMock.mockReset();
   queueCloseMock.mockReset();
   loggerInfoMock.mockClear();
   // 重建 _worker / _queue：closeCodeActWorker 关完就把它们置 undefined，
   // 不重建的话第二个测试就没有可关的东西（第一版漏了，测试之间互相串味）。
-  await enqueueCodeActJob({ id: `t${++seq}`, chatId: -100 } as never);
-  startCodeActWorker();   // _worker 是这个函数建的，enqueue 不建
+  getCodeActQueue();
+  startCodeActWorker();
 });
 
 // 挂着的那几条会真的等满 5s 赛跑上限，vitest 默认 5s 会先被砍。

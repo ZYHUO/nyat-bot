@@ -158,6 +158,9 @@ export const lifeSection = {
   // edge-tts 生成 MP3 → ffmpeg 转 OGG/Opus(Telegram 语音消息要求 OggS+Opus)。
   // 全部默认关;开启需系统装好 `python3 -m edge_tts` 与 `ffmpeg`。
   TTS_ENABLED: booleanFromEnv.default(false),
+  // Executable paths allow a private Python/ffmpeg runtime on older hosts.
+  TTS_PYTHON_PATH: z.string().trim().min(1).default('python3'),
+  TTS_FFMPEG_PATH: z.string().trim().min(1).default('ffmpeg'),
   // edge-tts 语音名(中文默认晓晓;也可换 zh-CN-XiaoyiNeural 等)。
   TTS_VOICE: z.string().default('zh-CN-XiaoxiaoNeural'),
   // （TTS_VOICE_PROBABILITY / TTS_MAX_CHARS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。TTS 的实际概率/长度上限在发送路径里另有一处，这两个键从未被读）

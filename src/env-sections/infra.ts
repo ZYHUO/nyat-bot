@@ -21,6 +21,19 @@ export const infraSection = {
   BOT_TOKEN: z.string().min(1, 'BOT_TOKEN is required'),
   BOT_USERNAME: z.string().min(1).default('xxb_bot'),
 
+  // QQ via an explicitly configured OneBot v11 forward WebSocket client.
+  // Off until the external QQ client has been installed and logged in.
+  ONEBOT_ENABLED: booleanFromEnv.default(false),
+  ONEBOT_WS_URL: z.string().default('ws://127.0.0.1:3001/'),
+  ONEBOT_ACCESS_TOKEN: z.string().default(''),
+  ONEBOT_ACCOUNT_ID: z.string().default(''),
+  ONEBOT_OWNER_ID: z.string().default(''),
+  ONEBOT_ALLOWED_GROUP_IDS: z.string().default(''),
+  ONEBOT_ALLOWED_USER_IDS: z.string().default(''),
+  ONEBOT_ACTION_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
+  ONEBOT_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
+  ONEBOT_RECONNECT_DELAY_MS: z.coerce.number().int().min(100).max(60000).default(5000),
+
   // Redis
   REDIS_URL: z.string().url().default('redis://127.0.0.1:6379/0'),
 
@@ -149,6 +162,8 @@ export const infraSection = {
   // 关 → describeAudio 直接返回中性占位,不发那通注定失败的调用。
   // 接上可用 audio 模型后:置 true + AI_USAGE_AUDIO_LABEL=<模型> 即生效。
   AUDIO_TRANSCRIBE_ENABLED: booleanFromEnv.default(false),
+  // Keep chat input_audio compatibility; dedicated speech models use multipart.
+  AUDIO_TRANSCRIBE_API_MODE: z.enum(['chat', 'transcriptions']).default('chat'),
   // PDF 识别:同理默认关。当前 vision 路由实际落到 GPT(sub2gpt54mini),
   // 读不了 PDF base64,这通调用必败。gemini/PDF-capable vision 恢复后置 true。
   PDF_VISION_ENABLED: booleanFromEnv.default(false),

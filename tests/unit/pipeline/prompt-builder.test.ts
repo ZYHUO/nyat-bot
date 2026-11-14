@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { buildSystemPrompt, buildMessages, _resetPromptCache } from '../../../src/pipeline/reply/prompt-builder.js';
+import { buildSystemPrompt, buildMessages, buildCodeActIdentityPrompt, _resetPromptCache } from '../../../src/pipeline/reply/prompt-builder.js';
 import type { FormattedMessage } from '../../../src/shared/types.js';
 
 // replyTo 注入需要 botUid 来区分"回复 bot"和"回复他人"
 vi.mock('../../../src/bot/bot.js', () => ({
-  getBotUid: () => 8888,
+  getBotUid: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 2 ** 52 + 11 : 8888,
   getBotIdentity: () => ({ uid: 8888, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '啾咪'] }),
   getBotDisplayName: () => '啾咪囝',
 }));
+vi.mock('../../../src/platform/owner-context.js', () => ({ isConversationOwner: () => false }));
+vi.mock('../../../src/shared/master-identity.js', () => ({ masterShortHint: () => 'QQ scoped owner identity' }));
 
 // Mock the config module to provide a known prompts directory
 vi.mock('../../../src/shared/config.js', () => {
@@ -38,6 +40,14 @@ vi.mock('../../../src/shared/config.js', () => {
 describe('Prompt Builder', () => {
   beforeEach(() => {
     _resetPromptCache();
+  });
+
+  it('QQ CodeAct persona uses scoped owner and advertises only its text compatibility route', () => {
+    const prompt = buildCodeActIdentityPrompt(undefined, -(2 ** 52 + 10));
+    expect(prompt).toContain('QQ scoped owner identity');
+    expect(prompt).toContain('宿主路由到 QQ');
+    expect(prompt).not.toContain('当前 env：');
+    expect(prompt).not.toContain('stickers.pick + sendSticker');
   });
 
   describe('buildSystemPrompt', () => {
@@ -101,6 +111,16 @@ describe('Prompt Builder', () => {
       const messages = buildMessages('sys', 'ctx', msg);
       expect(messages[1]!.content).toContain('回复对象: Bob 的消息(#9「yo」)');
       expect(messages[1]!.content).not.toContain('专门对你说的');
+    });
+
+    it('recognizes reply-to-self using this QQ conversation, never Telegram self', () => {
+      const chatId = -(2 ** 52 + 10);
+      const render = (uid: number) => buildMessages('sys', 'ctx', {
+        ...latestMessage, replyTo: { messageId: 7, uid, fullName: 'speaker', textSnippet: 'previous' },
+      }, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, chatId)[1]!.content;
+      expect(render(2 ** 52 + 11)).toContain('回复对象: 你刚才的消息');
+      expect(render(8888)).not.toContain('回复对象: 你刚才的消息');
+      expect(render(8888)).toContain('回复对象: speaker 的消息');
     });
 
     it('omits the reply-to line when the message replies to nothing', () => {

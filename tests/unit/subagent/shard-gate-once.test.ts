@@ -36,10 +36,19 @@ describe('分片共享一次过闸结果', () => {
 
   it('③ 闸放过之后才置位（不是无条件置位）', () => {
     const s = fs.readFileSync(SRC, 'utf8');
+    const start = s.indexOf('sendText(text:');
+    const end = s.indexOf('sendFinal(text:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = s.slice(start, end);
     // 置位行必须在闸的闭合括号之后、sendMessage 之前
-    const setIdx = s.indexOf('gatePassed = true;');
-    const gateIdx = s.indexOf('!gatePassed');
-    const sendIdx = s.indexOf('const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);');
+    const setIdx = body.indexOf('gatePassed = true;');
+    const gateIdx = body.indexOf('if (chatId < 0 && env().TRENCH_GATE_ENABLED && !gatePassed) {');
+    const sends = [...body.matchAll(/^\s*const messageId = await sendWithDeliveryGuard\(\(\) => sendMessage\(chatId, part, replyTo, opts\.messageThreadId\)\);\s*$/gm)];
+    expect(sends).toHaveLength(1);
+    const sendIdx = sends[0]!.index;
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(setIdx).toBeGreaterThan(-1);
     expect(gateIdx).toBeLessThan(setIdx);
     expect(setIdx).toBeLessThan(sendIdx);
   });

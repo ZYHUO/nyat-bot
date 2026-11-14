@@ -6,7 +6,9 @@
  *
  * 这里测的是**闸门本身**（在 host 的 admin 面上），不打真 TG API。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { buildCodeActSystemPrompt } from '../../../src/subagent/capability-prompt.js';
+import { CODEACT_CAPABILITY_METHODS, selectCodeActCapabilities } from '../../../src/sandbox/codeact/capabilities.js';
 
 const envMock: Record<string, unknown> = {
   ANTIAD_KICK_ENABLED: false,
@@ -42,8 +44,12 @@ describe('admin.kick 的安全边界', () => {
   it('不能踢自己', () => {
     const i = SRC.indexOf('async kick(uid: number');
     const body = SRC.slice(i, i + 1400);
-    expect(body).toContain('admin_no_self');
-    expect(body).toContain('getBotUid()');
+    const selfGuard = body.indexOf("if (target === getBotUid(chatId)) throw new Error('admin_no_self:");
+    expect(selfGuard).toBeGreaterThanOrEqual(0);
+    expect(body).not.toContain('getBotUid()');
+    // 自身保护必须使用当前会话的账号身份，并在真正踢人之前执行。
+    const kick = body.indexOf('await kickMember(chatId, target,');
+    expect(kick).toBeGreaterThan(selfGuard);
   });
 
   it('要 restrict 权限且走 rateGate', () => {
@@ -79,9 +85,15 @@ describe('admin.kick 的安全边界', () => {
     expect(body).toContain('asker > 0');
   });
 
-  it('模型侧工具说明里写了"最后手段"', () => {
+  it('宿主群管理守卫保留，但隔离模型没有 kick 能力或对应提示', () => {
     const ex = readFileSync('src/subagent/executor.ts', 'utf8');
-    expect(ex).toContain('admin.kick(uid');
-    expect(ex).toContain('踢人是最后手段');
+    const template = ex.match(/const EXECUTOR_SYSTEM = `([\s\S]*?)\n`;/)?.[1];
+    expect(template).toBeTruthy();
+    expect(buildCodeActSystemPrompt(template!)).not.toContain('admin.kick');
+    const kick = vi.fn();
+    const selected = selectCodeActCapabilities({ admin: { kick }, telegram: { sendText: vi.fn() } }, CODEACT_CAPABILITY_METHODS);
+    expect(selected.has('admin.kick')).toBe(false);
+    expect(selected.has('telegram.sendText')).toBe(true);
+    expect(kick).not.toHaveBeenCalled();
   });
 });

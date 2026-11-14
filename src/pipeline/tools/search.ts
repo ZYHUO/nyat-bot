@@ -1,439 +1,230 @@
-// ────────────────────────────────────────
-// Web search tool — StepFun MCP web_search (primary) + StepFun REST + new-api grok + SearxNG + DDG fallback
-// 2026-09-21 round 132/133：主路由换成 MCP；round 133 按用户要求删掉 Gemini grounding
-// （那个 key 被 Google 以「泄露」为由吊销，403 PERMISSION_DENIED）。
-// ────────────────────────────────────────
-
+// A failed provider and a verified zero-result response are different outcomes.
+// Existing tools use executeSearch; autonomous callers can inspect the typed result.
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 
 const MAX_RESULTS = 5;
-
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+export type SearchProvider = 'StepFun-MCP' | 'StepFun-REST' | 'new-api' | 'SearxNG' | 'DDG-Lite';
+export type SearchFailureCode = 'not_configured' | 'disabled' | 'timeout' | 'network' | 'blocked' | 'rate_limited' | 'unauthorized' | 'http_error' | 'invalid_response' | 'upstream_unavailable';
+export interface SearchResult { title: string; url: string; snippet: string }
+export interface SearchAttempt {
+  provider: SearchProvider;
+  status: 'success' | 'empty' | 'failed' | 'skipped';
+  code?: SearchFailureCode;
+  httpStatus?: number;
+}
+export interface WebSearchOutcome {
+  status: 'ok' | 'empty' | 'unavailable';
+  provider: SearchProvider | null;
+  results: SearchResult[];
+  answer?: string;
+  attempts: SearchAttempt[];
+}
+interface ProviderResult { results: SearchResult[]; answer?: string }
+
+class SearchError extends Error {
+  constructor(readonly code: SearchFailureCode, readonly httpStatus?: number) { super(code); }
+}
+function classifyFailure(error: unknown): { code: SearchFailureCode; httpStatus?: number } {
+  if (error instanceof SearchError) return { code: error.code, ...(error.httpStatus === undefined ? {} : { httpStatus: error.httpStatus }) };
+  if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) return { code: 'timeout' };
+  if (error instanceof SyntaxError) return { code: 'invalid_response' };
+  return { code: 'invalid_response' };
+}
+async function request(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  let response: Response;
+  try { response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) }); }
+  catch (error) {
+    const timeout = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+    throw new SearchError(timeout ? 'timeout' : 'network');
+  }
+  if (!response.ok) {
+    const code = response.status === 429 ? 'rate_limited' : response.status === 401 ? 'unauthorized' : response.status === 403 ? 'blocked' : 'http_error';
+    throw new SearchError(code, response.status);
+  }
+  return response;
+}
+
+export async function executeSearchDetailed(query: string): Promise<WebSearchOutcome> {
+  const e = env();
+  const attempts: SearchAttempt[] = [];
+  let emptyProvider: SearchProvider | null = null;
+  const routes: Array<{ provider: SearchProvider; available: boolean; disabled?: boolean; run: () => Promise<ProviderResult> }> = [
+    { provider: 'StepFun-MCP', available: e.STEPFUN_SEARCH_ENABLED !== false && !!e.STEPFUN_SEARCH_API_KEY,
+      disabled: e.STEPFUN_SEARCH_ENABLED === false,
+      run: () => stepfunMcpSearch(query, e.STEPFUN_SEARCH_API_KEY, e.STEPFUN_SEARCH_BASE_URL, e.STEPFUN_SEARCH_MAX_RESULTS, e.STEPFUN_SEARCH_CATEGORY) },
+    { provider: 'StepFun-REST', available: e.STEPFUN_SEARCH_ENABLED !== false && !!e.STEPFUN_SEARCH_API_KEY,
+      disabled: e.STEPFUN_SEARCH_ENABLED === false,
+      run: () => stepfunSearch(query, e.STEPFUN_SEARCH_API_KEY, e.STEPFUN_SEARCH_BASE_URL, e.STEPFUN_SEARCH_MAX_RESULTS, e.STEPFUN_SEARCH_CATEGORY) },
+    { provider: 'new-api', available: !!e.XAI_API_KEY,
+      run: () => xaiSearch(query, e.XAI_API_KEY!, e.XAI_SEARCH_BASE_URL, e.XAI_SEARCH_MODEL) },
+    { provider: 'SearxNG', available: !!e.SEARXNG_URL, run: () => searxngSearch(query, e.SEARXNG_URL!) },
+    { provider: 'DDG-Lite', available: true, run: () => ddgLiteSearch(query) },
+  ];
+  for (const route of routes) {
+    if (!route.available) {
+      attempts.push({ provider: route.provider, status: 'skipped', code: route.disabled ? 'disabled' : 'not_configured' });
+      continue;
+    }
+    try {
+      const result = await route.run();
+      attempts.push({ provider: route.provider, status: result.results.length ? 'success' : 'empty' });
+      if (result.results.length) return { status: 'ok', provider: route.provider, ...result, attempts };
+      emptyProvider ??= route.provider;
+    } catch (error) {
+      const failure = classifyFailure(error);
+      attempts.push({ provider: route.provider, status: 'failed', ...failure });
+      // Do not log provider bodies, credential-bearing URLs, queries, or raw errors.
+      logger.warn({ provider: route.provider, ...failure }, 'Web search route failed');
+    }
+  }
+  return { status: emptyProvider ? 'empty' : 'unavailable', provider: emptyProvider, results: [], attempts };
+}
 
 export async function executeSearch(query: string): Promise<string> {
-  const e = env();
-  // **全灭时必须说"全灭"，不能说"没有找到"。**
-  //
-  // 2026-09-21 round 123 实测：StepFun 搜索 `quota_exceeded`（429）→ Gemini 也失败
-  // → 只剩 DDG Lite，而 DDG 从这台机器出去是空的。最终返回
-  // `没有找到与"X"相关的结果。`——**一个基础设施故障，长得和一个合法的否定答案
-  // 一模一样**。模型据此诚实地告诉用户"我没搜到"，而那是个谎：它不是没搜到，
-  // 是**一条都没搜成**。
-  //
-  // 合龙检查也被骗了（`✗ stepfun 搜索返回带来源的结果` 看了三遍才明白是全灭）。
-  // 这个会话里同类的事出过四次（round 79 terminalEnabled / round 85 打得通但不在链里 /
-  // round 110 保句闸零触发 / 这次），每一次都是"失败伪装成正常输出"。
-  const failedRoutes: string[] = [];
-
-  // Route 0: StepFun 全网搜索（2026-09-20 起的主路由）。
-  //
-  // 为什么它是主路由而不是又一条 fallback：原来的 4 条链都要"让一个模型联网再
-  // 总结一遍"，多一跳、多一类把工具标签拼进正文的泄漏面（2026-09-20 刚出过
-  // <web.search><args>… 被原样发出去的事故）。stepfun 的 /v1/search 直接返回
-  // title/snippet/content/time，没有模型中转，也就没有那个泄漏面。
-  //
-  // 默认开；STEPFUN_SEARCH_ENABLED === false 时整条跳过（repo 惯例：默认真用 === false 关）。
-  //
-  // 2026-09-21 round 132：`/v1/search` 那个 REST 端点 **quota_exceeded 了**
-  // （round 124 实测 429），用户指了同一个账号下的 MCP 端点
-  // `/step_plan/v1/mcp/web_search/mcp`，探过是通的（tools/list 返回 web_search）。
-  // 所以主路由换成 MCP：JSON-RPC tools/call，参数 query/category/n/use_common_search。
-  // 旧 REST 端点留着当第二顺位——配额恢复它就能用，且它返回结构更干净。
-  if (e.STEPFUN_SEARCH_ENABLED !== false && e.STEPFUN_SEARCH_API_KEY) {
-    try {
-      return await stepfunMcpSearch(
-        query,
-        e.STEPFUN_SEARCH_API_KEY,
-        e.STEPFUN_SEARCH_BASE_URL,
-        e.STEPFUN_SEARCH_MAX_RESULTS,
-        e.STEPFUN_SEARCH_CATEGORY,
-      );
-    } catch (err) {
-      logger.warn({ err, query }, 'StepFun MCP search failed, falling back to REST');
-      failedRoutes.push('StepFun-MCP');
-    }
-    try {
-      return await stepfunSearch(
-        query,
-        e.STEPFUN_SEARCH_API_KEY,
-        e.STEPFUN_SEARCH_BASE_URL,
-        e.STEPFUN_SEARCH_MAX_RESULTS,
-        e.STEPFUN_SEARCH_CATEGORY,
-      );
-    } catch (err) {
-      logger.warn({ err, query }, 'StepFun REST search failed, falling back');
-      failedRoutes.push('StepFun-REST');
-    }
-  }
-
-
-  // Route 1: new-api grok search via search_parameters (fallback)
-  if (e.XAI_API_KEY) {
-    try {
-      return await xaiSearch(query, e.XAI_API_KEY, e.XAI_SEARCH_BASE_URL, e.XAI_SEARCH_MODEL);
-    } catch (err) {
-      logger.warn({ err, query }, 'new-api search failed, falling back');
-      failedRoutes.push('new-api');
-    }
-  }
-
-  // Route 2: SearxNG if configured
-  if (e.SEARXNG_URL) {
-    return searxngSearch(query, e.SEARXNG_URL);
-  }
-
-  // Route 3: DDG Lite (always available)
-  const ddg = await ddgLiteSearch(query);
-  // DDG 从这台机器出去是空的（round 123 curl 实测无响应体）。它返回"没有找到"
-  // 而不是抛错，所以这里补一道判据：**前面有路由失败 + DDG 也没结果 = 全灭**。
-  if (failedRoutes.length > 0 && ddg.startsWith('没有找到')) {
-    return `搜索全灭：${failedRoutes.join(' / ')} 都失败，DDG Lite 也无结果。`
-      + `（不是"没有相关信息"，是没有任何搜索提供商可用）`;
-  }
-  return ddg;
+  return formatSearchOutcome(query, await executeSearchDetailed(query));
 }
 
-// ── StepFun 全网搜索 ──
-// POST {base}/v1/search  →  { query, category, results:[{url,position,title,time,snippet,content}] }
-// 注意：服务端不认 max_results（实测恒返回 10 条），所以在客户端切。
-interface StepfunSearchResponse {
-  query?: string;
-  category?: string;
-  results?: Array<{
-    url?: string;
-    position?: number;
-    title?: string;
-    time?: string;
-    snippet?: string;
-    content?: string;
-  }>;
+/** Text compatibility for tools; callers must use status/results to decide whether evidence exists. */
+export function formatSearchOutcome(query: string, outcome: WebSearchOutcome): string {
+  if (outcome.status === 'unavailable') {
+    const failed = outcome.attempts.filter((attempt) => attempt.status === 'failed').map((attempt) => `${attempt.provider}:${attempt.code}`).join(' / ');
+    return `搜索不可用：${failed || '未配置可用的搜索来源'}。未完成有效查询，不能据此判断没有相关信息。`;
+  }
+  if (outcome.status === 'empty') return `搜索完成（${outcome.provider}）：未返回与“${query}”匹配的结果。`
+    + (outcome.attempts.some((attempt) => attempt.status === 'failed') ? '其他搜索来源未能完成查询。' : '');
+  let text = outcome.answer ? `${outcome.answer}\n\n来源：\n` : `关于“${query}”的搜索结果（${outcome.provider}）：\n`;
+  for (const result of outcome.results) text += `- ${result.title}\n  ${result.snippet}\n  ${result.url}\n`;
+  return text;
 }
 
-/**
- * StepFun 全网搜索 —— **MCP 版**（2026-09-21 round 132 起的主路由）。
- *
- * 端点 `POST {base}/mcp/web_search/mcp`，JSON-RPC 2.0：
- *   {"jsonrpc":"2.0","id":1,"method":"tools/call",
- *    "params":{"name":"web_search","arguments":{"query":"…","n":5,"category":"…"}}}
- *
- * 为什么换成它：原来的 REST `/v1/search` 在 round 124 实测 `quota_exceeded`
- * （429，整条搜索链因此全灭三天）。同一个 key 下的 MCP 端点探过是通的
- * （tools/list 返回 web_search，参数 query/category/n/use_common_search）。
- *
- * 返回体和 REST 版同样处理：MCP 的 content 是 [{type:'text', text:'…'}]，
- * 拼起来再走同一套"带来源"的格式化。
- */
-async function stepfunMcpSearch(
-  query: string,
-  apiKey: string,
-  baseUrl: string,
-  maxResults: number,
-  category: string,
-): Promise<string> {
-  const base = baseUrl.replace(/\/+$/, '');
-  const args: Record<string, unknown> = { query, n: Math.min(Math.max(maxResults, 1), 20) };
-  if (category) args.category = category;
-  const res = await fetch(`${base}/mcp/web_search/mcp`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      // MCP over HTTP 要同时接受两种，否则服务端可能只回 SSE
-      Accept: 'application/json, text/event-stream',
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: { name: 'web_search', arguments: args },
-    }),
-    signal: AbortSignal.timeout(25_000),
+function decodeEntities(text: string): string {
+  const named: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
+  return text.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt|nbsp);/gi, (original, entity: string) => {
+    if (!entity.startsWith('#')) return named[entity.toLowerCase()] ?? original;
+    const hex = entity[1]?.toLowerCase() === 'x';
+    const value = Number.parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10);
+    return value > 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff) ? String.fromCodePoint(value) : original;
   });
-  if (!res.ok) throw new Error(`stepfun MCP search HTTP ${res.status}`);
-  const data = (await res.json()) as {
-    error?: { message?: string };
-    result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
-  };
-  if (data.error) throw new Error(`stepfun MCP search: ${data.error.message ?? 'unknown'}`);
-  if (data.result?.isError) throw new Error('stepfun MCP search: tool returned isError');
-  const text = (data.result?.content ?? [])
-    .filter((c) => c.type === 'text' || c.type === undefined)
-    .map((c) => c.text ?? '')
-    .join('\n')
-    .trim();
-  if (!text) return '(no results)';
-  // MCP 的 text 里裹着一层 JSON（{query, category, results:[{url,title,snippet,time}]}）。
-  // **要解析出来再排版**，不能把原串倒给模型：那样一次搜索烧 4000 token 的括号，
-  // 而模型真正要的是"标题 + 摘要 + 链接"。round 132 实测原样返回 4027 字，
-  // 解析后同样内容约 800 字。
-  const parsed = parseMcpResults(text);
-  if (parsed.length === 0) {
-    // 解析不出来（格式变了）就退回原串，但截短——别把整坨 JSON 倒出去。
-    return `关于"${query}"的搜索结果：\n${text.slice(0, 1500)}`;
-  }
-  let out = `关于"${query}"的搜索结果：\n`;
-  for (const r of parsed.slice(0, maxResults)) {
-    out += `- ${r.title || '无标题'}\n  ${stripTags(r.snippet || '')}\n  ${r.url || '#'}\n`;
-  }
-  out += `\n    源: ${parsed.slice(0, maxResults).map((r) => r.url).filter(Boolean).join(' ')}`;
-  return out;
 }
-
-interface McpResultRow { url?: string; title?: string; snippet?: string; time?: string }
-
-/** 从 MCP 的 text 里解析出结果数组；解析不了返回 []。 */
-function parseMcpResults(text: string): McpResultRow[] {
-  // 兼容两种裹法：整段就是 JSON，或 JSON 前面有别的字。
-  const start = text.indexOf('{');
-  if (start < 0) return [];
+function plainText(value: string): string { return decodeEntities(value.replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim(); }
+function sourceUrl(raw: string): string | null {
   try {
-    const d = JSON.parse(text.slice(start)) as { results?: McpResultRow[] };
-    return Array.isArray(d.results) ? d.results : [];
-  } catch {
-    // 截断的 JSON（maxResults 太大被砍）——试着补一个 ]}
-    try {
-      const d = JSON.parse(`${text.slice(start).replace(/,\s*$/, '')}]}`) as { results?: McpResultRow[] };
-      return Array.isArray(d.results) ? d.results : [];
-    } catch {
-      return [];
-    }
-  }
+    const value = decodeEntities(raw);
+    const parsed = new URL(value, 'https://duckduckgo.com');
+    const target = parsed.hostname === 'duckduckgo.com' && parsed.pathname === '/l/' ? parsed.searchParams.get('uddg') : value;
+    if (!target) return null;
+    const url = new URL(target.startsWith('//') ? `https:${target}` : target);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
 }
-
-async function stepfunSearch(
-  query: string,
-  apiKey: string,
-  baseUrl: string,
-  maxResults: number,
-  category: string,
-): Promise<string> {
-  const body: Record<string, unknown> = { query };
-  if (category) body.category = category;
-  const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/v1/search`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!res.ok) throw new Error(`stepfun search HTTP ${res.status}`);
-  const data = (await res.json()) as StepfunSearchResponse;
-  const rows = (data.results ?? []).slice(0, maxResults);
-  if (rows.length === 0) return '(no results)';
-  const lines = rows.map((r, i) => {
-    const head = `[${r.position ?? i + 1}] ${r.title ?? '(无标题)'}`;
-    const when = r.time ? ` (${String(r.time).slice(0, 10)})` : '';
-    const src = r.url ? `\n    源: ${r.url}` : '';
-    // 优先 snippet（短、已是给人看的摘要）；没有就退回 content 并截断。
-    const text = (r.snippet ?? r.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
-    return `${head}${when}${src}${text ? `\n    ${text}` : ''}`;
-  });
-  return lines.join('\n');
-}
-
-// ── Gemini Google-Search grounding ──
-// generateContent + tools:[{google_search:{}}] → 模型联网搜索后给出综合答案 +
-// groundingMetadata.groundingChunks(来源)。key 走 query string(Gemini API 约定),
-// 不进任何日志。
-
-
-
-// ── new-api grok search (OpenAI-compatible chat/completions + search_parameters) ──
-
-interface ChatCompletionResponse {
-  choices?: Array<{
-    message?: { content?: string };
-  }>;
-  search_sources?: Array<{ url?: string; title?: string }>;
-  annotations?: Array<{
-    type?: string;
-    url_citation?: { url?: string; title?: string };
-  }>;
-  error?: { message?: string } | string;
-}
-
-async function xaiSearch(
-  query: string,
-  apiKey: string,
-  baseUrl: string,
-  model: string,
-): Promise<string> {
-  const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: query }],
-      search_parameters: { mode: 'on', return_citations: true },
-      stream: false,
-      max_tokens: 800,
-    }),
-    signal: AbortSignal.timeout(45_000),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`new-api search ${res.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const data = (await res.json()) as ChatCompletionResponse;
-
-  if (data.error) {
-    const msg = typeof data.error === 'string' ? data.error : data.error.message;
-    throw new Error(`new-api search error: ${msg ?? 'unknown'}`);
-  }
-
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content) return `没有找到与"${query}"相关的结果。`;
-
-  const sources = collectSearchSources(data);
-  if (sources.length === 0) return content;
-
-  let output = `${content}\n\n来源：\n`;
-  for (const s of sources.slice(0, MAX_RESULTS)) {
-    output += `- ${s.title ?? s.url}\n  ${s.url}\n`;
-  }
-  return output;
-}
-
-function collectSearchSources(
-  data: ChatCompletionResponse,
-): Array<{ url: string; title?: string }> {
-  const seen = new Set<string>();
-  const out: Array<{ url: string; title?: string }> = [];
-
-  for (const a of data.annotations ?? []) {
-    const u = a.url_citation?.url;
-    if (u && !seen.has(u)) {
-      seen.add(u);
-      out.push({ url: u, title: a.url_citation?.title });
-    }
-  }
-  for (const s of data.search_sources ?? []) {
-    const u = s.url;
-    if (u && !seen.has(u)) {
-      seen.add(u);
-      out.push({ url: u, title: s.title });
-    }
-  }
-  return out;
-}
-
-// ── DuckDuckGo Lite search ──
-
-interface SearchResult {
-  title: string;
-  url: string;
-  snippet: string;
-  published?: string;
-}
-
-async function ddgLiteSearch(query: string): Promise<string> {
-  try {
-    const res = await fetch('https://lite.duckduckgo.com/lite/', {
-      method: 'POST',
-      headers: {
-        'User-Agent': UA,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: `q=${encodeURIComponent(query)}`,
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!res.ok) return `搜索失败: DuckDuckGo 返回 ${res.status}`;
-
-    const html = await res.text();
-    const results = parseDdgLiteHtml(html);
-
-    if (!results.length) return `没有找到与"${query}"相关的结果。`;
-
-    let output = `关于"${query}"的搜索结果：\n`;
-    for (const r of results.slice(0, MAX_RESULTS)) {
-      output += `- ${r.title}\n  ${r.snippet}\n  ${r.url}\n`;
-    }
-    return output;
-  } catch (err) {
-    logger.error({ err, query }, 'DDG Lite search failed');
-    return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
-  }
-}
-
-function parseDdgLiteHtml(html: string): SearchResult[] {
+function rowsFromJson(value: unknown, limit: number): SearchResult[] {
+  if (!Array.isArray(value)) throw new SearchError('invalid_response');
   const results: SearchResult[] = [];
-
-  // DDG Lite format: <a rel="nofollow" href="URL" class='result-link'>TITLE</a>
-  // followed later by <td class='result-snippet'>SNIPPET</td>
-  const linkPattern = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
-  const snippetPattern = /class='result-snippet'>([\s\S]*?)<\/td>/g;
-
-  const links: Array<{ url: string; title: string }> = [];
-  let m: RegExpExecArray | null;
-
-  while ((m = linkPattern.exec(html)) !== null) {
-    const href = m[1];
-    const titleRaw = m[2];
-    if (href === undefined || titleRaw === undefined) continue;
-    links.push({
-      url: href,
-      title: stripTags(titleRaw).trim(),
-    });
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const url = typeof row.url === 'string' ? sourceUrl(row.url) : null;
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const snippet = row.snippet ?? row.content ?? '';
+    results.push({ url, title: typeof row.title === 'string' ? plainText(row.title).slice(0, 300) : '无标题',
+      snippet: typeof snippet === 'string' ? plainText(snippet).slice(0, 500) : '' });
+    if (results.length >= limit) break;
   }
-
-  const snippets: string[] = [];
-  while ((m = snippetPattern.exec(html)) !== null) {
-    const sn = m[1];
-    snippets.push(sn === undefined ? '' : stripTags(sn).trim());
-  }
-
-  for (let i = 0; i < links.length; i++) {
-    const link = links[i];
-    if (!link) continue;
-    const { url, title } = link;
-    const snippet = (i < snippets.length ? snippets[i] : '') ?? '';
-    if (title && url) {
-      results.push({ title, url, snippet });
-    }
-  }
-
+  if (value.length && !results.length) throw new SearchError('invalid_response');
   return results;
 }
 
-// ── SearxNG search ──
-
-async function searxngSearch(query: string, apiUrl: string): Promise<string> {
-  const url = `${apiUrl.replace(/\/+$/, '')}/search?q=${encodeURIComponent(query)}&format=json`;
-
-  try {
-    const res = await fetch(url, {
-      headers: { 'Accept': 'application/json', 'User-Agent': UA },
-      signal: AbortSignal.timeout(20_000),
-    });
-
-    if (!res.ok) return `搜索失败: SearxNG 返回 ${res.status}`;
-
-    const data = (await res.json()) as {
-      results?: Array<{ title?: string; content?: string; url?: string }>;
-    };
-    if (!data.results?.length) return `没有找到与"${query}"相关的结果。`;
-
-    let result = `关于"${query}"的搜索结果：\n`;
-    for (const item of data.results.slice(0, MAX_RESULTS)) {
-      result += `- ${item.title ?? '无标题'}\n  ${stripTags(item.content ?? '')}\n  ${item.url ?? '#'}\n`;
+async function stepfunMcpSearch(query: string, key: string, base: string, limit: number, category: string): Promise<ProviderResult> {
+  const args: Record<string, unknown> = { query, n: Math.min(Math.max(limit, 1), 20) };
+  if (category) args.category = category;
+  const response = await request(`${base.replace(/\/+$/, '')}/mcp/web_search/mcp`, {
+    method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'web_search', arguments: args } }),
+  }, 25_000);
+  let data: unknown;
+  if (response.headers?.get('content-type')?.includes('text/event-stream')) {
+    for (const event of (await response.text()).split(/\r?\n\r?\n/)) {
+      const text = event.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+      if (!text || text === '[DONE]') continue;
+      const parsed = JSON.parse(text) as { id?: unknown };
+      if (parsed.id === 1) data = parsed;
     }
-    return result;
-  } catch (err) {
-    logger.error({ err, query }, 'SearxNG search failed');
-    return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
-  }
+  } else data = await response.json();
+  if (!data || typeof data !== 'object') throw new SearchError('invalid_response');
+  const rpc = data as { error?: unknown; result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean } };
+  if (rpc.error || rpc.result?.isError) throw new SearchError('upstream_unavailable');
+  const text = (rpc.result?.content ?? []).filter((item) => item.type === 'text' || item.type === undefined).map((item) => item.text ?? '').join('\n').trim();
+  const start = text.indexOf('{');
+  if (start < 0) throw new SearchError('invalid_response');
+  const parsed = JSON.parse(text.slice(start)) as { results?: unknown };
+  return { results: rowsFromJson(parsed.results, limit) };
+}
+async function stepfunSearch(query: string, key: string, base: string, limit: number, category: string): Promise<ProviderResult> {
+  const response = await request(`${base.replace(/\/+$/, '')}/v1/search`, {
+    method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, ...(category ? { category } : {}) }),
+  }, 20_000);
+  const data = await response.json() as { results?: unknown };
+  return { results: rowsFromJson(data.results, limit) };
+}
+async function xaiSearch(query: string, key: string, base: string, model: string): Promise<ProviderResult> {
+  const response = await request(`${base.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: query }], search_parameters: { mode: 'on', return_citations: true }, stream: false, max_tokens: 800 }),
+  }, 45_000);
+  const data = await response.json() as { error?: unknown; choices?: Array<{ message?: { content?: string } }>;
+    annotations?: Array<{ url_citation?: { url?: string; title?: string } }>; search_sources?: Array<{ url?: string; title?: string }> };
+  if (data.error) throw new SearchError('upstream_unavailable');
+  const answer = data.choices?.[0]?.message?.content?.trim();
+  const results = rowsFromJson([...(data.search_sources ?? []), ...(data.annotations ?? []).map((item) => item.url_citation).filter(Boolean)], MAX_RESULTS);
+  // A model answer without source URLs is not a verified web search.
+  if (!answer || !results.length) throw new SearchError('invalid_response');
+  return { results, answer: answer.slice(0, 6000) };
 }
 
-function stripTags(html: string): string {
-  return html.replace(/<[^>]*>/g, '');
+function attribute(attributes: string, name: string): string | null {
+  return attributes.match(new RegExp(`\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i'))?.[2] ?? null;
+}
+/** Accept both quoting styles/attribute orders; unwrap DDG redirects to source URLs. */
+export function parseDdgLiteHtml(html: string): SearchResult[] {
+  const snippets = [...html.matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)]
+    .filter((match) => (attribute(match[1] ?? '', 'class') ?? '').split(/\s+/).includes('result-snippet'))
+    .map((match) => plainText(match[2] ?? '').slice(0, 500));
+  const results: SearchResult[] = [];
+  let index = 0;
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    if (!(attribute(match[1] ?? '', 'class') ?? '').split(/\s+/).includes('result-link')) continue;
+    const snippet = snippets[index++] ?? '';
+    const href = attribute(match[1] ?? '', 'href');
+    const url = href ? sourceUrl(href) : null;
+    const title = plainText(match[2] ?? '');
+    if (title && url && !results.some((result) => result.url === url)) results.push({ title, url, snippet });
+  }
+  return results;
+}
+async function ddgLiteSearch(query: string): Promise<ProviderResult> {
+  // Deployment-host probe: GET returned sources while POST returned HTTP 202
+  // challenges. GET can also be challenged: do not turn that into zero results.
+  const response = await request(`https://lite.duckduckgo.com/lite/?${new URLSearchParams({ q: query })}`, {
+    headers: { 'User-Agent': UA, Accept: 'text/html' },
+  }, 15_000);
+  const html = await response.text();
+  if (response.status === 202 || /anomaly-modal|<form[^>]*anomaly\.js|<form[^>]*(?:id|name)=["']challenge/i.test(html)) throw new SearchError('blocked', response.status);
+  const results = parseDdgLiteHtml(html).slice(0, MAX_RESULTS);
+  if (results.length) return { results };
+  if (/class\s*=\s*["'][^"']*\bno-results\b|no results (?:found )?for\b/i.test(html)) return { results: [] };
+  throw new SearchError('invalid_response');
+}
+async function searxngSearch(query: string, base: string): Promise<ProviderResult> {
+  const response = await request(`${base.replace(/\/+$/, '')}/search?${new URLSearchParams({ q: query, format: 'json' })}`, {
+    headers: { Accept: 'application/json', 'User-Agent': UA },
+  }, 20_000);
+  const data = await response.json() as { results?: unknown; unresponsive_engines?: unknown[] };
+  const results = rowsFromJson(data.results, MAX_RESULTS);
+  if (!results.length && data.unresponsive_engines?.length) throw new SearchError('upstream_unavailable');
+  return { results };
 }

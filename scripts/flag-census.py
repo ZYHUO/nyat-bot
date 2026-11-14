@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
-"""Flag census — 把 env.ts 里每个 flag 的"是什么 / 默认 / .env 实际值 / 有没有人读"
-合成一张真表。纯静态，不打数据库，不改任何东西。
+"""Flag census — 把 env.ts 里每个 flag 的"是什么 / 默认 / 来源文件值 / 有没有人读"
+合成一张真表。纯静态，不打数据库，只写清单产物。
 
-输出: docs/flag-census.md（人读）+ /tmp/flagcensus.json（后续用）
+默认读公开的 .env.example；--env-file 可显式指定本地运维输入。
+输出: docs/flag-census.md（人读）+ 系统临时目录内 flagcensus.json（后续用）
 """
+import argparse
 import glob
 import json
 import os
 import re
 import subprocess
+import tempfile
 from collections import defaultdict
 
 SRC = 'src/env.ts'
-ENVF = '.env'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--env-file', default='.env.example',
+                    help='静态配置来源（默认：公开的 .env.example；不会自动读取 .env）')
+args = parser.parse_args()
+ENVF = args.env_file
+if not os.path.isfile(ENVF):
+    parser.error('--env-file 必须指向存在的配置文件')
+source = {
+    'file': ENVF.replace('\\', '/'),
+    'kind': 'public_template' if os.path.abspath(ENVF) == os.path.abspath('.env.example') else 'explicit_file',
+}
 
 # 2026-09-21：schema 体按子系统拆到 src/env-sections/*.ts 了，src/env.ts 只用
 # spread 组合。所以这里改成**逐段文件**解析——顺带把 section 名记进每一行，
@@ -88,7 +101,7 @@ dups = [f['name'] for f in flags if f['name'] in seen or seen.add(f['name'])]
 if dups:
     print(f'⚠️  跨段重复的键: {sorted(set(dups))}')
 
-# ── 2. .env 实际值 ────────────────────────────────────────────────────────
+# ── 2. 显式来源文件值（不读取进程环境或运行时覆盖）────────────────────────
 envmap = {}
 for line in open(ENVF, encoding='utf8'):
     line = line.strip()
@@ -105,21 +118,23 @@ FALSE = {'false', '0', 'no', 'off', ''}
 # GEMINI_API_KEY / COMMON_API_KEY / WEBHOOK_SECRET 等真实凭据。这个脚本原来的
 # 设计目的就是「把 .env 实际值写进表里」，产物一 commit 就等于公开发布凭据
 # （GitHub secret scanning 已经有公开泄露告警）。现在一律不输出原值：
-# 纯布尔 / 纯数字保留（不是凭据，且「ON/off」这类信息是 census 的价值所在），
-# 其余一律替换成 <redacted>。
-REDACTED = '\x00REDACTED'
+# 凭据键始终打码；其他键只保留纯布尔 / 纯数字，其余也打码。
+REDACTED = '<redacted>'
+SECRET_KEY = re.compile(r'(?:^|_)(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?)$')
 
-def mask(v):
+def mask(k, v):
     if v is None:
         return None
     t = v.strip().strip("'\"")
+    if t and SECRET_KEY.search(k):
+        return REDACTED
     if t.lower() in TRUE or t.lower() in FALSE:
         return t
     if re.fullmatch(r'-?\d+(\.\d+)?', t):
         return t
     return REDACTED
 
-envmap = {k: mask(v) for k, v in envmap.items()}
+envmap = {k: mask(k, v) for k, v in envmap.items()}
 
 # ── 3. 有没有人读 ────────────────────────────────────────────────────────
 # 三种读法都要算，否则会把活旗标误判成死的（本会话已经因此差点误判 5 个）：
@@ -214,8 +229,8 @@ dead_on = [r for r in dead if r['on']]
 summary = {
     'total_keys': len(rows),
     'bool_flags': len(bools),
-    'on_in_prod': len(on_rows),
-    'set_in_env': len([r for r in rows if r['envval'] is not None]),
+    'on_in_source': len(on_rows),
+    'set_in_source': len([r for r in rows if r['envval'] is not None]),
     'dead_no_reader': len(dead),
     'dead_and_on': len(dead_on),
     'phantom_only_in_tests': len(phantom),
@@ -225,7 +240,12 @@ summary = {
 out = []
 out.append('# Flag census — 全量旗标清单\n')
 out.append('生成方式：`python3 scripts/flag-census.py`（纯静态：逐段读 `src/env-sections/*.ts` 的注释与默认值 '
-           '+ .env 实际值 + 五种读法 grep `src/`）。不打数据库、不改任何东西。\n')
+           '+ 指定来源文件值 + 五种读法 grep `src/`）。只写清单产物，不读取数据库、进程环境或运行时配置覆盖。\n')
+source_label = '公开模板' if source['kind'] == 'public_template' else '显式指定文件'
+out.append(f"配置来源：{source_label} {json.dumps(source['file'], ensure_ascii=False)}。"
+           '默认使用 .env.example；本地运维可用 --env-file 指定其他文件。'
+           '未填写的键按 schema 默认值统计；以下启用状态仅代表该静态来源，**不代表生产实际状态**。'
+           '凭据及非布尔、非数字的来源值均已脱敏。\n')
 out.append('2026-09-21 起 schema 按子系统拆成 `src/env-sections/*.ts`（`src/env.ts` 只用 spread 组合），'
            '所以这份清单**按段分组**、每行带「段」列——加旗标时先在这里找该进哪一段。'
            '另带「已退役」一节：删掉的旗标留名，免得下一个人再加回来。\n')
@@ -254,7 +274,7 @@ SECTION_DESC = {
 }
 out.append('## 段索引\n')
 out.append('拆段的主要收益就是这个：加旗标时知道该进哪个文件。\n')
-out.append('| 段 | 文件 | 键数 | 布尔 | 生产开着 | 管什么 |')
+out.append('| 段 | 文件 | 键数 | 布尔 | 来源启用 | 管什么 |')
 out.append('|---|---|---|---|---|---|')
 for _sec in SECTION_ORDER:
     _rs = [r for r in rows if r['section'] == _sec]
@@ -270,16 +290,16 @@ out.append('|---|---|')
 for k, v in summary.items():
     out.append(f'| {k} | {v} |')
 out.append('')
-out.append(f'**{summary["bool_flags"]} 个布尔旗标里，生产实际开着 {summary["on_in_prod"]} 个。** '
-           '这张表的意义就在于那一段：开着的东西才是要审计的对象。\n')
+out.append(f'**{summary["bool_flags"]} 个布尔旗标里，来源文件与 schema 默认值合计启用 {summary["on_in_source"]} 个。** '
+           '这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。\n')
 out.append('`readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 '
            '`const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/'
            '外部进程读的 `process.env` 旗标，要么是死旗标）。\n')
 
-out.append('## 🔴 死旗标：.env 开着，但代码里一个字都没有（%d 个）\n' % len(dead_on))
+out.append('## 🔴 死旗标：来源启用，但代码里一个字都没有（%d 个）\n' % len(dead_on))
 out.append('这些是"以为在跑"的开关。判定要求 src/ + scripts/ + packages/ 全无命中'
            '（`env().FLAG` / 解构 / `process.env.FLAG` 三种读法都算过）。\n')
-out.append('| flag | 段 | .env | 注释怎么说 | tests/ 里有吗 |')
+out.append('| flag | 段 | 来源值 | 注释怎么说 | tests/ 里有吗 |')
 out.append('|---|---|---|---|---|')
 for r in sorted(dead_on, key=lambda x: x['name']):
     c = (r['comment'] or '（无注释）').replace('|', '\\|').replace('\n', ' ')[:180]
@@ -295,14 +315,14 @@ out.append('⚠️ 2026-09-21 更正：我曾据这份清单写过"CORE_BELIEF_V
            'src/core/loop.ts:292 被读（`envShim().CORE_PERMISSION_GATE_ENABLED`）。'
            '只有 BLACKBOARD 是真的没人读。教训：读法不止 `env().FLAG` 一种，'
            '而"某一列是空"不等于"没人读"。\n')
-out.append('| flag | 段 | .env | 测试里怎么用 |')
+out.append('| flag | 段 | 来源值 | 测试里怎么用 |')
 out.append('|---|---|---|---|')
 for r in sorted(phantom, key=lambda x: x['name']):
     out.append(f"| `{r['name']}` | {r['section']} | {r['envval'] or '—'} | {', '.join(r['tests'][:3])} |")
 
-out.append('\n## 生产开着的旗标（%d 个）\n' % len(on_rows))
+out.append('\n## 来源启用的旗标（%d 个）\n' % len(on_rows))
 out.append('按段分组、段内按名字排序——要加旗标时照这个找位置。\n')
-out.append('| 段 | flag | 默认 | .env | 是什么（注释摘要） | 读者 |')
+out.append('| 段 | flag | 默认 | 来源值 | 是什么（注释摘要） | 读者 |')
 out.append('|---|---|---|---|---|---|')
 for r in sorted(on_rows, key=lambda x: (x['section'], x['name'])):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:150]
@@ -313,14 +333,14 @@ for r in sorted(on_rows, key=lambda x: (x['section'], x['name'])):
     out.append(f"| {r['section']} | `{r['name']}` | {r['default']} | {r['envval']} | {c} | {rd} |")
 
 out.append('\n## 关着的布尔旗标（%d 个）\n' % (len(bools) - len(on_rows)))
-out.append('| 段 | flag | 默认 | .env | 是什么（注释摘要） |')
+out.append('| 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |')
 out.append('|---|---|---|---|---|')
 for r in sorted([r for r in bools if not r['on']], key=lambda x: (x['section'], x['name'])):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:150]
     out.append(f"| {r['section']} | `{r['name']}` | {r['default']} | {r['envval'] or '—'} | {c} |")
 
 out.append('\n## 非布尔参数（%d 个）\n' % (len(rows) - len(bools)))
-out.append('| 段 | key | 默认 | .env | 是什么（注释摘要） |')
+out.append('| 段 | key | 默认 | 来源值 | 是什么（注释摘要） |')
 out.append('|---|---|---|---|---|')
 for r in sorted([r for r in rows if not r['is_bool']], key=lambda x: (x['section'], x['name'])):
     c = (r['comment'] or '').replace('|', '\\|').replace('\n', ' ')[:120]
@@ -381,18 +401,20 @@ out.append('还没处理的（本轮不动，原因见下）：`CORE_BLACKBOARD_
            '是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。\n')
 
 out.append('\n## src/ 里没人读的键（%d 个）\n' % len(dead))
-out.append('| key | 段 | .env | 说明 |')
+out.append('| key | 段 | 来源值 | 说明 |')
 out.append('|---|---|---|---|')
 for r in sorted(dead, key=lambda x: x['name']):
     out.append(f"| `{r['name']}` | {r['section']} | {r['envval'] or '—'} | {(r['comment'] or '')[:100]} |")
 
-open('docs/flag-census.md', 'w', encoding='utf8').write('\n'.join(out) + '\n')
-json.dump({'summary': summary, 'rows': rows}, open('/tmp/flagcensus.json', 'w'), ensure_ascii=False, indent=1)
+open('docs/flag-census.md', 'w', encoding='utf8').write('\n'.join(out).replace(REDACTED, '&lt;redacted&gt;') + '\n')
+json.dump({'source': source, 'summary': summary, 'rows': rows},
+          open(os.path.join(tempfile.gettempdir(), 'flagcensus.json'), 'w', encoding='utf8'), ensure_ascii=False, indent=1)
 
+print(json.dumps({'source': source}, ensure_ascii=False))
 print(json.dumps(summary, indent=1))
 print('\n=== 死旗标（开着但无人读）===')
 for r in dead_on:
-    print('  -', r['name'], '| .env =', r['envval'], '| tests:', ','.join(r['tests'][:2]) or '-')
+    print('  -', r['name'], '| 来源值 =', r['envval'], '| tests:', ','.join(r['tests'][:2]) or '-')
 print('\n=== 假开关（只被测试 mock）===')
 for r in phantom:
     print('  -', r['name'])

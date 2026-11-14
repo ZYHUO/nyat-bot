@@ -15,9 +15,11 @@
  * 新加旗标时如果忘了接线，这里会红——比等到审计时才发现好。
  * 真的需要"先加旗标后接线"，把它加进 ALLOWLIST 并写原因，别把测试关掉。
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { parse as parseDotenv } from 'dotenv';
 import { describe, expect, it } from 'vitest';
+import { booleanFromEnv } from '../../../src/env-sections/_shared.js';
 
 /**
  * 已知例外。每条都要写原因——这是欠条，不是免责声明。
@@ -140,37 +142,79 @@ function classifyReader(name: string, prepped: Prepped[]): ReaderKind {
   return 'none';
 }
 
-/** .env 里显式设成 true 的键。 */
-function envTrueKeys(): Set<string> {
-  const out = new Set<string>();
-  for (const line of readFileSync('.env', 'utf8').split('\n')) {
-    const t = line.trim();
-    if (!t || t.startsWith('#') || !t.includes('=')) continue;
-    const [k, v] = t.split('=', 2) as [string, string];
-    if (['true', '1', 'yes', 'on'].includes((v ?? '').trim().toLowerCase())) out.add(k.trim());
+type Flag = ReturnType<typeof parseEnvFlags>[number];
+
+/** Explicit candidate files must exist. CI without .env still audits schema defaults. */
+function auditValues(explicitPath = process.env['NYATBOT_FLAG_AUDIT_ENV'], read = (path: string) => readFileSync(path, 'utf8')): Record<string, string> {
+  try { return parseDotenv(read(explicitPath || '.env')); }
+  catch (error) {
+    if (!explicitPath && (error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw error;
   }
-  return out;
 }
 
-/**
- * 只认 `true` / `yes` / `on`——**不认 `1`**。
- *
- * `envTrueKeys()` 把 `1` 也算 true 是对的（很多旗标确实用 1/0），
- * 但"父关子开"这条检查的对象是**布尔语义的开关**。数字旗标的 `1`
- * 是"值为 1"（CONCURRENCY=1 / CALLS_PER_TICK=4），不是"开着"。
- * 混在一起就会误报，而误报会训练人忽略这条检查。
- */
-function isExplicitlyTrue(key: string): boolean {
-  for (const line of readFileSync('.env', 'utf8').split('\n')) {
-    const t = line.trim();
-    if (!t || t.startsWith('#') || !t.includes('=')) continue;
-    const [k, v] = t.split('=', 2) as [string, string];
-    if (k.trim() === key) return ['true', 'yes', 'on'].includes((v ?? '').trim().toLowerCase());
+/** Use the same coercion as production; explicit false overrides a true schema default. */
+function effectiveTrueKeys(flags: Flag[], values: Record<string, string>): Set<string> {
+  const on = new Set<string>();
+  for (const flag of flags) {
+    if (!flag.isBool) continue; // Numeric parameters (including 1) are not switches.
+    const explicit = Object.prototype.hasOwnProperty.call(values, flag.name);
+    const result = explicit ? booleanFromEnv.safeParse(values[flag.name]) : { success: true, data: flag.defaultTrue };
+    if (!result.success) throw new Error(`Invalid boolean flag: ${flag.name}`); // Never print input values.
+    if (result.data) on.add(flag.name);
   }
-  return false;
+  return on;
 }
+
+function enabledFlags(): Set<string> { return effectiveTrueKeys(parseEnvFlags(), auditValues()); }
+
+function readerFiles(): string[] {
+  return [...walk('src'), ...walk('scripts'), ...walk('packages')]
+    .filter((path) => {
+      const normalized = path.replace(/\\/g, '/');
+      return !normalized.endsWith('/env.ts') && !normalized.startsWith('src/env-sections/');
+    });
+}
+
+function unreachableChildren(families: Array<[string, string[]]>, on: Set<string>): Array<{ parent: string; child: string }> {
+  return families.flatMap(([parent, children]) => on.has(parent) ? []
+    : children.filter((child) => on.has(child)).map((child) => ({ parent, child })));
+}
+
+describe('flag audit input semantics', () => {
+  const flags: Flag[] = [
+    { name: 'PARENT', isBool: true, defaultTrue: true },
+    { name: 'CHILD', isBool: true, defaultTrue: true },
+    { name: 'COUNT', isBool: false, defaultTrue: false },
+  ];
+  it('parses quotes/comments/duplicate assignments and boolean 1 like dotenv and the schema', () => {
+    const values = parseDotenv('PARENT="false" # override\nCHILD="off"\nexport CHILD=\'1\'\nCOUNT=1');
+    expect([...effectiveTrueKeys(flags, values)]).toEqual(['CHILD']);
+  });
+  it('uses schema defaults when .env is absent, but never silently ignores an explicit missing path', () => {
+    const missing = () => { throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' }); };
+    expect([...effectiveTrueKeys(flags, auditValues('', missing))]).toEqual(['PARENT', 'CHILD']);
+    expect(() => auditValues('explicit-flags.env', missing)).toThrow('missing fixture');
+  });
+  it('rejects invalid boolean overrides without printing their contents', () => {
+    expect(() => effectiveTrueKeys(flags, { CHILD: 'secret-invalid-value' })).toThrow(/^Invalid boolean flag: CHILD$/);
+  });
+  it('checks effective parent/child pairs including defaults and unrelated enabled families', () => {
+    const families: Array<[string, string[]]> = [['PARENT', ['CHILD']], ['OTHER', ['OTHER_CHILD']]];
+    expect(unreachableChildren(families, new Set(['CHILD', 'OTHER']))).toEqual([{ parent: 'PARENT', child: 'CHILD' }]);
+    expect(unreachableChildren(families, effectiveTrueKeys(flags, { PARENT: 'false' }))).toEqual([{ parent: 'PARENT', child: 'CHILD' }]);
+    expect(unreachableChildren(families, effectiveTrueKeys(flags, {}))).toEqual([]);
+    expect(unreachableChildren(families, effectiveTrueKeys(flags, { PARENT: 'false', CHILD: 'false' }))).toEqual([]);
+  });
+});
 
 describe('no dead switches', () => {
+  it('explicit audit input contains only known boolean flags (no production secrets needed)', () => {
+    if (!process.env['NYATBOT_FLAG_AUDIT_ENV']) return;
+    const names = new Set(parseEnvFlags().filter((flag) => flag.isBool).map((flag) => flag.name));
+    const unknown = Object.keys(auditValues()).filter((key) => !names.has(key));
+    expect(unknown, 'NYATBOT_FLAG_AUDIT_ENV must contain only known boolean flag names').toEqual([]);
+  });
   // 守卫自己的守卫：解析不到旗标 = 下面的断言是空集合上的恒真命题。
   // 2026-09-21 拆段时就差点这么静默失效（schema 搬走了，这里还在读旧位置）。
   it('self-check：真的解析到了旗标（否则后面全是空集合上的恒真）', () => {
@@ -186,9 +230,8 @@ describe('no dead switches', () => {
 
   it('每个开着的布尔旗标都有读者（env().X / 解构 / process.env.X 三种读法都算）', () => {
     const flags = parseEnvFlags();
-    const trueInEnv = envTrueKeys();
-    const files = [...walk('src'), ...walk('scripts'), ...walk('packages')]
-      .filter((p) => !p.endsWith('env.ts') && !p.startsWith('src/env-sections/'));
+    const on = enabledFlags();
+    const files = readerFiles();
     // **声明处不算读者**：src/env.ts 与 src/env-sections/*.ts 只是"这个键存在"，
     // 不是"有人读它"。2026-09-21 schema 按子系统拆段后漏了这条——段文件自己
     // 被当成读者，守卫一夜之间全绿，而 21 个死键一个都没少。
@@ -206,8 +249,7 @@ describe('no dead switches', () => {
     const dead: string[] = [];
     for (const f of flags) {
       if (!f.isBool) continue;
-      const on = trueInEnv.has(f.name) || f.defaultTrue;
-      if (!on) continue;
+      if (!on.has(f.name)) continue;
       if (ALLOWLIST[f.name]) continue;
       if (!hasReader(f.name)) dead.push(f.name);
     }
@@ -239,11 +281,10 @@ describe('no dead switches', () => {
   // 188 个开着的布尔旗标里，72 个只能靠兜底认出，显式认下别名读法之后剩 6 个。
   // 那 6 个逐个查过都是真读法，但守卫证明不了——所以钉住名单，多一个就停下来看。
   it('只靠裸词匹配的旗标名单没有变长（松的那部分要可见）', () => {
-    const files = [...walk('src'), ...walk('scripts'), ...walk('packages')]
-      .filter((p) => !p.endsWith('env.ts') && !p.startsWith('src/env-sections/'));
+    const files = readerFiles();
     const prepped = prepBlobs(files.map((p) => ({ s: readFileSync(p, 'utf8') })));
-    const trueInEnv = envTrueKeys();
-    const on = parseEnvFlags().filter((f) => f.isBool && (trueInEnv.has(f.name) || f.defaultTrue));
+    const enabled = enabledFlags();
+    const on = parseEnvFlags().filter((f) => f.isBool && enabled.has(f.name));
 
     const weak: string[] = [];
     const none: string[] = [];
@@ -267,8 +308,7 @@ describe('no dead switches', () => {
   });
 
   it('ALLOWLIST 里的每一项都还真的没有读者（欠条到期要清）', () => {
-    const files = [...walk('src'), ...walk('scripts'), ...walk('packages')]
-      .filter((p) => !p.endsWith('env.ts') && !p.startsWith('src/env-sections/'));
+    const files = readerFiles();
     const blobs = files.map((p) => readFileSync(p, 'utf8'));
     const wired: string[] = [];
     for (const name of Object.keys(ALLOWLIST)) {
@@ -294,15 +334,23 @@ describe('no dead switches', () => {
   // 处理方式和 ALLOWLIST 同款：**故意留着的要写理由**，没写理由的一律算漏配。
   // 这样下一个"父关子开"出现时必须有人决定"是开父还是关子"，不会静默躺着。
   const FAMILIES: Array<[parent: string, children: string[]]> = [
+    // src/pipeline/multiagent/flags.ts: both switches must be on.
+    ['TURN_ACTOR_ENABLED', ['MULTI_AGENT_ENABLED']],
     ['MULTI_AGENT_ENABLED', [
       'MULTI_AGENT_MEMORY_ENABLED',
       'MULTI_AGENT_PERSONA_ENABLED',
       'MULTI_AGENT_PERSONA_CRITIC_ENABLED',
       'MULTI_AGENT_DIRECTOR_ENABLED',
+      'MULTI_AGENT_CONTEXT_DIGEST_ENABLED',
+      'MULTI_AGENT_CHAT_SPECIALISTS',
+      'MULTI_AGENT_ROUTE_CONVERGENCE_ENABLED',
+      'MULTI_AGENT_CHECKER_ENABLED',
+      'MULTI_AGENT_CRITIC_ENABLED',
       // round 74 补：WRITER_SELECTOR 也在 orchestrator.ts:464，同一个父。
       // 上一轮列 FAMILIES 时漏了它——只看了 orchestrator 里 185/404 两个位置。
       'WRITER_SELECTOR_ENABLED',
     ]],
+    ['MULTI_AGENT_CRITIC_ENABLED', ['MULTI_AGENT_CRITIC_ON_LOOKUP']],
     // round 4（v1.0 周期）：subagent 审计扫全库前缀找到的第二族。
     // `STEPFUN_CONSUMER_*` 是那个"8000M/月订阅用起来"的后台引擎，父开关切在
     // `cron/scheduler.ts:387`——**关时连 cron 都不注册**，四个子旗标
@@ -314,38 +362,26 @@ describe('no dead switches', () => {
       'STEPFUN_CONSUMER_REFLECT_WEIGHT',
     ]],
   ];
-  /** 父关着但子旗标故意开着的，写理由。没在这里的一律算漏配。 */
-  const PARENT_GATED: Record<string, string> = {
-    MULTI_AGENT_PERSONA_ENABLED: '人设员是"身份认知加强"要用的机制；父 MULTI_AGENT_ENABLED=false 是生产选择（并行专家贵、无生产证据），不是忘了开。开父之前它就该是 true。',
-    MULTI_AGENT_PERSONA_CRITIC_ENABLED: '同上：人设批评员，等父旗标。',
-    MULTI_AGENT_MEMORY_ENABLED: '记忆专家，等父旗标。',
-    MULTI_AGENT_DIRECTOR_ENABLED: '导演，等父旗标。',
-    WRITER_SELECTOR_ENABLED: '写手择优选择，在 orchestrator.ts:464，等父旗标。',
+  /** Existing schema inconsistency only, never an exemption for a deployment candidate. */
+  const DEFAULT_PARENT_GATED: Record<string, string> = {
+    'TURN_ACTOR_ENABLED->MULTI_AGENT_ENABLED':
+      'turn.ts defaults TURN_ACTOR to false while social.ts defaults MULTI_AGENT to true; flags.ts requires both. Track the existing default debt without accepting it in any supplied configuration.',
   };
-  it('self-check：没有"父关子开"且没写理由的不可达旗标', () => {
-    const on = envTrueKeys();
-    const offenders: string[] = [];
-    for (const [parent, children] of FAMILIES) {
-      if (on.has(parent)) continue;             // 父开着 → 子旗标可达
-      for (const c of children) {
-        if (!on.has(c)) continue;               // 子也关着 → 一致
-        // **只认显式布尔词。** `envTrueKeys()` 把 `1` 也算 true，而数字旗标
-        // （CONCURRENCY=1 / CALLS_PER_TICK=4）的 `1` 是"值为 1"不是"开着"。
-        // round 4 加 STEPFUN_CONSUMER 族时就撞上了：CONCURRENCY=1 被误判成
-        // "父关子开"。数字旗标该在这条检查之外——它们的"开/关"由父旗标决定，
-        // 自己的值只是参数。
-        if (!isExplicitlyTrue(c)) continue;
-        if (!PARENT_GATED[c]) {
-          offenders.push(`${c}=true 但父 ${parent}=false → 永远不可达，且没在 PARENT_GATED 里写理由`);
-        }
-      }
-    }
+  it('self-check：effective 配置没有未解释的父关子开，候选配置不使用历史生产豁免', () => {
+    const defaultsOnly = !process.env['NYATBOT_FLAG_AUDIT_ENV'] && !existsSync('.env');
+    const offenders = unreachableChildren(FAMILIES, enabledFlags())
+      .filter(({ parent, child }) => !(defaultsOnly && DEFAULT_PARENT_GATED[`${parent}->${child}`]))
+      .map(({ parent, child }) => `${child}=true but effective parent ${parent}=false`);
     expect(offenders, offenders.join('\n')).toEqual([]);
   });
 
-  it('self-check：PARENT_GATED 里没有过期条目（父开了就该清掉）', () => {
-    const on = envTrueKeys();
-    const stale = Object.keys(PARENT_GATED).filter((c) => on.has(c) && FAMILIES.some(([p]) => on.has(p)));
-    expect(stale, `父旗标已开，这些子旗标的理由该删了: ${stale.join(', ')}`).toEqual([]);
+  it('self-check：父子关系键存在，schema 默认欠条只匹配仍不可达的确切父子对', () => {
+    const flags = parseEnvFlags();
+    const names = new Set(flags.map((flag) => flag.name));
+    expect(FAMILIES.flatMap(([parent, children]) => [parent, ...children]).filter((name) => !names.has(name))).toEqual([]);
+    const defaultProblems = new Set(unreachableChildren(FAMILIES, effectiveTrueKeys(flags, {}))
+      .map(({ parent, child }) => `${parent}->${child}`));
+    const stale = Object.keys(DEFAULT_PARENT_GATED).filter((pair) => !defaultProblems.has(pair));
+    expect(stale, `schema 默认关系已修复，清掉对应欠条: ${stale.join(', ')}`).toEqual([]);
   });
 });

@@ -35,6 +35,8 @@ import { preloadSkills } from './pipeline/tools/registry.js';
 import { startMetaLoop, stopMetaLoop } from './meta/index.js';
 import { startCodeActWorker, closeCodeActWorker } from './subagent/index.js';
 import { getSandboxCapability } from './sandbox/terminal.js';
+import { assertMetaIsolationReady } from './startup/meta-isolation.js';
+import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, validateOneBotConfig } from './platform/onebot-runtime.js';
 
 import { installGlobalFetchProxy } from './shared/fetch-proxy.js';
 import { startDynamicLogLevel } from './shared/logger.js';
@@ -57,7 +59,13 @@ async function main(): Promise<void> {
 
   // 1. Validate env
   const config = env();
+  validateOneBotConfig(config);
   logger.info({ nodeEnv: config.NODE_ENV }, 'Environment validated');
+
+  // A configured flag is not evidence that this service UID can create its
+  // sandbox. Refuse to take over messages until the exact runtime passes.
+  await assertMetaIsolationReady();
+  if (config.META_SUBAGENT_ENABLED) logger.info('Meta isolation preflight passed');
 
   // 1.2 Global fetch proxy (KVM 受限网络：TG/LLM/Gemini 全走 xray 出口；本地直连）
   if (installGlobalFetchProxy(config.GLOBAL_FETCH_PROXY)) {
@@ -152,6 +160,7 @@ async function main(): Promise<void> {
   registerFeedbackHandler();
 
   const ownership = getStartupOwnership();
+  startOneBotRuntime(ownership.botIngress);
 
   // 8. Start BullMQ worker
   if (ownership.worker) {
@@ -232,7 +241,10 @@ async function main(): Promise<void> {
         const { logProcessBootContext } = await import('./cron/restart-hygiene.js');
         await logProcessBootContext();
       }
-      void bot.start({
+      // 不能 `void bot.start()`：409/401 会让 start() reject，轮询静默死掉、进程活着，
+      // 5 分钟后看门狗才 exit —— 09-28→09-30 每 12 分钟重启一次就是这个（见 polling-recovery.ts）。
+      const { startBotPollingWithRecovery } = await import('./ingress/polling-recovery.js');
+      startBotPollingWithRecovery(bot, {
         onStart: () => {
           logger.info('Bot started (polling)');
           (globalThis as { __markBootReady?: () => void }).__markBootReady?.();
@@ -397,9 +409,9 @@ async function main(): Promise<void> {
       // 在飞生成,最后才等 worker —— 旧顺序 closeWorker 在前,关机窗口内
       // 新消息持续打断→replan→起新 LLM 生成,30s 必然等不完。
       step('cron');
+      pauseOneBotIngress();
       stopCronJobs();
       stopMetaLoop();
-      await closeCodeActWorker();
       // 关机广播先于 stopBot:中止全部在飞主回合生成(actor 收到 Shutdown
       // abort 后把锚点条目回 pending 供重启重放)—— TG 链路挂死时 stopBot
       // 可能拖延,不能让它推迟广播(review 加固 #1)。广播是同步的,窗口内
@@ -429,7 +441,9 @@ async function main(): Promise<void> {
       // 在飞 job 的 LLM fetch 已被 abort、deliver 睡眠挂了 shutdown 信号
       // → 秒级收尾,worker.close 不再无限期等。
       step('worker');
+      await closeCodeActWorker();
       await closeWorker();
+      stopOneBotRuntime();
       step('queue');
       await closeQueue();
       // token 记账最后 flush 一次(别丢最后一分钟的账),需在 closeDb 之前。

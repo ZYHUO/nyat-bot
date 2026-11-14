@@ -37,7 +37,11 @@ vi.mock('../../../src/meta/heart-refractory.js', () => ({
   shouldSuppressMetaHeartDispatch: vi.fn(async () => false),
 }));
 vi.mock('../../../src/bot/bot.js', () => ({
-  getBotUid: () => 999001,
+  getBotUid: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 2 ** 52 + 11 : 999001,
+}));
+vi.mock('../../../src/platform/owner-context.js', () => ({
+  isConversationOwner: (chatId: number, uid: number) => chatId === -(2 ** 52 + 10)
+    ? uid === 2 ** 52 + 12 : uid === 6251541967,
 }));
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
@@ -45,6 +49,10 @@ vi.mock('../../../src/env.js', () => ({
     META_USAGE: 'judge',
     CODEACT_TIMEOUT_MS: 5000,
     CODEACT_BANNED_WORDS: [],
+    META_SUBAGENT_ENABLED: true,
+    CODEACT_ISOLATION_ENABLED: true,
+    META_SUBAGENT_CHAT_IDS: [],
+    META_ACTIVATED_AT_SEC: 1,
   }),
 }));
 vi.mock('../../../src/db/redis.js', () => ({
@@ -72,6 +80,25 @@ describe('L0 autoDispatch before Meta LLM', () => {
     tryClaimQuote.mockResolvedValue(true);
     tryMarkCodeActActive.mockClear();
     tryMarkCodeActActive.mockResolvedValue(true);
+  });
+
+  it.each([true, false])('QQ L0 reply ownership uses scoped self instead of Telegram self (%s)', async ownReply => {
+    const result = await runMetaSession([{
+      id: 'qq-a1', chatId: -(2 ** 52 + 10), layer: 'L0', pressure: 100,
+      reason: 'direct:mention', messageId: 2 ** 52 + 13, userId: 2 ** 52 + 12,
+      textPreview: '帮我看看', createdAt: Date.now(), payload: { replyTo: {
+        messageId: 2 ** 52 + 14, uid: ownReply ? 2 ** 52 + 11 : 999001,
+        fullName: 'speaker', textSnippet: 'previous message',
+      } },
+    }], []);
+    expect(result.digest).toBe('l0_auto_only');
+    expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+    const task = enqueueCodeActJob.mock.calls[0]![0] as { contentDirection: string; chatId: number };
+    expect(task.chatId).toBe(-(2 ** 52 + 10));
+    expect(task.contentDirection).toContain('本会话已核验的主人');
+    expect(task.contentDirection).not.toContain('Zh_Taiwan');
+    if (ownReply) expect(task.contentDirection).toContain(`回复你的 #${2 ** 52 + 14}`);
+    else expect(task.contentDirection).not.toContain(`回复你的 #${2 ** 52 + 14}`);
   });
 
   it('dispatches L0 with replyTo-self direction and skips Meta LLM', async () => {

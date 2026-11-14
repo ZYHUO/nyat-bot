@@ -64,11 +64,16 @@ function recentMaterial(windowSec: number): string {
       // Older deployments recorded completed episodes before task_evidence existed.
       // Keep the evidence gate when verified rows are available, but do not starve
       // the lifecycle forever when the database only contains legacy episodes.
+      //
+      // 只回退到「根本没有 task_evidence 记录」的老 episode。distiller 现在把 lifecycle-done 且
+      // 未被判 failed 的任务记成 outcome=done（以前恒为 failed），所以这里若只看 outcome='done'，
+      // 会把**有证据行但 unverified** 的新 episode 也放进技能素材——证据门就被绕开了。
       if (eps.length === 0) {
         eps = db
-          .prepare(`SELECT goal, outcome, summary FROM episodes
-             WHERE created_at > ? AND outcome = 'done'
-             ORDER BY created_at DESC LIMIT 20`)
+          .prepare(`SELECT e.goal, e.outcome, e.summary FROM episodes e
+             WHERE e.created_at > ? AND e.outcome = 'done'
+               AND NOT EXISTS (SELECT 1 FROM task_evidence t WHERE t.task_id = e.task_id)
+             ORDER BY e.created_at DESC LIMIT 20`)
           .all(since) as { goal: string; outcome: string; summary: string }[];
       }
     } catch {

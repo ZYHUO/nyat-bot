@@ -11,6 +11,9 @@ import type { AgencyRunStatus } from '../agent/agency-runtime.js';
 import { getTaskRecoverySummary } from '../agent/task-runtime-events.js';
 import { listSkillRevisionVerificationSummaries } from '../core/skills/revisions.js';
 import type { SkillRevisionStatus } from '../core/skills/revisions.js';
+import { getFeatureStatusReport } from './feature-status.js';
+import { getOneBotRuntimeStatus } from '../platform/onebot-runtime.js';
+import { findConversationRef, isPlatformInternalId } from '../platform/identity-store.js';
 
 interface MonitorDeps {
   redis: Redis;
@@ -31,6 +34,10 @@ const _titleCache = new Map<number, { title: string; ts: number }>();
 const TITLE_CACHE_TTL = 300_000; // 5 min
 
 async function getCachedTitle(bot: Bot, chatId: number): Promise<string> {
+  if (isPlatformInternalId(chatId)) {
+    const ref = findConversationRef(chatId);
+    return ref ? `QQ ${ref.conversationKind === 'group' ? '群' : '私聊'} ${ref.id}` : '未解析的平台会话';
+  }
   const cached = _titleCache.get(chatId);
   if (cached && Date.now() - cached.ts < TITLE_CACHE_TTL) return cached.title;
   const chat = await tryGetChat(bot, chatId);
@@ -74,6 +81,16 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
       return c.json({ ok: false, error: 'unauthorized' }, 401);
     }
     await next();
+  });
+
+  api.get('/features', async (c) => {
+    c.header('Cache-Control', 'no-store');
+    return c.json({ ok: true, ...await getFeatureStatusReport(deps.env, deps.redis) });
+  });
+
+  api.get('/onebot', (c) => {
+    c.header('Cache-Control', 'no-store');
+    return c.json({ ok: true, ...getOneBotRuntimeStatus() });
   });
 
   // List all chats with last message preview

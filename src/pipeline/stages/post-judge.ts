@@ -288,7 +288,7 @@ export async function runPostJudge(ctx: {
       recentMessages,
       judgeResult,
       botUid,
-      botName: getBotDisplayName(),
+      botName: getBotDisplayName(job.chatId),
       botPersona,
       isDirectInteraction: isDirect,
       signal: job.turnContext?.signal,

@@ -99,6 +99,7 @@ export interface CognitiveEventInput {
 }
 
 export interface TelegramMessageEventInput {
+  platform?: 'telegram' | 'qq';
   update: UpdateLike;
   chatId: number;
   messageId: number;
@@ -363,6 +364,7 @@ export function appendCognitiveEvent(input: CognitiveEventInput): AppendCognitiv
 export function appendTelegramMessageEvent(input: TelegramMessageEventInput): string | undefined {
   try {
     const raw = input.update as Record<string, unknown>;
+    const platform = input.platform ?? 'telegram';
     const isEdit = Boolean(raw['edited_message'] || raw['edited_channel_post']);
     const telegramMessage = (raw['edited_message'] ?? raw['edited_channel_post'] ?? raw['message'] ?? raw['channel_post']) as Record<string, unknown> | undefined;
     const updateId = typeof raw['update_id'] === 'number' ? raw['update_id'] : undefined;
@@ -375,11 +377,12 @@ export function appendTelegramMessageEvent(input: TelegramMessageEventInput): st
         chatId: input.chatId,
         ...(input.userId !== undefined && input.userId > 0 ? { userId: input.userId } : {}),
       },
-      source: 'telegram',
+      source: platform === 'telegram' ? 'telegram' : 'host',
       occurredAt: input.occurredAt,
-      correlationId: `telegram:${input.chatId}:${telegramKey}`,
-      dedupeKey: `telegram:${input.chatId}:${input.messageId}:${isEdit ? `edit:${versionKey}` : `message:${versionKey}`}`,
+      correlationId: `${platform}:${input.chatId}:${telegramKey}`,
+      dedupeKey: `${platform}:${input.chatId}:${input.messageId}:${isEdit ? `edit:${versionKey}` : `message:${versionKey}`}`,
       fact: {
+        ...(platform === 'qq' ? { platform } : {}),
         chatId: input.chatId,
         messageId: input.messageId,
         userId: input.userId ?? null,

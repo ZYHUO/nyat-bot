@@ -74,13 +74,14 @@ export interface HeartInput {
 export function isAddressedToBot(
   message: FormattedMessage,
   botUid: number,
+  chatId?: number,
 ): boolean {
   if (botUid > 0 && message.replyTo?.uid === botUid) return true;
   const text = (message.textContent || message.captionContent || '').trim();
   if (!text) return false;
   try {
-    const id = getBotIdentity();
-    if (isMentioningSelf(text, id.username, id.nicknames)) return true;
+    const id = getBotIdentity(chatId);
+    if (isMentioningSelf(text, id.username, id.nicknames, botUid)) return true;
   } catch {
     // bot 未初始化（测试/探针）时退回 botName 包含匹配
   }
@@ -110,7 +111,7 @@ function llmFailedDecision(
 ): HeartDecision {
   let act: HeartAct = 'pass';
   let why = 'llm_failed';
-  if (env().HEART_LLM_FAIL_KEEP_ADDRESSED && isAddressedToBot(input.message, input.botUid)) {
+  if (env().HEART_LLM_FAIL_KEEP_ADDRESSED && isAddressedToBot(input.message, input.botUid, input.chatId)) {
     act = 'wait';
     why = 'llm_failed_keep_addressed';
     incrCounter('heart_llm_fail_keep_addressed_total', { chat: input.chatId });

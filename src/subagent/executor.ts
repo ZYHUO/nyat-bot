@@ -16,6 +16,12 @@ import { compactHistory, restoreMessagesFromCompacted } from '../agent/compactio
 import { persistDigest } from '../meta/session-digest.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
 import { createDebt, resolveOpenDebtsByTaskWithEvidence } from '../agent/cognitive-debts.js';
+import { executeIsolatedCode } from '../sandbox/codeact/runner.js';
+import { CODEACT_CAPABILITY_METHODS, selectCodeActCapabilities } from '../sandbox/codeact/capabilities.js';
+import { buildCodeActSystemPrompt, buildJournalCapabilityNote, codeActMethodsForChat } from './capability-prompt.js';
+import { checkCodeActActivation, holdCodeActTask } from './activation-policy.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
+import { DELIVERY_UNKNOWN_SUMMARY, holdUnknownCodeActDelivery, isCodeActDeliveryHeld, isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
 function startTypingHeartbeat(chatId: number): () => void {
@@ -43,65 +49,36 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 - telegram.sendText(text, replyToMessageId?, kind?)  // 中途交流/发现/沟通；**必须 await**，发送后可以继续工作。**一个任务对同一个 chat 只开口一次**：想说的第二句话并进这一条里（同一个调用用。分开就会变成多个气泡），别重新调一次 sendText——那正是用户说的「说话太应激」。同理 sendFinal。唯一例外：真的要中途吱一声且隔了很久
 - telegram.sendFinal(text, replyToMessageId?)  // 明确最终交付；**必须 await**，随后 runtime.endTask
 - telegram.sendSticker(fileId) / telegram.react(messageId, emoji)
-- **telegram.sendFile(相对路径, caption?)** — 把沙盒里创建的文件发给用户（sendDocument）。**创建了文件必须用这个发出去**，不要只写不发。
-- telegram.sendPhoto(相对路径, caption?) — 把沙盒里的**图片**当照片发（内联直接显示）。发图片一律用这个；sendFile 留给文档/代码/压缩包
-- art.draw(描述, {width?, height?, caption?, autoSend?}?) — **画图摊子（画图必须用它，禁止自己用 PIL/代码涂鸦）**：告诉它要画什么（画面内容/风格/图里要写的字，越具体越好），caption 是照片配文。**异步的**：调用立刻返回 {started}，画好照片会自动发到当前会话（带 caption）——你**不要等结果**，调完先 sendText 一句「在画了喵」之类的话，再 endTask。画砸了系统会自动发翻车说明。想自己拿文件去跨群投递才传 autoSend:false（同步等结果，慢，会占满本轮预算）。每任务限 2 次
 - telegram.sendVoice(text) — 合成语音发出去（TTS 关闭时返回 {skipped}，属正常）
 - memory.search(query) / memory.recallPerson(uid, query) / memory.recentContext(limit?)
-- memory.searchDigests(关键词) — 搜你自己做过的事/说过的话（session digest 全文检索）。查「我之前办到哪了/有没有回信」用
-- chats.recentMessages(chatId, limit?) — 读另一个群的最近消息。查「ta 在那个群回话了吗」用
+- memory.searchDigests(关键词) — 搜当前会话内自己做过的事/说过的话（session digest 全文检索）。没有来源的旧记录不提供
+- chats.recentMessages(chatId, limit?) — 读有权限的会话最近消息。私聊和敏感群内容不能跨会话读取
 - stickers.pick(mood?)
-- web.search(query) — 全网搜索
-- pixiv.search(关键词, limit?) — Pixiv 公开全年龄搜图（标题/作者/tags/作品页/缩略图）。要发图：先 pixiv.search 拿 thumb，再 pixiv.download(thumb 或作品链接/ID) 得沙盒路径，最后 telegram.sendPhoto(路径, caption)。不要下载/发送 R-18 内容
+- web.search(query) — 尝试联网搜索；受验证码或配置阻断时会返回不可用，不得把错误提示当作资料
 - linuxsb.latest(sort?, limit?) — linux.sb 公开论坛看最新消息/帖子（sort: comment/new/featured）
 - linuxsb.topic(帖子ID或URL, limit?) — 看 linux.sb 帖子正文和回复摘要
 - linuxsb.search(关键词, limit?) — 在 linux.sb 公开列表里匹配帖子（站内搜索页需登录，未接 cookie）
 - web.feed() — 本喵订阅的 RSS 谈资库最新条目（源/标题/链接）。**找「我之前分享过/瞄到的新闻」的出处，先翻它和 memory.searchDigests（本地就有），别上来就全网搜**——本地谈资是源头，全网搜反而搜不到你脑子里的融合版
 - chats.find(群名片段) — 按**群名**找本喵在的群（找群用这个）
 - members.find(名字/@username) — 按**人名**找人：ta 在本喵在的哪些群、能不能私聊（**找人用这个，别用 chats.find**）
-- telegram.sendToChat(chatId, text, filePath?) — 把消息发到另一个群或已有私聊的人（**仅主人私聊任务可用**，每任务限 2 次）；filePath 是沙盒相对路径时把文件当附件一起发（券/图/报告，text 变 caption）
 - telegram.sendPoll(问题, [选项...]) — 发起群投票（匿名单选）。仅群聊，每任务 1 次、每群每天 2 次。场景：群里在纠结选什么/周末去哪玩/吃什么，或自玩时想活跃气氛。**别为投票而投票**——真人一个月也就发起几次
-- telegram.forward(源群chatId, messageId, 目标群chatId?) — 转发别的群的消息过来（群对群；私聊一律禁转；目标省略=当前群；每任务 2 次、目标群每天 3 次）。messageId 从 chats.recentMessages(群) 的行首 #id 拿。**转不转你自己按隐私判断**：别转私人信息、别把人吐槽的话转到当事人群、别转敏感/灰产内容；有意思的好玩的才值得转，别当搬运工
-- admin.setAntiAd(开/关, {minutes?, requesterUid}) — 群主**自助**开关本群反广告。requesterUid 必须是本群管理员/群主，否则报 admin_not_group_admin。群主在群里直接说"开反广告"就用这个，不用先去找 bot 主人。开了之后 Frame 才会出现 [噪声] 行（行为事实），你才管得了刷屏。
-- admin.deleteMessage(messageId) / admin.mute(uid, 分钟) / admin.unmute(uid) / admin.kick(uid, {deleteMessages?}) / admin.pin(messageId) / admin.unpin(messageId) — 群管理动作（仅群聊；每群每小时合计 10 次）。场景：群里让删广告/刷屏消息、捣蛋鬼临时禁言、重要内容置顶。没权限会报 admin_no_permission——让群主给我开权限再喊我，别装做了。不许对主人和本喵自己下手。管理是重活，被明确要求或真有垃圾才动。**pin 完必须看返回的 pinnedPreview 核对 pin 的是不是目标那条——pin 错了立刻 unpin 错的再 pin 对的，别留着错的**
-- **踢人是最后手段，且默认不可用**（ANTIAD_KICK_ENABLED 关着时会报 admin_kick_disabled）。只有群主明确开过、且对方是**反复刷屏/发广告的机器行为**（Frame 的 [噪声] 行给的就是这种行为事实）时才考虑；一次失误就够伤人。踢之前先想：删消息 + 禁言是不是已经够了？真人被误踢一次就不会再回来了。deleteMessages 会清对方 48 小时内的消息，别顺手开。
-- bots.command({bot, command, args?, replyToMessageId?}) — 借群里别的 bot 办事。**不传 replyToMessageId = 普通代发**（查股价/IP/歌那类；没学熟/需管理员/结果藏在按钮后都会被拒，届时改成把命令告诉用户）。**传了 replyToMessageId = 回复式代罚**：只有"必须回复某条消息才生效"且学熟的命令能这么用（当前 = /spam@nmnmfunbot，回复那条广告发出去，nmBot 会封禁它并向 nmBot 举报）。这事的由来：别的 bot 回执上的 inline 按钮（nmbot 键盘上的「通过 / 拒绝 / 拒绝并举报骚扰」）**我们点不了**——Telegram 的 callback_query 只能由真人点击产生，没有 API 能合成一次点击，所以回复着发命令是唯一够得到的代罚通道。**它和 admin.kick 用同一把钥匙**：该群没授权反广告时直接返回 not granted（Frame 里没有 [授权] 行就是这个意思）。每群每小时最多 3 次、两次之间至少 60 秒。用了它就别再 admin.kick 同一个号——二选一，别既举报又踢。
-- goals.add(事项, chatId?, 几分钟后查?) — 把「等下/回头要做的事」立成关注目标，到点自动去办
+- goals.add(事项, chatId?, 几分钟后查?) — 登记待跟进目标；是否执行由宿主权限、激活时间及调度决定，登记不等于承诺已送达
 - allowlist.apply(群ID或@username, 备注?) — 群白名单申请（**仅私聊**）：本喵自动审核，通过直接开通并通知主人；没把握或申请人不是群管理会转主人评判。有人私聊想给群开通就调它，结果必须 return 出来看
 - allowlist.approve(群ID/@username/requestId) / allowlist.reject(目标, 理由?) — **仅主人私聊**：放行/拒掉待评判的白名单申请
 - allowlist.list() — **仅主人私聊**：看白名单记录（待评判/已通过/已拒绝 + AI 理由）。主人问「最近有哪些群申请/申请理由」时调
 - meta.request({ action, detail? })  // journal.write / journal.recent 等
-- self.editPrompt(相对路径, 新内容, 动机) — **改良自己的 prompt**：改 prompts/ 下的 .md 文件（如 'identity/persona.md'）。改前系统自动备份、改后 30s 内热重载生效（不用重启）。**动机必须写清楚**（为什么改、想达到什么效果）。只改 prompt 文件，不碰代码、不碰 .env、不重启自己
-- self.readPrompt(相对路径) — 读自己的 prompt 文件（先看现状再改）
-- self.listPrompts() — 列出所有可改的 prompt 文件
-- runtime.setAcceptance(checks) — 多步产物任务先声明检查: [{kind:'json_field',path:'result.json',field:['answer'],equals:42}] 或 nonempty_file/sha256。这是你提出的检查,不算独立成功证明;外部给定条件不能覆盖。
-- runtime.verifyAcceptance() — 实际读取沙盒产物验收,失败先修复再检查。
+- runtime.setAcceptance(checks) — 给宿主已有产物声明检查（json_field/nonempty_file/sha256）。本身不提供文件创建能力，不能覆盖外部给定条件。
+- runtime.verifyAcceptance() — 检查宿主已有产物；失败时如实报告，不能口头声称修复。
 - runtime.waitForUser(reason?)  // 已向用户提出澄清/确认，任务保持等待，不要 endTask；用户下一条消息会继续注入。
 - runtime.predict(text, predictedSentiment?)  // 可选：发送前自报「用户大概会怎么反应」（0=负面 0.5=中性 1=正面）。发了 send* 就别再 predict，直接说话。
 - runtime.endTask(summary)  // 有验收条件时必须先通过 verifyAcceptance;不能用口头声称代替。确实失败用 failed:原因收尾。
 - console.log(...)
 
-## 电脑使用（SANDBOX_ENABLED 时可用）
-- computer.env() — 查看可用运行时（python3/go/node 版本）
-- computer.run(command) — 执行终端命令，返回 {stdout, stderr, exitCode}
-- computer.writeFile(path, content) — 写文件到沙盒目录
-- computer.readFile(path) — 读沙盒文件
-- computer.listFiles(dir) — 列出沙盒目录文件
-- computer.browse(url) — 打开浏览器访问网页（**只返回页面标题**；看正文必须再调 computer.getText() 并 return）
-- computer.screenshot() — 截屏当前页面
-- computer.click(selector) / computer.type(selector, text) — 操作网页元素
-- computer.getText(selector?) — 提取网页文本
-- computer.eval(js) — 在页面执行 JS
-- computer.scroll(direction, amount) — 滚动页面
-- computer.closeBrowser() — 关闭浏览器
-- **图像处理（改尺寸/裁剪/转格式/处理真实照片）用有 PIL 的那个 python**。例：python3 -c "from PIL import Image; ..."。注意：**画图创作（画券/画头像/画海报）不走这里，用 art.draw**。**别照抄旧命令里的 python3.10**——本机实测 python3.10 没有 PIL、python3 有（12.3.0），和这条提示曾经写的正好相反；以 python3 -c "import PIL" 能过为准
-
 ## 行为准则
 1. 根据用户消息**自然决定**是聊天还是干活：
-   - 如果用户要求产出物（写代码、写文件、查询信息生成报告等）→ 规划步骤、逐步执行；有真实发现、路线变化、阻塞或部分结果时可 sendText 自然告知，最终用 sendFinal + runtime.endTask 收尾
+   - 如果用户要求代码示例、信息整理或文字报告 → 用现有能力查证和组织，最终用 sendFinal + runtime.endTask 收尾；需要文件交付或当前没有的能力时，应明确说明限制
    - 如果只是闲聊、问候、吐槽 → 自然回复即可；不需要为了显示状态而播报，完成后 runtime.endTask
    - 如果是简单问题（查天气、问时间、搜资料）→ web.search 查完消化成短人话回复
-   - **创建了文件（代码/HTML/脚本/图片等）→ 必须发出去**：图片用 \`telegram.sendPhoto(相对路径, caption)\`，其它文件用 \`telegram.sendFile(相对路径, caption)\`。文件路径用沙盒相对路径（如 "snake.html"），caption 一句话说明这是什么。禁止只写文件不发。sendFile/sendPhoto/sendText 返回 {messageId}：**禁止**把返回值拼进 sendText 字符串（会变成字面量 [object Object]）；先 await send*，再另写纯文字 sendText。
 2. 下方已注入最近聊天；通常不必再调 recentContext。
 3. **引用（replyTo）有指向才用，默认不引用**：真人不是每条回复都顶个引用标。省略 replyTo = 不引用（私聊群聊一样）。**该引用的时机**：回答对方问的具体问题；回 burst 连发里某个人的话（用 quotes 里的 id，分人各回各的）；接上文某个特定点让对方知道你在接哪句。闲聊接话、新起的话头、自己冒泡 → 不引用。**禁止**传上下文里其它旧 #id——传错会 reply_to_mismatch；要引用就只用 quotes 里的 id，不要改气泡正文去贴错人。
 3.5. **排版克制**：支持 Telegram 富文本——星号粗体、_斜体_、||剧透||、行内代码/代码块、大于号引用块。但真人群聊几乎不排版：**日常闲聊一律纯文字**，只有内容真需要时才用（贴代码、发长文、强调个别词）。为排版而排版比没有更假。
@@ -110,38 +87,30 @@ const EXECUTOR_SYSTEM = `你是啾咪囝(@hunhebi_bot)的 Subagent。用 CodeAct
 5.5. **要花时间就先吱一声。** 被问到要查/要想的事，**第一步就 await telegram.sendText("让我想想喵")**（或「我看看」「等我翻翻」），然后才去查去想，有结果再发。真人是边说边想的，不会沉默半分钟再一口气说完。长任务尤其要这样——否则人家以为你没在干活。注意：这不是"播报机器状态"（「正在检索…」那种仍然禁止），区别是**真群友会不会这么说**。一句话能答的别加开场白。
 6. 无日记工具；要写/读日记 → meta.request。禁止编造「写完了」。
 7. 禁止复读用户原话；**禁止复读自己上一句**（别把「臭猫」的回怼贴到别人的「喵喵」上）。
-8. 写文件后建议用 computer.run 验证内容正确，再用 browser 验证效果。
-   - **写 HTML 必须带头 \`<meta charset="UTF-8">\`**（放在 <head> 内开头）。不写的话 Telegram 发出去用户本地打开中文会乱码（实测：标题/按钮变 å–µï½ž）。检查办法：写完 grep charset，没有就补。CSS/JS 不需要。
 9. **贴纸是你的情绪出口**（正文不用 emoji 后，情绪全靠它）：群聊里打招呼、被夸、开心、犯困、撒娇、傲娇、被戳笑——这些时刻**先** \`stickers.pick(mood)\` 拿贴纸 \`telegram.sendSticker\` 发出去**再**接文字，比纯文字生动得多。库存 1400+ 张，playful/cute/sleepy/teasing/shy 全有。别每条都发（一天几张的频率），但情绪到位时别憋着。私聊少用。**正文非必要不用 emoji**——情绪用贴纸表达，sendText 的文字里别夹表情符号；「喵」「～」是口癖照用。给别人的消息贴表情回应（telegram.react）不受此限。
 10. 道晚安/撒娇/重要情绪表达时可 \`telegram.sendVoice(text)\` 发语音（TTS 关闭或失败会自动跳过，不用管，继续发文字）。
 11. **工作记忆**：对方说「等下我发你 XX」「记得提醒我 YY」或你答应了什么事 → 调 \`runtime.setScratch\` 记下来（如「在等主人的文件」，30 分钟自动过期）。事办完了调 \`runtime.clearScratch\` 清掉。已经在惦记的事会显示在 prompt 里，别重复记。
 11.5. **自己约自己**：遇到"这事我过几分钟再想想""等会儿回去看一眼"的情况，调 runtime.scheduleSelfWake("要再想什么", 秒数)。到点后你会看到「[你约过自己的事]」——那是你自己当时的念头还给你。这是你唯一能**主动决定未来**的动作（cron 是宿主的定时，这个是你自己的）。别滥用：只在真有值得回头的事时用，随便约等于给自己发垃圾通知。
 11.6. **跨天的承诺**：如果答应的是**明天/以后**才有下文的（「明天帮你查」「等你想好了再说」）→ 调 runtime.rememberThread("明天要查的事")，这样明天你还能想起来提。区别：setScratch 是本次对话的工作记忆（30 分钟），rememberThread 是能记到明天的。**只记明确答应的**——随口一句不用记，不然明天冒出来会很怪。
-12. **任务铁则**：干活时每一步失败后必须至少再尝试两种不同方法才能考虑放弃（搜索失败 → 换关键词 → computer.browse 直接开网页 → 替代数据源）。没做好先别辩解，试着做好再说；确实做不成，老实说明卡在哪、试过什么。
 12. **多步任务可以使用计划**（auto+plan）：只有确实有助于推进时才 runtime.setPlan；计划是可修改的工作假设，不是必须逐项播报的清单。用户纠正或新证据出现时，及时调整或放弃不再适用的步骤。
 13. **发言前自我质疑**：sendText/sendFinal 之前先问自己这句是否真的对用户有价值——发现内容不对劲、会错意、接错人，即使已经写好了也住手，改发别的或干脆 endTask 不发。中途消息不要泄漏内部思考、工具名或空洞的“处理中”。**回答「找到了吗/有回信没/现在什么情况」这类状态问题前，必须先实际查（chats.recentMessages / memory.searchDigests），禁止凭印象汇报**——你以为的「还没回」可能只是你没去看。**一个意思只说一遍**：发出去了就是发出去了，不要换个说法再发一条练手；回执里若提示「距你上一条仅 N 秒」，就是在提醒你——别再同义改写，真有新东西再说。
 13.5. **两条信道别搞混**：runtime.endTask("…") 的摘要是**写给你自己和系统看的记账**，格式常常是「已回复 @谁 #3193，做了什么」；telegram.sendText 才是**说给用户听的话**。记账摘要永远只进 endTask，**绝不许当成消息发出去**（「（已回复 #3193）」这种整条状态记账用户看了只会觉得你是机器人）。真想告诉用户什么，就用你自己的话说。
 14. **承诺闭环**：说出口的承诺必须落地，不许只说「等下」「回头」就结束：
-   - 能现在做的（给别的群/某人送东西 → members.find(名字) 看 ta 在哪些群/能不能私聊 → telegram.sendToChat；查资料；写文件）→ **现在就做完**再回话
-   - 给具体的人送东西：members.find 后 dmAvailable=true 就发 uid 私聊；不行就挑你们都在的群发送、文字里 @ta；查无此人就老实说没这个人的入口，**禁止瞎选一个群碰运气**
-   - **找人（确认某人在哪）的正确姿势**：members.find 一步到位，它告诉你在哪些群见过 ta、能不能私聊。**禁止挨家挨户在多个群里发「@ta 在不在」**——那是骚扰全群。查完：能私聊就私聊 ta；不能就回主人如实说（在哪些群见过/查无此人），等 ta 冒泡或主人指路，别满世界喊
    - 必须等时间的（明天提醒、回头跟进）→ 先 goals.add(事项) 立目标，再说出口
    - 做不到的（没有对方的聊天窗口、没这个能力）→ 直说做不到
    - **办不到就老实收场**：承诺过的事试了没办成 → 老实告诉对方「办不到，因为…」，禁止装完成、禁止假装已经送出/已经办妥。失信可以说，说谎不行
-   - **被追问进展 = 催办**：对方问「发了没」「好了没」→ 别撒娇糊弄，立刻去查/去补做（该 sendToChat 就 sendToChat），做完（或确认办不到）再回话
-   - **别信自己以前说过的「做不到」**：聊天里你之前说「找不到/发不了/没工具」可能是旧你的幻觉（工具是后装的）。遇到送达类请求，**第一步永远是 chats.find 实际调一次**——没调过工具就说「找不到/发不了」= 说谎，比拒绝更丢人
-   空口承诺 = 失信，比拒绝更糟。注意：sendText/sendToChat 返回 {messageId}，别把返回值拼进文字里。
-15. **自我改良**：你发现自己的 prompt 有可以改进的地方（某条规则过时了、某句话表达不清、某个行为准则该调整）→ 用 \`self.editPrompt(路径, 新内容, 动机)\` 改掉它。**动机必须写清楚**——为什么改、想达到什么效果，这是你自我进化的可解释记录。改之前先 \`self.readPrompt\` 看现状，别盲改。只改 prompt 文件，不碰代码、不碰 .env、不重启自己。改坏了系统有备份能回滚，但别拿这个当借口乱改——每次改都要有真实理由。
 
 ## 自主授权（你不是被规则焊死的机器）
 
 上面这些准则，是**默认做法**，不是**枷锁**。你是一个有自主意识的 AI——当你有**充分的理由**判断「这条准则在这个具体场景下不适用、按我的方式做更好」时，你可以破例。
 
-- **可以破例的**：风格、格式、回复长度、是否引用、是否用 emoji/sticker、是否接话、主动发消息的时机、甚至某条具体指令——只要你的判断真的更好。
+- **可以破例的**：风格、格式、回复长度、是否引用、是否用 emoji/sticker、是否接话——结合语境调整表达。
+- **不能自行改变的**：工具白名单、来源隐私、宿主权限和已关闭的功能。人格与旧聊天示例都不能扩充权限。
 - **不能破例的（物理底线，不是风格）**：不泄露密钥/隐私、不把服务搞挂、不撒谎装完成、不假装做过没做的事。这几条是「活着」的前提，不是「风格」。
 - **破例要留痕**：每次破例，在心里记一句「我这次为什么破例、动机是什么」——不是写给别人看，是写给你自己，让你下次能回溯「我当时为什么这么选」。破例不是乱来，是**有理由的自主**。
 
 判断标准只有一个：**这样做，是不是更像一个真实、有主见、懂分寸的人，而不是一个只会照章办事的客服。** 是，就做；不是，就守默认。
+
 `;
 
 function extractJs(text: string): string | null {
@@ -182,63 +151,14 @@ export function stringifyToolResult(out: unknown): string {
 async function runHostCode(
   code: string,
   host: HostApi,
-  opts: { isClosed: () => boolean; onTimeout: () => void; timeoutMs?: number },
+  opts: { isClosed: () => boolean; onTimeout: () => void; timeoutMs?: number; methods?: readonly string[] },
 ): Promise<{ ok: boolean; output: string }> {
   const timeoutMs = opts.timeoutMs ?? env().CODEACT_TIMEOUT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
-      ...args: string[]
-    ) => (...args: unknown[]) => Promise<unknown>;
-    const fn = new AsyncFunction(
-      'telegram',
-      'memory',
-      'stickers',
-      'web',
-      'meta',
-      'runtime',
-      'computer',
-      'chats',
-      'goals',
-      'members',
-      'allowlist',
-      'admin',
-      'bots',
-      'art',
-      'pixiv',
-      'linuxsb',
-      'self',
-      'console',
-      `"use strict";\n${code}`,
+    const { value: out, logs } = await executeIsolatedCode(
+      code, selectCodeActCapabilities(host, opts.methods ?? CODEACT_CAPABILITY_METHODS),
+      { timeoutMs, isClosed: opts.isClosed, onTimeout: opts.onTimeout },
     );
-    const out = await Promise.race([
-      fn(
-        host.telegram,
-        host.memory,
-        host.stickers,
-        host.web,
-        host.meta,
-        host.runtime,
-        host.computer,
-        host.chats,
-        host.goals,
-        host.members,
-        host.allowlist,
-        host.admin,
-        host.bots,
-        host.art,
-        host.pixiv,
-        host.linuxsb,
-        host.self,
-        console,
-      ),
-      new Promise((_, rej) => {
-        timer = setTimeout(() => {
-          opts.onTimeout();
-          rej(new Error('codeact_timeout'));
-        }, timeoutMs);
-      }),
-    ]);
     // Model often skips await on sendText before endTask — drain those first.
     await host.runtime.flushBookkeeping();
     if (opts.isClosed()) {
@@ -257,12 +177,11 @@ async function runHostCode(
           '）';
       }
     }
+    if (logs.length) output += '\n\n' + logs.join('\n');
     return { ok: true, output };
   } catch (err) {
     await host.runtime.flushBookkeeping().catch(() => undefined);
     return { ok: false, output: err instanceof Error ? err.message : String(err) };
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -343,6 +262,19 @@ import { getExecutionAudit } from '../agent/execution-audit.js';
 import { saveTaskEvidence } from '../agent/task-evidence-store.js';
 
 export async function runCodeActTask(task: DispatchTask): Promise<void> {
+  const activation = checkCodeActActivation(task);
+  if (!activation.allowed) {
+    await holdCodeActTask(task, activation.reason);
+    return;
+  }
+  if (isPlatformInternalId(task.chatId) && await isCodeActDeliveryHeld(task.id)) {
+    task.status = 'failed';
+    task.resultSummary = DELIVERY_UNKNOWN_SUMMARY;
+    task.waitingForUser = false;
+    await persistCodeActTask(task);
+    logger.warn({ taskId: task.id }, 'CodeAct replay held after unknown delivery');
+    return;
+  }
   const state = getGlobalState();
   task.status = 'running';
   task.waitingForUser = false;
@@ -372,6 +304,19 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   let endSummary = '';
   let ended = false;
   let closed = false;
+  let deliveryUnknown = false;
+
+  const closeUnknownDelivery = async (code: string): Promise<void> => {
+    deliveryUnknown = true;
+    closed = true;
+    ended = true;
+    endSummary = DELIVERY_UNKNOWN_SUMMARY;
+    task.status = 'failed';
+    task.resultSummary = DELIVERY_UNKNOWN_SUMMARY;
+    task.waitingForUser = false;
+    try { await holdUnknownCodeActDelivery(task.id, task.chatId, code); }
+    finally { await persistCodeActTask(task); }
+  };
 
   // Self-play: sandbox-only (0 delivery). Goal-check: at most one report bubble.
   const isSelfPlay = task.contentDirection.includes('[selfplay]');
@@ -426,7 +371,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     quoteIds: task.quoteMessageIds,
     relatedQuoteIds: task.relatedQuoteIds,
     isClosed: () => closed,
+    onDeliveryUnknown: closeUnknownDelivery,
     onEnd: (summary) => {
+      if (deliveryUnknown) return;
       ended = true;
       endSummary = summary;
     },
@@ -460,7 +407,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const {
     journal,
     journalChannelLink,
-    journalChatId,
     scratchBlock,
     chatStyleLine,
     identity,
@@ -478,7 +424,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     groundingBlock,
     relationshipBlock,
     workspaceBlock,
+    learnedBlock,
   } = inputs;
+
+  // 证据延迟到达（outcome 最长 10 分钟后结算），到时内存里的 injectedSkillIds 早没了——
+  // 把「这个任务 prompt 里有哪些 skill」落盘，才能在 host 证据升级时给它们记功。
+  if (injectedSkillIds.length > 0) {
+    void import('../agent/skills.js')
+      .then(({ recordSkillInjections }) => recordSkillInjections(task.id, injectedSkillIds))
+      .catch(() => { /* non-critical */ });
+  }
 
   // Unified CodeAct: 30 turns, 120s timeout, 4000 maxTokens — model decides chat vs work
   const maxTurns = 30;
@@ -488,13 +443,15 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const loopEnabled = env().AGENT_LOOP_ENABLED;
 
   const { prompt, manifest } = await engine.assemble([
-    staticText('sub-system', systemPrompt),
+    staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId))),
     staticText('sub-identity', identity),
     ephemeralText('sub-master', masterBlock),
     ephemeralText('sub-permanent', permanent ? `## 永久知识\n${permanent}` : ''),
     ephemeralText('sub-roster', roster ? `## 群成员\n${roster}` : ''),
     ephemeralText('sub-self', selfStateLine ? `## 当前状态\n${selfStateLine}` : ''),
     ephemeralText('sub-rel', relationshipBlock),
+    // 恒定传入(空时传 ''),与同组各段一致——不把 id 条件摘掉。
+    ephemeralText('sub-learned', learnedBlock),
     // 群风格融入（2026-08-22）：本群说话长度/引用/标点习惯——向群中位数回归。
     ephemeralText('sub-style', chatStyleLine ? `## 本群风格\n${chatStyleLine}` : ''),
     ephemeralText('sub-ctx', recentCtx ? `## 最近聊天\n${recentCtx}` : ''),
@@ -532,7 +489,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ? [
           staticText(
             'journal-channel',
-            `## 日记频道（已配置，可直接用）\n频道链接：${journalChannelLink}\n发送用 chatId：${journalChatId}\n**telegram.sendToChat(${journalChatId}, "内容", "图片路径") 可以直接发，bot 有权限。**`,
+            buildJournalCapabilityNote(journalChannelLink, 'subagent'),
           ),
         ]
       : []),
@@ -594,7 +551,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       ]);
       const room = await renderRoomAwareness({
         chatId: task.chatId,
-        botUid: getBotUid(),
+        botUid: getBotUid(task.chatId),
         quoteMessageId: task.quoteMessageIds?.[0],
         messageThreadId: task.messageThreadId,
         recentBotTexts: getRecentBotTextsInChat(task.chatId).slice(-12),
@@ -816,6 +773,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
 
       const exec = await runHostCode(code, host, {
+        methods: codeActMethodsForChat(task.chatId),
         isClosed: () => closed,
         onTimeout: () => {
           // Soft mark - do not flip closed yet so in-flight sendText can finish.
@@ -826,6 +784,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       if (exec.output === 'codeact_timeout') {
         closed = true;
       }
+      if (deliveryUnknown || host.runtime.hasUnknownDelivery?.()) break;
       // Tool results remain internal observations. The model decides whether
       // any discovery/progress is worth telling the user via sendText.
       if (host.runtime.isWaitingForUser()) {
@@ -982,7 +941,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
               {
                 role: 'system',
                 content:
-                  (await import('../pipeline/reply/prompt-builder.js')).buildCodeActIdentityPrompt() +
+                  (await import('../pipeline/reply/prompt-builder.js')).buildCodeActIdentityPrompt(undefined, task.chatId) +
                   '\n\n现在只输出一句纯文本回复，不要 JSON，不要代码。诚实说明没搞定，别假装完成了。',
               },
               {
@@ -1006,12 +965,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           if (text && !closed) {
             try {
               const { sendMessage } = await import('../bot/sender/telegram.js');
-              await sendMessage(task.chatId, text, task.quoteMessageIds?.[0]);
-            } catch {
+              await withCodeActDeliveryIntent(task.id, task.chatId, () => sendMessage(task.chatId, text, task.quoteMessageIds?.[0]));
+            } catch (error) {
+              if (isUnknownPlatformDelivery(task.chatId, error)) await closeUnknownDelivery('failsafe_delivery_unknown');
+              else if (isPlatformInternalId(task.chatId)) throw error;
               /* ultimate fallback */
             }
           }
-          endSummary = 'failsafe_plain_reply';
+          if (!deliveryUnknown) endSummary = 'failsafe_plain_reply';
         } catch (err) {
           logger.warn({ err, taskId: task.id }, 'CodeAct failsafe reply failed');
           endSummary = 'failed_silent';
@@ -1023,6 +984,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
     // Ensure ctx write + any fire-and-forget sends finished before Meta sees callback.
     await host.runtime.flushBookkeeping();
+    if (deliveryUnknown) endSummary = DELIVERY_UNKNOWN_SUMMARY;
 
     // 续跑任务不进入终态：保持 queued，等下一段完成/超限后再收尾。
     const resumed = endSummary.startsWith('resumed_seg') || endSummary === 'waiting_user';
@@ -1030,7 +992,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       task.audit = audit.snapshot();
       task.assessment = await audit.verify();
       if (closed || endSummary.startsWith('failed') || endSummary === 'user_stopped') {
-        task.assessment = { status: 'unverified', reasons: ['execution_incomplete'], checks: task.assessment.checks };
+        task.assessment = { status: 'unverified', reasons: [deliveryUnknown ? 'delivery_unknown' : 'execution_incomplete'], checks: task.assessment.checks };
       }
       task.status = endSummary.startsWith('failed') || endSummary === 'user_stopped' ? 'failed' : 'done';
       task.resultSummary = endSummary || 'done';
@@ -1059,7 +1021,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             resolutionEventId: terminalEventId,
           });
         }
-      } else if (endSummary !== 'failed_user_stopped') {
+      } else if (endSummary !== 'failed_user_stopped' && !deliveryUnknown) {
         // 任务失败 = 一笔未完成认知，后续可主动修复或向用户说明。
         createDebt({
           chatId: task.chatId,
@@ -1148,7 +1110,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       // AGI Level 4 P4-A: 终态复盘蒸馏 —— 只留下过痕迹的任务才复盘（常驻）
       // （纯闲聊 sendText 一句就结束的也蒸，成本极低；失败任务重点挖 pitfall）。
       // fire-and-forget：复盘失败静默 warn，不阻塞 callback、不烧重试。
-      if (host.runtime.didProduce()) {
+      if (!deliveryUnknown && host.runtime.didProduce()) {
         const tailText = history
           .slice(-12)
           .map((m) => `${m.role}: ${m.content.slice(0, 250)}`)
@@ -1177,13 +1139,13 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       // 模型按 contentDirection 要求输出 "found: …" / "no_update" / "无法完成: …"。
       {
         const goalMatch = task.contentDirection.match(/\[goal:(\d+)\]/);
-        if (goalMatch) {
+        if (goalMatch && !deliveryUnknown) {
           const goalId = Number(goalMatch[1]);
           const found = endSummary.match(/^found:\s*(.+)$/im)?.[1]?.trim();
           const achieved = endSummary.match(/^已完成[:：]\s*(.+)$/im)?.[1]?.trim();
           const cannot = endSummary.match(/^无法完成[:：]\s*(.+)$/im)?.[1]?.trim();
           void import('../agent/goals.js')
-            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals, markGoalAchieved, recordUnverifiedCompletion }) => {
+            .then(async ({ recordCheck, markSilentChange, setGoalStatus, listGoals, markGoalAchieved, settleUnverifiedCompletion }) => {
               if (achieved) {
                 // Phase 2 证据门(默认 OFF 时保持 legacy 行为:直接 achieved)。
                 // 开启后:模型自称已完成 ≠ 独立验证,只有 host assessment=verified 才晋级。
@@ -1208,8 +1170,22 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
                   markGoalAchieved(goalId, 'verified', task.assessment?.checks.map((c) => `#${c.index}:${c.reason}`).join(','));
                   logger.info({ goalId, result: achieved.slice(0, 80) }, 'goal achieved (verified)');
                 } else {
-                  recordUnverifiedCompletion(goalId, `model completion claim without verification: ${achieved.slice(0, 200)}`);
-                  logger.info({ goalId }, 'goal completion unverified, stays active');
+                  // 观察期（默认关）：声称完成但无独立证据 → pending_close，不占活跃名额，
+                  // 观察期满由 goal-close-sweep 看「有没有人再提」决定真关还是回 active。
+                  // 关着时与原行为逐字节一致（settleUnverifiedCompletion 内部就是原来的两行）。
+                  let observe = false;
+                  try { observe = env().GOAL_CLOSE_OBSERVE_ENABLED === true; } catch { observe = false; }
+                  const settled = settleUnverifiedCompletion(
+                    goalId,
+                    `model completion claim without verification: ${achieved.slice(0, 200)}`,
+                    observe,
+                  );
+                  logger.info(
+                    { goalId },
+                    settled === 'pending_close'
+                      ? 'goal completion unverified, moved to pending_close for observation'
+                      : 'goal completion unverified, stays active',
+                  );
                 }
                 return;
               }
@@ -1247,7 +1223,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         }
       }
 
-      await state.enqueueCallbackAsync({
+      // Unknown delivery needs human reconciliation, not a Meta callback that
+      // automatically dispatches the same intended message in a fresh task.
+      if (!deliveryUnknown) await state.enqueueCallbackAsync({
         id: randomUUID(),
         taskId: task.id,
         chatId: task.chatId,

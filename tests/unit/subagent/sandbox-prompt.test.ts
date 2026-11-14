@@ -15,6 +15,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { applySandboxAvailabilityNotes } from '../../../src/subagent/sandbox-prompt.js';
+import { buildCodeActSystemPrompt } from '../../../src/subagent/capability-prompt.js';
+import { CODEACT_CAPABILITY_METHODS } from '../../../src/sandbox/codeact/capabilities.js';
 
 /**
  * 与 EXECUTOR_SYSTEM 里那几行同文的 minimal prompt。
@@ -148,7 +150,7 @@ describe('组合：真 EXECUTOR_SYSTEM 过改写器', () => {
 
   it('掏得出真 prompt（掏不出来这条测试自己就该红）', () => {
     expect(REAL.length).toBeGreaterThan(2000);
-    expect(REAL).toContain('art.draw(');
+    expect(REAL).toContain('telegram.sendText(');
   });
 
   it('终端不可用 → 真 prompt 里不再有任何一处推荐死路', () => {
@@ -166,14 +168,14 @@ describe('组合：真 EXECUTOR_SYSTEM 过改写器', () => {
     }
   });
 
-  it('翻车之后，画图的正路仍在 prompt 里（art.draw 的指引一条都没被改写掉）', () => {
-    const out = applySandboxAvailabilityNotes(REAL, DEAD);
-    expect(out).toContain('art.draw(描述');
-    expect(out).toContain('画图必须用它');
-    expect(out).toContain('每任务限 2 次');
-    // 图像处理那条被改写后仍指向 art.draw，而不是让模型去撸 PIL
-    const pil = out.split('\n').find((l) => l.includes('图像处理'))!;
-    expect(pil).toContain('art.draw');
+  it('真实运行提示只描述已导出的能力；bwrap可用也不会自动授予终端或画图', () => {
+    for (const availability of [DEAD, ALIVE]) {
+      const out = buildCodeActSystemPrompt(applySandboxAvailabilityNotes(REAL, availability));
+      expect(out).not.toMatch(/art\.draw|computer\.run|telegram\.sendFile|telegram\.sendToChat/);
+      for (const method of out.match(/\b(?:telegram|memory|stickers|web|meta|chats|members|goals|allowlist|linuxsb|pixiv|runtime|computer|browser|art|admin|bots|self)\.[A-Za-z][A-Za-z0-9]*/g) ?? []) {
+        expect(CODEACT_CAPABILITY_METHODS).toContain(method);
+      }
+    }
   });
 
   it('终端可用 → 真 prompt 一字不改', () => {

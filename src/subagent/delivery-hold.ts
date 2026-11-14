@@ -1,0 +1,74 @@
+import { getRedis } from '../db/redis.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
+import { randomUUID } from 'node:crypto';
+
+export const DELIVERY_UNKNOWN_SUMMARY = 'failed_delivery_unknown_no_retry';
+export const DELIVERY_HOLD_KEY = 'xxb:codeact:delivery-unknown';
+
+class CodeActDeliveryError extends Error {
+  constructor(readonly code: string, readonly delivery: 'not_sent' | 'unknown') {
+    super(code);
+    this.name = 'CodeActDeliveryError';
+  }
+}
+
+const CLEAR_MATCHING_INTENT = `
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+  return redis.call('HDEL', KEYS[1], ARGV[1])
+end
+return 0`;
+
+/** Durable before-send claim. A crash or Redis outage after send leaves it held. */
+export async function withCodeActDeliveryIntent<T>(
+  taskId: string | undefined,
+  chatId: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!isPlatformInternalId(chatId)) return operation();
+  if (!taskId) throw new CodeActDeliveryError('qq_delivery_task_required', 'not_sent');
+  const intent = JSON.stringify({ taskId, chatId, at: Date.now(), code: 'delivery_in_flight', attempt: randomUUID() });
+  let claimed: number;
+  try { claimed = await getRedis().hsetnx(DELIVERY_HOLD_KEY, taskId, intent); }
+  catch { throw new CodeActDeliveryError('delivery_intent_store_unavailable', 'not_sent'); }
+  if (claimed !== 1) throw new CodeActDeliveryError('delivery_already_held', 'unknown');
+
+  const clear = async (): Promise<void> => {
+    let removed: unknown;
+    try { removed = await getRedis().eval(CLEAR_MATCHING_INTENT, 1, DELIVERY_HOLD_KEY, taskId, intent); }
+    catch { throw new CodeActDeliveryError('delivery_confirmation_store_unavailable', 'unknown'); }
+    if (removed !== 1) throw new CodeActDeliveryError('delivery_intent_changed', 'unknown');
+  };
+
+  let result: T;
+  try { result = await operation(); }
+  catch (error) {
+    const delivery = error && typeof error === 'object' && 'delivery' in error ? error.delivery : undefined;
+    if (delivery === 'not_sent' || delivery === 'rejected') {
+      await clear();
+      throw error;
+    }
+    // An error without a transport classification cannot prove no delivery.
+    // Keep the durable claim and let the host stop without interpreting text.
+    if (delivery === 'unknown') throw error;
+    throw new CodeActDeliveryError('delivery_result_unclassified', 'unknown');
+  }
+  await clear();
+  return result;
+}
+
+/** Only trusted transport errors at a QQ send boundary can close a task. */
+export function isUnknownPlatformDelivery(chatId: number, error: unknown): boolean {
+  return isPlatformInternalId(chatId) && error !== null && typeof error === 'object'
+    && 'delivery' in error && error.delivery === 'unknown';
+}
+
+/** No TTL: an old BullMQ payload must not become sendable after its task hash expires. */
+export async function holdUnknownCodeActDelivery(taskId: string, chatId: number, code: string): Promise<void> {
+  const safeCode = /^[a-z0-9_:-]{1,64}$/i.test(code) ? code : 'delivery_unknown';
+  await getRedis().hsetnx(DELIVERY_HOLD_KEY, taskId, JSON.stringify({ taskId, chatId, at: Date.now(), code: safeCode }));
+}
+
+/** Redis failure is deliberately not fail-open for a replayable QQ task. */
+export async function isCodeActDeliveryHeld(taskId: string): Promise<boolean> {
+  return (await getRedis().hget(DELIVERY_HOLD_KEY, taskId)) !== null;
+}

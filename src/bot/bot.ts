@@ -2,6 +2,8 @@ import { Bot } from 'grammy';
 import { HttpsProxyAgent } from 'hpagent';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { assertTelegramPayload } from '../platform/telegram-guard.js';
+import { getPlatformBotIdentity } from '../platform/account-context.js';
 
 let _bot: Bot | undefined;
 let _botUid = 0;
@@ -15,6 +17,10 @@ export async function createBot(): Promise<Bot> {
       ? { baseFetchConfig: { agent: new HttpsProxyAgent({ proxy: e.GLOBAL_FETCH_PROXY, keepAlive: true }) } }
       : {};
     _bot = new Bot(e.BOT_TOKEN, { client: clientOpt });
+    _bot.api.config.use(async (previous, method, payload, signal) => {
+      assertTelegramPayload(payload);
+      return previous(method, payload, signal);
+    });
 
     // Initialize bot (required for webhook mode handleUpdate)
     await _bot.init();
@@ -33,19 +39,25 @@ export async function createBot(): Promise<Bot> {
   return _bot;
 }
 
-export function getBotUid(): number {
-  return _botUid;
+export function getBotUid(chatId?: number): number {
+  return getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? [])?.uid ?? _botUid;
 }
 
-export function getBotUsername(): string {
+export function getBotUsername(chatId?: number): string {
+  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? []);
+  if (identity) return identity.username;
   return _botUsername || env().BOT_USERNAME;
 }
 
-export function getBotDisplayName(): string {
+export function getBotDisplayName(chatId?: number): string {
+  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? []);
+  if (identity) return identity.displayName;
   return _botDisplayName || env().BOT_NICKNAMES[0] || getBotUsername();
 }
 
-export function getBotIdentity(): { uid: number; username: string; displayName: string; nicknames: string[] } {
+export function getBotIdentity(chatId?: number): { uid: number; username: string; displayName: string; nicknames: string[] } {
+  const identity = getPlatformBotIdentity(chatId, env().BOT_NICKNAMES ?? []);
+  if (identity) return identity;
   const username = getBotUsername();
   const displayName = getBotDisplayName();
   const configuredNicknames = env().BOT_NICKNAMES.map((name) => name.trim()).filter(Boolean);

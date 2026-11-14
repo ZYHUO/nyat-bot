@@ -64,7 +64,7 @@ export async function runRewardGate(
 
   const last = recent[recent.length - 1] ?? ({ messageId: 0, uid: 0 } as FormattedMessage);
   const ctx = recent.length > 0
-    ? slimContextForAI(recent.slice(-REWARD_GATE_CONTEXT_MSGS), last, getBotUid())
+    ? slimContextForAI(recent.slice(-REWARD_GATE_CONTEXT_MSGS), last, getBotUid(chatId))
     : '(无最近消息)';
 
   const system =

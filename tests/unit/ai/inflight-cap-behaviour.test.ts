@@ -130,6 +130,76 @@ describe('每个 model 的在飞上限', () => {
     expect(msg).toMatch(/in-flight|exhausted|all candidates/i);
   });
 
+  it('⑦ waitIfCooling 的调用方被在飞上限挡下时，要等坑放掉后再试一次（而不是立刻全灭）', async () => {
+    // 生产事实：unified-tick 每 5 分钟用 judge 链决策一次，撞上别人占满的坑时 794/797 次直接
+    // llm_failed。日志里 skipped 的 coolingForSec 全是 0——不是冷却，是在飞上限。
+    // fallback 的"等一等再试"只看 shortestCooldownSec>0，在飞上限挡下时它恒为 0，等待分支进不去。
+    envMock.AI_MAX_INFLIGHT_PER_MODEL = 1;
+    callModelMock.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return { content: 'ok', latencyMs: 1 };
+    });
+    const holder = callWithFallback(base);            // 占住唯一的坑 ~60ms
+    await new Promise((r) => setTimeout(r, 5));
+    const waiter = callWithFallback({ ...base, waitIfCooling: true });
+    const [h, w] = await Promise.allSettled([holder, waiter]);
+    expect(h.status).toBe('fulfilled');
+    expect(w.status).toBe('fulfilled');                // 等坑放掉后重试成功
+    expect(callModelMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('⑧ 没设 waitIfCooling 的调用方（延迟敏感路径）被挡下仍然立刻失败，不被拖慢', async () => {
+    envMock.AI_MAX_INFLIGHT_PER_MODEL = 1;
+    callModelMock.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return { content: 'ok', latencyMs: 1 };
+    });
+    const holder = callWithFallback(base);
+    await new Promise((r) => setTimeout(r, 5));
+    const t0 = Date.now();
+    const quick = callWithFallback({ ...base, maxTimeoutMs: 5000 });   // heart/gate 这类：设了 maxTimeoutMs、没设 waitIfCooling
+    await expect(quick).rejects.toThrow();
+    expect(Date.now() - t0).toBeLessThan(40);          // 立刻失败，没有等
+    await holder;
+  });
+
+  it('⑨ 等完重试也守在飞上限：重试那一刻坑仍被别人占着 → 不能硬发车（否则等于绕过上限）', async () => {
+    // holder 占着唯一的坑，且一直占到 waiter 的等待结束之后——此时重试若不占坑直接发车，
+    // 同一个 model 上会同时有 2 个在飞（cap=1）。
+    vi.useFakeTimers();
+    try {
+      envMock.AI_MAX_INFLIGHT_PER_MODEL = 1;
+      let concurrent = 0;
+      let peak = 0;
+      callModelMock.mockImplementation(async (_l: unknown, _m: unknown, _o: unknown) => {
+        concurrent++;
+        peak = Math.max(peak, concurrent);
+        await new Promise((r) => setTimeout(r, 10_000));   // 远长于 waiter 的 3s 等待
+        concurrent--;
+        return { content: 'ok', latencyMs: 1 };
+      });
+      const holder = callWithFallback(base);
+      await vi.advanceTimersByTimeAsync(5);
+      const waiter = callWithFallback({ ...base, waitIfCooling: true });
+      const waiterOutcome = waiter.then(() => 'ok' as const, () => 'rejected' as const);
+      await vi.advanceTimersByTimeAsync(3_100);           // 越过 waiter 的 3s 等待 → 它进入重试
+      expect(peak).toBe(1);                               // 重试没有硬发车
+      await vi.advanceTimersByTimeAsync(10_000);
+      await holder;
+      expect(await waiterOutcome).toBe('rejected');       // 占不到坑 → 走全灭路径，而不是越界发车
+      expect(peak).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('⑩ unified-tick 的决策调用声明了 waitIfCooling（不然在飞上限一挡就 llm_failed）', async () => {
+    const fs = await import('node:fs');
+    const src = fs.readFileSync('src/cron/unified-tick.ts', 'utf8');
+    const call = src.slice(src.indexOf('usage: env().UNIFIED_TICK_USAGE'));
+    expect(call.slice(0, 1200)).toContain('waitIfCooling: true');
+  });
+
   it('⑥ 上限挡下要记数（AGENTS.md：挡住要可数）', async () => {
     // 结构上确认计数器名稳定（行为断言见 verify-integration）
     const fs = await import('node:fs');

@@ -63,7 +63,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
 
     // Skip bot's own messages — prevents self-reply loops
-    if (formatted.uid === getBotUid()) {
+    if (formatted.uid === getBotUid(job.chatId)) {
       logger.debug({ chatId: job.chatId, messageId: formatted.messageId }, "Skipping own message");
       return;
     }
@@ -95,8 +95,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
 
   const e = env();
-  const botUid = getBotUid();
-  const botIdentity = getBotIdentity();
+  const botUid = getBotUid(job.chatId);
+  const botIdentity = getBotIdentity(job.chatId);
 
     // 3.0 bot 消息分类(地基,shadow:只打标 + 日志,不改行为)。其他 bot
     // 的入站消息打 botClass,供后续 A 互动 / D 降噪 / 命令学习共用一个判定。
@@ -371,6 +371,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         formatted.textContent || formatted.captionContent || '',
         botIdentity.username,
         botIdentity.nicknames,
+        botUid,
       );
       if (mentioned) {
         // Phase 13.5: 关联闭环优先于新建 —— 对进行中任务的追问/催促/取消
@@ -571,6 +572,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
               formatted.textContent || formatted.captionContent || "",
               botIdentity.username,
               botIdentity.nicknames,
+              botUid,
             ),
           ...(job.cognitiveAnchorEventId ? { asOfEventId: job.cognitiveAnchorEventId } : {}),
         });

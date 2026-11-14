@@ -239,7 +239,7 @@ export async function runHeartBranch(ctx: {
       recentMessages,
       botUid,
       // 显示名而非 @handle:"你是hunhebi_bot"和下面 persona 的"我是啾咪囝"打架
-      botName: getBotDisplayName(),
+      botName: getBotDisplayName(job.chatId),
       selfState,
       lastSpokeSecAgo,
       cognitiveWorkspaceHint,

@@ -631,3 +631,44 @@ describe('respectManualOrder（画摊子的选路交还）', () => {
       .toEqual(['flashFast', 'kimiCode']);
   });
 });
+
+// ─── tick：独立链，不被 auto-assign 改写回回复链的 label ─────────────────────────
+//
+// 2026-10-01：unified-tick 原来用 judge，与 reply/summarize/deep_think/asi 共用 spacebunny，
+// 每个 model 在飞上限 2，坑一直满 → 797 次 tick 里 794 次 llm_failed。改成独立的 tick usage
+// 指向 lfree。但 SMART_GROUP_AUTO_ASSIGN=true 会 bypass 手动链、按延迟从全池选——如果 tick 不声明
+// respectManualOrder，它会被排回最快的 spacebunny，独立 usage 就等于没设。
+describe('tick（统一唤醒决策）的选路', () => {
+  beforeEach(() => {
+    mockLabels.clear();
+    process.env.SMART_GROUP_ENABLED = 'true';
+    process.env.SMART_GROUP_AUTO_ASSIGN = 'true';
+    process.env.SMART_GROUP_STRATEGY = 'best-latency';
+    delete process.env.SMART_GROUP_DIVERSIFY_UPSTREAM;
+  });
+
+  it('tick 不参与 auto-assign（哪怕池子里有更快的、且正是回复链在用的 label）', async () => {
+    const { smartGroupAutoAssign } = await import('../../../src/ai/smart-group.js');
+    setLabels([
+      makeLabel('spacebunny', { tier: 'high' }),
+      makeLabel('lfree', { tier: 'medium' }),
+    ]);
+    recordSmartGroupResult('spacebunny', 300, true);
+    recordSmartGroupResult('lfree', 3000, true);
+    expect(await smartGroupAutoAssign('tick')).toEqual([]);
+    // 对照：judge 照旧自动选路（独立链不是全局关停）
+    expect(await smartGroupAutoAssign('judge')).not.toEqual([]);
+  });
+
+  it('reorder 不把 tick 的手动链翻回去', async () => {
+    const { smartGroupReorder } = await import('../../../src/ai/smart-group.js');
+    setLabels([
+      makeLabel('lfree', { tier: 'medium' }),
+      makeLabel('spacebunny', { tier: 'high' }),
+    ]);
+    recordSmartGroupResult('spacebunny', 300, true);
+    recordSmartGroupResult('lfree', 3000, true);
+    expect(await smartGroupReorder(['lfree', 'spacebunny'], 'tick')).toEqual(['lfree', 'spacebunny']);
+    expect(await smartGroupReorder(['lfree', 'spacebunny'], 'judge')).toEqual(['spacebunny', 'lfree']);
+  });
+});

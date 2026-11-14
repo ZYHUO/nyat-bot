@@ -5,13 +5,13 @@
 // 只有一种任务类型: research("帮我查 X")。
 //
 // 安全: 任务创建权限收紧(createTask 由被 @ 的直接请求触发)。
-// 多轮搜索: 搜 → 看 → 换词再搜 → 交叉验证 → 完成发回。
+// 多轮搜索: 搜 → 看 → 换词再搜 → 摘要 → 完成发回（摘要不等于事实核验）。
 // ────────────────────────────────────────
 import { Worker } from 'bullmq';
 import type { Job } from 'bullmq';
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
-import { executeSearch } from '../pipeline/tools/search.js';
+import { executeSearchDetailed, formatSearchOutcome } from '../pipeline/tools/search.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { sendMessage } from '../bot/sender/telegram.js';
 import {
@@ -19,6 +19,8 @@ import {
   completeTask, retryTask, tasksEnabled,
 } from '../agent/task-store.js';
 import { saveTaskEvidence } from '../agent/task-evidence-store.js';
+import { env } from '../env.js';
+import { checkProactiveActivation } from '../cron/activation-policy.js';
 
 export const TASK_QUEUE_NAME = 'task-executor';
 
@@ -47,7 +49,7 @@ function decideNextQuery(goal: string, resultsSoFar: string[], round: number, ma
 
 /**
  * LLM 综合搜索结果 → 一份连贯、结论先行的回答。
- * 作用: 去重、消解矛盾(取多数/最新)、按用户问题组织、标来源。
+ * 作用: 去重、保留矛盾与不确定性、按用户问题组织、标来源。
  * 失败回退 null(调用方用原始拼接)。"AGI 感"的关键一步 —— 查完要"理解并组织",
  * 不是把两个搜索块平铺给对方看。
  */
@@ -58,9 +60,9 @@ async function synthesizeResults(goal: string, results: string[]): Promise<strin
   const prompt = `你是研究助手: 用户让我查「${goal}」,下面是几轮搜索结果(可能重复、矛盾、噪音)。
 请综合成一份回答:
 1. 直接先给结论(一两句),再给关键细节;不要复述"搜索结果"本身
-2. 数字/事实冲突时取多数来源或更新的那一个,并给出最可信的值;矛盾明显时如实说明
+2. 数字/事实冲突时如实保留矛盾与不确定性,不得仅凭多数或更新日期判定真伪;摘要不是独立事实核验
 3. 去重、去掉噪音和无关内容
-4. 保留 2-4 个最有用的来源名(放在末尾 "来源:" 一行)
+4. 保留 2-4 个最有用的来源名及原始 URL(放在末尾 "来源:" 一行),不要编造来源
 5. 纯文本,不啰嗦,总量 500 字以内;禁止 markdown/粗体/**列表符号**/* 编号,不要任何标题
 
 搜索结果:
@@ -90,78 +92,137 @@ ${budget}`;
   }
 }
 
+class ResearchTaskError extends Error {
+  constructor(readonly reason: 'search_unavailable' | 'search_budget_exhausted' | 'delivery_not_confirmed' | 'activation_changed') {
+    super(reason);
+  }
+}
+
 export async function executeTask(job: Job<TaskJobData>): Promise<string | null> {
+  if (!tasksEnabled()) return null;
   const { taskId, chatId } = job.data;
   const task = getTask(taskId);
   if (!task) {
     logger.warn({ taskId }, 'task not found, skipping');
     return null;
   }
-  if (task.state === 'cancelled') return null;
+  if (task.state === 'cancelled' || task.state === 'done') return null;
+  if (env().PROACTIVE_ACTIVATED_AT_SEC && task.created_at <= env().PROACTIVE_ACTIVATED_AT_SEC) {
+    logger.info({ taskId }, 'Restored task retained in history; awaiting explicit recreation');
+    return null;
+  }
+  if (!(await checkProactiveActivation(chatId)).allowed) return null;
 
   setTaskState(taskId, 'running');
   const goal = task.goal;
   const maxRounds = task.max_rounds;
   const results: string[] = [];
   let round = task.search_round;
+  let searchCalls = 0;
+  let unavailableQueries = 0;
+  let emptyQueries = 0;
+  let partial = false;
+  let synthesisAttempted = false;
+  let synthesisFailed = false;
+  let deliveryAttempted = false;
+
+  // Recheck the destination after potentially slow searches/LLM calls. A duplicate skip (-1)
+  // is not a Telegram delivery receipt and must not produce a delivered evidence record.
+  const deliver = async (text: string): Promise<void> => {
+    if (!tasksEnabled() || !(await checkProactiveActivation(chatId)).allowed) {
+      throw new ResearchTaskError('activation_changed');
+    }
+    deliveryAttempted = true;
+    const messageId = await sendMessage(chatId, text);
+    if (!Number.isSafeInteger(messageId) || messageId <= 0) {
+      throw new ResearchTaskError('delivery_not_confirmed');
+    }
+  };
 
   try {
-    // 多轮搜索循环: 搜 → 看 → 换词再搜 → 交叉验证
+    // Only successful source-bearing outcomes enter results; status text is never evidence.
     while (round < maxRounds) {
+      const query = round === 0 ? goal : decideNextQuery(goal, results, round, maxRounds);
+      if (!query) break;
       const { round: newRound, done } = bumpSearchRound(taskId);
       round = newRound;
-      const query = round === 1 ? goal : decideNextQuery(goal, results, round, maxRounds);
-      if (!query) break;
 
       setProgress(taskId, [`正在搜索: ${query}`, ...results.slice(-2).map((r) => `已获得 ${r.length} 字结果`)]);
-      const raw = await executeSearch(query);
-      results.push(raw);
+      searchCalls += 1;
+      const outcome = await executeSearchDetailed(query);
+      partial ||= outcome.attempts.some((attempt) => attempt.status === 'failed');
+      let record: string;
+      if (outcome.status === 'ok' && outcome.results.length) {
+        record = formatSearchOutcome(query, outcome);
+        results.push(record);
+      } else if (outcome.status === 'empty') {
+        emptyQueries += 1;
+        record = '搜索完成，但本轮未返回匹配结果；不能据此判断相关事实不存在。';
+      } else {
+        unavailableQueries += 1;
+        record = '搜索不可用，本轮未获得有效证据。';
+      }
 
-      appendLedger(taskId, { step: `搜索 #${round}: ${query}`, result: raw.slice(0, 500), ts: Math.floor(Date.now() / 1000) });
-      logger.info({ taskId, round, len: raw.length }, 'task search round done');
+      appendLedger(taskId, { step: `搜索 #${round}: ${query}`, result: record.slice(0, 500), ts: Math.floor(Date.now() / 1000) });
+      logger.info({ taskId, round, searchStatus: outcome.status, sources: outcome.results.length }, 'task search round done');
 
       if (done) break;
     }
 
-    // 收尾: 先尝试 LLM 综合(去重/消矛盾/结论先行),失败回退原始拼接
     const combined = results.join('\n\n---\n\n');
     if (!combined.trim()) {
-      // 所有轮次都没拿到有效结果(重派时 search_round 可能已满)
-      completeTask(taskId, combined);
+      // A provider failure or an exhausted previous run is not a completed empty query.
+      if (unavailableQueries) throw new ResearchTaskError('search_unavailable');
+      if (!emptyQueries) throw new ResearchTaskError('search_budget_exhausted');
+      const notice = `「${goal}」本次搜索已完成，但没有返回匹配结果；这不代表相关信息不存在。`
+        + (partial ? '部分搜索来源未能完成查询。' : '');
+      await deliver(notice);
+      completeTask(taskId, notice);
       saveTaskEvidence({ taskId: `research:${taskId}`, chatId,
-        lifecycle: 'done', assessment: 'failed',
-        turns: round, totalCalls: round, failedCalls: round, retryCount: task.retry_count,
-        reasons: ['empty_results'] });
-      await sendMessage(chatId, `「${goal}」我没查到新东西,要换个关键词再试吗?`);
+        lifecycle: 'done', assessment: 'unverified',
+        turns: round, totalCalls: searchCalls, failedCalls: 0, retryCount: task.retry_count,
+        reasons: ['delivered_empty', 'search_empty', ...(partial ? ['partial_search'] : [])] });
       return null;
     }
+    synthesisAttempted = true;
     const synthesized = await synthesizeResults(goal, results);
-    const summary = (synthesized ?? combined).slice(0, 6000);
-    completeTask(taskId, summary);
+    synthesisFailed = synthesized === null;
+    partial ||= unavailableQueries > 0 || emptyQueries > 0;
+    const notice = partial ? '部分检索未获得可用资料，以下仅基于成功返回的来源整理。\n' : '';
+    const summary = notice + (synthesized ?? combined).slice(0, 6000 - notice.length);
     appendLedger(taskId, { step: '综合', result: synthesized ? `LLM 综合(${summary.length}字)` : '原始拼接(LLM 综合失败)', ts: Math.floor(Date.now() / 1000) });
-    // Phase A: research 任务也有证据了 —— 有交付物 = verified(发回群了),
-    // 综合失败回退原始拼接 = unverified(发了但质量无保证)。reason 只记 host 事实。
-    saveTaskEvidence({ taskId: `research:${taskId}`, chatId,
-      lifecycle: 'done', assessment: synthesized ? 'verified' : 'unverified',
-      turns: round, totalCalls: round, failedCalls: 0, retryCount: task.retry_count,
-      reasons: synthesized ? ['delivered_synthesized'] : ['delivered_raw_fallback'] });
 
-    // 主动发回结果(任务循环的交付点 —— bot 被自己的任务唤醒后交付)
-    const header = `📋 查好了「${goal}」\n`;
+    const header = `📋 「${goal}」检索摘要（未独立核验）\n`;
     const body = summary.length > 3500 ? `${summary.slice(0, 3500)}…\n\n(内容较长,已存任务台账)` : summary;
-    await sendMessage(chatId, header + body);
+    await deliver(header + body);
+    completeTask(taskId, summary);
+    // Delivery is an observed lifecycle event. LLM synthesis is not factual verification.
+    saveTaskEvidence({ taskId: `research:${taskId}`, chatId,
+      lifecycle: 'done', assessment: 'unverified',
+      turns: round, totalCalls: searchCalls + 1, failedCalls: unavailableQueries + Number(synthesisFailed), retryCount: task.retry_count,
+      reasons: [synthesized ? 'delivered_synthesized' : 'delivered_raw_fallback', ...(partial ? ['partial_search'] : [])] });
     return summary;
   } catch (err) {
     logger.error({ err, taskId }, 'task execution failed');
     // 止损: 失败 → 退避重试(15min/2h/1d,上限 3 次),期间不再被 cron 重派。
     // 达上限则终止任务并发"放弃了"文案(reviewer: blocked 死锁 + 无限重派修复)。
     const willRetry = retryTask(taskId);
+    const reason = err instanceof ResearchTaskError ? err.reason : deliveryAttempted ? 'delivery_failed' : 'execution_failed';
+    saveTaskEvidence({ taskId: `research:${taskId}`, chatId,
+      lifecycle: willRetry ? 'pending' : 'blocked', assessment: 'failed',
+      turns: round, totalCalls: searchCalls + Number(synthesisAttempted),
+      failedCalls: unavailableQueries + Number(synthesisFailed), retryCount: getTask(taskId)?.retry_count ?? task.retry_count,
+      reasons: [reason] });
     setProgress(taskId, [`任务中断: ${err instanceof Error ? err.message : String(err)} (${willRetry ? '稍后重试' : '已放弃'})`]);
     if (willRetry) {
       appendLedger(taskId, { step: '失败', result: `第 ${getTask(taskId)?.retry_count ?? '?'} 次失败: ${err instanceof Error ? err.message : String(err)}`, ts: Math.floor(Date.now() / 1000) });
-      await sendMessage(chatId, `⚠️ 「${goal}」查的时候卡住了,我等会儿换个方式再试。`);
-    } else {
-      await sendMessage(chatId, `⚠️ 「${goal}」试了几次都没查成,先放着吧,你想的话我再找别的方法。`);
+    }
+    // Do not immediately send a second message after an ambiguous delivery failure.
+    if (!deliveryAttempted && reason !== 'activation_changed') {
+      const detail = reason === 'search_unavailable' ? '搜索服务当前不可用，尚未获得有效查询结果' : '这次查询未能完成';
+      try {
+        await deliver(`⚠️ 「${goal}」${detail}。${willRetry ? '已安排稍后重试。' : '已停止自动重试。'}`);
+      } catch { /* Failure notices cannot turn a failed research task into a delivery success. */ }
     }
     return null;
   }

@@ -105,22 +105,26 @@ export function getTask(id: number): TaskRow | null {
 
 /** 某用户的活跃任务(pending/running/blocked/waiting_user)。 */
 export function listActiveTasks(ownerUid: number, chatId: number): TaskRow[] {
+  const activationEpoch = env().PROACTIVE_ACTIVATED_AT_SEC ?? 0;
   const rows = getDb()
     .prepare(
       `SELECT * FROM tasks WHERE owner_uid = ? AND chat_id = ? AND state IN ('pending','running','blocked','waiting_user')
+       AND (? = 0 OR created_at > ?)
        ORDER BY updated_at DESC LIMIT 20`,
     )
-    .all(ownerUid, chatId) as Record<string, unknown>[];
+    .all(ownerUid, chatId, activationEpoch, activationEpoch) as Record<string, unknown>[];
   return rows.map(rowToTask);
 }
 
 /** 到点该唤醒的任务(定时)。 */
 export function listDueTasks(now = nowSec()): TaskRow[] {
+  const activationEpoch = env().PROACTIVE_ACTIVATED_AT_SEC ?? 0;
   const rows = getDb()
     .prepare(
-      `SELECT * FROM tasks WHERE state IN ('pending','blocked','waiting_user') AND next_wake IS NOT NULL AND next_wake <= ?`,
+      `SELECT * FROM tasks WHERE state IN ('pending','blocked','waiting_user') AND next_wake IS NOT NULL AND next_wake <= ?
+       AND (? = 0 OR created_at > ?)`,
     )
-    .all(now) as Record<string, unknown>[];
+    .all(now, activationEpoch, activationEpoch) as Record<string, unknown>[];
   return rows.map(rowToTask);
 }
 

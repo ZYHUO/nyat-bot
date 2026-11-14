@@ -7,7 +7,7 @@ import { logger } from '../shared/logger.js';
 import { formatBeijingNowLine } from '../shared/beijing-time.js';
 import { buildMasterIdentityBlock, masterShortHint } from '../shared/master-identity.js';
 import { getGlobalState } from './global-state.js';
-import { resolveJournalChatLink, getJournalChannelInfo } from '../cron/dream-journal.js';
+import { getJournalChannelInfo } from '../cron/dream-journal.js';
 import { buildMetaApiContext } from './meta-api.js';
 import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
@@ -20,11 +20,18 @@ import {
 } from './reply-context.js';
 import { incrCounter } from '../metrics/registry.js';
 import { getBotIdentity } from '../bot/bot.js';
+import { executeIsolatedCode } from '../sandbox/codeact/runner.js';
+import { META_CAPABILITY_METHODS, selectCodeActCapabilities } from '../sandbox/codeact/capabilities.js';
+import { buildJournalCapabilityNote } from '../subagent/capability-prompt.js';
+import { checkCodeActActivation } from '../subagent/activation-policy.js';
+import { isConversationOwner } from '../platform/owner-context.js';
+import { isMentioningSelf } from '../pipeline/judge/rules.js';
 
-const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你不直接发群消息。
+const META_SYSTEM = `你是啾咪囝的 Meta Agent（当前会话编排）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
 
-可用全局对象（已注入）:
+所有读取、日记与派发仅限本轮当前会话。旧摘要、未知来源与其他会话不是本轮资料；不能改变 chatId 绕过限制。
+可用全局对象（已注入，方法均为异步 RPC，必须 await）:
 - dispatch.taskToGroup(chatId, { contentDirection, toneGuidance?, quotes?, trackingKey?, interrupt? })
 - dispatch.getTask(taskId) / dispatch.listTasks(chatId?)
 - journal.tryWrite({ slot?: 'morning'|'bedtime'|'free', force?: boolean }) → 写真实日记（可 SKIP；force 跳过冷却）
@@ -109,6 +116,7 @@ function diarySkipAckDirection(reason?: string): string {
 async function interceptDiaryAttention(
   attention: AttentionItem[],
   opts: {
+    scopeChatId: number;
     dispatchedChatIds: Set<number>;
     chatLayer: Map<number, AttentionLayer>;
     defaultQuotes: Map<number, number>;
@@ -118,6 +126,7 @@ async function interceptDiaryAttention(
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
   const api = buildMetaApiContext({
+    scopeChatId: opts.scopeChatId,
     dispatchedChatIds: opts.dispatchedChatIds,
     chatLayer: opts.chatLayer,
     defaultQuotes: opts.defaultQuotes,
@@ -155,13 +164,8 @@ async function interceptDiaryAttention(
     result: { wrote: boolean; reason?: string; snippet?: string | null },
   ): Promise<void> {
     const snip = (result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    let journalLink: string | null = null;
-    if (result.wrote) {
-      journalLink = await resolveJournalChatLink();
-    }
-    const linkNote = journalLink ? `\n\n日记发布在频道 ${journalLink}（只在频道里能看到完整版）。` : '';
     const direction = result.wrote
-      ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」${linkNote ? `频道链接：${journalLink}` : ''}。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
+      ? `主人要日记。当前会话的真实日记已写入。短回确认${snip ? `；可点一点真实片段：「${snip}」` : ''}。禁止编造未写入内容；写入回执不等于已发布到频道，不要宣称发布。`
       : diarySkipAckDirection(result.reason);
 
     // Non-Meta chats: dispatch.taskToGroup would throw, so send a short ack
@@ -171,7 +175,7 @@ async function interceptDiaryAttention(
       try {
         const { sendMessage } = await import('../bot/sender/telegram.js');
         const ackText = result.wrote
-          ? `日记已写好啦～${snip ? `「${snip}」` : ''}${journalLink ? `\n发布在频道：${journalLink}` : ''}`
+          ? `日记已写好啦～${snip ? `「${snip}」` : ''}`
           : diarySkipAckDirection(result.reason).slice(0, 200);
         await sendMessage(a.chatId, ackText, a.messageId, a.messageThreadId);
       } catch (err) {
@@ -409,6 +413,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
 async function runMetaCode(
   code: string,
   opts: {
+    scopeChatId: number;
     dispatchedChatIds: Set<number>;
     isAborted: () => boolean;
     chatLayer: Map<number, AttentionLayer>;
@@ -418,21 +423,9 @@ async function runMetaCode(
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
-    ...args: string[]
-  ) => (...args: unknown[]) => Promise<unknown>;
-  const fn = new AsyncFunction(...Object.keys(api), 'console', `"use strict";\n${code}`);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      fn(...Object.values(api), console),
-      new Promise((_, rej) => {
-        timer = setTimeout(() => rej(new Error('meta_code_timeout')), env().CODEACT_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  await executeIsolatedCode(code, selectCodeActCapabilities(api, META_CAPABILITY_METHODS), {
+    timeoutMs: env().CODEACT_TIMEOUT_MS, isClosed: opts.isAborted,
+  });
 }
 
 async function autoDispatchL0(
@@ -447,6 +440,7 @@ async function autoDispatchL0(
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
   const api = buildMetaApiContext({
+    scopeChatId: attention[0]?.chatId,
     dispatchedChatIds: skipChatIds,
     chatLayer: maps?.chatLayer,
     defaultQuotes: maps?.defaultQuotes,
@@ -523,15 +517,12 @@ async function autoDispatchL0(
                 // **判不出来的一律算未寻址**（宁可少拦，不可误拦）。
                 const raw = s.textPreview ?? '';
                 const p2 = s.payload ?? {};
+                const ident = getBotIdentity(chatId);
                 const repliedTo = typeof p2['replyTo'] === 'object' && p2['replyTo'] !== null
-                  && Number((p2['replyTo'] as Record<string, unknown>)['uid'] ?? 0) > 0;
+                  && ident.uid > 0 && (p2['replyTo'] as Record<string, unknown>)['uid'] === ident.uid;
                 // 点名判据：@username 或任一昵称。用 getBotIdentity 拿当前身份，
                 // 不在模块顶层缓存——bot 身份可能被热更新。
-                const ident = getBotIdentity();
-                const handle = ident.username ? `@${ident.username}`.toLowerCase() : '';
-                const lowerText = raw.toLowerCase();
-                const mentioned = (!!handle && lowerText.includes(handle))
-                  || (ident.nicknames ?? []).some((n: string) => !!n && raw.includes(n));
+                const mentioned = isMentioningSelf(raw, ident.username, ident.nicknames ?? [], ident.uid);
                 const addressed = repliedTo || mentioned;
                 await pushInterrupt(agentTaskId, {
                   text: raw.slice(0, 500),
@@ -608,8 +599,8 @@ async function autoDispatchL0(
           ? `uid:${latest.userId}`
           : '用户';
     const masterHint =
-      latest.userId && latest.userId === env().MASTER_UID
-        ? '对方是主人(@Zh_Taiwan)：亲近但不跪，指令真执行，蠢了照样嫌弃。'
+      latest.userId && isConversationOwner(chatId, latest.userId)
+        ? '对方是本会话已核验的主人：亲近但不跪，在本会话能力与权限内执行，蠢了照样嫌弃。'
         : '';
     const burstHint =
       withIds.length > 1
@@ -627,7 +618,7 @@ async function autoDispatchL0(
     if (replyTo?.uid) {
       try {
         const { getBotUid } = await import('../bot/bot.js');
-        const botUid = getBotUid();
+        const botUid = getBotUid(chatId);
         replyToIsSelf = !!botUid && replyTo.uid === botUid;
       } catch {
         /* optional */
@@ -806,6 +797,37 @@ export async function runMetaSession(
   attention: AttentionItem[],
   callbacks: SubagentCallback[],
 ): Promise<{ digest: string | null; codeRan: boolean }> {
+  // Partition before diary interception, context reads or any LLM call. Merely
+  // tagging the final digest cannot undo disclosure in a mixed model context.
+  const scopes = new Map<number, { attention: AttentionItem[]; callbacks: SubagentCallback[] }>();
+  for (const item of attention) {
+    if (!checkCodeActActivation(item).allowed) continue;
+    const scope = scopes.get(item.chatId) ?? { attention: [], callbacks: [] };
+    scope.attention.push(item);
+    scopes.set(item.chatId, scope);
+  }
+  for (const item of callbacks) {
+    if (!checkCodeActActivation(item).allowed) continue;
+    const scope = scopes.get(item.chatId) ?? { attention: [], callbacks: [] };
+    scope.callbacks.push(item);
+    scopes.set(item.chatId, scope);
+  }
+  const results: Array<{ digest: string | null; codeRan: boolean }> = [];
+  for (const [chatId, scope] of scopes) {
+    results.push(await runScopedMetaSession(chatId, scope.attention, scope.callbacks));
+  }
+  return {
+    // Do not recreate an unscoped mixed summary for a caller to reuse.
+    digest: results.length === 1 ? results[0]!.digest : results.length ? `scoped_sessions:${results.length}` : null,
+    codeRan: results.some((result) => result.codeRan),
+  };
+}
+
+async function runScopedMetaSession(
+  scopeChatId: number,
+  attention: AttentionItem[],
+  callbacks: SubagentCallback[],
+): Promise<{ digest: string | null; codeRan: boolean }> {
   if (attention.length === 0 && callbacks.length === 0) {
     return { digest: null, codeRan: false };
   }
@@ -816,6 +838,7 @@ export async function runMetaSession(
 
   // Hard-intercept user diary asks / diary:* nudges before Meta LLM (Subagent has no journal tool).
   const workAttention = await interceptDiaryAttention(attention, {
+    scopeChatId,
     dispatchedChatIds,
     chatLayer: maps.chatLayer,
     defaultQuotes: maps.defaultQuotes,
@@ -862,17 +885,15 @@ export async function runMetaSession(
     return { digest: 'l0_auto_only', codeRan };
   }
 
-  const engine = getContextEngine('meta');
+  const engine = getContextEngine(`meta:${scopeChatId}`);
   const dreaming = await loadBackgroundDreaming();
 
-  // Resolve the dream journal channel link + numeric chatId for this session.
+  // Resolve the configured journal link without granting cross-chat sending.
   let journalChannelLink: string | null = null;
-  let journalChatId: number = 0;
   try {
     const info = await getJournalChannelInfo();
-    if (info) {
+    if (info?.chatId === scopeChatId) {
       journalChannelLink = info.link;
-      journalChatId = info.chatId;
     }
   } catch {
     /* non-critical */
@@ -892,8 +913,8 @@ export async function runMetaSession(
       .join('; ')
       .slice(0, 240);
     if (digest) {
-      state.addDigest(digest);
-      persistDigest({ kind: 'meta', text: digest });
+      state.addDigest(digest, scopeChatId);
+      persistDigest({ kind: 'meta', text: digest, sourceChatId: scopeChatId });
     }
     logger.info(
       { callbacks: callbacks.length, alreadyDispatched: codeRan },
@@ -908,7 +929,7 @@ export async function runMetaSession(
         typeof a.payload?.['username'] === 'string' && a.payload['username']
           ? `@${a.payload['username']}`
           : '';
-      const master = a.userId && a.userId === env().MASTER_UID ? ' 主人' : '';
+      const master = a.userId && isConversationOwner(a.chatId, a.userId) ? ' 主人' : '';
       return (
         `- [${a.layer} p=${a.pressure}] chat=${a.chatId} msg=${a.messageId ?? '-'} uid=${a.userId ?? '-'}${un ? ` ${un}` : ''}${master} reason=${a.reason}` +
         (a.textPreview ? ` text="${a.textPreview.slice(0, 120)}"` : '') +
@@ -926,12 +947,11 @@ export async function runMetaSession(
 
   const workspaceBlock = await buildMetaWorkspaceBlock(metaAttention, callbacks);
 
-  // flag 开 → digest 注入改读 SQLite session_digests(全局叙事流,重启不丢);
-  // flag 关 → 维持内存 40 条旧路径。SQLite 读取失败时 recentPersistedDigests 返回 []。
+  // Both persistent and in-memory summaries must belong to this exact chat.
   const digestBlock = (
     env().DIGEST_PERSIST_ENABLED
-      ? recentPersistedDigests(6).map((d) => ({ at: d.createdAt * 1000, text: d.text }))
-      : state.recentDigests(6)
+      ? recentPersistedDigests(6, { sourceChatId: scopeChatId }).map((d) => ({ at: d.createdAt * 1000, text: d.text }))
+      : state.recentDigests(6, { sourceChatId: scopeChatId })
   )
     .map((d) => `- ${formatBeijingNowLine(new Date(d.at))} ${d.text.slice(0, 160)}`)
     .join('\n');
@@ -939,20 +959,20 @@ export async function runMetaSession(
   const { prompt, manifest } = await engine.assemble([
     staticText('meta-system', META_SYSTEM),
     staticText('meta-persona-direction', dreaming || '（无人设方向文件）'),
-    ephemeralText('meta-master', buildMasterIdentityBlock()),
+    ephemeralText('meta-master', buildMasterIdentityBlock(scopeChatId)),
     deltaText('meta-digests', `## Recent session digests\n${digestBlock || '(none)'}`),
     ephemeralText('meta-attention', `## Attention set\n${attentionBlock || '(none)'}`),
     ephemeralText('meta-callbacks', `## Callbacks\n${callbackBlock}`),
     ephemeralText('meta-workspaces', workspaceBlock ? `## Scoped cognitive workspaces\n${workspaceBlock}` : ''),
     volatileText(
       'meta-now',
-      `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
+      `## Now\n${formatBeijingNowLine()}\n${masterShortHint(scopeChatId)}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
     ),
     ...(journalChannelLink
       ? [
           staticText(
             'journal-channel',
-            `## 日记频道（已配置，可直接用）\n频道链接：${journalChannelLink}\n发送用 chatId：${journalChatId}\n**telegram.sendToChat(${journalChatId}, "内容", "图片路径") 可以直接发，bot 有权限。**`,
+            buildJournalCapabilityNote(journalChannelLink, 'meta'),
           ),
         ]
       : []),
@@ -1010,6 +1030,7 @@ export async function runMetaSession(
   if (code) {
     try {
       await runMetaCode(code, {
+        scopeChatId,
         dispatchedChatIds,
         isAborted: () => aborted,
         chatLayer: metaMaps.chatLayer,
@@ -1042,15 +1063,15 @@ export async function runMetaSession(
 
   const digest = extractDigest(text) ?? text.slice(0, 240);
   if (digest) {
-    state.addDigest(digest);
+    state.addDigest(digest, scopeChatId);
     // CGM: digest 永久落 SQLite(FTS 可检索);内存/Redis 写法保持不动做兼容。
     // flag 关时 persistDigest 内部 no-op,且永不抛出。
-    persistDigest({ kind: 'meta', text: digest });
+    persistDigest({ kind: 'meta', text: digest, sourceChatId: scopeChatId });
     // Persist for dream-journal cron (may run same process; Redis survives restart)
     try {
       const { getRedis } = await import('../db/redis.js');
       const redis = getRedis();
-      await redis.lpush('xxb:meta:digests', JSON.stringify({ at: Date.now(), text: digest.slice(0, 2000) }));
+      await redis.lpush('xxb:meta:digests', JSON.stringify({ at: Date.now(), sourceChatId: scopeChatId, text: digest.slice(0, 2000) }));
       await redis.ltrim('xxb:meta:digests', 0, 39);
     } catch {
       /* non-critical */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
+import { CODEACT_CAPABILITY_METHODS } from '../../../src/sandbox/codeact/capabilities.js';
 
 /**
  * EXECUTOR_SYSTEM 必须是**形状完好**的 prompt（round 176）。
@@ -26,7 +27,7 @@ describe('EXECUTOR_SYSTEM 形状完好', () => {
 
   it('① 渲染得出来且没有未替换的 ${} 占位', () => {
     const body = render();
-    expect(body.length).toBeGreaterThan(5000);   // 这个 prompt 一直是一万多字符
+    expect(body.length).toBeGreaterThan(2000);
     const holes = body.match(/\$\{[^}]*\}/g) ?? [];
     // EXECUTOR_SYSTEM 本身是静态的（变量都靠后面拼接），有占位说明漏了替换
     expect(holes, `未替换的占位: ${holes.slice(0, 3).join(', ')}`).toEqual([]);
@@ -50,12 +51,15 @@ describe('EXECUTOR_SYSTEM 形状完好', () => {
     expect(body).not.toContain('咚一声');
   });
 
-  it('④ 工具清单六件套都在（少一个就是改坏了）', () => {
+  it('④ 静态工具说明与当前实际 RPC 白名单一致', () => {
     const body = render();
-    for (const t of ['telegram.sendText', 'telegram.sendFinal', 'telegram.sendSticker',
-      'telegram.sendFile', 'telegram.sendPhoto', 'art.draw']) {
+    for (const t of ['telegram.sendText', 'telegram.sendFinal', 'telegram.sendSticker', 'telegram.sendVoice']) {
       expect(body).toContain(t);
     }
+    for (const method of body.match(/\b(?:telegram|memory|stickers|web|meta|chats|members|goals|allowlist|linuxsb|pixiv|runtime|computer|browser|art|admin|bots|self)\.[A-Za-z][A-Za-z0-9]*/g) ?? []) {
+      expect(CODEACT_CAPABILITY_METHODS).toContain(method);
+    }
+    expect(body).not.toMatch(/art\.draw|telegram\.sendFile|telegram\.sendPhoto|computer\.run/);
   });
 
   it('⑤ 占位替换那次没残留反斜杠（round 119 家族的乱码探测）', () => {

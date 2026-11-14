@@ -40,6 +40,8 @@ export interface DispatchArgs {
 }
 
 export function buildMetaApiContext(opts?: {
+  /** Host-owned scope; the guest cannot override this with method arguments. */
+  scopeChatId?: number;
   defaultChatId?: number;
   dispatchedChatIds?: Set<number>;
   isAborted?: () => boolean;
@@ -53,10 +55,19 @@ export function buildMetaApiContext(opts?: {
   defaultCognitiveAnchorEventIds?: Map<number, string>;
 }): Record<string, unknown> {
   const state = getGlobalState();
-  const inferredChatId =
-    opts?.defaultChatId ??
-    opts?.chatLayer?.keys().next().value ??
-    opts?.defaultCognitiveAnchorEventIds?.keys().next().value;
+  const inferredCandidates = new Set([
+    ...(opts?.defaultChatId === undefined ? [] : [opts.defaultChatId]),
+    ...(opts?.chatLayer?.keys() ?? []),
+    ...(opts?.defaultCognitiveAnchorEventIds?.keys() ?? []),
+  ]);
+  const inferredChatId = opts?.scopeChatId ?? (inferredCandidates.size === 1 ? [...inferredCandidates][0] : undefined);
+  const requireScope = (requested?: number): number => {
+    if (typeof inferredChatId !== 'number' || !Number.isSafeInteger(inferredChatId) || inferredChatId === 0) {
+      throw new Error('meta_scope_required');
+    }
+    if (requested !== undefined && requested !== inferredChatId) throw new Error('meta_scope_mismatch');
+    return inferredChatId;
+  };
   const kernelTurns = new Map<string, CognitiveTurn>();
   const observeMetaAction = (
     action: Parameters<typeof recordMetaActionObservation>[0]["action"],
@@ -91,7 +102,8 @@ export function buildMetaApiContext(opts?: {
     ): Promise<{ taskId: string }> {
       if (opts?.isAborted?.()) throw new Error("meta_aborted");
       const cid = Number(chatId);
-      if (!Number.isFinite(cid) || cid === 0) throw new Error("invalid chatId");
+      if (!Number.isSafeInteger(cid) || cid === 0) throw new Error("invalid chatId");
+      requireScope(cid);
       if (!isMetaSubagentChat(cid))
         throw new Error(`chat ${cid} not on Meta+Subagent path`);
       if (!args?.contentDirection?.trim())
@@ -566,20 +578,24 @@ export function buildMetaApiContext(opts?: {
       return { taskId: task.id };
     },
     getTask(taskId: string) {
-      return state.getTask(String(taskId)) ?? null;
+      const chatId = requireScope();
+      const task = state.getTask(String(taskId));
+      return task?.chatId === chatId ? task : null;
     },
     listTasks(chatId?: number | string) {
-      return state.listTasks(chatId === undefined ? undefined : Number(chatId));
+      return state.listTasks(requireScope(chatId === undefined ? undefined : Number(chatId)));
     },
   };
 
   const todo = {
     add(text: string) {
+      const sourceChatId = requireScope();
       const id = randomUUID();
       state.todos.push({
         id,
         text: String(text).slice(0, 500),
         createdAt: Date.now(),
+        sourceChatId,
       });
       observeMetaAction("todo.add", "completed", undefined, {
         textChars: String(text).length,
@@ -588,14 +604,16 @@ export function buildMetaApiContext(opts?: {
     },
     list() {
       observeMetaAction("todo.list");
-      return [...state.todos];
+      return state.todos.filter((item) => item.sourceChatId === requireScope());
     },
     remove(id: string) {
-      state.todos = state.todos.filter((t) => t.id !== id);
+      const sourceChatId = requireScope();
+      const idKnown = state.todos.some((t) => t.id === id && t.sourceChatId === sourceChatId);
+      state.todos = state.todos.filter((t) => t.id !== id || t.sourceChatId !== sourceChatId);
       observeMetaAction("todo.remove", "completed", undefined, {
-        idKnown: state.todos.some((t) => t.id === id),
+        idKnown,
       });
-      return true;
+      return idKnown;
     },
   };
 
@@ -603,7 +621,7 @@ export function buildMetaApiContext(opts?: {
     listStatus() {
       observeMetaAction("agents.listStatus");
       return state
-        .listTasks()
+        .listTasks(requireScope())
         .slice(-20)
         .map((t) => ({
           taskId: t.id,
@@ -652,15 +670,17 @@ export function buildMetaApiContext(opts?: {
       snippet?: string | null;
     }> {
       if (opts?.isAborted?.()) throw new Error("meta_aborted");
+      const sourceChatId = requireScope();
       const { tryWriteDreamJournal, readRecentDreamSnippet } =
         await import("../cron/dream-journal.js");
       const result = await tryWriteDreamJournal({
         slot: args?.slot,
         force: !!args?.force,
+        sourceChatId,
       });
       let snippet: string | null = null;
       if (result.wrote) {
-        snippet = await readRecentDreamSnippet(280);
+        snippet = await readRecentDreamSnippet(280, { sourceChatId });
       }
       logger.info(
         { ...result, forced: !!args?.force },
@@ -675,9 +695,10 @@ export function buildMetaApiContext(opts?: {
       return { ...result, snippet };
     },
     async recent(maxChars?: number): Promise<{ snippet: string | null }> {
+      const sourceChatId = requireScope();
       const { readRecentDreamSnippet } =
         await import("../cron/dream-journal.js");
-      const snippet = await readRecentDreamSnippet(maxChars ?? 400);
+      const snippet = await readRecentDreamSnippet(maxChars ?? 400, { sourceChatId });
       observeMetaAction("journal.recent", "completed", undefined, {
         hasSnippet: Boolean(snippet),
       });
@@ -703,6 +724,7 @@ export function buildMetaApiContext(opts?: {
       if (opts?.isAborted?.()) throw new Error('meta_aborted');
       const chatId = Number(input?.chatId ?? inferredChatId);
       if (!Number.isSafeInteger(chatId) || chatId === 0) throw new Error('mission chatId required');
+      requireScope(chatId);
       const objective = String(input?.objective ?? '').trim().slice(0, 320);
       const successChecks = Array.isArray(input?.successChecks)
         ? input.successChecks.map((value) => String(value).trim().slice(0, 200)).filter(Boolean).slice(0, 8)
@@ -766,6 +788,7 @@ export function buildMetaApiContext(opts?: {
       if (opts?.isAborted?.()) throw new Error('meta_aborted');
       const chatId = Number(input?.chatId ?? inferredChatId);
       if (!Number.isSafeInteger(chatId) || chatId === 0) throw new Error('sensor chatId required');
+      requireScope(chatId);
       const text = (value: unknown, max: number): string => String(value ?? '').trim().slice(0, max);
       const question = text(input?.question, 320);
       const prediction = text(input?.prediction, 320);
@@ -824,6 +847,7 @@ export function buildMetaApiContext(opts?: {
       if (opts?.isAborted?.()) throw new Error('meta_aborted');
       const chatId = Number(input?.chatId ?? inferredChatId);
       if (!Number.isSafeInteger(chatId) || chatId === 0) throw new Error('value chatId required');
+      requireScope(chatId);
       const text = (value: unknown, max: number): string => String(value ?? '').trim().slice(0, max);
       const name = text(input?.name, 120);
       const statement = text(input?.statement, 320);
@@ -883,6 +907,7 @@ export function buildMetaApiContext(opts?: {
       if (opts?.isAborted?.()) throw new Error('meta_aborted');
       const chatId = Number(input?.chatId ?? inferredChatId);
       if (!Number.isSafeInteger(chatId) || chatId === 0) throw new Error('affect chatId required');
+      requireScope(chatId);
       const text = (value: unknown, max: number): string => String(value ?? '').trim().slice(0, max);
       const clamp = (value: unknown, min: number, max: number): number => {
         const parsed = Number(value);
@@ -936,6 +961,7 @@ export function buildMetaApiContext(opts?: {
       if (opts?.isAborted?.()) throw new Error('meta_aborted');
       const chatId = Number(input?.chatId ?? inferredChatId);
       if (!Number.isSafeInteger(chatId) || chatId === 0) throw new Error('circuit chatId required');
+      requireScope(chatId);
       const text = (value: unknown, max: number): string => String(value ?? '').trim().slice(0, max);
       const list = (values: unknown, max: number, itemMax: number): string[] => Array.isArray(values)
         ? values.map((value) => text(value, itemMax)).filter(Boolean).slice(0, max)

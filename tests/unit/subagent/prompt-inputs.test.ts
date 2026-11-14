@@ -25,11 +25,11 @@ vi.mock('../../../src/env.js', () => ({ env: () => envMock }));
 
 // ── 被 prompt-inputs 动态 import 的各段（可逐测试换行为） ──────────────────
 const dream = {
-  readRecentDreamSnippet: vi.fn(async () => 'DIARY'),
-  getJournalChannelInfo: vi.fn(async () => ({ link: 'https://t.me/j', chatId: 123 })),
+  readRecentDreamSnippet: vi.fn(async (_maxChars?: number, _scope?: { sourceChatId: number }) => 'DIARY'),
+  getJournalChannelInfo: vi.fn(async () => ({ link: 'https://t.me/j', chatId: -100 })),
 };
 vi.mock('../../../src/cron/dream-journal.js', () => ({
-  readRecentDreamSnippet: (...a: unknown[]) => dream.readRecentDreamSnippet(...(a as [number])),
+  readRecentDreamSnippet: (...a: unknown[]) => dream.readRecentDreamSnippet(...(a as [number, { sourceChatId: number }])),
   getJournalChannelInfo: () => dream.getJournalChannelInfo(),
 }));
 
@@ -74,6 +74,13 @@ const memberCache = {
 vi.mock('../../../src/pipeline/reply/member-cache.js', () => ({
   getCachedRoster: (...a: unknown[]) => memberCache.getCachedRoster(...(a as [number])),
   setCachedRoster: (...a: unknown[]) => memberCache.setCachedRoster(...(a as [number, string])),
+}));
+
+const learnedCtx = {
+  buildLearnedContext: vi.fn(async () => ({ block: 'LEARNED_BLOCK', parts: ['norms'], expressionIds: [] as number[] })),
+};
+vi.mock('../../../src/subagent/learned-context.js', () => ({
+  buildLearnedContext: (...a: unknown[]) => learnedCtx.buildLearnedContext(...(a as [never])),
 }));
 
 const ctxManager = {
@@ -216,12 +223,13 @@ beforeEach(() => {
   envMock.RECALL_BUDGET_ENABLED = false;
   // 复位各 mock 的默认行为（clearAllMocks 会清实现，逐个补回）
   dream.readRecentDreamSnippet.mockResolvedValue('DIARY');
-  dream.getJournalChannelInfo.mockResolvedValue({ link: 'https://t.me/j', chatId: 123 });
+  dream.getJournalChannelInfo.mockResolvedValue({ link: 'https://t.me/j', chatId: -100 });
   scratch.warmScratchCache.mockResolvedValue(undefined);
   scratch.scratchPromptBlockSync.mockReturnValue('SCRATCH');
   chatStyle.getChatStyle.mockResolvedValue({});
   chatStyle.chatStylePromptLine.mockReturnValue('STYLE_LINE');
   config.loadCachedPrompt.mockImplementation((name: string) => (name === 'knowledge/permanent.md' ? 'PERM' : ''));
+  learnedCtx.buildLearnedContext.mockResolvedValue({ block: 'LEARNED_BLOCK', parts: ['norms'], expressionIds: [] });
   ctxManager.getRecent.mockResolvedValue([] as never);
   ctxManager.getGroupMembers.mockResolvedValue([] as never);
   memberCache.getCachedRoster.mockReturnValue('ROSTER_CACHED');
@@ -252,6 +260,17 @@ beforeEach(() => {
 });
 
 describe('collectPromptInputs — 各段产物', () => {
+  it('does not expose another journal channel link to the current conversation', async () => {
+    dream.getJournalChannelInfo.mockResolvedValue({ link: 'https://t.me/private-journal', chatId: -200 });
+    const inputs = await collectPromptInputs({
+      task: makeTask(), host: makeHost(), isSelfPlay: false,
+      replyAnchor: undefined, executorSystem: EXECUTOR_BASE,
+    });
+    expect(inputs.journalChannelLink).toBeNull();
+    expect(inputs.journalChatId).toBe(0);
+    expect(dream.readRecentDreamSnippet).toHaveBeenCalledWith(300, { sourceChatId: -100 });
+  });
+
   it('全部就绪时产出完整原料', async () => {
     recentWithAnchor();
     const inputs = await collectPromptInputs({
@@ -263,8 +282,9 @@ describe('collectPromptInputs — 各段产物', () => {
     });
 
     expect(inputs.journal).toBe('DIARY');
+    expect(dream.readRecentDreamSnippet).toHaveBeenCalledWith(300, { sourceChatId: makeTask().chatId });
     expect(inputs.journalChannelLink).toBe('https://t.me/j');
-    expect(inputs.journalChatId).toBe(123);
+    expect(inputs.journalChatId).toBe(-100);
     expect(inputs.scratchBlock).toBe('SCRATCH');
     expect(inputs.chatStyleLine).toBe('STYLE_LINE');
     expect(inputs.identity).toBe('IDENTITY');
@@ -276,6 +296,10 @@ describe('collectPromptInputs — 各段产物', () => {
     expect(inputs.memoryBlock).toBe('MEM_BLOCK');
     expect(inputs.workspaceBlock).toBe('WS_BLOCK');
     expect(inputs.groundingBlock).toBe('GROUND_BLOCK');
+    expect(inputs.learnedBlock).toBe('LEARNED_BLOCK');
+    expect(learnedCtx.buildLearnedContext).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: expect.any(Number), targetUserId: expect.anything() }),
+    );
     expect(inputs.relationshipBlock).toContain('和对方的关系');
     expect(inputs.relationshipBlock).toContain('REL_HINT');
     expect(inputs.relationshipBlock).toContain('REL_NEW');
@@ -462,6 +486,7 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
     ctxManager.getRecent.mockRejectedValue(new Error('x'));
     memoryCtx.buildSubagentMemoryBlock.mockRejectedValue(new Error('x'));
     cognitiveWorkspace.buildCognitiveWorkspace.mockRejectedValue(new Error('x'));
+    learnedCtx.buildLearnedContext.mockRejectedValue(new Error('x'));
 
     const inputs = await collectPromptInputs({
       task: makeTask(),
@@ -470,6 +495,7 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
       replyAnchor: 999,
       executorSystem: EXECUTOR_BASE,
     });
+    expect(inputs.learnedBlock).toBe('');
     expect(inputs.systemPrompt).toBe('EXECUTOR_BASE（当前 = /spam@nmnmfunbot，回复那条广告发出去）TAIL');
     expect(inputs.targetBlock).toContain('messageId=#999');
     expect(inputs.memoryBlock).toBe('');

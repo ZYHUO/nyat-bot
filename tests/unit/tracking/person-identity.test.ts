@@ -80,4 +80,17 @@ describe('person-identity (cross-group)', () => {
   it('returns null when no identity exists yet', () => {
     expect(buildCrossGroupInjection(999, -1)).toBeNull();
   });
+
+  it('keeps the original private source when a new primary has no replacement impression', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (?,?,?,?,?)')
+      .run(7, 'private DM detail', 7, 2, now);
+    mockGroups.mockResolvedValue([-100, 7]);
+    mockAgg.mockReturnValue({ primaryChatId: -100, affinity: 50 });
+    mockProfile.mockReturnValue(null);
+    await refreshPersonIdentity(7);
+    expect(getPersonIdentity(7)?.impression).toBe('private DM detail');
+    expect(getPersonIdentity(7)?.primary_chat_id).toBe(7);
+    expect(buildCrossGroupInjection(7, -999)).toBeNull();
+  });
 });

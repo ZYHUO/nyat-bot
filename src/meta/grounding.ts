@@ -17,7 +17,7 @@
 import { callWithFallback } from '../ai/fallback.js';
 import { getRedis } from '../db/redis.js';
 import { env } from '../env.js';
-import { executeSearch } from '../pipeline/tools/search.js';
+import { executeSearchDetailed, formatSearchOutcome } from '../pipeline/tools/search.js';
 import { logger } from '../shared/logger.js';
 
 const DIGEST_TTL_S = 600; // digest 10min 过期（派发→执行正常就几秒）
@@ -70,16 +70,6 @@ export function sanitizeForGrounding(text: string): string {
   return t;
 }
 
-/** executeSearch 的失败/无结果串不算证据（与 pipeline/tools/search.ts 的措辞对齐）。 */
-function hasSearchEvidence(raw: string): boolean {
-  const t = (raw ?? '').trim();
-  if (!t) return false;
-  if (t.startsWith('搜索失败')) return false;
-  if (t.includes('没有找到与')) return false;
-  if (t === '(no results)') return false;
-  return true;
-}
-
 /**
  * 命中启发式则后台跑一轮核查并写 Redis。fire-and-forget：调用方 `void` 掉即可；
  * 内部全 try/catch，永不 reject，绝不阻塞 dispatch。
@@ -109,11 +99,13 @@ export async function maybeStartGrounding(opts: {
       return;
     }
 
-    const raw = await executeSearch(query.slice(0, 200));
-    if (!hasSearchEvidence(raw)) {
-      logger.info({ chatId, messageId }, 'grounding: no search evidence, dropped');
+    const outcome = await executeSearchDetailed(query.slice(0, 200));
+    if (outcome.status !== 'ok' || !outcome.results.length) {
+      logger.info({ chatId, messageId, searchStatus: outcome.status }, 'grounding: no search evidence, dropped');
       return;
     }
+    const raw = formatSearchOutcome(query, outcome);
+    const partial = outcome.attempts.some((attempt) => attempt.status === 'failed');
 
     const res = await callWithFallback({
       usage: env().GROUNDING_USAGE,
@@ -121,8 +113,9 @@ export async function maybeStartGrounding(opts: {
         {
           role: 'system',
           content:
-            '你是事实核查摘要器。把搜索结果压成 150 字内的中文要点：只留与问题直接相关的事实结论，' +
-            '去掉来源列表/客套/过程描述。信息矛盾或不确定就直说。不要称呼提问者。',
+            '把搜索来源压成 150 字内的中文要点：只保留与问题直接相关且有来源支持的信息，' +
+            '去掉客套/过程描述。搜索摘要不等于独立事实核验，不能把无结果推断为事实不存在。' +
+            '信息矛盾或不确定就直说。不要称呼提问者。',
         },
         { role: 'user', content: `问题：${query}\n\n搜索结果：\n${raw.slice(0, 3000)}` },
       ],
@@ -130,8 +123,10 @@ export async function maybeStartGrounding(opts: {
       temperature: 0.2,
       allowHedge: false, // 后台任务，hedge 双发纯翻倍账单
     });
-    const digest = (res.content ?? '').trim().slice(0, DIGEST_MAX_CHARS);
-    if (!digest) return;
+    const summary = (res.content ?? '').trim();
+    if (!summary) return;
+    const notice = partial ? '部分搜索来源未能完成查询；以下仅根据可用来源整理，未作独立事实核验。\n' : '';
+    const digest = notice + summary.slice(0, DIGEST_MAX_CHARS - notice.length);
 
     await redis.set(digestKey(chatId, messageId), digest, 'EX', DIGEST_TTL_S);
     logger.info(

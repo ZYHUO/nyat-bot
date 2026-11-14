@@ -33,8 +33,10 @@ vi.mock('../../../src/nyatos/frame.js', () => ({
 }));
 
 vi.mock('../../../src/bot/bot.js', () => ({
-  getBotIdentity: () => ({ uid: 8392759490, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: [] }),
-  getBotDisplayName: () => '啾咪囝',
+  getBotIdentity: (chatId?: number) => chatId === -(2 ** 52 + 10)
+    ? { uid: 2 ** 52 + 11, username: '', displayName: 'QQ喵', nicknames: ['QQ喵'] }
+    : { uid: 8392759490, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: [] },
+  getBotDisplayName: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 'QQ喵' : '啾咪囝',
   getBotUid: () => 8392759490,
 }));
 
@@ -51,6 +53,14 @@ vi.mock('../../../src/tracking/self-history.js', () => ({
 const { renderRoomAwareness } = await import('../../../src/subagent/room-awareness.js');
 
 describe('renderRoomAwareness', () => {
+  it('builds the QQ room frame using the current chat display identity', async () => {
+    const chatId = -(2 ** 52 + 10);
+    await renderRoomAwareness({ chatId, botUid: 2 ** 52 + 11 });
+    const { buildFrame } = await import('../../../src/nyatos/frame.js');
+    expect(buildFrame).toHaveBeenLastCalledWith(expect.objectContaining({
+      botUid: 2 ** 52 + 11, botUsername: '', botDisplayName: 'QQ喵',
+    }));
+  });
   it('renders the frame into an injectable prompt block', async () => {
     const r = await renderRoomAwareness({ chatId: -1002943259956, botUid: 8392759490 });
     expect(r.text).toContain('[这个房间现在什么样]');

@@ -101,14 +101,34 @@ describe('parseDistillOutput', () => {
 });
 
 describe('distillEpisode evidence gate', () => {
-  it('maps unverified lifecycle-done to failed episode outcome', async () => {
-    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+  it('unverified lifecycle-done 记 done（没被证实 ≠ 失败），但血缘仍是 unverified', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({
+      summary: 's',
+      experience: [{ kind: 'trick', content: 'unverified-done lineage', tags: ['t'] }],
+    }) });
     const unverified = { ...baseTask, assessment: { status: 'unverified', reasons: ['no_contract'], checks: [] } };
     await distillEpisode({ task: unverified, outcome: 'done', progressSummary: 's', tailText: 't' });
     const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
-    expect(ep['outcome']).toBe('failed');
+    expect(ep['outcome']).toBe('done');
     const prompt = String(callWithFallbackMock.mock.calls[0]![0]['messages'][1]['content']);
-    expect(prompt).toContain('outcome: failed');
+    expect(prompt).toContain('outcome: done');
+    const entries = db.prepare('SELECT * FROM experience_entries').all() as Array<Record<string, unknown>>;
+    expect(entries[0]!['source_assessment']).toBe('unverified');
+  });
+
+  it('host 明确判 failed 的 lifecycle-done 仍记 failed', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+    const failed = { ...baseTask, assessment: { status: 'failed', reasons: ['acceptance_check_failed'], checks: [] } };
+    await distillEpisode({ task: failed, outcome: 'done', progressSummary: 's', tailText: 't' });
+    const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
+    expect(ep['outcome']).toBe('failed');
+  });
+
+  it('lifecycle failed 永远记 failed（即使 assessment 是 verified）', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+    await distillEpisode({ task: baseTask, outcome: 'failed', progressSummary: 's', tailText: 't' });
+    const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
+    expect(ep['outcome']).toBe('failed');
   });
 
   it('keeps verified done as done', async () => {

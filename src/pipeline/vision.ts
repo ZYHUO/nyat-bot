@@ -10,17 +10,45 @@ import { getDb } from '../db/sqlite.js';
 import { getStickerDescription, storeAnalysisResult } from '../knowledge/sticker/store.js';
 
 /** 下载 Telegram 图片为 data URL(静态图;webm/tgs 返回 null)。供描述/识图/回复直读复用。 */
-export async function fetchImageDataUrl(fileId: string): Promise<string | null> {
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+async function downloadStaticImage(fileId: string): Promise<{ dataUrl: string | null; animated: boolean }> {
+  const signal = AbortSignal.timeout(30_000);
   const bot = getBot();
-  const file = await bot.api.getFile(fileId);
+  // grammY pins the abort-controller type, but accepts native Node 22 signals.
+  const file = await bot.api.getFile(fileId, signal as unknown as Parameters<typeof bot.api.getFile>[1]);
   const filePath = file.file_path;
-  if (!filePath) return null;
+  if (!filePath) return { dataUrl: null, animated: false };
   const ext = filePath.split('.').pop()?.toLowerCase();
-  if (ext === 'webm' || ext === 'tgs') return null; // 动态:调用方应传缩略图 file_id
+  if (ext === 'webm' || ext === 'tgs') return { dataUrl: null, animated: true };
+  if (file.file_size && file.file_size > MAX_IMAGE_BYTES) return { dataUrl: null, animated: false };
   const fileUrl = `https://api.telegram.org/file/bot${bot.token}/${filePath}`;
-  const response = await fetch(fileUrl);
-  if (!response.ok) return null;
-  const buffer = await response.arrayBuffer();
+  const response = await fetch(fileUrl, { signal, redirect: 'error' });
+  if (!response.ok) return { dataUrl: null, animated: false };
+  if (Number(response.headers.get('content-length')) > MAX_IMAGE_BYTES) {
+    await response.body?.cancel();
+    return { dataUrl: null, animated: false };
+  }
+  const reader = response.body?.getReader();
+  let buffer: ArrayBuffer;
+  if (reader) {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > MAX_IMAGE_BYTES) { await reader.cancel(); return { dataUrl: null, animated: false }; }
+        chunks.push(chunk.value);
+      }
+    } finally { reader.releaseLock(); }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    buffer = bytes.buffer;
+  } else buffer = await response.arrayBuffer();
+  if (!buffer.byteLength || buffer.byteLength > MAX_IMAGE_BYTES) return { dataUrl: null, animated: false };
   const base64 = Buffer.from(buffer).toString('base64');
   let mimeType = response.headers.get('content-type') ?? 'image/jpeg';
   if (mimeType.includes('octet')) {
@@ -29,7 +57,16 @@ export async function fetchImageDataUrl(fileId: string): Promise<string | null> 
     else if (b[0] === 0x89 && b[1] === 0x50) mimeType = 'image/png';
     else mimeType = 'image/jpeg';
   }
-  return `data:${mimeType};base64,${base64}`;
+  return { dataUrl: `data:${mimeType};base64,${base64}`, animated: false };
+}
+
+export async function fetchImageDataUrl(fileId: string): Promise<string | null> {
+  try { return (await downloadStaticImage(fileId)).dataUrl; }
+  catch {
+    // Telegram download errors can include the credential-bearing file URL.
+    logger.warn({ fileId }, 'Image download failed');
+    return null;
+  }
 }
 
 export interface StickerEmotion {
@@ -98,49 +135,9 @@ export async function analyzeStickerEmotion(fileId: string): Promise<StickerEmot
  */
 export async function describeImage(fileId: string, question?: string): Promise<string> {
   try {
-    // 1. Get file URL from Telegram
-    const bot = getBot();
-    const file = await bot.api.getFile(fileId);
-    const filePath = file.file_path;
-
-    if (!filePath) {
-      logger.warn({ fileId }, 'No file_path returned from Telegram');
-      return '[图片]';
-    }
-
-    // Skip animated stickers (WebM/TGS) — not supported by image vision models
-    const ext = filePath.split('.').pop()?.toLowerCase();
-    if (ext === 'webm' || ext === 'tgs') {
-      logger.debug({ fileId, filePath }, 'Skipping animated sticker (not a static image)');
-      return '[动态贴纸]';
-    }
-
-    // 2. Build download URL
-    const token = bot.token;
-    const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
-
-    // 3. Download image
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      logger.warn({ fileId, status: response.status }, 'Failed to download image from Telegram');
-      return '[图片]';
-    }
-
-    const buffer = await response.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    let mimeType = response.headers.get('content-type') ?? 'image/jpeg';
-    // Telegram serves sticker files as application/octet-stream — detect WebP by magic bytes
-    if (mimeType === 'application/octet-stream' || mimeType.includes('octet')) {
-      const bytes = new Uint8Array(buffer.slice(0, 4));
-      if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
-        mimeType = 'image/webp'; // RIFF header = WebP
-      } else if (bytes[0] === 0x89 && bytes[1] === 0x50) {
-        mimeType = 'image/png';  // PNG
-      } else {
-        mimeType = 'image/webp'; // default for stickers
-      }
-    }
-    const dataUrl = `data:${mimeType};base64,${base64}`;
+    const { dataUrl, animated } = await downloadStaticImage(fileId);
+    if (animated) return '[动态贴纸]';
+    if (!dataUrl) return '[图片]';
 
     // 4. Load vision prompt
     const config = getConfig();
@@ -169,8 +166,8 @@ export async function describeImage(fileId: string, question?: string): Promise<
     const description = result.content.trim();
     logger.debug({ fileId, descLength: description.length }, 'Image described');
     return description || '[图片]';
-  } catch (err) {
-    logger.warn({ fileId, err }, 'Vision failed, returning placeholder');
+  } catch {
+    logger.warn({ fileId }, 'Vision failed, returning placeholder');
     return '[图片]';
   }
 }

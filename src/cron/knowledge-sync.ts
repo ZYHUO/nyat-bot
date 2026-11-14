@@ -82,13 +82,13 @@ export async function runKnowledgeSync(): Promise<void> {
     return;
   }
 
-  const botUid = getBotUid();
   const systemPrompt = loadPrompt('task/knowledge-summarize.md', getConfig().promptsDir);
   const hashes = loadHashes();
 
   for (const chatId of chatIds) {
     const start = performance.now();
     try {
+      const botUid = getBotUid(chatId);
       const context = await getAll(chatId);
       const payload = stableStringifyContext(context);
       const currentHash = createHash('sha256').update(payload).digest('hex');

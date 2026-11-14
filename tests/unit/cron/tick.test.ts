@@ -12,6 +12,7 @@ const redisLists = new Map<string, string[]>();
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
     zrange: async () => ['-1001234567890'],
+    zrevrange: async () => ['-1001234567890'],
     get: async (k: string) => redisStore.get(k) ?? null,
     set: async (k: string, v: string, ..._rest: unknown[]) => { redisStore.set(k, v); },
     keys: async (p: string) => [...redisLists.keys()].filter((k) => k.startsWith(p.replace('*', ''))),
@@ -204,6 +205,7 @@ describe('runUnifiedTick execution mapping', () => {
   });
 
   it('self_play dispatches CodeAct and sets cooldown key', async () => {
+    envFlags.META_SUBAGENT_ENABLED = true;
     callWithFallbackMock.mockResolvedValue({ content: '{"action":"self_play","idea":"写个贪吃蛇","plan":["写","跑"],"reason":"x"}' });
     await runUnifiedTick();
     expect(enqueueMock).toHaveBeenCalledOnce();
@@ -217,6 +219,7 @@ describe('runUnifiedTick execution mapping', () => {
   });
 
   it('self_play vetoed when cooldown active', async () => {
+    envFlags.META_SUBAGENT_ENABLED = true;
     redisStore.set('xxb:selfplay:last', String(now - 100)); // 100s ago, cooldown 4h
     callWithFallbackMock.mockResolvedValue({ content: '{"action":"self_play","idea":"x idea","plan":[],"reason":"x"}' });
     await runUnifiedTick();

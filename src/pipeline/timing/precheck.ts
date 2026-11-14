@@ -66,7 +66,7 @@ export function isClearlyHumanToHuman(input: PreCheckInput): boolean {
   // Commands are addressed to whichever bot owns them; leave those to the gate.
   if (text.startsWith('/')) return false;
 
-  if (isMentioningSelf(text, input.botUsername, input.botNicknames)) return false;
+  if (isMentioningSelf(text, input.botUsername, input.botNicknames, input.botUid)) return false;
   if (msg.replyTo?.uid === input.botUid) return false;
 
   // Structural evidence that humans are talking among themselves: at least one

@@ -37,20 +37,22 @@ describe('judge 链的跨账号兜底', () => {
     expect(crossAccount.length, `backups 全在 stepfun 账号内: ${backups.join(',')}`).toBeGreaterThan(0);
   });
 
-  it('② 同账号 backup 保留（快，无额外握手）', () => {
+  it('② 链上不能只剩一个 label（主 label 之外至少一个 backup）', () => {
     const env = fs.readFileSync('.env', 'utf8');
     const backups = (env.match(/^AI_USAGE_JUDGE_BACKUPS=(.+)$/m)?.[1] ?? '')
       .split(',')
-      .map((s) => s.trim());
-    expect(backups).toContain('stepfunjudge');
+      .map((s) => s.trim())
+      .filter(Boolean);
+    expect(backups.length).toBeGreaterThan(0);
   });
 
-  it('③ 跨账号的那个排在同账号之后（顺序即优先级）', () => {
+  it('③ 同账号 backup 若存在，必须排在跨账号的前面（顺序即优先级）', () => {
     const env = fs.readFileSync('.env', 'utf8');
     const backups = (env.match(/^AI_USAGE_JUDGE_BACKUPS=(.+)$/m)?.[1] ?? '')
       .split(',')
       .map((s) => s.trim());
-    const sameIdx = backups.indexOf('stepfunjudge');
+    const sameIdx = backups.findIndex((b) => STEPFUN_FAMILY.has(b));
+    if (sameIdx < 0) return; // 2026-09-30 stepfun 家族已从 .env 摘掉，链全在跨账号 label 上
     const crossIdx = backups.findIndex((b) => !STEPFUN_FAMILY.has(b));
     expect(sameIdx).toBeLessThan(crossIdx);
   });

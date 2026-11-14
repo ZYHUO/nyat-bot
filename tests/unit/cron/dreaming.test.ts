@@ -24,7 +24,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-// 手mock Redis:任务 hash / digest list / 活跃群 zset 各自可调。
+// 手mock Redis:任务 hash / digest list; 活跃群只用于断言不会跨会话读取。
 const redisMock = {
   hgetall: vi.fn(async () => ({}) as Record<string, string>),
   lrange: vi.fn(async () => [] as string[]),
@@ -96,7 +96,7 @@ function seedPerson(chatId: number, uid: number, name: string, affinity: number)
 function taskJson(id: string, createdAt: number, over: Record<string, unknown> = {}): string {
   return JSON.stringify({
     id,
-    chatId: -100123,
+    chatId: mockEnv.MASTER_UID,
     contentDirection: '看看大家在聊什么',
     createdAt,
     status: 'done',
@@ -113,6 +113,9 @@ beforeEach(() => {
   mockEnv.DREAMING_ENABLED = true;
   mockEnv.MASTER_UID = 7624515600;
   mockEnv.RELATIONSHIP_QUANT_ENABLED = false;
+  redisMock.hgetall.mockClear();
+  redisMock.lrange.mockClear();
+  redisMock.zrange.mockClear();
   redisMock.hgetall.mockResolvedValue({});
   redisMock.lrange.mockResolvedValue([]);
   redisMock.zrange.mockResolvedValue([]);
@@ -228,7 +231,7 @@ describe('buildDreamingContext', () => {
     });
     globalTasks.listTasks = () => [
       // 同 id 覆盖 redis 行(进程内状态更新),新增一条 c。
-      { id: 'b', chatId: -100123, contentDirection: '看看大家在聊什么', createdAt: (since + 20) * 1000, status: 'done', resultSummary: '进程内终态' },
+      { id: 'b', chatId: mockEnv.MASTER_UID, contentDirection: '看看大家在聊什么', createdAt: (since + 20) * 1000, status: 'done', resultSummary: '进程内终态' },
       { id: 'c', chatId: 7624515600, contentDirection: '帮主人查资料', createdAt: (since + 30) * 1000, status: 'running' },
     ];
     const ctx = await buildDreamingContext(since);
@@ -240,19 +243,20 @@ describe('buildDreamingContext', () => {
   });
 
   it('includes top-affinity people (affinity path) with display names', async () => {
-    seedPerson(-100123, 11, '小明', 88);
-    seedPerson(-100123, 22, '小红', 95);
+    seedPerson(mockEnv.MASTER_UID, 11, '小明', 88);
+    seedPerson(mockEnv.MASTER_UID, 22, '小红', 95);
     seedPerson(-100456, 33, '阿伟', 40);
     const ctx = await buildDreamingContext(NOW_SEC - 3600);
     expect(ctx.text).toContain('小红');
     expect(ctx.text).toContain('小明');
     expect(ctx.text.indexOf('小红')).toBeLessThan(ctx.text.indexOf('小明')); // 按好感降序
-    expect(ctx.text).toContain('群-100123');
+    expect(ctx.text).toContain('私聊');
+    expect(ctx.text).not.toContain('阿伟');
   });
 
   it('uses quant score/tier when RELATIONSHIP_QUANT_ENABLED', async () => {
     mockEnv.RELATIONSHIP_QUANT_ENABLED = true;
-    seedPerson(-100123, 11, '小明', 10);
+    seedPerson(mockEnv.MASTER_UID, 11, '小明', 10);
     testDb
       .prepare(`UPDATE chat_relationships SET quant_score = 91, quant_tier = 1 WHERE uid = 11`)
       .run();
@@ -261,17 +265,19 @@ describe('buildDreamingContext', () => {
     expect(ctx.text).toContain('分 91');
   });
 
-  it('includes session digests and active groups', async () => {
+  it('includes same-chat session digests without collecting other active groups', async () => {
     redisMock.lrange.mockResolvedValue([
-      JSON.stringify({ at: NOW_SEC * 1000, text: '给群 -100123 派发了 L0 回复' }),
+      JSON.stringify({ at: NOW_SEC * 1000, sourceChatId: mockEnv.MASTER_UID, text: '给主人派发了 L0 回复' }),
       'not-json',
     ]);
     redisMock.zrange.mockResolvedValue(['-100123', '-100456', '12345']);
     const ctx = await buildDreamingContext(NOW_SEC - 3600);
     expect(ctx.text).toContain('派发了 L0 回复');
     expect(ctx.text).not.toContain('not-json');
-    expect(ctx.text).toContain('-100123, -100456'); // 只留群(负数)
+    expect(ctx.text).not.toContain('-100123');
+    expect(ctx.text).not.toContain('-100456');
     expect(ctx.text).not.toContain('12345');
+    expect(redisMock.zrange).not.toHaveBeenCalled();
   });
 
   it('caps total size: oldest digests dropped first, then oldest tasks, then hard slice', async () => {
@@ -286,7 +292,7 @@ describe('buildDreamingContext', () => {
     redisMock.hgetall.mockResolvedValue(hash);
     redisMock.lrange.mockResolvedValue(
       Array.from({ length: 30 }, (_, i) =>
-        JSON.stringify({ at: (since + i) * 1000, text: `digest${i} ${'流'.repeat(200)}` }),
+        JSON.stringify({ at: (since + i) * 1000, sourceChatId: mockEnv.MASTER_UID, text: `digest${i} ${'流'.repeat(200)}` }),
       ),
     );
     const ctx = await buildDreamingContext(since);
@@ -307,5 +313,61 @@ describe('buildDreamingContext', () => {
     expect(ctx.text).toContain('做梦素材');
     expect(ctx.text).toContain('(本周期没有派发过任务)');
     expect(ctx.text).toContain('(无)');
+  });
+
+  it('never forwards another private chat, group, or unknown source into the master task', async () => {
+    const createdAt = NOW_SEC * 1000;
+    redisMock.hgetall.mockResolvedValue({
+      own: taskJson('own', createdAt, { contentDirection: 'OWN_TASK' }),
+      dm: taskJson('dm', createdAt, { chatId: 42, contentDirection: 'SECRET_DM_TASK' }),
+      group: taskJson('group', createdAt, { chatId: -100123, contentDirection: 'SECRET_GROUP_TASK' }),
+      legacy: taskJson('legacy', createdAt, { chatId: undefined, contentDirection: 'SECRET_UNKNOWN_TASK' }),
+    });
+    globalTasks.listTasks = () => [
+      // A foreign in-memory task must not overwrite an allowed Redis task sharing its ID.
+      { id: 'own', chatId: 42, createdAt, contentDirection: 'SECRET_OVERRIDE', status: 'done' },
+    ];
+    redisMock.lrange.mockResolvedValue([
+      JSON.stringify({ at: createdAt, sourceChatId: mockEnv.MASTER_UID, text: 'OWN_DIGEST' }),
+      JSON.stringify({ at: createdAt, sourceChatId: 42, text: 'SECRET_DM_DIGEST' }),
+      JSON.stringify({ at: createdAt, sourceChatId: -100123, text: 'SECRET_GROUP_DIGEST' }),
+      JSON.stringify({ at: createdAt, text: 'SECRET_UNKNOWN_DIGEST' }),
+    ]);
+    seedPerson(mockEnv.MASTER_UID, 99, 'OWN_PERSON', 1);
+    // More than LIMIT foreign rows prove filtering happens before ranking and LIMIT.
+    for (let uid = 1; uid <= 10; uid++) seedPerson(42, uid, `SECRET_PERSON_${uid}`, 100);
+
+    const result = await runDreaming();
+    expect(result.status).toBe('done');
+    const task = enqueueCodeActJob.mock.calls[0]![0] as { chatId: number; contentDirection: string };
+    expect(task.chatId).toBe(mockEnv.MASTER_UID);
+    expect(task.contentDirection).toContain('OWN_TASK');
+    expect(task.contentDirection).toContain('OWN_DIGEST');
+    expect(task.contentDirection).toContain('OWN_PERSON');
+    expect(task.contentDirection).not.toContain('SECRET_');
+    expect(runs()[0]!.tasks_reviewed).toBe(1);
+    expect(redisMock.zrange).not.toHaveBeenCalled();
+  });
+
+  it('filters foreign quant-score people before ranking and LIMIT', async () => {
+    mockEnv.RELATIONSHIP_QUANT_ENABLED = true;
+    seedPerson(mockEnv.MASTER_UID, 99, 'OWN_PERSON', 1);
+    for (let uid = 1; uid <= 10; uid++) seedPerson(42, uid, `SECRET_PERSON_${uid}`, 100);
+    testDb.prepare('UPDATE chat_relationships SET quant_score = 99, quant_tier = 1').run();
+    testDb.prepare('UPDATE chat_relationships SET quant_score = 1 WHERE chat_id = ?').run(mockEnv.MASTER_UID);
+
+    const ctx = await buildDreamingContext(NOW_SEC - 3600);
+    expect(ctx.text).toContain('OWN_PERSON');
+    expect(ctx.text).not.toContain('SECRET_');
+  });
+
+  it.each([0, -100123, Number.NaN, 1.5])('missing or invalid master %s reads no material', async (master) => {
+    mockEnv.MASTER_UID = master;
+    const ctx = await buildDreamingContext(NOW_SEC - 3600);
+    expect(ctx.tasksReviewed).toBe(0);
+    expect(ctx.text).toContain('缺少有效的主人私聊来源');
+    expect(redisMock.hgetall).not.toHaveBeenCalled();
+    expect(redisMock.lrange).not.toHaveBeenCalled();
+    expect(redisMock.zrange).not.toHaveBeenCalled();
   });
 });

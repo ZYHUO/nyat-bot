@@ -46,7 +46,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
     void (async () => {
       try {
         const { getBotUid } = await import('../bot/bot.js');
-        const botUid = getBotUid();
+        const botUid = getBotUid(chatId);
         if (formatted.isBot && formatted.uid !== botUid) {
           const bc = formatted.botClass;
           if (env().PEER_REACTION_ENABLED && (bc === 'chat' || bc === 'cmd_result')) {
@@ -86,7 +86,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
           import('../pipeline/tools/bot-delegation.js'),
           import('../bot/bot.js'),
         ]);
-        const handled = await tryHandleDelegationReceipt(chatId, formatted, getBotUid());
+        const handled = await tryHandleDelegationReceipt(chatId, formatted, getBotUid(chatId));
         if (handled) {
           logger.info({ chatId, bot: formatted.username }, 'Meta: delegation receipt handled');
         }
@@ -110,7 +110,7 @@ export function runMetaBookkeepingHooks(chatId: number, formatted: FormattedMess
             import('../bot/bot.js'),
             import('../ai/fallback.js'),
           ]);
-        const { needsReflection } = await checkOutcome(chatId, formatted, getBotIdentity().username);
+        const { needsReflection } = await checkOutcome(chatId, formatted, getBotIdentity(chatId).username);
         if (!needsReflection) return;
         await generateReflection(chatId, async (prompt) => {
           try {

@@ -169,6 +169,17 @@ export function closeSelfActOutcome(input: {
        WHERE chat_id = ? AND bot_message_id = ? AND outcome = 'unknown'`,
     ).run(input.outcome, at, input.chatId, input.botMessageId) as { changes?: number };
     if (result.changes !== 1) return false;
+    // 把这次观察回写成该任务的 host 证据（只在 unverified 行上动，见 task-evidence-store）。
+    try {
+      const row = getDb().prepare(
+        `SELECT task_id FROM self_replies WHERE chat_id = ? AND bot_message_id = ?`,
+      ).get(input.chatId, input.botMessageId) as { task_id?: string | null } | undefined;
+      if (row?.task_id) {
+        void import('../agent/task-evidence-store.js')
+          .then(({ applyEchoEvidence }) => applyEchoEvidence(row.task_id!))
+          .catch(() => { /* evidence is an aid; the self_replies row above is the source of truth */ });
+      }
+    } catch { /* non-critical */ }
     // Mirror the observation into the event ledger as `own_action_result`, so the
     // cognitive clock (agent/cognitive-clock.ts) can render "what I just did" from
     // the append-only stream. Both paths (pipeline and Meta) reach this function,
@@ -451,24 +462,38 @@ export function recordSelfReply(
   triggerMsgId: number | null,
   replyText: string,
   botMessageId?: number,
+  taskId?: string,
 ): void {
   if (!env().SELF_HISTORY_ENABLED) return;
   const text = (replyText ?? '').trim();
   if (!text) return;
   try {
     const db = getDb();
-    db.prepare(
-      `INSERT INTO self_replies
-         (chat_id, trigger_uid, trigger_msg_id, reply_text, ts, bot_message_id, outcome)
-       VALUES (?, ?, ?, ?, ?, ?, 'unknown')`,
-    ).run(
+    const base = [
       chatId,
       triggerUid,
       triggerMsgId,
       text.slice(0, 500),
       Math.floor(Date.now() / 1000),
       Number.isSafeInteger(botMessageId) && (botMessageId ?? 0) > 0 ? Number(botMessageId) : null,
-    );
+    ];
+    const tid = typeof taskId === 'string' && taskId ? taskId.slice(0, 80) : null;
+    // task_id 是后加的可选列（migrations/0116）。没有 taskId 时仍走原来的 SQL：新增的可选列
+    // 不该有机会拖垮这条必写的记录——self_replies 是 Echo / outcome 整条链的写入口，
+    // INSERT 失败只会被下面的 catch 吞成 debug 日志，等于悄悄全丢。
+    if (tid === null) {
+      db.prepare(
+        `INSERT INTO self_replies
+           (chat_id, trigger_uid, trigger_msg_id, reply_text, ts, bot_message_id, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, 'unknown')`,
+      ).run(...base);
+    } else {
+      db.prepare(
+        `INSERT INTO self_replies
+           (chat_id, trigger_uid, trigger_msg_id, reply_text, ts, bot_message_id, outcome, task_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?)`,
+      ).run(...base, tid);
+    }
   } catch (err) {
     logger.debug({ err, chatId, triggerUid }, 'recordSelfReply failed (non-critical)');
   }

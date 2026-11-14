@@ -28,6 +28,8 @@ import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
 import { scheduleMetaDeferReeval } from './defer.js';
 import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
+import { createHash } from 'node:crypto';
+import { checkCodeActActivation } from '../subagent/activation-policy.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
@@ -47,6 +49,19 @@ export interface MetaWaitAnchor {
 
 function waitAnchorKey(chatId: number): string {
   return `xxb:meta:wait-anchor:${chatId}`;
+}
+
+// A temporary Redis failure must not turn held work back into runnable input.
+const pendingHeldAnchors = new Map<string, string>();
+async function flushHeldAnchors(): Promise<void> {
+  try {
+    for (const [id, raw] of pendingHeldAnchors) {
+      await getRedis().hsetnx('xxb:meta:activation-held', id, raw);
+      pendingHeldAnchors.delete(id);
+    }
+  } catch {
+    logger.warn({ pending: pendingHeldAnchors.size }, 'Meta wait archive unavailable; rejected anchors retained for retry');
+  }
 }
 
 export async function setMetaWaitAnchor(anchor: MetaWaitAnchor, ttlSec: number): Promise<void> {
@@ -78,8 +93,20 @@ export async function takeMetaWaitAnchor(chatId: number): Promise<MetaWaitAnchor
 /** After timing wait-resume: re-feed Attention so Meta can reconsider. */
 export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> {
   if (!env().META_SUBAGENT_ENABLED || !env().TIMING_GATE_ENABLED) return false;
+  await flushHeldAnchors();
   const anchor = await takeMetaWaitAnchor(chatId);
   if (!anchor) return false;
+  const decision = checkCodeActActivation(anchor);
+  if (!decision.allowed || anchor.chatId !== chatId) {
+    const reason = !decision.allowed ? decision.reason : 'anchor_chat_mismatch';
+    const id = `wait:${createHash('sha256').update(JSON.stringify(anchor)).digest('hex')}`;
+    pendingHeldAnchors.set(id, JSON.stringify({ kind: 'wait', reason, heldAt: Date.now(), input: anchor }));
+    await flushHeldAnchors();
+    logger.warn({ chatId, reason }, 'Meta wait anchor held before replay');
+    // Handled, not resumed: the timing caller must not fall through to its
+    // legacy Turn Actor replay after we reject the Meta anchor.
+    return true;
+  }
   try {
     const { getAttentionAccumulator } = await import('./attention.js');
     await getAttentionAccumulator().ingestAsync({
@@ -200,8 +227,8 @@ export async function evaluateMetaTiming(opts: {
     message: formatted,
     recentMessages,
     judgeResult: stubJudge(false),
-    botUid: getBotUid() || 0,
-    botName: getBotDisplayName(),
+    botUid: getBotUid(chatId) || 0,
+    botName: getBotDisplayName(chatId),
     botPersona,
     isDirectInteraction: false,
     lastSpokeSecAgo,

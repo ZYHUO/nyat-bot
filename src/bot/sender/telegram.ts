@@ -11,6 +11,12 @@ import { recordBotMessageForConnectivity } from '../../agent/reverse-valve.js';
 import { logger } from '../../shared/logger.js';
 import { getRedis } from '../../db/redis.js';
 import { incrCounter } from '../../metrics/registry.js';
+import {
+  deletePlatformMessage, platformChatAction, platformConversation,
+  rejectUnsupportedPlatformAction, sendPlatformText,
+} from '../../platform/outbound.js';
+import { assertTelegramPayload } from '../../platform/telegram-guard.js';
+import { UnsupportedCapabilityError } from '../../platform/types.js';
 
 const MAX_RETRIES = 3;
 
@@ -26,6 +32,8 @@ const BASE_BACKOFF_MS = 1000;
 
 /** React to a message with a single emoji (Telegram setMessageReaction). Best-effort. */
 export async function reactToMessage(chatId: number, messageId: number, emoji: string): Promise<boolean> {
+  rejectUnsupportedPlatformAction(chatId, 'reactions');
+  assertTelegramPayload({ chat_id: chatId, message_id: messageId });
   try {
     const bot = getBot();
     // emoji must be one of Telegram's allowed reaction emojis; callers supply only those.
@@ -45,6 +53,8 @@ export async function sendPoll(
   options: string[],
   messageThreadId?: number,
 ): Promise<number> {
+  rejectUnsupportedPlatformAction(chatId, 'polls');
+  assertTelegramPayload({ chat_id: chatId, message_thread_id: messageThreadId });
   try {
     const bot = getBot();
     const threadParam = messageThreadId ? { message_thread_id: messageThreadId } : {};
@@ -67,6 +77,9 @@ export async function forwardMessage(
   fromChatId: number,
   messageId: number,
 ): Promise<number> {
+  rejectUnsupportedPlatformAction(targetChatId, 'forwarding');
+  rejectUnsupportedPlatformAction(fromChatId, 'forwarding');
+  assertTelegramPayload({ chat_id: targetChatId, from_chat_id: fromChatId, message_id: messageId });
   try {
     const bot = getBot();
     const r = await bot.api.forwardMessage(targetChatId, fromChatId, Math.floor(messageId));
@@ -79,6 +92,8 @@ export async function forwardMessage(
 
 /** 临时禁言（restrictChatMember 全权限关闭 + until_date）。失败 false。 */
 export async function muteMember(chatId: number, uid: number, minutes: number): Promise<boolean> {
+  rejectUnsupportedPlatformAction(chatId, 'member administration');
+  assertTelegramPayload({ chat_id: chatId, user_id: uid });
   try {
     const bot = getBot();
     const until = Math.floor(Date.now() / 1000) + Math.floor(minutes) * 60;
@@ -121,6 +136,8 @@ export async function kickMember(
   uid: number,
   deleteMessages = false,
 ): Promise<boolean> {
+  rejectUnsupportedPlatformAction(chatId, 'member administration');
+  assertTelegramPayload({ chat_id: chatId, user_id: uid });
   try {
     const bot = getBot();
     const id = Math.floor(uid);
@@ -145,6 +162,8 @@ export async function kickMember(
 
 /** 解除禁言（恢复全权限）。失败 false。 */
 export async function unmuteMember(chatId: number, uid: number): Promise<boolean> {
+  rejectUnsupportedPlatformAction(chatId, 'member administration');
+  assertTelegramPayload({ chat_id: chatId, user_id: uid });
   try {
     const bot = getBot();
     await bot.api.restrictChatMember(chatId, Math.floor(uid), {
@@ -169,6 +188,8 @@ export async function unmuteMember(chatId: number, uid: number): Promise<boolean
 
 /** 置顶/取消置顶。失败 false。 */
 export async function pinMessage(chatId: number, messageId: number, unpin = false): Promise<boolean> {
+  rejectUnsupportedPlatformAction(chatId, 'pins');
+  assertTelegramPayload({ chat_id: chatId, message_id: messageId });
   try {
     const bot = getBot();
     if (unpin) await bot.api.unpinChatMessage(chatId, Math.floor(messageId));
@@ -341,6 +362,22 @@ export async function sendMessage(
   replyToId?: number,
   messageThreadId?: number,
 ): Promise<number> {
+  if (platformConversation(chatId)) {
+    if (messageThreadId !== undefined) throw new UnsupportedCapabilityError('topics');
+    // OneBot owns its receipt semantics. No Telegram fallback, sharding or retry
+    // may run after an unknown-delivery error from this single send attempt.
+    const messageId = await sendPlatformText(chatId, text, replyToId);
+    recordSpeech();
+    recordBotReply(chatId);
+    recordConnectivityWindow(chatId, messageId, Math.floor(Date.now() / 1000));
+    if (replyToId && replyToId > 0) {
+      void import('../../meta/answered.js')
+        .then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId))
+        .catch(() => { /* telemetry never breaks the send path */ });
+    }
+    return messageId;
+  }
+  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: replyToId, message_thread_id: messageThreadId });
   // round 60：同群同文本 30 秒内去重（见上面 dedupKey 的注释）。
   const trimmed = text.trim();
   if (trimmed.length > 0) {
@@ -514,6 +551,8 @@ export async function editMessage(
   messageId: number,
   text: string,
 ): Promise<void> {
+  rejectUnsupportedPlatformAction(chatId, 'editing');
+  assertTelegramPayload({ chat_id: chatId, message_id: messageId });
   await withRetry(async () => {
     const bot = getBot();
     try {
@@ -531,6 +570,8 @@ export async function sendSticker(
   chatId: number,
   stickerId: string,
 ): Promise<number> {
+  rejectUnsupportedPlatformAction(chatId, 'stickers');
+  assertTelegramPayload({ chat_id: chatId, sticker: stickerId });
   return withRetry(async () => {
     const bot = getBot();
     const result = await bot.api.sendSticker(chatId, stickerId);
@@ -548,6 +589,8 @@ export async function sendFile(
   filePath: string,
   opts: { caption?: string; replyToId?: number; messageThreadId?: number; filename?: string } = {},
 ): Promise<{ messageId: number }> {
+  rejectUnsupportedPlatformAction(chatId, 'files');
+  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
   const { InputFile } = await import('grammy');
   const { readFile, stat } = await import('node:fs/promises');
   const { basename } = await import('node:path');
@@ -587,6 +630,8 @@ export async function sendPhoto(
   filePath: string,
   opts: { caption?: string; replyToId?: number; messageThreadId?: number } = {},
 ): Promise<{ messageId: number }> {
+  rejectUnsupportedPlatformAction(chatId, 'photos');
+  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
   const { InputFile } = await import('grammy');
   const { readFile, stat } = await import('node:fs/promises');
   const { basename } = await import('node:path');
@@ -624,6 +669,8 @@ export async function sendVoice(
   oggBuffer: Buffer,
   opts: { replyToId?: number; messageThreadId?: number } = {},
 ): Promise<{ messageId: number }> {
+  rejectUnsupportedPlatformAction(chatId, 'voice');
+  assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });
   const { InputFile } = await import('grammy');
   const bot = getBot();
   const anchor =
@@ -648,6 +695,8 @@ export async function sendVoice(
  * Delete a message. Fails silently if already deleted or not found.
  */
 export async function deleteMessage(chatId: number, messageId: number): Promise<void> {
+  if (platformConversation(chatId)) return deletePlatformMessage(chatId, messageId);
+  assertTelegramPayload({ chat_id: chatId, message_id: messageId });
   try {
     const bot = getBot();
     await bot.api.deleteMessage(chatId, messageId);
@@ -660,6 +709,11 @@ export async function sendChatAction(
   action: 'typing' | 'upload_photo' | 'upload_document' | 'record_voice',
   messageThreadId?: number,
 ): Promise<void> {
+  if (platformChatAction(chatId)) {
+    logger.debug({ chatId, action, available: false }, 'Platform chat action unavailable');
+    return;
+  }
+  assertTelegramPayload({ chat_id: chatId, message_thread_id: messageThreadId });
   try {
     const bot = getBot();
     // forum（topic）群必须带 message_thread_id，否则 typing 显示在 General 而不是对应话题里

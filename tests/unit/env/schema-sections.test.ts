@@ -50,8 +50,13 @@ describe('env schema 拆段', () => {
     // 加旗标时这个数会变——
     // 那时该做的是重新核对，而不是把这个数字改大。
     // round 206: 497 → 498（加了 SEND_LOG_FULL_TEXT）
-    expect(all.length).toBe(498);
-    expect(new Set(all).size).toBe(498);
+    // 2026-10-01: 498 → 499（META_INJECT_LEARNED_ENABLED，把学习产物接进 Meta 路径）
+    //             499 → 501（GOAL_CLOSE_OBSERVE_ENABLED / GOAL_CLOSE_OBSERVE_HOURS，goal 待关闭观察期）
+    //             501 → 502（CODEACT_WEB_FETCH_TO_FILE_ENABLED，沙盒无网络，宿主侧带数据进来）
+    // Includes this rollout's transport/runtime settings; independently recounted.
+    // 522 includes 10 OneBot connection and account settings; checked against all section keys.
+    expect(all.length).toBe(522);
+    expect(new Set(all).size).toBe(522);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -66,6 +71,11 @@ describe('env schema 拆段', () => {
     expect(parsed.AGENT_TASK_SEND_BUDGET).toBe(6);             // meta
     expect(parsed.VIDEO_DESCRIBE_ENABLED).toBe(true);          // features
     expect(parsed.NYATOS_BUDGET_MAX_ACTS).toBe(6);             // life
+    expect(parsed.PROACTIVE_ACTIVATED_AT_SEC).toBe(0);         // cognition
+    expect(parsed.META_ACTIVATED_AT_SEC).toBe(0);              // meta (disabled until explicitly activated)
+    expect(parsed.AUDIO_TRANSCRIBE_API_MODE).toBe('chat');     // infra compatibility default
+    expect(parsed.TTS_PYTHON_PATH).toBe('python3');            // life
+    expect(parsed.TTS_FFMPEG_PATH).toBe('ffmpeg');             // life
   });
 
   it('③ 每个段文件都被 env.ts import（加了文件忘了接 = 整段静默消失）', () => {

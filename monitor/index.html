@@ -164,6 +164,20 @@ body{background:var(--bg-main);color:var(--fg);font-family:-apple-system,BlinkMa
 @media(min-width:601px){
   .mobile-back{display:none!important}
 }
+.feature-overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:16px 0}
+.feature-card{padding:14px;background:var(--bg-secondary,#17212b);border:1px solid #334453;border-radius:10px}
+.feature-title{display:flex;justify-content:space-between;gap:8px;font-weight:600;margin-bottom:8px}
+.feature-detail,.feature-note{font-size:12px;color:#a7bacb;line-height:1.7;overflow-wrap:anywhere}
+.feature-badge{font-size:12px;border-radius:6px;padding:2px 7px;background:#263a4e;color:#bed7ec;white-space:nowrap}
+.feature-badge.blocked,.feature-badge.degraded{background:#54302c;color:#ffd0b8}
+.feature-badge.running,.feature-badge.scheduled{background:#214235;color:#bde9ca}
+.feature-badge.disabled{background:#333d48;color:#b0bcc8}
+.feature-table-wrap{overflow-x:auto;border:1px solid #334453;border-radius:8px}
+.feature-table{border-collapse:collapse;width:100%;min-width:850px;font-size:12px;text-align:left}
+.feature-table th,.feature-table td{padding:10px;border-bottom:1px solid #293b4d;vertical-align:top}
+.feature-table th{color:#a7bacb;white-space:nowrap}
+.feature-refresh{border:1px solid #4b6a83;color:#d6e9fa;background:#203447;border-radius:6px;padding:7px 12px;cursor:pointer}
+.feature-section{max-width:1500px;width:100%;margin:0 auto}
 </style>
 </head>
 <body>
@@ -190,6 +204,7 @@ body{background:var(--bg-main);color:var(--fg);font-family:-apple-system,BlinkMa
       <div class="sidebar-tabs">
         <div class="sidebar-tab active" id="tab-groups" onclick="switchTab('groups')">群组</div>
         <div class="sidebar-tab" id="tab-dms" onclick="switchTab('dms')">私信</div>
+        <div class="sidebar-tab" id="tab-features" onclick="switchTab('features')">功能</div>
       </div>
       <div class="chat-list" id="chat-list"></div>
     </div>
@@ -232,6 +247,7 @@ const NAME_COLORS=['#fc5c65','#fd9644','#a55eea','#26de81','#2bcbba','#45aaf2','
 let TOKEN=localStorage.getItem('monitor_token')||'';
 let currentChat=null,pollAbort=null,pollTotal=0;
 let allChats=[],groupChats=[],dmChats=[],activeTab='groups',newMsgCount=0;
+let featureRequest=0;
 
 function avatarGradient(id){return AVATAR_GRADIENTS[Math.abs(id)%AVATAR_GRADIENTS.length]}
 function nameColor(uid){return NAME_COLORS[Math.abs(uid||0)%NAME_COLORS.length]}
@@ -273,6 +289,7 @@ function isAtBottom(){const a=document.getElementById('msg-area');return a.scrol
 function scrollToBottom(){const a=document.getElementById('msg-area');a.scrollTop=a.scrollHeight;newMsgCount=0;updateScrollBtn()}
 function updateScrollBtn(){
   const btn=document.getElementById('scroll-btn'),atB=isAtBottom();
+  if(activeTab==='features'){btn.classList.remove('visible');return}
   btn.classList.toggle('visible',!atB);
   const badge=btn.querySelector('.scroll-bottom-badge');
   if(badge)badge.remove();
@@ -302,11 +319,54 @@ if(TOKEN)doAuth();
 
 // Tabs
 function switchTab(tab){
+  const wasFeatures=activeTab==='features';
   activeTab=tab;
   document.getElementById('tab-groups').className='sidebar-tab'+(tab==='groups'?' active':'');
   document.getElementById('tab-dms').className='sidebar-tab'+(tab==='dms'?' active':'');
+  document.getElementById('tab-features').className='sidebar-tab'+(tab==='features'?' active':'');
+  if(tab==='features'){showFeatureStatus();return}
+  if(wasFeatures){featureRequest++;document.getElementById('msg-header').style.display='none';document.getElementById('msg-area').innerHTML='<div class="empty-state">选择一个聊天开始查看</div>'}
   filterChats();
 }
+
+function featureTime(ms){return ms==null?'未观察到':new Date(ms).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})}
+function featureSchedule(schedule){
+  const time=at=>String(at.hour).padStart(2,'0')+':'+String(at.minute).padStart(2,'0');
+  if(schedule.dailyAt)return'每天 '+time(schedule.dailyAt);
+  if(schedule.weeklyAt)return'每周'+'日一二三四五六'[schedule.weeklyAt.day]+' '+time(schedule.weeklyAt);
+  return schedule.everySec?'每 '+schedule.everySec+' 秒':'未设置';
+}
+function showFeatureStatus(){
+  currentChat=null;newMsgCount=0;
+  if(pollAbort){pollAbort.abort();pollAbort=null}
+  document.getElementById('header-title').textContent='功能与定时任务';
+  document.getElementById('header-sub').textContent='当前进程 · 北京时间';
+  document.getElementById('msg-header').style.display='';
+  document.getElementById('chat-list').innerHTML='<div class="feature-card"><b>运行观察</b><p class="feature-note">配置开关、依赖、注册状态与最近执行。每 15 秒刷新。</p><button class="feature-refresh" onclick="showFeatureStatus()">打开 / 刷新</button></div>';
+  document.getElementById('msg-area').innerHTML='<div class="spinner-wrap"><div class="spinner"></div></div>';
+  if(window.innerWidth<=600){document.getElementById('sidebar').classList.add('hidden');document.getElementById('right-panel').classList.remove('hidden')}
+  updateScrollBtn();loadFeatureStatus();
+}
+async function loadFeatureStatus(){
+  if(activeTab!=='features')return;
+  const request=++featureRequest;
+  try{
+    const response=await fetch(apiUrl('/features'),{cache:'no-store'});
+    if(!response.ok)throw new Error(response.status===401?'认证失效，请重新登录':'状态接口暂不可用');
+    const data=await response.json();
+    if(activeTab!=='features'||request!==featureRequest)return;
+    const labels={disabled:'已关闭',blocked:'依赖阻塞',configured:'已配置 · 待触发',scheduled:'已调度',running:'正在执行',degraded:'最近执行异常'};
+    const depLabels={ready:'就绪',blocked:'缺失',unknown:'未验证'};
+    const resultLabels={completed:'回调完成',skipped:'业务跳过',failed:'执行失败'};
+    const reasonLabels={disabled:'已关闭',no_evidence:'无可用素材',cooldown:'冷却中',model_skip:'模型选择跳过',empty_output:'空输出',unparsed:'无法解析',llm_failed:'模型调用失败',not_due:'未到期'};
+    const cards=data.features.map(feature=>'<section class="feature-card"><div class="feature-title"><span>'+esc(feature.label)+'</span><span class="feature-badge '+esc(feature.state)+'">'+esc(labels[feature.state]||feature.state)+'</span></div><div class="feature-detail">'+esc(feature.flag)+' = '+(feature.enabled?'ON':'OFF')+(feature.scope==='restricted'?' · 限定会话':'')+'</div>'+feature.dependencies.map(dep=>'<div class="feature-detail">'+esc(dep.label)+'：'+esc(depLabels[dep.status])+'</div>').join('')+(feature.expectedTask?'<div class="feature-detail">注册任务：'+esc(feature.tasks.join('、')||'未注册')+'</div>':'')+'</section>').join('');
+    const rows=data.tasks.map(task=>'<tr><td>'+esc(task.name)+'</td><td>'+esc(featureSchedule(task.schedule))+'</td><td>'+esc(featureTime(task.lastStartedAt))+'<br><span class="feature-note">结束 '+esc(featureTime(task.lastFinishedAt))+'</span></td><td>'+esc(task.running?'执行中':task.nextRunAt==null?'未知 / 未启动':featureTime(task.nextRunAt))+(task.due&&!task.running?'<br>已到期，等待心跳':'')+'</td><td>'+esc(task.running?'执行中':resultLabels[task.result]||'尚无执行结果')+(task.timedOut?'<br>曾超过超时阈值':'')+(task.reason?'<br>'+esc(reasonLabels[task.reason]||'已跳过'):'')+(!task.historyAvailable?'<br>历史读取不可用':'')+'</td><td>'+(task.durationMs==null?'—':esc((task.durationMs/1000).toFixed(2))+' 秒')+'</td></tr>').join('');
+    const area=document.getElementById('msg-area'),scroll=area.scrollTop;
+    area.innerHTML='<div class="feature-section"><button class="feature-refresh" onclick="loadFeatureStatus()">刷新状态</button><p class="feature-note">观察时间 '+esc(featureTime(data.observedAt))+' · 心跳 '+(data.schedulerRunning?'运行中':'未启动')+' · Redis '+(data.redisReady?'已连接':'未连接')+'</p>'+data.notes.map(note=>'<p class="feature-note">'+esc(note)+'</p>').join('')+'<div class="feature-overview">'+cards+'</div><h3>定时任务（'+data.tasks.length+'）</h3><p class="feature-note">时间统一为北京时间。任务回调完成不代表一定生成或发送内容；未观察到结果会保留为空。</p><div class="feature-table-wrap"><table class="feature-table"><thead><tr><th>任务</th><th>计划</th><th>最近开始 / 结束</th><th>下次应执行</th><th>结果</th><th>耗时</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+(data.tasks.length?'':'<p class="feature-note">当前进程没有已注册任务。</p>')+'</div>';
+    area.scrollTop=scroll;
+  }catch(error){if(activeTab==='features'&&request===featureRequest)document.getElementById('msg-area').innerHTML='<div class="feature-card">'+esc(error.message)+'<p><button class="feature-refresh" onclick="loadFeatureStatus()">重试</button></p></div>'}
+}
+setInterval(()=>{if(TOKEN&&activeTab==='features')loadFeatureStatus()},15000);
 
 // Chats
 async function loadChats(){
@@ -339,6 +399,7 @@ function renderChats(chats){
 }
 
 function filterChats(){
+  if(activeTab==='features')return;
   const q=document.getElementById('search-input').value.trim().toLowerCase();
   const base=getVisibleChats();
   renderChats(q?base.filter(c=>c.title.toLowerCase().includes(q)):base);
@@ -373,6 +434,7 @@ async function loadMessages(chatId){
   area.innerHTML='<div class="spinner-wrap"><div class="spinner"></div></div>';
   const r=await fetch(apiUrl('/messages?chat_id='+chatId+'&limit=50'));
   const d=await r.json();
+  if(currentChat!==chatId||activeTab==='features')return;
   renderMessages(d.messages||[]);
   pollTotal=(d.messages||[]).length;
   startPoll(chatId);
@@ -468,6 +530,7 @@ async function startPoll(chatId){
     try{
       const r=await fetch(apiUrl('/poll?chat_id='+chatId+'&after='+pollTotal),{signal:ctrl.signal});
       const d=await r.json();
+      if(currentChat!==chatId||ctrl.signal.aborted||activeTab==='features')return;
       if(d.messages&&d.messages.length>0){
         const area=document.getElementById('msg-area'),atB=isAtBottom();
         for(const m of d.messages)area.appendChild(createMsg(m,null));

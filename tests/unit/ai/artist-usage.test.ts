@@ -43,6 +43,7 @@ const POOL: AILabel[] = [
   label('stepfunthink', 'step-3.5-flash', 'high', 'https://api.stepfun.com/step_plan/v1'),
   label('stepfunasi', 'step-3.7-flash', 'medium', 'https://api.stepfun.com/step_plan/v1'),
   label('dshkimi', 'kimi-for-coding', 'high', 'https://kimi.example/v1'),
+  label('spacebunny', 'space-bunny', 'high', 'https://spacebunny.example/v1'),
   label('lfree', 'big-pickle', 'low', 'https://lfree.example/v1'),
   label('step5', 'step-5-preview', 'high', 'https://step5.example/v1'),
 ];
@@ -56,7 +57,7 @@ describe('artist（画摊子）的 AI 路由', () => {
 
   it('getUsage("artist") 解析得出链——不再 "AI usage not found: artist"', () => {
     const u = getUsage('artist');
-    expect(u.label).toBe('dshkimi');
+    expect(u.label).toBe('spacebunny');
     expect([u.label, ...u.backups].length).toBeGreaterThanOrEqual(2);
   });
 

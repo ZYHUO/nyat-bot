@@ -5,10 +5,13 @@ import { sendMessage, sendSticker, reactToMessage, sendChatAction } from '../bot
 import { searchMemory, searchMemoryByUser } from '../memory/chroma.js';
 import { getReadyStickersByIntent } from '../knowledge/sticker/store.js';
 import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-identity.js';
+import { isCrossContextPrivate } from '../memory/visibility.js';
 import { isDM } from '../shared/chat.js';
 import { isEchoOf } from '../shared/echo-text.js';
 import { findTopicRepeat } from './topic-repeat.js';
 import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
+import { isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
 
 /**
  * round 89：**同一锚点短时间内重复回复要拦。**
@@ -439,6 +442,12 @@ export interface HostApi {
     search: (query: string) => Promise<string>;
     /** 本地 RSS 谈资库的最新条目（源/标题/链接）——找「我之前分享过的新闻出处」先翻这里。 */
     feed: () => Promise<string>;
+    /**
+     * 宿主侧抓取一个 http(s) 文本资源（RSS/JSON/CSV/HTML…，≤512KB）并写进沙盒路径。
+     * 沙盒本身没有网络——要处理外部数据：先 web.fetchToFile，再 computer.run 里的脚本读那个文件。
+     * 返回 { ok, path, bytes, truncated } 或 { ok:false, reason }。
+     */
+    fetchToFile: (url: string, path: string) => Promise<{ ok: boolean; path?: string; bytes?: number; contentType?: string; truncated?: boolean; reason?: string }>;
   };
   /** Pixiv 公开全年龄搜图（只读；图片下载到沙盒路径，发送走 telegram.sendPhoto）。 */
   pixiv: {
@@ -466,6 +475,8 @@ export interface HostApi {
     didSendText: () => boolean;
     /** A final delivery was explicitly sent or the task was ended. */
     didProduceFinal: () => boolean;
+    /** Unacknowledged QQ delivery closes this host; never treat it as a final receipt. */
+    hasUnknownDelivery?: () => boolean;
     /** An intermediate delivery happened without ending the task. */
     didSendIntermediate: () => boolean;
     /** The last delivery kind, if any. */
@@ -621,6 +632,8 @@ export function createHostApi(
      * 乘上 10 段就是 60 条，等于没拦）。
      */
     onSend?: () => void;
+    /** Called before returning an unknown delivery error to the guest. */
+    onDeliveryUnknown?: (code: string) => void | Promise<void>;
     /** Max sendFile calls (default unlimited; self-play passes 1). */
     maxFileSends?: number;
     /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
@@ -647,6 +660,8 @@ export function createHostApi(
   let ended = false;
   let textSent = 0;
   let finalSent = false;
+  let deliveryUnknown = false;
+  let deliveryTail: Promise<void> = Promise.resolve();
   let intermediateSent = false;
   let lastDeliveryKind: DeliveryKind | undefined;
   let waitingForUser = false;
@@ -753,7 +768,32 @@ export function createHostApi(
   const blockedByGate: string[] = [];
 
   const assertOpen = () => {
+    if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
     if (opts.isClosed?.()) throw new Error('host_closed');
+  };
+
+  const sendWithDeliveryGuard = <T>(operation: () => Promise<T>): Promise<T> => {
+    if (!isPlatformInternalId(chatId)) return operation();
+    // Already-entered parallel guest calls wait here, then observe the closure
+    // from the first uncertain receipt before another external send can begin.
+    const pending = deliveryTail.then(async () => {
+      assertOpen();
+      try {
+        return await withCodeActDeliveryIntent(opts.taskId, chatId, operation);
+      } catch (error) {
+        if (isUnknownPlatformDelivery(chatId, error)) {
+          deliveryUnknown = true;
+          waitingForUser = false;
+          const code = 'code' in (error as object) && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code : 'delivery_unknown';
+          try { await opts.onDeliveryUnknown?.(code); }
+          catch { logger.error({ taskId: opts.taskId }, 'Unknown delivery hold persistence failed; host remains closed'); }
+        }
+        throw error;
+      }
+    });
+    deliveryTail = pending.then(() => undefined, () => undefined);
+    return pending;
   };
 
   const trackInflight = <T>(p: Promise<T>): Promise<T> => {
@@ -840,7 +880,7 @@ export function createHostApi(
         aiCall: callAllowlistReviewModel,
         getRecentContext: botFlow.defaultGetRecentContext,
         masterUid: env().MASTER_UID,
-        botUid: getBotUid(),
+        botUid: getBotUid(chatId),
       },
     };
   };
@@ -1377,7 +1417,7 @@ export function createHostApi(
                 }
               }
 
-              const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
+              const messageId = await sendWithDeliveryGuard(() => sendMessage(chatId, part, replyTo, opts.messageThreadId));
               if (messageId > 0) {
                 void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
                 // Nyat Trench L0：说出口了 → 抽走 85% 气压。
@@ -1418,7 +1458,7 @@ export function createHostApi(
                 // 下游（Echo 判据、包络回测的主动/被叫到分类）误判成主动发言
                 // ——2026-09-19 回测因此把 413/425 条错判成"主动插话太密"。
                 const effectiveAnchor = replyTo ?? opts.defaultReplyTo ?? null;
-                recordSelfReply(chatId, opts.targetUserId ?? 0, effectiveAnchor, part, messageId);
+                recordSelfReply(chatId, opts.targetUserId ?? 0, effectiveAnchor, part, messageId, opts.taskId);
               } catch (err) {
                 logger.debug({ err, chatId }, 'host sendText self-history failed (non-critical)');
               }
@@ -2082,7 +2122,7 @@ export function createHostApi(
         perm: 'can_delete_messages' | 'can_restrict_members' | 'can_pin_messages',
       ): Promise<void> => {
         const { getBot, getBotUid } = await import('../bot/bot.js');
-        const member = (await getBot().api.getChatMember(chatId, getBotUid())) as unknown as Record<string, unknown>;
+        const member = (await getBot().api.getChatMember(chatId, getBotUid(chatId))) as unknown as Record<string, unknown>;
         const status = String(member['status'] ?? '');
         if (status !== 'administrator' || member[perm] !== true) {
           const permName = perm.replace(/^can_/i, '').replace(/_/g, ' ');
@@ -2124,7 +2164,7 @@ export function createHostApi(
           if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
           if (target === env().MASTER_UID) throw new Error('admin_no_master: 不许对主人下手');
           const { getBotUid } = await import('../bot/bot.js');
-          if (target === getBotUid()) throw new Error('admin_no_self: 不能禁言我自己');
+          if (target === getBotUid(chatId)) throw new Error('admin_no_self: 不能禁言我自己');
           await assertAdminPerm('can_restrict_members');
           await rateGate();
           const { muteMember } = await import('../bot/sender/telegram.js');
@@ -2184,7 +2224,7 @@ export function createHostApi(
           if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
           if (target === env().MASTER_UID) throw new Error('admin_no_master: 不许对主人下手');
           const { getBotUid } = await import('../bot/bot.js');
-          if (target === getBotUid()) throw new Error('admin_no_self: 不能踢我自己');
+          if (target === getBotUid(chatId)) throw new Error('admin_no_self: 不能踢我自己');
           await assertAdminPerm('can_restrict_members');
           await rateGate();
           const { kickMember } = await import('../bot/sender/telegram.js');
@@ -2291,6 +2331,7 @@ export function createHostApi(
         }
         const out: Array<{ chatId: number; title: string }> = [];
         for (const id of ids) {
+          if (isCrossContextPrivate({ sourceChatId: id }, chatId)) continue;
           let title = '';
           try {
             const cached = await redis.get(`xxb:chat_title:${id}`);
@@ -2323,7 +2364,8 @@ export function createHostApi(
       },
       async recentMessages(targetChatId: number, limit = 12) {
         const tid = Number(targetChatId);
-        if (!Number.isFinite(tid) || tid === 0) return '(invalid chatId)';
+        if (!Number.isSafeInteger(tid) || tid === 0) return '(invalid chatId)';
+        if (isCrossContextPrivate({ sourceChatId: tid }, chatId)) return '(private context unavailable)';
         const n = Math.min(Math.max(Number(limit) || 12, 1), 30);
         try {
           const { getRecent } = await import('../pipeline/context/manager.js');
@@ -2331,7 +2373,7 @@ export function createHostApi(
           const { getBotUid } = await import('../bot/bot.js');
           const msgs = await getRecent(tid, n);
           if (!msgs.length) return '(那个群最近没有记录)';
-          const botUid = getBotUid() || 0;
+          const botUid = getBotUid(chatId) || 0;
           const text = msgs.map((m) => slimSingleMessage(m, botUid)).join('\n');
           noteUnviewed(`chats.recentMessages(${tid})`, text);
           return text;
@@ -2359,6 +2401,7 @@ export function createHostApi(
         const byUid = new Map<number, { username: string; name: string; chatIds: number[] }>();
         for (const r of rows) {
           if (!(r.uid > 0)) continue;
+          if (isCrossContextPrivate({ sourceChatId: r.chat_id }, chatId)) continue;
           const cur = byUid.get(r.uid) ?? { username: r.username ?? '', name: r.full_name ?? '', chatIds: [] };
           if (!cur.username && r.username) cur.username = r.username;
           if (!cur.name && r.full_name) cur.name = r.full_name;
@@ -2518,12 +2561,12 @@ export function createHostApi(
         const t = String(topic ?? '').trim().slice(0, 100);
         if (!t) return { goalId: null, reason: 'empty_topic' };
         const cid = Number(targetChatId);
-        // 2026-08-22 审查修复: 目标群必须与任务同源(防跨群挂 goal), 主人 DM 任务可指定任意已开群。
-        const isMasterTask = env().MASTER_UID > 0 && chatId === env().MASTER_UID;
-        if (Number.isFinite(cid) && cid !== 0 && cid !== chatId && !isMasterTask) {
+        // The guest can schedule follow-up only in its bound conversation; a
+        // master-DM task is not authorization to publish its contents elsewhere.
+        if (targetChatId !== undefined && (!Number.isSafeInteger(cid) || cid !== chatId)) {
           return { goalId: null, reason: 'goal_target_chat_mismatch' };
         }
-        const goalChatId = Number.isFinite(cid) && cid !== 0 ? cid : chatId;
+        const goalChatId = chatId;
         const minutes = Number(checkInMinutes);
         const intervalSec = Math.min(Math.max(Number.isFinite(minutes) && minutes > 0 ? minutes : 15, 5), 1440) * 60;
         const { createGoal } = await import('../agent/goals.js');
@@ -2623,8 +2666,12 @@ export function createHostApi(
         if (!Number.isFinite(id) || id <= 0) return '(invalid uid)';
         const bits: string[] = [];
         try {
-          const ident = getPersonIdentity(id);
-          if (ident?.impression) bits.push(`impression: ${ident.impression}`);
+          const ident = env().PERSON_IDENTITY_ENABLED ? getPersonIdentity(id) : null;
+          // Use the same source policy as memory/profile injection. Disabling the
+          // visibility flag never grants permission to disclose a private source.
+          if (ident?.impression && !isCrossContextPrivate({ sourceChatId: ident.primary_chat_id }, chatId)) {
+            bits.push(`impression: ${ident.impression.slice(0, 400)}`);
+          }
           const inj = buildCrossGroupInjection(id, chatId);
           if (inj) bits.push(inj);
         } catch { /* optional */ }
@@ -2656,7 +2703,7 @@ export function createHostApi(
           const { getBotUid } = await import('../bot/bot.js');
           const msgs = await getRecent(chatId, limit, opts.messageThreadId);
           if (!msgs.length) return '(empty)';
-          const botUid = getBotUid() || 0;
+          const botUid = getBotUid(chatId) || 0;
           const masterUid = env().MASTER_UID;
           const lines = msgs.map((m) => {
             const base = slimSingleMessage(m, botUid);
@@ -2680,7 +2727,7 @@ export function createHostApi(
         try {
           if (!env().DIGEST_PERSIST_ENABLED) return '(digest persist disabled)';
           const { searchDigests } = await import('../meta/session-digest.js');
-          const hits = searchDigests(q, 5);
+          const hits = searchDigests(q, 5, { sourceChatId: chatId });
           if (!hits.length) return '(没有找到相关记录)';
           const text = hits.map((h) => `- ${h.text.slice(0, 160)}`).join('\n');
           noteUnviewed(`memory.searchDigests(${q.slice(0, 30)})`, text);
@@ -2744,6 +2791,26 @@ export function createHostApi(
           logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host web.search failed');
           incrCounter('host_tool_calls_total', { tool: 'web.search', outcome: 'error' });
           return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+      async fetchToFile(url: string, path: string) {
+        assertOpen();
+        if (!env().CODEACT_WEB_FETCH_TO_FILE_ENABLED) return { ok: false, reason: 'web.fetchToFile disabled' };
+        if (!env().SANDBOX_ENABLED) return { ok: false, reason: 'sandbox disabled' };
+        const u = String(url ?? '').trim().slice(0, 500);
+        const p = String(path ?? '').trim().slice(0, 200);
+        try {
+          const { fetchToSandboxFile } = await import('../sandbox/fetch-to-file.js');
+          const r = await fetchToSandboxFile(u, p);
+          logger.info({ chatId, host: (() => { try { return new URL(u).hostname; } catch { return '?'; } })(), ok: r.ok, bytes: r.bytes, reason: r.reason }, 'host web.fetchToFile');
+          countTool('web.fetchToFile');
+          if (!r.ok) incrCounter('host_tool_calls_total', { tool: 'web.fetchToFile', outcome: 'error' });
+          noteUnviewed(`web.fetchToFile(${u.slice(0, 40)})`, r.ok ? `${r.path} ${r.bytes}B` : r.reason ?? 'failed');
+          return r;
+        } catch (err) {
+          logger.warn({ err, chatId }, 'host web.fetchToFile failed');
+          incrCounter('host_tool_calls_total', { tool: 'web.fetchToFile', outcome: 'error' });
+          return { ok: false, reason: `fetchToFile failed: ${err instanceof Error ? err.message.slice(0, 100) : 'unknown'}` };
         }
       },
       async feed() {
@@ -2928,6 +2995,7 @@ export function createHostApi(
       setAcceptance(checks) { audit.propose(checks); },
       verifyAcceptance() { return audit.verify(); },
       endTask(summary: string) {
+        if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
         logger.info({ chatId, taskId: opts.taskId, summary: String(summary ?? '').slice(0, 160), deliveryKind: lastDeliveryKind ?? null }, 'task finalization requested');
         if (ended) return;
         if (!String(summary).startsWith('failed')) audit.assertCanEnd();
@@ -2940,8 +3008,9 @@ export function createHostApi(
         return textSent > 0;
       },
       didProduceFinal() {
-        return finalSent || ended;
+        return !deliveryUnknown && (finalSent || ended);
       },
+      hasUnknownDelivery() { return deliveryUnknown; },
       didSendIntermediate() {
         return intermediateSent;
       },
@@ -2949,6 +3018,7 @@ export function createHostApi(
         return lastDeliveryKind;
       },
       waitForUser(reason?: string) {
+        if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
         waitingForUser = true;
         waitingReason = String(reason ?? '').slice(0, 240);
         lastDeliveryKind = 'clarification';

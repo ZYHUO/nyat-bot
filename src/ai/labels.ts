@@ -109,14 +109,14 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // OpenAI 兼容格式），而清完 label 后唯一非 claude 原生格式的就是 dshkimi
   // （kimi-for-coding，/v1/models 实测 supports_dynamic_tools: true、1M context）。
   // deep_think 同理换成 stepfunthink 主、dshkimi 兜底。
-  reply_tools: { label: 'dshkimi',      backups: [],                 timeout: 90_000, maxTokens: 8_000 },
+  reply_tools: { label: 'spacebunny',   backups: ['lfree'],          timeout: 90_000, maxTokens: 8_000 },
   // 2026-09-22 round 3：主 label 原为 sub2gpt54mini——**它在 round 133/134 清 7864
   // label 时被删了**，而这里没跟着改。于是每次 vision 调用都直接 fallback 到
   // stepfunvision（一个 reasoning 模型，思维链吃 max_tokens → 空正文）。
   // 日志观测到 3 分钟 9 次 `claude: 空正文 —— 思维链吃光 max_tokens（截断）`。
   // 现在直接拿 stepfunvision 当主（它声明 vision=true、实测能出正文），
   // backup 给 dshkimi（kimi-for-coding 同样声明 supports_image_in）。
-  vision:    { label: 'stepfunvision', backups: ['dshkimi'],       timeout: 30_000 },
+  vision:    { label: 'stepfunvision', backups: ['spacebunny'],    timeout: 30_000 },
   audio:     { label: 'stepfun',       backups: [],               timeout: 30_000 },
   // 视频理解（2026-09-21）：独立 usage，不蹭 vision 链——见 env.ts 的
   // VIDEO_DESCRIBE_ENABLED 注释。step5（step-5-preview）是实测唯一稳定出正文的，
@@ -124,7 +124,7 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // 会吃 token，所以 maxTokens 给得比图片大得多）。
   // backup 现在有两个：stepfunvision（同厂，reasoning 吃 token，所以 maxTokens 给大）
   // 和 dshkimi（kimi-for-coding，/v1/models 实测声明 supports_video_in）。
-  video:     { label: 'step5',         backups: ['stepfunvision', 'dshkimi'], timeout: 120_000, maxTokens: 2_000 },
+  video:     { label: 'step5',         backups: ['stepfunvision', 'lfree'],   timeout: 120_000, maxTokens: 2_000 },
   // judge/heart（step-3.7-flash reasoning）：maxTokens 不设上限——reasoning_content 计入
   // completion，卡 800 会把 JSON 截成半截；实测 low 档自然输出 300-1000 token。
   // timeout 45s：开了 reasoning 后 P99 偶到 35s，30s 会无谓触发同模型 backup 重试。
@@ -133,7 +133,7 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // Mundo「难题攻坚」部门(可选,默认关)
   mundo:     { label: 'mundo',         backups: ['stepfun'],      timeout: 480_000, maxTokens: 16_000 },
   // 「深想」异步深答(可选)
-  deep_think:{ label: 'stepfunthink',   backups: ['dshkimi'],               timeout: 120_000, maxTokens: 16_000 },
+  deep_think:{ label: 'stepfunthink',   backups: ['lfree', 'musespark'],    timeout: 120_000, maxTokens: 16_000 },
   // 画摊子（agent/artist.ts）——SVG 是**长代码活**，选路标准和聊天正相反。
   //
   // 2026-09-21 事故：.env 在清 label 时把 `AI_USAGE_ARTIST_LABEL=kimi` 整行删了
@@ -152,7 +152,21 @@ const USAGE_DEFAULTS: Record<string, AIUsage> = {
   // backup 顺序按实测排：stepfun（同一个模型，额度给到 8000 时 26s 能出完整 SVG）
   // 在 step5 前面——step5 实测 90s 还没画完（超时），放第二位等于先白等一分半。
   // timeout 120s：给最慢的 backup 一个真实机会，也覆盖 dshkimi 自己的 69s P50。
-  artist:    { label: 'dshkimi',       backups: ['stepfun', 'step5'], timeout: 120_000, maxTokens: 8_000, temperature: 0.7 },
+  artist:    { label: 'spacebunny',    backups: ['lfree'],            timeout: 120_000, maxTokens: 8_000, temperature: 0.7 },
+  // 统一唤醒 tick（unified-tick）的决策调用——**独立于 judge，也独立于所有回复/后台链**。
+  //
+  // 它原来用 judge，而 judge/reply/reply_pro/summarize/deep_think/asi 的主 label 全是 spacebunny，
+  // 每个 model 的在飞上限是 2。每 5 分钟那一刻同时涌进十几个后台任务，再加上正在跑的 11–28s
+  // 回复生成，坑一直是满的：09-25→10-01 共 797 次 tick 里 794 次 llm_failed（skipped 的
+  // coolingForSec 全是 0——是在飞上限，不是冷却）。自主决策循环实际上没有在运转。
+  //
+  // 第一版指向 lfree，上线后同样 llm_failed——lfree 是 reflection 的主 label，又是 reply/judge/
+  // summarize/asi/deep_think 的**备份**：judge 一被挡就整批 fallback 到它，坑照样被抢光
+  // （inflight 挡下 192 次）。所以挑 label 的判据不是"延迟低"，是"没有任何 usage 的链上有它"。
+  // mimo（mimo-v2.6-flash）满足：.env 里没有任何 usage 引用它；2026-10-01 真实调用 tick 的
+  // JSON 9/9 可解析，p50 4.4s、最慢 6.5s。不给 backups：失败就安静一轮，好过去抢回复链的坑；
+  // 要加备份，必须是同样不在任何链上的 label（tests/unit/ai/tick-usage.test.ts 会拦）。
+  tick:      { label: 'mimo',          backups: [],                   timeout: 45_000, maxTokens: 1500, temperature: 0.7 },
 };
 
 /**

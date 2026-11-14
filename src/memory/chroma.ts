@@ -74,6 +74,36 @@ export function findEmbedOnnxWeights(onnxDir: string): string | null {
   }
   return null;
 }
+
+/**
+ * `pipeline()` 除了 onnx 权重还要读这三个 JSON（configs.js / tokenizers.js）。
+ * 2026-09-24 只把权重 curl 进了缓存，chroma.ts 见到权重就上 `local_files_only`，
+ * 于是 tokenizer.json 连下载的机会都没了 —— 六天 18,915 次
+ * `Memory embedding unavailable`，零次成功。"锁离线"必须以整套文件为条件。
+ */
+const EMBED_JSON_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json'] as const;
+
+export function findMissingEmbedJson(modelDir: string): string[] {
+  const missing: string[] = [];
+  for (const f of EMBED_JSON_FILES) {
+    try {
+      const p = join(modelDir, f);
+      if (statSync(p).size === 0) { missing.push(f); continue; }
+      const fd = openSync(p, 'r');
+      try {
+        const buf = Buffer.alloc(16);
+        const n = readSync(fd, buf, 0, 16, 0);
+        const head = buf.subarray(0, n).toString('latin1');
+        if (!/^\s*\{/.test(head)) missing.push(f); // redirect stub / HTML 错误页
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      missing.push(f);
+    }
+  }
+  return missing;
+}
 /** 去重查询的硬超时。写入是 fire-and-forget,但仍然跑在消息处理的任务里。 */
 const DEDUP_TIMEOUT_MS = 300;
 /** 混合检索时每一路的超取倍数 —— 融合后才截到 topK,单路取满 topK 会让融合无从选择。 */
@@ -152,20 +182,29 @@ function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
     // undici 抛 `terminated: other side closed` / `Body Timeout Error` ——
     // 2026-09-21 的 2280 条告警里 2270 条是这个，只有 10 条真是 Qdrant upsert。
     // 权重在本地 ⇒ `local_files_only` 让整条路离线，proxy 再烂也碰不到它。
-    const onnxDir = join(xenovaEnv.cacheDir, modelId, 'onnx');
+    const modelDir = join(xenovaEnv.cacheDir, modelId);
+    const onnxDir = join(modelDir, 'onnx');
     const localWeightsFile = findEmbedOnnxWeights(onnxDir);
+    const missingJson = findMissingEmbedJson(modelDir);
     if (!localWeightsFile) {
       logger.warn(
         { model: modelId, onnxDir },
         'Memory embedding weights are NOT in the local cache — embedding will download them (this is what the "Memory write failed" flood actually is). Fix once: npx tsx scripts/fetch-embed-model.mts',
       );
+    } else if (missingJson.length > 0) {
+      logger.warn(
+        { model: modelId, modelDir, missingJson },
+        'Memory embedding weights are cached but tokenizer/config JSON is missing — staying online so they can download. Fix once: npx tsx scripts/fetch-embed-model.mts',
+      );
     }
+    const fullyLocal = localWeightsFile !== null && missingJson.length === 0;
     const extractor = await pipeline('feature-extraction', modelId, {
       progress_callback: undefined, // suppress download progress logs
-      // 权重在本地就锁死离线。缺文件时这句会**立刻**抛可读的错误(而非挂着代理等 5s 超时)，
-      // 所以只在确认有文件时才加。
-      ...(localWeightsFile ? { local_files_only: true } : {}),
+      // 整套文件（权重 + 三个 JSON）都在本地才锁死离线。只看权重就锁，会把缺的
+      // tokenizer.json 也一起锁在门外，每条消息都失败（2026-09-24 → 09-30 就是这样）。
+      ...(fullyLocal ? { local_files_only: true } : {}),
     });
+    logger.info({ model: modelId, local: fullyLocal }, 'Memory embedder loaded');
 
     _embedder = async (texts: string[]): Promise<number[][]> => {
       // key 带长度前缀:两条不同长文本前 512 字符相同就会共享 embedding(review 指出的

@@ -61,6 +61,8 @@ export interface PromptInputs {
   groundingBlock: string;
   relationshipBlock: string;
   workspaceBlock: string;
+  /** 学来的东西（群味/方言/norms/自我提醒/跨群身份）。META_INJECT_LEARNED_ENABLED 关时恒为 ''。 */
+  learnedBlock: string;
 }
 
 export interface CollectPromptInputsCtx {
@@ -102,6 +104,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     policies,
     groundingBlock,
     relationshipBlock,
+    learned,
     replyCmds,
     selfPlayPrompt,
     recent,
@@ -111,12 +114,12 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
       try {
         const { readRecentDreamSnippet, getJournalChannelInfo } = await import('../cron/dream-journal.js');
         const [snippet, info] = await Promise.all([
-          readRecentDreamSnippet(300),
+          readRecentDreamSnippet(300, { sourceChatId: chatId }),
           getJournalChannelInfo(),
         ]);
         return {
           journal: snippet ?? '',
-          info: info ? { link: info.link, chatId: info.chatId } : null,
+          info: info?.chatId === chatId ? { link: info.link, chatId: info.chatId } : null,
         };
       } catch {
         return { journal: '', info: null as { link: string; chatId: number } | null };
@@ -141,7 +144,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     (async () => {
       try {
         const { buildCodeActIdentityPrompt } = await import('../pipeline/reply/prompt-builder.js');
-        return buildCodeActIdentityPrompt(task.targetUserId);
+        return buildCodeActIdentityPrompt(task.targetUserId, task.chatId);
       } catch { return ''; }
     })(),
     (async () => {
@@ -150,7 +153,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     (async () => {
       try {
         const { buildMasterIdentityBlock } = await import('../shared/master-identity.js');
-        return buildMasterIdentityBlock();
+        return buildMasterIdentityBlock(chatId);
       } catch { return ''; }
     })(),
     (async () => {
@@ -279,6 +282,17 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
         if (newcomer) hints.push(newcomer);
         if (!hints.length) return '';
         return `## 和对方的关系\n${hints.join('\n')}`;
+      } catch { return ''; }
+    })(),
+    // 学来的东西：写侧一直在跑，读侧此前只在 legacy buildMessages 里（见 learned-context.ts 头注）。
+    (async () => {
+      try {
+        const { buildLearnedContext } = await import('./learned-context.js');
+        const r = await buildLearnedContext({ chatId, targetUserId: task.targetUserId });
+        if (r.parts.length) {
+          logger.info({ taskId: task.id, chatId, parts: r.parts }, 'learned context injected');
+        }
+        return r.block;
       } catch { return ''; }
     })(),
     // 「当前能借力的 bot 命令」实时清单（替换 systemPrompt 里的写死散文）。
@@ -493,5 +507,6 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
     groundingBlock,
     relationshipBlock,
     workspaceBlock,
+    learnedBlock: learned,
   };
 }

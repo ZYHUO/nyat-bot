@@ -1,5 +1,9 @@
 import type { DispatchTask, MetaSessionDigest, SubagentCallback } from './types.js';
 import { logger } from '../shared/logger.js';
+import { digestBelongsToChat, isDigestSourceChatId } from './digest-scope.js';
+import type { DigestReadScope } from './digest-scope.js';
+
+export type ScopedMetaSessionDigest = MetaSessionDigest & { sourceChatId: number | null };
 
 const MAX_DIGESTS = 40;
 const MAX_TASKS = 200;
@@ -15,18 +19,23 @@ return items
 `;
 
 export class GlobalState {
-  digests: MetaSessionDigest[] = [];
+  digests: ScopedMetaSessionDigest[] = [];
   tasks = new Map<string, DispatchTask>();
   pendingCallbacks: SubagentCallback[] = [];
-  todos: Array<{ id: string; text: string; createdAt: number }> = [];
+  todos: Array<{ id: string; text: string; createdAt: number; sourceChatId?: number }> = [];
 
-  addDigest(text: string): void {
-    this.digests.push({ at: Date.now(), text: text.slice(0, 2000) });
+  addDigest(text: string, sourceChatId?: number): void {
+    this.digests.push({
+      at: Date.now(), text: text.slice(0, 2000),
+      sourceChatId: isDigestSourceChatId(sourceChatId) ? sourceChatId : null,
+    });
     if (this.digests.length > MAX_DIGESTS) this.digests.splice(0, this.digests.length - MAX_DIGESTS);
   }
 
-  recentDigests(n = 8): MetaSessionDigest[] {
-    return this.digests.slice(-n);
+  recentDigests(n = 8, opts?: DigestReadScope): ScopedMetaSessionDigest[] {
+    if (!isDigestSourceChatId(opts?.sourceChatId)) return [];
+    const limit = Math.max(1, Math.min(MAX_DIGESTS, n | 0));
+    return this.digests.filter((digest) => digestBelongsToChat(digest.sourceChatId, opts.sourceChatId)).slice(-limit);
   }
 
   putTask(task: DispatchTask): void {

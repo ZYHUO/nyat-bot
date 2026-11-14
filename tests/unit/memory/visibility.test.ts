@@ -74,6 +74,17 @@ describe('isCrossContextPrivate 真值表', () => {
   it('DM contextual 跨界 → 丢(来源私密)', () => {
     expect(isCrossContextPrivate({ visibility: 'contextual', sourceChatId: DM_UID }, GROUP_A)).toBe(true);
   });
+  it('public 标签不能覆盖来源 DM 或敏感群的私密性', () => {
+    expect(isCrossContextPrivate({ visibility: 'public', sourceChatId: DM_UID }, GROUP_A)).toBe(true);
+    expect(isCrossContextPrivate({ visibility: 'public', sourceChatId: SENSITIVE_GROUP }, GROUP_A)).toBe(true);
+  });
+  it('缺来源或来源损坏时，各类标签均不能证明可跨会话共享', () => {
+    for (const visibility of [undefined, 'contextual', 'public'] as const) {
+      for (const sourceChatId of [undefined, null, 0, Number.NaN]) {
+        expect(isCrossContextPrivate({ visibility, sourceChatId }, GROUP_A)).toBe(true);
+      }
+    }
+  });
   it('缺 visibility 字段(存量)→ 按来源私密性判定', () => {
     expect(isCrossContextPrivate({ sourceChatId: DM_UID }, GROUP_A)).toBe(true);
     expect(isCrossContextPrivate({ sourceChatId: GROUP_B }, GROUP_A)).toBe(false);

@@ -408,6 +408,9 @@ const USAGE_PROFILES: Record<string, UsageProfile> = {
   // 500ms 的 step-3.7-flash（reasoning，长 SVG 下正文必空）。count=2 是
   // "万一将来重开自动选路"时的语义，现在靠 respectManualOrder 完全不走这条路。
   artist:      { minTier: 'high',   vision: false, video: false, count: 2, respectManualOrder: true },
+  // tick 的意义就在于**不和回复链共用同一个 label**。auto-assign 按延迟排序会把它重新排回
+  // spacebunny（最快的），独立 usage 就白设了——所以显式交还手动链（同 artist 的理由）。
+  tick:        { minTier: 'medium', vision: false, video: false, count: 1, respectManualOrder: true },
 };
 
 const DEFAULT_PROFILE: UsageProfile = { minTier: 'medium', vision: false, video: false, count: 3 };

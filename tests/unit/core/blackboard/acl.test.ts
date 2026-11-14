@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let db: Database.Database;
+const envMock = vi.hoisted(() => ({ CORE_BLACKBOARD_ENABLED: true }));
+vi.mock('../../../../src/env.js', () => ({ env: () => envMock }));
 vi.mock('../../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -13,9 +15,11 @@ import {
   writeEntry,
   readEntry,
   setEntryStatus,
+  listEntries,
 } from '../../../../src/core/blackboard/store.js';
 
 beforeEach(() => {
+  envMock.CORE_BLACKBOARD_ENABLED = true;
   db = new Database(':memory:');
   db.exec(readFileSync('migrations/0084_core_blackboard.sql', 'utf8'));
 });
@@ -53,5 +57,18 @@ describe('blackboard ACL', () => {
     expect(readEntry(r.id!)!.status).toBe('open');
     expect(setEntryStatus(r.id!, 'approved')).toBe(true);
     expect(readEntry(r.id!)!.status).toBe('approved');
+  });
+
+  it('总闸关闭时拒绝合法写入、读取和状态推进，保留已有数据', () => {
+    const existing = writeEntry({ kind: 'proposal', author: 'l1', content: '{}', chatId: -100 });
+    expect(existing.ok).toBe(true);
+    envMock.CORE_BLACKBOARD_ENABLED = false;
+    expect(writeEntry({ kind: 'proposal', author: 'l1', content: '{}', chatId: -100 })).toEqual({
+      ok: false, reason: 'blackboard disabled',
+    });
+    expect(readEntry(existing.id!)).toBeNull();
+    expect(listEntries('proposal', 'open')).toEqual([]);
+    expect(setEntryStatus(existing.id!, 'approved')).toBe(false);
+    expect(db.prepare('SELECT status FROM core_blackboard').all()).toEqual([{ status: 'open' }]);
   });
 });

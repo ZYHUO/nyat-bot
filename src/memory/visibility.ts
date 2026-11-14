@@ -63,11 +63,9 @@ export function isCrossContextPrivate(
   const src = item.sourceChatId ?? null;
   if (src !== null && src === boundChatId) return false; // 本会话恒保留
   if (item.visibility === 'private') return true;
-  if (item.visibility === 'public') return false;
-  // 缺 src **且**缺 visibility:既无法证明来源、也无法证明级别,fail-closed 视作
-  // 私密丢弃(宁严勿松——存量无 provenance 数据的泄漏面比误杀面贵,review finding)。
-  if (src === null && item.visibility === undefined) return true;
-  // contextual + 有 src → 看来源会话私密性。
+  // 来源不明时不能证明它来自可共享会话；单条 public/contextual 标签不能替代来源。
+  if (src === null || !Number.isSafeInteger(src) || src === 0) return true;
+  // 会话私密性是独立兜底：误标 public 也不能把 DM/敏感群内容带出去。
   return isPrivateChat(src);
 }
 

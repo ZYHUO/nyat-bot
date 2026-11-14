@@ -77,7 +77,7 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
   try {
     const { buildFrame, renderFrame } = await import('../nyatos/frame.js');
     const { getBotIdentity, getBotDisplayName } = await import('../bot/bot.js');
-    const identity = getBotIdentity();
+    const identity = getBotIdentity(input.chatId);
 
     const frame = await buildFrame({
       scope: { visibility: 'chat', chatId: input.chatId },
@@ -95,7 +95,7 @@ export async function renderRoomAwareness(input: RoomAwarenessInput): Promise<Ro
       recent: [],
       botUid: input.botUid,
       botUsername: identity.username,
-      botDisplayName: getBotDisplayName(),
+      botDisplayName: getBotDisplayName(input.chatId),
       withImpulses: true,
       withSelfWakes: true,
     });

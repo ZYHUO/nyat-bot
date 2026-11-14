@@ -157,9 +157,18 @@ export interface DistillEpisodeArgs {
  */
 export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillResult | null> {
   const { task, outcome, progressSummary, tailText } = args;
-  // Evidence gate: lifecycle done without host verification must not be distilled as success.
+  // 只有 host 明确判 failed 才把 lifecycle done 降成 failed。
+  //
+  // 原来是 `outcome==='done' && assessment==='verified' ? 'done' : 'failed'`——
+  // 群聊任务没有 contract，assessment 恒为 unverified（task_evidence 7038 条里 verified 仅 1 条），
+  // 于是 09-05 之后 episodes 表一条 done 都没有（日均 100–380 条全是 failed），
+  // 同期日志里 CodeAct task done 近 24h 是 199 done / 10 failed。成功的任务被当成失败来复盘，
+  // 经验库在从成功里挖"教训"。
+  //
+  // 「没被证实」≠「失败」。证据门仍在血缘列：source_assessment 保持 unverified，
+  // skill-distill 只吃 verified 血缘，所以这里放宽不会让未验证的经验流进技能。
   const assessed: 'done' | 'failed' =
-    outcome === 'done' && task.assessment?.status === 'verified' ? 'done' : 'failed';
+    outcome === 'done' && task.assessment?.status !== 'failed' ? 'done' : 'failed';
   try {
     const system = loadCachedPrompt('task/distill.md');
     const user = [

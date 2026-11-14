@@ -30,6 +30,16 @@ function variants(pattern: string): string[] {
 }
 
 const CHECKS: Array<[string, string]> = [
+  ['独立音频转写协议', 'AUDIO_TRANSCRIBE_API_MODE'],
+  ['语音私有运行时', 'TTS_PYTHON_PATH'],
+  ['语音 Opus 编码器', 'TTS_FFMPEG_PATH'],
+  ['有状态搜索结果', 'executeSearchDetailed'],
+  ['CodeAct 隔离总闸', 'CODEACT_ISOLATION_ENABLED'],
+  ['CodeAct 内核隔离执行', 'codeact_isolation_unavailable'],
+  ['迁移后真人活动门控', 'checkProactiveActivation'],
+  ['主动动作固定启用时间', 'PROACTIVE_ACTIVATED_AT_SEC'],
+  ['后台模型并发预算', 'AI_WORKLOAD_BUDGET_ENABLED'],
+  ['后台模型预算上限', 'AI_MAX_BACKGROUND_INFLIGHT_PER_MODEL'],
   // L0 海床
   ['L0 有界积分器渲染', 'renderTrench'],
   ['L0 时间泵', 'xxb:trench:lastpump:'],
@@ -101,7 +111,7 @@ const CHECKS: Array<[string, string]> = [
   // 包络按群活跃度缩放（2026-09-21）
   ['包络活跃度缩放', 'scaledBurst'],
   // 沙盒参数表对齐守卫（2026-09-21）
-  ['沙盒 bots 命名空间', "'bots',"],
+  ['沙盒 RPC 能力白名单', 'codeact_capability_denied_or_limit'],
   // reasoning token 下限（2026-09-21）
   ['reasoning token 下限', 'REASONING_TOKEN_FLOOR'],
   // topic-scan 低抽取告警（2026-09-21）
@@ -124,6 +134,42 @@ const CHECKS: Array<[string, string]> = [
   ['onnx 权重去 stub', 'redirecting'],
   // 缺权重时的可操作告警（把出路写进日志：去跑 scripts/fetch-embed-model.mts）
   ['embedding 缺失告警', 'Memory embedding weights'],
+  // 离线锁要以整套文件为条件（2026-09-30）：09-24 只抓了权重就锁，tokenizer.json 再没
+  // 机会下载，六天 18,915 次 "Memory embedding unavailable"、零次成功。
+  ['embedding JSON 齐全判定', 'findMissingEmbedJson'],
+  ['embedder 加载成功日志', 'Memory embedder loaded'],
+  // 长轮询死后原地重开（2026-09-30）：409 让 bot.start() reject，原来 void 掉 →
+  // 轮询静默死、5 分钟后看门狗重启进程，09-28→09-30 每 12 分钟一次。
+  ['轮询死后自愈', 'Polling loop died'],
+  // 学来的东西接进 Meta 路径（2026-10-01）：读侧原来只在 legacy buildMessages（~0.17% 发送）。
+  ['学习产物 Meta 读侧', 'learned context injected'],
+  ['学习产物总闸', 'META_INJECT_LEARNED_ENABLED'],
+  // 无 contract 任务的 host 证据（2026-10-01）：task_evidence 7038/7039 恒 unverified，
+  // episodes 自 09-05 起零 done。用 self_replies 的结局（有没有人接）给任务补证据。
+  ['Echo 证据升级', 'applyEchoEvidence'],
+  ['Echo 证据落盘日志', 'task evidence upgraded from host echo'],
+  ['skill 注入留痕', 'recordSkillInjections'],
+  ['skill 延迟记功', 'recordSkillVerifiedUseForTask'],
+  // 在飞上限挡下时 waitIfCooling 的调用方要等一下再试（2026-10-01）：unified-tick 797 次里 794 次
+  // llm_failed，skipped 的 coolingForSec 全是 0 —— 是在飞上限而不是冷却。
+  ['在飞上限挡下可等待', 'blockedByInFlight'],
+  ['tick 决策声明可等待', 'tick 是 5 分钟一次的后台决策'],
+  // tick 独立 usage（2026-10-01）：与回复链共用 spacebunny 的在飞坑 → 794/797 次 llm_failed。
+  ['tick 独立 usage 链', 'tick: { label: "mimo"'],
+  ['tick 选路交还手动链', 'tick: { minTier: "medium", vision: false, video: false, count: 1, respectManualOrder: true }'],
+  // goal 待关闭观察期（2026-10-01）：声称完成但无独立证据 → pending_close → 看「有没有人再提」。
+  ['goal 观察期决策函数', 'settleUnverifiedCompletion'],
+  ['goal 沉默关闭', 'goal closed by silence'],
+  ['goal 观察期结算 cron', 'goal-close-sweep'],
+  // web.fetchToFile（2026-10-02）：沙盒无网络，宿主侧带数据进来；并修了 fetchUrlPinned 超量不 settle。
+  ['web.fetchToFile 宿主实现', 'fetchToSandboxFile'],
+  ['web.fetchToFile 开关', 'CODEACT_WEB_FETCH_TO_FILE_ENABLED'],
+  ['fetchUrlPinned 超量截断收尾', 'truncatedByCap'],
+  // care_master 不被群里 group_speak 的 connection 饱和连带封住（2026-10-02）：39 次否决 vs 12 次发出。
+  ['care_master 豁免全局 connection 饱和', "if (a.type === \"care_master\") return null"],
+  ['tick 外壳超时常量', 'TICK_RACE_TIMEOUT_MS'],
+  ['tick 决策耗时留痕', 'tick decision call finished'],
+  ['tick 默认走独立 usage', 'UNIFIED_TICK_USAGE: z9.string().default("tick")'],
   // 沙盒控制流拒绝降级（2026-09-21）
   ['控制流拒绝降级', 'sandbox control flow (expected)'],
   // 选路：零成功 demote + vision 严格过滤（2026-09-21）
@@ -139,7 +185,7 @@ const CHECKS: Array<[string, string]> = [
   ['claude 分支不再吞媒体', 'carriesMedia'],
   ['provider 健康播报', 'neverSucceeded'],
   // 画摊子：SVG 长代码活的授权链 + 选路交还手动链（2026-09-21）
-  ['画摊子 usage 默认链', 'artist: { label: "dshkimi"'],
+  ['画摊子 usage 默认链', 'artist: { label: "spacebunny"'],
   ['代发回执：命令被退回单独一支', 'isCommandRejection'],
   ['代发缺参闸（arity-aware）', 'usageNeedsArg'],
   ['代发缺参兜底：人类消息带实参', 'humanMessageCarriesArg'],
@@ -174,6 +220,12 @@ try {
 }
 
 const missing: string[] = [];
+CHECKS.push(['Meta 启动隔离实测', 'Meta isolation preflight passed']);
+CHECKS.push(['Meta/CodeAct 有界排队', 'codeact_isolation_queue_full']);
+CHECKS.push(['OneBot 启动连接', 'OneBot connection state']);
+CHECKS.push(['QQ/Telegram 发送隔离', 'telegram_platform_id_blocked']);
+CHECKS.push(['OneBot 未知送达停止重试', 'failed_delivery_unknown_no_retry']);
+CHECKS.push(['QQ 持久身份映射', 'platform_identity_refs']);
 for (const [name, pattern] of CHECKS) {
   if (!variants(pattern).some((v) => bundle.includes(v))) missing.push(`${name} (${pattern})`);
 }

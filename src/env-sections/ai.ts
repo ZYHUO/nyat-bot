@@ -31,6 +31,10 @@ export const aiSection = {
   // 默认 2：多数账号的并发上限在 2-4，取 2 保守但不会把链序列化到一个。
   // 调大 = 更多并发（更快，但容易撞上限）；调小 = 更拖屈。
   AI_MAX_INFLIGHT_PER_MODEL: z.coerce.number().int().min(1).max(16).default(2),
+  // Atomic expiring leases reserve at least one slot for user-facing calls.
+  // Off preserves the legacy admission policy; heartbeat tasks supply background context.
+  AI_WORKLOAD_BUDGET_ENABLED: booleanFromEnv.default(false),
+  AI_MAX_BACKGROUND_INFLIGHT_PER_MODEL: z.coerce.number().int().min(0).max(15).default(1),
   JEV_ENABLED: booleanFromEnv.default(false),
   // Jev 结构化判断总开关。默认关：开了会影响用户等待路径上的延迟，先灰度再放开。
   // lfree relay 的系统 one 端点基址（不带 /v1/systemone，代码自己拼）。

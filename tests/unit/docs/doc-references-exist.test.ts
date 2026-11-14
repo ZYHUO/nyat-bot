@@ -51,6 +51,9 @@ function extractPaths(md: string): string[] {
     if (/^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(p) && !p.includes('/')) continue;
     // 代码调用形状的不算
     if (/[()]/.test(p)) continue;
+    // logs/ 是 gitignore 的运行时产物（voice-daily.log / gate-evidence.log 要脚本跑过才有），
+    // 新机器上不存在 ≠ 文档写错了。
+    if (p.startsWith('logs/')) continue;
     out.push(p);
   }
   return [...new Set(out)];

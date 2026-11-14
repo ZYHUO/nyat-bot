@@ -329,14 +329,14 @@ export async function runIngressShadow(input: {
     // transcript is itself (measured 2026-09-18 — it read "@nyatbot" as a
     // stranger and stayed silent on a message addressed to it).
     const { getBotDisplayName, getBotIdentity } = await import('../bot/bot.js');
-    const identity = getBotIdentity();
+    const identity = getBotIdentity(input.chatId);
     const frame = await buildFrame({
       scope: { visibility: 'chat', chatId: input.chatId },
       trigger: input.message,
       recent: input.recent,
       botUid: input.botUid,
       botUsername: identity.username,
-      botDisplayName: getBotDisplayName(),
+      botDisplayName: getBotDisplayName(input.chatId),
     });
     const shadow = await decideShadow(frame);
     appendCognitiveEvent({

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 
 let db: Database.Database;
+const envMock = vi.hoisted(() => ({ GOAL_LONG_TERM_ENABLED: false, CORE_DUAL_WRITE: false }));
+vi.mock('../../../src/env.js', () => ({ env: () => envMock }));
 
 vi.mock('../../../src/db/sqlite.js', () => ({
   getDb: () => db,
@@ -16,6 +18,7 @@ function nowSec(): number {
 }
 
 beforeEach(() => {
+  envMock.GOAL_LONG_TERM_ENABLED = false;
   db = new Database(':memory:');
   db.exec(`
     CREATE TABLE goals (
@@ -137,6 +140,7 @@ describe('recordCheck', () => {
   });
 
   it('AGI L5 P3: long_term goal survives past normal stale window (30d instead of 7d)', () => {
+    envMock.GOAL_LONG_TERM_ENABLED = true;
     const id = createGoal({ topic: '长期关注的目标', origin: 'master', longTerm: true })!;
     // 10 天无发现:普通目标已 stale,long_term 仍 active(窗口 30 天)
     db.prepare(`UPDATE goals SET created_at = ? WHERE id = ?`).run(nowSec() - GOAL_STALE_AFTER_SEC - 10, id);
@@ -145,6 +149,16 @@ describe('recordCheck', () => {
     expect(g.status).toBe('active');
     // 31 天无发现:long_term 也 stale
     db.prepare(`UPDATE goals SET created_at = ? WHERE id = ?`).run(nowSec() - GOAL_LONG_TERM_STALE_AFTER_SEC - 10, id);
+    recordCheck(id, null);
+    expect(listGoals()[0]!.status).toBe('stale');
+  });
+
+  it('关闭长期目标语义后，已有 long_term 目标按普通过期窗口处理', () => {
+    envMock.GOAL_LONG_TERM_ENABLED = true;
+    const id = createGoal({ topic: '长期观察的目标', origin: 'master', longTerm: true })!;
+    expect(listGoals()[0]!.long_term).toBe(1);
+    envMock.GOAL_LONG_TERM_ENABLED = false;
+    db.prepare('UPDATE goals SET created_at = ? WHERE id = ?').run(nowSec() - GOAL_STALE_AFTER_SEC - 10, id);
     recordCheck(id, null);
     expect(listGoals()[0]!.status).toBe('stale');
   });

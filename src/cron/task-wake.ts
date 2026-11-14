@@ -9,6 +9,8 @@ import { listDueTasks, getTask } from '../agent/task-store.js';
 import { TASK_QUEUE_NAME } from '../queue/task-worker.js';
 import type { TaskJobData } from '../queue/task-worker.js';
 import { logger } from '../shared/logger.js';
+import { env } from '../env.js';
+import { checkProactiveActivation } from './activation-policy.js';
 
 let _queue: Queue<TaskJobData> | undefined;
 function getWakeQueue(): Queue<TaskJobData> {
@@ -25,6 +27,8 @@ export async function wakeDueTasks(): Promise<number> {
     // 已 done/cancelled 的不会在 listDueTasks 里;再防一手竞态
     const fresh = getTask(t.id);
     if (!fresh || fresh.state === 'done' || fresh.state === 'cancelled') continue;
+    if (env().PROACTIVE_ACTIVATED_AT_SEC && fresh.created_at <= env().PROACTIVE_ACTIVATED_AT_SEC) continue;
+    if (!(await checkProactiveActivation(fresh.chat_id)).allowed) continue;
     await getWakeQueue().add('task_execute', {
       type: 'task_execute',
       taskId: t.id,

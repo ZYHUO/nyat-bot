@@ -31,9 +31,10 @@ describe('interrupt 的寻址打标', () => {
 
   it('② 判据用全仓同一个寻址定义，不新造第二套', () => {
     const b = block();
-    expect(b).toContain('getBotIdentity()');
-    expect(b).toContain('@${ident.username}');
-    expect(b).toContain('nicknames');
+    expect(b).toContain('getBotIdentity(chatId)');
+    expect(b).not.toContain('getBotIdentity()');
+    expect(b).toContain('isMentioningSelf(raw, ident.username, ident.nicknames ?? [], ident.uid)');
+    expect(b).toContain("['uid'] === ident.uid");
     expect(b).toContain('replyTo');
   });
 

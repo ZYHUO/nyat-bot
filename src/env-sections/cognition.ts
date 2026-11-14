@@ -17,6 +17,9 @@ import { z } from 'zod';
 import { booleanFromEnv } from './_shared.js';
 
 export const cognitionSection = {
+  // 迁移后的主动动作只面向此时间之后有真人发言的会话；0 保持旧部署行为。
+  // 固定首次启用的 epoch，不随进程重启更新；消息原始时间以秒为单位。
+  PROACTIVE_ACTIVATED_AT_SEC: z.coerce.number().int().nonnegative().default(0),
   // ── AGI Level 4 P4-A: 经验沉淀（常驻）─────────────────────────────────
   // 任务终态复盘蒸馏成 episode + 可复用经验；开工前按 contentDirection
   // 检索相关经验注入 executor prompt。复盘走便宜链，失败静默不重试。

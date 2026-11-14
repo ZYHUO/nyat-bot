@@ -19,6 +19,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { callModelMock } = vi.hoisted(() => ({ callModelMock: vi.fn() }));
+const QQ_CHAT = -(2 ** 52 + 10);
+const QQ_SELF = 2 ** 52 + 11;
 
 vi.mock('../../../../src/ai/provider.js', () => ({ callModel: callModelMock }));
 vi.mock('../../../../src/ai/labels.js', () => ({
@@ -53,7 +55,9 @@ vi.mock('../../../../src/shared/config.js', () => ({
 }));
 // bot 身份：寻址判定要用 username + nicknames
 vi.mock('../../../../src/bot/bot.js', () => ({
-  getBotIdentity: () => ({ uid: 9, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '本喵'] }),
+  getBotIdentity: (chatId?: number) => chatId === QQ_CHAT
+    ? { uid: QQ_SELF, username: '', displayName: 'QQ喵', nicknames: ['QQ喵'] }
+    : { uid: 9, username: 'hunhebi_bot', displayName: '啾咪囝', nicknames: ['啾咪囝', '本喵'] },
   getBotUid: () => 9,
 }));
 
@@ -108,9 +112,25 @@ describe('isAddressedToBot', () => {
   it('空消息 → 不是（不猜）', () => {
     expect(isAddressedToBot(msg({ textContent: '' }), 9)).toBe(false);
   });
+
+  it('QQ identity recognizes its own internal mention and never any arbitrary @ or TG handle', () => {
+    expect(isAddressedToBot(msg({ textContent: `@${QQ_SELF}在吗` }), QQ_SELF, QQ_CHAT)).toBe(true);
+    expect(isAddressedToBot(msg({ textContent: `@${QQ_SELF + 1} 在吗` }), QQ_SELF, QQ_CHAT)).toBe(false);
+    expect(isAddressedToBot(msg({ textContent: `@${QQ_SELF}1` }), QQ_SELF, QQ_CHAT)).toBe(false);
+    expect(isAddressedToBot(msg({ textContent: '@hunhebi_bot 在吗' }), QQ_SELF, QQ_CHAT)).toBe(false);
+    expect(isAddressedToBot(msg({ textContent: 'QQ喵 在吗' }), QQ_SELF, QQ_CHAT)).toBe(true);
+    expect(isAddressedToBot(msg({ replyTo: { uid: 9, messageId: 8 } }), QQ_SELF, QQ_CHAT)).toBe(false);
+  });
 });
 
 describe('心流 LLM 失败时的保句闸', () => {
+  it('keeps a QQ internal self mention on model failure, with the current chat identity', async () => {
+    callModelMock.mockRejectedValue(netError());
+    const d = await heartDecision(baseInput({ chatId: QQ_CHAT, botUid: QQ_SELF,
+      message: { role: 'user', uid: QQ_SELF + 1, messageId: 9, textContent: `@${QQ_SELF} 帮忙`, timestamp: 0, isForwarded: false } as FormattedMessage }));
+    expect(d.act).toBe('wait');
+    expect(d.why).toBe('llm_failed_keep_addressed');
+  });
   it('① 被直接叫到 + LLM 全挂 → wait（保句），不 pass（丢弃）', async () => {
     callModelMock.mockRejectedValue(netError());
     const d = await heartDecision(

@@ -26,7 +26,10 @@ vi.mock('bullmq', () => {
   return { Queue: FakeQueue, Worker: FakeWorker, DelayedError: class extends Error {} };
 });
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({}) }));
-vi.mock('../../../src/env.js', () => ({ env: () => ({ CODEACT_CONCURRENCY: 1 }) }));
+vi.mock('../../../src/env.js', () => ({ env: () => ({ CODEACT_CONCURRENCY: 1,
+  META_SUBAGENT_ENABLED: true, CODEACT_ISOLATION_ENABLED: true,
+  META_SUBAGENT_CHAT_IDS: [-100], META_ACTIVATED_AT_SEC: 1,
+}) }));
 vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ putTask: putTaskMock }) }));
 vi.mock('../../../src/subagent/task-store.js', () => ({
   tryMarkCodeActActive: vi.fn(),

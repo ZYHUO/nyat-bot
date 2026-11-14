@@ -175,10 +175,10 @@ export async function tryMetaIngressIntercepts(
   //
   // 判据刻意和 legacy 一致：必须**回复本喵发过的贴纸** + 文本命中
   // `looksLikeStickerDislike`。别处不拦。
-  if (chatId < 0 && formatted.replyTo && formatted.replyTo.uid === getBotUid() && !formatted.isBot) {
+  if (chatId < 0 && formatted.replyTo && formatted.replyTo.uid === getBotUid(chatId) && !formatted.isBot) {
     try {
       const { tryStickerDislikeCommand } = await import('../pipeline/stages/sticker-dislike-command.js');
-      if (await tryStickerDislikeCommand(chatId, formatted, getBotUid())) return 'handled';
+      if (await tryStickerDislikeCommand(chatId, formatted, getBotUid(chatId))) return 'handled';
     } catch (err) {
       logger.debug({ err, chatId }, 'Meta: sticker-dislike intercept failed (non-critical)');
     }
@@ -269,7 +269,7 @@ export async function tryMetaIngressIntercepts(
     chatId < 0 &&
     hasActiveGame(chatId) &&
     !formatted.isBot &&
-    formatted.replyTo?.uid === getBotUid()
+    formatted.replyTo?.uid === getBotUid(chatId)
   ) {
     const gameResult = playGame(chatId, formatted.uid, formatted.textContent || '');
     if (gameResult) {

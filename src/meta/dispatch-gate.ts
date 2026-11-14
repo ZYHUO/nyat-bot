@@ -48,9 +48,9 @@ export interface DispatchGateResult {
 }
 
 /** Nicknames for the pre-check; never throws when the bot is not initialised. */
-function safeBotNicknames(): string[] {
+function safeBotNicknames(chatId: number): string[] {
   try {
-    return getBotIdentity().nicknames ?? [];
+    return getBotIdentity(chatId).nicknames ?? [];
   } catch {
     return [];
   }
@@ -143,12 +143,12 @@ export async function evaluateDispatchGate(opts: {
       message: trigger,
       recentMessages,
       judgeResult,
-      botUid: getBotUid() || 0,
-      botName: getBotDisplayName(),
+      botUid: getBotUid(chatId) || 0,
+      botName: getBotDisplayName(chatId),
       botPersona,
       // Nicknames let the pre-check recognise a mention by name, not just @handle.
       // Defensive: a missing identity must not break the gate call itself.
-      botNicknames: safeBotNicknames(),
+      botNicknames: safeBotNicknames(chatId),
       isDirectInteraction: false,
       lastSpokeSecAgo,
       prefetchedState,

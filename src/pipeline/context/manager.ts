@@ -419,7 +419,7 @@ export async function addAssistant(
   let fullName = '';
   try {
     const { getBotIdentity } = await import('../../bot/bot.js');
-    const id = getBotIdentity();
+    const id = getBotIdentity(chatId);
     uid = id.uid || 0;
     username = id.username || '';
     fullName = id.displayName || '';

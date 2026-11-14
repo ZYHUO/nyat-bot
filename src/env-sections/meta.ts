@@ -30,6 +30,9 @@ export const metaSection = {
       if (!t) return [] as number[];
       return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
     }),
+  // Fixed rollout epoch; tasks/attention/callbacks created before it stay held.
+  // 0 fails closed when Meta is enabled; each restoration must set its activation time.
+  META_ACTIVATED_AT_SEC: z.coerce.number().int().nonnegative().max(8_640_000_000).default(0),
   // Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。
   META_TICK_MS: z.coerce.number().int().positive().default(5000),
   /**
@@ -51,6 +54,14 @@ export const metaSection = {
    * 而非永久丢弃。需 TIMING_GATE_ENABLED + META_SUBAGENT_ENABLED 同开。默认关。
    */
   META_DEFER_ENABLED: booleanFromEnv.default(false),
+  /**
+   * 把「学来的东西」接进 Meta 路径的 CodeAct prompt：群表达、方言 exemplar、群氛围 norms、
+   * 自我提醒、跨群身份。这五样的写侧（learner-scan / profile-merge / self-reflect）都在跑，
+   * 但唯一的读侧 buildMessages 只被 legacy 回复引擎调用（占发送 ~0.17%），Meta 主路径
+   * （~98% 发送）从不读——学了不用。各块仍受自己原有的开关约束（EXPRESSION_INJECT_ENABLED /
+   * GROUP_NORMS_ENABLED / PERSON_IDENTITY_ENABLED），这里只是总闸。默认关：先灰度。
+   */
+  META_INJECT_LEARNED_ENABLED: booleanFromEnv.default(false),
   /**
    * Dispatch 期 timing gate：把 runTimingGate 挂到 CodeAct dispatch 前——
    * Heart/Meta 决定「说不说」，gate 决定「什么时候说」（老 pipeline 里
@@ -122,6 +133,11 @@ export const metaSection = {
   ARTIST_USAGE: z.string().default('reply'),
   // （CODEACT_MAX_TURNS 2026-09-21 删除：全仓库（src/scripts/packages/tests，含 .sh）无一处读取。每段轮数上限是 executor.ts 里写死的 30，不是这个 8）
   CODEACT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // Generated JavaScript never falls back to execution in the bot process.
+  CODEACT_ISOLATION_ENABLED: booleanFromEnv.default(false),
+  CODEACT_ISOLATION_BWRAP_PATH: z.string().default('/usr/bin/bwrap'),
+  // Exact comma-separated ELF library paths for the private Node runtime.
+  CODEACT_ISOLATION_RUNTIME_FILES: z.string().default(''),
   // CodeAct BullMQ / local pump 全局并发；同 chat 仍串行（Redis active lock）。
   CODEACT_CONCURRENCY: z.coerce.number().int().positive().default(4),
   // 长时间 Agent 循环：分段续跑 + checkpoint + 上下文压缩。默认关，灰度开。

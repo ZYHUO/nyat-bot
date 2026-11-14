@@ -13,6 +13,7 @@ import {
   persistCodeActTask,
 } from './task-store.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
+import { checkCodeActActivation, holdCodeActTask, requireCodeActActivation } from './activation-policy.js';
 
 export const CODEACT_QUEUE_NAME = 'xxb-codeact';
 
@@ -36,6 +37,7 @@ export function getCodeActQueue(): Queue<DispatchTask> {
 
 /** Persist + enqueue; falls back to in-process runner if Redis/BullMQ fails. */
 export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
+  await requireCodeActActivation(task);
   const state = getGlobalState();
   if (task.status !== 'running') task.status = 'queued';
   state.putTask(task);
@@ -64,6 +66,7 @@ export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
  * attempts=1（checkpoint 本身 durable，失败下段重入队即可，重试 8 次只会放大问题）。
  */
 export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void> {
+  await requireCodeActActivation(task);
   const state = getGlobalState();
   task.status = 'queued';
   state.putTask(task);
@@ -94,6 +97,14 @@ export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void>
 
 async function processCodeActJob(job: Job<DispatchTask>, token?: string): Promise<void> {
   const task = job.data;
+  const activation = checkCodeActActivation(task);
+  if (!activation.allowed) {
+    await holdCodeActTask(task, activation.reason);
+    // It remains in the separate immutable archive; do not repeatedly retry a
+    // task whose chat or creation time is outside this deployment's authority.
+    job.discard();
+    throw new Error(`codeact_activation_denied:${activation.reason}`);
+  }
   const got = await tryMarkCodeActActive(task.chatId, task.id);
   if (!got) {
     if (token) {

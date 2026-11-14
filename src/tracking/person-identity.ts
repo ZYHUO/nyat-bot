@@ -15,8 +15,8 @@ import { logger } from '../shared/logger.js';
 import { getUserContexts } from '../pipeline/context/manager.js';
 import { getAggregatedAffinity } from './user-affinity.js';
 import { getUserProfilePrompt } from './user-profile.js';
-import { isGroup } from '../shared/chat.js';
 import { isPrivateChat } from '../memory/visibility.js';
+import { runWithAiWorkload } from '../ai/workload.js';
 
 const STALE_SEC = 6 * 3600;
 
@@ -109,8 +109,10 @@ function upsertIdentity(
        -- 抹掉已积累的跨群印象,而 PROFILE_MERGE_ENABLED 默认关 → 全局结构化列是空 →
        -- buildCrossGroupInjection 里 "if (!row.impression) return null" 让跨群认人直接归零,
        -- 且要等 6h + 画像 cron 才恢复。真的要清空走 upsertIdentity 的 clearImpression=true。
+       -- 保留旧摘要时同时保留其来源，不能把 DM 摘要重新标成新的共享群来源。
        impression = COALESCE(excluded.impression, person_identity.impression),
-       primary_chat_id = excluded.primary_chat_id,
+       primary_chat_id = CASE WHEN excluded.impression IS NULL
+         THEN person_identity.primary_chat_id ELSE excluded.primary_chat_id END,
        chat_count = excluded.chat_count,
        updated_at = excluded.updated_at`,
   ).run(uid, impression, primary, chatCount, now);
@@ -149,7 +151,7 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
     const existing = getPersonIdentity(uid);
     // impression 用**落库后**的值,不是本地变量 —— COALESCE 可能保留了旧值,返回本地的
     // null 会让调用方以为跨群印象没了。
-    return { ...(existing ?? {} as PersonIdentityRow), uid, impression: existing?.impression ?? impression, primary_chat_id: primary, chat_count: contexts.length, updated_at: now };
+    return { ...(existing ?? {} as PersonIdentityRow), uid, impression: existing?.impression ?? impression, primary_chat_id: existing ? existing.primary_chat_id : primary, chat_count: contexts.length, updated_at: now };
   } catch (err) {
     logger.debug({ err, uid }, 'refreshPersonIdentity failed (non-critical)');
     return null;
@@ -250,7 +252,7 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
     // review #10:加 in-flight 节流,否则 stale 窗口内该用户每条消息都 spawn 一次 LLM 合并。
     if (env().PROFILE_MERGE_ENABLED && (!row?.last_merged_at || now - row.last_merged_at > STALE_SEC) && shouldTriggerMerge(uid, now)) {
       void import('../cron/profile-merge.js')
-        .then(({ mergeGlobalProfile }) => mergeGlobalProfile(uid))
+        .then(({ mergeGlobalProfile }) => runWithAiWorkload('background', () => mergeGlobalProfile(uid)))
         .catch(() => { /* fire-and-forget */ });
     }
   }
@@ -260,15 +262,15 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   // (旧 dedup 守卫曾被全局分支跳过,导致在 home 群也注入"别的地方也认识")。
   if (row.primary_chat_id === currentChatId) return null;
 
-  // 机制2/3 优先:全局结构化画像(LLM 合并产出)。合并 prompt 已排除私聊具体隐私
-  // (safe-by-construction,残余风险=LLM 自觉)。review #2:把这条**跨上下文共享**
-  // 路径与隐私开关耦合 —— 注入进群且全局画像含私密来源时,要求 MEMORY_VISIBILITY_ENABLED
-  // 已开(运维已进入隐私感知模式);否则退回下方按来源 scrub 的 impression 路,不裸注
-  // 可能含 DM 提炼物的全局画像进群。
+  // 全局摘要没有逐字段来源，不能靠合并模型保证移除了私密事实。
+  // 只要混入另一个私密会话或来源不明，就退回下面有明确来源的 impression。
+  // 当前会话自己的私密来源仍可读；隐私开关不授予跨会话共享权限。
   const g = getGlobalProfile(uid);
   if (g && g.lastMergedAt && (g.traits.length || g.interests.length || g.relationToBot)) {
-    const derivedFromPrivate = g.sourceContextIds.some((c) => isPrivateChat(c));
-    const okToInject = !isGroup(currentChatId) || !derivedFromPrivate || env().MEMORY_VISIBILITY_ENABLED;
+    const okToInject = g.sourceContextIds.length > 0 && g.sourceContextIds.every((sourceChatId) =>
+      Number.isSafeInteger(sourceChatId) && sourceChatId !== 0 &&
+      (sourceChatId === currentChatId || !isPrivateChat(sourceChatId)),
+    );
     if (okToInject) {
       const bits: string[] = [];
       if (g.traits.length) bits.push(`性格:${g.traits.slice(0, 6).join('、')}`);
@@ -285,10 +287,10 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   // 群还是私聊,一律剔除(敏感群内容也不该在别处裸泄;DM 内容不该进群)。
   if (!row.impression) return null;
   if (
-    row.primary_chat_id !== null &&
-    isPrivateChat(row.primary_chat_id)
+    row.primary_chat_id === null || !Number.isSafeInteger(row.primary_chat_id) ||
+    row.primary_chat_id === 0 || isPrivateChat(row.primary_chat_id)
   ) {
-    return null; // 群里不注入来自私聊/敏感会话的原始画像(等 LLM 合并出安全的全局画像再注)
+    return null; // 未知来源或另一个私密会话的原始画像不可跨出。
   }
   return `[这个人你在别的地方也认识] 你和 TA 在 ${row.chat_count} 个场景有交集。你对 TA 的整体印象:\n${row.impression.slice(0, 400)}`;
 }

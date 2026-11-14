@@ -50,7 +50,7 @@ function persistSocialFeedback(input: {
   correlationSuffix: string;
 }): void {
   try {
-    const botUid = getBotUid();
+    const botUid = getBotUid(input.chatId);
     if (!Number.isSafeInteger(botUid) || botUid <= 0) return;
     recordSocialInteraction({
       chatId: input.chatId,

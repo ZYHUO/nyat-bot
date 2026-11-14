@@ -29,7 +29,9 @@ import { recallEpisodes } from '../../tracking/group-episodes.js';
 import { getExemplars } from '../../learners/dialect-exemplar.js';
 import { currentRiskLevel, buildValveHint } from '../../agent/reverse-valve.js';
 import { getBotUid } from '../../bot/bot.js';
-import { isMaster } from '../../admin/auth.js';
+import { isConversationOwner } from '../../platform/owner-context.js';
+import { isPlatformInternalId } from '../../platform/identity-store.js';
+import { masterShortHint } from '../../shared/master-identity.js';
 import { formatBeijingNowLine } from '../../shared/beijing-time.js';
 
 const SECTION_SEP = '\n\n---\n\n';
@@ -113,9 +115,10 @@ export function buildSystemPrompt(userId?: number, _chatId?: number): string {
  * Meta/CodeAct 用的人格层：persona + guardrails + tone + codeact-reply。
  * 主人 uid 由 assemble 时的 master 块（env.MASTER_UID）注入，此处不硬编码。
  */
-export function buildCodeActIdentityPrompt(userId?: number): string {
+export function buildCodeActIdentityPrompt(userId?: number, chatId?: number): string {
+  const platformChat = chatId !== undefined && isPlatformInternalId(chatId);
   const masterUid = env().MASTER_UID;
-  const masterUidHint = masterUid
+  const masterUidHint = platformChat ? masterShortHint(chatId) : masterUid
     ? `主人 uid 以运行时注入为准（当前 env：${masterUid}）；行尾标「主人」的就是主人。`
     : '主人身份见下方「主人」块；行尾标「主人」的就是主人。';
   const layers = [
@@ -125,7 +128,7 @@ export function buildCodeActIdentityPrompt(userId?: number): string {
     loadCachedPrompt('task/codeact-reply.md'),
     `# CodeAct 输出差异（覆盖「数据包/JSON」旧契约）
 
-你**不**输出 JSON / 协议数据包。用 \`telegram.sendText(纯文本)\` 说话；贴纸用 stickers.pick + sendSticker。
+你**不**输出 JSON / 协议数据包。${platformChat ? '当前是 QQ 会话；仅通过兼容命名 telegram.sendText 发送文字（宿主路由到 QQ），不支持贴纸、媒体、投票、反应或 Telegram 管理操作。' : '用 `telegram.sendText(纯文本)` 说话；贴纸用 stickers.pick + sendSticker。'}
 persona 若写「通过数据包完成行动」——对本路径作废。
 
 认人：上下文 \`[…] 名字(@username): … ⟨uid:N⟩\`；认 @/uid 不认嘴。${masterUidHint}
@@ -326,7 +329,7 @@ export function buildMessages(
   }
   // bot 对当前发送者的称呼(bot_tag,可私聊"叫我X"纠正)——优先于群外号,
   // 让写手用它叫人。主人由 persona 处理,这里跳过避免重复/冲突。
-  if (chatId !== undefined && !latestMessage.isAnonymous && !isMaster(latestMessage.uid, env().MASTER_UID)) {
+  if (chatId !== undefined && !latestMessage.isAnonymous && !isConversationOwner(chatId, latestMessage.uid)) {
     try {
       const botTag = getBotTagForAddressing(chatId, latestMessage.uid);
       if (botTag) currentMsgBlock += `\n你对他的称呼: ${botTag}`;
@@ -339,7 +342,7 @@ export function buildMessages(
     const rt = latestMessage.replyTo;
     const rtName = sanitizeSenderString(rt.fullName ?? '');
     const rtSnip = (rt.textSnippet ?? '').slice(0, 60);
-    currentMsgBlock += rt.uid === getBotUid()
+    currentMsgBlock += rt.uid === getBotUid(chatId)
       ? `\n回复对象: 你刚才的消息(#${rt.messageId}「${rtSnip}」)——这条消息是专门对你说的,回应它`
       : `\n回复对象: ${rtName} 的消息(#${rt.messageId}「${rtSnip}」)`;
   }

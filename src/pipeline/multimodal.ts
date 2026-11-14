@@ -7,17 +7,21 @@ import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import type { FormattedMessage } from '../shared/types.js';
+import { transcribeAudio, MAX_AUDIO_BYTES } from '../ai/transcription.js';
 
 // MaiBot 借鉴:超大文件直接丢弃 —— 发给 LLM 会 413/超时,卡住整条管线。
 // Telegram 文件上限 50MB,base64 后 ×1.33;10MB 已远超任何视觉模型需要。
-const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+const MAX_MEDIA_BYTES = MAX_AUDIO_BYTES;
 
 async function downloadTelegramFile(
   fileId: string,
+  signal: AbortSignal = AbortSignal.timeout(30_000),
 ): Promise<{ buffer: ArrayBuffer; mimeType: string; filePath: string } | null> {
   try {
     const bot = getBot();
-    const file = await bot.api.getFile(fileId);
+    // grammY's declaration still names abort-controller; Node 22's native signal
+    // implements the same runtime cancellation contract used by its HTTP client.
+    const file = await bot.api.getFile(fileId, signal as unknown as Parameters<typeof bot.api.getFile>[1]);
     const filePath = file.file_path;
     if (!filePath) return null;
     if (file.file_size && file.file_size > MAX_MEDIA_BYTES) {
@@ -27,18 +31,37 @@ async function downloadTelegramFile(
 
     const token = bot.token;
     const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
-    const response = await fetch(fileUrl);
+    const response = await fetch(fileUrl, { signal, redirect: 'error' });
     if (!response.ok) return null;
-
-    const buffer = await response.arrayBuffer();
+    const contentLength = Number(response.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_MEDIA_BYTES) { await response.body?.cancel(); return null; }
+    // Enforce the limit while streaming, including missing/false Content-Length.
+    const reader = response.body?.getReader();
+    let buffer: ArrayBuffer;
+    if (reader) {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        total += chunk.value.byteLength;
+        if (total > MAX_MEDIA_BYTES) { await reader.cancel(); return null; }
+        chunks.push(chunk.value);
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      buffer = bytes.buffer;
+    } else buffer = await response.arrayBuffer();
     if (buffer.byteLength > MAX_MEDIA_BYTES) {
       logger.info({ fileId, bytes: buffer.byteLength }, 'Media too large after download, dropping');
       return null;
     }
     const mimeType = response.headers.get('content-type') ?? 'application/octet-stream';
     return { buffer, mimeType, filePath };
-  } catch (err) {
-    logger.warn({ fileId, err }, 'downloadTelegramFile failed');
+  } catch {
+    // The file URL contains the bot token; transport errors may repeat that URL.
+    logger.warn({ fileId }, 'downloadTelegramFile failed');
     return null;
   }
 }
@@ -54,17 +77,23 @@ function audioFormatFromMime(mime: string): string {
 }
 
 async function describeAudio(fileId: string, label: string): Promise<string> {
-  const downloaded = await downloadTelegramFile(fileId);
+  if (!env().AUDIO_TRANSCRIBE_ENABLED) return `[${label}]`;
+  const signal = AbortSignal.timeout(30_000);
+  const downloaded = await downloadTelegramFile(fileId, signal);
   // 下不动(多半文件太大)≠ 内容不存在:文件已在群里、别人收得到。用中性占位,
   // 别写"无法下载"——否则 bot 会把别的 bot 发来的歌/语音误读成"失败了"。
   if (!downloaded) return `[${label}]`;
 
-  // 默认不转写:当前所有 input_audio 供应商在本环境都不可用,发出去必 400/超时,
-  // 白白吃满 timeout + 双 backup 重试 + 刷日志。开关关 → 直接中性占位,不发调用。
-  // (旧实现把 audio/ogg 当 image 丢给 GPT vision,每条语音都注定失败 —— 已根治。)
-  if (!env().AUDIO_TRANSCRIBE_ENABLED) return `[${label}]`;
-
   try {
+    if (env().AUDIO_TRANSCRIBE_API_MODE === 'transcriptions') {
+      const result = await transcribeAudio({ buffer: downloaded.buffer, mimeType: downloaded.mimeType, fileName: downloaded.filePath, signal });
+      if (result.status === 'ok') {
+        logger.info({ label: result.label, chars: result.text.length }, 'Audio transcribed');
+        return `[${label}内容：${result.text}]`;
+      }
+      logger.info({ status: result.status, reason: result.reason }, 'Audio transcription placeholder used');
+      return `[${label}]`;
+    }
     const base64 = Buffer.from(downloaded.buffer).toString('base64');
     const format = audioFormatFromMime(downloaded.mimeType);
 
@@ -80,11 +109,14 @@ async function describeAudio(fileId: string, label: string): Promise<string> {
         },
       ],
       maxTokens: 300,
+      maxTimeoutMs: 30_000,
+      signal,
     });
-
-    return `[${label}内容：${result.content.trim()}]`;
-  } catch (err) {
-    logger.warn({ fileId, err }, 'Audio description failed');
+    const text = result.content.trim();
+    if (!text) { logger.info('Audio chat transcription empty — placeholder used'); return `[${label}]`; }
+    return `[${label}内容：${text}]`;
+  } catch {
+    logger.warn({ fileId }, 'Audio description failed');
     // 失败也用中性占位,别写"无法识别"——以免把别人的语音误读成 bot 出错。
     return `[${label}]`;
   }

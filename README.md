@@ -164,6 +164,7 @@ Most chat bots are **responding** systems: cue in, text out. Real group members 
 - 🔄 **Turn Actor** — MaiBot-style per-chat turns: bursts judged as one thought, mid-generation interrupts trigger replans, "wait for them to finish" genuinely resumes, bounded self-continuation
 - ⏱️ **Timing gate** — LLM three-way decision (continue / wait / no_action) with cooldowns, talk-value thresholds, defer-resume jobs that never drop messages, lognormal human-like delays, typing indicators, burst multi-bubble replies
 - 🧭 **Meta + Subagent + CodeAct** (optional, default off) — Attention → Meta tick → JS dispatch → Subagent host APIs (telegram/memory/stickers) → callback; graylisted per chat (`META_SUBAGENT_CHAT_IDS`), see [`docs/meta-subagent/`](docs/meta-subagent/)
+- **QQ / OneBot v11** (optional, default off) — authenticated forward WebSocket, persistent platform identities, shared Meta ingress, scoped text/mention/quote replies and confirmed deletion. See the [QQ setup and capability matrix](docs/onebot-qq.md).
 - 🧱 **Context Engine** — `static|delta|ephemeral|volatile` assembly + Manifest (stable prefix for prompt-cache-friendly providers); shared by Meta/Subagent
 - 🧠 **3-level judge pipeline** — L0 local rules → L1 micro AI → L2 full AI (fallback path when Heart is off; Meta graylist chats skip it to avoid double replies)
 - 🎯 **Multi-model routing + Smart Group** — per-usage provider chains (reply / judge / vision / summarize / deep_think) with auto-assign from a live health/latency pool, hedged requests, circuit breakers, Redis runtime overrides
@@ -486,7 +487,8 @@ npm install
 #   curl https://sh.rustup.rs -sSf | sh && npm run build:nyatdb
 cp .env.example .env
 # Edit .env with your Bot Token and AI API config
-# optional Meta: META_SUBAGENT_ENABLED=true (graylist via META_SUBAGENT_CHAT_IDS first)
+# optional Meta: requires verified CodeAct isolation and a fixed META_ACTIVATED_AT_SEC
+# META_SUBAGENT_CHAT_IDS empty enables all chats; a list restricts scope
 # see docs/meta-subagent/
 # optional NyatDB: NYATDB_ENABLED=true (DUAL_WRITE first, then consider READ)
 # engine repo: https://github.com/ZYHUO/nyatdb
@@ -563,6 +565,7 @@ Everything is env-driven, see [`.env.example`](.env.example). Core knobs:
 | `RESIDENT_STICKER_PACKS` | Resident sticker pack set_names (comma-separated) | (optional) |
 | `META_SUBAGENT_ENABLED` | Meta+Subagent+CodeAct orchestration | `false` |
 | `META_SUBAGENT_CHAT_IDS` | Graylist chatIds (comma-separated; **empty = all**) | (empty=all) |
+| `META_ACTIVATED_AT_SEC` | Fixed activation cutoff; older work is held, positive value required when Meta is enabled | `0` |
 | `META_TICK_MS` / `META_USAGE` | Meta loop interval / cheap-model usage | `5000` / `judge` |
 | `TIMING_GATE_TIMEOUT_MS` | Per-hop LLM budget for Heart/gate (shared by primary+hedge) | `15000` |
 | `SUBAGENT_MEMORY_ENABLED` | Subagent CodeAct long-memory section (visibility-layer scrubbed) | `true` |

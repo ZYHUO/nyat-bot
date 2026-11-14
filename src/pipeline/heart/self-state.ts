@@ -137,7 +137,7 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
         // 昨日最后一条 digest（bot 昨天实际做成的事）
         try {
           const { digestsSince } = await import('../../meta/session-digest.js');
-          const yesterday = digestsSince(yesterdayStartSec, 60).filter((d) => d.createdAt < todayStartSec);
+          const yesterday = digestsSince(yesterdayStartSec, 60, { sourceChatId: chatId }).filter((d) => d.createdAt < todayStartSec);
           const last = yesterday[yesterday.length - 1];
           if (last) parts.push(`昨天你做过：「${last.text.slice(0, 80)}」`);
         } catch { /* optional */ }
