@@ -9,6 +9,7 @@ import { callWithFallback } from '../ai/fallback.js';
 import { getBotUid } from '../bot/bot.js';
 import { getDynamicKnowledge, updateKnowledge } from '../knowledge/manager.js';
 import { getAll } from '../pipeline/context/manager.js';
+import { parseContextRedisKey } from '../pipeline/context/storage-scope.js';
 import { getConfig, loadPrompt } from '../shared/config.js';
 import { env } from '../env.js';
 import { getRedis } from '../db/redis.js';
@@ -70,8 +71,14 @@ export async function runKnowledgeSync(): Promise<void> {
       const [next, found] = await redis.scan(cursor, 'MATCH', `${CTX_PREFIX}*`, 'COUNT', '200');
       cursor = next;
       for (const k of found) {
-        const id = parseInt(k.slice(CTX_PREFIX.length), 10);
-        if (!Number.isNaN(id) && id < 0) ids.add(id);
+        if (k.startsWith(CTX_PREFIX + 'v2:')) {
+          const scope = parseContextRedisKey(k);
+          if (scope && scope.chatId < 0) ids.add(scope.chatId);
+        } else if (/^xxb:ctx:-[1-9]\d*(?::t[1-9]\d*)?$/.test(k)) {
+          // Discovery only: legacy rows still pass the source-aware context read guard.
+          const id = Number(k.slice(CTX_PREFIX.length).split(':')[0]);
+          if (Number.isSafeInteger(id)) ids.add(id);
+        }
       }
     } while (cursor !== '0');
     chatIds = [...ids];

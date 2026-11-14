@@ -38,6 +38,7 @@ const redisMock = {
     return 'OK';
   }),
   expire: vi.fn(async () => 1),
+  multi: () => redisMock.pipeline(),
   // guarded compress Lua:头部没变 → 裁 ctx + 存摘要 + FIFO 截断(原子)
   eval: vi.fn(async (
     _script: string, _nk: number,
@@ -61,6 +62,8 @@ const redisMock = {
       rpush: (k: string, v: string) => { ops.push(() => redisMock.rpush(k, v)); return p; },
       ltrim: (k: string, a: number, b: number) => { ops.push(() => redisMock.ltrim(k, a, b)); return p; },
       expire: (k: string, t: number) => { ops.push(() => redisMock.expire(k, t)); return p; },
+      set: (k: string, v: string, ...args: unknown[]) => { ops.push(() => redisMock.set(k, v, ...args)); return p; },
+      del: (...ks: string[]) => { ops.push(() => redisMock.del(...ks)); return p; },
       exec: async () => { for (const op of ops) await op(); return []; },
     };
     return p;
@@ -77,6 +80,8 @@ vi.mock('../../../../src/shared/config.js', () => ({
 }));
 
 const callWithFallbackMock = vi.hoisted(() => vi.fn());
+const scopedNyatMock = vi.hoisted(() => vi.fn());
+vi.mock('../../../../src/pipeline/context/manager.js', () => ({ readScopedNyatContext: scopedNyatMock }));
 vi.mock('../../../../src/ai/fallback.js', () => ({ callWithFallback: callWithFallbackMock }));
 
 const envValues: Record<string, unknown> = {
@@ -95,10 +100,13 @@ vi.mock('../../../../src/nyatdb/index.js', () => ({
 
 import { maybeCompressMidTerm, getMidTermBlock } from '../../../../src/pipeline/context/mid-term.js';
 import { resolveContextScope } from '../../../../src/context-engine/scope.js';
+import { contextRedisKey, contextStorageKey } from '../../../../src/pipeline/context/storage-scope.js';
 
 const CHAT = -100555;
-const CTX_KEY = `xxb:ctx:${CHAT}`;
-const MTM_KEY = `xxb:mtm:${CHAT}`;
+const scope = (threadId?: number) => resolveContextScope(CHAT, threadId)!;
+const keySuffix = () => contextStorageKey(scope());
+const CTX_KEY = contextRedisKey(scope());
+const MTM_KEY = `xxb:mtm:v3:${keySuffix()}`;
 
 function fillCtx(n: number): void {
   const l: string[] = [];
@@ -110,6 +118,7 @@ function fillCtx(n: number): void {
       timestamp: 1781000000 + i * 60,
       messageId: i + 1,
       textContent: `msg ${i}`,
+      contextScope: scope(),
     }));
   }
   lists.set(CTX_KEY, l);
@@ -120,6 +129,11 @@ describe('mid-term memory', () => {
     lists.clear();
     kv.clear();
     vi.clearAllMocks();
+    scopedNyatMock.mockReset().mockReturnValue(null);
+    envValues['BOT_TOKEN'] = '12345:test-only';
+    delete envValues['NYATDB_ENABLED'];
+    delete envValues['NYATDB_DUAL_WRITE'];
+    delete envValues['NYATDB_REDIS_MIRROR'];
     envValues['MTM_ENABLED'] = true;
     envValues['MTM_INPUT_MAX_CHARS'] = 16000;
     envValues['MTM_CHUNK'] = 150;
@@ -186,7 +200,7 @@ describe('mid-term memory', () => {
 
   it('锁被占用时跳过(不并发压缩)', async () => {
     fillCtx(385);
-    kv.set(`xxb:mtm:lock:${CHAT}`, '1');
+    kv.set(`xxb:mtm:lock:v3:${keySuffix()}`, '1');
     await maybeCompressMidTerm(CHAT);
     expect(callWithFallbackMock).not.toHaveBeenCalled();
   });
@@ -196,7 +210,7 @@ describe('mid-term memory', () => {
     callWithFallbackMock.mockRejectedValue(new Error('All labels exhausted'));
     await maybeCompressMidTerm(CHAT);
     expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
-    expect(kv.get(`xxb:mtm:fail:${CHAT}`)).toBe('1');
+    expect(kv.get(`xxb:mtm:fail:v3:${keySuffix()}`)).toBe('1');
     // 原文未被裁(压缩没发生)
     expect(lists.get(CTX_KEY)).toHaveLength(385);
 
@@ -205,12 +219,12 @@ describe('mid-term memory', () => {
     expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
 
     // 链恢复(冷却过期)后正常压缩,冷却键被清除
-    kv.delete(`xxb:mtm:fail:${CHAT}`);
+    kv.delete(`xxb:mtm:fail:v3:${keySuffix()}`);
     callWithFallbackMock.mockResolvedValue({ content: '群里在聊代理协议,小明宣布退群又回来了' });
     await maybeCompressMidTerm(CHAT);
     expect(callWithFallbackMock).toHaveBeenCalledTimes(2);
     expect(lists.get(MTM_KEY)).toHaveLength(1);
-    expect(kv.has(`xxb:mtm:fail:${CHAT}`)).toBe(false);
+    expect(kv.has(`xxb:mtm:fail:v3:${keySuffix()}`)).toBe(false);
   });
 
   it('flag off:压缩与注入都是 no-op', async () => {
@@ -295,7 +309,7 @@ describe('mid-term memory', () => {
 
   it('话题压缩读取和存储保持同源，不能读取General或其他话题摘要', async () => {
     fillCtx(385);
-    lists.set(`${CTX_KEY}:t7`, [...lists.get(CTX_KEY)!]);
+    lists.set(contextRedisKey(scope(7)), lists.get(CTX_KEY)!.map(raw => JSON.stringify({ ...JSON.parse(raw), contextScope: scope(7), messageThreadId: 7 })));
     await maybeCompressMidTerm(CHAT, 7);
     expect(lists.get(CTX_KEY)).toHaveLength(385);
     expect(await getMidTermBlock(CHAT)).toBeNull();
@@ -314,5 +328,90 @@ describe('mid-term memory', () => {
     await maybeCompressMidTerm(CHAT);
     expect(lists.get(CTX_KEY)).toHaveLength(385);
     expect(lists.get(MTM_KEY) ?? []).toHaveLength(0);
+  });
+
+  it('旧裸 ctx 与旧摘要保留但不作为当前账号可压缩输入', async () => {
+    fillCtx(385);
+    const old = lists.get(CTX_KEY)!;
+    lists.delete(CTX_KEY);
+    lists.set(`xxb:ctx:${CHAT}`, old);
+    lists.set(`xxb:mtm:${CHAT}`, [JSON.stringify({ version: 2, source: scope(), summary: '旧未知正文摘要', anchors: [], fromTs: 1, toTs: 2, count: 3, createdAt: 1 })]);
+    await maybeCompressMidTerm(CHAT);
+    expect(callWithFallbackMock).not.toHaveBeenCalled();
+    expect(await getMidTermBlock(CHAT)).toBeNull();
+    expect(lists.get(`xxb:ctx:${CHAT}`)).toEqual(old);
+    expect(lists.get(`xxb:mtm:${CHAT}`)).toHaveLength(1);
+  });
+
+  it.each([
+    undefined,
+    { ...scope(), accountId: '99999' },
+    { ...scope(), chatId: CHAT - 1 },
+    { ...scope(), platform: 'qq' },
+    { ...scope(), threadId: 7 },
+  ])('原文来源缺失或不匹配时不调用模型、不裁剪: %j', async contextScope => {
+    fillCtx(385);
+    const first = JSON.parse(lists.get(CTX_KEY)![0]!);
+    lists.get(CTX_KEY)![0] = JSON.stringify({ ...first, textContent: 'PRIVATE_CANARY', contextScope });
+    const unchanged = [...lists.get(CTX_KEY)!];
+    await maybeCompressMidTerm(CHAT);
+    expect(callWithFallbackMock).not.toHaveBeenCalled();
+    expect(lists.get(CTX_KEY)).toEqual(unchanged);
+    expect(lists.has(MTM_KEY)).toBe(false);
+  });
+
+  it('遇到不可信中间条目仅压缩此前可信前缀，不能跳过后误删', async () => {
+    fillCtx(385);
+    lists.get(CTX_KEY)![2] = JSON.stringify({ ...JSON.parse(lists.get(CTX_KEY)![2]!), contextScope: undefined, textContent: 'PRIVATE_CANARY' });
+    const original = [...lists.get(CTX_KEY)!];
+    await maybeCompressMidTerm(CHAT);
+    expect(lists.get(CTX_KEY)).toEqual(original.slice(2));
+    expect(JSON.parse(lists.get(MTM_KEY)![0]!).count).toBe(2);
+    expect(callWithFallbackMock.mock.calls[0]![0].messages[1].content).not.toContain('PRIVATE_CANARY');
+  });
+
+  it('模型等待期间账号改变时不提交旧账号摘要', async () => {
+    fillCtx(385);
+    callWithFallbackMock.mockImplementationOnce(async () => {
+      envValues['BOT_TOKEN'] = '54321:test-only';
+      return { content: '不可再提交的摘要' };
+    });
+    await maybeCompressMidTerm(CHAT);
+    expect(lists.get(CTX_KEY)).toHaveLength(385);
+    expect(lists.has(MTM_KEY)).toBe(false);
+  });
+
+  it('摘要读取等待期间账号改变时不返回旧账号内容', async () => {
+    const old = JSON.stringify({ version: 2, source: scope(), summary: 'PRIVATE_CANARY', anchors: [], fromTs: 1, toTs: 2, count: 3, createdAt: 1 });
+    redisMock.lrange.mockImplementationOnce(async () => {
+      envValues['BOT_TOKEN'] = '54321:test-only';
+      return [old];
+    });
+    expect(await getMidTermBlock(CHAT)).toBeNull();
+  });
+
+  it('NyatDB 同源话题可压缩，游标和锁隔离账号与话题，异源行不进入模型', async () => {
+    envValues['NYATDB_ENABLED'] = true;
+    envValues['NYATDB_DUAL_WRITE'] = true;
+    envValues['NYATDB_REDIS_MIRROR'] = false;
+    fillCtx(550);
+    const messages = lists.get(CTX_KEY)!.map(raw => ({ ...JSON.parse(raw), contextScope: scope(7), messageThreadId: 7 }));
+    scopedNyatMock.mockReturnValue([
+      { ...messages[0], contextScope: { ...scope(7), accountId: '99999' }, textContent: 'PRIVATE_CANARY' },
+      ...messages,
+    ]);
+    // Old chat-only control state cannot block or advance this topic.
+    kv.set(`xxb:mtm:lock:${CHAT}`, '1');
+    kv.set(`xxb:mtm:nyat_cursor:${CHAT}`, '999999');
+    await maybeCompressMidTerm(CHAT, 7);
+    expect(scopedNyatMock).toHaveBeenCalledWith(scope(7), expect.any(Number));
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
+    expect(callWithFallbackMock.mock.calls[0]![0].messages[1].content).not.toContain('PRIVATE_CANARY');
+    expect(await getMidTermBlock(CHAT, 7)).toContain('topic=7');
+    expect(await getMidTermBlock(CHAT)).toBeNull();
+    expect(kv.get(`xxb:mtm:nyat_cursor:v3:${contextStorageKey(scope(7))}`)).toBe('150');
+    expect(kv.get(`xxb:mtm:nyat_cursor:${CHAT}`)).toBe('999999');
+    await maybeCompressMidTerm(CHAT, 7);
+    expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
   });
 });

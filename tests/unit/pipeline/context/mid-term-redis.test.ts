@@ -13,7 +13,8 @@ vi.mock('../../../../src/env.js', () => ({ env: () => ({ BOT_TOKEN: '12345:test-
 vi.mock('../../../../src/ai/fallback.js', () => ({ callWithFallback: fixture.llm }));
 vi.mock('../../../../src/shared/config.js', () => ({ getConfig: () => ({ promptsDir: '' }), loadPrompt: () => 'summarize synthetic history' }));
 vi.mock('../../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() } }));
-vi.mock('../../../../src/nyatdb/index.js', () => ({ getNyatDb: () => null, unpackChatLogRow: () => null }));
+vi.mock('../../../../src/pipeline/context/manager.js', () => ({ readScopedNyatContext: () => null }));
+import { contextRedisKey, contextStorageKey, resolveStorageScope } from '../../../../src/pipeline/context/storage-scope.js';
 import { getMidTermBlock, maybeCompressMidTerm } from '../../../../src/pipeline/context/mid-term.js';
 
 // Explicit opt-in: fresh port=0/socket-only server, never existing REDIS_URL/data.
@@ -22,9 +23,10 @@ const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 describe.skipIf(!serverPath)('MTM coverage against actual isolated Redis Lua', () => {
   let child: ChildProcess | undefined, dir: string | undefined, redis: Redis;
   const chat = -987654;
-  const key = `xxb:ctx:${chat}`;
-  const mtm = `xxb:mtm:${chat}`;
-  const entries = Array.from({ length: 8 }, (_, i) => JSON.stringify({ role: 'user', uid: 77, fullName: '合成作者', textContent: `合成内容 ${i}`, messageId: i + 1, timestamp: 1000 + i }));
+  const scope = resolveStorageScope(chat)!;
+  const key = contextRedisKey(scope);
+  const mtm = `xxb:mtm:v3:${contextStorageKey(scope)}`;
+  const entries = Array.from({ length: 8 }, (_, i) => JSON.stringify({ contextScope: scope, role: 'user', uid: 77, fullName: '合成作者', textContent: `合成内容 ${i}`, messageId: i + 1, timestamp: 1000 + i }));
   beforeAll(async () => {
     if (!serverPath || !isAbsolute(serverPath)) throw new Error('Test Redis path must be absolute');
     dir = await mkdtemp(join(tmpdir(), 'nyat-mtm-test-'));

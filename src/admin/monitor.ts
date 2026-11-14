@@ -5,6 +5,7 @@ import type { Env } from '../env.js';
 import { timingSafeEqual } from 'crypto';
 import { listObligationSnapshots } from './obligations.js';
 import { getRecent } from '../pipeline/context/manager.js';
+import { parseContextRedisKey } from '../pipeline/context/storage-scope.js';
 import { getCognitiveRouteWindow } from '../agent/cognitive-route-observations.js';
 import { listAgencyRunSummaries } from '../agent/agency-runtime.js';
 import type { AgencyRunStatus } from '../agent/agency-runtime.js';
@@ -59,8 +60,14 @@ async function listActiveChatIds(redis: Redis): Promise<number[]> {
     const [next, batch] = await redis.scan(cursor, 'MATCH', 'xxb:ctx:*', 'COUNT', 200);
     cursor = next;
     for (const key of batch) {
-      const chatId = Number(key.replace('xxb:ctx:', ''));
-      if (Number.isFinite(chatId)) ids.add(chatId);
+      if (key.startsWith('xxb:ctx:v2:')) {
+        const scope = parseContextRedisKey(key);
+        if (scope) ids.add(scope.chatId);
+      } else if (/^xxb:ctx:-?[1-9]\d*$/.test(key)) {
+        // Legacy metadata remains discoverable; getRecent separately proves each body source.
+        const chatId = Number(key.slice('xxb:ctx:'.length));
+        if (Number.isSafeInteger(chatId)) ids.add(chatId);
+      }
     }
   } while (cursor !== '0');
   return [...ids];

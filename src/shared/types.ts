@@ -4,6 +4,7 @@
 
 import type { MessageEventIdentity } from './event-identity.js';
 import type { PendingIntentRef } from '../meta/pending-intent.js';
+import type { ContextScope } from '../context-engine/scope.js';
 
 export interface FormattedMessage {
   role: 'user' | 'assistant' | 'system';
@@ -17,6 +18,8 @@ export interface FormattedMessage {
   messageId: number;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
+  /** Exact host-established account/conversation/topic provenance of stored context. */
+  contextScope?: ContextScope;
   textContent: string;
   captionContent?: string;
   sticker?: {

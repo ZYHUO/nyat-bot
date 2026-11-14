@@ -12,6 +12,9 @@ import { logger } from '../../shared/logger.js';
 import { unwrapPromptEnvelope, looksLikePromptEnvelope } from '../../shared/message-text.js';
 import { unpackChatLogRow, getNyatDb, chatAppendFromFormatted } from '../../nyatdb/index.js';
 import { filterRecalledOneBotMessages } from '../../platform/onebot-notices.js';
+import type { ContextScope } from '../../context-engine/scope.js';
+import { matchesContextScope } from '../../context-engine/scope.js';
+import { bindContextMessage, contextRedisKey, contextStorageId, contextStorageKey, isMessageInContextScope, resolveStorageScope } from './storage-scope.js';
 
 const CTX_PREFIX = 'xxb:ctx:';
 const MEMBERS_PREFIX = 'xxb:members:';
@@ -34,21 +37,11 @@ redis.call('EXPIRE', key, tonumber(ARGV[4]))
 return len
 `;
 
-function ctxKey(chatId: number, threadId?: number): string {
+function legacyCtxKey(chatId: number, threadId?: number): string {
   // General topic (thread_id=1) is the default topic → plain key (backward compat).
   // Non-forum chats / undefined threadId → plain key.
   if (!threadId || threadId <= 1) return CTX_PREFIX + chatId;
   return `${CTX_PREFIX}${chatId}:t${threadId}`;
-}
-
-/**
- * NyatDB ChatLog is keyed by numeric chatId; topic-specific context needs a
- * synthetic numeric key. Use chatId * 100000 + threadId ONLY when threadId > 1
- * (General topic / non-forum reuse the plain chatId → backward compatible).
- */
-function nyatChatKey(chatId: number, threadId?: number): number {
-  if (!threadId || threadId <= 1) return chatId;
-  return chatId * 100000 + threadId;
 }
 
 function nyatWriteEnabled(): boolean {
@@ -79,27 +72,29 @@ function sanitizeMessage(message: FormattedMessage): FormattedMessage {
   return { ...message, textContent: inner };
 }
 
-function appendToNyatDb(chatId: number, message: FormattedMessage, threadId?: number): void {
+function appendToNyatDb(scope: ContextScope, message: FormattedMessage): void {
   const ndb = getNyatDb();
   if (!ndb) throw new Error('nyatdb_unavailable');
   if (!(message.messageId > 0)) {
-    logger.debug({ chatId }, 'skip NyatDB append (no messageId)');
+    logger.debug({ chatId: scope.chatId }, 'skip NyatDB append (no messageId)');
     return;
   }
-  ndb.chatAppend(nyatChatKey(chatId, threadId), chatAppendFromFormatted(message));
+  const key = contextStorageId(scope, true);
+  if (key === null) throw Error('context_storage_unavailable');
+  ndb.chatAppend(key, chatAppendFromFormatted(message));
   const keep = env().NYATDB_MAX_MESSAGES_PER_CHAT;
   if (keep > 0 && message.messageId % 64 === 0) {
-    ndb.chatTrimKeepLast(nyatChatKey(chatId, threadId), keep);
+    ndb.chatTrimKeepLast(key, keep);
   }
 }
 
-async function appendToRedisCtx(chatId: number, message: FormattedMessage, threadId?: number): Promise<void> {
+async function appendToRedisCtx(scope: ContextScope, message: FormattedMessage): Promise<void> {
   const redis = getRedis();
   const maxLen = env().CONTEXT_MAX_LENGTH;
   await redis.eval(
     RPUSH_TRIM_LUA,
     1,
-    ctxKey(chatId, threadId),
+    contextRedisKey(scope),
     JSON.stringify(message),
     String(maxLen),
     String(maxLen - TRUNCATE_SIZE),
@@ -109,11 +104,16 @@ async function appendToRedisCtx(chatId: number, message: FormattedMessage, threa
 
 export async function addMessage(chatId: number, message: FormattedMessage, threadId?: number): Promise<void> {
   message = sanitizeMessage(message);
+  const bound = bindContextMessage(chatId, message, threadId);
+  const scope = bound.scope;
+  message = bound.message;
+  threadId = scope.threadId;
+  const cacheKey = contextStorageKey(scope);
 
   let nyatOk = false;
   if (nyatWriteEnabled()) {
     try {
-      appendToNyatDb(chatId, message, threadId);
+      appendToNyatDb(scope, message);
       nyatOk = true;
     } catch (err) {
       logger.warn({ err, chatId, messageId: message.messageId }, 'NyatDB append failed');
@@ -123,18 +123,18 @@ export async function addMessage(chatId: number, message: FormattedMessage, thre
   // Redis ctx: mirror, or primary fallback when NyatDB write failed / disabled
   if (redisCtxWriteEnabled() || !nyatOk) {
     try {
-      await appendToRedisCtx(chatId, message, threadId);
+      await appendToRedisCtx(scope, message);
       // Redis moved ahead of NyatDB — allow catch-up on next getRecent
       if (!nyatOk) {
-        catchUpSettled.delete(chatId);
-        redisPeekSkip.delete(chatId);
+        catchUpSettled.delete(cacheKey);
+        redisPeekSkip.delete(cacheKey);
       }
     } catch (err) {
       if (!nyatOk) throw err;
       logger.warn({ err, chatId }, 'Redis ctx mirror failed (NyatDB already wrote)');
     }
   } else if (nyatOk) {
-    catchUpSettled.add(chatId);
+    catchUpSettled.add(cacheKey);
   }
 
   const redis = getRedis();
@@ -178,13 +178,14 @@ export async function addMessage(chatId: number, message: FormattedMessage, thre
   }
 }
 
-function safeParseMessages(raw: string[]): FormattedMessage[] {
+function safeParseMessages(raw: string[], scope: ContextScope): FormattedMessage[] {
   const result: FormattedMessage[] = [];
   for (const r of raw) {
     try {
-      result.push(JSON.parse(r) as FormattedMessage);
+      const message = JSON.parse(r) as FormattedMessage;
+      if (isMessageInContextScope(message, scope)) result.push(message);
     } catch {
-      logger.warn({ snippet: r.slice(0, 80) }, 'Corrupted context entry skipped');
+      logger.warn({ chatId: scope.chatId, threadId: scope.threadId }, 'Unverifiable context entry skipped');
     }
   }
   return result;
@@ -200,64 +201,76 @@ function fromNyatChatRows(
     text: string;
     bodyFormat?: string;
   }>,
+  scope: ContextScope,
 ): FormattedMessage[] {
   return rows.map((r) =>
     unpackChatLogRow({
       ...r,
       bodyFormat: r.bodyFormat === 'json' ? 'json' : r.bodyFormat === 'text' ? 'text' : undefined,
     }) as FormattedMessage,
-  );
+  ).filter(message => isMessageInContextScope(message, scope));
 }
 
-function readFromNyatDb(chatId: number, count: number, threadId?: number): FormattedMessage[] | null {
+/** Shared safe reader for recent context and mid-term compression. */
+export function readScopedNyatContext(scope: ContextScope, count: number): FormattedMessage[] | null {
+  if (!matchesContextScope(scope, resolveStorageScope(scope.chatId, scope.threadId))) return [];
   if (!env().NYATDB_ENABLED || !env().NYATDB_READ) return null;
   try {
     const ndb = getNyatDb();
     if (!ndb) return null;
-    const rows = ndb.chatRecent(nyatChatKey(chatId, threadId), count);
-    if (!rows.length) return null;
-    return fromNyatChatRows(rows);
+    const key = contextStorageId(scope);
+    const current = key === null ? [] : fromNyatChatRows(ndb.chatRecent(key, count), scope);
+    // Never inspect or infer the old lossy topic-number buckets. Source-aware
+    // non-topic rows can be read, but unknown old bodies stay untouched on disk.
+    const legacy = scope.threadId === 0 ? fromNyatChatRows(ndb.chatRecent(scope.chatId, count), scope) : [];
+    return mergeRecentWithRedis(current, legacy, count);
   } catch (err) {
-    logger.warn({ err, chatId }, 'NyatDB read failed; falling back to Redis');
+    logger.warn({ err, chatId: scope.chatId }, 'NyatDB read failed; falling back to Redis');
     return null;
   }
 }
 
-async function readFromRedis(chatId: number, count: number, threadId?: number): Promise<FormattedMessage[]> {
+async function readFromRedis(scope: ContextScope, count: number): Promise<FormattedMessage[]> {
   const redis = getRedis();
-  const raw = await redis.lrange(ctxKey(chatId, threadId), -count, -1);
-  return safeParseMessages(raw);
+  const [current, legacy] = await Promise.all([
+    redis.lrange(contextRedisKey(scope), -count, -1),
+    redis.lrange(legacyCtxKey(scope.chatId, scope.threadId), -count, -1),
+  ]);
+  // Legacy Redis keys are unambiguous strings, but their rows still need an
+  // existing source identity. A current token is never used to relabel them.
+  return mergeRecentWithRedis(safeParseMessages(current, scope), safeParseMessages(legacy, scope), count);
 }
 
 /** Lazy migrate Redis → NyatDB when NyatDB is empty but Redis still has history. */
-function backfillNyatFromRedis(chatId: number, msgs: FormattedMessage[], threadId?: number): void {
+function backfillNyatFromRedis(scope: ContextScope, msgs: FormattedMessage[]): void {
   if (!nyatWriteEnabled() || !msgs.length) return;
   try {
     const ndb = getNyatDb();
     if (!ndb) return;
-    const nk = nyatChatKey(chatId, threadId);
+    const nk = contextStorageId(scope, true);
+    if (nk === null) return;
     const existing = ndb.chatRecent(nk, 1);
     if (existing.length) return;
     let n = 0;
     for (const m of msgs) {
-      if (!(m.messageId > 0)) continue;
+      if (!isMessageInContextScope(m, scope)) continue;
       try {
-        ndb.chatAppend(nk, chatAppendFromFormatted(m));
+        ndb.chatAppend(nk, chatAppendFromFormatted({ ...m, contextScope: scope }));
         n += 1;
       } catch {
         /* skip bad rows */
       }
     }
-    if (n) logger.info({ chatId, threadId, n }, 'NyatDB backfilled from Redis ctx');
+    if (n) logger.info({ chatId: scope.chatId, threadId: scope.threadId, n }, 'NyatDB backfilled from verified Redis ctx');
   } catch (err) {
-    logger.warn({ err, chatId }, 'NyatDB backfill failed');
+    logger.warn({ err, chatId: scope.chatId }, 'NyatDB backfill failed');
   }
 }
 
 /** Chats whose Redis tip is known ≤ NyatDB tip (process-local). */
-const catchUpSettled = new Set<number>();
+const catchUpSettled = new Set<string>();
 /** Chats with no Redis-only holes in the ring — skip Redis LRANGE on getRecent. */
-const redisPeekSkip = new Set<number>();
+const redisPeekSkip = new Set<string>();
 
 /** @internal vitest only */
 export function _resetNyatCatchUpStateForTests(): void {
@@ -270,36 +283,24 @@ export function _resetNyatCatchUpStateForTests(): void {
  * from the broken dual-write era). Uses chatRecent ring for membership — native chatGet
  * index can miss rows that are already in the ring.
  */
-async function catchUpNyatFromRedis(chatId: number, threadId?: number): Promise<number> {
-  if (!nyatWriteEnabled() || catchUpSettled.has(chatId)) return 0;
+async function catchUpNyatFromRedis(scope: ContextScope): Promise<number> {
+  const cacheKey = contextStorageKey(scope);
+  if (!nyatWriteEnabled() || catchUpSettled.has(cacheKey)) return 0;
   try {
     const ndb = getNyatDb();
     if (!ndb) return 0;
 
-    const nk = nyatChatKey(chatId, threadId);
-    const redis = getRedis();
-    const tipRaw = await redis.lindex(ctxKey(chatId, threadId), -1);
-    if (!tipRaw) {
-      catchUpSettled.add(chatId);
-      return 0;
-    }
-
-    const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX, env().CONTEXT_MAX_LENGTH);
-    const known = new Set(ndb.chatRecent(nk, ringMax).map((r) => r.messageId));
-    const fromRedis = await readFromRedis(chatId, env().CONTEXT_MAX_LENGTH, threadId);
+    const fromRedis = await readFromRedis(scope, env().CONTEXT_MAX_LENGTH);
     if (!fromRedis.length) {
-      catchUpSettled.add(chatId);
+      catchUpSettled.add(cacheKey);
       return 0;
     }
-
-    const tipRow = ndb.chatRecent(nk, 1)[0];
-    const nyatLastId = tipRow?.messageId ?? 0;
-    let redisLastId = 0;
-    try {
-      redisLastId = (JSON.parse(tipRaw) as FormattedMessage).messageId ?? 0;
-    } catch {
-      return 0;
-    }
+    const nk = contextStorageId(scope, true);
+    if (nk === null) return 0;
+    const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX || 0, env().CONTEXT_MAX_LENGTH);
+    const current = fromNyatChatRows(ndb.chatRecent(nk, ringMax), scope);
+    const known = new Set(current.map(r => r.messageId));
+    const nyatLastId = current.at(-1)?.messageId ?? 0;
 
     // Only append Redis msgs that are newer than Nyat tip (safe for ring order).
     // Older holes are filled at read-time via mergeRecentWithRedis.
@@ -308,7 +309,7 @@ async function catchUpNyatFromRedis(chatId: number, threadId?: number): Promise<
       if (!(m.messageId > nyatLastId)) continue;
       if (known.has(m.messageId)) continue;
       try {
-        ndb.chatAppend(nk, chatAppendFromFormatted(m));
+        ndb.chatAppend(nk, chatAppendFromFormatted({ ...m, contextScope: scope }));
         known.add(m.messageId);
         n += 1;
       } catch {
@@ -316,12 +317,12 @@ async function catchUpNyatFromRedis(chatId: number, threadId?: number): Promise<
       }
     }
     if (n) {
-      logger.info({ chatId, threadId, n, from: nyatLastId, to: redisLastId }, 'NyatDB catch-up from Redis ctx');
+      logger.info({ chatId: scope.chatId, threadId: scope.threadId, n }, 'NyatDB catch-up from verified Redis ctx');
     }
-    catchUpSettled.add(chatId);
+    catchUpSettled.add(cacheKey);
     return n;
   } catch (err) {
-    logger.warn({ err, chatId }, 'NyatDB catch-up failed');
+    logger.warn({ err, chatId: scope.chatId }, 'NyatDB catch-up failed');
     return 0;
   }
 }
@@ -348,21 +349,29 @@ function mergeRecentWithRedis(
 }
 
 export async function getRecent(chatId: number, count: number, threadId?: number): Promise<FormattedMessage[]> {
+  const scope = resolveStorageScope(chatId, threadId);
+  if (!scope || !Number.isSafeInteger(count) || count <= 0) return [];
+  const cacheKey = contextStorageKey(scope);
+  // Configuration may be revoked while Redis awaits. Never return the previous
+  // account's body to a caller whose current account binding has changed.
+  const finish = (messages: FormattedMessage[]): FormattedMessage[] =>
+    matchesContextScope(scope, resolveStorageScope(chatId, threadId))
+      ? filterRecalledOneBotMessages(chatId, messages) : [];
   // Heal tip-ahead gaps before preferring NyatDB.
   if (nyatWriteEnabled() && env().NYATDB_READ) {
-    await catchUpNyatFromRedis(chatId, threadId);
+    await catchUpNyatFromRedis(scope);
   }
 
-  const fromNyat = readFromNyatDb(chatId, count, threadId);
+  const fromNyat = readScopedNyatContext(scope, count);
 
   // After catch-up + one clean merge, skip Redis LRANGE (hot path).
   if (
     fromNyat &&
     fromNyat.length > 0 &&
-    redisPeekSkip.has(chatId) &&
+    redisPeekSkip.has(cacheKey) &&
     !env().NYATDB_REDIS_MIRROR
   ) {
-    return filterRecalledOneBotMessages(chatId, fromNyat.slice(-count));
+    return finish(fromNyat.slice(-count));
   }
 
   // 取满 CONTEXT_MAX_LENGTH 只为给 mergeRecentWithRedis 补 NyatDB 空洞。NyatDB 读关闭时
@@ -372,34 +381,33 @@ export async function getRecent(chatId: number, count: number, threadId?: number
   // 合计 ~1.4MB Redis 出向 + 40-80ms 同步阻塞。
   const needForMerge = nyatWriteEnabled() && env().NYATDB_READ;
   const fromRedis = await readFromRedis(
-    chatId,
+    scope,
     needForMerge ? Math.max(count, env().CONTEXT_MAX_LENGTH) : count,
-    threadId,
   );
 
   if (fromNyat && fromNyat.length > 0) {
     const merged = mergeRecentWithRedis(fromNyat, fromRedis, count);
-    if (!env().NYATDB_REDIS_MIRROR && catchUpSettled.has(chatId)) {
-      const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX, env().CONTEXT_MAX_LENGTH);
+    if (!env().NYATDB_REDIS_MIRROR && catchUpSettled.has(cacheKey)) {
+      const ringMax = Math.max(env().NYATDB_CHAT_RING_MAX || 0, env().CONTEXT_MAX_LENGTH);
       const ringIds = new Set(
-        (readFromNyatDb(chatId, ringMax, threadId) ?? fromNyat).map((m) => m.messageId).filter((id) => id > 0),
+        (readScopedNyatContext(scope, ringMax) ?? fromNyat).map((m) => m.messageId).filter((id) => id > 0),
       );
       const hasHole = fromRedis.some((m) => m.messageId > 0 && !ringIds.has(m.messageId));
-      if (hasHole) redisPeekSkip.delete(chatId);
-      else redisPeekSkip.add(chatId);
+      if (hasHole) redisPeekSkip.delete(cacheKey);
+      else redisPeekSkip.add(cacheKey);
     }
     // Mirror off: keep legacy Redis hole copy alive until peek-skip settles.
-    if (fromRedis.length > 0 && !env().NYATDB_REDIS_MIRROR && !redisPeekSkip.has(chatId)) {
+    if (fromRedis.length > 0 && !env().NYATDB_REDIS_MIRROR && !redisPeekSkip.has(cacheKey)) {
       getRedis()
-        .expire(ctxKey(chatId, threadId), CTX_TTL)
+        .expire(contextRedisKey(scope), CTX_TTL)
         .catch(() => {});
     }
-    return filterRecalledOneBotMessages(chatId, merged);
+    return finish(merged);
   }
 
   if (fromRedis.length > 0) {
-    backfillNyatFromRedis(chatId, fromRedis, threadId);
-    return filterRecalledOneBotMessages(chatId, fromRedis.slice(-count));
+    backfillNyatFromRedis(scope, fromRedis);
+    return finish(fromRedis.slice(-count));
   }
   return [];
 }

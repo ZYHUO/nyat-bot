@@ -186,6 +186,18 @@ beforeEach(() => {
 afterEach(async () => { closeQqHeartBatches(); await settleIngress(); _resetAttentionAccumulator(); vi.clearAllTimers(); vi.useRealTimers(); db.close(); });
 
 describe.each(['qq', 'telegram'] as const)('%s shared participation and timing', platform => {
+  it('establishes trusted context identity at the real gateway with durable ingress disabled', async () => {
+    expect(f.config.DURABLE_INGRESS_ENABLED).toBe(false);
+    const message = incoming(platform, 970);
+    await message.ingest(); await settleIngress();
+    const write = f.addMessage.mock.calls.find(([chatId]) => chatId === message.chatId);
+    expect(write).toBeDefined();
+    const formatted = write![1] as FormattedMessage;
+    expect(formatted.eventIdentity?.ref.conversation).toMatchObject({
+      platform, accountId: platform === 'qq' ? '42' : '12345', conversationKind: 'group',
+    });
+    expect(formatted.eventIdentity?.eventId).toMatch(/^[a-f0-9]{64}$/);
+  });
   it.each(['wait', 'no_action'] as const)('records sampled timing %s without claiming delivery', async action => {
     Object.assign(f.config, { NYATOS_SHADOW_ENABLED: true, HEART_ENABLED: false, META_DEFER_ENABLED: true });
     f.gate.mockResolvedValue({ action, reason: 'fixture pause', waitSec: 12, shortCircuited: false, latencyMs: 1 });

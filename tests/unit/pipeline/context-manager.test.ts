@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { FormattedMessage } from '../../../src/shared/types.js';
+import { createMessageEventIdentity } from '../../../src/shared/event-identity.js';
+import { fromTelegramChatId } from '../../../src/platform/identity.js';
 
 const mockEval = vi.fn();
 const mockHset = vi.fn();
@@ -18,7 +20,7 @@ vi.mock('../../../src/db/redis.js', () => ({
 }));
 
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({ CONTEXT_MAX_LENGTH: 600 }),
+  env: () => ({ CONTEXT_MAX_LENGTH: 600, BOT_TOKEN: '123:synthetic' }),
 }));
 
 vi.mock('../../../src/shared/logger.js', () => ({
@@ -37,6 +39,7 @@ function makeMessage(overrides: Partial<FormattedMessage> = {}): FormattedMessag
     messageId: 1,
     textContent: 'hello',
     isForwarded: false,
+    eventIdentity: createMessageEventIdentity({ ref: { conversation: fromTelegramChatId('123', -1001), id: '1' }, occurredAt: 1700000000000 }),
     ...overrides,
   };
 }
