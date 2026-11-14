@@ -89,6 +89,7 @@ const TASK_NAMES = new Set([
   'topic-scan', 'cache-warmup', 'learner-scan',
 ]);
 const SAFE_REASONS = new Set(['disabled', 'no_evidence', 'cooldown', 'model_skip', 'empty_output', 'unparsed', 'llm_failed', 'not_due']);
+const SAFE_DURABLE_STATES = new Set(['not_scheduled', 'scheduled', 'claimed', 'started', 'succeeded', 'skipped', 'failed', 'unknown']);
 const PROBE_LABELS = { model: '模型端到端能力尚未探测', vector: '向量服务尚未探测', sandbox: '操作系统隔离能力尚未探测', vision: '图片模型能力尚未探测', weather: '天气源连通性尚未探测', audio: '转写接口尚未在当前进程探测', tts: '语音合成与编码尚未在当前进程探测' };
 
 function safeTask(task: TickTaskObservation, index: number): TickTaskObservation {
@@ -104,6 +105,9 @@ function safeTask(task: TickTaskObservation, index: number): TickTaskObservation
     lastDispatchedAt: task.lastDispatchedAt, nextRunAt: task.nextRunAt, due: task.due,
     historyAvailable: task.historyAvailable, result: task.result,
     reason: task.reason && SAFE_REASONS.has(task.reason) ? task.reason : null, timedOut: task.timedOut,
+    ...(task.durableState === undefined ? {} : { durableState: SAFE_DURABLE_STATES.has(task.durableState) ? task.durableState : 'unknown' }),
+    ...(task.lastCompletedAt === undefined ? {} : { lastCompletedAt: typeof task.lastCompletedAt === 'number'
+      && Number.isSafeInteger(task.lastCompletedAt) && task.lastCompletedAt > 0 ? task.lastCompletedAt : null }),
   };
 }
 

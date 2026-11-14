@@ -8,7 +8,7 @@ import { env } from '../env.js';
 import { resolveConversationScope } from '../shared/privacy-scope.js';
 import { resolveOwnerDmReadContext } from '../shared/owner-memory-scope.js';
 import { appendCognitiveEvent, getCognitiveEvent, type CognitiveEventInput } from './cognitive-events.js';
-import { checkpointProcess, hasCurrentProcessWakeSource, recordMissionObservation, requestProcessWake, stopMission, stopProcess, type ProcessWake } from './cognitive-continuity.js';
+import { checkpointProcess, hasCurrentProcessWakeSource, listPendingProcessWakes, recordMissionObservation, requestProcessWake, stopMission, stopProcess, type ProcessWake } from './cognitive-continuity.js';
 import { validateAcceptance } from './task-evidence.js';
 
 export interface LifeProject {
@@ -49,6 +49,117 @@ export function lifeProjectForWake(wake: ProcessWake): LifeProject | null {
   catch { return null; } // Older installations without this optional migration.
 }
 
+function wakeBelongsToProject(project: LifeProject, wake: ProcessWake): boolean {
+  if (wake.scope.visibility !== 'chat' || wake.scope.chatId !== project.chat_id
+    || wake.scope.taskId || wake.kind !== 'strategist' || wake.processId !== processId(project)) return false;
+  const saved = getCognitiveEvent(wake.wakeEventId);
+  const value = saved?.fact['value'] as { processId?: unknown; wakeAt?: unknown;
+    scope?: { visibility?: unknown; chatId?: unknown; taskId?: unknown } } | undefined;
+  return value?.processId === processId(project) && value.wakeAt === wake.wakeAt
+    && saved?.chatId === project.chat_id && value.scope?.visibility === 'chat'
+    && value.scope.chatId === project.chat_id && !value.scope.taskId
+    && hasCurrentProcessWakeSource(saved);
+}
+
+function runningAttempt(project: LifeProject): LifeAttempt | undefined {
+  return getDb().prepare("SELECT * FROM life_project_attempts WHERE project_id=? AND status='running'").get(project.id) as LifeAttempt | undefined;
+}
+
+function stopLifeProcess(project: LifeProject, reason: string, now: number): void {
+  if (!stopProcess({ processId: processId(project), scope: scopeOf(project), reason, recordedAt: now })) {
+    throw new Error('life_stop_process_unavailable');
+  }
+}
+
+function closeExpiredLifeState(project: LifeProject, running: LifeAttempt | undefined, now: number): boolean {
+  if (running) {
+    if (running.lease_until >= now) return false;
+    const outcomeId = event({ type: 'task_observation', source: 'host', scope: scopeOf(project), occurredAt: now,
+      dedupeKey: `life-outcome:${running.id}`, correlationId: `life:${project.id}`, causationId: running.wake_event_id,
+      fact: { kind: 'digital_creation_unknown', projectId: project.id, attemptId: running.id, reason: 'expired_started_attempt',
+        conversationScope: resolveConversationScope(project.chat_id) } });
+    getDb().prepare("UPDATE life_project_attempts SET status='unknown',finished_at=?,result_code='expired_started_attempt',outcome_event_id=? WHERE id=? AND status='running'")
+      .run(now, outcomeId, running.id);
+    getDb().prepare("UPDATE life_projects SET status='held' WHERE id=?").run(project.id);
+    stopLifeProcess(project, 'digital_project_unknown', now);
+    return true;
+  }
+  if (now < project.deadline_at && project.attempts_started < project.max_attempts) return false;
+  const expired = now >= project.deadline_at;
+  const expiredId = event({ type: 'task_observation', source: 'host', scope: scopeOf(project), occurredAt: now,
+    dedupeKey: `life-expired:${project.id}`, correlationId: `life:${project.id}`,
+    fact: { kind: expired ? 'digital_project_expired' : 'digital_project_budget_exhausted', projectId: project.id,
+      conversationScope: resolveConversationScope(project.chat_id) } });
+  getDb().prepare("UPDATE life_projects SET status='exhausted' WHERE id=?").run(project.id);
+  if (!recordMissionObservation({ missionId: project.mission_id, scope: scopeOf(project), status: expired ? 'expired' : 'failed',
+    observedAt: now, evidenceEventIds: [expiredId] })) throw new Error('life_expiry_event_unavailable');
+  stopLifeProcess(project, expired ? 'digital_project_deadline' : 'digital_project_budget_exhausted', now);
+  return true;
+}
+
+function retireLifeWakes(project: LifeProject, pending: ProcessWake[], keepId: string | undefined, now: number): void {
+  for (const wake of pending) {
+    if (wake.wakeEventId === keepId || !wakeBelongsToProject(project, wake)) continue;
+    if (!checkpointProcess({ processId: processId(project), wakeEventId: wake.wakeEventId, scope: scopeOf(project),
+      status: 'waiting', recordedAt: now,
+      ...(project.status === 'active' && project.next_due_at > now ? { nextWakeAt: project.next_due_at } : {}) })) {
+      throw new Error('life_superseded_checkpoint_unavailable');
+    }
+  }
+}
+
+function requestLifeWake(project: LifeProject, causes: string[]): void {
+  if (!requestProcessWake({ processId: processId(project), kind: 'strategist', scope: scopeOf(project),
+    wakeAt: project.next_due_at, reason: 'digital_project_next_practice', causeEventIds: causes, dedupePrecision: 'second' })) {
+    throw new Error('life_next_wake_unavailable');
+  }
+}
+
+/** Repair older duplicate wakes without replaying a model call or changing its result. */
+export function reconcileLifeProjectWakes(now = sec()): void {
+  if (!env().LIFE_PROJECT_ENABLED) return;
+  // Optional migration is absent in older installations and unit fixtures.
+  if (!getDb().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='life_projects'").get()) return;
+  const projects = (getDb().prepare('SELECT * FROM life_projects').all() as LifeProject[]).filter(exactOwner);
+  if (!projects.length) return;
+  const pending = listPendingProcessWakes();
+  for (const project of projects) {
+    getDb().transaction(() => {
+      const current = findLifeProject(project.id)!;
+      const ownWakes = pending.filter(wake => wakeBelongsToProject(current, wake));
+      if (current.status !== 'active') {
+        retireLifeWakes(current, ownWakes, undefined, now);
+        if (ownWakes.length) stopLifeProcess(current, `digital_project_${current.status}`, now);
+        return;
+      }
+      const running = runningAttempt(current);
+      if (closeExpiredLifeState(current, running, now)) {
+        retireLifeWakes(findLifeProject(current.id)!, ownWakes, undefined, now);
+        return;
+      }
+      if (running) {
+        // Keep the actual started wake for lease-expiry recovery. Other wake
+        // records are waiting/superseded, not successful attempts.
+        retireLifeWakes(current, ownWakes, running.wake_event_id, now);
+        return;
+      }
+      const used = new Set((getDb().prepare('SELECT wake_event_id FROM life_project_attempts WHERE project_id=?')
+        .all(current.id) as Array<{ wake_event_id: string }>).map(row => row.wake_event_id));
+      const next = ownWakes.find(wake => wake.wakeAt === current.next_due_at && !used.has(wake.wakeEventId));
+      retireLifeWakes(current, ownWakes, next?.wakeEventId, now);
+      if (!next) requestLifeWake(current, [current.activation_event_id]);
+    }).immediate();
+  }
+}
+
+/** Filter before the shared runtime's LIMIT; never consume a slot for a held/old wake. */
+export function lifeProjectWakeIsDue(project: LifeProject, wake: ProcessWake, now = sec()): boolean {
+  return !!env().LIFE_PROJECT_ENABLED && !!env().CODEACT_ISOLATION_ENABLED
+    && exactOwner(project) && project.status === 'active' && wakeBelongsToProject(project, wake)
+    && wake.wakeAt === project.next_due_at && now >= project.next_due_at && now < project.deadline_at
+    && project.attempts_started < project.max_attempts && !runningAttempt(project);
+}
+
 /** Only the explicit local operator activation script calls this API. */
 export function activateLifeProject(input: { chatId: number; objective: string; operatorRef: string; maxAttempts?: number; nowSec?: number }): LifeProject {
   if (!env().LIFE_PROJECT_ENABLED) throw new Error('life_project_disabled');
@@ -81,8 +192,7 @@ export function activateLifeProject(input: { chatId: number; objective: string; 
       created_at,deadline_at,next_due_at,max_attempts) VALUES(?,?,?,?,?,?,?,'active',?,?,?,?)`)
       .run(id, input.chatId, current.platform, current.accountId, missionId, activationId, objective, now, now + 30 * DAY, now, maxAttempts);
     const project = findLifeProject(id)!;
-    if (!requestProcessWake({ processId: processId(project), kind: 'strategist', scope, wakeAt: now,
-      reason: 'operator_activated_digital_project', causeEventIds: [activationId] })) throw new Error('life_project_wake_unavailable');
+    requestLifeWake(project, [activationId]);
     return project;
   }).immediate();
 }
@@ -100,38 +210,13 @@ export function lifeClaimIsActive(claim: LifeClaim): boolean {
 }
 
 export function claimLifeAttempt(project: LifeProject, wake: ProcessWake, now = sec()): LifeClaim | null {
-  const savedWake = getCognitiveEvent(wake.wakeEventId);
-  const wakeValue = savedWake?.fact['value'] as { processId?: unknown } | undefined;
-  if (!env().LIFE_PROJECT_ENABLED || !exactOwner(project) || wake.scope.chatId !== project.chat_id
-    || wake.processId !== processId(project) || wakeValue?.processId !== processId(project)
-    || !hasCurrentProcessWakeSource(savedWake)) return null;
+  if (!env().LIFE_PROJECT_ENABLED || !exactOwner(project) || !wakeBelongsToProject(project, wake)) return null;
   return getDb().transaction(() => {
     const current = findLifeProject(project.id)!;
     if (current.status !== 'active') return null;
-    const running = getDb().prepare("SELECT * FROM life_project_attempts WHERE project_id=? AND status='running'").get(project.id) as LifeAttempt | undefined;
-    if (running) {
-      if (running.lease_until < now) {
-        const outcomeId = event({ type: 'task_observation', source: 'host', scope: scopeOf(current), occurredAt: now,
-          dedupeKey: `life-outcome:${running.id}`, correlationId: `life:${current.id}`, causationId: running.wake_event_id,
-          fact: { kind: 'digital_creation_unknown', projectId: current.id, attemptId: running.id, reason: 'expired_started_attempt',
-            conversationScope: resolveConversationScope(current.chat_id) } });
-        getDb().prepare("UPDATE life_project_attempts SET status='unknown',finished_at=?,result_code='expired_started_attempt',outcome_event_id=? WHERE id=? AND status='running'")
-          .run(now, outcomeId, running.id);
-        getDb().prepare("UPDATE life_projects SET status='held' WHERE id=?").run(current.id);
-      }
-      return null;
-    }
-    if (now >= current.deadline_at) {
-      const expiredId = event({ type: 'task_observation', source: 'host', scope: scopeOf(current), occurredAt: now,
-        dedupeKey: `life-expired:${current.id}`, correlationId: `life:${current.id}`,
-        fact: { kind: 'digital_project_expired', projectId: current.id, conversationScope: resolveConversationScope(current.chat_id) } });
-      getDb().prepare("UPDATE life_projects SET status='exhausted' WHERE id=?").run(current.id);
-      if (!recordMissionObservation({ missionId: current.mission_id, scope: scopeOf(current), status: 'expired',
-        observedAt: now, evidenceEventIds: [expiredId] }) || !stopProcess({ processId: processId(current), scope: scopeOf(current), recordedAt: now,
-        reason: 'digital_project_deadline' })) throw new Error('life_expiry_event_unavailable');
-      return null;
-    }
-    if (now < current.next_due_at || current.attempts_started >= current.max_attempts) return null;
+    const running = runningAttempt(current);
+    if (closeExpiredLifeState(current, running, now) || running) return null;
+    if (now < current.next_due_at || wake.wakeAt !== current.next_due_at) return null;
     if (getDb().prepare('SELECT 1 FROM life_project_attempts WHERE wake_event_id=?').get(wake.wakeEventId)) return null;
     const id = randomUUID(), token = randomUUID(), ordinal = current.attempts_started + 1;
     getDb().prepare(`INSERT INTO life_project_attempts(id,project_id,ordinal,wake_event_id,owner_token,status,started_at,lease_until)
@@ -270,8 +355,12 @@ export function settleLifeAttempt(claim: LifeClaim, status: 'succeeded' | 'faile
       summary: '数字短诗文件验收；未评价文学水平；后台未发消息', ...(terminal ? {} : { nextWakeAt: next }) })) throw new Error('life_mission_receipt_unavailable');
     if (!checkpointProcess({ processId: processId(current.project), wakeEventId: current.attempt.wake_event_id, scope: scopeOf(current.project),
       status: status === 'succeeded' ? 'completed' : 'failed', recordedAt: now, outcomeEventIds: [outcomeId], ...(terminal ? {} : { nextWakeAt: next }) })) throw new Error('life_checkpoint_unavailable');
-    if (!terminal && !requestProcessWake({ processId: processId(current.project), kind: 'strategist', scope: scopeOf(current.project),
-      wakeAt: next, reason: 'digital_project_next_practice', causeEventIds: [outcomeId] })) throw new Error('life_next_wake_unavailable');
+    const settledProject = findLifeProject(current.project.id)!;
+    const pending = listPendingProcessWakes();
+    const nextWake = terminal ? undefined : pending.find(wake => wakeBelongsToProject(settledProject, wake) && wake.wakeAt === next);
+    retireLifeWakes(settledProject, pending, nextWake?.wakeEventId, now);
+    if (terminal) stopLifeProcess(settledProject, 'digital_project_finished', now);
+    else if (!nextWake) requestLifeWake(settledProject, [outcomeId]);
     return outcomeId;
   }).immediate();
 }

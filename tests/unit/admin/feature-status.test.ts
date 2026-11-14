@@ -58,7 +58,8 @@ describe('feature status manifest', () => {
     const secret = 'never-return-this-key';
     const chat = -100987654321;
     const config = { MONITOR_TOKEN: secret, BOT_TOKEN: secret, MASTER_UID: chat, TURN_ACTOR_ENABLED: true, TURN_ACTOR_CHAT_IDS: [chat] } as unknown as Env;
-    const contaminated = { ...task(), name: `custom:${chat}`, reason: secret, error: secret, chatId: chat, apiKey: secret,
+    const contaminated = { ...task(), name: `custom:${chat}`, reason: secret, durableState: secret, lastCompletedAt: chat,
+      error: secret, chatId: chat, apiKey: secret,
       schedule: { dailyAt: { hour: 7, minute: 0, chatId: chat } } } as TickTaskObservation;
     const data = report(config, [contaminated]);
     const json = JSON.stringify(data);
@@ -67,6 +68,16 @@ describe('feature status manifest', () => {
     expect(json).not.toContain('BOT_TOKEN');
     expect(json).not.toContain('MONITOR_TOKEN');
     expect(data.tasks[0]?.name).toBe('unlisted-task-1');
+    expect(data.tasks[0]?.durableState).toBe('unknown');
+    expect(data.tasks[0]?.lastCompletedAt).toBeNull();
     expect(data.features.find((feature) => feature.id === 'turn')?.scope).toBe('restricted');
+  });
+
+  it('preserves typed durable state and real completion time without claiming an unknown run succeeded', () => {
+    const completed = 1_800_000_001_234;
+    const data = report({}, [task({ durableState: 'succeeded', lastCompletedAt: completed }),
+      task({ durableState: 'unknown', lastCompletedAt: null, nextRunAt: null })]);
+    expect(data.tasks[0]).toMatchObject({ durableState: 'succeeded', lastCompletedAt: completed });
+    expect(data.tasks[1]).toMatchObject({ durableState: 'unknown', lastCompletedAt: null, nextRunAt: null });
   });
 });

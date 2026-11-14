@@ -20,7 +20,7 @@ import { recordInnerState } from './nyatos-state.js';
 import { hasCurrentEmotionSource, projectInnerStateFromConversationField } from './emotion-continuity.js';
 import { env } from '../env.js';
 import { getCognitiveEvent } from './cognitive-events.js';
-import { lifeProjectForWake } from './life-project.js';
+import { lifeProjectForWake, lifeProjectWakeIsDue, reconcileLifeProjectWakes } from './life-project.js';
 
 const PROCESS_CADENCE_SEC: Record<CognitiveProcessKind, number> = {
   observer: 15 * 60,
@@ -79,7 +79,15 @@ export async function runCognitiveProcessTick(
   now = nowSec(),
   limit = 20,
 ): Promise<CognitiveProcessTickResult> {
-  const wakes = listDueProcessWakes(now, limit);
+  reconcileLifeProjectWakes(now);
+  const lifeProcesses = new Set<string>();
+  const wakes = listDueProcessWakes(now, limit, wake => {
+    const project = lifeProjectForWake(wake);
+    if (!project) return true;
+    if (lifeProcesses.has(wake.processId) || !lifeProjectWakeIsDue(project, wake, now)) return false;
+    lifeProcesses.add(wake.processId);
+    return true;
+  });
   const result: CognitiveProcessTickResult = {
     claimed: wakes.length,
     completed: 0,

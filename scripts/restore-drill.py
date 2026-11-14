@@ -25,7 +25,7 @@ class DrillError(RuntimeError):
 
 
 def fail(code):
-    raise DrillError(code)
+    raise DrillError(code) from None
 
 
 def trusted_runtime(filename, *, directory=False):
@@ -62,15 +62,32 @@ def clean_environment(home):
     return environment
 
 
-def execute(args, home, timeout=120, extra_env=None):
+def save_copy_failure_stderr(home, stderr):
+    # This directory is the new root-private quarantine workdir. Never log the
+    # command, its stdout (config dump contains credentials), or inherited env.
+    # Exclusive/no-follow creation cannot overwrite an earlier diagnostic/link.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        descriptor = os.open(Path(home) / 'rclone-copy.stderr.log', flags, 0o600)
+        with os.fdopen(descriptor, 'wb') as log:
+            log.write((stderr or b'')[-1024 * 1024:])
+    except OSError:
+        fail('command_diagnostic_write_failed')
+
+
+def execute(args, home, timeout=120, extra_env=None, copy_failure_log=False):
     try:
         result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=home, env={**clean_environment(home), **(extra_env or {})}, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
+        if copy_failure_log:
+            save_copy_failure_stderr(home, error.stderr)
         fail('command_timeout')
     except OSError:
         fail('command_start_failed')
     if result.returncode:
+        if copy_failure_log:
+            save_copy_failure_stderr(home, result.stderr)
         fail('command_failed')
     if len(result.stdout) > 8 * 1024 * 1024:
         fail('command_result_too_large')
@@ -80,7 +97,8 @@ def execute(args, home, timeout=120, extra_env=None):
 def rclone(config, args, home, timeout=300):
     # Inherited RCLONE_CONFIG_* cannot redirect a trusted, explicitly supplied config.
     password = backup.rclone_environment(config)['RCLONE_CONFIG_PASS']
-    return execute(backup.rclone_args(config) + args, home, timeout, {'RCLONE_CONFIG_PASS': password})
+    return execute(backup.rclone_args(config) + args, home, timeout, {'RCLONE_CONFIG_PASS': password},
+                   copy_failure_log=bool(args and args[0] == 'copy'))
 
 
 def validate_cloud(config, home):
@@ -132,8 +150,9 @@ def download_generation(config, run_id, work):
         fail('cloud_download_space_low')
     target = work / 'cloud'
     target.mkdir(mode=0o700)  # Must be new: never satisfy this stage using a local backup.
-    rclone(drive, ['copy', remote, str(target), '--transfers', '2', '--checkers', '2',
-                  '--retries', '1', '--low-level-retries', '1'], work, timeout=7200)
+    rclone(drive, ['copy', remote, str(target), '--transfers', '1', '--checkers', '1',
+                  '--tpslimit', '1', '--tpslimit-burst', '1', '--retries', '3',
+                  '--low-level-retries', '10', '--retries-sleep', '30s'], work, timeout=7200)
     if {entry.name for entry in target.iterdir()} != expected:
         fail('downloaded_inventory_mismatch')
     if (target / 'manifest.json').read_bytes() != raw_manifest or (target / 'COMPLETE.json').read_bytes() != raw_seal:

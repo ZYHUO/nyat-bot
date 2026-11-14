@@ -363,6 +363,15 @@ export function claimDueMissionWakes(now = nowSec(), limit = 20): MissionWake[] 
   const wakes: MissionWake[] = [];
   const due = listMissionContinuity(undefined, Number.POSITIVE_INFINITY)
     .filter(item => !['verified', 'failed', 'stopped', 'expired'].includes(item.status) && (item.nextWakeAt ?? 0) <= now)
+    .filter(item => {
+      // Operator-owned digital projects have a precise, budgeted scheduler.
+      // A second minute-based mission_due wake must not compete with it. This
+      // also recognizes existing activations, without relabelling old events.
+      const proposal = getCognitiveEvent(item.missionId);
+      const activation = proposal?.source === 'host' && proposal.causationId
+        ? getCognitiveEvent(proposal.causationId) : null;
+      return activation?.source !== 'host' || activation.fact['kind'] !== 'operator_activated_digital_project';
+    })
     .sort((a, b) => (a.nextWakeAt ?? a.proposedAt) - (b.nextWakeAt ?? b.proposedAt) || a.missionId.localeCompare(b.missionId));
   for (const mission of due.slice(0, Math.min(100, Math.max(1, Math.trunc(limit))))) {
     const requested = requestMissionWake({ missionId: mission.missionId, scope: mission.scope, wakeAt: now, reason: 'mission_due' });
@@ -464,6 +473,7 @@ export function requestProcessWake(input: {
   wakeAt?: number;
   reason: string;
   causeEventIds?: string[];
+  dedupePrecision?: 'second';
 }): { inserted: boolean; eventId: string; wakeAt: number } | null {
   let key: string;
   try { key = scopeKey(input.scope); } catch { return null; }
@@ -480,9 +490,11 @@ export function requestProcessWake(input: {
   };
   // Account changes must not alias an older wake in the same minute. Keep the
   // legacy key while continuity is off; new account-bound keys are bounded.
-  const dedupeKey = env().EMOTION_CONTINUITY_ENABLED && conversation?.accountId
-    ? `process-wake:v2:${createHash('sha256').update(JSON.stringify([key, processId, Math.floor(wakeAt / 60), conversation])).digest('hex')}`
-    : `process-wake:${key}:${processId}:${Math.floor(wakeAt / 60)}`;
+  const dedupeKey = input.dedupePrecision === 'second'
+    ? `process-wake:exact:${createHash('sha256').update(JSON.stringify([key, processId, wakeAt, conversation])).digest('hex')}`
+    : env().EMOTION_CONTINUITY_ENABLED && conversation?.accountId
+      ? `process-wake:v2:${createHash('sha256').update(JSON.stringify([key, processId, Math.floor(wakeAt / 60), conversation])).digest('hex')}`
+      : `process-wake:${key}:${processId}:${Math.floor(wakeAt / 60)}`;
   const result = appendCognitiveEvent({
     type: 'cognitive_process_wake', source: 'scheduler', scope: input.scope, occurredAt: nowSec(),
     correlationId: `process:${processId}`, dedupeKey,
@@ -491,7 +503,7 @@ export function requestProcessWake(input: {
   return result ? { inserted: result.inserted, eventId: result.event.id, wakeAt } : null;
 }
 
-export function listDueProcessWakes(now = nowSec(), limit = 50): ProcessWake[] {
+function* pendingProcessWakes(): Generator<ProcessWake> {
   const checkpoints = processCheckpoints();
   const stoppedAt = new Map<string, number>();
   for (const event of iterateCognitiveHistory({ type: 'cognitive_process_stopped' })) {
@@ -501,18 +513,32 @@ export function listDueProcessWakes(now = nowSec(), limit = 50): ProcessWake[] {
     const processId = boundedText(candidate['processId'], 160);
     if (processId) stoppedAt.set(JSON.stringify([event.scopeKey, processId]), event.occurredAt);
   }
-  const out: ProcessWake[] = [];
   for (const event of iterateCognitiveHistory({ type: 'cognitive_process_wake' })) {
     const value = parseProcessWake(event);
-    if (!value || value.wakeAt > now || event.scopeKey !== scopeKey(value.scope)) continue;
+    if (!value || event.scopeKey !== scopeKey(value.scope)) continue;
     if (env().EMOTION_CONTINUITY_ENABLED && value.scope.visibility === 'chat' && !hasCurrentProcessWakeSource(event)) continue;
     const checkpoint = checkpoints.get(event.id);
     if (checkpoint && scopeKey(checkpoint.scope) === event.scopeKey && checkpoint.processId === value.processId) continue;
     if ((stoppedAt.get(JSON.stringify([event.scopeKey, value.processId])) ?? -1) >= event.occurredAt) continue;
-    out.push({
+    yield {
       processId: value.processId, kind: value.kind, scope: value.scope, wakeEventId: event.id,
       wakeAt: value.wakeAt, reason: value.reason, causeEventIds: value.causeEventIds,
-    });
+    };
+  }
+}
+
+/** Includes future pending wakes, so a host driver can retire superseded work. */
+export function listPendingProcessWakes(): ProcessWake[] {
+  return [...pendingProcessWakes()];
+}
+
+export function listDueProcessWakes(now = nowSec(), limit = 50, eligible?: (wake: ProcessWake) => boolean): ProcessWake[] {
+  const out: ProcessWake[] = [];
+  for (const wake of pendingProcessWakes()) {
+    // Driver eligibility is applied before LIMIT, never after a stale process
+    // has already consumed the entire bounded execution window.
+    if (wake.wakeAt > now || (eligible && !eligible(wake))) continue;
+    out.push(wake);
     if (out.length >= Math.min(100, Math.max(1, Math.trunc(limit)))) break;
   }
   return out;

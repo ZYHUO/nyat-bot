@@ -10,9 +10,10 @@
 //   dailyAt(h,m)  — 每天北京时间 h:m(错过窗口补跑一次,重启不漏)
 //   weeklyAt(d,h,m) — 每周北京时间周 d h:m
 //
-// lastRun 持久化 Redis(xxb:tick:lastrun:<name>),重启后:
-//   - 间隔任务:从上次真实运行时间续算,不重跑不漏跑
+// Durable 模式以 SQLite 为准;Redis lastRun 仅记录派发遥测。
+//   - 间隔任务:从上次成功/跳过的实际完成时间续算,过期合并为当前一次
 //   - 定点任务:当天/当周窗口已过且未跑 → 立即补跑一次
+// 旧模式仍以 Redis(xxb:tick:lastrun:<name>) 的派发时间续算。
 //
 // 防重叠沿用 safeRun(同名任务在跑就跳过,锁握到真正 settle)。
 // ────────────────────────────────────────
@@ -21,7 +22,7 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../db/redis.js';
 import { runWithAiWorkload } from '../ai/workload.js';
-import { claimScheduledRun, finishScheduledRun, getScheduledCompletion, getScheduledRun, renewScheduledRun, startScheduledRun } from './scheduled-runs.js';
+import { claimScheduledRun, finishScheduledRun, getScheduledCompletion, getScheduledFinishedAt, getScheduledRun, renewScheduledRun, startScheduledRun } from './scheduled-runs.js';
 import type { ScheduledClaim } from './scheduled-runs.js';
 
 export type TickTaskOutcome = { status: 'completed' | 'skipped'; reason?: string };
@@ -81,10 +82,14 @@ export function nextTickDueAt(task: TickTask, nowSec: number, lastRunSec: number
   return null;
 }
 
-async function getLastRun(name: string): Promise<number> {
-  if (env().DURABLE_CRON_ENABLED) return getScheduledCompletion(name) / 1000;
+function durableCadenceBase(task: TickTask): number {
+  return task.everySec !== undefined ? getScheduledFinishedAt(task.name) : getScheduledCompletion(task.name);
+}
+
+async function getLastRun(task: TickTask): Promise<number> {
+  if (env().DURABLE_CRON_ENABLED) return durableCadenceBase(task) / 1000;
   try {
-    const v = await getRedis().get(LASTRUN_KEY(name));
+    const v = await getRedis().get(LASTRUN_KEY(task.name));
     return v ? Number(v) : 0;
   } catch {
     return 0;
@@ -102,7 +107,7 @@ async function setLastRun(name: string, ts: number): Promise<void> {
 
 /** 判断任务是否到期。返回 true = 该跑了。 */
 async function isDue(task: TickTask, nowSec: number): Promise<boolean> {
-  const next = nextTickDueAt(task, nowSec, await getLastRun(task.name), env().PROACTIVE_ACTIVATED_AT_SEC ?? 0);
+  const next = nextTickDueAt(task, nowSec, await getLastRun(task), env().PROACTIVE_ACTIVATED_AT_SEC ?? 0);
   return next !== null && next <= nowSec;
 }
 
@@ -115,8 +120,9 @@ async function scan(): Promise<void> {
       try {
         if (env().DURABLE_CRON_ENABLED) {
           if (_running.has(task.name)) continue;
-          const due = nextTickDueAt(task, nowSec, await getLastRun(task.name), env().PROACTIVE_ACTIVATED_AT_SEC ?? 0);
-          const claim = claimScheduledRun(task.name, due === null ? null : due * 1000, task.retrySafe === true);
+          const due = nextTickDueAt(task, nowSec, await getLastRun(task), env().PROACTIVE_ACTIVATED_AT_SEC ?? 0);
+          const claim = claimScheduledRun(task.name, due === null ? null : due * 1000, task.retrySafe === true,
+            Date.now(), task.everySec === undefined ? undefined : task.everySec * 1000);
           if (claim) {
             // Dispatch telemetry must not hold a SQLite claim behind Redis's
             // offline queue; Redis is not this run's completion authority.
@@ -280,9 +286,11 @@ export async function getTickObservations(nowMs = Date.now()): Promise<TickTaskO
     const saved = decodeSnapshot(rows[index * 2 + 1] ?? null);
     const state = snapshots.get(task.name) ?? saved ?? { lastStartedAt: null, lastFinishedAt: null, durationMs: null, result: null, reason: null, timedOut: false };
     const durable = env().DURABLE_CRON_ENABLED ? getScheduledRun(task.name) : null;
-    const completedAt = env().DURABLE_CRON_ENABLED ? getScheduledCompletion(task.name) : null;
+    const completedAt = env().DURABLE_CRON_ENABLED ? getScheduledFinishedAt(task.name) : null;
+    const cadenceBase = env().DURABLE_CRON_ENABLED ? durableCadenceBase(task) / 1000 : last;
     const knownHistory = env().DURABLE_CRON_ENABLED || historyAvailable;
-    let dueAt = knownHistory ? nextTickDueAt(task, Math.floor(nowMs / 1000), completedAt === null ? last : completedAt / 1000, env().PROACTIVE_ACTIVATED_AT_SEC ?? 0) : null;
+    let dueAt = knownHistory ? nextTickDueAt(task, nowMs / 1000, cadenceBase, env().PROACTIVE_ACTIVATED_AT_SEC ?? 0) : null;
+    if (env().DURABLE_CRON_ENABLED && task.everySec !== undefined && dueAt !== null) dueAt = Math.max(dueAt, nowMs / 1000);
     if (durable?.state === 'failed' || durable?.state === 'scheduled') dueAt = durable.available_at / 1000;
     if (durable && ['claimed', 'started', 'unknown'].includes(durable.state)) dueAt = null;
     return { ...state, name: task.name, registered: true, running: _running.has(task.name),

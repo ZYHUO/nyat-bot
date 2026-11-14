@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import tarfile
+import traceback
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -30,7 +31,7 @@ class RestoreDrillTests(unittest.TestCase):
         self.source = self.root / 'remote-fixture'
         self.source.mkdir()
         self.work = self.root / 'quarantine-drill'
-        self.work.mkdir()
+        self.work.mkdir(mode=0o700)
         self.run_id = 'nyatbot-20261114T160000Z-abcdef123456'
         self.config = {'drive': {'remote': 'nyatcrypt:nyatbot'}, 'redis': {'port': 16379}, 'qdrant': {'url': 'http://127.0.0.1:16333'}}
         with contextlib.closing(sqlite3.connect(self.source / 'sqlite.db')) as db:
@@ -76,8 +77,67 @@ class RestoreDrillTests(unittest.TestCase):
             source, manifest = drill.download_generation(self.config, self.run_id, self.work)
         self.assertNotEqual(source, self.source)
         self.assertEqual(sum(call.args[1][0] == 'copy' for call in remote.call_args_list), 1)
+        download = next(call for call in remote.call_args_list if call.args[1][0] == 'copy')
+        self.assertEqual(download.args[1][3:], ['--transfers', '1', '--checkers', '1',
+            '--tpslimit', '1', '--tpslimit-burst', '1', '--retries', '3',
+            '--low-level-retries', '10', '--retries-sleep', '30s'])
+        self.assertEqual(download.kwargs['timeout'], 7200)
         self.assertTrue(drill.sqlite_checks(source, manifest)['manifestWatermarksMatched'])
         self.assertEqual(drill.sqlite_checks(source, manifest)['migrationCount'], 1)
+
+    def test_copy_failure_logs_only_bounded_stderr_privately_and_exposes_static_error(self):
+        diagnostic = b'403 Quota exceeded PRIVATE_STDERR_CANARY'
+        stdout = b'PRIVATE_CONFIG_STDOUT_CANARY'
+        result = subprocess.CompletedProcess(['synthetic'], 1, stdout, b'x' * (1024 * 1024) + diagnostic)
+        console = io.StringIO()
+        with patch.object(drill.backup, 'rclone_environment', return_value={'RCLONE_CONFIG_PASS': 'SECRET_ENV_CANARY'}), \
+                patch.object(drill.backup, 'rclone_args', return_value=['synthetic-rclone']), \
+                patch.object(drill.subprocess, 'run', return_value=result) as run, \
+                patch.object(drill.os, 'open', wraps=os.open) as opened, \
+                contextlib.redirect_stdout(console), contextlib.redirect_stderr(console):
+            with self.assertRaises(drill.DrillError) as caught:
+                drill.rclone({}, ['copy', 'fixed-remote', 'fixed-destination'], self.work, timeout=7200)
+        self.assertEqual(str(caught.exception), 'command_failed')
+        self.assertEqual(console.getvalue(), '')
+        log = self.work / 'rclone-copy.stderr.log'
+        self.assertEqual(log.stat().st_size, 1024 * 1024)
+        self.assertTrue(log.read_bytes().endswith(diagnostic))
+        self.assertNotIn(stdout, log.read_bytes())
+        self.assertNotIn(b'SECRET_ENV_CANARY', log.read_bytes())
+        self.assertEqual(opened.call_args.args[2], 0o600)
+        self.assertTrue(opened.call_args.args[1] & os.O_EXCL)
+        if os.name == 'posix':
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(run.call_args.kwargs['timeout'], 7200)
+        self.assertNotIn('CANARY', json.dumps({'status': 'failed', 'error': str(caught.exception)}))
+
+    def test_copy_timeout_keeps_private_diagnostic_but_never_stdout_or_exception_details(self):
+        with patch.object(drill.subprocess, 'run', side_effect=subprocess.TimeoutExpired(
+                ['PRIVATE_ARG_CANARY'], 7200, output=b'PRIVATE_STDOUT_CANARY', stderr=b'PRIVATE_TIMEOUT_CANARY')):
+            with self.assertRaises(drill.DrillError) as caught:
+                drill.execute(['synthetic'], self.work, timeout=7200, copy_failure_log=True)
+        self.assertEqual(str(caught.exception), 'command_timeout')
+        self.assertNotIn('CANARY', ''.join(traceback.format_exception(caught.exception)))
+        self.assertEqual((self.work / 'rclone-copy.stderr.log').read_bytes(), b'PRIVATE_TIMEOUT_CANARY')
+
+    def test_success_and_config_dump_failure_never_create_diagnostic_or_print_config(self):
+        with patch.object(drill.backup, 'rclone_environment', return_value={'RCLONE_CONFIG_PASS': 'SECRET'}), \
+                patch.object(drill.backup, 'rclone_args', return_value=['synthetic-rclone']), \
+                patch.object(drill.subprocess, 'run') as run, \
+                contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            run.return_value = subprocess.CompletedProcess([], 0, b'', b'PRIVATE_SUCCESS_CANARY')
+            self.assertEqual(drill.rclone({}, ['copy', 'fixed-remote', 'fixed-destination'], self.work), b'')
+            run.return_value = subprocess.CompletedProcess([], 1, b'PRIVATE_CONFIG_CANARY', b'PRIVATE_CONFIG_ERROR_CANARY')
+            with self.assertRaisesRegex(drill.DrillError, '^command_failed$'):
+                drill.rclone({}, ['config', 'dump'], self.work)
+        self.assertEqual(stdout.getvalue() + stderr.getvalue(), '')
+        self.assertFalse((self.work / 'rclone-copy.stderr.log').exists())
+
+    def test_diagnostic_never_overwrites_existing_work_file(self):
+        path = self.work / 'rclone-copy.stderr.log'; path.write_bytes(b'preserved')
+        with self.assertRaisesRegex(drill.DrillError, '^command_diagnostic_write_failed$'):
+            drill.save_copy_failure_stderr(self.work, b'PRIVATE_NEW_CANARY')
+        self.assertEqual(path.read_bytes(), b'preserved')
 
     def test_bad_id_or_seal_never_downloads_and_missing_cloud_never_uses_local_backup(self):
         with patch.object(drill, 'rclone') as remote:

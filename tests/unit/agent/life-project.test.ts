@@ -61,7 +61,8 @@ vi.mock('../../../src/context-engine/index.js', () => ({ getContextEngine: () =>
 
 import { activateLifeProject, cancelLifeProject, claimLifeAttempt, consumeLifeModelRequest, findLifeProject,
   lifeProjectContext, settleLifeAttempt, verifyLifeArtifact, writeLifeArtifact, type LifeAttempt } from '../../../src/agent/life-project.js';
-import { listDueProcessWakes, runCognitiveContinuityTick, getMissionContinuity, requestProcessWake } from '../../../src/agent/cognitive-continuity.js';
+import { listDueProcessWakes, listPendingProcessWakes, listProcessCheckpointsForTest,
+  runCognitiveContinuityTick, getMissionContinuity, requestProcessWake } from '../../../src/agent/cognitive-continuity.js';
 import { runCognitiveProcessTick } from '../../../src/agent/cognitive-process-runtime.js';
 import { runLifeProjectWake } from '../../../src/agent/life-project-runner.js';
 import { buildCognitiveWorkspace } from '../../../src/agent/cognitive-workspace.js';
@@ -82,6 +83,7 @@ beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'nyat-life-project-'));
   databasePath = join(directory, 'state.sqlite');
   config['BOT_TOKEN'] = '123:test'; config['LIFE_PROJECT_ENABLED'] = true;
+  config['EMOTION_CONTINUITY_ENABLED'] = true;
   config['CODEACT_ISOLATION_ENABLED'] = true;
   config['LIFE_PROJECT_ARTIFACT_DIR'] = join(directory, 'artifacts');
   beforeRequest = undefined; executeMode = 'success'; modelRequests = 0; executions = 0; lastMessages = [];
@@ -164,6 +166,16 @@ describe('bounded owner digital project', () => {
     expect(findLifeProject(project.id)!.attempts_started).toBe(1);
   });
 
+  it('competing actual runtime ticks leave one future wake and cannot spend a second model request', async () => {
+    const project = activate();
+    const results = await Promise.all([runCognitiveProcessTick(base), runCognitiveProcessTick(base)]);
+    expect(results.reduce((count, result) => count + result.completed, 0)).toBe(1);
+    expect(modelRequests).toBe(1); expect(executions).toBe(1);
+    expect(findLifeProject(project.id)!.attempts_started).toBe(1);
+    expect(listPendingProcessWakes()).toHaveLength(1);
+    expect(listPendingProcessWakes()[0]!.wakeAt).toBe(base + DAY);
+  });
+
   it('turning off the feature or OS isolation leaves queued work without starting or charging a model', async () => {
     const project = activate();
     config['LIFE_PROJECT_ENABLED'] = false;
@@ -184,6 +196,10 @@ describe('bounded owner digital project', () => {
     const attempt = db.prepare('SELECT * FROM life_project_attempts').get() as LifeAttempt;
     expect(attempt).toMatchObject({ status: 'unknown', llm_requests: 2 });
     expect(findLifeProject(project.id)!.status).toBe('held');
+    expect(listPendingProcessWakes()).toEqual([]);
+    expect(listProcessCheckpointsForTest().get(wake.wakeEventId)).toMatchObject({ status: 'waiting', outcomeEventIds: [] });
+    expect(db.prepare("SELECT count(*) AS n FROM cognitive_events WHERE type='cognitive_process_stopped'").get()).toEqual({ n: 1 });
+    expect(runCognitiveContinuityTick(base + 2 * DAY)).toEqual({ missionsWoken: 0, processesWoken: 0 });
     await runCognitiveProcessTick(base + 2 * DAY);
     expect(modelRequests).toBe(0); expect(findLifeProject(project.id)!.attempts_started).toBe(1);
   });
@@ -241,5 +257,148 @@ describe('bounded owner digital project', () => {
     expect(lifeProjectContext(42)).toContain('历史作品当前不可校验');
     expect((db.prepare("SELECT count(*) AS n FROM cognitive_events WHERE dedupe_key=?").get(`life-integrity:${project.id}`) as { n: number }).n).toBe(1);
     expect(modelRequests).toBe(2);
+  });
+
+  it('cross-minute mission ticks do not duplicate a life wake; legacy duplicates become waiting and preserve history', async () => {
+    const project = activate();
+    const first = listDueProcessWakes(base)[0]!;
+    vi.setSystemTime((base + 61) * 1000);
+    expect(runCognitiveContinuityTick(base + 61)).toEqual({ missionsWoken: 0, processesWoken: 0 });
+    // Persist the exact pre-fix shape: another minute's generic mission wake.
+    const old = requestProcessWake({ processId: first.processId, kind: 'strategist', scope: first.scope,
+      wakeAt: base + 61, reason: 'mission_due' })!;
+    await runCognitiveProcessTick(base + 61);
+    expect(modelRequests).toBe(1);
+    expect(listProcessCheckpointsForTest().get(first.wakeEventId)?.status).toBe('completed');
+    expect(listProcessCheckpointsForTest().get(old.eventId)).toMatchObject({ status: 'waiting', outcomeEventIds: [] });
+    expect(db.prepare('SELECT 1 FROM cognitive_events WHERE id=?').get(old.eventId)).toBeDefined();
+    const pending = listPendingProcessWakes();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.wakeAt).toBe(findLifeProject(project.id)!.next_due_at);
+    for (let hour = 1; hour <= 12; hour++) {
+      const now = base + 61 + hour * 3600;
+      vi.setSystemTime(now * 1000); reopen();
+      expect(runCognitiveContinuityTick(now)).toEqual({ missionsWoken: 0, processesWoken: 0 });
+      expect((await runCognitiveProcessTick(now, 1)).claimed).toBe(0);
+    }
+    expect(modelRequests).toBe(1); expect(listPendingProcessWakes()).toHaveLength(1);
+  });
+
+  it('more than twenty old not-due wakes cannot starve another process with a one-slot limit', async () => {
+    const project = activate();
+    await runCognitiveProcessTick(base);
+    const oldIds: string[] = [];
+    for (let index = 1; index <= 25; index++) {
+      const now = base + index * 60; vi.setSystemTime(now * 1000);
+      oldIds.push(requestProcessWake({ processId: `mission:${project.mission_id}`, kind: 'strategist',
+        scope: { visibility: 'chat', chatId: 42 }, wakeAt: now, reason: 'mission_due' })!.eventId);
+    }
+    const now = base + 3600; vi.setSystemTime(now * 1000); reopen();
+    const healthy = requestProcessWake({ processId: 'healthy-other-process', kind: 'strategist',
+      scope: { visibility: 'chat', chatId: 42 }, wakeAt: now, reason: 'test' })!;
+    expect((await runCognitiveProcessTick(now, 1)).claimed).toBe(1);
+    const checkpoints = listProcessCheckpointsForTest();
+    expect(checkpoints.get(healthy.eventId)?.status).toBe('waiting');
+    for (const id of oldIds) expect(checkpoints.get(id)).toMatchObject({ status: 'waiting', outcomeEventIds: [] });
+    expect(modelRequests).toBe(1);
+    expect(db.prepare('SELECT count(*) AS n FROM life_project_attempts').get()).toEqual({ n: 1 });
+    expect(listPendingProcessWakes().filter(wake => wake.processId === `mission:${project.mission_id}`)).toHaveLength(1);
+  });
+
+  it('repairs an older same-minute future wake without aliasing it or running the next practice early', async () => {
+    const project = activate();
+    await runCognitiveProcessTick(base);
+    const next = findLifeProject(project.id)!.next_due_at;
+    // Simulate a legacy database whose only next wake is one second too early.
+    const canonical = listPendingProcessWakes()[0]!;
+    db.prepare('DELETE FROM cognitive_events WHERE id=?').run(canonical.wakeEventId);
+    const old = requestProcessWake({ processId: canonical.processId, kind: 'strategist', scope: canonical.scope,
+      wakeAt: next - 1, reason: 'legacy_future' })!;
+    vi.setSystemTime((next - 1) * 1000); reopen();
+    expect((await runCognitiveProcessTick(next - 1, 1)).claimed).toBe(0);
+    expect(modelRequests).toBe(1);
+    expect(listProcessCheckpointsForTest().get(old.eventId)?.status).toBe('waiting');
+    expect(listPendingProcessWakes()).toHaveLength(1);
+    expect(listPendingProcessWakes()[0]!.wakeAt).toBe(next);
+    vi.setSystemTime(next * 1000);
+    await runCognitiveProcessTick(next, 1);
+    expect(modelRequests).toBe(2);
+  });
+
+  it('terminal settlement stops the process and retires both due and future duplicates without extra success receipts', async () => {
+    const project = activate(1), initial = listDueProcessWakes(base)[0]!;
+    requestProcessWake({ processId: initial.processId, kind: 'strategist', scope: initial.scope,
+      wakeAt: base + 61, reason: 'old_future_duplicate' });
+    await runCognitiveProcessTick(base);
+    expect(findLifeProject(project.id)!.status).toBe('completed');
+    expect(listPendingProcessWakes()).toEqual([]);
+    const checkpoints = [...listProcessCheckpointsForTest().values()];
+    expect(checkpoints.filter(row => row.status === 'completed')).toHaveLength(1);
+    expect(checkpoints.filter(row => row.status === 'waiting')).toHaveLength(1);
+    expect(db.prepare("SELECT count(*) AS n FROM cognitive_events WHERE type='cognitive_process_stopped'").get()).toEqual({ n: 1 });
+    vi.setSystemTime((base + DAY) * 1000); reopen();
+    expect(runCognitiveContinuityTick(base + DAY)).toEqual({ missionsWoken: 0, processesWoken: 0 });
+    expect((await runCognitiveProcessTick(base + DAY)).claimed).toBe(0);
+    expect(modelRequests).toBe(1);
+  });
+
+  it('invalid-account and disabled life wakes do not occupy a shared runtime slot', async () => {
+    const project = activate();
+    // Keep the general legacy selector permissive to exercise the life gate.
+    config['EMOTION_CONTINUITY_ENABLED'] = false;
+    config['BOT_TOKEN'] = '456:test';
+    const healthy = requestProcessWake({ processId: 'healthy-new-account', kind: 'strategist',
+      scope: { visibility: 'chat', chatId: 42 }, wakeAt: base, reason: 'test' })!;
+    expect((await runCognitiveProcessTick(base, 1)).claimed).toBe(1);
+    expect(listProcessCheckpointsForTest().has(healthy.eventId)).toBe(true);
+    expect(findLifeProject(project.id)!.attempts_started).toBe(0);
+    config['BOT_TOKEN'] = '123:test'; config['LIFE_PROJECT_ENABLED'] = false;
+    const healthy2 = requestProcessWake({ processId: 'healthy-feature-off', kind: 'strategist',
+      scope: { visibility: 'chat', chatId: 42 }, wakeAt: base, reason: 'test' })!;
+    expect((await runCognitiveProcessTick(base, 1)).claimed).toBe(1);
+    expect(listProcessCheckpointsForTest().has(healthy2.eventId)).toBe(true);
+    expect(modelRequests).toBe(0);
+  });
+
+  it('a failed superseded-checkpoint transaction preserves the original pending history and cannot spend a request', async () => {
+    const project = activate(), first = listDueProcessWakes(base)[0]!;
+    requestProcessWake({ processId: first.processId, kind: 'strategist', scope: first.scope,
+      wakeAt: base + 61, reason: 'old_duplicate' });
+    db.exec(`CREATE TRIGGER reject_life_cleanup BEFORE INSERT ON cognitive_events
+      WHEN NEW.type='cognitive_process_checkpoint' BEGIN SELECT RAISE(ABORT, 'fixture checkpoint unavailable'); END`);
+    vi.setSystemTime((base + 120) * 1000);
+    await expect(runCognitiveProcessTick(base + 120)).rejects.toThrow('life_superseded_checkpoint_unavailable');
+    expect(listPendingProcessWakes()).toHaveLength(2);
+    expect(findLifeProject(project.id)!.attempts_started).toBe(0); expect(modelRequests).toBe(0);
+    db.exec('DROP TRIGGER reject_life_cleanup');
+    await runCognitiveProcessTick(base + 120);
+    expect(modelRequests).toBe(1); expect(listPendingProcessWakes()).toHaveLength(1);
+  });
+
+  it('future-wake persistence failure rolls back retirement, then repeated recovery is idempotent', async () => {
+    const project = activate();
+    await runCognitiveProcessTick(base);
+    const next = findLifeProject(project.id)!.next_due_at;
+    const canonical = listPendingProcessWakes()[0]!;
+    db.prepare('DELETE FROM cognitive_events WHERE id=?').run(canonical.wakeEventId);
+    const old = requestProcessWake({ processId: canonical.processId, kind: 'strategist', scope: canonical.scope,
+      wakeAt: next - 1, reason: 'legacy_future' })!;
+    db.exec(`CREATE TRIGGER reject_next_life_wake BEFORE INSERT ON cognitive_events
+      WHEN NEW.type='cognitive_process_wake' BEGIN SELECT RAISE(ABORT, 'fixture next wake unavailable'); END`);
+    vi.setSystemTime((base + 3600) * 1000);
+    await expect(runCognitiveProcessTick(base + 3600)).rejects.toThrow('life_next_wake_unavailable');
+    expect(listProcessCheckpointsForTest().has(old.eventId)).toBe(false);
+    expect(listPendingProcessWakes().map(wake => wake.wakeEventId)).toEqual([old.eventId]);
+    expect(modelRequests).toBe(1);
+    db.exec('DROP TRIGGER reject_next_life_wake');
+    await runCognitiveProcessTick(base + 3600);
+    const count = db.prepare('SELECT count(*) AS n FROM cognitive_events').get();
+    for (let repeat = 0; repeat < 5; repeat++) {
+      reopen(); await runCognitiveProcessTick(base + 3600);
+    }
+    expect(db.prepare('SELECT count(*) AS n FROM cognitive_events').get()).toEqual(count);
+    expect(listPendingProcessWakes()).toHaveLength(1);
+    expect(listPendingProcessWakes()[0]!.wakeAt).toBe(next);
+    expect(modelRequests).toBe(1);
   });
 });

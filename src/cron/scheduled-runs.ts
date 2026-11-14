@@ -25,12 +25,20 @@ export function getScheduledCompletion(taskName: string): number {
   return row?.last_completed_at ?? 0;
 }
 
+/** Real completion time, distinct from the calendar occurrence cursor above. */
+export function getScheduledFinishedAt(taskName: string): number {
+  const row = getDb().prepare(`SELECT MAX(finished_at) AS finished_at FROM scheduled_runs
+    WHERE task_name=? AND state IN ('succeeded','skipped')`).get(taskName) as { finished_at: number | null };
+  return row.finished_at ?? 0;
+}
+
 export function getScheduledRun(taskName: string): ScheduledRunRow | null {
   return getDb().prepare('SELECT * FROM scheduled_runs WHERE task_name=? ORDER BY scheduled_at DESC LIMIT 1').get(taskName) as ScheduledRunRow | undefined ?? null;
 }
 
 /** SQLite is the single authority. A copied database is not a cluster lease. */
-export function claimScheduledRun(taskName: string, dueAt: number | null, retrySafe: boolean, now = Date.now()): ScheduledClaim | null {
+export function claimScheduledRun(taskName: string, dueAt: number | null, retrySafe: boolean, now = Date.now(), intervalMs?: number): ScheduledClaim | null {
+  if (intervalMs !== undefined && (!Number.isSafeInteger(intervalMs) || intervalMs <= 0)) throw new Error('invalid_scheduled_interval');
   const db = getDb();
   return db.transaction(() => {
     db.prepare(`UPDATE scheduled_runs SET state='scheduled',owner=NULL,lease_until=NULL
@@ -42,6 +50,15 @@ export function claimScheduledRun(taskName: string, dueAt: number | null, retryS
     if (db.prepare(`SELECT 1 FROM scheduled_runs WHERE task_name=? AND state IN ('claimed','started','unknown') LIMIT 1`).get(taskName)) return null;
     let row = db.prepare(`SELECT * FROM scheduled_runs WHERE task_name=? AND state IN ('scheduled','failed') ORDER BY scheduled_at LIMIT 1`).get(taskName) as ScheduledRunRow | undefined;
     if (!row && dueAt !== null && dueAt <= now) {
+      if (intervalMs !== undefined) {
+        // Check inside the claim transaction: another owner may have finished
+        // since this caller read its due time. Retries above keep their identity.
+        const finished = getScheduledFinishedAt(taskName);
+        if (finished > 0 && now < finished + intervalMs) return null;
+        // Missed intervals become one current run, never fabricated successful
+        // historical slots or a burst of catch-up calls after enabling/restarting.
+        dueAt = now;
+      }
       db.prepare(`INSERT OR IGNORE INTO scheduled_runs(task_name,scheduled_at,state,retry_safe,available_at)
         VALUES (?,?,'scheduled',?,?)`).run(taskName, dueAt, retrySafe ? 1 : 0, now);
       row = db.prepare('SELECT * FROM scheduled_runs WHERE task_name=? AND scheduled_at=?').get(taskName, dueAt) as ScheduledRunRow | undefined;

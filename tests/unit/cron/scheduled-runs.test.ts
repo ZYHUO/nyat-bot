@@ -11,12 +11,110 @@ vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ status: 'ready',
 }) }));
 vi.mock('../../../src/ai/workload.js', () => ({ runWithAiWorkload: (_lane: string, fn: () => unknown) => fn() }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
-import { claimScheduledRun, finishScheduledRun, getScheduledCompletion, getScheduledRun, renewScheduledRun, startScheduledRun } from '../../../src/cron/scheduled-runs.js';
-import { drainHeartbeat, nextTickDueAt, registerTickTask, scanOnceForTest, stopHeartbeat } from '../../../src/cron/heartbeat.js';
+import { claimScheduledRun, finishScheduledRun, getScheduledCompletion, getScheduledFinishedAt, getScheduledRun, renewScheduledRun, startScheduledRun } from '../../../src/cron/scheduled-runs.js';
+import { drainHeartbeat, getTickObservations, nextTickDueAt, registerTickTask, scanOnceForTest, startHeartbeat, stopHeartbeat } from '../../../src/cron/heartbeat.js';
 let db: Database.Database;
 beforeEach(() => {
   db = new Database(':memory:'); db.exec(readFileSync('migrations/0127_scheduled_runs.sql', 'utf8'));
   state.db.mockReturnValue(db); state.redis.clear(); state.hungRedis = false;
+  state.config.DURABLE_CRON_ENABLED = true; state.config.PROACTIVE_ACTIVATED_AT_SEC = 0;
+});
+
+describe('interval cadence uses actual completion without replaying missed slots', () => {
+  async function scan() { await scanOnceForTest(); await vi.advanceTimersByTimeAsync(0); }
+
+  it('uses an existing real finish after upgrade, not its fifteen-hour-old scheduled slot', async () => {
+    vi.useFakeTimers(); const now = Date.parse('2026-11-15T02:52:00.123Z'); vi.setSystemTime(now);
+    const oldSlot = now - 15 * 3600_000;
+    const old = claimScheduledRun('interval', oldSlot, true, now - 21_000)!;
+    startScheduledRun(old, now - 21_000); finishScheduledRun(old, 'succeeded', now - 20_000);
+    const run = vi.fn().mockResolvedValue(undefined);
+    registerTickTask({ name: 'interval', everySec: 60, run }); startHeartbeat();
+    await scan(); expect(run).not.toHaveBeenCalled();
+    expect((await getTickObservations())[0]).toMatchObject({ nextRunAt: now + 40_000,
+      lastCompletedAt: now - 20_000, durableState: 'succeeded', due: false });
+    await vi.advanceTimersByTimeAsync(39_999); await scan(); expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); await scan(); expect(run).toHaveBeenCalledOnce();
+    expect(getScheduledCompletion('interval')).toBe(now + 40_000);
+    expect(db.prepare('SELECT count(*) AS n FROM scheduled_runs').get()).toEqual({ n: 2 });
+    await vi.advanceTimersByTimeAsync(30_000); await scan(); expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces a stale activation into one real run, then waits a full interval after a long body and restart', async () => {
+    vi.useFakeTimers(); const now = Date.parse('2026-11-15T03:00:00Z'); vi.setSystemTime(now);
+    state.config.PROACTIVE_ACTIVATED_AT_SEC = now / 1000 - 15 * 3600;
+    let settle!: () => void;
+    const run = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { settle = resolve; })).mockResolvedValue(undefined);
+    registerTickTask({ name: 'new-interval', everySec: 60, retrySafe: true, run });
+    await scan(); expect(run).toHaveBeenCalledOnce();
+    expect(getScheduledRun('new-interval')).toMatchObject({ scheduled_at: now, state: 'started' });
+    expect(getScheduledFinishedAt('new-interval')).toBe(0);
+    await vi.advanceTimersByTimeAsync(45_000); await scan(); expect(run).toHaveBeenCalledOnce();
+    settle(); await vi.advanceTimersByTimeAsync(0);
+    expect(getScheduledFinishedAt('new-interval')).toBe(now + 45_000);
+    stopHeartbeat(); registerTickTask({ name: 'new-interval', everySec: 60, retrySafe: true, run });
+    await vi.advanceTimersByTimeAsync(59_999); await scan(); expect(run).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1); await scan(); expect(run).toHaveBeenCalledTimes(2);
+    expect(getScheduledRun('new-interval')).toMatchObject({ scheduled_at: now + 105_000, state: 'succeeded' });
+    expect(db.prepare('SELECT count(*) AS n FROM scheduled_runs').get()).toEqual({ n: 2 });
+  });
+
+  it('coalesces a long downtime after prior success without scheduling a burst', async () => {
+    vi.useFakeTimers(); const now = Date.parse('2026-11-15T04:00:00Z'); vi.setSystemTime(now);
+    const old = claimScheduledRun('resume', now - 10 * 3600_000, true, now - 10 * 3600_000)!;
+    startScheduledRun(old, now - 10 * 3600_000); finishScheduledRun(old, 'skipped', now - 10 * 3600_000 + 500);
+    const run = vi.fn().mockResolvedValue(undefined);
+    registerTickTask({ name: 'resume', everySec: 3600, run });
+    await scan(); expect(run).toHaveBeenCalledOnce();
+    expect(getScheduledRun('resume')?.scheduled_at).toBe(now);
+    for (let i = 0; i < 6; i++) { await vi.advanceTimersByTimeAsync(30_000); await scan(); }
+    expect(run).toHaveBeenCalledOnce();
+    expect(db.prepare('SELECT count(*) AS n FROM scheduled_runs').get()).toEqual({ n: 2 });
+  });
+
+  it('rechecks the finish atomically when another caller holds a stale due calculation', () => {
+    const first = claimScheduledRun('racing', 1, true, 100_000, 60_000)!;
+    startScheduledRun(first, 100_000); finishScheduledRun(first, 'succeeded', 100_010);
+    expect(claimScheduledRun('racing', 1, true, 100_011, 60_000)).toBeNull();
+    expect(claimScheduledRun('racing', 1, true, 160_009, 60_000)).toBeNull();
+    expect(claimScheduledRun('racing', 1, true, 160_010, 60_000)).toMatchObject({ scheduledAt: 160_010 });
+    expect(db.prepare('SELECT count(*) AS n FROM scheduled_runs').get()).toEqual({ n: 2 });
+  });
+
+  it('retries the original failed occurrence before the cadence and starts the next interval only after success', async () => {
+    vi.useFakeTimers(); const now = Date.parse('2026-11-15T05:00:00Z'); vi.setSystemTime(now);
+    const run = vi.fn().mockRejectedValueOnce(new Error('synthetic failure')).mockResolvedValue(undefined);
+    registerTickTask({ name: 'retry-interval', everySec: 3600, retrySafe: true, run });
+    await scan(); expect(getScheduledFinishedAt('retry-interval')).toBe(0);
+    await vi.advanceTimersByTimeAsync(30_000); await scan(); expect(run).toHaveBeenCalledTimes(2);
+    expect(getScheduledRun('retry-interval')).toMatchObject({ scheduled_at: now, attempts: 2, state: 'succeeded' });
+    expect(getScheduledFinishedAt('retry-interval')).toBe(now + 30_000);
+    await vi.advanceTimersByTimeAsync(3600_000 - 1); await scan(); expect(run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1); await scan(); expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it('never coalesces away an unknown external effect after a restart', async () => {
+    vi.useFakeTimers(); const now = Date.parse('2026-11-15T06:00:00Z'); vi.setSystemTime(now);
+    const run = vi.fn().mockRejectedValue(new Error('uncertain delivery'));
+    registerTickTask({ name: 'uncertain-interval', everySec: 60, run });
+    await scan(); expect(getScheduledRun('uncertain-interval')?.state).toBe('unknown');
+    stopHeartbeat(); registerTickTask({ name: 'uncertain-interval', everySec: 60, run }); startHeartbeat();
+    vi.setSystemTime(now + 86400_000); await scan();
+    expect(run).toHaveBeenCalledOnce(); expect(getScheduledFinishedAt('uncertain-interval')).toBe(0);
+    expect((await getTickObservations())[0]).toMatchObject({ durableState: 'unknown', nextRunAt: null, lastCompletedAt: null });
+    expect(db.prepare('SELECT count(*) AS n FROM scheduled_runs').get()).toEqual({ n: 1 });
+  });
+
+  it('keeps the missed weekly slot and its next calendar boundary despite a late finish', async () => {
+    vi.useFakeTimers(); const now = Date.parse('2026-11-17T08:00:00Z'); vi.setSystemTime(now);
+    const run = vi.fn().mockResolvedValue(undefined);
+    state.config.PROACTIVE_ACTIVATED_AT_SEC = Date.parse('2026-11-08T23:00:00Z') / 1000;
+    registerTickTask({ name: 'weekly-catchup', weeklyAt: { day: 1, hour: 7, minute: 0 }, run }); startHeartbeat();
+    await scan(); expect(run).toHaveBeenCalledOnce();
+    expect(getScheduledCompletion('weekly-catchup')).toBe(Date.parse('2026-11-15T23:00:00Z'));
+    expect((await getTickObservations())[0]).toMatchObject({ lastCompletedAt: now, nextRunAt: Date.parse('2026-11-22T23:00:00Z') });
+    await vi.advanceTimersByTimeAsync(30_000); await scan(); expect(run).toHaveBeenCalledOnce();
+  });
 });
 afterEach(() => { stopHeartbeat(); vi.useRealTimers(); db.close(); });
 
