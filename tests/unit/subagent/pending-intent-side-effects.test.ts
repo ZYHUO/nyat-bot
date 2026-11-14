@@ -106,7 +106,9 @@ describe('pending intent fences at delayed host side effects', () => {
     const { api } = await host(); await api.telegram.sendText('等下本喵查完告诉你');
     api.runtime.endTask(summary); await api.runtime.flushBookkeeping();
     expect(f.llm).not.toHaveBeenCalled(); expect(f.createGoal).not.toHaveBeenCalled(); expect(f.createDebt).not.toHaveBeenCalled();
-    expect(f.context).toHaveBeenCalledWith('xxb:ctx:20', expect.objectContaining({ messageId: 9001 }));
+    expect(f.context).toHaveBeenCalledWith('xxb:ctx:v2:["telegram","12345",20,"private",0]', expect.objectContaining({ messageId: 9001,
+      contextScope: { platform: 'telegram', accountId: '12345', chatId: 20, conversationKind: 'private', threadId: 0 },
+    }));
   });
 
   it('a stale endTask does not start recovery even if its summary claims done', async () => {

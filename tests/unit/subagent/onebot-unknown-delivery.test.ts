@@ -159,7 +159,10 @@ describe('real background executor separates checking from publishing',()=>{
     await runCodeActTask(current);
     expect(current).toMatchObject({status:'done',sendsUsed:1,publicationOutcome:{state:'sent'}});
     expect(f.detailed).toHaveBeenCalledOnce();expect(f.sends).not.toHaveBeenCalled();expect(f.callbacks).not.toHaveBeenCalled();
-    expect(f.contextWrite).toHaveBeenCalledWith('xxb:ctx:20',expect.objectContaining({messageId:98,textContent:'合成新版本结果'}));
+    expect(f.contextWrite).toHaveBeenCalledWith('xxb:ctx:v2:["telegram","12345",20,"private",0]',expect.objectContaining({
+      messageId:98,textContent:'合成新版本结果',
+      contextScope:{platform:'telegram',accountId:'12345',chatId:20,conversationKind:'private',threadId:0},
+    }));
     await runCodeActTask(current);expect(f.detailed).toHaveBeenCalledOnce();
   });
   it('a failed model call never turns into the ordinary foreground fallback message',async()=>{
@@ -247,7 +250,10 @@ describe('actual CodeAct host closes stale generated drafts', () => {
     await runCodeActTask(current);
     expect(f.checkpoint).toHaveBeenCalledOnce(); expect(f.sends).toHaveBeenCalledOnce();
     expect(current).toMatchObject({ status: 'failed', resultSummary: 'failed_input_superseded', sendsUsed: 1 });
-    expect(f.contextWrite).toHaveBeenCalledWith('xxb:ctx:20',expect.objectContaining({messageId:44,textContent:'已确认的中间结果'}));
+    expect(f.contextWrite).toHaveBeenCalledWith('xxb:ctx:v2:["telegram","12345",20,"private",0]',expect.objectContaining({
+      messageId:44,textContent:'已确认的中间结果',
+      contextScope:{platform:'telegram',accountId:'12345',chatId:20,conversationKind:'private',threadId:0},
+    }));
     expect(f.callbacks).not.toHaveBeenCalled(); expect(f.resume).not.toHaveBeenCalled(); expect(f.createDebt).not.toHaveBeenCalled();
   });
   it('rechecks after asynchronous sending preparation, not only at host entry', async () => {
@@ -319,8 +325,10 @@ describe('QQ unknown delivery closes the actual host and executor', () => {
     expect(host.runtime.didSendText()).toBe(true);
     const contextErrors = f.debug.mock.calls.filter(call => call[1] === 'host addAssistant failed').map(call => String(call[0].err));
     expect(contextErrors, contextErrors.join('\n')).toEqual([]);
-    expect(f.contextWrite).toHaveBeenCalledWith('xxb:ctx:-100',
-      expect.objectContaining({ textContent: '已经确认的片段', messageId: 401, role: 'assistant' }));
+    expect(f.contextWrite).toHaveBeenCalledWith('xxb:ctx:v2:["telegram","12345",-100,"group",0]',
+      expect.objectContaining({ textContent: '已经确认的片段', messageId: 401, role: 'assistant',
+        contextScope: { platform: 'telegram', accountId: '12345', chatId: -100, conversationKind: 'group', threadId: 0 },
+      }));
     expect(f.contextWrite).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(f.memoryAck).toHaveBeenCalledWith(-100,
       { messageId: 401, text: '已经确认的片段', partIndex: 0 }));
