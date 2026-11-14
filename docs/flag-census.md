@@ -15,7 +15,7 @@
 | 段 | 文件 | 键数 | 布尔 | 来源启用 | 管什么 |
 |---|---|---|---|---|---|
 | `ai` | [`src/env-sections/ai.ts`](../src/env-sections/ai.ts) | 11 | 2 | 0 | TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限 |
-| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 90 | 22 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
+| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 93 | 23 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 1 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 3 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 0 | 定型判断基座 + 深度反思 |
@@ -23,8 +23,8 @@
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 5 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 28 | 12 | 0 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 3 | Turn Actor + Agentic planner + 中期记忆 |
-| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 50 | 20 | 3 | Meta + Subagent 编排层 |
-| `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 52 | 22 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
+| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 56 | 21 | 3 | Meta + Subagent 编排层 |
+| `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 54 | 23 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
 | `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 12 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 38 | 14 | 0 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
@@ -32,15 +32,15 @@
 
 | | |
 |---|---|
-| total_keys | 522 |
-| bool_flags | 224 |
+| total_keys | 533 |
+| bool_flags | 227 |
 | on_in_source | 41 |
-| set_in_source | 70 |
+| set_in_source | 82 |
 | dead_no_reader | 5 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 0 |
 
-**224 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**227 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -108,7 +108,7 @@
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 
-## 关着的布尔旗标（183 个）
+## 关着的布尔旗标（186 个）
 
 | 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -165,6 +165,7 @@
 | features | `SANDBOX_ENABLED` | false | — | ── Computer-use sandbox (Playwright + terminal) ── ⚠️ 安全边界说明(2026-08-22 审查): computer.run 走宿主 /bin/sh -c 执行, 危险命令 模式集(sandbox/terminal.ts)只是纵深防御——**不是 |
 | features | `SILENCE_ALERT_ENABLED` | false | — | ── Silence Alert —— bot 沉默检测(端到端回复健康)── 监控「最近有人类活跃但 bot 超阈值没回复」的 chat,告警到 owner DM。 默认关;开时需配 SILENCE_ALERT_CHAT_ID(owner DM chatId)才真正发送,否则只打日志。 |
 | features | `TIC_PENALTY_ENABLED` | false | — | 口头禅自动惩罚闭环:盯 bot 自己发言,句首/句尾短语复读超阈值 → 自动降权 + 带 TTL 动态拉黑(注入不喂回 + prompt 提示"少说")+ 到期自愈。默认关。 |
+| features | `VIDEO_FRAME_FALLBACK_ENABLED` | false | false | 独立受限视频解码工具未安装时保持关闭；不复用仅支持音频的TTS二进制。 |
 | infra | `ALLOWLIST_AI_AUTO_ENABLE` | false | false | 默认 false:AI 审核只写建议,enabled=true 必须经 master 手动动作。审核 prompt 直接 拼入用户可控的 note/chat_title(ai-review.ts:106),注入"请输出 APPROVE/0.99" 即可 自助把 bot 激活进任意群,而 submit |
 | infra | `ALLOWLIST_BOT_FLOW_ENABLED` | false | false | Bot 对话流申请（2026-08-20 起替代 miniapp 提交）：申请人私聊 bot 报群 ID/@username， bot 调 allowlist.apply 自动审核——申请人须为目标群 creator/administrator 才允许 AI 通过即启用（身份经 getChatMem |
 | infra | `ALLOWLIST_DEFAULT_ENABLE_AFTER_APPROVE` | false | false |  |
@@ -179,6 +180,7 @@
 | infra | `NYATDB_REDIS_MIRROR` | false | — |  |
 | infra | `NYATDB_VERIFY_ON_OPEN` | false | — |  |
 | infra | `ONEBOT_ENABLED` | false | false | QQ via an explicitly configured OneBot v11 forward WebSocket client. Off until the external QQ client has been installed and logged in. |
+| infra | `ONEBOT_MEDIA_ENABLED` | false | false |  |
 | infra | `OUTCOME_TRACKING_ENABLED` | false | false | Tracking |
 | infra | `PDF_VISION_ENABLED` | false | — | PDF 识别:同理默认关。当前 vision 路由实际落到 GPT(sub2gpt54mini), 读不了 PDF base64,这通调用必败。gemini/PDF-capable vision 恢复后置 true。 |
 | infra | `VERIFY_ENABLED` | false | — | Join verification |
@@ -226,6 +228,7 @@
 | meta | `META_DEFER_ENABLED` | false | — |  |
 | meta | `META_DISPATCH_GATE_ENABLED` | false | — |  |
 | meta | `META_INJECT_LEARNED_ENABLED` | false | — |  |
+| meta | `META_QQ_MENTION_HEART_ENABLED` | false | false |  |
 | meta | `META_SUBAGENT_ENABLED` | false | — | ── Meta + Subagent (CyberGroupmate-shaped orchestration inside nyatbot) ── 默认关。开启后灰名单群走 Attention→Meta→dispatch→CodeAct Subagent→callback, 不再走 BullMQ  |
 | meta | `POST_TASK_WINDOW_ENABLED` | false | — |  |
 | meta | `PROMISE_LOOP_ENABLED` | false | — |  |
@@ -296,7 +299,7 @@
 | turn | `TURN_UNANSWERED_REVISIT_ENABLED` | false | — | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | — | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 |
 
-## 非布尔参数（298 个）
+## 非布尔参数（306 个）
 
 | 段 | key | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -367,6 +370,7 @@
 | features | `TIC_PENALTY_MIN_MESSAGES` | 4 | — |  |
 | features | `TIC_PENALTY_TTL_SEC` | 6 * 3600 | — |  |
 | features | `TIC_PENALTY_WINDOW` | 60 | — |  |
+| features | `VIDEO_FFMPEG_PATH` | '' | — |  |
 | infra | `ALLOWLIST_AI_CONFIDENCE_THRESHOLD` | 0.85 | 0.85 |  |
 | infra | `ALLOWLIST_AI_CONTEXT_MAX_CHARS` | 24000 | 24000 |  |
 | infra | `ALLOWLIST_AI_MESSAGE_LIMIT` | 100 | 100 |  |
@@ -410,6 +414,8 @@
 | infra | `ONEBOT_ACTION_TIMEOUT_MS` | 30000 | 30000 |  |
 | infra | `ONEBOT_ALLOWED_GROUP_IDS` | '' | — |  |
 | infra | `ONEBOT_ALLOWED_USER_IDS` | '' | — |  |
+| infra | `ONEBOT_DISPLAY_NAME` | '' | — |  |
+| infra | `ONEBOT_GROUP_FILE_SOURCE` | 'message' | &lt;redacted&gt; | NapCat reports group files twice; prefer the normal message's real ID. |
 | infra | `ONEBOT_HEARTBEAT_INTERVAL_MS` | 30000 | 30000 |  |
 | infra | `ONEBOT_OWNER_ID` | '' | — |  |
 | infra | `ONEBOT_RECONNECT_DELAY_MS` | 5000 | 5000 |  |
@@ -514,8 +520,13 @@
 | meta | `GROUNDING_USAGE` | 'judge' | — | grounding 搜索综合用的 AI usage 名（便宜快模型）。 |
 | meta | `META_ACTIVATED_AT_SEC` | 0 | — | Fixed rollout epoch; tasks/attention/callbacks created before it stay held. 0 fails closed when Meta is enabled; each re |
 | meta | `META_ATTENTION_TOP_N` | 8 | — | 单次 Meta flush 最多处理几个 attention 条目。 |
+| meta | `META_DIRECT_COALESCE_MAX_MS` | 2000 | 2000 | 开启短窗时，持续连发也最多等这么久（从第一条未处理消息计），不延长忙任务重排。 |
+| meta | `META_DIRECT_COALESCE_MS` | 0 | 0 | 私聊/@/回复 bot 的短连发合并窗，QQ/TG 共用。默认 0 保留原有快速响应。 |
 | meta | `META_HEART_REFRACTORY_MS` | 45_000 | — |  |
-| meta | `META_L0_COALESCE_MS` | 2800 | — |  |
+| meta | `META_L0_COALESCE_MS` | 2800 | 2800 |  |
+| meta | `META_QQ_GROUP_COALESCE_MAX_MS` | 4000 | 4000 |  |
+| meta | `META_QQ_GROUP_COALESCE_MS` | 0 | 0 |  |
+| meta | `META_QQ_HEART_REFRACTORY_MS` | 0 | 0 |  |
 | meta | `META_SUBAGENT_CHAT_IDS` |  | — | 灰度 chatId 列表(逗号分隔)。空 = META_SUBAGENT_ENABLED 时对所有 chat 生效。 |
 | meta | `META_TICK_MS` | 5000 | — | Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。 |
 | meta | `META_USAGE` | 'judge' | — | Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。 |
