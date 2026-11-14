@@ -597,6 +597,8 @@ def verify_generation(directory):
             raise RuntimeError('backup_checksum_failed')
     if 'sqlite.db' not in seen or 'redis.rdb' not in seen or 'qdrant-metadata.json' not in seen:
         raise RuntimeError('required_component_missing')
+    if any((directory / name).stat().st_size == 0 for name in ('sqlite.db', 'redis.rdb', 'qdrant-metadata.json')):
+        raise RuntimeError('required_component_empty')
     metadata = json.loads((directory / 'qdrant-metadata.json').read_text(encoding='utf-8'))
     collections = metadata.get('collections') if isinstance(metadata, dict) else None
     if not isinstance(collections, dict) or not isinstance(metadata.get('aliases'), dict):
@@ -699,9 +701,11 @@ def remote_generation(drive, run_id, now):
         for record in manifest['files']:
             name = record.get('file') if isinstance(record, dict) else None
             if (not isinstance(name, str) or not MEMBER_RE.fullmatch(name) or name in expected
-                    or type(record.get('bytes')) is not int or record['bytes'] <= 0
+                    or type(record.get('bytes')) is not int or record['bytes'] < 0
                     or not isinstance(record.get('sha256'), str) or not re.fullmatch('[a-f0-9]{64}', record['sha256'])
                     or members.get(name) != record['bytes']): return None
+            if record['bytes'] == 0 and (name in ('sqlite.db', 'redis.rdb', 'qdrant-metadata.json')
+                    or name.startswith('qdrant-') and name.endswith('.snapshot')): return None
             expected.add(name)
         if expected != members.keys() or not {'sqlite.db', 'redis.rdb', 'qdrant-metadata.json',
                 'qdrant-' + manifest['embedding']['collection'] + '.snapshot'} <= expected: return None

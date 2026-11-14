@@ -547,6 +547,50 @@ with backup.stopped_writers(config, sys.argv[3]): pass
         self.assertTrue(destructive[0][1].endswith('/COMPLETE.json'))
         self.assertFalse(any(action in ('purge', 'delete') for action, _ in calls))
 
+    def test_retention_accepts_real_zero_byte_optional_wal_in_sealed_generation(self):
+        config, generation, now, objects, calls, execute, _add = self.retention_fixture()
+        (generation / 'sqlite.db-wal').write_bytes(b'')
+        manifest = json.loads((generation / 'manifest.json').read_text())
+        manifest['files'].append({'file': 'sqlite.db-wal', 'bytes': 0,
+                                  'sha256': backup.digest(generation / 'sqlite.db-wal')})
+        backup.write_json(generation / 'manifest.json', manifest)
+        receipt = json.loads((generation / 'COMPLETE.json').read_text())
+        receipt['manifestSha256'] = backup.digest(generation / 'manifest.json')
+        backup.write_json(generation / 'COMPLETE.json', receipt)
+        objects[self.run_id] = {item.name: item.read_bytes() for item in generation.iterdir()}
+        with patch.object(backup, 'validate_encrypted_drive'), patch.object(backup, 'rclone_command', side_effect=execute):
+            remote = backup.remote_generation(config['drive'], self.run_id, now)
+            self.assertIsNotNone(remote)
+            self.assertEqual(remote['members']['sqlite.db-wal'], 0)
+            result = backup.apply_retention(config, generation, now)
+        self.assertEqual(result['deleted'], [])
+        self.assertFalse(any(action in ('deletefile', 'rmdir') for action, _ in calls))
+
+    def test_remote_generation_rejects_negative_sizes_and_empty_required_components(self):
+        config, _generation, now, objects, _calls, execute, _add = self.retention_fixture()
+        original = copy.deepcopy(objects[self.run_id])
+        cases = [('sqlite.db', -1), ('sqlite.db', 0), ('redis.rdb', 0),
+                 ('qdrant-metadata.json', 0), ('qdrant-memory.snapshot', 0)]
+        for name, size in cases:
+            with self.subTest(name=name, size=size):
+                files = copy.deepcopy(original); body = json.loads(files['manifest.json'])
+                record = next(record for record in body['files'] if record['file'] == name)
+                files[name] = b''; record['bytes'] = size; record['sha256'] = backup.hashlib.sha256(b'').hexdigest()
+                files['manifest.json'] = json.dumps(body).encode()
+                receipt = json.loads(files['COMPLETE.json']); receipt['manifestSha256'] = backup.hashlib.sha256(files['manifest.json']).hexdigest()
+                files['COMPLETE.json'] = json.dumps(receipt).encode(); objects[self.run_id] = files
+                with patch.object(backup, 'rclone_command', side_effect=execute):
+                    self.assertIsNone(backup.remote_generation(config['drive'], self.run_id, now))
+
+    def test_local_generation_rejects_empty_required_components_even_with_matching_hash(self):
+        generation = self.generation()
+        for name in ('sqlite.db', 'redis.rdb', 'qdrant-metadata.json'):
+            with self.subTest(name=name):
+                target = generation / name; original = target.read_bytes(); target.write_bytes(b'')
+                self.rehash(generation)
+                with self.assertRaisesRegex(RuntimeError, 'required_component_empty'): backup.verify_generation(generation)
+                target.write_bytes(original); self.rehash(generation)
+
     def test_failed_current_upload_or_root_prefix_never_runs_cleanup(self):
         config, generation, now, objects, calls, execute, add = self.retention_fixture()
         add(now - dt.timedelta(days=500), 'abcdef123457')
