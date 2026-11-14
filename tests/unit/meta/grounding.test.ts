@@ -108,6 +108,14 @@ describe('sanitizeForGrounding', () => {
 });
 
 describe('maybeStartGrounding / takeGrounding', () => {
+  it('does not export a DM or identifying group question to search or summarization', async () => {
+    vi.clearAllMocks();
+    await maybeStartGrounding({ chatId: 101, messageId: 42, text: '最新的 iPhone 什么时候发布？' });
+    await maybeStartGrounding({ chatId: -100, messageId: 43, text: '我的邮箱 private@example.org 是不是泄露了？' });
+    await maybeStartGrounding({ chatId: -100, messageId: 44, text: '保密：刚才私聊内容是什么？' });
+    expect(executeSearch).not.toHaveBeenCalled();
+    expect(callWithFallback).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     store.clear();
     counters.clear();

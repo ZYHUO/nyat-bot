@@ -22,13 +22,14 @@ beforeEach(() => {
 });
 
 describe('scoped world state', () => {
-  it('keeps same entity names separate per chat and permits global facts', () => {
+  it('keeps entity names separate per chat and holds unproven global facts from chat prompts', () => {
     upsertEntity('project-x', 'project', { owner: 'A' }, -100);
     upsertEntity('project-x', 'project', { owner: 'B' }, -200);
     upsertEntity('shared', 'topic', { status: 'global' });
     expect(findEntities('project-x', undefined, 4, { visibility: 'chat', chatId: -100 }).map((e) => e.properties.owner)).toEqual(['A']);
     expect(findEntities('project-x', undefined, 4, { visibility: 'chat', chatId: -200 }).map((e) => e.properties.owner)).toEqual(['B']);
-    expect(findEntities('shared', undefined, 4, { visibility: 'chat', chatId: -100 }).map((e) => e.properties.status)).toEqual(['global']);
+    expect(findEntities('shared', undefined, 4, { visibility: 'chat', chatId: -100 })).toEqual([]);
+    expect(findEntities('shared', undefined, 4).map((e) => e.properties.status)).toEqual(['global']);
   });
 
   it('keeps task entities visible only to that task and its chat', () => {

@@ -1,5 +1,6 @@
 import { env } from '../env.js';
 import type { DispatchTask } from '../meta/types.js';
+import { inspectMetaTaskScope } from '../meta/input-scope.js';
 
 interface ActivationConfig {
   META_SUBAGENT_ENABLED?: boolean;
@@ -9,7 +10,9 @@ interface ActivationConfig {
 }
 export type CodeActActivationReason =
   | 'meta_disabled' | 'isolation_disabled' | 'invalid_chat' | 'chat_outside_scope'
-  | 'invalid_activation_epoch' | 'invalid_created_at' | 'predates_activation';
+  | 'invalid_activation_epoch' | 'invalid_created_at' | 'predates_activation'
+  | 'task_scope_invalid' | 'task_scope_unavailable'
+  | 'checkpoint_missing' | 'checkpoint_invalid' | 'checkpoint_unavailable';
 export type CodeActActivationDecision =
   | { allowed: true }
   | { allowed: false; reason: CodeActActivationReason };
@@ -47,8 +50,17 @@ export async function holdCodeActTask(task: DispatchTask, reason: CodeActActivat
 }
 
 export async function requireCodeActActivation(task: DispatchTask): Promise<void> {
-  const decision = checkCodeActActivation(task);
+  const decision = checkCodeActTaskActivation(task);
   if (decision.allowed) return;
   await holdCodeActTask(task, decision.reason);
   throw new Error(`codeact_activation_denied:${decision.reason}`);
+}
+
+/** Durable tasks carry message/user references as well as a numeric chat label. */
+export function checkCodeActTaskActivation(task: DispatchTask): CodeActActivationDecision {
+  const activation = checkCodeActActivation(task);
+  if (!activation.allowed) return activation;
+  const scope = inspectMetaTaskScope(task);
+  if (scope.status === 'valid') return activation;
+  return { allowed: false, reason: scope.status === 'unavailable' ? 'task_scope_unavailable' : 'task_scope_invalid' };
 }

@@ -15,7 +15,7 @@ import { logger } from '../shared/logger.js';
 import { getUserContexts } from '../pipeline/context/manager.js';
 import { getAggregatedAffinity } from './user-affinity.js';
 import { getUserProfilePrompt } from './user-profile.js';
-import { isPrivateChat } from '../memory/visibility.js';
+import { canReadConversationSource, samePlatformAccount } from '../shared/privacy-scope.js';
 import { runWithAiWorkload } from '../ai/workload.js';
 
 const STALE_SEC = 6 * 3600;
@@ -130,7 +130,8 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
   try {
     // 机制2:上下文 = 群 ∪ DM(不再只数群)。纯 DM / 单群但也私聊过的人
     // 也算 >1 上下文,能拿到跨上下文连结。
-    const contexts = await getUserContexts(uid).catch(() => [] as number[]);
+    const contexts = (await getUserContexts(uid).catch(() => [] as number[]))
+      .filter(chatId => samePlatformAccount(uid, chatId));
     const now = Math.floor(Date.now() / 1000);
     if (contexts.length <= 1) {
       // tombstone:更新时间戳以节流;impression=null → buildCrossGroupInjection 返回 null。
@@ -139,7 +140,8 @@ export async function refreshPersonIdentity(uid: number): Promise<PersonIdentity
       return { uid, impression: null, primary_chat_id: null, chat_count: contexts.length, updated_at: now };
     }
     const agg = getAggregatedAffinity(uid);
-    const primary = agg.primaryChatId ?? contexts[0]!;
+    const primary = agg.primaryChatId !== null && contexts.includes(agg.primaryChatId)
+      ? agg.primaryChatId : contexts[0]!;
     // impression 兜底仍取 primary 上下文画像;全局结构化列(traits/interests/…)
     // 由机制5 LLM 合并 cron 产出,这里保留已有值不覆盖。
     const impression = getUserProfilePrompt(primary, uid);
@@ -243,7 +245,7 @@ export function setGlobalProfile(uid: number, p: {
  * when missing/stale; never blocks prompt assembly.
  */
 export function buildCrossGroupInjection(uid: number, currentChatId: number): string | null {
-  if (!env().PERSON_IDENTITY_ENABLED || !uid) return null;
+  if (!env().PERSON_IDENTITY_ENABLED || !uid || !samePlatformAccount(uid, currentChatId)) return null;
   const row = getPersonIdentity(uid);
   const now = Math.floor(Date.now() / 1000);
   if (!row || now - row.updated_at > STALE_SEC) {
@@ -267,10 +269,10 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   // 当前会话自己的私密来源仍可读；隐私开关不授予跨会话共享权限。
   const g = getGlobalProfile(uid);
   if (g && g.lastMergedAt && (g.traits.length || g.interests.length || g.relationToBot)) {
+    // Merged profile fields have no separate public grants. Every contributing
+    // contextual source must be readable; one foreign source taints the summary.
     const okToInject = g.sourceContextIds.length > 0 && g.sourceContextIds.every((sourceChatId) =>
-      Number.isSafeInteger(sourceChatId) && sourceChatId !== 0 &&
-      (sourceChatId === currentChatId || !isPrivateChat(sourceChatId)),
-    );
+      canReadConversationSource(sourceChatId, currentChatId, { visibility: 'contextual' }));
     if (okToInject) {
       const bits: string[] = [];
       if (g.traits.length) bits.push(`性格:${g.traits.slice(0, 6).join('、')}`);
@@ -278,7 +280,7 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
       if (g.commStyle) bits.push(`说话:${g.commStyle}`);
       if (g.relationToBot) bits.push(`和你的关系:${g.relationToBot}`);
       if (g.stablePatterns.length) bits.push(`习惯:${g.stablePatterns.slice(0, 4).join('、')}`);
-      return `[这个人你在别的地方也认识] 跨 ${row.chat_count} 个场景对 TA 的整体印象:\n${bits.join(';')}`;
+      return `[本会话的人物记忆] ${bits.join(';')}`;
     }
   }
 
@@ -287,8 +289,7 @@ export function buildCrossGroupInjection(uid: number, currentChatId: number): st
   // 群还是私聊,一律剔除(敏感群内容也不该在别处裸泄;DM 内容不该进群)。
   if (!row.impression) return null;
   if (
-    row.primary_chat_id === null || !Number.isSafeInteger(row.primary_chat_id) ||
-    row.primary_chat_id === 0 || isPrivateChat(row.primary_chat_id)
+    row.primary_chat_id === null || !canReadConversationSource(row.primary_chat_id, currentChatId, { visibility: 'contextual' })
   ) {
     return null; // 未知来源或另一个私密会话的原始画像不可跨出。
   }

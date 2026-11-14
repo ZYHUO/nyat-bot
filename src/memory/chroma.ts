@@ -20,20 +20,18 @@ import { join } from 'node:path';
 import { LRUCache } from 'lru-cache';
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
-import { defaultVisibilityForChat, isPrivateChat, scrubMemoryHits, type MemoryVisibility } from './visibility.js';
+import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility, type VisibilityFields } from './visibility.js';
 import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
+import { isValidConversationScope, resolveConversationScope, samePlatformAccount } from '../shared/privacy-scope.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
  * Qdrant returns cosine similarity directly (normalized embeddings ⇒ ~[0,1]); we
  * clamp it to [0,1]. Optional so callers that don't need it can ignore it.
  */
-export type ScoredMessage = FormattedMessage & {
+export type ScoredMessage = FormattedMessage & VisibilityFields & {
   score?: number;
-  /** 机制1:记忆级 visibility 与来源会话(跨上下文召回时 scrub 用)。 */
-  visibility?: MemoryVisibility;
-  sourceChatId?: number | null;
 };
 
 const VECTOR_SIZE = 384;
@@ -323,6 +321,8 @@ export async function memorizeMessage(
   /** 机制1:覆盖默认 visibility(如频道帖显式传 'public');默认按会话私密性推断。 */
   visibilityOverride?: MemoryVisibility,
 ): Promise<void> {
+  const sourceScope = resolveConversationScope(chatId);
+  if (!sourceScope) return;
   const text = msg.textContent || msg.captionContent || '';
   if (!text.trim() || msg.isBot) return;
 
@@ -403,6 +403,8 @@ export async function memorizeMessage(
           mid, chatId, messageId: msg.messageId, uid: msg.uid,
           username: msg.username, fullName: msg.fullName, timestamp: msg.timestamp,
           role: msg.role, text, visibility, sourceChatId: chatId,
+          sourcePlatform: sourceScope.platform,
+          ...(sourceScope.accountId ? { sourceAccountId: sourceScope.accountId } : {}),
         },
       }],
     }));
@@ -500,7 +502,7 @@ export async function searchMemory(
   topK = 8,
   timeoutMs = 500,
 ): Promise<ScoredMessage[]> {
-  if (!query.trim()) return [];
+  if (!query.trim() || !isValidConversationScope(chatId)) return [];
 
   try {
     const result = await Promise.race([
@@ -543,19 +545,22 @@ async function _searchMemoryInner(
   const semantic: ScoredMessage[] = [];
   for (const hit of hits) {
     const m = hitToMessage(hit);
-    if (m) semantic.push(m);
+    // A backend filter is not provenance: damaged/imported payloads can disagree
+    // with it. Local recall must never turn a foreign hit into a current message.
+    if (m?.sourceChatId === chatId) semantic.push(m);
   }
+  const localSemantic = scrubMemoryHits(semantic, chatId).kept;
 
-  if (!hybrid) return applyMinScore(semantic, { chatId }).slice(0, topK);
+  if (!hybrid) return applyMinScore(localSemantic, { chatId }).slice(0, topK);
 
   // 词法路:384 维小模型对专有名词/黑话/型号天然弱,BM25 正好补这一块。
   const lexical = await lexicalPath(store, chatId, query, perPath);
-  if (lexical.length === 0) return applyMinScore(semantic, { chatId }).slice(0, topK);
+  if (lexical.length === 0) return applyMinScore(localSemantic, { chatId }).slice(0, topK);
 
   // 阈值只施加于语义路 —— 词法路没有可比的 [0,1] 分数,拿余弦阈值卡它没有意义。
   const { rrfFuse } = await import('./fusion.js');
   const fused = rrfFuse<ScoredMessage>(
-    [applyMinScore(semantic, { chatId }), lexical],
+    [applyMinScore(localSemantic, { chatId }), lexical],
     (m) => `${m.sourceChatId ?? chatId}_${m.messageId}`,
     { limit: topK },
   );
@@ -589,9 +594,11 @@ async function lexicalPath(
     for (const p of points) {
       const m = hitToMessage(p as { payload?: Record<string, unknown> | null; score?: number });
       const mid = (p.payload ?? {})['mid'];
-      if (m && typeof mid === 'string') byMid.set(mid, m);
+      if (m?.sourceChatId === chatId && typeof mid === 'string'
+        && mid === `${chatId}_${m.messageId}`) byMid.set(mid, m);
     }
-    return rows.map((r) => byMid.get(r.chromaId)).filter((m): m is ScoredMessage => m !== undefined);
+    const local = rows.map((r) => byMid.get(r.chromaId)).filter((m): m is ScoredMessage => m !== undefined);
+    return scrubMemoryHits(local, chatId).kept;
   } catch (err) {
     logger.debug({ err, chatId }, 'lexical path failed (non-critical, falling back to vector-only)');
     return [];
@@ -635,6 +642,21 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
     typeof v === 'string' ? v : undefined;
   const doc = asStr(meta['text']);
   if (!doc) return null;
+  const validChatId = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value !== 0;
+  // Historical chatId is an explicit source; absence of both is not. An invalid
+  // or conflicting *present* source must not be repaired by a different field.
+  const rawSource = meta['sourceChatId'];
+  const rawChat = meta['chatId'];
+  if (rawSource !== undefined && !validChatId(rawSource)) return null;
+  if (rawChat !== undefined && !validChatId(rawChat)) return null;
+  if (rawSource !== undefined && rawChat !== undefined && rawSource !== rawChat) return null;
+  const sourceChatId = rawSource ?? rawChat;
+  if (!validChatId(sourceChatId)) return null;
+  const sourcePlatform = meta['sourcePlatform'];
+  const sourceAccountId = meta['sourceAccountId'];
+  if (sourcePlatform !== undefined && sourcePlatform !== 'telegram' && sourcePlatform !== 'qq') return null;
+  if (sourceAccountId !== undefined && (typeof sourceAccountId !== 'string' || !/^[1-9]\d*$/.test(sourceAccountId))) return null;
   // Qdrant Cosine returns similarity directly (higher = closer); clamp to [0,1].
   const score = typeof hit.score === 'number'
     ? Math.max(0, Math.min(1, hit.score))
@@ -654,21 +676,23 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
     isForwarded: false,
     score,
     visibility,
-    sourceChatId: asNum(meta['sourceChatId']) ?? asNum(meta['chatId']) ?? null,
+    sourceChatId,
+    ...(sourcePlatform !== undefined ? { sourcePlatform } : {}),
+    ...(sourceAccountId !== undefined ? { sourceAccountId } : {}),
   };
 }
 
 /**
  * 机制4:per-uid 跨上下文记忆检索(旁路,不锁 chatId)。filter 改按 uid,
- * 返回**强制过 scrubMemoryHits(boundChatId)**——默认带 public + 非私密来源
- * contextual,private 一律剔除。
+ * 返回强制过 scrubMemoryHits(boundChatId)。跨会话只允许来源明确、同平台账号的
+ * public 记录；contextual 留在原会话，私聊和敏感来源不能跨出。
  *
  * **双 flag fail-closed 在本函数内收口**(不再靠调用方自觉)。原先的约定是"仅
  * MEMORY_CROSS_CONTEXT_ENABLED && MEMORY_VISIBILITY_ENABLED 同开时才应由调用方启用",
  * retriever.retrieveCrossContext 照做了,但 subagent 的 host-api.recallPerson 漏了 ——
- * 而 scrubMemoryHits 在 MEMORY_VISIBILITY_ENABLED=false(默认)时是**空操作**,于是
+ * 当时 scrubMemoryHits 在 MEMORY_VISIBILITY_ENABLED=false 时曾是空操作，于是
  * 任意群成员可让 CodeAct 模型对任意 uid 调 recallPerson,把受害者 DM 原文取回并念到群里。
- * 守卫放在唯一出口这里,新调用方不可能再绕过。
+ * 现在 scrub 永不关闭；两个 feature flag 只控制是否启用跨上下文召回。
  */
 export async function searchMemoryByUser(
   uid: number,
@@ -680,7 +704,8 @@ export async function searchMemoryByUser(
   const e = env();
   if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) return [];
   // 负数 uid = sender_chat(匿名管理员/频道),不是真实的人,不做 per-person 检索。
-  if (!query.trim() || !uid || uid <= 0) return [];
+  if (!query.trim() || !Number.isSafeInteger(uid) || uid <= 0
+    || !samePlatformAccount(uid, boundChatId)) return [];
   try {
     return await Promise.race([
       _searchMemoryByUserInner(uid, query, boundChatId, topK),
@@ -698,6 +723,8 @@ async function _searchMemoryByUserInner(
   boundChatId: number,
   topK: number,
 ): Promise<ScoredMessage[]> {
+  const targetScope = resolveConversationScope(boundChatId);
+  if (!targetScope?.accountId) return [];
   const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
   const [vector] = await embed([query]);
   if (!vector) return [];
@@ -707,10 +734,12 @@ async function _searchMemoryByUserInner(
     vector,
     limit: topK * 3,
     filter: {
-      must: [{ key: 'uid', match: { value: uid } }],
-      // 纵深:private 在**数据库侧**就剔掉,不要取回进程内存再靠 JS 过滤(取回即已是
-      // 泄漏面 —— 中途任何日志/异常都会带出原文)。存量点没有 visibility 字段时
-      // must_not 不会命中,仍由下面的 scrubMemoryHits 按 sourceChatId 兜底。
+      must: [{ key: 'uid', match: { value: uid } },
+        { key: 'visibility', match: { value: 'public' satisfies MemoryVisibility } },
+        { key: 'sourcePlatform', match: { value: targetScope.platform } },
+        { key: 'sourceAccountId', match: { value: targetScope.accountId } }],
+      // Database filters require public provenance before retrieval; the JS
+      // boundary still verifies source IDs and sensitive-chat policy per hit.
       must_not: [{ key: 'visibility', match: { value: 'private' satisfies MemoryVisibility } }],
     },
     with_payload: true,
@@ -722,7 +751,7 @@ async function _searchMemoryByUserInner(
     const m = hitToMessage(hit);
     // review #7:同会话命中由 semantic 路覆盖,这里只要"别的场景"的 —— 在
     // scrub/slice **之前**就剔除,否则本会话记忆挤占 topK 预算、跨上下文召回饿死。
-    if (m && m.sourceChatId !== boundChatId) raw.push(m);
+    if (m && m.uid === uid && m.sourceChatId !== boundChatId) raw.push(m);
   }
   // 阈值放在 scrub **之前**:低分噪声不该先占掉 topK 预算再被裁掉。
   const scored = applyMinScore(raw, { uid, boundChatId });
@@ -736,26 +765,10 @@ async function _searchMemoryByUserInner(
 }
 
 /**
- * 供**自动注入 prompt** 的检索出口。与 searchMemory 的区别不在检索,而在守卫。
- *
- * 为什么单独开一个出口而不是让调用方自己过滤:searchMemory 只锁 chatId,那保证的是
- * "检索没跨会话",**不等于"取出来的东西可以进这个 prompt"** —— DM 与
- * MEMORY_SENSITIVE_CHAT_IDS 群里的每一条记忆按 defaultVisibilityForChat 都是
- * private。而注入进 prompt 的内容会被模型复述、被摘要、被写进日记,再扩散到别处。
- * chroma.ts:493-501 那次事故(私聊原文被念到群里)的复盘结论就是:守卫必须放在唯一
- * 出口,靠调用方自觉一定会漏。所以这里是硬守卫,调用方无法绕过、也没有 flag 能关掉。
- *
- * 三道闸,全部 fail-closed:
- *  1. 私聊/敏感会话一律不返回 —— 它们的记忆整体是 private。
- *  2. 逐条丢弃 visibility !== public|contextual,**包括缺字段的存量点**(宁严勿松:
- *     存量点写入时还没有 visibility 字段,无法证明它安全)。
- *  3. sourceChatId 必须等于 chatId。Qdrant filter 用的是 payload.chatId,而渲染与
- *     记账用 sourceChatId,超级群迁移等场景下两者可能不一致 —— 那时"检索锁的会话"
- *     与"这条记忆真正的来源"就不是同一个。
- *
- * 另外强制一个非零相关性下限:MEMORY_MIN_SCORE 默认 0(纯 topK),那样这个函数的
- * 真实语义会变成"从本会话历史里随机抽几条塞进 prompt",越是无关的旧话被复述,
- * 参与者越预期不到。拿不到分数的命中(词法路/融合路)一律丢弃。
+ * Prompt recall stays in the current proven conversation, including its own
+ * private memory. Privacy is a source boundary, not a ban on remembering a DM
+ * inside that DM. Unknown/conflicting sources are rejected by searchMemory;
+ * relevance still needs a real score above the automatic-injection floor.
  */
 export async function searchMemoryForInjection(
   chatId: number,
@@ -763,8 +776,6 @@ export async function searchMemoryForInjection(
   topK = 4,
   timeoutMs = 400,
 ): Promise<ScoredMessage[]> {
-  // 闸 1:私聊 / 敏感群整体不参与自动注入。
-  if (isPrivateChat(chatId)) return [];
   if (!query.trim()) return [];
 
   const hits = await searchMemory(chatId, query, topK, timeoutMs);
@@ -772,9 +783,7 @@ export async function searchMemoryForInjection(
 
   const floor = Math.max(env().MEMORY_MIN_SCORE, INJECTION_MIN_SCORE_FLOOR);
   const kept = hits.filter((m) => {
-    // 闸 2:只放行明确标记为可共享的。缺字段 = 丢。
-    if (m.visibility !== 'public' && m.visibility !== 'contextual') return false;
-    // 闸 3:来源必须就是本会话。
+    // Local source proof is required even for public records.
     if (m.sourceChatId !== chatId) return false;
     return typeof m.score === 'number' && m.score >= floor;
   });

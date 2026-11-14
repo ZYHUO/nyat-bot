@@ -6,6 +6,7 @@ import type { ConversationRef, MessageRef, MessageSegment, PlatformAction } from
 import { PlatformBoundaryError, UnsupportedCapabilityError } from './types.js';
 import type { OneBotMediaKind } from './onebot-media-stream.js';
 import { getOneBotGroupNoticeState, isOneBotMessageRecalled } from './onebot-notices.js';
+import { assertOutboundText, assertOutboundFile } from '../shared/outbound-privacy.js';
 
 export interface OneBotSender {
   send(action: PlatformAction): Promise<MessageRef>;
@@ -77,9 +78,10 @@ function assertNotRecalled(chatId: number, messageId: number): void {
 
 function validateSegments(segments: readonly MessageSegment[], conversation: ConversationRef): void {
   if (!segments.length) throw new PlatformOutboundError('empty_platform_message');
+  assertOutboundText(segments.filter((segment) => segment.type === 'text').map((segment) => segment.text).join(''));
   let replies = 0;
   for (const segment of segments) {
-    if (segment.type === 'text') continue;
+    if (segment.type === 'text') { assertOutboundText(segment.text); continue; }
     if (segment.type === 'mention') {
       if (conversation.conversationKind !== 'group') throw new UnsupportedCapabilityError('private mentions');
       if (accountKey(segment.user) !== accountKey(conversation)) throw new PlatformOutboundError('cross_account_mention');
@@ -116,6 +118,7 @@ export async function sendPlatformSegments(chatId: number, segments: readonly Me
 }
 
 export async function sendPlatformText(chatId: number, text: string, replyToId?: number): Promise<number> {
+  assertOutboundText(text);
   const conversation = platformConversation(chatId);
   if (!conversation) throw new PlatformOutboundError('not_onebot_conversation');
   const segments: MessageSegment[] = [];
@@ -171,6 +174,7 @@ export async function reactPlatformMessage(chatId: number, messageId: number, em
 
 export async function sendPlatformMedia(chatId: number, kind: OneBotMediaKind, bytes: Buffer, fileName: string,
   opts: { caption?: string; replyToId?: number; beforeSend?: () => void } = {}): Promise<number> {
+  assertOutboundFile(bytes, fileName, opts.caption);
   assertCanSend(chatId);
   const { conversation, client } = resolveSender(chatId);
   if (!client.sendMedia) throw new PlatformOutboundError('onebot_media_unavailable');

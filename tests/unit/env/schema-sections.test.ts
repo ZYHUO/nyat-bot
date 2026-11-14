@@ -56,8 +56,9 @@ describe('env schema 拆段', () => {
     // Includes this rollout's transport/runtime settings; independently recounted.
     // Independently recounted after QQ pre-Heart batching, addressing and display-name controls.
     // Recounted all section keys and verified uniqueness for this rollout.
-    expect(all.length).toBe(533);
-    expect(new Set(all).size).toBe(533);
+    // DM_AUTO_PRIVATE retired: a flag cannot grant private-context disclosure.
+    expect(all.length).toBe(532);
+    expect(new Set(all).size).toBe(532);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });

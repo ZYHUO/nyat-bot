@@ -93,6 +93,15 @@ describe('CodeAct activation policy', () => {
 });
 
 describe('queue authority before execution', () => {
+  it('holds a native Telegram task contaminated with a QQ quote before queue or worker side effects', async () => {
+    const contaminated = task({ relatedQuoteIds: [2 ** 52 + 99] });
+    await expect(enqueueCodeActJob(contaminated)).rejects.toThrow('task_scope_invalid');
+    expect(mocks.add).not.toHaveBeenCalled(); expect(mocks.put).not.toHaveBeenCalled();
+    startCodeActWorker(); const discard = vi.fn();
+    await expect(mocks.processor!({ data: contaminated, discard })).rejects.toThrow('task_scope_invalid');
+    expect(discard).toHaveBeenCalledOnce(); expect(mocks.lock).not.toHaveBeenCalled(); expect(mocks.run).not.toHaveBeenCalled();
+    expect(JSON.parse(String(mocks.archive.mock.calls[0]![2])).task.relatedQuoteIds).toEqual([2 ** 52 + 99]);
+  });
   it('rejects new queue and resume entries before lifecycle writes or local fallback', async () => {
     await expect(enqueueCodeActJob(task({ chatId: -100 }))).rejects.toThrow('chat_outside_scope');
     await expect(enqueueResumeCodeActJob(task({ createdAt: activationMs - 1, segment: 4 }))).rejects.toThrow('predates_activation');

@@ -13,7 +13,7 @@ import {
   persistCodeActTask,
 } from './task-store.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
-import { checkCodeActActivation, holdCodeActTask, requireCodeActActivation } from './activation-policy.js';
+import { checkCodeActTaskActivation, holdCodeActTask, requireCodeActActivation } from './activation-policy.js';
 
 export const CODEACT_QUEUE_NAME = 'xxb-codeact';
 
@@ -97,7 +97,7 @@ export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void>
 
 async function processCodeActJob(job: Job<DispatchTask>, token?: string): Promise<void> {
   const task = job.data;
-  const activation = checkCodeActActivation(task);
+  const activation = checkCodeActTaskActivation(task);
   if (!activation.allowed) {
     await holdCodeActTask(task, activation.reason);
     // It remains in the separate immutable archive; do not repeatedly retry a
@@ -133,6 +133,9 @@ export function startCodeActWorker(): Worker<DispatchTask> {
   });
   _worker.on('failed', (job, err) => {
     logger.warn({ jobId: job?.id, err: err.message }, 'CodeAct job failed');
+    // Rejected queue data has no authority to mutate a same-ID cached task or
+    // clear its chat's active indexes. The original job remains in its archive.
+    if (err.message.startsWith('codeact_activation_denied:')) return;
     // round 102: **超时的 job 也要解注内。**
     //
     // 现场：task 25249feb 在 09-23 18:51 UTC `job stalled more than allowable limit`

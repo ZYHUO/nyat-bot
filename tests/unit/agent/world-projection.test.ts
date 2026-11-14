@@ -9,7 +9,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({ RELATIONSHIP_ENABLED: true }),
+  env: () => ({ RELATIONSHIP_ENABLED: true, BOT_TOKEN: '123:synthetic-test-token' }),
 }));
 
 import { buildScopedWorldProjection } from '../../../src/agent/world-projection.js';
@@ -44,6 +44,8 @@ describe('scoped Self/Person/Group/World projection', () => {
       `INSERT INTO user_profiles (chat_id, uid, profile_prompt, updated_at)
        VALUES (?, ?, ?, ?)`,
     ).run(-100, 7, '偏好短句，关注数据库', now);
+    db.prepare('INSERT INTO user_profiles (chat_id, uid, profile_prompt, updated_at) VALUES (?, ?, ?, ?)')
+      .run(-200, 7, 'FOREIGN_PROFILE_MARKER', now);
     db.prepare(
       `INSERT INTO chat_relationships (chat_id, uid, affinity, interaction_count, last_interaction_at, last_summary, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -63,6 +65,8 @@ describe('scoped Self/Person/Group/World projection', () => {
     expect(projection.self[0]).toMatchObject({ kind: 'self', scopeKey: 'global', status: 'unverified', evidence: ['feedback:event-1'] });
     expect(projection.person[0]).toMatchObject({ kind: 'person', scopeKey: 'user:7@chat:-100', status: 'unverified', expiresAt: now + 30 * 24 * 3600, evidence: ['profile:-100:7', 'chat_relationships:-100:7'] });
     expect(projection.person[0]?.statement).toContain('互动记录：已互动 12 次');
+    expect(projection.person[0]?.statement).toContain('偏好短句，关注数据库');
+    expect(projection.person[0]?.statement).not.toContain('FOREIGN_PROFILE_MARKER');
     expect(projection.group[0]).toMatchObject({ kind: 'group', scopeKey: 'chat:-100', status: 'unverified', expiresAt: now + 6 * 3600 });
     expect(projection.world[0]).toMatchObject({ kind: 'world', subject: 'project:project-x', source: 'world_event:event-world-1', scopeKey: 'chat:-100', confidence: 0.85 });
     expect(projection.worldEntities).toHaveLength(1);

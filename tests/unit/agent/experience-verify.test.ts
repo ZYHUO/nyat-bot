@@ -22,6 +22,7 @@ function loadMigrations(): void {
   db.exec(readFileSync(join(__dirname, '../../../migrations/0054_episodes_experience.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../migrations/0057_experience_verify.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../migrations/0061_experience_share.sql'), 'utf8'));
+  db.exec("INSERT INTO episodes (id, task_id, chat_id, goal, outcome, summary, created_at) VALUES (1, 'scoped-fixture', 1, 'synthetic', 'done', 'synthetic', 1)");
 }
 
 beforeEach(() => {
@@ -129,14 +130,14 @@ describe('findRelevantExperience 降权', () => {
     const b = saveOne('sendFile 文件交付经验可疑');
     db.prepare('UPDATE experience_entries SET verified = 1 WHERE id = ?').run(a);
     db.prepare('UPDATE experience_entries SET verified = 2 WHERE id = ?').run(b);
-    const hits = findRelevantExperience('sendFile 文件交付', 3);
+    const hits = findRelevantExperience('sendFile 文件交付', 3, { boundChatId: 1 });
     expect(hits.length).toBeGreaterThanOrEqual(2);
     expect(hits[0]!.id).toBe(a); // 已验证的排前面
   });
 
   it('返回 id 供注入记录', () => {
     const id = saveOne('返回 id 的经验');
-    const hits = findRelevantExperience('返回 id', 1);
+    const hits = findRelevantExperience('返回 id', 1, { boundChatId: 1 });
     expect(hits[0]!.id).toBe(id);
   });
 });
@@ -145,7 +146,7 @@ function saveOne(content: string): number | null {
   const ts = Math.floor(Date.now() / 1000);
   const r = db
     .prepare('INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run('trick', content, '["测试"]', null, 'episode', ts);
+    .run('trick', content, '["测试"]', 1, 'episode', ts);
   return Number(r.lastInsertRowid);
 }
 

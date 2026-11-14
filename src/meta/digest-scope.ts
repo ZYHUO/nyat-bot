@@ -1,10 +1,12 @@
-/** Telegram chat provenance for digests; unknown or mixed sources are not public. */
+import { inspectMetaChatScope } from './input-scope.js';
+
+/** Chat provenance includes mapped QQ account identity; unknown/mixed is not public. */
 export interface DigestReadScope {
   sourceChatId: number;
 }
 
 export function isDigestSourceChatId(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value !== 0;
+  return inspectMetaChatScope(value).status === 'valid';
 }
 
 /** A single-chat label is valid only when every contributing source agrees. */

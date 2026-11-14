@@ -36,7 +36,7 @@ export const memorySection = {
   // 逐条 scrub(DM 默认 private,群默认 contextual)。是机制3/4 跨上下文共享的前置门,
   // 关闭时跨上下文入口一律 fail-closed 拒绝返回。默认关。
   MEMORY_VISIBILITY_ENABLED: booleanFromEnv.default(false),
-  // 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 由 DM_AUTO_PRIVATE 自动判定。
+  // 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 始终私密，不受开关影响。
   MEMORY_SENSITIVE_CHAT_IDS: z
     .string()
     .default('')
@@ -45,8 +45,6 @@ export const memorySection = {
       if (!t) return [] as number[];
       return t.split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n) && n !== 0);
     }),
-  // DM 是否自动判为私密会话(CGM dmAutoPrivate)。默认 true。
-  DM_AUTO_PRIVATE: booleanFromEnv.default(true),
   // 机制5 LLM 全局画像合并 cron:低频把某人各上下文(群+DM)画像喂便宜模型提炼成
   // 全局 traits/interests/relation,写回 person_identity 全局列。默认关。
   PROFILE_MERGE_ENABLED: booleanFromEnv.default(false),
@@ -92,8 +90,8 @@ export const memorySection = {
   // Meta 的引擎跨所有会话,其输出经 digest/梦境日记扩散到每个群的 prompt,
   // 私聊记忆进 Meta 就有一条通往别的群的洗白路径(与那次"私聊原文被念到群里"同源)。
   SUBAGENT_MEMORY_ENABLED: booleanFromEnv.default(false),
-  // 灰度名单。**空 = 关闭**,与本仓其他 flag 的「空 = 全量」刻意相反:
-  // 这是隐私相关特性,配错的代价不对称 —— 漏开只是没效果,误开是内容外泄。
+  // 启用后的会话名单。空 = 全量;非空时仅列出的会话生效。
+  // 来源隔离始终由检索层强制执行,全量启用不授予跨平台或跨会话读取权。
   SUBAGENT_MEMORY_CHAT_IDS: z
     .string()
     .default('')

@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { assertOutboundText } from '../shared/outbound-privacy.js';
 
 /** Per-command timeout. Short replies synthesize in ~1-3s; this is a safe ceiling. */
 const TTS_CMD_TIMEOUT_MS = 15_000;
@@ -34,6 +35,7 @@ const MAX_STDERR_CHARS = 8192;
 export async function synthesizeVoice(text: string, voice?: string): Promise<Buffer | null> {
   const cfg = env();
   if (!cfg.TTS_ENABLED) return null;
+  assertOutboundText(text);
 
   const clean = text.trim();
   if (!clean) return null;

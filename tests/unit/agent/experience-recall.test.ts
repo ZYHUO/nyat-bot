@@ -23,8 +23,8 @@ const BOT = 'hunhebi_bot';
 
 function seed(content: string, tags = '[]'): void {
   db.prepare(
-    `INSERT INTO experience_entries (kind, content, tags, origin_bot, verified, created_at)
-     VALUES ('lesson', ?, ?, ?, 1, strftime('%s','now'))`,
+    `INSERT INTO experience_entries (kind, content, tags, origin_bot, verified, source_episode_id, created_at)
+     VALUES ('lesson', ?, ?, ?, 1, 1, strftime('%s','now'))`,
   ).run(content, tags, BOT);
 }
 
@@ -35,6 +35,7 @@ beforeEach(() => {
   for (const f of readdirMigrations()) {
     if (/experience/.test(f)) db.exec(readFileSync(`migrations/${f}`, 'utf8'));
   }
+  db.exec("INSERT INTO episodes (id, task_id, chat_id, goal, outcome, summary, created_at) VALUES (1, 'scoped-fixture', 1, 'synthetic', 'done', 'synthetic', 1)");
   seed('接话前未核对自身此前发言内容，容易违反「禁止复读上一句」的规则，回复前需先回溯自身近3条发言确认无重复');
   seed('处理群内追问类短回任务时，若未先明确追问的上下文指向就回复，极易出现内容偏离对话语境的问题');
   seed('调用消息发送类工具后必须return执行结果，否则无法确认消息是否成功送达，也造成无效调用');
@@ -47,40 +48,40 @@ function readdirMigrations(): string[] {
 
 describe('findRelevantExperience · 自由文本能检索到', () => {
   it('① 复读相关的查询命中复读那条经验', () => {
-    const hits = findRelevantExperience('接话前要注意不要复读上一句', 3, { botId: BOT });
+    const hits = findRelevantExperience('接话前要注意不要复读上一句', 3, { botId: BOT, boundChatId: 1 });
     expect(hits.length).toBeGreaterThan(0);
     expect(hits.map((h) => h.content).join(' ')).toContain('复读');
   });
 
   it('② 上下文对齐的查询命中上下文那条', () => {
-    const hits = findRelevantExperience('回复前先对齐对话上下文', 3, { botId: BOT });
+    const hits = findRelevantExperience('回复前先对齐对话上下文', 3, { botId: BOT, boundChatId: 1 });
     expect(hits.map((h) => h.content).join(' ')).toContain('上下文');
   });
 
   it('③ 工具送达的查询命中送达那条', () => {
-    const hits = findRelevantExperience('调用消息发送工具后要确认送达', 3, { botId: BOT });
+    const hits = findRelevantExperience('调用消息发送工具后要确认送达', 3, { botId: BOT, boundChatId: 1 });
     expect(hits.map((h) => h.content).join(' ')).toContain('送达');
   });
 
   it('④ 命中会累加 use_count', () => {
-    findRelevantExperience('接话前要注意不要复读上一句', 3, { botId: BOT });
+    findRelevantExperience('接话前要注意不要复读上一句', 3, { botId: BOT, boundChatId: 1 });
     const rows = db.prepare('SELECT use_count FROM experience_entries WHERE use_count > 0').all() as { use_count: number }[];
     expect(rows.length).toBeGreaterThan(0);
   });
 
   it('⑤ 空查询不炸', () => {
-    expect(findRelevantExperience('', 3, { botId: BOT })).toEqual([]);
-    expect(findRelevantExperience('   ', 3, { botId: BOT })).toEqual([]);
+    expect(findRelevantExperience('', 3, { botId: BOT, boundChatId: 1 })).toEqual([]);
+    expect(findRelevantExperience('   ', 3, { botId: BOT, boundChatId: 1 })).toEqual([]);
   });
 
   it('⑥ limit 生效', () => {
-    const hits = findRelevantExperience('复读 上下文 送达 回复 接话', 2, { botId: BOT });
+    const hits = findRelevantExperience('复读 上下文 送达 回复 接话', 2, { botId: BOT, boundChatId: 1 });
     expect(hits.length).toBeLessThanOrEqual(2);
   });
 
   it('⑦ allowShared=false 时只回本 bot 的（别的 bot 的一条都不给）', () => {
     const hits = findRelevantExperience('接话前要注意不要复读上一句', 3, {
-      botId: 'other_bot', allowShared: false,
+      boundChatId: 1, botId: 'other_bot', allowShared: false,
     });
     expect(hits).toEqual([]);
   });
@@ -88,7 +89,7 @@ describe('findRelevantExperience · 自由文本能检索到', () => {
   it('⑦b allowShared=true 时别的 bot 的**已验证**经验也能拿到', () => {
     // 这正是生产的配置：EXPERIENCE_SHARE_ENABLED 开着时，跨 bot 借已验证的教训。
     const hits = findRelevantExperience('接话前要注意不要复读上一句', 3, {
-      botId: 'other_bot', allowShared: true,
+      boundChatId: 1, botId: 'other_bot', allowShared: true,
     });
     expect(hits.length).toBeGreaterThan(0);
   });

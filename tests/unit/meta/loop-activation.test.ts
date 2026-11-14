@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../../src/env.js', () => ({ env: () => mocks.env }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ hsetnx: mocks.archive }) }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { warn: mocks.warn, info: vi.fn() } }));
-vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ drainCallbacks: mocks.callbacks }) }));
+vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ drainCallbacks: mocks.callbacks,
+  getTask: (id: string) => ({ id, chatId: 42, createdAt: 1_800_000_000_000, status: 'done', contentDirection: 'synthetic' }),
+}) }));
 vi.mock('../../../src/meta/defer.js', () => ({ drainDueMetaDefers: mocks.defers }));
 vi.mock('../../../src/meta/session.js', () => ({ runMetaSession: mocks.session }));
 

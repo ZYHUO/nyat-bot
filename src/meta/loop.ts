@@ -7,6 +7,7 @@ import { runMetaSession } from './session.js';
 import type { AttentionItem } from './types.js';
 import { checkCodeActActivation } from '../subagent/activation-policy.js';
 import type { CodeActActivationReason } from '../subagent/activation-policy.js';
+import { holdMetaScopeInput, inspectMetaCallback } from './input-scope.js';
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
@@ -55,6 +56,13 @@ export async function metaTick(): Promise<void> {
     for (const cb of drainedCallbacks) {
       // Check the original timestamp before ingestAsync assigns a new one.
       if (!await allowReplay('callback', cb)) continue;
+      const scope = await inspectMetaCallback(cb);
+      if (scope.status !== 'valid') {
+        if (scope.status === 'unavailable' || !await holdMetaScopeInput('callback', cb, scope.reason)) {
+          await state.enqueueCallbackAsync(cb);
+        }
+        continue;
+      }
       callbacks.push(cb);
       await acc.ingestAsync({
         chatId: cb.chatId,

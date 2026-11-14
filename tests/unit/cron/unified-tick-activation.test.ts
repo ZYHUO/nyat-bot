@@ -1,17 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { config, recent, members, groups, goals, call, enqueue, send, persona, store, digestRead, redisList } = vi.hoisted(() => ({
+const { config, recent, members, groups, goals, call, enqueue, send, persona, store, digestRead, redisList,
+  forward, slot, sent, scoreTaste, recordForward, proposals, topics, impulses, dbRows, systemPrompt } = vi.hoisted(() => ({
   config: { PROACTIVE_ACTIVATED_AT_SEC: 0, MASTER_UID: 42, UNIFIED_TICK_HOUR_START: 0, UNIFIED_TICK_HOUR_END: 23,
     UNIFIED_TICK_USAGE: 'judge', SELF_PLAY_COOLDOWN_SEC: 14400, META_SUBAGENT_ENABLED: false,
-    MEMORY_SENSITIVE_CHAT_IDS: [] as number[], DIGEST_PERSIST_ENABLED: true },
+    MEMORY_SENSITIVE_CHAT_IDS: [] as number[], DIGEST_PERSIST_ENABLED: true, RSS_MONITOR_ENABLED: false,
+    UNIFIED_TICK_ABSENT_USERS_ENABLED: false, TRENCH_ENVELOPE_MODE: 'off' },
   recent: vi.fn(), members: vi.fn(), groups: vi.fn(), goals: vi.fn(), call: vi.fn(), enqueue: vi.fn(),
   send: vi.fn(), persona: vi.fn(), store: new Map<string, string>(), digestRead: vi.fn(), redisList: vi.fn(),
+  forward: vi.fn(), slot: vi.fn(), sent: vi.fn(), scoreTaste: vi.fn(), recordForward: vi.fn(), proposals: vi.fn(),
+  topics: vi.fn(), impulses: vi.fn(), dbRows: vi.fn(), systemPrompt: vi.fn(),
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => config }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ zrevrange: groups, get: async (key: string) => store.get(key) ?? null,
-  lrange: redisList,
+  lrange: redisList, keys: async () => ['xxb:rss:fuel:-100'], llen: async () => 1,
   set: async (key: string, value: string) => { store.set(key, value); return 'OK'; } }) }));
-vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { throw new Error('Unexpected real database access in activation test'); } }));
+vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => ({ prepare: () => ({ all: dbRows }) }) }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent: recent, getGroupMembers: members, addAssistant: vi.fn() }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: call }));
@@ -23,21 +27,27 @@ vi.mock('../../../src/agent/cognitive-debts.js', () => ({ listDueDebtsScoped: ()
 vi.mock('../../../src/shared/weather.js', () => ({ getWeatherHint: vi.fn(async () => null) }));
 vi.mock('../../../src/tracking/school-state.js', () => ({ getLifeTransition: () => null }));
 vi.mock('../../../src/meta/missed.js', () => ({ peekMissed: vi.fn(async () => []), clearMissed: vi.fn() }));
-vi.mock('../../../src/tracking/topic-registry.js', () => ({ getActiveTopics: () => [] }));
-vi.mock('../../../src/tracking/topic-bandit.js', () => ({ getTopicScores: () => [] }));
-vi.mock('../../../src/pipeline/rhythm/taste.js', () => ({ scoreTaste: () => ({ score: 0 }), wasForwardedRecently: () => false, SHARE_THRESHOLD: 100 }));
+vi.mock('../../../src/tracking/topic-registry.js', () => ({ getActiveTopics: topics }));
+vi.mock('../../../src/tracking/topic-bandit.js', () => ({ getTopicScores: () => [], pickTopic: (_chatId: number, labels: string[]) => labels[0], recordPull: vi.fn() }));
+vi.mock('../../../src/pipeline/rhythm/taste.js', () => ({ scoreTaste, recordForward, wasForwardedRecently: () => false, SHARE_THRESHOLD: 100 }));
 vi.mock('../../../src/meta/session-digest.js', () => ({ recentDigests: digestRead }));
-vi.mock('../../../src/agent/impulse-history.js', () => ({ getRecentImpulses: () => [] }));
+vi.mock('../../../src/agent/impulse-history.js', () => ({ getRecentImpulses: impulses }));
 vi.mock('../../../src/core/drives/score.js', () => ({ suppress: () => null, deriveDriveValues: () => ({ connection: 0, curiosity: 0, competence: 0, autonomy: 0 }), scoreAction: () => 0 }));
 vi.mock('../../../src/core/drives/store.js', () => ({ getDrives: () => [], setDriveValue: vi.fn(), satiate: vi.fn() }));
-vi.mock('../../../src/core/agenda/proposals.js', () => ({ proposeActions: () => [], formatProposals: () => '' }));
+vi.mock('../../../src/core/agenda/proposals.js', () => ({ proposeActions: proposals, formatProposals: () => '' }));
 vi.mock('../../../src/subagent/queue.js', () => ({ enqueueCodeActJob: enqueue }));
-vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage: send, forwardMessage: vi.fn() }));
+vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage: send, forwardMessage: forward }));
 vi.mock('../../../src/pipeline/turn/proactive-turn.js', () => ({ generatePersonaProactiveText: persona }));
-vi.mock('../../../src/cron/proactive-coordinator.js', () => ({ tryAcquireProactiveSlot: vi.fn(async () => true), markProactiveSent: vi.fn() }));
+vi.mock('../../../src/cron/proactive-coordinator.js', () => ({ tryAcquireProactiveSlot: slot, markProactiveSent: sent }));
 vi.mock('../../../src/bot/bot.js', () => ({ getBotUid: () => 999 }));
+vi.mock('../../../src/pipeline/reward/reward-model.js', () => ({ runRewardGate: async () => ({ accept: true }) }));
+vi.mock('../../../src/tracking/self-history.js', () => ({ recordSelfReply: vi.fn() }));
+vi.mock('../../../src/tracking/outcome.js', () => ({ recordReply: vi.fn() }));
+vi.mock('../../../src/nyatos/trench.js', () => ({ releasePressure: vi.fn() }));
+vi.mock('../../../src/pipeline/context/slim.js', () => ({ slimContextForAI: (messages: unknown[], current: unknown) => JSON.stringify([...messages, current]) }));
+vi.mock('../../../src/pipeline/reply/prompt-builder.js', () => ({ buildSystemPrompt: systemPrompt }));
 
-import { buildWorldState, runUnifiedTick } from '../../../src/cron/unified-tick.js';
+import { buildWorldState, decideTick, runUnifiedTick } from '../../../src/cron/unified-tick.js';
 
 function human(timestamp: number) { return { role: 'user', uid: 42, timestamp, textContent: 'test message', fullName: 'Test', messageId: 1 }; }
 
@@ -48,6 +58,12 @@ describe('unified tick activation boundaries', () => {
     config.PROACTIVE_ACTIVATED_AT_SEC = Math.floor(Date.now() / 1000) - 24 * 3600;
     config.META_SUBAGENT_ENABLED = false;
     config.MEMORY_SENSITIVE_CHAT_IDS = [];
+    config.RSS_MONITOR_ENABLED = false;
+    config.UNIFIED_TICK_ABSENT_USERS_ENABLED = false;
+    scoreTaste.mockReturnValue({ score: 999 }); proposals.mockReturnValue([]);
+    topics.mockReturnValue([]); impulses.mockReturnValue([]); dbRows.mockReturnValue([]);
+    slot.mockResolvedValue(true); sent.mockResolvedValue(undefined); persona.mockReset();
+    systemPrompt.mockReturnValue('same-chat persona');
     digestRead.mockReturnValue([{ text: 'PRIVATE_SQL_DIGEST' }]);
     redisList.mockResolvedValue([JSON.stringify({ text: 'PRIVATE_REDIS_DIGEST' })]);
     groups.mockResolvedValue(['-100', '-200']); goals.mockReturnValue([]);
@@ -125,5 +141,107 @@ describe('unified tick activation boundaries', () => {
     await runUnifiedTick();
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ chatId: 42, status: 'queued' }));
+  });
+
+  it('does not collect message forwarding candidates even when taste would rate them highly', async () => {
+    const state = await buildWorldState();
+    expect(state.groups).toHaveLength(2);
+    expect(state.shareCandidates).toEqual([]);
+    expect(scoreTaste).not.toHaveBeenCalled();
+    expect(recent.mock.calls.every(([, count]) => count !== 30)).toBe(true);
+  });
+
+  it('strips all scoped prose before both global model input and agenda proposals, including legacy candidates', async () => {
+    const state = await buildWorldState();
+    state.masterLastText = 'CANARY_DM';
+    state.groups[0]!.lastTexts = 'CANARY_A'; state.groups[1]!.lastTexts = 'CANARY_B';
+    state.shareCandidates = [{ fromChatId: -100, messageId: 1, text: 'CANARY_SHARE', score: 999 }];
+    state.absentUsers = [{ chatId: -100, uid: 7, name: 'CANARY_NAME', absentDays: 4 }];
+    state.dueGoals = [{ id: 3, topic: 'CANARY_GOAL', lastFinding: 'CANARY_FINDING' }];
+    state.dueDebts = [{ id: 4, kind: 'CANARY_KIND', chatId: -100, statement: 'CANARY_DEBT' }];
+    state.missed = [{ chatId: -200, name: 'CANARY_MISSED_NAME', text: 'CANARY_MISSED', ageMin: 5 }];
+    state.topics = [{ chatId: -100, label: 'CANARY_TOPIC' }];
+    state.recentDigests = ['CANARY_DIGEST'];
+    state.cognitiveWorkspaces = [{ chatId: -200, text: 'CANARY_WORKSPACE' }];
+    impulses.mockReturnValue([{ why: 'CANARY_IMPULSE', verdict: 'speak', atSec: Math.floor(Date.now() / 1000) }]);
+    state.rssTopTitles = ['Public release https://example.org/news'];
+    state.rssNewCount = 1;
+    await decideTick(state);
+    const modelInput = JSON.stringify(call.mock.calls[0]![0]);
+    expect(modelInput).not.toContain('CANARY_');
+    expect(modelInput).toContain('Public release https://example.org/news');
+    expect(modelInput).toContain('群 -100'); expect(modelInput).toContain('群 -200');
+    expect(JSON.stringify(proposals.mock.calls)).not.toContain('CANARY_');
+    expect(proposals.mock.calls[0]![0].world.shareCandidates).toEqual([]);
+    expect(impulses).not.toHaveBeenCalled();
+    expect(state.groups[0]!.lastTexts).toBe('CANARY_A'); // Local history is preserved.
+    expect(state.absentUsers[0]!.name).toBe('CANARY_NAME');
+  });
+
+  it('hard-denies a model-selected legacy raw-message share after both chats are activated', async () => {
+    call.mockResolvedValue({ content: '{"action":"share","fromChatId":-100,"messageId":1,"toChatId":-200,"reason":"test"}' });
+    await runUnifiedTick();
+    expect(members).toHaveBeenCalledWith(-100); expect(members).toHaveBeenCalledWith(-200);
+    expect(forward).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
+    expect(persona).not.toHaveBeenCalled(); expect(slot).not.toHaveBeenCalled();
+    expect(recordForward).not.toHaveBeenCalled(); expect(sent).not.toHaveBeenCalled();
+  });
+
+  it('generates a public-link group message from only the selected chat context after metadata-only scheduling', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    recent.mockImplementation(async (chatId: number) => [{ ...human(now - 5 * 3600), textContent: chatId === -100 ? 'CANARY_LOCAL_A' : 'CANARY_OTHER_B' }]);
+    topics.mockImplementation((chatId: number) => [{ label: chatId === -100 ? 'CANARY_LOCAL_TOPIC' : 'CANARY_OTHER_TOPIC' }]);
+    config.RSS_MONITOR_ENABLED = true;
+    redisList.mockResolvedValue([JSON.stringify({ title: 'Public release https://example.org/news', source: 'official' })]);
+    call.mockImplementation(async (request: { usage: string }) => request.usage === 'judge'
+      ? { content: '{"action":"group_speak","chatId":-100,"reason":"公开资讯"}' }
+      : { content: '{"replyContent":"新公告：https://example.org/news","targetMessageId":1}' });
+    const actual = await vi.importActual<typeof import('../../../src/pipeline/turn/proactive-turn.js')>('../../../src/pipeline/turn/proactive-turn.js');
+    persona.mockImplementation(actual.generatePersonaProactiveText);
+    await runUnifiedTick();
+    const planner = call.mock.calls.find(([request]) => request.usage === 'judge')![0];
+    const writer = call.mock.calls.find(([request]) => request.usage === 'reply')![0];
+    expect(JSON.stringify(planner)).not.toContain('CANARY_');
+    expect(JSON.stringify(writer)).toContain('CANARY_LOCAL_A');
+    expect(JSON.stringify(writer)).toContain('CANARY_LOCAL_TOPIC');
+    expect(JSON.stringify(writer)).not.toContain('CANARY_OTHER');
+    expect(JSON.stringify(writer)).toContain('https://example.org/news');
+    expect(systemPrompt).toHaveBeenCalledWith(undefined, -100);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(-100, '新公告：https://example.org/news');
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it('resolves an absent member name only in the selected chat, without sending names to the global model', async () => {
+    config.UNIFIED_TICK_ABSENT_USERS_ENABLED = true;
+    const lastAt = Math.floor(Date.now() / 1000) - 4 * 86400;
+    dbRows.mockReturnValue([{ chatId: -200, uid: 8, name: '小乙', lastAt }, { chatId: -100, uid: 7, name: '小甲', lastAt }]);
+    call.mockResolvedValue({ content: '{"action":"remember_user","chatId":-100,"reason":"有缺席记录"}' });
+    persona.mockResolvedValue('小甲最近怎么样');
+    await runUnifiedTick();
+    expect(JSON.stringify(call.mock.calls)).not.toContain('小甲');
+    expect(JSON.stringify(call.mock.calls)).not.toContain('小乙');
+    expect(persona).toHaveBeenCalledWith(-100, 999, expect.stringContaining('小甲'));
+    expect(persona.mock.calls[0]![2]).not.toContain('小乙');
+    expect(send).toHaveBeenCalledWith(-100, '小甲最近怎么样');
+  });
+
+  it('ignores global care text and generates the DM only from its own conversation', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    recent.mockImplementation(async (chatId: number) => [{ ...human(now - 5 * 3600), textContent: chatId === 42 ? 'CANARY_OWNER_DM' : 'CANARY_OTHER_GROUP' }]);
+    call.mockImplementation(async (request: { usage: string }) => request.usage === 'judge'
+      ? { content: '{"action":"care_master","text":"UNTRUSTED_GLOBAL_TEXT","reason":"沉默很久"}' }
+      : { content: '{"replyContent":"今天过得怎么样？","targetMessageId":1}' });
+    const actual = await vi.importActual<typeof import('../../../src/pipeline/turn/proactive-turn.js')>('../../../src/pipeline/turn/proactive-turn.js');
+    persona.mockImplementation(actual.generatePersonaProactiveText);
+    await runUnifiedTick();
+    const planner = call.mock.calls.find(([request]) => request.usage === 'judge')![0];
+    const writer = call.mock.calls.find(([request]) => request.usage === 'reply')![0];
+    expect(JSON.stringify(planner)).not.toContain('CANARY_');
+    expect(JSON.stringify(writer)).toContain('CANARY_OWNER_DM');
+    expect(JSON.stringify(writer)).not.toContain('CANARY_OTHER_GROUP');
+    expect(JSON.stringify(writer)).not.toContain('UNTRUSTED_GLOBAL_TEXT');
+    expect(systemPrompt).toHaveBeenCalledWith(undefined, 42);
+    expect(send).toHaveBeenCalledWith(42, '今天过得怎么样？');
   });
 });

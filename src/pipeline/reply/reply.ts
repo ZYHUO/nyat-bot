@@ -791,7 +791,7 @@ export async function generateReply(
   }
 
   // 中期记忆 pinned 块(flag off 时为 null,零开销)
-  const midTermMemory = await getMidTermBlock(chatId).catch(() => null);
+  const midTermMemory = await getMidTermBlock(chatId, message.messageThreadId).catch(() => null);
   const cognitiveWorkspaceHint = await cognitiveWorkspacePromise;
 
   const buildMessageArgs = [

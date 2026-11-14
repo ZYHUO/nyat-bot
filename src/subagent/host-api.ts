@@ -1,4 +1,6 @@
 import { incrCounter } from '../metrics/registry.js';
+import { assertOutboundText, assertPublicSearchQuery } from '../shared/outbound-privacy.js';
+import { samePlatformAccount } from '../shared/privacy-scope.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { sendMessage, sendSticker, reactToMessage, sendChatAction } from '../bot/sender/telegram.js';
@@ -910,6 +912,7 @@ export function createHostApi(
             }
             const rawText = String(text ?? '').trim();
             if (!rawText) throw new Error('empty text');
+            assertOutboundText(rawText); // Before candidate previews or guard-model calls.
             // 模型双转义事故（2026-08-24 做梦字条：整段话带着字面 \n 原样发给了主人）。
             // 模型在 JS 字符串里写了 \\n，eval 出来就是字面 backslash-n。签名：
             // 有字面 \n 序列且不含代码围栏（含围栏的可能是真代码片段，别动）。
@@ -1023,7 +1026,7 @@ export function createHostApi(
             try {
               const { getRecent } = await import('../pipeline/context/manager.js');
               // Wide window: dual-write holes + busy groups push prior bot lines out of 16.
-              const recent = await getRecent(chatId, 80);
+              const recent = await getRecent(chatId, 80, opts.messageThreadId);
               const userLines = recent
                 .filter((m) => m.role !== 'assistant')
                 .slice(-4)
@@ -1532,7 +1535,7 @@ export function createHostApi(
                       import('../tracking/realtime-learn.js'),
                       import('../tracking/asi-scoring.js'),
                     ]);
-                  const recent = await getRecent(chatId, 80).catch(() => []);
+                  const recent = await getRecent(chatId, 80, opts.messageThreadId).catch(() => []);
                   const anchorId = replyTo ?? opts.defaultReplyTo ?? null;
                   const triggerMsg = (anchorId
                     ? recent.find((m) => m.messageId === anchorId)
@@ -1907,6 +1910,7 @@ export function createHostApi(
       },
       sendVoice(text: string) {
         assertOpen();
+        assertOutboundText(String(text ?? ''));
         return trackInflight(
           (async () => {
             let clean = String(text ?? '').trim();
@@ -2284,7 +2288,7 @@ export function createHostApi(
           let preview = '';
           try {
             const { getRecent } = await import('../pipeline/context/manager.js');
-            const msgs = await getRecent(chatId, 60);
+            const msgs = await getRecent(chatId, 60, opts.messageThreadId);
             const hit = msgs.find((m) => m.messageId === mid);
             preview = (hit?.textContent ?? '').slice(0, 80);
           } catch { /* best-effort */ }
@@ -2406,7 +2410,7 @@ export function createHostApi(
           const { getRecent } = await import('../pipeline/context/manager.js');
           const { slimSingleMessage } = await import('../pipeline/context/slim.js');
           const { getBotUid } = await import('../bot/bot.js');
-          const msgs = await getRecent(tid, n);
+          const msgs = await getRecent(tid, n, opts.messageThreadId);
           if (!msgs.length) return '(那个群最近没有记录)';
           const botUid = getBotUid(chatId) || 0;
           const text = msgs.map((m) => slimSingleMessage(m, botUid)).join('\n');
@@ -2698,7 +2702,7 @@ export function createHostApi(
       },
       async recallPerson(uid: number, query: string) {
         const id = Number(uid);
-        if (!Number.isFinite(id) || id <= 0) return '(invalid uid)';
+        if (!Number.isSafeInteger(id) || id <= 0 || !samePlatformAccount(id, chatId)) return '(invalid or foreign uid)';
         const bits: string[] = [];
         try {
           const ident = env().PERSON_IDENTITY_ENABLED ? getPersonIdentity(id) : null;
@@ -2812,18 +2816,19 @@ export function createHostApi(
       async search(query: string) {
         assertOpen();
         if (!env().CODEACT_WEB_SEARCH_ENABLED) return '(web search disabled)';
+        assertPublicSearchQuery(String(query ?? ''));
         const q = String(query ?? '').trim().slice(0, 200);
         if (!q) throw new Error('empty query');
         try {
           const { executeSearch } = await import('../pipeline/tools/search.js');
           const raw = await executeSearch(q);
           const out = String(raw ?? '').trim().slice(0, 3500);
-          logger.info({ chatId, q: q.slice(0, 80), chars: out.length }, 'host web.search');
+          logger.info({ chatId, queryChars: q.length, chars: out.length }, 'host web.search');
           countTool('web.search');
           noteUnviewed(`web.search(${q.slice(0, 40)})`, out || '(no results)');
           return out || '(no results)';
         } catch (err) {
-          logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host web.search failed');
+          logger.warn({ err, chatId, queryChars: q.length }, 'host web.search failed');
           incrCounter('host_tool_calls_total', { tool: 'web.search', outcome: 'error' });
           return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -2881,6 +2886,7 @@ export function createHostApi(
       async search(query: string, limit?: number) {
         assertOpen();
         if (!env().CODEACT_PIXIV_ENABLED) return '(pixiv disabled)';
+        assertPublicSearchQuery(String(query ?? ''));
         const q = String(query ?? '').trim().slice(0, 100);
         if (!q) return '(empty query)';
         try {
@@ -2900,7 +2906,7 @@ export function createHostApi(
           noteUnviewed(`pixiv.search(${q.slice(0, 40)})`, out);
           return out;
         } catch (err) {
-          logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host pixiv.search failed');
+          logger.warn({ err, chatId, queryChars: q.length }, 'host pixiv.search failed');
           return `Pixiv 搜索失败: ${err instanceof Error ? err.message : String(err)}`;
         }
       },

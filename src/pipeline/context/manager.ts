@@ -147,7 +147,7 @@ export async function addMessage(chatId: number, message: FormattedMessage, thre
   // Mid-term: Redis path when mirroring; NyatDB path when sole chat store.
   if (redisCtxWriteEnabled() || !nyatOk || (nyatOk && !env().NYATDB_REDIS_MIRROR)) {
     import('./mid-term.js')
-      .then(({ maybeCompressMidTerm }) => maybeCompressMidTerm(chatId))
+      .then(({ maybeCompressMidTerm }) => maybeCompressMidTerm(chatId, threadId))
       .catch(() => {});
   }
 

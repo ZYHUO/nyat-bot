@@ -16,6 +16,8 @@ function loadMigrations(): void {
   db.exec(readFileSync(join(__dirname, '../../../migrations/0054_episodes_experience.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../migrations/0057_experience_verify.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../migrations/0061_experience_share.sql'), 'utf8'));
+  db.exec("INSERT INTO episodes (id, task_id, chat_id, goal, outcome, summary, created_at) VALUES (1, 'scoped-fixture', 1, 'synthetic', 'done', 'synthetic', 1)");
+  db.exec("INSERT INTO episodes (id, task_id, chat_id, goal, outcome, summary, created_at) VALUES (2, 'fixture2', 1, 'synthetic', 'done', 'synthetic', 1), (3, 'fixture3', 1, 'synthetic', 'done', 'synthetic', 1)");
 }
 
 beforeEach(() => {
@@ -37,7 +39,7 @@ function seedShared(): { selfId: number; verifiedOtherId: number; unverifiedOthe
 describe('cross-bot sharing gate (AGI L5 Phase 5)', () => {
   it('allowShared: 收本 bot 的 + 已验证的他人; 未验证的他人被过滤', () => {
     const ids = seedShared();
-    const hits = findRelevantExperience('shared 测试', 5, { botId: 'botA', allowShared: true });
+    const hits = findRelevantExperience('shared 测试', 5, { boundChatId: 1, botId: 'botA', allowShared: true });
     const hitIds = hits.map((h) => h.id);
     expect(hitIds).toContain(ids.selfId);
     expect(hitIds).toContain(ids.verifiedOtherId);
@@ -46,7 +48,7 @@ describe('cross-bot sharing gate (AGI L5 Phase 5)', () => {
 
   it('allowShared=false: 只收本 bot 的', () => {
     const ids = seedShared();
-    const hits = findRelevantExperience('shared 测试', 5, { botId: 'botA', allowShared: false });
+    const hits = findRelevantExperience('shared 测试', 5, { boundChatId: 1, botId: 'botA', allowShared: false });
     const hitIds = hits.map((h) => h.id);
     expect(hitIds).toContain(ids.selfId);
     expect(hitIds).not.toContain(ids.verifiedOtherId);
@@ -55,7 +57,7 @@ describe('cross-bot sharing gate (AGI L5 Phase 5)', () => {
 
   it('botId 为 botB 时: 自己(含未验证)全收', () => {
     const ids = seedShared();
-    const hits = findRelevantExperience('shared 测试', 5, { botId: 'botB', allowShared: true });
+    const hits = findRelevantExperience('shared 测试', 5, { boundChatId: 1, botId: 'botB', allowShared: true });
     const hitIds = hits.map((h) => h.id);
     expect(hitIds).toContain(ids.verifiedOtherId);
     expect(hitIds).toContain(ids.unverifiedOtherId); // 自己的经验不受验证门控

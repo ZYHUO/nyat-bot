@@ -57,6 +57,7 @@ vi.mock('../../../src/ai/fallback.js', () => ({
 
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
+    BOT_TOKEN: '12345:test-only',
     AGENT_COMPACT_USAGE: 'judge',
     AGENT_LOOP_ENABLED: true,
     AGENT_MAX_SEGMENTS: 10,
@@ -180,10 +181,10 @@ describe('agent compaction', () => {
       history,
       progressSummary: '摘要内容',
     });
-    // system + 摘要 + 确认 + 最近 16 轮
+    // Restore itself must not silently discard history that was never summarized.
     expect(messages[0]!.role).toBe('system');
     expect(messages.some((m) => m.content.includes('摘要内容'))).toBe(true);
-    expect(messages.length).toBeLessThan(20);
+    expect(messages.length).toBe(83);
     // 最近一轮保留原文
     expect(messages[messages.length - 1]!.content).toBe('a39');
   });

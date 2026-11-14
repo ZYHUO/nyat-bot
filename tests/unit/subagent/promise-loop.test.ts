@@ -21,6 +21,7 @@ const redisGet = vi.fn(async () => null);
 const redisSet = vi.fn(async () => 'OK');
 
 const envBase: Record<string, unknown> = {
+  BOT_TOKEN: '123:synthetic-test-token',
   PROMISE_LOOP_ENABLED: true,
   MASTER_UID: MASTER,
   CODEACT_BANNED_WORDS: [],
@@ -29,7 +30,6 @@ const envBase: Record<string, unknown> = {
   MEMORY_CROSS_CONTEXT_ENABLED: false,
   MEMORY_VISIBILITY_ENABLED: false,
   MEMORY_SENSITIVE_CHAT_IDS: [],
-  DM_AUTO_PRIVATE: true,
   DIGEST_PERSIST_ENABLED: true,
   GOAL_MAX_ACTIVE: 20,
 };
@@ -120,6 +120,7 @@ describe('promise loop (承诺闭环)', () => {
     dbAll.mockReturnValue([]);
     zrange.mockResolvedValue([String(GROUP)]);
     redisGet.mockResolvedValue(null);
+    getRecent.mockResolvedValue([]);
   });
 
   async function makeApi(chatId = MASTER) {
@@ -179,11 +180,13 @@ describe('promise loop (承诺闭环)', () => {
     );
   });
 
-  it('chats.find: fuzzy matches group title, caches title', async () => {
-    const { api } = await makeApi();
+  it('chats.find: fuzzy matches the current group title, caches only that title', async () => {
+    zrange.mockResolvedValue(['-1002', String(GROUP)]);
+    const { api } = await makeApi(GROUP);
     const hits = await api.chats.find('乐乐猫');
     expect(hits).toEqual([{ chatId: GROUP, title: '乐乐猫的快乐老家' }]);
     expect(redisSet).toHaveBeenCalledWith(`xxb:chat_title:${GROUP}`, '乐乐猫的快乐老家', 'EX', 21600);
+    expect(getChat.mock.calls).toEqual([[GROUP]]);
     const miss = await api.chats.find('不存在的群');
     expect(String(miss)).toContain('没查到');
     expect(String(miss)).toContain('members.find');
@@ -211,8 +214,8 @@ describe('promise loop (承诺闭环)', () => {
     expect(createGoal).toHaveBeenCalledWith(expect.objectContaining({ chatId: MASTER }), 20);
   });
 
-  it('chat/member lookup never returns metadata from a sensitive source', async () => {
-    envBase.MEMORY_SENSITIVE_CHAT_IDS = [GROUP];
+  it.each([false, true])('chat/member lookup rejects foreign sources even when sensitive=%s', async (sensitive) => {
+    envBase.MEMORY_SENSITIVE_CHAT_IDS = sensitive ? [GROUP] : [];
     dbAll.mockReturnValue([{ chat_id: GROUP, uid: 7, username: 'private_marker', full_name: 'private name', sender_tag: null }]);
     const { api } = await makeApi();
     const chats = await api.chats.find('乐乐猫');
@@ -221,6 +224,7 @@ describe('promise loop (承诺闭环)', () => {
     expect(Array.isArray(members) ? members : []).toEqual([]);
     expect(getChatMember).not.toHaveBeenCalled();
     expect(getChat).not.toHaveBeenCalled();
+    expect(redisGet).not.toHaveBeenCalled();
   });
 
   it('backstop: LLM judges unfulfilled promise → auto goal on endTask', async () => {
@@ -286,10 +290,11 @@ describe('promise loop (承诺闭环)', () => {
     expect(createGoal).not.toHaveBeenCalled();
   });
 
-  it('members.find: DB 画像 → 成员确认 → DM 可达性，返回在群列表', async () => {
+  it('members.find: 本群画像 → 成员确认，异群画像不能覆盖本群名字或暴露成员', async () => {
     dbAll.mockReturnValue([
+      { chat_id: -1002, uid: 7916374789, username: 'FOREIGN_NAME_MARKER', full_name: 'foreign name', sender_tag: null },
+      { chat_id: -1002, uid: 888, username: 'FOREIGN_USER_MARKER', full_name: 'foreign user', sender_tag: null },
       { chat_id: GROUP, uid: 7916374789, username: 'auto_ccb', full_name: 'CCB', sender_tag: null },
-      { chat_id: -1002, uid: 7916374789, username: 'auto_ccb', full_name: 'CCB', sender_tag: null },
     ]);
     getChatMember.mockImplementation(async (cid: unknown) =>
       cid === -1002 ? { status: 'left' } : { status: 'member' },
@@ -297,7 +302,7 @@ describe('promise loop (承诺闭环)', () => {
     getChat.mockImplementation(async (cid: unknown) =>
       cid === 7916374789 ? { id: 7916374789 } : { title: '乐乐猫游乐场' },
     );
-    const { api } = await makeApi();
+    const { api } = await makeApi(GROUP);
     const hits = await api.members.find('ccb');
     expect(hits).toHaveLength(1);
     expect(hits[0]).toMatchObject({
@@ -306,6 +311,9 @@ describe('promise loop (承诺闭环)', () => {
       groups: [{ chatId: GROUP, title: '乐乐猫游乐场' }],
       dmAvailable: true,
     });
+    expect(getChatMember.mock.calls).toEqual([[GROUP, 7916374789]]);
+    expect(getChat.mock.calls).toEqual([[GROUP], [7916374789]]);
+    expect(JSON.stringify(hits)).not.toContain('FOREIGN_');
   });
 
   it('members.find: 查无此人 → 指路字符串', async () => {
@@ -315,13 +323,17 @@ describe('promise loop (承诺闭环)', () => {
     expect(await api.members.find('')).toEqual([]);
   });
 
-  it('chats.recentMessages: 读另一个群的最近消息', async () => {
+  it('chats.recentMessages: 本群内容可读，异群请求在访问上下文前拒绝', async () => {
     getRecent.mockResolvedValue([
       { role: 'user', uid: 1, username: 'ccb', fullName: 'CCB', timestamp: 1, messageId: 1, textContent: '压抑', isForwarded: false },
     ]);
-    const { api } = await makeApi();
+    const { api } = await makeApi(GROUP);
     const out = await api.chats.recentMessages(GROUP, 5);
     expect(out).toContain('压抑');
+    expect(getRecent).toHaveBeenCalledWith(GROUP, 5, undefined);
+    getRecent.mockClear();
+    expect(await api.chats.recentMessages(-1002, 5)).toBe('(private context unavailable)');
+    expect(getRecent).not.toHaveBeenCalled();
     getRecent.mockResolvedValue([]);
     expect(await api.chats.recentMessages(GROUP, 5)).toBe('(那个群最近没有记录)');
     expect(await api.chats.recentMessages(0, 5)).toBe('(invalid chatId)');

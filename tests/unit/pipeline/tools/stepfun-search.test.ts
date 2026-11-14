@@ -57,6 +57,10 @@ beforeEach(() => {
 });
 
 describe('StepFun 搜索（主路由）', () => {
+  it('refuses private identifying queries before contacting any provider', async () => {
+    await expect(m.executeSearch('帮我查一下邮箱 private@example.org 是谁的')).rejects.toThrow('outbound_privacy_blocked');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it('打到 /v1/search 且带 Bearer key', async () => {
     await m.executeSearch('测试');
     expect(state.url).toBe('https://api.stepfun.com/step_plan/v1/mcp/web_search/mcp');

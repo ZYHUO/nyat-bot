@@ -4,6 +4,7 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { assertTelegramPayload } from '../platform/telegram-guard.js';
 import { getPlatformBotIdentity } from '../platform/account-context.js';
+import { assertOutboundPayload, assertSameConversationForward } from '../shared/outbound-privacy.js';
 
 let _bot: Bot | undefined;
 let _botUid = 0;
@@ -19,6 +20,11 @@ export async function createBot(): Promise<Bot> {
     _bot = new Bot(e.BOT_TOKEN, { client: clientOpt });
     _bot.api.config.use(async (previous, method, payload, signal) => {
       assertTelegramPayload(payload);
+      if (/^(?:forward|copy)Messages?$/.test(method)) {
+        const source = payload as unknown as Record<string, unknown>;
+        assertSameConversationForward(source['chat_id'], source['from_chat_id']);
+      }
+      if (/^(?:send|edit|answerInlineQuery)/.test(method)) assertOutboundPayload(payload);
       return previous(method, payload, signal);
     });
 

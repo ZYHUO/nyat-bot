@@ -13,6 +13,7 @@ import type { HostApi } from '../../../src/subagent/host-api.js';
 
 // ── env ────────────────────────────────────────────────────────────────────
 const envMock: Record<string, unknown> = {
+  BOT_TOKEN: '12345:test-only',
   BOT_USERNAME: 'hunhebi_bot',
   EXPERIENCE_SHARE_ENABLED: false,
   RECALL_BUDGET_ENABLED: false,
@@ -22,6 +23,8 @@ const envMock: Record<string, unknown> = {
   LOOP_POLICY_MAX: 4,
 };
 vi.mock('../../../src/env.js', () => ({ env: () => envMock }));
+const midTerm = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock('../../../src/pipeline/context/mid-term.js', () => ({ getMidTermBlock: midTerm.get }));
 
 // ── 被 prompt-inputs 动态 import 的各段（可逐测试换行为） ──────────────────
 const dream = {
@@ -221,6 +224,8 @@ beforeEach(() => {
   memoryCtx.calls.length = 0;
   workspaceCalls.length = 0;
   envMock.RECALL_BUDGET_ENABLED = false;
+  envMock.MTM_ENABLED = false;
+  midTerm.get.mockResolvedValue('SCOPED_MIDTERM');
   // 复位各 mock 的默认行为（clearAllMocks 会清实现，逐个补回）
   dream.readRecentDreamSnippet.mockResolvedValue('DIARY');
   dream.getJournalChannelInfo.mockResolvedValue({ link: 'https://t.me/j', chatId: -100 });
@@ -306,26 +311,28 @@ describe('collectPromptInputs — 各段产物', () => {
     expect(inputs.targetBlock).toContain('锚点正文');
     expect(inputs.anchorText).toBe('锚点正文');
 
-    // 追加顺序与原实现一致：经验 → 技能 → 世界状态 → 循环策略
+    // Only source-bound experience is injected; unscoped skills/policies stay out.
     const sp = inputs.systemPrompt;
     expect(sp.startsWith('EXECUTOR_BASE')).toBe(true);
     expect(sp).toContain('[过往经验]');
     expect(sp).toContain('exp-content');
-    expect(sp).toContain('[可用技能]');
-    expect(sp).toContain('sk-name');
+    expect(sp).not.toContain('[可用技能]');
+    expect(sp).not.toContain('sk-name');
     expect(sp).toContain('WORLD_BLOCK');
-    expect(sp).toContain('[循环策略]');
-    expect(sp).toContain('pol-rule');
-    expect(sp.indexOf('[过往经验]')).toBeLessThan(sp.indexOf('[可用技能]'));
-    expect(sp.indexOf('[可用技能]')).toBeLessThan(sp.indexOf('WORLD_BLOCK'));
-    expect(sp.indexOf('WORLD_BLOCK')).toBeLessThan(sp.indexOf('[循环策略]'));
+    expect(sp).not.toContain('[循环策略]');
+    expect(sp).not.toContain('pol-rule');
+    expect(sp.indexOf('[过往经验]')).toBeLessThan(sp.indexOf('WORLD_BLOCK'));
+    expect(skills.findRelevantSkills).not.toHaveBeenCalled();
+    expect(loopPolicy.listActivePolicies).not.toHaveBeenCalled();
+    expect(episodes.findRelevantExperience).toHaveBeenCalledWith(expect.any(String), 3,
+      expect.objectContaining({ boundChatId: -100 }));
     // 回复式命令清单替换生效，原写死散文被换掉
     expect(sp).toContain('当前真过得去闸的回复式命令：/spam@nmnmfunbot');
     expect(sp).not.toContain('（当前 = /spam@nmnmfunbot，回复那条广告发出去）');
 
     expect(inputs.injectedExperienceIds).toEqual([11]);
-    expect(inputs.injectedSkillIds).toEqual([22]);
-    expect(inputs.injectedPolicyIds).toEqual([33]);
+    expect(inputs.injectedSkillIds).toEqual([]);
+    expect(inputs.injectedPolicyIds).toEqual([]);
   });
 
   it('依赖顺序：getRecent 的锚点正文流进 memory/workspace 的查询词（改并行顺序会红）', async () => {
@@ -419,14 +426,6 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
       expect(i.injectedExperienceIds).toEqual([]);
       expect(i.systemPrompt).not.toContain('[过往经验]');
     }],
-    ['skills 抛', () => skills.findRelevantSkills.mockImplementation(() => { throw new Error('boom'); }), (i) => {
-      expect(i.injectedSkillIds).toEqual([]);
-      expect(i.systemPrompt).not.toContain('[可用技能]');
-    }],
-    ['loop policies 抛', () => loopPolicy.listActivePolicies.mockImplementation(() => { throw new Error('boom'); }), (i) => {
-      expect(i.injectedPolicyIds).toEqual([]);
-      expect(i.systemPrompt).not.toContain('[循环策略]');
-    }],
     ['grounding 抛', () => grounding.takeGroundingBlock.mockRejectedValue(new Error('redis down')), (i) => {
       expect(i.groundingBlock).toBe('');
     }],
@@ -496,7 +495,7 @@ describe('collectPromptInputs — fail-soft（异常只降级自己）', () => {
       executorSystem: EXECUTOR_BASE,
     });
     expect(inputs.learnedBlock).toBe('');
-    expect(inputs.systemPrompt).toBe('EXECUTOR_BASE（当前 = /spam@nmnmfunbot，回复那条广告发出去）TAIL');
+    expect(inputs.systemPrompt).toContain('EXECUTOR_BASE（当前 = /spam@nmnmfunbot，回复那条广告发出去）TAIL');
     expect(inputs.targetBlock).toContain('messageId=#999');
     expect(inputs.memoryBlock).toBe('');
   });
@@ -583,5 +582,37 @@ describe('collectPromptInputs — 条件分支', () => {
       executorSystem: EXECUTOR_BASE,
     });
     expect(inputs.recentCtx).toBe('');
+  });
+
+  it('actual CodeAct collector binds MTM to current topic and adds the platform/account privacy contract', async () => {
+    envMock.MTM_ENABLED = true;
+    const inputs = await collectPromptInputs({
+      task: makeTask({ messageThreadId: 7 }), host: makeHost(), isSelfPlay: false,
+      replyAnchor: 999, executorSystem: EXECUTOR_BASE,
+    });
+    expect(midTerm.get).toHaveBeenCalledWith(-100, 7);
+    expect(inputs.midTermMemory).toBe('SCOPED_MIDTERM');
+    expect(inputs.systemPrompt).toContain('"platform":"telegram"');
+    expect(inputs.systemPrompt).toContain('"accountId":"12345"');
+    expect(inputs.systemPrompt).toContain('"chatId":-100');
+    expect(inputs.systemPrompt).toContain('"threadId":7');
+    expect(inputs.systemPrompt).toContain('同名用户不等同');
+    expect(inputs.systemPrompt).toContain('不得输出凭据');
+    expect(inputs.systemPrompt).not.toContain('test-only');
+  });
+
+  it('actual target and retrieval query preserve a long current message tail and quoted author', async () => {
+    ctxManager.getRecent.mockResolvedValue([{
+      messageId: 999, uid: 77, role: 'user', username: 'someone', fullName: '某人',
+      textContent: '背景'.repeat(1500) + '@机器人 更正：不要发图。最后的问题还没回答？', timestamp: 2,
+      replyTo: { messageId: 998, uid: 88, fullName: '原作者', textSnippet: '原消息'.repeat(800) + '原需求仍待完成' },
+    }] as never);
+    const inputs = await collectPromptInputs({ task: makeTask(), host: makeHost(), isSelfPlay: false, replyAnchor: 999, executorSystem: EXECUTOR_BASE });
+    expect(inputs.targetBlock).toContain('#999 uid=77 @someone');
+    expect(inputs.targetBlock).toContain('最后的问题还没回答？');
+    expect(inputs.targetBlock).toContain('#998 uid=88');
+    expect(inputs.targetBlock).toContain('原需求仍待完成');
+    expect(inputs.anchorText).toContain('不要发图');
+    expect(memoryCtx.calls[0]!.query).toContain('最后的问题还没回答');
   });
 });

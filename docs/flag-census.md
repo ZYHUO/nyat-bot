@@ -16,7 +16,7 @@
 |---|---|---|---|---|---|
 | `ai` | [`src/env-sections/ai.ts`](../src/env-sections/ai.ts) | 11 | 2 | 0 | TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限 |
 | `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 93 | 23 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
-| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 1 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
+| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 30 | 15 | 0 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 3 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 0 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 33 | 19 | 0 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
@@ -32,15 +32,15 @@
 
 | | |
 |---|---|
-| total_keys | 533 |
-| bool_flags | 227 |
-| on_in_source | 41 |
+| total_keys | 532 |
+| bool_flags | 226 |
+| on_in_source | 40 |
 | set_in_source | 82 |
-| dead_no_reader | 5 |
+| dead_no_reader | 6 |
 | dead_and_on | 0 |
-| phantom_only_in_tests | 0 |
+| phantom_only_in_tests | 1 |
 
-**227 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**226 个布尔旗标里，来源文件与 schema 默认值合计启用 40 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -51,7 +51,7 @@
 | flag | 段 | 来源值 | 注释怎么说 | tests/ 里有吗 |
 |---|---|---|---|---|
 
-## 🟡 假开关：只被测试 mock，src/ 不读（0 个）
+## 🟡 假开关：只被测试 mock，src/ 不读（1 个）
 
 比死旗标更坏——测试把它们当闸门 mock，于是"关着它"的断言其实什么都没验证。
 
@@ -59,8 +59,9 @@
 
 | flag | 段 | 来源值 | 测试里怎么用 |
 |---|---|---|---|
+| `LOOP_POLICY_MAX` | cognition | — | tests/unit/subagent/prompt-inputs.test.ts |
 
-## 来源启用的旗标（41 个）
+## 来源启用的旗标（40 个）
 
 按段分组、段内按名字排序——要加旗标时照这个找位置。
 
@@ -85,7 +86,6 @@
 | infra | `JUDGE_KNOWLEDGE_GROUP` | true | None |  | core/state.ts, pipeline/judge/judge.ts |
 | infra | `JUDGE_KNOWLEDGE_PERMANENT` | true | None |  | core/state.ts, pipeline/judge/judge.ts |
 | infra | `VIDEO_DESCRIBE_ENABLED` | true | None | 视频理解（2026-09-21）。默认开——它跟 audio/PDF 那俩不一样:那两个是"供应商 读不了所以必败"，这个是**真的能跑**。实测 step-5-preview 吃 base64 video_url， 6 秒测试视频准确描述了内容。关掉只退回中性占位（[视频]），不会报错。  为什么 | pipeline/multimodal.ts |
-| memory | `DM_AUTO_PRIVATE` | true | None | DM 是否自动判为私密会话(CGM dmAutoPrivate)。默认 true。 | memory/visibility.ts |
 | meta | `REPLY_HUMANIZER_SAFE_MODE` | true | None |  | pipeline/stages/deliver.ts |
 | meta | `REPLY_LONG_TEXT_SAFE_SPLIT_ENABLED` | true | None | 回复形态与安全分段：先灰度控制，关闭时保留旧回复路径。 （REPLY_MODE_ENABLED / REPLY_ACK_THEN_EXPAND_ENABLED / REPLY_MICRO_REACTION_MAX_CHARS / REPLY_ACK_MAX_CHARS / REPLY_MAX_EXP | pipeline/reply/reply.ts |
 | meta | `TASK_PROGRESS_ENABLED` | true | None | 长任务用户可见阶段通知：运行时负责短确认/保活，失败不影响任务执行。 | agent/task-progress.ts |
@@ -491,12 +491,12 @@
 | memory | `MEMORY_DEDUP_THRESHOLD` | 0.93 | — |  |
 | memory | `MEMORY_EMBED_MODEL` | 'Xenova/all-MiniLM-L6-v2' | — | ── 长期记忆嵌入模型 / collection / 相关性下限 ────────────── 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文 同义 0.7543 / 无关 0.6 |
 | memory | `MEMORY_MIN_SCORE` | 0 | — | 检索相关性下限(0..1)。0 = 不过滤,保持历史行为(纯 topK)。 换模型与调阈值刻意分成两次改动;标定必须用真实语料,别沿用旧模型下的经验值。 |
-| memory | `MEMORY_SENSITIVE_CHAT_IDS` |  | — | 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 由 DM_AUTO_PRIVATE 自动判定。 |
+| memory | `MEMORY_SENSITIVE_CHAT_IDS` |  | — | 始终视作私密的会话(逗号分隔 chatId;群为负数)。DM 始终私密，不受开关影响。 |
 | memory | `PROFILE_MERGE_CHAT_IDS` |  | — | 合并灰度群列表(逗号分隔 chatId,群为负数),空 = 对所有上下文生效。 |
 | memory | `PROFILE_MERGE_USAGE` | 'summarize' | — | 全局画像合并走哪个便宜模型 usage 路由。 |
 | memory | `REPLY_DIRECT_RECENT_WINDOW` | 30 | — | 优化:direct 模式只取最近 N 条(原 50)——砍掉不可缓存的上下文体积,降 token/延迟。 |
 | memory | `SLEEP_WAKE_WINDOW_MIN` | 20 | — |  |
-| memory | `SUBAGENT_MEMORY_CHAT_IDS` |  | — | 灰度名单。**空 = 关闭**,与本仓其他 flag 的「空 = 全量」刻意相反: 这是隐私相关特性,配错的代价不对称 —— 漏开只是没效果,误开是内容外泄。 |
+| memory | `SUBAGENT_MEMORY_CHAT_IDS` |  | — | 启用后的会话名单。空 = 全量;非空时仅列出的会话生效。 来源隔离始终由检索层强制执行,全量启用不授予跨平台或跨会话读取权。 |
 | memory | `SUBAGENT_MEMORY_MAX_CHARS` | 600 | — |  |
 | memory | `SUBAGENT_MEMORY_TIMEOUT_MS` | 400 | — | 上下界都要:下界防 `TIMEOUT-50` 变成 0 导致「记忆永远为空且与无命中不可区分」, 上界防有人调大后阻塞 CodeAct(那是生产热路径)。 |
 | memory | `SUBAGENT_MEMORY_TOPK` | 3 | — |  |
@@ -661,12 +661,13 @@
 `CODEACT_MAX_TURNS` / `TASK_MAX_ROUNDS` / `VERIFY_*` / `TTS_*` / `STREAMING_*` / `SEMANTIC_DUP_THRESHOLD` / `GROUNDING_*` / `JUDGE_PROACTIVE_*` / `EXPERIENCE_VERIFY_MIN_SUCCESS` / `DREAMING_USAGE` 是参数型键，grep 不到读取点但可能被脚本或别处按名取用，删前要逐个确认。
 
 
-## src/ 里没人读的键（5 个）
+## src/ 里没人读的键（6 个）
 
 | key | 段 | 来源值 | 说明 |
 |---|---|---|---|
 | `GEMINI_API_KEY` | infra | — | Gemini 联网搜索(Google Search grounding,AI Studio key)。配 KEY 即为主搜索路由。 注:3.1-flash-lite 的 grounding 在免费 k |
 | `GEMINI_SEARCH_MODEL` | infra | — |  |
 | `GEMINI_SEARCH_PROXY` | infra | — | 本机真实出口地区不支持 grounding(400 User location not supported);设代理只让 Gemini 搜索这一路走代理(其余流量直连,免得 Redis/Qdrant/ |
+| `LOOP_POLICY_MAX` | cognition | — |  |
 | `PHP_WEBHOOK_URL` | life | — |  |
 | `TS_WEBHOOK_URL` | life | — | Cutover (optional — only used by scripts/cutover.sh) |

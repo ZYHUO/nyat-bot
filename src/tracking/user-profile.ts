@@ -9,6 +9,7 @@ import { callWithFallback } from '../ai/fallback.js';
 import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
 import { recordRelationshipActivity } from './relationship-quant.js';
+import { samePlatformAccount } from '../shared/privacy-scope.js';
 const MAX_PENDING = 50;      // 积累多少条消息再总结
 const MIN_PENDING_TO_SUMMARIZE = 8;
 const MAX_PROMPT_CHARS = 600;
@@ -119,6 +120,7 @@ export function recordUserMessage(
 // ── 读取侧（reply 时注入，同步，极快）────────────────────
 
 export function getUserProfilePrompt(chatId: number, uid: number, asOfSec?: number): string | null {
+  if (!samePlatformAccount(chatId, uid)) return null;
   const boundedAsOf = Number.isSafeInteger(asOfSec) && (asOfSec as number) > 0 ? asOfSec : undefined;
   const row = (boundedAsOf === undefined
     ? getDb().prepare('SELECT profile_prompt FROM user_profiles WHERE chat_id = ? AND uid = ?').get(chatId, uid)
@@ -136,6 +138,7 @@ export interface ProfileSection {
 
 /** Read all non-empty structured profile sections for a user, in canonical order. */
 export function getProfileSections(chatId: number, uid: number, asOfSec?: number): ProfileSection[] {
+  if (!samePlatformAccount(chatId, uid)) return [];
   const boundedAsOf = Number.isSafeInteger(asOfSec) && (asOfSec as number) > 0 ? asOfSec : undefined;
   const rows = (boundedAsOf === undefined
     ? getDb().prepare('SELECT section_name, bullets FROM user_profile_sections WHERE chat_id = ? AND uid = ?').all(chatId, uid)
@@ -219,6 +222,7 @@ export function buildProfileInjection(chatId: number, uid: number): string | nul
 }
 
 export function getUserTag(chatId: number, uid: number): string | null {
+  if (!samePlatformAccount(chatId, uid)) return null;
   const row = getDb().prepare(
     'SELECT sender_tag FROM user_profiles WHERE chat_id = ? AND uid = ?',
   ).get(chatId, uid) as { sender_tag: string | null } | undefined;
@@ -226,16 +230,17 @@ export function getUserTag(chatId: number, uid: number): string | null {
 }
 
 /**
- * 跨群外号(功能 B):sender_tag 是 TG 全局身份,不因群而异。DM 场景取该 uid
- * 在所有群里最新的非空 sender_tag,避免叫错某个群的外号。fail-soft 返回 null。
+ * A displayed tag is contextual, not a public identity grant. Keep the legacy
+ * API name, but read only the requested conversation (the user's DM by default).
  */
-export function getAggregatedUserTag(uid: number): string | null {
+export function getAggregatedUserTag(uid: number, boundChatId = uid): string | null {
+  if (!samePlatformAccount(boundChatId, uid)) return null;
   try {
     const row = getDb().prepare(
       `SELECT sender_tag FROM user_profiles
-        WHERE uid = ? AND sender_tag IS NOT NULL AND sender_tag != ''
+        WHERE uid = ? AND chat_id = ? AND sender_tag IS NOT NULL AND sender_tag != ''
         ORDER BY updated_at DESC LIMIT 1`,
-    ).get(uid) as { sender_tag: string | null } | undefined;
+    ).get(uid, boundChatId) as { sender_tag: string | null } | undefined;
     return row?.sender_tag ?? null;
   } catch {
     return null;
@@ -244,26 +249,20 @@ export function getAggregatedUserTag(uid: number): string | null {
 
 // ── bot 对用户本人的称呼(bot_tag)──────────────────────────
 // 优先级:主人(见 dm-proactive) > bot_tag > 群里外号(sender_tag)。
-// per-(chat,user);DM 行(chat_id=uid)作跨群默认,群行可覆盖。
-// 读取:当前 chat 的 bot_tag → 回退 DM 默认行。fail-soft 返回 null。
+// per-(chat,user); a private nickname must not silently become a group alias.
 
 /**
- * 取 bot 对 (chatId,uid) 的称呼。先看当前 chat 的 bot_tag,没有则回退到
- * DM 默认行 (uid,uid) 的 bot_tag(私聊里"叫我X"设的就是这行,跨群生效)。
+ * Read only the current conversation's chosen name. A separate public naming
+ * preference would need an explicit grant; existing DM rows do not provide one.
  */
 export function getBotTagForAddressing(chatId: number, uid: number): string | null {
+  if (!samePlatformAccount(chatId, uid)) return null;
   try {
     const db = getDb();
     const cur = db.prepare(
       'SELECT bot_tag FROM user_profiles WHERE chat_id = ? AND uid = ?',
     ).get(chatId, uid) as { bot_tag: string | null } | undefined;
     if (cur?.bot_tag && cur.bot_tag.trim()) return cur.bot_tag.trim();
-    if (chatId !== uid) {
-      const dm = db.prepare(
-        'SELECT bot_tag FROM user_profiles WHERE chat_id = ? AND uid = ?',
-      ).get(uid, uid) as { bot_tag: string | null } | undefined;
-      if (dm?.bot_tag && dm.bot_tag.trim()) return dm.bot_tag.trim();
-    }
     return null;
   } catch {
     return null;

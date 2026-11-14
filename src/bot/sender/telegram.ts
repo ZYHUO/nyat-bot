@@ -18,6 +18,7 @@ import {
 import { assertTelegramPayload } from '../../platform/telegram-guard.js';
 import { UnsupportedCapabilityError } from '../../platform/types.js';
 import { env } from '../../env.js';
+import { assertOutboundText, assertOutboundFile, assertSameConversationForward } from '../../shared/outbound-privacy.js';
 
 const MAX_RETRIES = 3;
 
@@ -54,6 +55,7 @@ export async function sendPoll(
   options: string[],
   messageThreadId?: number,
 ): Promise<number> {
+  assertOutboundText([question, ...options].join('\n'));
   rejectUnsupportedPlatformAction(chatId, 'polls');
   assertTelegramPayload({ chat_id: chatId, message_thread_id: messageThreadId });
   try {
@@ -80,6 +82,7 @@ export async function forwardMessage(
 ): Promise<number> {
   rejectUnsupportedPlatformAction(targetChatId, 'forwarding');
   rejectUnsupportedPlatformAction(fromChatId, 'forwarding');
+  assertSameConversationForward(targetChatId, fromChatId);
   assertTelegramPayload({ chat_id: targetChatId, from_chat_id: fromChatId, message_id: messageId });
   try {
     const bot = getBot();
@@ -363,6 +366,7 @@ export async function sendMessage(
   replyToId?: number,
   messageThreadId?: number,
 ): Promise<number> {
+  assertOutboundText(text);
   if (platformConversation(chatId)) {
     if (messageThreadId !== undefined) throw new UnsupportedCapabilityError('topics');
     // OneBot owns its receipt semantics. No Telegram fallback, sharding or retry
@@ -403,7 +407,7 @@ export async function sendMessage(
         // 提到 info 之后这个数才真的可读。计数器本来就有
         // （send_duplicate_skipped_total），但 Prometheus 只在**本次进程内**
         // 自增过才导出，重启即清零——跨重启的历史只能靠日志。
-        logger.info({ chatId, chars: trimmed.length, text: trimmed.slice(0, 40) }, 'sendMessage: duplicate text within 30s, skipped');
+        logger.info({ chatId, chars: trimmed.length }, 'sendMessage: duplicate text within 30s, skipped');
         incrCounter('send_duplicate_skipped_total', { chat: chatId });
         return -1;
       }
@@ -552,6 +556,7 @@ export async function editMessage(
   messageId: number,
   text: string,
 ): Promise<void> {
+  assertOutboundText(text);
   rejectUnsupportedPlatformAction(chatId, 'editing');
   assertTelegramPayload({ chat_id: chatId, message_id: messageId });
   await withRetry(async () => {
@@ -611,6 +616,7 @@ export async function sendFile(
 
   const buffer = await readFile(filePath);
   const filename = opts.filename ?? basename(filePath);
+  assertOutboundFile(buffer, filename, opts.caption);
   if (qq) {
     const messageId = await sendPlatformMedia(chatId, 'file', buffer, filename, opts);
     recordSpeech(); recordBotReply(chatId);
@@ -645,6 +651,7 @@ export async function sendPhoto(
   filePath: string,
   opts: { caption?: string; replyToId?: number; messageThreadId?: number } = {},
 ): Promise<{ messageId: number }> {
+  if (opts.caption) assertOutboundText(opts.caption);
   const qq = platformConversation(chatId);
   if (qq && !env().ONEBOT_MEDIA_ENABLED) throw new UnsupportedCapabilityError('photos');
   if (!qq) assertTelegramPayload({ chat_id: chatId, reply_to_message_id: opts.replyToId, message_thread_id: opts.messageThreadId });

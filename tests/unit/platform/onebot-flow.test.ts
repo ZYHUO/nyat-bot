@@ -119,7 +119,8 @@ class FixtureRedis {
   }
 }
 
-const migration = readFileSync('migrations/0118_platform_identity.sql', 'utf8');
+const migration = ['0118_platform_identity.sql', '0120_onebot_notices.sql']
+  .map(file => readFileSync(`migrations/${file}`, 'utf8')).join('\n');
 const codec = createOneBotCodec('42');
 let db: Database.Database;
 let redis: FixtureRedis;

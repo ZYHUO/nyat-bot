@@ -23,6 +23,7 @@ vi.mock('../../../src/db/redis.js', () => ({
 }));
 
 const envValues: Record<string, unknown> = {
+  BOT_TOKEN: '123:synthetic',
   PERSON_IDENTITY_ENABLED: true,
   PROFILE_MERGE_ENABLED: false,
   MEMORY_VISIBILITY_ENABLED: true,
@@ -118,33 +119,30 @@ describe('全局画像 setGlobalProfile / getGlobalProfile(机制2 schema)', () 
 describe('buildCrossGroupInjection(机制3:全局画像优先 + 群内 scrub 私聊来源)', () => {
   const fresh = () => Math.floor(Date.now() / 1000);
 
-  it('只有共享群来源的全局画像可注入另一个群', () => {
+  it('multiple ordinary group sources remain contextual and cannot enter another group', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, ?, ?, 2, ?)')
       .run('原始印象', GROUP_A, fresh());
     setGlobalProfile(42, { traits: ['毒舌'], interests: ['猫'], commStyle: '短句', relationToBot: '老熟人', stablePatterns: [], sourceContextIds: [GROUP_A, -1003], confidence: 0.8 });
     const out = buildCrossGroupInjection(42, GROUP_B);
-    expect(out).toContain('别的地方也认识');
-    expect(out).toContain('毒舌');
-    expect(out).toContain('老熟人');
+    expect(out).toBeNull();
   });
 
-  it('开启 visibility 也不能把 DM 提炼物注入群，回退到有共享来源的原始印象', () => {
+  it('neither a mixed DM summary nor an ungranted foreign group fallback may cross scope', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, ?, ?, 2, ?)')
       .run('群里公开的印象', GROUP_A, fresh());
     setGlobalProfile(42, { traits: ['来自私聊的秘密'], interests: [], commStyle: '', relationToBot: '', stablePatterns: [], sourceContextIds: [GROUP_A, DM], confidence: 0.8 });
     for (const enabled of [true, false]) {
       envValues['MEMORY_VISIBILITY_ENABLED'] = enabled;
       const out = buildCrossGroupInjection(42, GROUP_B);
-      expect(out).toContain('群里公开的印象');
-      expect(out).not.toContain('来自私聊的秘密');
+      expect(out).toBeNull();
     }
   });
 
-  it('混合摘要只可回到其私密来源，不可进入另一个私聊', () => {
+  it('a mixed summary cannot return to one source while disclosing another source', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, NULL, ?, 2, ?)')
       .run(GROUP_A, fresh());
     setGlobalProfile(42, { traits: ['私聊来源事实'], interests: [], commStyle: '', relationToBot: '', stablePatterns: [], sourceContextIds: [GROUP_A, DM], confidence: 0.8 });
-    expect(buildCrossGroupInjection(42, DM)).toContain('私聊来源事实');
+    expect(buildCrossGroupInjection(42, DM)).toBeNull();
     expect(buildCrossGroupInjection(42, 43)).toBeNull();
   });
 
@@ -171,16 +169,25 @@ describe('buildCrossGroupInjection(机制3:全局画像优先 + 群内 scrub 私
     expect(buildCrossGroupInjection(7, GROUP_B)).toBeNull();
   });
 
-  it('无全局画像 + impression 来自群(shared)+ 注入进另一个群 → 放行', () => {
+  it('a group impression without an explicit public grant cannot enter another group', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (8, ?, ?, 2, ?)')
       .run('群A里的公开印象', GROUP_A, fresh());
     const out = buildCrossGroupInjection(8, GROUP_B);
-    expect(out).toContain('群A里的公开印象');
+    expect(out).toBeNull();
   });
 
   it('上下文数 ≤1 → 不注入', () => {
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (9, ?, ?, 1, ?)')
       .run('只在一个地方', GROUP_A, fresh());
     expect(buildCrossGroupInjection(9, GROUP_B)).toBeNull();
+  });
+
+  it('keeps a structured profile whose complete provenance is the current conversation', () => {
+    testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (42, NULL, ?, 2, ?)')
+      .run(GROUP_A, fresh());
+    setGlobalProfile(42, { traits: ['本会话已知偏好'], interests: [], commStyle: '', relationToBot: '',
+      stablePatterns: [], sourceContextIds: [DM], confidence: 0.8 });
+    expect(buildCrossGroupInjection(42, DM)).toContain('本会话已知偏好');
+    expect(buildCrossGroupInjection(42, GROUP_B)).toBeNull();
   });
 });

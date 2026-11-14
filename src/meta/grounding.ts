@@ -19,6 +19,8 @@ import { getRedis } from '../db/redis.js';
 import { env } from '../env.js';
 import { executeSearchDetailed, formatSearchOutcome } from '../pipeline/tools/search.js';
 import { logger } from '../shared/logger.js';
+import { assertPublicSearchQuery } from '../shared/outbound-privacy.js';
+import { resolveConversationScope } from '../shared/privacy-scope.js';
 
 const DIGEST_TTL_S = 600; // digest 10min 过期（派发→执行正常就几秒）
 const RATE_LIMIT_WINDOW_S = 600;
@@ -82,8 +84,14 @@ export async function maybeStartGrounding(opts: {
   try {
     if (!env().GROUNDING_ENABLED) return;
     const { chatId, messageId } = opts;
+    const scope = resolveConversationScope(chatId);
+    if (!scope || scope.conversationKind !== 'group' || env().MEMORY_SENSITIVE_CHAT_IDS?.includes(chatId)) return;
     if (!messageId || messageId <= 0) return;
     if (!looksFactualQuestion(opts.text)) return;
+
+    // Check before removing mentions/truncating: sanitization is not permission
+    // to export the remaining private conversation to a search engine.
+    assertPublicSearchQuery(opts.text);
 
     const query = sanitizeForGrounding(opts.text);
     if (query.length < MIN_TEXT_LEN) return;
@@ -130,7 +138,7 @@ export async function maybeStartGrounding(opts: {
 
     await redis.set(digestKey(chatId, messageId), digest, 'EX', DIGEST_TTL_S);
     logger.info(
-      { chatId, messageId, query: query.slice(0, 60), chars: digest.length },
+      { chatId, messageId, queryChars: query.length, chars: digest.length },
       'grounding digest stored',
     );
   } catch (err) {

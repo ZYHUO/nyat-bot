@@ -25,6 +25,10 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('TTS private runtime and OGG/Opus validation', () => {
+  it('blocks credentials before synthesis or temporary file creation', async () => {
+    await expect(synthesizeVoice(`sk-${'synthetic_privacy_canary_'.repeat(2)}`)).rejects.toThrow('outbound_privacy_blocked');
+    expect(spawnMock).not.toHaveBeenCalled(); expect(mkdirMock).not.toHaveBeenCalled();
+  });
   it('passes text as a literal argv value without a shell, and enforces 48kHz mono Opus', async () => {
     const text = '你好; $(echo unsafe) `touch file`';
     expect(await synthesizeVoice(text)).toEqual(validOgg());

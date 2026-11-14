@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AttentionItem, SubagentCallback } from '../../../src/meta/types.js';
+import type { AttentionItem, DispatchTask, SubagentCallback } from '../../../src/meta/types.js';
 
 const f = vi.hoisted(() => ({
   config: {
@@ -11,18 +11,19 @@ const f = vi.hoisted(() => ({
   },
   call: vi.fn(async () => ({ content: '[SESSION_DIGEST]scoped output[/SESSION_DIGEST]' })),
   persist: vi.fn(), add: vi.fn(), recent: vi.fn(), memoryRecent: vi.fn(), api: vi.fn(),
-  lpush: vi.fn(async () => 1), engine: vi.fn(),
+  lpush: vi.fn(async () => 1), archive: vi.fn(async () => 1), engine: vi.fn(), tasks: new Map<string, DispatchTask>(),
   journalInfo: null as { chatId: number; link: string } | null,
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.config }));
 vi.mock('node:fs/promises', () => ({ readFile: vi.fn(async () => '') }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: f.call }));
 vi.mock('../../../src/meta/meta-api.js', () => ({ buildMetaApiContext: f.api }));
-vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ addDigest: f.add, recentDigests: f.memoryRecent }) }));
+vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ addDigest: f.add, recentDigests: f.memoryRecent,
+  getTask: (id: string) => f.tasks.get(id) }) }));
 vi.mock('../../../src/meta/session-digest.js', () => ({ persistDigest: f.persist, recentDigests: f.recent }));
 vi.mock('../../../src/cron/dream-journal.js', () => ({ getJournalChannelInfo: async () => f.journalInfo }));
 vi.mock('../../../src/sandbox/codeact/runner.js', () => ({ executeIsolatedCode: vi.fn() }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ lpush: f.lpush, ltrim: vi.fn() }) }));
+vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ lpush: f.lpush, ltrim: vi.fn(), hsetnx: f.archive, hget: async () => null }) }));
 vi.mock('../../../src/bot/bot.js', () => ({ getBotIdentity: () => ({ uid: 123 }) }));
 vi.mock('../../../src/metrics/registry.js', () => ({ incrCounter: vi.fn() }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn() } }));
@@ -39,10 +40,12 @@ function attention(chatId: number, text: string, createdAt = 101000): AttentionI
   return { id: `a${chatId}`, chatId, layer: 'L1', pressure: 70, reason: 'synthetic_question', textPreview: text, messageId: 7, createdAt };
 }
 function callback(chatId: number, summary: string, createdAt = 101000): SubagentCallback {
+  f.tasks.set(`t${chatId}`, { id: `t${chatId}`, chatId, createdAt, status: 'done', contentDirection: 'synthetic' });
   return { id: `c${chatId}`, taskId: `t${chatId}`, chatId, summary, createdAt, ok: false };
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  f.tasks.clear();
   f.config.META_SUBAGENT_ENABLED = true;
   f.config.DIGEST_PERSIST_ENABLED = true;
   f.journalInfo = null;
@@ -53,6 +56,14 @@ beforeEach(() => {
 });
 
 describe('Meta session source partition and activation', () => {
+  it('rejects a mislabeled private callback and callback Attention before any model or digest write', async () => {
+    const original = callback(42, 'PRIVATE_CALLBACK_MISROUTED');
+    const forged = { ...original, chatId: -100 };
+    await runMetaSession([{ ...attention(-100, original.summary), layer: 'L1_CALLBACK', reason: 'callback:ok',
+      payload: { taskId: original.taskId } }], [forged]);
+    expect(f.call).not.toHaveBeenCalled(); expect(f.add).not.toHaveBeenCalled(); expect(f.persist).not.toHaveBeenCalled();
+    expect(f.archive).toHaveBeenCalledTimes(2);
+  });
   it('never puts private and group attention/callbacks in the same model context', async () => {
     const result = await runMetaSession([attention(42, 'PRIVATE_MARKER'), attention(-100, 'GROUP_MARKER')], [callback(42, 'PRIVATE_CALLBACK'), callback(-100, 'GROUP_CALLBACK')]);
     expect(f.call).toHaveBeenCalledTimes(2);

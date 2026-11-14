@@ -55,18 +55,20 @@ export function scopeKeysForPredicate(predicate: string, scope?: CognitiveScope)
       if (!user) return [];
       return validId(scope.chatId) ? [`${user}@chat:${scope.chatId}`] : [user];
     case 'person.trait':
-      return user ? [user] : [];
+      // A merged per-user identity may contain private/other-chat observations.
+      // A user ID is not disclosure permission for all conversations.
+      return user && validId(scope.chatId) ? [`${user}@chat:${scope.chatId}`] : [];
     case 'entity.status':
       if (scope.visibility === 'task') {
         try {
-          return [scopeKey(scope), ...(chat ? [chat] : []), 'global'];
+          return [scopeKey(scope), ...(chat ? [chat] : [])];
         } catch {
-          return chat ? [chat, 'global'] : ['global'];
+          return chat ? [chat] : [];
         }
       }
-      return chat ? [chat, 'global'] : ['global'];
+      return chat ? [chat] : [];
     case 'goal.state':
-      return chat ? [chat, 'global'] : ['global'];
+      return chat ? [chat] : [];
     default:
       return [scopeKey(scope)];
   }
@@ -101,7 +103,8 @@ export function legacyBeliefMatchesScope(
     return sourceRowId === userId && evidence.some((item) => item.endsWith(`:${userId}`));
   }
   if (predicate === 'person.trait' && userId !== undefined) {
-    return sourceRowId === userId || evidence.includes(`identity:${userId}`);
+    // Old identity:<uid> rows have no per-field chat provenance.
+    return chatId !== undefined && evidence.includes(`profile:${chatId}:${userId}`);
   }
   return false;
 }

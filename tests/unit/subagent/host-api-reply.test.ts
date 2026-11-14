@@ -59,6 +59,18 @@ vi.mock('../../../src/tracking/person-identity.js', () => ({
 }));
 
 describe('host sendText reply_to policy', () => {
+  it('rejects credentials before candidate logging or transport', async () => {
+    const { logger } = await import('../../../src/shared/logger.js');
+    const logs = [vi.spyOn(logger, 'info'), vi.spyOn(logger, 'warn'), vi.spyOn(logger, 'debug'), vi.spyOn(logger, 'error')];
+    try {
+      const { createHostApi } = await import('../../../src/subagent/host-api.js');
+      const host = createHostApi(7624515600, { onEnd: () => {} });
+      const secret = `sk-${'synthetic_privacy_canary_'.repeat(2)}`;
+      await expect(host.telegram.sendText(secret)).rejects.toThrow('outbound_privacy_blocked');
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(JSON.stringify(logs.flatMap(log => log.mock.calls))).not.toContain(secret);
+    } finally { logs.forEach(log => log.mockRestore()); }
+  });
   beforeEach(() => {
     sendMessage.mockClear();
   });

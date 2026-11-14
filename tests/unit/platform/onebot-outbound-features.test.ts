@@ -50,6 +50,14 @@ beforeEach(() => {
 afterEach(() => { clearOneBotSender(); db.close(); });
 
 describe('QQ outbound media uses durable scoped identities and receipts', () => {
+  it('blocks credential text and exports before any transport effect', async () => {
+    const secret = `sk-${'synthetic_privacy_canary_'.repeat(2)}`;
+    await expect(sendPlatformText(chatId, secret)).rejects.toThrow('outbound_privacy_blocked');
+    await expect(sendPlatformMedia(chatId, 'file', Buffer.from(secret), 'export.txt')).rejects.toThrow('outbound_privacy_blocked');
+    await expect(sendPlatformMedia(chatId, 'image', bytes, 'picture.png', { caption: secret })).rejects.toThrow('outbound_privacy_blocked');
+    expect(send).not.toHaveBeenCalled(); expect(media).not.toHaveBeenCalled();
+    expect(receiptNumber).toBe(1000);
+  });
   it('maps a confirmed media receipt and a native quoted-message reference', async () => {
     const id = await sendPlatformMedia(chatId, 'file', bytes, 'fixture.txt', { caption: '附件', replyToId: nativeId });
     expect(id).toBeGreaterThan(2 ** 52);

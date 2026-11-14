@@ -551,7 +551,10 @@ it('holds QQ Attention through recall-store failure without losing it or delayin
   await vi.advanceTimersByTimeAsync(50); await settleIngress();
   expect(f.dispatch).toHaveBeenCalledOnce();
   expect(f.dispatch.mock.calls[0]![0]).toBe(tg.chatId);
-  expect(await getAttentionAccumulator().peek()).toEqual([expect.objectContaining({ chatId: qq.chatId, messageId: qq.messageId })]);
+  // The input remains queued, but readers cannot expose its unverified body
+  // while the recall/source store is unavailable. Restore must dispatch it once.
+  expect(await getAttentionAccumulator().size()).toBe(1);
+  expect(await getAttentionAccumulator().peek()).toEqual([]);
   db.exec(noticeMigration);
   await vi.advanceTimersByTimeAsync(1000); await settleIngress();
   expect(f.dispatch).toHaveBeenCalledTimes(2);

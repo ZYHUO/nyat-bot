@@ -23,7 +23,10 @@ vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { throw new Error('un
 vi.mock('../../../src/platform/onebot-notices.js', () => ({ isOneBotMessageRecalled: () => false }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: f.llm }));
 vi.mock('../../../src/sandbox/codeact/runner.js', () => ({ executeIsolatedCode: f.isolated }));
-vi.mock('../../../src/subagent/activation-policy.js', () => ({ checkCodeActActivation: () => ({ allowed: true }), holdCodeActTask: vi.fn() }));
+// This fixture isolates uncertain delivery after admission. Real task/source
+// admission is covered by input-scope and codeact-activation-policy suites.
+vi.mock('../../../src/subagent/activation-policy.js', () => ({ checkCodeActActivation: () => ({ allowed: true }),
+  checkCodeActTaskActivation: () => ({ allowed: true }), holdCodeActTask: vi.fn() }));
 vi.mock('../../../src/subagent/task-store.js', () => ({ persistCodeActTask: f.persist }));
 vi.mock('../../../src/subagent/queue.js', () => ({ enqueueResumeCodeActJob: f.resume }));
 vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ putTask: f.putTask, enqueueCallbackAsync: f.callbacks }) }));
@@ -33,7 +36,10 @@ vi.mock('../../../src/meta/speaker-burst.js', () => ({ clearSpeakerBurst: vi.fn(
 vi.mock('../../../src/agent/checkpoint.js', () => ({ loadCheckpoint: vi.fn(async () => null), saveCheckpoint: f.checkpoint,
   registerAgentChat: vi.fn(async () => {}), unregisterAgentChat: vi.fn(async () => {}), clearCheckpoint: vi.fn(async () => {}) }));
 vi.mock('../../../src/agent/interrupts.js', () => ({ drainInterrupts: vi.fn(async () => []), isHardStop: () => false }));
-vi.mock('../../../src/agent/compaction.js', () => ({ compactHistory: vi.fn(), restoreMessagesFromCompacted: vi.fn() }));
+vi.mock('../../../src/agent/compaction.js', async (original) => ({
+  ...await original<typeof import('../../../src/agent/compaction.js')>(),
+  compactHistory: vi.fn(), restoreMessagesFromCompacted: vi.fn(),
+}));
 vi.mock('../../../src/agent/task-runtime-events.js', () => ({ emitTaskRuntimeEvent: vi.fn(() => 'synthetic-event') }));
 vi.mock('../../../src/agent/task-evidence-store.js', () => ({ saveTaskEvidence: f.finalEvidence }));
 vi.mock('../../../src/agent/cognitive-debts.js', () => ({ createDebt: f.createDebt, resolveOpenDebtsByTaskWithEvidence: vi.fn() }));

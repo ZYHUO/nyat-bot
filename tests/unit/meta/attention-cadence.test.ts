@@ -13,6 +13,10 @@ vi.mock('../../../src/meta/loop.js', () => ({ metaTick: mocks.tick }));
 // Real SQLite recall behavior is covered by onebot-cadence; this suite isolates
 // scheduling and Redis marker races without requiring platform identities.
 vi.mock('../../../src/platform/onebot-notices.js', () => ({ isOneBotMessageRecalled: () => false }));
+// This fixture intentionally uses synthetic unmapped IDs to isolate clock races;
+// input-scope.test exercises the actual SQLite identity boundary separately.
+vi.mock('../../../src/meta/input-scope.js', () => ({ inspectMetaAttention: (value: AttentionItem) => ({ status: 'valid', value }),
+  holdMetaScopeInput: async () => true }));
 
 import { getAttentionAccumulator, _resetAttentionAccumulator } from '../../../src/meta/attention.js';
 import { batchMessagesAnswered, isMessageAnswered, markMessageAnswered } from '../../../src/meta/answered.js';

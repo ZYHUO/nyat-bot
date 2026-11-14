@@ -3,6 +3,7 @@ import { extname, join } from 'node:path';
 
 import { resolveSandboxRoot } from '../../sandbox/paths.js';
 import { env } from '../../env.js';
+import { assertPublicSearchQuery } from '../../shared/outbound-privacy.js';
 
 export interface PixivWork {
   id: string;
@@ -139,6 +140,7 @@ async function fetchPixiv(url: string): Promise<Response> {
 }
 
 export async function searchPixiv(query: string, opts?: { limit?: number }): Promise<PixivWork[]> {
+  assertPublicSearchQuery(query);
   const limit = clampLimit(opts?.limit, 5, 10);
   const res = await fetchPixiv(pixivSearchUrl(query, 1));
   if (!res.ok) throw new Error(`pixiv_http_${res.status}`);

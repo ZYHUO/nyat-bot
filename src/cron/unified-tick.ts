@@ -80,10 +80,7 @@ export interface WorldState {
   masterSilentSec: number | null; // null = MASTER_UID 未配
   masterLastText: string;
   groups: { chatId: number; silentSec: number; lastTexts: string; botSilentSec?: number }[];
-  /**
-   * H3.1 转发候选(taste 确定性打分 ≥阈值 的真人消息,每群 ≤2 条)。
-   * LLM 只能从这里选 share 目标,不许编造 messageId。
-   */
+  /** Legacy input only. Unverified original messages are never global share candidates. */
   shareCandidates?: { fromChatId: number; messageId: number; text: string; score: number }[];
   /** 3+ 天没出现的熟面孔(交互≥5 次)——"想起某人"的数据源。 */
   absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
@@ -421,32 +418,10 @@ export async function buildWorldState(): Promise<WorldState> {
   // must never fall back to the legacy Redis list containing mixed private text.
   const recentDigests: string[] = [];
 
-  // H3.1 转发候选:各活跃群近 30 条里 taste ≥阈值 且 7 天内没转过的,每群 ≤2。
-  // 确定性打分先行 —— LLM 只做"转哪条到哪群"的选择,不做品味判断。
+  // A taste score, group membership or a short excerpt is not public provenance.
+  // Keep legacy state shape without collecting original-message forwarding candidates.
+  // Public RSS/web knowledge uses the separate group_speak path.
   const shareCandidates: NonNullable<WorldState['shareCandidates']> = [];
-  try {
-    const { scoreTaste, wasForwardedRecently, SHARE_THRESHOLD } = await import('../pipeline/rhythm/taste.js');
-    for (const g of groups.slice(0, 5)) {
-      try {
-        const recent = await getRecent(g.chatId, 30);
-        let picked = 0;
-        for (let i = recent.length - 1; i >= 0 && picked < 2; i--) {
-          const m = recent[i]!;
-          if (m.role === 'assistant' || m.isBot) continue;
-          const s = scoreTaste(m);
-          if (s.score < SHARE_THRESHOLD) continue;
-          if (wasForwardedRecently(g.chatId, m.messageId)) continue;
-          shareCandidates.push({
-            fromChatId: g.chatId,
-            messageId: m.messageId,
-            text: (m.textContent || m.captionContent || '').slice(0, 80),
-            score: s.score,
-          });
-          picked++;
-        }
-      } catch { /* skip chat */ }
-    }
-  } catch { /* keep empty */ }
 
   return {
     hourBeijing: hourBeijing(),
@@ -481,18 +456,19 @@ function parseTickVerdict(raw: string): TickVerdict | null {
     const obj = JSON.parse(m[0]) as Record<string, unknown>;
     const type = obj['action'];
     const reason = typeof obj['reason'] === 'string' ? (obj['reason'] as string).slice(0, 150) : '';
-    if (type === 'care_master' && typeof obj['text'] === 'string' && (obj['text'] as string).trim()) {
-      return { action: { type, text: (obj['text'] as string).trim().slice(0, 300) }, reason };
+    if (type === 'care_master') {
+      // Legacy text is deliberately ignored: scheduling cannot author a DM reply.
+      return { action: { type, text: '' }, reason };
     }
     if (type === 'group_speak' && typeof obj['chatId'] === 'number') {
       return { action: { type, chatId: obj['chatId'] as number }, reason };
     }
-    if (type === 'remember_user' && typeof obj['chatId'] === 'number' && typeof obj['name'] === 'string') {
+    if (type === 'remember_user' && typeof obj['chatId'] === 'number') {
       return {
         action: {
           type,
           chatId: obj['chatId'] as number,
-          name: (obj['name'] as string).slice(0, 40),
+          name: typeof obj['name'] === 'string' ? obj['name'].slice(0, 40) : '',
           absentDays: typeof obj['absentDays'] === 'number' ? (obj['absentDays'] as number) : 3,
         },
         reason,
@@ -533,12 +509,11 @@ const TICK_RACE_TIMEOUT_MS = 40_000;
 const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟你醒一次，看一眼世界，决定这一个周期做**一件**事——或者继续安静。
 
 可选动作（只能选一个）：
-- care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
-- group_speak: 有真实想分享的就开口——跟进群里在聊的话题、分享你最近做的有意思的事（见 session digest）、或群里冷场超过 20 分钟去自然冒个泡。chatId=目标群。**没料的硬冒泡不如安静**；别复读你 digest 里刚分享过的同一件事。
-- remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
+- care_master: 主人沉默很久了，选择在主人私聊里关心一下。只选动作，最终正文由主人私聊的独立上下文生成。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
+- group_speak: 根据群的活跃度、冷场时间和公开资讯，选择一个适合自然开口的目标群。chatId=目标群。只做调度，话题和正文由目标群独立上下文生成，仍可决定保持安静。**没料的硬冒泡不如安静**。
+- remember_user: 世界状态里有熟面孔好几天没出现了，在对应群里自然地提一句。只选 chatId；实际称呼和缺席天数由目标会话的宿主查询提供，不编造人名。这是"想起朋友"不是"查户口"。没有缺席记录时不该选。
 - self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索/搜点有意思的东西）。idea+plan。自玩是私下练习，别为了表演而自玩；但玩出了真有意思的东西（画了好玩的/挖到冷知识/写成个小工具）可以自然地分享给群里或主人一次。
 - check_goal: 有到期关注目标，去查查进展。goalId。
-- share: A 群有条真有意思的消息（见「值得转发的」），转到 B 群给那边的人看。fromChatId=来源群，messageId=那条消息，toChatId=目标群。**只能选候选列表里的，不许编 id；目标群选当前话题能接住它的（别往正经群倒梗、别往梗群倒正经）；A 转 A（同群）禁止**。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
 - note_impulse: 你自己起过个念头但还没说出口（见「你自已没说出口的念头」），而现在**不是开口的时候**。选它=把那个念头记下来，**不会发给任何人**。这是你唯一的"做了但没人看见"的动作——真人也会把话咽回去但记在心里。
 - remember_thread: 有一件你想回头再管的事（同上来源），选它=挂到"以后再说"的清单上，**不会发给任何人**。
@@ -548,11 +523,43 @@ const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟�
 - 深夜（23-8 点）除非主人刚发过消息，否则 quiet。
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
 - 上下文里刚出现过你自己的自玩汇报时，下一周期优先 quiet，不要用 care_master 继续推销。
+- 不自动跨会话转发聊天原文：普通群不代表公开来源，兴趣打分也不是分享许可。公开网页、RSS 新闻等知识可以通过 group_speak 自然分享；同会话的正常引用回复不受影响。
 
-只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|share|note_impulse|remember_thread", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "fromChatId": 数字(share 时), "messageId": 数字(share 时), "toChatId": 数字(share 时), "about": "…"(note_impulse/remember_thread 时写你要记的是什么), "reason": "一句话为什么"}`;
+只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|note_impulse|remember_thread", "chatId": 数字(可选), "goalId": 数字(可选), "idea": "…"(可选), "plan": ["…"](可选), "about": "…"(note_impulse/remember_thread 时写你要记的是什么), "reason": "一句话为什么"}`;
+
+/** Global scheduling needs cadence metadata, never conversation prose from another scope. */
+function projectGlobalPlanningState(state: WorldState): WorldState {
+  const route = state.cognitiveRoute;
+  const cognitiveRoute: CognitiveRoutingDecision | undefined = route
+    && ['fast', 'deep', 'background'].includes(route.route) && Number.isFinite(route.score)
+    ? { route: route.route, score: Math.max(0, Math.min(100, route.score)), signals: [],
+      primarySignal: null, reason: '', shouldUseWorkspace: false }
+    : undefined;
+  return {
+    hourBeijing: state.hourBeijing,
+    masterSilentSec: state.masterSilentSec,
+    masterLastText: '',
+    groups: state.groups.map(g => ({ chatId: g.chatId, silentSec: g.silentSec, botSilentSec: g.botSilentSec, lastTexts: '' })),
+    absentUsers: (state.absentUsers ?? []).map(u => ({ chatId: u.chatId, uid: u.uid, absentDays: u.absentDays, name: '' })),
+    dueGoals: state.dueGoals.map(g => ({ id: g.id, topic: '(在目标会话内读取)', lastFinding: null })),
+    dueDebts: (state.dueDebts ?? []).map(d => ({ id: d.id, kind: 'scoped', chatId: d.chatId, statement: '' })),
+    missed: (state.missed ?? []).map(m => ({ chatId: m.chatId, name: '', text: '', ageMin: m.ageMin, kind: m.kind })),
+    // These inputs originate in the public RSS/weather feed and the bot's own clock.
+    rssNewCount: state.rssNewCount,
+    rssTopTitles: state.rssTopTitles,
+    weather: state.weather,
+    lifeTransition: state.lifeTransition,
+    selfPlayCooldownLeftSec: state.selfPlayCooldownLeftSec,
+    lastCareAgoSec: state.lastCareAgoSec,
+    cognitiveRoute,
+  };
+}
 
 /** 单次 LLM 决策。失败 → quiet（fail-closed）。 */
 export async function decideTick(state: WorldState): Promise<TickVerdict> {
+  // Project before both prompt rendering and agenda generation. Keep the caller's
+  // full state intact for the chosen target's local generation after scheduling.
+  state = projectGlobalPlanningState(state);
   const groupLines = state.groups.length
     ? state.groups
         .map((g) => `  群 ${g.chatId}: 沉默 ${Math.floor(g.silentSec / 60)} 分钟。最近: ${g.lastTexts.slice(0, 150)}`)
@@ -562,7 +569,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ? (state.cognitiveWorkspaces ?? []).slice(0, 3).map((workspace) => `  群 ${workspace.chatId}:\n${workspace.text.slice(0, 1200)}`).join('\n')
     : '  (工作区未启用或暂无 projection)';
   const routeLine = state.cognitiveRoute
-    ? `后台认知路由：${state.cognitiveRoute.route}（score=${state.cognitiveRoute.score}, reason=${state.cognitiveRoute.reason}）。它只决定是否读取有范围的工作区，不授予发送、工具或 Agency 权限。`
+    ? `后台认知路由：${state.cognitiveRoute.route}（score=${state.cognitiveRoute.score}）。仅保留调度元数据，不授予发送、工具或 Agency 权限。`
     : '后台认知路由：未启用（保持统一唤醒的 legacy 读取预算）。';
   const goalLines = state.dueGoals.length
     ? state.dueGoals.map((g) => `  goal#${g.id}: 「${g.topic}」${g.lastFinding ? `上次发现: ${g.lastFinding.slice(0, 60)}` : '(首次检查)'}`).join('\n')
@@ -572,7 +579,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     : '  (没有到期债务)';
   const absentLines = (state.absentUsers ?? []).length
     ? state.absentUsers
-        .map((u) => `  ${u.name}(群 ${u.chatId})已 ${u.absentDays} 天没出现`)
+        .map((u) => `  群 ${u.chatId} 有熟面孔已 ${u.absentDays} 天没出现（称呼仅在原会话读取）`)
         .join('\n')
     : '  (没有长时间缺席的熟面孔)';
   const topicLines = (state.topics ?? []).length
@@ -590,46 +597,8 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         )
         .join('\n')
     : '  (没有)';
-  // 它自己没说出口的念头（NyatOS 影子判定 speak 而线上静默的那批）。
-  // 只算一次：proposeActions 也要用它，每个 tick 两遍 × 每群一次查询是白烧。
-  let ownImpulses: Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }> = [];
-  try {
-    ownImpulses = await collectUnactedImpulses(state.groups.map((g) => g.chatId));
-  } catch { /* 没就不自主，别硬造 */ }
-  const impulseLines = ownImpulses.length
-    ? ownImpulses.map((o) => `  群 ${o.chatId}: ${o.minutesAgo} 分钟前你想过——「${o.about}」`).join('\n')
-    : '';
-  const shareLines = (state.shareCandidates ?? []).length
-    ? state.shareCandidates!
-        .map((c) => `  群 ${c.fromChatId} #${c.messageId} (分${c.score}): 「${c.text}」`)
-        .join('\n')
-    : '  (没有值得转的)';
-/**
- * 它自己起过、但没说出口的念头。
- *
- * 定义要保守：只看 NyatOS 影子判定为 speak、而同一批消息上线上结果仍为静默的样本
- * （那两个本来就是为"对比单决策点与真实行为"而设计的成对事件）。取每个群最近一条，
- * 时间窗 6 小时。读不到就返回空——这个数据是"自己的事"的燃料，但不是必需项。
- */
-async function collectUnactedImpulses(chatIds: number[], withinMin = 360): Promise<Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }>> {
-  const out: Array<{ chatId: number; about: string; minutesAgo: number; verdict: string }> = [];
-  try {
-    const { getRecentImpulses } = await import('../agent/impulse-history.js');
-    const nowSec = Math.floor(Date.now() / 1000);
-    for (const chatId of chatIds) {
-      const impulses = getRecentImpulses(chatId, 5, withinMin).filter((i) => i.verdict === 'speak');
-      const first = impulses[0];
-      if (!first || !first.why) continue;
-      out.push({
-        chatId,
-        about: first.why,
-        minutesAgo: Math.max(1, Math.round((nowSec - first.atSec) / 60)),
-        verdict: first.verdict,
-      });
-    }
-  } catch { /* 没有就不自主，别硬造 */ }
-  return out;
-}
+  // Per-chat impulse prose remains in its own conversation; the global planner
+  // must not turn an unspoken thought from A into a reason to speak in B.
 
 // Phase 3 drives（只做 scorer + suppressor 提示，不决策）：世界状态派生
   // drive 值 → 候选动作按期望增益排序 → 拼进 prompt 给 LLM 看。fail-soft：
@@ -662,14 +631,12 @@ async function collectUnactedImpulses(chatIds: number[], withinMin = 360): Promi
         absentUsers: state.absentUsers ?? [],
         selfPlayCooldownLeftSec: state.selfPlayCooldownLeftSec,
         lifeTransition: state.lifeTransition ?? null,
-        shareCandidates: (state.shareCandidates ?? []).map((c) => ({
-          fromChatId: c.fromChatId,
-          messageId: c.messageId,
-        })),
+        // Ignore even caller-supplied legacy candidates: they have no public provenance.
+        shareCandidates: [],
         // 它自己起过、没说出口的念头：影子判定 speak 而线上最终静默的那批。
         // 这是目前唯一现成的"我有自己的事"来源（goals.origin='self' 是 0 行），
         // 而且内容就是它当时自己想说的话，不是我替它编的。
-        unactedImpulses: ownImpulses,
+        unactedImpulses: [],
       },
       masterConfigured: env().MASTER_UID > 0,
     });
@@ -709,7 +676,7 @@ async function collectUnactedImpulses(chatIds: number[], withinMin = 360): Promi
     missedLines,
     ``,
     `你自已没说出口的念头（你当时想接却没接的；不是现在必须说，可以记下、可以装作没想过）:`,
-    impulseLines || '  （没有）',
+    '  （仅在原会话读取）',
     ``,
     `你最近做的事（session digest）:`,
     digestLines,
@@ -722,9 +689,6 @@ async function collectUnactedImpulses(chatIds: number[], withinMin = 360): Promi
     ``,
     `欠着的认知债务（相关群出现合适时机时可自然偿还——兑现/核实/承认错了；别硬提）:`,
     debtLines,
-    ``,
-    `值得转发的（A 群看到的好东西，可以转到 B 群——只能选下面列的，不许编 id）:`,
-    shareLines,
     ``,
     `RSS 新资讯: ${state.rssNewCount} 条待消化${(state.rssTopTitles ?? []).length ? `：\n${(state.rssTopTitles ?? []).map((t) => `  - ${t}`).join('\n')}` : ''}`,
     `self-play 冷却: ${state.selfPlayCooldownLeftSec > 0 ? `还有 ${Math.floor(state.selfPlayCooldownLeftSec / 60)} 分钟` : '已就绪'}`,
@@ -962,20 +926,25 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       // 世界状态已算好 silent/lastCare，这里强制执行，不再赌 LLM 自律。
       if (state.masterSilentSec !== null && state.masterSilentSec < CARE_MASTER_MIN_SILENT_SEC) {
         logger.info(
-          { silentSec: state.masterSilentSec, text: a.text.slice(0, 40) },
+          { silentSec: state.masterSilentSec },
           'unified tick: care_master vetoed — master not silent long enough',
         );
         return;
       }
       if (state.lastCareAgoSec < CARE_MASTER_MIN_INTERVAL_SEC) {
         logger.info(
-          { lastCareAgoSec: state.lastCareAgoSec, text: a.text.slice(0, 40) },
+          { lastCareAgoSec: state.lastCareAgoSec },
           'unified tick: care_master vetoed — cared too recently',
         );
         return;
       }
-      if (a.text.includes('[object Object]')) {
-        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — corrupt text');
+      const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
+      const { getBotUid } = await import('../bot/bot.js');
+      const text = await generatePersonaProactiveText(e.MASTER_UID, getBotUid(e.MASTER_UID),
+        '[主动关心] 主人已经沉默很久，可以基于这段私聊自然关心一句。不要复读问候，不要追问自玩产物；没有合适的话就保持安静。');
+      if (!text) return;
+      if (text.includes('[object Object]')) {
+        logger.info('unified tick: care_master vetoed — corrupt text');
         return;
       }
       // L1 沟壁：主动开口（哪怕是私聊主人）也要过硬闸。私聊不是豁免理由——
@@ -990,8 +959,8 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         });
         return;
       }
-      if (CARE_PEDDLE_RE.test(a.text)) {
-        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — self-play peddle');
+      if (CARE_PEDDLE_RE.test(text)) {
+        logger.info('unified tick: care_master vetoed — self-play peddle');
         return;
       }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
@@ -1004,7 +973,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
         const { getRecent } = await import('../pipeline/context/manager.js');
         const recent = await getRecent(e.MASTER_UID, 12).catch(() => []);
-        const gateVerdict = await runRewardGate(e.MASTER_UID, recent, a.text, 'proactive');
+        const gateVerdict = await runRewardGate(e.MASTER_UID, recent, text, 'proactive');
         if (!gateVerdict.accept) {
           logger.info({ chatId: e.MASTER_UID, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: proactive rejected by reward gate');
           return;
@@ -1012,9 +981,9 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       } catch (err) {
         logger.debug({ err, chatId: e.MASTER_UID }, 'reward gate failed (fail-open)');
       }
-        const messageId = await sendMessage(e.MASTER_UID, a.text);
+        const messageId = await sendMessage(e.MASTER_UID, text);
         if (messageId) {
-          await addAssistant(e.MASTER_UID, { textContent: a.text, messageId });
+          await addAssistant(e.MASTER_UID, { textContent: text, messageId });
         }
         await redis.set(LAST_CARE_KEY + e.MASTER_UID, String(now));
         await markProactiveSent(e.MASTER_UID, 'unified-tick');
@@ -1025,7 +994,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         // 防重复由本分支自己的 masterSilentSec / lastCareAgoSec 两道护栏负责，
         // 不需要靠全局 drive 饱和。
         await recordTickVerdict({ chosen: 'care_master', vetoed: [], reason: verdict.reason });
-        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: cared for master');
+        logger.info('unified tick: cared for master');
       } catch (err) {
         logger.warn({ err }, 'unified tick: care_master send failed');
       }
@@ -1192,7 +1161,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
 
     case 'remember_user': {
       const match = state.absentUsers.find(
-        (u) => u.chatId === a.chatId && (u.name === a.name || u.name.includes(a.name) || a.name.includes(u.name)),
+        (u) => u.chatId === a.chatId && (!a.name || u.name === a.name || u.name.includes(a.name) || a.name.includes(u.name)),
       );
       if (!match) {
         logger.info(
@@ -1383,71 +1352,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
     }
 
     case 'share': {
-      if (!isGlobalPlanningChat(a.fromChatId) || !isGlobalPlanningChat(a.toChatId)) return;
-      // H3.1 跨群转发：四道硬门（LLM 只做选择，安全由代码兜底）。
-      const cand = (state.shareCandidates ?? []).find(
-        (c) => c.fromChatId === a.fromChatId && c.messageId === a.messageId,
-      );
-      if (!cand) {
-        logger.info({ from: a.fromChatId, msg: a.messageId }, 'unified tick: share rejected — not in candidates');
-        return;
-      }
-      if (a.toChatId === a.fromChatId) {
-        logger.info('unified tick: share rejected — same chat');
-        return;
-      }
-      if (!state.groups.some((g) => g.chatId === a.toChatId)) {
-        logger.info({ to: a.toChatId }, 'unified tick: share rejected — unknown target');
-        return;
-      }
-      try {
-        const { wasForwardedRecently, recordForward } = await import('../pipeline/rhythm/taste.js');
-        if (wasForwardedRecently(a.fromChatId, a.messageId)) {
-          logger.info('unified tick: share rejected — forwarded recently');
-          return;
-        }
-        const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
-        if (!(await tryAcquireProactiveSlot(a.toChatId, 'unified-tick-share'))) return;
-        const { forwardMessage, sendMessage } = await import('../bot/sender/telegram.js');
-        const { addAssistant } = await import('../pipeline/context/manager.js');
-        const fwdId = await forwardMessage(a.toChatId, a.fromChatId, a.messageId);
-        if (!fwdId) {
-          logger.info('unified tick: share forward failed');
-          return;
-        }
-        recordForward(a.fromChatId, a.messageId, cand.score, { toChatId: a.toChatId, toMessageId: fwdId });
-        // 转发后跟一句人话（像真人"诶这个好笑转给你们看"），失败也认——转发本身已落地。
-        try {
-          const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
-          const { getBotUid } = await import('../bot/bot.js');
-          const line = await generatePersonaProactiveText(
-            a.toChatId,
-            getBotUid(a.toChatId),
-            `[转发跟话] 你刚把一条有意思的消息转到这个群。自然地跟一句为什么转（比如"这个太好笑了转给你们看看"），一句话，别复述转发内容，别自我介绍。`,
-          );
-          if (line) {
-            // Proactive willingness gate — see the group_speak site for rationale.
-            try {
-              const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
-              const { getRecent } = await import('../pipeline/context/manager.js');
-              const recent = await getRecent(a.toChatId, 12).catch(() => []);
-              const gateVerdict = await runRewardGate(a.toChatId, recent, line, 'proactive');
-              if (!gateVerdict.accept) {
-                logger.info({ chatId: a.toChatId, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: share line rejected by reward gate');
-                return;
-              }
-            } catch (err) {
-              logger.debug({ err, chatId: a.toChatId }, 'reward gate failed (fail-open)');
-            }
-            const mid = await sendMessage(a.toChatId, line);
-            if (mid) await addAssistant(a.toChatId, { textContent: line, messageId: mid });
-          }
-        } catch { /* follow-up optional */ }
-        await markProactiveSent(a.toChatId, 'unified-tick-share');
-        logger.info({ from: a.fromChatId, msg: a.messageId, to: a.toChatId }, 'unified tick: shared');
-      } catch (err) {
-        logger.warn({ err }, 'unified tick: share failed');
-      }
+      // Legacy/model-invented actions still reach a hard host denial. There is no
+      // verified public provenance or complete payload for forwarding by messageId;
+      // neither an excerpt nor ordinary-group membership can grant that authority.
+      logger.info({ from: a.fromChatId, msg: a.messageId, to: a.toChatId,
+        reason: 'source_provenance_unverified' }, 'unified tick: original-message share blocked');
       return;
     }
   }
@@ -1472,7 +1381,7 @@ export async function runUnifiedTick(): Promise<void> {
     // AGI L5 L3: 群氛围推断 —— 活跃群且 norms 过期/缺失时补一次(便宜链,失败静默)。
     // H4.2: buildWorldState 只取 6 条(3 条拼 lastTexts, recent.slice(-3))，
     // 拼完 split('\n') 只剩 1 行 → recent.length>=5 恒假 → norms 表线上 0 行。
-    // 改直查 getRecent 30 条(与 H3.1 shareCandidates 同窗)，够 5 条才 infer。
+    // 改直查 getRecent 30 条，够 5 条才 infer。
     if (e.GROUP_NORMS_ENABLED) {
       try {
         const { needsRefresh, inferGroupNorms } = await import('../agent/group-norms.js');

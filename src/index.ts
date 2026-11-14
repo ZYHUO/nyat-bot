@@ -3,7 +3,8 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { logger } from './shared/logger.js';
-import { env } from './env.js';
+import { env, getProviders } from './env.js';
+import { registerOutboundSecrets } from './shared/outbound-privacy.js';
 import { getConfig } from './shared/config.js';
 import { getRedis, closeRedis } from './db/redis.js';
 import { runMigrations, closeDb } from './db/sqlite.js';
@@ -59,6 +60,7 @@ async function main(): Promise<void> {
 
   // 1. Validate env
   const config = env();
+  registerOutboundSecrets(Array.from(getProviders().values(), (provider) => provider.apiKey));
   validateOneBotConfig(config);
   logger.info({ nodeEnv: config.NODE_ENV }, 'Environment validated');
 

@@ -3,6 +3,7 @@ import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
 import type { AttentionItem, AttentionLayer } from './types.js';
 import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
+import { holdMetaScopeInput, inspectMetaAttention } from './input-scope.js';
 
 const REDIS_KEY = 'xxb:meta:attention';
 const MAX = 500;
@@ -80,7 +81,7 @@ function parseItems(raw: string[]): AttentionItem[] {
   for (const r of raw) {
     try {
       const it = JSON.parse(r) as AttentionItem;
-      if (it && typeof it.chatId === 'number' && it.id) out.push(it);
+      if (it && typeof it === 'object') out.push(it);
     } catch {
       /* drop */
     }
@@ -97,15 +98,29 @@ export class AttentionAccumulator {
 
   ingest(partial: Omit<AttentionItem, 'id' | 'createdAt' | 'pressure'> & { pressure?: number }): AttentionItem {
     const item = buildItem(partial);
-    this.local.push(item);
+    const scope = inspectMetaAttention(item);
+    if (scope.status !== 'valid') {
+      if (scope.status === 'unavailable') this.local.push(item);
+      else void holdMetaScopeInput('attention', item, scope.reason).then(held => { if (!held) this.local.push(item); });
+      scheduleCoalesceWake(1000);
+      return item;
+    }
+    this.local.push(scope.value);
     if (this.local.length > MAX) this.local.splice(0, this.local.length - MAX);
-    void this.persistPush(item);
-    return item;
+    void this.persistPush(scope.value);
+    return scope.value;
   }
 
   async ingestAsync(
     partial: Omit<AttentionItem, 'id' | 'createdAt' | 'pressure'> & { pressure?: number },
   ): Promise<AttentionItem | null> {
+    const original = buildItem(partial);
+    const scope = inspectMetaAttention(original);
+    if (scope.status !== 'valid') {
+      const held = scope.status === 'invalid' && await holdMetaScopeInput('attention', original, scope.reason);
+      if (!held) { this.local.push(original); scheduleCoalesceWake(1000); }
+      return null;
+    }
     // 已回过的 message 不再进队列（重启残留 / 双路径）
     if (partial.messageId && partial.messageId > 0) {
       try {
@@ -121,7 +136,7 @@ export class AttentionAccumulator {
         /* fail-open */
       }
     }
-    const item = buildItem(partial);
+    const item = scope.value;
     try {
       await this.persistPush(item);
     } catch (err) {
@@ -189,13 +204,19 @@ export class AttentionAccumulator {
     // Drop stale + already-answered (restart / busy-requeue leftovers)
     // Batch the answered-check into a single MGET instead of N serial GETs.
     const notStale: AttentionItem[] = [];
+    const unreadScopeState: AttentionItem[] = [];
     let droppedStale = 0;
     for (const it of byId.values()) {
+      const scope = inspectMetaAttention(it);
+      if (scope.status !== 'valid') {
+        if (scope.status === 'unavailable' || !await holdMetaScopeInput('attention', it, scope.reason)) unreadScopeState.push(it);
+        continue;
+      }
       if (now - (it.createdAt || 0) > MAX_AGE_MS) {
         droppedStale += 1;
         continue;
       }
-      notStale.push(it);
+      notStale.push(scope.value);
     }
 
     let droppedAnswered = 0;
@@ -245,8 +266,8 @@ export class AttentionAccumulator {
       }
       fresh.push(it);
     }
-    if (unreadRecallState.length) {
-      logger.warn({ held: unreadRecallState.length }, 'Attention recall state unavailable — holding for retry');
+    if (unreadRecallState.length || unreadScopeState.length) {
+      logger.warn({ held: unreadRecallState.length + unreadScopeState.length }, 'Attention scope/recall state unavailable — holding for retry');
       scheduleCoalesceWake(1000);
     }
     if (droppedStale || droppedAnswered || droppedRecalled) {
@@ -310,7 +331,7 @@ export class AttentionAccumulator {
     }
 
     const picked = ready.slice(0, n);
-    const remain = [...ready.slice(n), ...held, ...unreadRecallState];
+    const remain = [...ready.slice(n), ...held, ...unreadRecallState, ...unreadScopeState];
 
     if (remain.length) {
       try {
@@ -354,7 +375,10 @@ export class AttentionAccumulator {
     } catch (err) {
       logger.debug({ err }, 'Attention Redis load failed — using local');
     }
-    return Array.from(byId.values());
+    return Array.from(byId.values()).flatMap(item => {
+      const scope = inspectMetaAttention(item);
+      return scope.status === 'valid' ? [scope.value] : [];
+    });
   }
 }
 

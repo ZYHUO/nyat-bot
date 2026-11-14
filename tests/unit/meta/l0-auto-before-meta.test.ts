@@ -13,6 +13,11 @@ const allQuotesAnswered = vi.fn(async () => false);
 const isMetaSubagentChat = vi.fn(() => true);
 const suppressHeartDispatch = vi.fn(async (_chatId: number) => false);
 const markMessageAnswered = vi.fn(async (_chatId: number, _messageId: number) => undefined);
+// Deliberately synthetic identity constants test scheduling, not SQLite routing.
+// Real mapping rejection and acceptance are exercised by input-scope.test.
+vi.mock('../../../src/meta/input-scope.js', () => ({ inspectMetaAttention: (value: unknown) => ({ status: 'valid', value }),
+  inspectMetaChatScope: (value: number) => ({ status: 'valid', value }), holdMetaScopeInput: async () => true,
+  inspectMetaTaskScope: (value: unknown) => ({ status: 'valid', value }) }));
 
 vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: (...args: unknown[]) => callWithFallback(...args),

@@ -18,6 +18,7 @@ const redis = {
   del: vi.fn(async (k: string) => (store.delete(k) ? 1 : 0)),
 };
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redis }));
+vi.mock('../../../src/env.js', () => ({ env: () => ({ BOT_TOKEN: '12345:test-only' }) }));
 vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));

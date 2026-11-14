@@ -4,6 +4,7 @@ import { callWithFallback } from '../ai/fallback.js';
 import { getContextEngine, staticText, deltaText, ephemeralText, volatileText } from '../context-engine/index.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { holdMetaScopeInput, inspectMetaAttention, inspectMetaCallback, inspectMetaTaskBinding } from './input-scope.js';
 import { formatBeijingNowLine } from '../shared/beijing-time.js';
 import { buildMasterIdentityBlock, masterShortHint } from '../shared/master-identity.js';
 import { getGlobalState } from './global-state.js';
@@ -807,14 +808,40 @@ export async function runMetaSession(
   // Partition before diary interception, context reads or any LLM call. Merely
   // tagging the final digest cannot undo disclosure in a mixed model context.
   const scopes = new Map<number, { attention: AttentionItem[]; callbacks: SubagentCallback[] }>();
-  for (const item of attention) {
-    if (!checkCodeActActivation(item).allowed) continue;
+  for (const original of attention) {
+    if (!checkCodeActActivation(original).allowed) continue;
+    const inspected = inspectMetaAttention(original);
+    if (inspected.status !== 'valid') {
+      if (inspected.status === 'unavailable' || !await holdMetaScopeInput('attention', original, inspected.reason)) {
+        const { getAttentionAccumulator } = await import('./attention.js');
+        await getAttentionAccumulator().requeue([original]);
+      }
+      continue;
+    }
+    const item = inspected.value;
+    if (item.layer === 'L1_CALLBACK' || item.reason.startsWith('callback:') || item.reason.startsWith('subagent_request:')) {
+      const binding = await inspectMetaTaskBinding(item.chatId, item.payload?.['taskId']);
+      if (binding.status !== 'valid') {
+        if (binding.status === 'unavailable' || !await holdMetaScopeInput('attention', original, binding.reason)) {
+          const { getAttentionAccumulator } = await import('./attention.js');
+          await getAttentionAccumulator().requeue([original]);
+        }
+        continue;
+      }
+    }
     const scope = scopes.get(item.chatId) ?? { attention: [], callbacks: [] };
     scope.attention.push(item);
     scopes.set(item.chatId, scope);
   }
   for (const item of callbacks) {
     if (!checkCodeActActivation(item).allowed) continue;
+    const inspected = await inspectMetaCallback(item);
+    if (inspected.status !== 'valid') {
+      if (inspected.status === 'unavailable' || !await holdMetaScopeInput('callback', item, inspected.reason)) {
+        await getGlobalState().enqueueCallbackAsync(item);
+      }
+      continue;
+    }
     const scope = scopes.get(item.chatId) ?? { attention: [], callbacks: [] };
     scope.callbacks.push(item);
     scopes.set(item.chatId, scope);

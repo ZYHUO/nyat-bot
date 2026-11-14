@@ -2,6 +2,7 @@
 // Existing tools use executeSearch; autonomous callers can inspect the typed result.
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { assertPublicSearchQuery } from '../../shared/outbound-privacy.js';
 
 const MAX_RESULTS = 5;
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -47,6 +48,7 @@ async function request(url: string, init: RequestInit, timeoutMs: number): Promi
 }
 
 export async function executeSearchDetailed(query: string): Promise<WebSearchOutcome> {
+  assertPublicSearchQuery(query);
   const e = env();
   const attempts: SearchAttempt[] = [];
   let emptyProvider: SearchProvider | null = null;

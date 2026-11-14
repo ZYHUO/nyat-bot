@@ -12,6 +12,7 @@ const mockProfile = vi.fn();
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => testDb }));
 vi.mock('../../../src/env.js', () => ({ env: () => ({
+  BOT_TOKEN: '123:synthetic',
   PERSON_IDENTITY_ENABLED: true,
   PROFILE_MERGE_ENABLED: false,
   MEMORY_VISIBILITY_ENABLED: true,
@@ -66,13 +67,12 @@ describe('person-identity (cross-group)', () => {
     expect(mockProfile).toHaveBeenCalledWith(-100, 7); // pulled from the primary group
   });
 
-  it('injects the cross-group block in OTHER groups, but not in the primary group', async () => {
+  it('does not turn a contextual group profile into a public cross-group grant', async () => {
     const now = Math.floor(Date.now() / 1000);
     testDb.prepare('INSERT INTO person_identity (uid, impression, primary_chat_id, chat_count, updated_at) VALUES (?,?,?,?,?)')
       .run(7, '喜欢猫、爱打游戏', -100, 3, now);
     const inOther = buildCrossGroupInjection(7, -999);
-    expect(inOther).toContain('别的地方也认识'); // 机制3:文案从"群"改"地方(含DM)"
-    expect(inOther).toContain('喜欢猫');
+    expect(inOther).toBeNull();
     const inPrimary = buildCrossGroupInjection(7, -100);
     expect(inPrimary).toBeNull(); // primary group already has its own per-group profile
   });

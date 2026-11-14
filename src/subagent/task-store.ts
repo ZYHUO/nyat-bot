@@ -92,12 +92,13 @@ export async function persistCodeActTask(task: DispatchTask): Promise<void> {
   }
 }
 
-export async function loadCodeActTask(taskId: string): Promise<DispatchTask | null> {
+export async function loadCodeActTask(taskId: string, opts?: { throwOnError?: boolean }): Promise<DispatchTask | null> {
   try {
     const raw = await getRedis().hget(TASK_HASH, taskId);
     if (!raw) return null;
     return JSON.parse(raw) as DispatchTask;
-  } catch {
+  } catch (error) {
+    if (opts?.throwOnError) throw error;
     return null;
   }
 }

@@ -10,6 +10,7 @@
 import { getDb } from '../db/sqlite.js';
 import { segment } from '../memory/lexical.js';
 import { logger } from '../shared/logger.js';
+import { isValidConversationScope } from '../shared/privacy-scope.js';
 
 export interface EpisodeInput {
   taskId: string;
@@ -144,9 +145,11 @@ export function saveExperienceEntries(entries: ExperienceEntryInput[]): void {
 export function findRelevantExperience(
   query: string,
   limit = 3,
-  opts?: { botId?: string; allowShared?: boolean },
+  opts?: { botId?: string; allowShared?: boolean; boundChatId?: number },
 ): ExperienceHit[] {
   const { botId = 'self', allowShared = true } = opts ?? {};
+  const boundChatId = opts?.boundChatId;
+  if (boundChatId === undefined || !isValidConversationScope(boundChatId)) return [];
   try {
     const db = getDb();
     // 用 Intl.Segmenter 分词，不用标点切。
@@ -177,15 +180,16 @@ export function findRelevantExperience(
       .join(' + ');
     const likeParams = tokens.map((t) => `%${t}%`);
     const args: Array<string | number> = allowShared
-      ? [...likeParams, botId, botId, limit * 3]
-      : [...likeParams, botId, limit * 3];
+      ? [...likeParams, boundChatId, botId, botId, limit * 3]
+      : [...likeParams, boundChatId, botId, limit * 3];
     const rows = db
       .prepare(
         `SELECT * FROM (
            SELECT e.id, e.content, e.kind, e.verified, e.origin_bot,
                   (${scoreExpr}) AS score
            FROM experience_entries e
-           WHERE 1 = 1${whereShared}
+           JOIN episodes source ON source.id = e.source_episode_id
+           WHERE source.chat_id = ?${whereShared}
          )
          WHERE score > 0
          ORDER BY score DESC, id ASC

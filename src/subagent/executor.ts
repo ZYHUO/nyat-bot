@@ -10,16 +10,17 @@ import { sendChatAction } from '../bot/sender/telegram.js';
 import { formatBeijingNowLine } from '../shared/beijing-time.js';
 import { randomUUID } from 'node:crypto';
 import { persistCodeActTask } from './task-store.js';
-import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat, clearCheckpoint } from '../agent/checkpoint.js';
+import { loadCheckpoint, saveCheckpoint, registerAgentChat, unregisterAgentChat, clearCheckpoint, retireHeldCheckpointTask } from '../agent/checkpoint.js';
+import type { CheckpointRejectionReason } from '../agent/checkpoint.js';
 import { drainInterrupts, isHardStop } from '../agent/interrupts.js';
-import { compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
+import { clipHeadTail, compactHistory, restoreMessagesFromCompacted } from '../agent/compaction.js';
 import { persistDigest } from '../meta/session-digest.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
 import { createDebt, resolveOpenDebtsByTaskWithEvidence } from '../agent/cognitive-debts.js';
 import { executeIsolatedCode } from '../sandbox/codeact/runner.js';
 import { CODEACT_CAPABILITY_METHODS, selectCodeActCapabilities } from '../sandbox/codeact/capabilities.js';
 import { buildCodeActSystemPrompt, buildJournalCapabilityNote, codeActMethodsForChat } from './capability-prompt.js';
-import { checkCodeActActivation, holdCodeActTask } from './activation-policy.js';
+import { checkCodeActTaskActivation, holdCodeActTask } from './activation-policy.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
 import { DELIVERY_UNKNOWN_SUMMARY, holdUnknownCodeActDelivery, isCodeActDeliveryHeld, isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
 
@@ -262,6 +263,35 @@ import { getExecutionAudit } from '../agent/execution-audit.js';
 import { saveTaskEvidence } from '../agent/task-evidence-store.js';
 
 export async function runCodeActTask(task: DispatchTask): Promise<void> {
+  const activation = checkCodeActTaskActivation(task);
+  if (!activation.allowed) {
+    await holdCodeActTask(task, activation.reason);
+    return;
+  }
+  let checkpointReason: CheckpointRejectionReason = 'checkpoint_invalid';
+  const checkpoint = task.checkpointKey
+    ? await loadCheckpoint(task.checkpointKey, task, reason => { checkpointReason = reason; }) : null;
+  if (task.checkpointKey && !checkpoint) {
+    try {
+      await holdCodeActTask(task, checkpointReason);
+      const retired = await retireHeldCheckpointTask(task, checkpointReason);
+      if (retired) {
+        const state = getGlobalState();
+        const cached = state.getTask(task.id);
+        // A same-ID task for another conversation or a newer segment has no
+        // relationship to this rejected checkpoint. Leave that cache untouched.
+        if (!cached || (cached.chatId === retired.chatId && cached.createdAt === retired.createdAt
+          && cached.checkpointKey === retired.checkpointKey
+          && (cached.messageThreadId ?? 0) === (retired.messageThreadId ?? 0))) state.putTask(retired);
+        Object.assign(task, retired);
+      }
+    } catch {
+      // Failed archival must not execute or fall through generic queue failure
+      // cleanup, which cannot establish ownership of a same-ID durable task.
+      logger.warn({ taskId: task.id, chatId: task.chatId }, 'Checkpoint hold deferred; no task executed');
+    }
+    return;
+  }
   if (isPlatformInternalId(task.chatId)) {
     const { isOneBotMessageRecalled } = await import('../platform/onebot-notices.js');
     const ids = [...(task.quoteMessageIds ?? []), ...(task.relatedQuoteIds ?? []),
@@ -274,11 +304,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       return;
     }
   }
-  const activation = checkCodeActActivation(task);
-  if (!activation.allowed) {
-    await holdCodeActTask(task, activation.reason);
-    return;
-  }
   if (isPlatformInternalId(task.chatId) && await isCodeActDeliveryHeld(task.id)) {
     task.status = 'failed';
     task.resultSummary = DELIVERY_UNKNOWN_SUMMARY;
@@ -286,6 +311,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await persistCodeActTask(task);
     logger.warn({ taskId: task.id }, 'CodeAct replay held after unknown delivery');
     return;
+  }
+  if (checkpoint) {
+    // Restore budgets before constructing the host, which snapshots maxTextSends.
+    task.totalTurns = Math.max(task.totalTurns ?? 0, checkpoint.totalTurns);
+    task.sendsUsed = Math.max(task.sendsUsed ?? 0, checkpoint.sendsUsed ?? 0);
   }
   const state = getGlobalState();
   task.status = 'running';
@@ -477,6 +507,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     // 在 delta/ephemeral 语义下是否等于"沿用上次的值"无法从代码证实,而赌错
     // 的后果是上一轮的记忆黏在这一轮的 prompt 上。
     ephemeralText('sub-memory', memoryBlock ? `## 相关往事(仅供参考,不是本轮要回的话)\n${memoryBlock}` : ''),
+    ephemeralText('sub-mid-term', inputs.midTermMemory ? `## 本会话中期记忆\n${inputs.midTermMemory}` : ''),
     ephemeralText('sub-target', targetBlock),
     deltaText(
       'sub-direction',
@@ -520,20 +551,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // 长时间 Agent 循环：checkpoint 恢复 + 用户 interrupt 注入（loopEnabled/segment 见上方）。
   let resumeSummary = '';
   let restoredHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> | null = null;
-  if (task.checkpointKey) {
-    try {
-      const cp = await loadCheckpoint(task.checkpointKey);
-      if (cp) {
-        restoredHistory = restoreMessagesFromCompacted(cp);
-        resumeSummary = cp.progressSummary;
-        task.totalTurns = cp.totalTurns ?? task.totalTurns ?? 0;
-        // 发送预算也要恢复：不恢复的话续跑段又拿到满额预算，跨段累计就白做了
-        // —— 这正是这次要修的 bug 的另一半（只堵 save 不堵 restore 等于没堵）。
-        task.sendsUsed = Math.max(task.sendsUsed ?? 0, cp.sendsUsed ?? 0);
-      }
-    } catch (err) {
-      logger.warn({ err, taskId: task.id }, 'agent checkpoint restore failed — starting fresh');
-    }
+  if (checkpoint) {
+    restoredHistory = restoreMessagesFromCompacted(checkpoint, prompt);
+    resumeSummary = checkpoint.progressSummary;
   }
 
   let history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
@@ -581,7 +601,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     const pending = task.pendingUserInput;
     task.pendingUserInput = undefined;
     const block = pending
-      .map((input) => `- ${input.from ?? '用户'}: ${input.text}`)
+      .map((input) => `- ${input.from ?? '用户'} [mid=${input.messageId ?? '未知'}]: ${input.text}`)
       .join('\n');
     const pendingHardStop = pending.some((input) => isHardStop(input.text));
     const pendingResolution = pendingHardStop ? '用户已停止该任务，债务关闭' : undefined;
@@ -678,7 +698,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
               break;
             }
             const block = interrupts
-              .map((i) => `- (${new Date(i.at).toLocaleString('zh-CN', { hour12: false })}) ${i.from}: ${i.text}`)
+              .map((i) => `- (${new Date(i.at).toLocaleString('zh-CN', { hour12: false })}) ${i.from} [mid=${i.messageId ?? '未知'}]: ${i.text}`)
               .join('\n');
             history.push({
               role: 'user',
@@ -850,15 +870,14 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
               contentDirection: task.contentDirection,
             });
             progressSummary = c.summary;
+            history = [{ role: 'system', content: prompt }, ...c.recent];
           } else {
             // 轮数不多：用模型本段最后一句当进度摘要，不调 LLM。
             const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant');
             if (lastAssistant) {
               progressSummary =
-                `${resumeSummary ? `${resumeSummary}\n` : ''}[段 ${segment + 1}] ${lastAssistant.content.slice(0, 500)}`.slice(
-                  0,
-                  2000,
-                );
+                `[段 ${segment + 1}] ${clipHeadTail(lastAssistant.content, 700)}`
+                + (resumeSummary ? `\n[此前进度]\n${clipHeadTail(resumeSummary, 1200)}` : '');
             }
           }
         } catch (err) {
