@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 let db: Database.Database;
+let nowMs = 1_794_690_000_000;
+let restoreClock: () => void;
 const hashes = new Map<string, Map<string, string>>();
 const locks = new Map<string, string>();
 let failCleanup = false;
@@ -59,6 +61,11 @@ async function flush(): Promise<void> {
   await vi.waitFor(() => expect((db.prepare("SELECT COUNT(*) AS n FROM reply_feedback_effects WHERE state='claimed'").get() as { n: number }).n).toBe(0));
 }
 beforeEach(() => {
+  // Settlement assertions compare one logical instant; scheduler delays must not
+  // accidentally turn an idempotency check into a mood-decay check.
+  nowMs = 1_794_690_000_000;
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+  restoreClock = () => clock.mockRestore();
   db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   for (const name of ['0002_phase3', '0017_chat_mood', '0018_self_history_relationship', '0069_relationship_quant',
@@ -69,7 +76,13 @@ beforeEach(() => {
   config.BOT_TOKEN = '12345:test-only'; config.ASI_SAMPLE_RATE = 0;
   vi.clearAllMocks(); effects.score.mockResolvedValue(undefined);
 });
-afterEach(async () => { await flush(); db.close(); });
+afterEach(async () => {
+  try { await flush(); }
+  finally {
+    try { db.close(); }
+    finally { restoreClock(); }
+  }
+});
 
 describe('durable feedback attribution through recordReply → checkOutcome', () => {
   it('does not attribute a reply to another human to the pending bot reply', async () => {
@@ -130,6 +143,20 @@ describe('durable feedback attribution through recordReply → checkOutcome', ()
     expect(db.prepare('SELECT total_outcomes FROM outcome_meta').get()).toEqual({ total_outcomes: 1 });
     expect(effects.route).toHaveBeenCalledTimes(1); expect(effects.echo).toHaveBeenCalledTimes(1);
     expect(hashes.get(`xxb:reply_outcome:pending:${chat}`)!.size).toBe(0);
+  });
+  it('retains real one-second mood decay while replayed feedback still settles only once', async () => {
+    await seed(); failCleanup = true;
+    await checkOutcome(chat, source(), 'nyatbot'); await flush();
+    expect(getChatMood(chat).valence).toBe(5);
+    nowMs += 1000;
+    failCleanup = false;
+    await checkOutcome(chat, source(), 'nyatbot'); await flush();
+    expect(getChatMood(chat).valence).toBe(5 * Math.pow(0.9, 1 / 3600));
+    expect(getChatMood(chat).valence).toBeLessThan(5);
+    expect(db.prepare('SELECT valence FROM chat_mood WHERE chat_id = ?').get(chat)).toEqual({ valence: 5 });
+    expect(count('reply_feedback_events')).toBe(1); expect(count('reply_outcomes')).toBe(1);
+    expect(getRelationship(chat, 22).count).toBe(1);
+    expect(effects.route).toHaveBeenCalledTimes(1); expect(effects.echo).toHaveBeenCalledTimes(1);
   });
   it('settles concurrent replies to two different bot messages without a lock dropping one', async () => {
     await seed(); await seed(801);
