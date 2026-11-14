@@ -24,6 +24,7 @@ import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility, type 
 import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 import { isValidConversationScope, resolveConversationScope, samePlatformAccount } from '../shared/privacy-scope.js';
+import { inspectOwnerMemorySource, resolveOwnerDmReadContext, type OwnerDmReadContext, type OwnerMemoryPrincipal, type OwnerMemoryProvenance } from '../shared/owner-memory-scope.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
@@ -33,6 +34,9 @@ import { isValidConversationScope, resolveConversationScope, samePlatformAccount
 export type ScoredMessage = FormattedMessage & VisibilityFields & {
   score?: number;
 };
+
+/** Separate owner audience; source fields are never relabelled as public/current. */
+export type OwnerMemoryHit = ScoredMessage & { sourceChatId: number; ownerRecall: OwnerMemoryProvenance };
 
 const VECTOR_SIZE = 384;
 /**
@@ -680,6 +684,84 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
     ...(sourcePlatform !== undefined ? { sourcePlatform } : {}),
     ...(sourceAccountId !== undefined ? { sourceAccountId } : {}),
   };
+}
+
+type OwnerMemoryFilter = NonNullable<Parameters<QdrantClient['search']>[1]['filter']>;
+
+function ownerMemoryFilter(principal: OwnerMemoryPrincipal): OwnerMemoryFilter {
+  const dm = { should: [{ key: 'chatId', match: { value: principal.dmChatId } },
+    { key: 'sourceChatId', match: { value: principal.dmChatId } }] };
+  const ownerWords = { must: [{ key: 'uid', match: { value: principal.uid } },
+    { key: 'role', match: { value: 'user' } },
+    { should: [dm, { key: 'chatId', range: { lt: 0 } }, { key: 'sourceChatId', range: { lt: 0 } }] }] };
+  const ownBotReply = principal.botUid === null ? [] : [{ must: [dm,
+    { key: 'uid', match: { value: principal.botUid } }, { key: 'role', match: { value: 'assistant' } },
+    // A legacy Telegram assistant row cannot prove which bot authored it.
+    ...(principal.platform === 'telegram' ? [{ key: 'sourceAccountId', match: { value: principal.accountId } }] : [])] }];
+  return {
+    must: [
+      { should: [ownerWords, ...ownBotReply] },
+      { should: [{ key: 'sourcePlatform', match: { value: principal.platform } }, { is_empty: { key: 'sourcePlatform' } }] },
+      { should: [{ key: 'sourceAccountId', match: { value: principal.accountId } }, { is_empty: { key: 'sourceAccountId' } }] },
+    ],
+    must_not: (env().MEMORY_SENSITIVE_CHAT_IDS ?? []).flatMap(chatId => [
+      { key: 'chatId', match: { value: chatId } }, { key: 'sourceChatId', match: { value: chatId } },
+    ]),
+  };
+}
+
+/**
+ * Linked recall for the authenticated owner's private recipient only. This does
+ * not change ordinary public/cross-context permissions, write payloads, or give
+ * the owner access to other people's DMs or arbitrary group conversation text.
+ */
+export async function searchOwnerMemory(
+  boundChatId: number,
+  query: string,
+  topK = 5,
+  timeoutMs = 1000,
+  requesterUid?: number,
+): Promise<OwnerMemoryHit[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const context = resolveOwnerDmReadContext(boundChatId, requesterUid);
+    if (!context || !query.trim()) return [];
+    const limit = Number.isFinite(topK) ? Math.min(10, Math.max(1, Math.trunc(topK))) : 5;
+    const timeout = Number.isFinite(timeoutMs) ? Math.min(3000, Math.max(50, timeoutMs)) : 1000;
+    return await Promise.race([
+      searchOwnerMemoryInner(context, query.slice(0, 500), limit).catch(() => [] as OwnerMemoryHit[]),
+      new Promise<OwnerMemoryHit[]>(resolve => { timer = setTimeout(() => resolve([]), timeout); }),
+    ]);
+  } catch {
+    // Do not log queries, records or credentials on a failure of a private read.
+    logger.debug({ chatId: boundChatId }, 'owner memory search unavailable');
+    return [];
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+async function searchOwnerMemoryInner(context: OwnerDmReadContext, query: string, topK: number): Promise<OwnerMemoryHit[]> {
+  const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
+  const [vector] = await embed([query]);
+  if (!vector) return [];
+  const batches = await Promise.all(context.principals.map(principal => store.search(collectionName(), {
+    vector, limit: topK * 3, filter: ownerMemoryFilter(principal), with_payload: true,
+    params: { quantization: { rescore: true, oversampling: 2.0 } },
+  }).catch(() => [])));
+  const byMessage = new Map<string, OwnerMemoryHit>();
+  const floor = Math.max(Number(env().MEMORY_MIN_SCORE) || 0, INJECTION_MIN_SCORE_FLOOR);
+  for (const batch of batches) for (const hit of batch) {
+    const row = hitToMessage(hit);
+    // Do not normalize an absent/unknown payload role into an authenticated author.
+    if (!row || (hit.payload?.['role'] !== 'user' && hit.payload?.['role'] !== 'assistant')
+      || !Number.isSafeInteger(row.messageId) || row.messageId <= 0
+      || typeof row.score !== 'number' || !Number.isFinite(row.score) || row.score < floor) continue;
+    const ownerRecall = inspectOwnerMemorySource(row, context);
+    if (!ownerRecall) continue;
+    const key = `${ownerRecall.sourceChatId}:${row.messageId}`;
+    const previous = byMessage.get(key);
+    if (!previous || (previous.score ?? 0) < row.score) byMessage.set(key, { ...row, sourceChatId: ownerRecall.sourceChatId, ownerRecall });
+  }
+  return [...byMessage.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, topK);
 }
 
 /**

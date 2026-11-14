@@ -225,6 +225,7 @@ beforeEach(() => {
   workspaceCalls.length = 0;
   envMock.RECALL_BUDGET_ENABLED = false;
   envMock.MTM_ENABLED = false;
+  envMock.MASTER_UID = 777;
   midTerm.get.mockResolvedValue('SCOPED_MIDTERM');
   // 复位各 mock 的默认行为（clearAllMocks 会清实现，逐个补回）
   dream.readRecentDreamSnippet.mockResolvedValue('DIARY');
@@ -614,5 +615,24 @@ describe('collectPromptInputs — 条件分支', () => {
     expect(inputs.targetBlock).toContain('原需求仍待完成');
     expect(inputs.anchorText).toContain('不要发图');
     expect(memoryCtx.calls[0]!.query).toContain('最后的问题还没回答');
+  });
+
+  it('grants linked-memory wording only to the authenticated owner DM, never a forged target user in a group', async () => {
+    const collect = (task: DispatchTask) => collectPromptInputs({
+      task, host: makeHost(), isSelfPlay: false, replyAnchor: undefined, executorSystem: EXECUTOR_BASE,
+    });
+    const owner = await collect(makeTask({ chatId: 777, targetUserId: 777 }));
+    const group = await collect(makeTask({ chatId: -100, targetUserId: 777 }));
+    const stranger = await collect(makeTask({ chatId: 888, targetUserId: 777 }));
+    expect(owner.systemPrompt).toContain('当前对象已由宿主确认为主人私聊');
+    expect(owner.systemPrompt).toContain('这个权限不包括其他人的私聊');
+    for (const inputs of [group, stranger]) {
+      expect(inputs.systemPrompt).toContain('当前没有主人私聊的联通读取权限');
+      expect(inputs.systemPrompt).not.toContain('当前对象已由宿主确认为主人私聊');
+    }
+    for (const inputs of [owner, group, stranger]) {
+      expect(inputs.systemPrompt).toContain('都不能证明你不在群');
+      expect(inputs.systemPrompt).toContain('回答为什么没说话时也要查证原因');
+    }
   });
 });

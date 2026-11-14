@@ -28,7 +28,7 @@ vi.mock('../../../src/platform/onebot-media.js', () => ({
   setOneBotMediaTransport: f.media, registerOneBotMedia: vi.fn(() => { throw new Error('No media fixture'); }),
 }));
 
-import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, getOneBotRuntimeStatus } from '../../../src/platform/onebot-runtime.js';
+import { startOneBotRuntime, stopOneBotRuntime, pauseOneBotIngress, getOneBotRuntimeStatus, getOneBotGroupDirectory } from '../../../src/platform/onebot-runtime.js';
 import { getOrCreateConversationId } from '../../../src/platform/identity-store.js';
 import { sendPlatformText } from '../../../src/platform/outbound.js';
 
@@ -72,6 +72,7 @@ beforeEach(async () => {
       const request = JSON.parse(raw.toString()) as Request; requests.push(request);
       if (omitDecisionAck && request.action === 'set_friend_add_request') return;
       const data = request.action === 'get_login_info' ? { user_id: 42 }
+        : request.action === 'get_group_list' ? [{ group_id: 123, group_name: '目录合成群' }]
         : request.action.startsWith('send_') ? { message_id: 900 + requests.length } : null;
       socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: request.echo, data }));
     });
@@ -86,6 +87,17 @@ afterEach(async () => {
 });
 
 describe('OneBot runtime request and ingress integration', () => {
+  it('exposes a typed read-only directory only for the current authenticated runtime account', async () => {
+    await expect(getOneBotGroupDirectory('42')).rejects.toMatchObject({ code: 'directory_unavailable' });
+    await ready(false);
+    expect(await getOneBotGroupDirectory('42')).toEqual([{ groupId: '123', title: '目录合成群' }]);
+    await expect(getOneBotGroupDirectory('43')).rejects.toMatchObject({ code: 'directory_unavailable' });
+    expect(requests.filter(request => request.action === 'get_group_list')).toHaveLength(1);
+    expect(sent()).toHaveLength(0);
+    stopOneBotRuntime();
+    await expect(getOneBotGroupDirectory('42')).rejects.toMatchObject({ code: 'directory_unavailable' });
+  });
+
   it('stores a request, handles an owner approval, and returns a confirmed same-account DM receipt', async () => {
     await ready(); emit(requestEvent());
     await vi.waitFor(() => expect(row()?.status).toBe('pending'));

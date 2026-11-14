@@ -7,11 +7,18 @@ checks are unconditional; an old feature flag cannot grant disclosure rights.
 ## What can enter a reply
 
 - Proven history from the current conversation remains usable. Private chats and
-  sensitive groups cannot be exported into another conversation.
+  sensitive groups cannot be exported into unrelated audiences. The separate
+  owner-DM reader links only that owner's own messages and their bot conversations;
+  it never imports another person's DM. See [linked owner memory](linked-owner-memory.md).
 - Cross-conversation memory requires explicit public visibility, a known source,
   and matching platform/account provenance. Contextual memories remain local.
   Unknown or conflicting source metadata fails closed, including vector and
   lexical retrieval results. Old records are preserved, not relabeled public.
+- The bot's group directory is metadata, not a grant to read group messages.
+  Membership is checked against the current platform/account. A partial directory,
+  failed query or permission restriction never proves that the bot is absent.
+  Explicit `OWNER_MEMORY_LINK_ENABLED=true` binds the configured Telegram and QQ
+  owner identities; by default each owner retains only their own platform view.
 - Private nicknames and merged global identity fields do not automatically become
   group facts. Cognitive belief and world-state reads no longer include unscoped
   global records in a chat/task request. Experiences must join to an episode in

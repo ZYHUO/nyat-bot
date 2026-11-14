@@ -1,7 +1,8 @@
 import type { Env } from '../env.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { OneBotClient } from './onebot-client.js';
+import { OneBotClient, OneBotClientError } from './onebot-client.js';
+import type { OneBotGroupMetadata } from './onebot-client.js';
 import { ingestOneBotMessage, parseOneBotIds } from './onebot-ingress.js';
 import { clearOneBotSender, registerOneBotSender, sendPlatformText } from './outbound.js';
 import { PlatformBoundaryError } from './types.js';
@@ -103,6 +104,21 @@ export function stopOneBotRuntime(): void {
 /** Leave the sender connected until already running workers have drained. */
 export function pauseOneBotIngress(): void {
   acceptingMessages = false;
+}
+
+/** Host-only, read-only directory. A stopped/foreign account is unknown, never empty. */
+export async function getOneBotGroupDirectory(accountId: string): Promise<OneBotGroupMetadata[]> {
+  const current = client;
+  if (!env().ONEBOT_ENABLED || !current || registeredAccount !== accountId
+    || env().ONEBOT_ACCOUNT_ID !== accountId || current.snapshot().state !== 'ready') {
+    throw new OneBotClientError('directory_unavailable');
+  }
+  const groups = await current.getGroupList({ accountId });
+  if (client !== current || registeredAccount !== accountId || !env().ONEBOT_ENABLED
+    || env().ONEBOT_ACCOUNT_ID !== accountId || current.snapshot().state !== 'ready') {
+    throw new OneBotClientError('directory_unavailable');
+  }
+  return groups;
 }
 
 export function getOneBotRuntimeStatus() {

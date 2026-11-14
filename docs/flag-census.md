@@ -16,7 +16,7 @@
 |---|---|---|---|---|---|
 | `ai` | [`src/env-sections/ai.ts`](../src/env-sections/ai.ts) | 11 | 2 | 0 | TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限 |
 | `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 93 | 23 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
-| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 30 | 15 | 0 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
+| `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 31 | 16 | 0 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 3 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 0 | 定型判断基座 + 深度反思 |
 | `cognition` | [`src/env-sections/cognition.ts`](../src/env-sections/cognition.ts) | 33 | 19 | 0 | AGI Level 4/5/6：经验沉淀、自我技能、爱好、经验验证、Dreaming、长期任务、证据门、Loop 策略、多智能体共享、世界状态、context rot、群体风格、ToM、记忆陈旧、Task 架构、反向阀门 |
@@ -32,15 +32,15 @@
 
 | | |
 |---|---|
-| total_keys | 532 |
-| bool_flags | 226 |
+| total_keys | 533 |
+| bool_flags | 227 |
 | on_in_source | 40 |
 | set_in_source | 82 |
 | dead_no_reader | 6 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 1 |
 
-**226 个布尔旗标里，来源文件与 schema 默认值合计启用 40 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**227 个布尔旗标里，来源文件与 schema 默认值合计启用 40 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -108,7 +108,7 @@
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 
-## 关着的布尔旗标（186 个）
+## 关着的布尔旗标（187 个）
 
 | 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -209,6 +209,7 @@
 | memory | `MEMORY_HYBRID_ENABLED` | false | — | 混合检索:向量召回 + FTS5 BM25 词法召回,按 RRF(名次融合)合并。 384 维小模型对专有名词/群内黑话/型号天然弱(jargon-miner 挖的正是这类词), BM25 补的就是这一块。关闭时完全走旧的纯向量路径。默认关。 |
 | memory | `MEMORY_VISIBILITY_ENABLED` | false | — | ── DM↔群记忆连结(借鉴 CyberGroupmate 以人为中心统一记忆;docs/dm-group-memory-*.md)── 机制1 隐私 visibility 兜底:记忆/画像跨上下文返回前按 private/contextual/public 逐条 scrub(DM 默认 priva |
 | memory | `METRICS_ENABLED` | false | — | （原 PROACTIVE_SCAN_* / PROACTIVE_PRESSURE_* / SCHEDULE_LLM_WAKE 三个旗标 2026-09-21 删除：全仓库无一处读取，.env 里却开着。前者对应的独立 scan cron 已被 unified-tick 取代，后两者描述的机制从未落地 |
+| memory | `OWNER_MEMORY_LINK_ENABLED` | false | — | Explicitly bind MASTER_UID and ONEBOT_OWNER_ID as the same person for owner-DM memory and group-directory reads. Different platform admins must not be |
 | memory | `PERSON_IDENTITY_ENABLED` | false | — | 跨群人物身份(借鉴 CGM 两层人物模型):在别的群也认得的人,带上跨群整体印象。默认关。 |
 | memory | `PROFILE_MERGE_ENABLED` | false | — | 机制5 LLM 全局画像合并 cron:低频把某人各上下文(群+DM)画像喂便宜模型提炼成 全局 traits/interests/relation,写回 person_identity 全局列。默认关。 |
 | memory | `REPLY_JSON_MODE` | false | — | 回复写手强制合法 JSON(DeepSeek/OpenAI json_object)——根治单引号/Python-dict 脏输出。默认关。 |

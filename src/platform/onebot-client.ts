@@ -59,6 +59,12 @@ export interface OneBotClientSnapshot {
   reconnectAttempts: number;
   lastHeartbeatAt: number | null;
 }
+
+/** Current authenticated account's group directory, never a chat-history grant. */
+export interface OneBotGroupMetadata {
+  groupId: string;
+  title: string;
+}
 export interface OneBotClientOptions {
   /** Combined API/event endpoint. URL credentials, query strings and fragments are refused. */
   endpoint: string;
@@ -325,6 +331,24 @@ export class OneBotClient {
     if (integerId(data?.['user_id'], true) !== input.userId || integerId(data?.['group_id'], true) !== input.groupId ||
       (role !== 'owner' && role !== 'admin' && role !== 'member')) throw new OneBotClientError('invalid_member_receipt');
     return { role };
+  }
+
+  async getGroupList(input: { accountId: string }): Promise<OneBotGroupMetadata[]> {
+    this.requireAccount(input.accountId);
+    const data = await this.request('get_group_list', {}, false);
+    if (!Array.isArray(data) || data.length > 2048) throw new OneBotClientError('invalid_group_list_receipt');
+    const seen = new Set<string>();
+    return data.map(raw => {
+      const row = object(raw);
+      const groupId = integerId(row?.['group_id'], true);
+      const title = row?.['group_name'];
+      if (!groupId || !Number.isSafeInteger(Number(groupId)) || seen.has(groupId)
+        || typeof title !== 'string' || !title.trim() || title.length > 1024) {
+        throw new OneBotClientError('invalid_group_list_receipt');
+      }
+      seen.add(groupId);
+      return { groupId, title: title.trim() };
+    });
   }
 
   /** This capability is host-only. It exposes no arbitrary OneBot action to a model. */

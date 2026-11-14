@@ -57,8 +57,9 @@ describe('env schema 拆段', () => {
     // Independently recounted after QQ pre-Heart batching, addressing and display-name controls.
     // Recounted all section keys and verified uniqueness for this rollout.
     // DM_AUTO_PRIVATE retired: a flag cannot grant private-context disclosure.
-    expect(all.length).toBe(532);
-    expect(new Set(all).size).toBe(532);
+    // Explicit opt-in binding for the two configured owner identities.
+    expect(all.length).toBe(533);
+    expect(new Set(all).size).toBe(533);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -85,6 +86,7 @@ describe('env schema 拆段', () => {
     expect(parsed.ONEBOT_DISPLAY_NAME).toBe('');
     expect(parsed.ONEBOT_MEDIA_ENABLED).toBe(false);
     expect(parsed.ONEBOT_GROUP_FILE_SOURCE).toBe('message');
+    expect(parsed.OWNER_MEMORY_LINK_ENABLED).toBe(false);
     expect(parsed.AUDIO_TRANSCRIBE_API_MODE).toBe('chat');     // infra compatibility default
     expect(parsed.TTS_PYTHON_PATH).toBe('python3');            // life
     expect(parsed.TTS_FFMPEG_PATH).toBe('ffmpeg');             // life

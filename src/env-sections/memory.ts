@@ -63,6 +63,10 @@ export const memorySection = {
   // scrub(默认带 public + 非私密来源 contextual,private 一律剔除)。
   // **必须** MEMORY_VISIBILITY_ENABLED 也开才生效(fail-closed)。默认关。
   MEMORY_CROSS_CONTEXT_ENABLED: booleanFromEnv.default(false),
+  // Explicitly bind MASTER_UID and ONEBOT_OWNER_ID as the same person for owner-DM
+  // memory and group-directory reads. Different platform admins must not be linked
+  // by default. This never authorizes publishing private memories into a group.
+  OWNER_MEMORY_LINK_ENABLED: booleanFromEnv.default(false),
   // ── 长期记忆嵌入模型 / collection / 相关性下限 ──────────────
   // 默认的 all-MiniLM-L6-v2 是**英文单语**模型,而本 bot 是中文群聊。生产机实测中文
   // 同义 0.7543 / 无关 0.6097 → 区分度仅 0.1446(「打篮球」vs「查比特币价格」相似度

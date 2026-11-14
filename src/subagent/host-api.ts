@@ -1,10 +1,13 @@
 import { incrCounter } from '../metrics/registry.js';
 import { assertOutboundText, assertPublicSearchQuery } from '../shared/outbound-privacy.js';
 import { samePlatformAccount } from '../shared/privacy-scope.js';
+import { resolveOwnerDmReadContext } from '../shared/owner-memory-scope.js';
+import type { ChatDirectoryResult } from './chat-directory.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { sendMessage, sendSticker, reactToMessage, sendChatAction } from '../bot/sender/telegram.js';
-import { searchMemory, searchMemoryByUser } from '../memory/chroma.js';
+import { searchMemory, searchMemoryByUser, searchOwnerMemory } from '../memory/chroma.js';
+import type { OwnerMemoryHit, ScoredMessage } from '../memory/chroma.js';
 import { getReadyStickersByIntent } from '../knowledge/sticker/store.js';
 import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-identity.js';
 import { isCrossContextPrivate } from '../memory/visibility.js';
@@ -372,9 +375,9 @@ export interface HostApi {
       replyToMessageId?: number;
     }) => Promise<{ ok: boolean; text: string }>;
   };
-  /** 群目录（承诺闭环配套）：按**群名片段**找群。空命中返回指路字符串（找错对象的自救提示）。 */
+  /** 群目录元数据与正文读取分别授权；查找结果包含范围、来源和不确定性。 */
   chats: {
-    find: (query: string) => Promise<Array<{ chatId: number; title: string }> | string>;
+    find: (query: string) => Promise<ChatDirectoryResult>;
     /** 读另一个群的最近消息（本 bot 自己的上下文库，只读）。查「ta 回话了吗」用。 */
     recentMessages: (chatId: number, limit?: number) => Promise<string>;
   };
@@ -2354,52 +2357,13 @@ export function createHostApi(
     },
     chats: {
       async find(query: string) {
-        const q = String(query ?? '').trim().slice(0, 50);
-        if (!q) return [];
-        const norm = (s: string) => s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-        const nq = norm(q);
-        if (!nq) return [];
-        const { getRedis } = await import('../db/redis.js');
-        const redis = getRedis();
-        let ids: number[] = [];
-        try {
-          const raw = await redis.zrange('xxb:active_groups', 0, 39);
-          ids = [...new Set(raw.map(Number).filter((n) => Number.isFinite(n) && n < 0))];
-        } catch {
-          return [];
-        }
-        const out: Array<{ chatId: number; title: string }> = [];
-        for (const id of ids) {
-          if (isCrossContextPrivate({ sourceChatId: id }, chatId)) continue;
-          let title = '';
-          try {
-            const cached = await redis.get(`xxb:chat_title:${id}`);
-            if (cached) {
-              title = cached;
-            } else {
-              const { getBot } = await import('../bot/bot.js');
-              const chat = (await getBot().api.getChat(id)) as { title?: string };
-              title = typeof chat.title === 'string' ? chat.title : '';
-              if (title) await redis.set(`xxb:chat_title:${id}`, title, 'EX', 21600);
-            }
-          } catch {
-            continue; // 已退群/不可达——跳过
-          }
-          const nt = norm(title);
-          if (nt && (nt.includes(nq) || nq.includes(nt))) {
-            out.push({ chatId: id, title });
-            if (out.length >= 3) break;
-          }
-        }
-        logger.info({ chatId, query: q, candidates: ids.length, hits: out.length }, 'host chats.find');
-        // 空命中时给指路而不是裸 []——模型拿「群名查不到」当「这个人不存在」用是
-        // 2026-08-19 的实测事故（找 ccb 却调了群名搜索）。
-        if (out.length === 0) {
-          return `群名里没查到「${q}」。注意：chats.find 是按**群名**找群；如果你要找的是**某个人**（ta 在哪些群/能不能私聊），用 members.find(名字)。`;
-        }
-        noteUnviewed(`chats.find(${q.slice(0, 30)})`, out);
+        assertOpen();
+        const { findBotGroups } = await import('./chat-directory.js');
+        const result = await findBotGroups(chatId, opts.targetUserId, query);
+        logger.info({ chatId, status: result.status, scope: result.scope, hits: result.groups.length }, 'host chats.find');
+        noteUnviewed('chats.find', result);
         countTool('chats.find');
-        return out;
+        return result;
       },
       async recentMessages(targetChatId: number, limit = 12) {
         const tid = Number(targetChatId);
@@ -2688,10 +2652,38 @@ export function createHostApi(
     memory: {
       async search(query: string) {
         try {
-          const hits = await searchMemory(chatId, String(query).slice(0, 200), 5, 1500);
+          // The host-bound private peer grants this read, not opts.targetUserId
+          // or a model-provided platform/chat label. Ordinary chats stay local.
+          const owner = resolveOwnerDmReadContext(chatId);
+          const searchQuery = String(query).slice(0, 200);
+          let hits: Array<ScoredMessage | OwnerMemoryHit>;
+          if (owner) {
+            // Linked recall supplements local history, including legacy local
+            // bot replies. Failure of either optional path cannot hide the other.
+            const [local, linked] = await Promise.allSettled([
+              searchMemory(chatId, searchQuery, 5, 1500),
+              searchOwnerMemory(chatId, searchQuery, 5, 1500),
+            ]);
+            if (local.status === 'rejected' && linked.status === 'rejected') throw local.reason;
+            const localHits = local.status === 'fulfilled' ? local.value : [];
+            const linkedHits = linked.status === 'fulfilled' ? linked.value : [];
+            hits = [];
+            const seen = new Set<string>();
+            for (let i = 0; i < Math.max(localHits.length, linkedHits.length) && hits.length < 5; i++) {
+              for (const hit of [localHits[i], linkedHits[i]]) {
+                if (!hit || hits.length >= 5) continue;
+                const identity = JSON.stringify([hit.sourcePlatform ?? null, hit.sourceAccountId ?? null, hit.sourceChatId ?? chatId, hit.messageId]);
+                if (seen.has(identity)) continue;
+                seen.add(identity);
+                hits.push(hit);
+              }
+            }
+          } else {
+            hits = await searchMemory(chatId, searchQuery, 5, 1500);
+          }
           if (!hits.length) return '(no hits)';
           const text = hits
-            .map((h, i) => `${i + 1}. ${String(h.textContent ?? '').slice(0, 200)}`)
+            .map((h, i) => `${i + 1}. ${'ownerRecall' in h ? `[${h.ownerRecall.label}; 会话 ${h.ownerRecall.sourceChatId}] ` : ''}${String(h.textContent ?? '').slice(0, 200)}`)
             .join('\n');
           noteUnviewed(`memory.search(${String(query).slice(0, 30)})`, text);
           return text;
@@ -2702,7 +2694,22 @@ export function createHostApi(
       },
       async recallPerson(uid: number, query: string) {
         const id = Number(uid);
-        if (!Number.isSafeInteger(id) || id <= 0 || !samePlatformAccount(id, chatId)) return '(invalid or foreign uid)';
+        if (!Number.isSafeInteger(id) || id <= 0) return '(invalid or foreign uid)';
+        const owner = resolveOwnerDmReadContext(chatId);
+        // Only the two configured identities of this same owner can use linked
+        // recallPerson. An arbitrary uid does not widen a private read scope.
+        if (owner?.principals.some(principal => principal.uid === id)) {
+          try {
+            const hits = await searchOwnerMemory(chatId, String(query || '最近').slice(0, 200), 5, 2000);
+            const text = hits.length ? 'memories:\n' + hits.map((hit, i) =>
+              `${i + 1}. [${hit.ownerRecall.label}; 会话 ${hit.ownerRecall.sourceChatId}] ${String(hit.textContent ?? '').slice(0, 180)}`).join('\n') : '(no person recall)';
+            noteUnviewed(`memory.recallPerson(${id})`, text);
+            return text;
+          } catch {
+            return '(memory unavailable)';
+          }
+        }
+        if (!samePlatformAccount(id, chatId)) return '(invalid or foreign uid)';
         const bits: string[] = [];
         try {
           const ident = env().PERSON_IDENTITY_ENABLED ? getPersonIdentity(id) : null;
