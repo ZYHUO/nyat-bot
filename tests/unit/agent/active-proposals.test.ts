@@ -131,4 +131,3 @@ describe('active perception and self-authored value proposals', () => {
     })).toBeNull();
   });
 });
-

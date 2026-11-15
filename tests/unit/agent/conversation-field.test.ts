@@ -62,4 +62,3 @@ describe('ConversationField projection', () => {
     expect(state.commitments).toEqual([]);
   });
 });
-

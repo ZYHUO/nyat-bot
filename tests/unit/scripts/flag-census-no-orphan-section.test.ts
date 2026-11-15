@@ -78,7 +78,7 @@ describe('flag-census 不漏段', { timeout: 60000 }, () => {
       .map((m) => Number(m[1])).reduce((a, b) => a + b, 0);
     const total = Number(censusOut.match(/"total_keys":\s*(\d+)/)![1]);
     expect(keySums, `段表合计 ${keySums} != total_keys ${total}`).toBe(total);
-    
+
   });
 
   it('⑤ 没有死键开着（dead_and_on 必须 0）', () => {

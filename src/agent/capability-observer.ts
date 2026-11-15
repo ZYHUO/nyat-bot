@@ -119,4 +119,3 @@ export function clearCapabilityObservationCache(): void {
   cache.clear();
   inFlight.clear();
 }
-

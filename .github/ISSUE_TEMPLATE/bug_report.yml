@@ -54,7 +54,7 @@ body:
       label: Steps to reproduce
       placeholder: |
         1. Add bot to a group
-        2. Send "..." 
+        2. Send "..."
         3. Bot responds with ...
     validations:
       required: true

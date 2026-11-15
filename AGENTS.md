@@ -755,5 +755,3 @@ The sharper form of round 62's rule:
 `try/finally` fails that. A startup sweep does not. And the guard
 (`no-tamper-leftovers.test.ts`, which fails on any `ZZ_` marker in `src/` or `dist/`)
 covers the case where the recovery itself never runs.
-
-

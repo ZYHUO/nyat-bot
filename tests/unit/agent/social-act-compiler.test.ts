@@ -47,4 +47,3 @@ describe('SocialAct compiler', () => {
     expect(compileSocialActProposal(proposal({ capability }))).toBeNull();
   });
 });
-

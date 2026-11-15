@@ -250,4 +250,3 @@ describe('CognitiveTurnRuntime', () => {
     expect(runtime.settle(turn!, { envelopeId: action!.id, status: 'completed' })?.inserted).toBe(false);
   });
 });
-
