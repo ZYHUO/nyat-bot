@@ -145,4 +145,3 @@ describe('task 级 burst 闸（行为）', () => {
     expect(n, '多片调用的每一片都该发出去（现在只剩 ' + n + ' 片）').toBeGreaterThan(1);
   });
 });
-

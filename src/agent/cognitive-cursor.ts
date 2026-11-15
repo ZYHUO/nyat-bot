@@ -213,4 +213,3 @@ export function listCognitiveEventsAfterCursor(input: {
       : {}),
   });
 }
-

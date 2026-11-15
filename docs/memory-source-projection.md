@@ -68,8 +68,9 @@ to force incompatible vectors into the current collection.
 Rollback keeps migration 0126 and its source/tombstone tables. Rolling back to an
 older binary that ignores these guards can make retained stale vectors readable;
 that is not a safe rollback. Keep the source-aware reader or restore a verified,
-coherent data snapshot. Old and new embedding spaces must not be mixed. A remote
-embedding service is a later compute boundary and is not implemented here.
+coherent data snapshot. Old and new embedding spaces must not be mixed. Optional
+[remote embedding compute](embedding-compute.md) only generates vectors; source
+persistence, projection state and Qdrant writes remain on the single authority.
 
 Limits: source persistence is atomic with its own outbox, not with every prior
 ingress receipt. F11 marks a crashed in-progress handler unknown instead of
