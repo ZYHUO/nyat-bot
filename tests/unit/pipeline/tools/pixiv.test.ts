@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { extractPixivId, parsePixivSearchResults, pixivSearchUrl, pixivThumbUrl } from '../../../../src/pipeline/tools/pixiv.js';
+import { extractPixivId, parsePixivSearchResults, pixivSearchUrl, pixivThumbUrl, searchPixiv } from '../../../../src/pipeline/tools/pixiv.js';
 
 const SAMPLE = {
   error: false,
@@ -36,6 +36,13 @@ const SAMPLE = {
 };
 
 describe('pixiv tool helpers', () => {
+  it('does not leak an identifying query through the alternate search tool', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    try {
+      await expect(searchPixiv('private@example.org')).rejects.toThrow('outbound_privacy_blocked');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
   it('builds a public artwork search URL with encoded query', () => {
     const url = pixivSearchUrl('初音 未来', 2);
     expect(url).toContain('https://www.pixiv.net/ajax/search/artworks/');

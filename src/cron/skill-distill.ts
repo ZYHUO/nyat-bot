@@ -64,11 +64,16 @@ function recentMaterial(windowSec: number): string {
       // Older deployments recorded completed episodes before task_evidence existed.
       // Keep the evidence gate when verified rows are available, but do not starve
       // the lifecycle forever when the database only contains legacy episodes.
+      //
+      // 只回退到「根本没有 task_evidence 记录」的老 episode。distiller 现在把 lifecycle-done 且
+      // 未被判 failed 的任务记成 outcome=done（以前恒为 failed），所以这里若只看 outcome='done'，
+      // 会把**有证据行但 unverified** 的新 episode 也放进技能素材——证据门就被绕开了。
       if (eps.length === 0) {
         eps = db
-          .prepare(`SELECT goal, outcome, summary FROM episodes
-             WHERE created_at > ? AND outcome = 'done'
-             ORDER BY created_at DESC LIMIT 20`)
+          .prepare(`SELECT e.goal, e.outcome, e.summary FROM episodes e
+             WHERE e.created_at > ? AND e.outcome = 'done'
+               AND NOT EXISTS (SELECT 1 FROM task_evidence t WHERE t.task_id = e.task_id)
+             ORDER BY e.created_at DESC LIMIT 20`)
           .all(since) as { goal: string; outcome: string; summary: string }[];
       }
     } catch {
@@ -134,7 +139,12 @@ export async function runSkillDistill(): Promise<void> {
         { role: 'system', content: system },
         { role: 'user', content: material },
       ],
-      maxTokens: 1200,
+            // round 70：去掉写死的 maxTokens（原来是 1200），让它落到 usage 级配置。
+      // 1200 是上一个模型够用的遗留；推理模型（step-3.7-flash 的
+      // reasoning_content 计入 completion）下一个 prompt 的思维链就超过它，
+      // 于是 content 恒空。上面 topic-scan 的注释早就写了这个病因，值没跟着改——
+      // 同 round 69 的 ASI rubric：**代码知道病因而配了错的值**。
+
       temperature: 0.3,
       allowHedge: false,
     });

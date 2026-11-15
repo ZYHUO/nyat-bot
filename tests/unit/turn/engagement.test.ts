@@ -80,18 +80,25 @@ describe('computeEngagement', () => {
     }
   });
 
-  it('注记只发群速一种;自己话密不再重复喊"收着点"(review #10)', () => {
-    // velocity 中间带 → 注记
+  it('note 报"你现在的状态"，不喊"收着点"', () => {
+    // 2026-09-18 改：旧设计只发群速一种，理由是"自己话密"已由 heart.md 的
+    // 刷屏自检覆盖（review #10）。但那条自检后来被删了——它是助手腔
+    //（"提醒自己少说"），而我们要的是"一个热爱说话的人"。
+    // 所以现在把"话密"的**体感**交回给模型，措辞是状态不是命令：
+    // 让模型自己掂量，而不是被宿主按住。
     const quiet = Array.from({ length: 10 }, () => msg('user'));
     const v = computeEngagement(quiet, BOT, 45);
     expect(v.note).toContain('刷得很快');
 
-    // share/replies 中间带、无 velocity → 无注记(heart.md 刷屏自检覆盖)
+    // share/replies 中间带 → 现在**有**注记，且说的是事实不是禁令
     const msgs: FormattedMessage[] = [];
     for (let i = 0; i < 3; i++) msgs.push(msg('user'), msg('assistant'));
     msgs.push(...Array.from({ length: 6 }, () => msg('user')));
     const s = computeEngagement(msgs, BOT, 5);
-    expect(s.note).toBeNull();
+    expect(s.note).toBeTruthy();
+    expect(s.note).toContain('你说得挺多');
+    // 自己掂量 ≠ 被命令收手
+    expect(s.note).not.toMatch(/收着点|闭嘴|不要|少说|禁止/);
   });
 });
 

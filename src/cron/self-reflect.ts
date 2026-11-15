@@ -2,7 +2,7 @@
 // Self-Reflect — 每日自我复盘 (AGI Level 4 P4-C)
 //
 // 凌晨低峰跑一次：取最近 24h 主人 DM + 最活跃群的回复样本 + 近期任务
-// 统计 → judge LLM 复盘 → ≤5 条可操作自我认知落库 → 注入回复 prompt。
+// 统计 → judge LLM 复盘 → ≤5 条待核验候选落库。混合来源不自动晋升。
 // 复盘失败静默，明天再来——self-model 是慢变量，不急这一天。
 // ────────────────────────────────────────
 
@@ -81,18 +81,25 @@ export async function runSelfReflect(): Promise<void> {
     const groups = await activeGroups24h();
 
     const samples: string[] = [];
+    const sourceChatIds: number[] = [];
     // 主人 DM 样本（最权威的表现观察窗口）
     if (masterUid > 0) {
       const dm = await getRecent(masterUid, 30).catch(() => []);
       const dmText = formatSamples(dm, 20);
-      if (dmText) samples.push(`=== 与主人的私聊（最近）===\n${dmText}`);
+      if (dmText) {
+        samples.push(`=== 与主人的私聊（最近）===\n${dmText}`);
+        sourceChatIds.push(masterUid);
+      }
     }
     // 最活跃群样本
     const topGroup = groups[0];
     if (topGroup) {
       const g = await getRecent(topGroup, 40).catch(() => []);
       const gText = formatSamples(g, 20);
-      if (gText) samples.push(`=== 最活跃群（最近）===\n${gText}`);
+      if (gText) {
+        samples.push(`=== 最活跃群（最近）===\n${gText}`);
+        sourceChatIds.push(topGroup);
+      }
     }
 
     if (!samples.length) {
@@ -124,7 +131,10 @@ export async function runSelfReflect(): Promise<void> {
 
     const notes = parseSelfReflectOutput(res.content ?? '');
     if (notes === null) {
-      logger.warn('self-reflect: output unparseable — skip');
+      logger.warn(
+        { len: (res.content ?? '').length },
+        'self-reflect: output unparseable — skip',
+      );
       return;
     }
     if (notes.length === 0) {
@@ -132,9 +142,9 @@ export async function runSelfReflect(): Promise<void> {
       return;
     }
 
-    const saved = saveSelfNotes(notes);
+    const saved = saveSelfNotes(notes, { origin: 'self_reflect', sourceChatIds });
     pruneSelfNotes(20);
-    logger.info({ saved, total: notes.length }, 'self-reflect: notes saved');
+    logger.info({ candidatesSaved: saved, total: notes.length, activePromoted: 0 }, 'self-reflect: candidates saved for review');
   } catch (err) {
     logger.warn({ err }, 'runSelfReflect failed');
   }

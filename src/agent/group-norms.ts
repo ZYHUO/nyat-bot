@@ -247,9 +247,25 @@ export async function inferGroupNorms(
   }
 }
 
-/** 构建注入 reply prompt 的 [群氛围] 块。 */
+/**
+ * 构建注入 reply prompt 的 [群氛围] 块。
+ *
+ * 带上"这是什么时候的印象"：群规是 6 小时前推断的，而群里的梗和黑话是**会过气**的。
+ * 三周前流行的说法现在还在用，就是那种"这人怎么还在玩这个梗"的尴尬。
+ * 这是**事实**（多久以前观察到的），不是命令——模型自己判断还合不合时宜。
+ */
 export function buildNormsBlock(chatId: number): string {
   const n = getGroupNorms(chatId);
   if (!n?.norms.length) return "";
-  return `\n\n[群氛围]\n这个群的隐性规则：\n${n.norms.map((r) => `- ${r}`).join("\n")}\n回复时自然地贴合这个群的氛围。`;
+  const ageSec = Math.max(0, nowSec() - n.lastUpdatedAt);
+  const ageDays = Math.floor(ageSec / 86400);
+  const ageHours = Math.floor(ageSec / 3600);
+  const freshness = ageDays >= 3
+    ? `（这是 ${ageDays} 天前的印象，群里的梗可能已经换了）`
+    : ageDays >= 1
+      ? `（这是 ${ageDays} 天前的印象）`
+      : ageHours >= 1
+        ? `（这是 ${ageHours} 小时前的印象）`
+        : '';
+  return `\n\n[群氛围]\n这个群的隐性规则${freshness}：\n${n.norms.map((r) => `- ${r}`).join("\n")}\n回复时自然地贴合这个群的氛围。`;
 }

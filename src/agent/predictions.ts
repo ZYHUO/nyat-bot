@@ -401,7 +401,7 @@ export function summarizePredictionCalibrationByDimension(options: PredictionDim
   const grouped = new Map<string, { chatId: number; userId: number | null; actionType: string | null; errors: number[] }>();
   for (const row of rows) {
     if (typeof row.predictionError !== 'number' || !Number.isFinite(row.predictionError)) continue;
-    const key = `${row.chatId}\u0000${row.userId ?? ''}\u0000${row.actionType ?? ''}`;
+    const key = `${row.chatId} ${row.userId ?? ''} ${row.actionType ?? ''}`;
     if (!grouped.has(key) && grouped.size >= maxGroups) break;
     const group = grouped.get(key) ?? { chatId: row.chatId, userId: row.userId, actionType: row.actionType, errors: [] };
     group.errors.push(row.predictionError);

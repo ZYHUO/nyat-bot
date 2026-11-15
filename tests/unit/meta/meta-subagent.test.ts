@@ -124,13 +124,14 @@ describe('AttentionAccumulator', () => {
 });
 
 describe('MetaSandbox', () => {
-  it('runs sync code with injected API', () => {
+  it('fails closed instead of running generated code in the bot process', async () => {
     const box = new MetaSandbox({
       add: (a: number, b: number) => a + b,
     });
-    const r = box.execute('add(2, 40)');
-    expect(r.error).toBe(false);
-    expect(r.output).toContain('42');
+    const r = await box.execute('globalThis.__metaUnsafeExecuted = true; return 42;');
+    expect(r.error).toBe(true);
+    expect(r.output).toContain('codeact_isolation_disabled');
+    expect((globalThis as Record<string, unknown>)['__metaUnsafeExecuted']).toBeUndefined();
   });
 });
 
@@ -139,7 +140,7 @@ describe('GlobalState', () => {
 
   it('keeps digests and callbacks', async () => {
     const s = getGlobalState();
-    s.addDigest('hello');
+    s.addDigest('hello', -100);
     await s.enqueueCallbackAsync({
       id: 'c1',
       taskId: 't1',
@@ -148,7 +149,7 @@ describe('GlobalState', () => {
       ok: true,
       createdAt: Date.now(),
     });
-    expect(s.recentDigests(1)[0]!.text).toBe('hello');
+    expect(s.recentDigests(1, { sourceChatId: -100 })[0]!.text).toBe('hello');
     expect(await s.drainCallbacks()).toHaveLength(1);
     expect(await s.drainCallbacks()).toHaveLength(0);
   });

@@ -20,11 +20,16 @@ import { slimContextForAI } from '../context/slim.js';
 import { loadCachedPrompt } from '../../shared/config.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { normalizeReactionEmoji } from '../reply/reaction-emoji.js';
+import { answeredTimestamps } from '../../meta/answered.js';
 import { incrCounter } from '../../metrics/registry.js';
 import { getReflection } from '../../tracking/outcome.js';
+import { isMentioningSelf } from '../judge/rules.js';
+import { getBotIdentity } from '../../bot/bot.js';
 import type { SelfState } from './self-state.js';
+import { isPlatformInternalId } from '../../platform/identity-store.js';
 
-export type HeartAct = 'reply' | 'wait' | 'pass';
+export type HeartAct = 'reply' | 'wait' | 'pass' | 'react';
 
 export interface HeartDecision {
   act: HeartAct;
@@ -32,6 +37,8 @@ export interface HeartDecision {
   path: 'chat' | 'lookup';
   why: string;
   latencyMs: number;
+  /** round 8：act=react 时模型挑的 emoji（已过白名单校验）；其余 act 为 undefined。 */
+  emoji?: string;
   /** 折算出的 JudgeResult(供下游 mute/intercept/telemetry 沿用既有形状) */
   judgeResult: JudgeResult;
 }
@@ -49,7 +56,118 @@ export interface HeartInput {
   burstNote?: string;
   /** Optional bounded scoped workspace block for the V2 rollout. */
   cognitiveWorkspaceHint?: string;
+  /**
+   * Concrete facts about the bot's own recent behaviour in this chat.
+   * Rendered by src/agent/self-history.ts; empty when there is nothing to show.
+   * This is what lets the model notice it is over-participating — the host does
+   * not decide that for it.
+   */
+  selfHistory?: string;
   signal?: AbortSignal;
+  /** Verified protocol addressing for the complete QQ input batch. */
+  addressed?: boolean;
+  ongoingFollowup?: boolean;
+}
+
+/**
+ * 这条消息是不是**直接叫 bot**（@username / 昵称 / 回复 bot / 私聊）。
+ *
+ * 与 precheck.ts 的 isClearlyHumanToHuman 同一套判据，但反过来用：
+ * 那个问"是不是 clearly 人与人之间聊"，这个问"是不是 clearly 在叫我"。
+ */
+export function isAddressedToBot(
+  message: FormattedMessage,
+  botUid: number,
+  chatId?: number,
+): boolean {
+  if (botUid > 0 && message.replyTo?.uid === botUid) return true;
+  const text = (message.textContent || message.captionContent || '').trim();
+  if (!text) return false;
+  try {
+    const id = getBotIdentity(chatId);
+    if (isMentioningSelf(text, id.username, id.nicknames, botUid)) return true;
+  } catch {
+    // bot 未初始化（测试/探针）时退回 botName 包含匹配
+  }
+  return false;
+}
+
+/**
+ * 心流 LLM 失败时的**保句闸**（2026-09-21 新增的前置功能）。
+ *
+ * 实测：`heart LLM failed, fail-closed pass` 在日志里出现 1867 次，
+ * 占全部心流裁决（7443 次）的 **25%**。失败原因 64% 是 "All labels exhausted"
+ * （整条 fallback 链死透），其余是超时/限流/内容审查。
+ *
+ * 旧行为一律 `pass` —— **消息被永久丢弃**。对没人叫 bot 的群聊消息这没毛病
+ * （本来就不一定该接），但对**直接叫到 bot** 的那句是另一回事：
+ * 有人 @ 了本喵问一件事，因为基础设施故障，这句话就此消失，对方永远等不到回复。
+ * 这和"无视直接提问是另一种失败"是同一条原则——只是失败方从模型变成了线路。
+ *
+ * 所以：LLM 判不了时，**被直接叫到的消息转 wait（稍后重评），不转 pass（丢弃）**。
+ * 没被叫到的仍旧 pass，避免线路故障时把整群闲聊都排成重试。
+ *
+ * `HEART_LLM_FAIL_KEEP_ADDRESSED` 门控，默认开。关则完全回到旧行为。
+ */
+function llmFailedDecision(
+  input: HeartInput,
+  latencyMs: number,
+): HeartDecision {
+  let act: HeartAct = 'pass';
+  let why = 'llm_failed';
+  if (input.addressed || (env().HEART_LLM_FAIL_KEEP_ADDRESSED && isAddressedToBot(input.message, input.botUid, input.chatId))) {
+    act = 'wait';
+    why = 'llm_failed_keep_addressed';
+    incrCounter('heart_llm_fail_keep_addressed_total', { chat: input.chatId });
+    logger.warn(
+      { chatId: input.chatId, messageId: input.message.messageId },
+      'heart LLM failed — 被直接叫到，转 wait 保句（不丢弃）',
+    );
+  }
+  return { act, path: 'chat', why, latencyMs, judgeResult: toJudgeResult(act, 'chat', latencyMs) };
+}
+
+/**
+ * 清洗心流的 `why`——它会被原样注入写手的 prompt 当"念头"。
+ *
+ * 2026-09-23（新 goal，用户："前言不搭后语"）。实测 10,807 条 Heart decision：
+ *
+ *   why 含 `{`   926 条（9%）
+ *   why 被截断    164 条（2%）
+ *
+ * 那些 why 长这样：
+ *
+ *   {doro发的众筹澳门家宽，倍率还行，要参吗？
+ *   {刚撩猫羽就发男铜贴纸，这反差绷不住
+ *
+ * 模型有时在 why 里塞引用链/嵌套 JSON 片段（它把 `→回复 某人(#22222)`
+ * 这类上下文记号当成了自己输出的一部分）。原样收下再截到 40 字，
+ * 这条断裂的 JSON 片段就会被注入：
+ *
+ *   reply.ts:623  [你的念头] 你看到这条消息时心里想的是:「{doro发的众筹…」。
+ *
+ * 写手拿到一个坏念头，还被要求"顺着这个念头说，别另起炉灶"——
+ * 于是它接得莫名其妙。**9% 的回复带着坏念头开笔。**
+ *
+ * 清洗规则（保守，只去明显是机器残留的部分，不动人话）：
+ *   · 去掉首尾的 `{` `}` `[` `]` `"` `'` 和空白
+ *   · 去掉尾部被截断的 JSON 尾巴（`…`、`,`、`："`、未闭合的引号）
+ *   · 全部清完还为空 -> 返回 ''（调用方据此决定不注入）
+ */
+function cleanWhy(raw: string): string {
+  let t = String(raw ?? '').trim();
+  if (!t) return '';
+  // 首尾的括号/引号/空白（模型把 JSON 结构也写进了 why）
+  t = t.replace(/^[\s{}[\]"'`]+/, '').replace(/[\s{}[\]"'`]+$/, '');
+  // 尾部截断的 JSON 残留：`…","path":"cha` 这种——在第一个 `","x":"` 处切断，
+  // 只留人的那部分。（round 58 实测的是"散文 + 首尾括号"，
+  // 这里是同一家族的另一种：整段 JSON 被塞进 why 后截断。）
+  const cut = t.search(/["']\s*,\s*["'][\w-]+["']\s*:/);
+  if (cut > 0) t = t.slice(0, cut);
+  t = t.replace(/[,，:：、\s]+$/, '').trim();
+  // 未闭合的引号（截断在字符串中段）
+  if ((t.match(/"/g)?.length ?? 0) % 2 === 1) t = t.replace(/["']?[^"']*$/, '').trim();
+  return t.slice(0, 40);
 }
 
 function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why: string } | null {
@@ -59,12 +177,19 @@ function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why:
   try {
     const obj = JSON.parse(m[0]) as Record<string, unknown>;
     const act = String(obj['act'] ?? '').toLowerCase();
-    if (act !== 'reply' && act !== 'wait' && act !== 'pass') return null;
+    if (act !== 'reply' && act !== 'wait' && act !== 'pass' && act !== 'react') return null;
     const pathRaw = String(obj['path'] ?? 'chat').toLowerCase();
+    // round 8（新 goal）：react 带一个 emoji 字段。模型自己选表情，
+    // 但只接受 Telegram 允许的那一小组（见 reaction-emoji.ts 的说明——
+    // ❤ 是 U+2764 不带变体选择符，直接让模型写很容易写错）。
+    // 不在集合里的回落到 null，由调用方随机挑。
+    const emojiRaw = String(obj['emoji'] ?? '');
+    const emoji = normalizeReactionEmoji(emojiRaw);
     return {
       act: act as HeartAct,
       path: pathRaw === 'lookup' ? 'lookup' : 'chat',
-      why: String(obj['why'] ?? '').slice(0, 40),
+      why: cleanWhy(String(obj['why'] ?? '')),
+      ...(act === 'react' ? { emoji } : {}),
     };
   } catch {
     return null;
@@ -148,9 +273,13 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
       .replace(/\{persona_core\}/g, personaCore || `${input.botName} 是群聊里的猫娘成员`)
       .replace(/\{self_state\}/g, input.selfState.narration)
       .replace(/\{learned_rules\}/g, learnedRules);
+    if (e.META_QQ_MENTION_HEART_ENABLED && input.chatId < 0 && isPlatformInternalId(input.chatId)) {
+      systemPrompt += '\n\n[当前QQ群回应规则——覆盖前文的点名必回约束]\n被 @、被引用或被叫名字表示对方在叫你本人，但不构成必须文字回复的命令。对真实提问、请求和需要确认的指令优先 reply；需要等后文时 wait；招呼、玩笑、已经回应过或无需文字的接话可以 react 或 pass。不得仅因被点名就机械生成文字。以上规则替代前文与之冲突的点名禁令；其他安全、隐私与身份规则继续适用。';
+    }
   } catch (err) {
     logger.warn({ err }, 'heart prompt load failed, fail-closed pass');
     const latencyMs = Math.round(performance.now() - start);
+    if (input.addressed) return llmFailedDecision(input, latencyMs);
     return { act: 'pass', path: 'chat', why: 'prompt_load_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 
@@ -158,11 +287,48 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const presence = input.lastSpokeSecAgo !== undefined && input.lastSpokeSecAgo < 180
     ? `\n(你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,正处于对话中)`
     : '';
+  // The model's own recent behaviour, as facts. Placed right before the decision
+  // so it is in view when judging; the older daily rules stay in the system
+  // prompt. Both are needed: rules say "what generally works", this says
+  // "what I just did".
+  const selfHistoryBlock = input.selfHistory?.trim()
+    ? `\n\n${input.selfHistory.trim().slice(0, 900)}`
+    : '';
   const burstLine = input.burstNote ? `\n${input.burstNote}` : '';
   const workspaceLine = input.cognitiveWorkspaceHint?.trim()
     ? `\n\n${input.cognitiveWorkspaceHint.trim().slice(0, 3000)}`
     : '';
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${burstLine}${workspaceLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  // round 4（新 goal，用户："重复回复的概率太高了"）：
+  // **★ 这条消息你自己是不是已经回过？** —— 当成事实告诉心流。
+  //
+  // 全量日志实测（40,083 条入站 / 4,808 个首气泡）：
+  //   同一个锚点被回复 >1 次          153 个（占唯一锚点 7.9%）
+  //   多出来的回复                    206 个 → 真实重复率 4.3%
+  //   最严重的 8 个锚点各被回 5-6 次（"有完没完喵" / "本喵看不到图细节" ×3 变体）
+  //
+  // `markMessageAnswered` 全仓有 6 处调用（发出去就记），但**读它的人里没有
+  // 心流**——attention.ts 只用它跳过"入队"，meta-api/session 用它防别的事，
+  // 没有一处在"要不要回"之前问一句"我回过没有"。于是 bot 可以对同一条消息
+  // 反复开口,而每次都以为自己是第一次接。
+  //
+  // 这里补上。**是陈述事实,不是禁令**——有时候同一条追加了新内容确实值得再回
+  // （"那你觉得呢"跟在"在吗"后面）。把已经回过的次数和间隔给它看,
+  // 让"又想接一遍"这个念头撞上事实。收不收看它自己。
+  const nowSec = Math.floor(Date.now() / 1000);
+  const answeredTimes = await answeredTimestamps(input.chatId, input.message.messageId);
+  const answeredLine = answeredTimes.length
+    ? `\n[这条你已经回过 ${answeredTimes.length} 次] 最近一次 ${Math.max(1, Math.round((nowSec - answeredTimes[0]!) / 60))} 分钟前。${
+        answeredTimes.length >= 2
+          ? '**连着接同一条,群里看着像复读机**——要么说点真正新的,要么让它过去。'
+          : '除非人家追加了新内容,否则再回一遍就是在重复自己。'}`
+    : '';
+
+  const addressedLine = input.addressed
+    ? input.ongoingFollowup
+      ? '\n[宿主事实] 这批中至少一条来自本会话正在处理任务的发送者，也可能混有其他群友的消息。按各条的发送者判断哪些内容补充或修正当前任务，相关内容优先 reply 交回现有任务，需要等后文时 wait；无关闲聊仍可 react/pass。不要把最新一句的发送者自动当成任务发起者，不要重复启动同一个任务。'
+      : '\n[协议事实] 这批消息里有人直接 @ 你、叫你的名字或引用你的消息，是在叫你本人。结合整批内容判断：真实提问、请求和需要确认的指令优先 reply，需等后文时 wait；招呼、玩笑或无需文字的接话可以 react/pass。被提及不等于必须发一条文字。'
+    : '';
+  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}${answeredLine}${addressedLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
 
   let raw: string;
   try {
@@ -201,7 +367,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     }
     const latencyMs = Math.round(performance.now() - start);
     logger.warn({ err, chatId: input.chatId }, 'heart LLM failed, fail-closed pass');
-    return { act: 'pass', path: 'chat', why: 'llm_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
+    return llmFailedDecision(input, latencyMs);
   }
 
   let parsed = parseHeart(raw);
@@ -237,6 +403,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   }
   const latencyMs = Math.round(performance.now() - start);
   if (!parsed) {
+    if (input.addressed) return llmFailedDecision(input, latencyMs);
     // H0 hybrid fail-soft:parse 失败 ≠ 没听懂。旧行为 fail-closed pass 直接吞回复,
     // 与 llm_failed 的 defer/judge 兜底不对称 —— 同一条消息因"吐脏 JSON"还是
     // "链路挂了"走不同命运。parse_failed 进同一条 hybrid 路径:defer 预算内重评,
@@ -269,7 +436,12 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
         // 反思模型是 newapiv4pro(轻思考,~2-6s),放宽到 10s;超了就放弃、用原念头。
         maxTimeoutMs: 10_000,
       });
-      const refined = (rr.content || '').trim().replace(/^[「"'"]+|[」"'"]+$/g, '').slice(0, 60);
+      // round 164：**refined 也要过 cleanWhy。** 之前这里只剥「」引号，
+      // 不剥 {}[]——反射模型回 JSON 残片时，覆写后的 why 就带着前导 `{`。
+      // 实测 09-21/22/23 三天 dirty why 532/352/211 条，全是这条路径漏的
+      // （parseHeart 里的 cleanWhy 在覆写之前就跑完了）。
+      // 而 why 会注入 [你的念头] 给写手——这里脏了，下游拿到的是垃圾方向。
+      const refined = cleanWhy((rr.content || '').trim()).slice(0, 60);
       if (refined.length >= 2) {
         logger.info({ chatId: input.chatId, from: parsed.why, to: refined }, 'Heart reflect refined 念头');
         parsed = { ...parsed, why: refined };

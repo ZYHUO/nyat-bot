@@ -1,0 +1,13 @@
+{
+  "name": "WEATHER",
+  "description": "查询指定城市的天气信息，包括温度、天气状况、风力等",
+  "parameters": {
+    "city": { "type": "string", "description": "城市名称，支持中文或英文" }
+  },
+  "execute": {
+    "type": "http",
+    "url": "https://wttr.in/{{city}}?format=j1",
+    "method": "GET",
+    "resultPath": "current_condition.0"
+  }
+}

@@ -12,6 +12,7 @@
 // ────────────────────────────────────────
 
 import { l0Rule } from '../pipeline/judge/judge.js';
+import { isMentioningSelf } from '../pipeline/judge/rules.js';
 import { microJudge } from '../pipeline/judge/micro.js';
 import { getRecent } from '../pipeline/context/manager.js';
 import { getBotUid, getBotIdentity } from '../bot/bot.js';
@@ -71,10 +72,7 @@ function detectDirectInteraction(
   botNicknames: string[],
 ): { mentioned: boolean; repliedToBot: boolean } {
   const text = message.textContent || message.captionContent || '';
-  const lower = text.toLowerCase();
-  const mentioned =
-    lower.includes(`@${botUsername.toLowerCase()}`) ||
-    botNicknames.some((n) => n && lower.includes(n.toLowerCase()));
+  const mentioned = isMentioningSelf(text, botUsername, botNicknames, botUid);
   return {
     mentioned,
     // replyTo 只有 messageId 没有 uid 时保守判 false（防把路人回复当@我）
@@ -85,8 +83,8 @@ function detectDirectInteraction(
 export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult> {
   const e = env();
   void e;
-  const botUid = getBotUid();
-  const botIdentity = getBotIdentity();
+  const botUid = getBotUid(input.chatId);
+  const botIdentity = getBotIdentity(input.chatId);
 
   // ── assembleState（只读，fail-soft） ──
   let state: CoreState | undefined;
@@ -127,20 +125,34 @@ export async function runCoreTick(input: CoreTickInput): Promise<CoreTickResult>
   const level = classifyLevel(l0, direct);
 
   // L0 observation 上黑板（best-effort，不拦路）
-  try {
-    writeEntry({
-      kind: 'observation',
-      author: 'l0',
-      content: JSON.stringify({
-        level,
-        l0rule: l0?.rule ?? null,
-        mentioned: direct.mentioned,
-        messageId: input.message.messageId,
-      }),
-      chatId: input.chatId,
-    });
-  } catch {
-    /* non-critical */
+  //
+  // 2026-09-18: this used to write an `observation` entry for every L0-classified
+  // message. The design (docs/core-v2.md) says L1 reads observations via
+  // `visibleToL1`, but that reader was never built — `visibleToL1` is exported
+  // and never called, and every `listEntries` caller asks for `authorized_intent`.
+  // So the write accumulated 1,752 unconsumed rows (status always `open`) with no
+  // consumer and no pruning: pure write amplification on the hot path, and it
+  // made the blackboard look like it held state when it only held telemetry.
+  //
+  // The classification result is already observable via logger.debug and the
+  // cognitive event ledger (which IS consumed). Re-enable only together with a
+  // real consumer; the flag exists so that stays an explicit decision.
+  if (env().CORE_BLACKBOARD_OBSERVATIONS_ENABLED) {
+    try {
+      writeEntry({
+        kind: 'observation',
+        author: 'l0',
+        content: JSON.stringify({
+          level,
+          l0rule: l0?.rule ?? null,
+          mentioned: direct.mentioned,
+          messageId: input.message.messageId,
+        }),
+        chatId: input.chatId,
+      });
+    } catch {
+      /* non-critical */
+    }
   }
 
   if (level === 'l0-pass') {

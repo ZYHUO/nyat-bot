@@ -15,11 +15,11 @@
 import { callWithFallback } from '../../ai/fallback.js';
 import { getRedis } from '../../db/redis.js';
 import { logger } from '../../shared/logger.js';
+import { env } from '../../env.js';
 import { slimContextForAI } from '../context/slim.js';
 import { getBotUid } from '../../bot/bot.js';
 import type { FormattedMessage } from '../../shared/types.js';
 
-const REWARD_GATE_ENABLED = true;     // tunable
 const REWARD_GATE_TIMEOUT_MS = 6000;  // tunable
 const REWARD_GATE_CONTEXT_MSGS = 12;  // tunable — how many recent msgs the judge sees
 
@@ -58,13 +58,13 @@ export async function runRewardGate(
   proposedText: string,
   kind: 'proactive' | 'idle' = 'proactive',
 ): Promise<RewardVerdict> {
-  if (!REWARD_GATE_ENABLED || !proposedText.trim()) {
+  if (!env().REWARD_GATE_ENABLED || !proposedText.trim()) {
     return { accept: true, reasoning: 'disabled' };
   }
 
   const last = recent[recent.length - 1] ?? ({ messageId: 0, uid: 0 } as FormattedMessage);
   const ctx = recent.length > 0
-    ? slimContextForAI(recent.slice(-REWARD_GATE_CONTEXT_MSGS), last, getBotUid())
+    ? slimContextForAI(recent.slice(-REWARD_GATE_CONTEXT_MSGS), last, getBotUid(chatId))
     : '(无最近消息)';
 
   const system =
@@ -82,7 +82,6 @@ export async function runRewardGate(
           { role: 'system', content: system },
           { role: 'user', content: user },
         ],
-        maxTokens: 120,
         temperature: 0,
       }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), REWARD_GATE_TIMEOUT_MS)),

@@ -31,6 +31,7 @@ import { checkTalkValueThreshold } from './talk-value.js';
 import { isTimingDegraded } from './state-store.js';
 import { hasDeferBudget } from './defer.js';
 import { appendGateHistory, formatGateHistoryBlock, getGateHistory } from './gate-history.js';
+import { isClearlyHumanToHuman } from './precheck.js';
 
 export type GateAction = 'continue' | 'wait' | 'no_action';
 
@@ -69,6 +70,8 @@ export interface GateInput {
   botUid: number;
   botName: string;
   botPersona: string;
+  /** Bot nicknames, so the pre-check recognises a mention by name (not just @). */
+  botNicknames?: string[];
   /** True when pipeline already determined this is a direct interaction. */
   isDirectInteraction: boolean;
   /**
@@ -319,6 +322,39 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
     }
   }
 
+  // ── Deterministic pre-check (cost) ──
+  //
+  // Measured 2026-09-18: the LLM branch answered `no_action` in 121 of 122
+  // decisions (43/43 in the last 6h), and every reason traced back to one
+  // explicit rule in timing-gate.md — "群友们彼此在聊、不是在跟我聊 →
+  // no_action，别硬挤". This answers that case structurally, at 0ms.
+  //
+  // Conservative by construction: only fires when nobody addresses the bot AND
+  // the window shows humans talking to each other. Anything ambiguous still
+  // reaches the LLM, so the failure mode is an extra call, never a dropped reply.
+  if (e.TIMING_GATE_PRECHECK_ENABLED && !input.proactiveMode) {
+    try {
+      if (
+        isClearlyHumanToHuman({
+          message: input.message,
+          recentMessages: input.recentMessages,
+          botUid: input.botUid,
+          botUsername: input.botName,
+          botNicknames: input.botNicknames ?? [],
+          proactiveMode: input.proactiveMode,
+        })
+      ) {
+        logger.info(
+          { chatId: input.chatId, reason: 'human_to_human_precheck' },
+          'gate precheck: no_action without LLM',
+        );
+        return makeShortCircuit('no_action', 'precheck_human_to_human', start);
+      }
+    } catch (err) {
+      logger.debug({ err, chatId: input.chatId }, 'gate precheck failed (fall through to LLM)');
+    }
+  }
+
   // ── LLM call ──
   let systemPrompt = '';
   try {
@@ -367,6 +403,25 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
 
   const timeoutMs = e.TIMING_GATE_TIMEOUT_MS;
 
+  // Nyat Trench Phase 2 预备：gate 的 LLM 分支做成可开关。
+  //
+  // 为什么值得删（实测，2026-09-19）：
+  //   - 324 次调用里 199 次解析失败（61%），每次 fail-closed 成 no_action
+  //   - 成功的 125 次里 124 次是 no_action，理由清一色是同一条规则的改写
+  //   - token 占比仅 ~0.2%，所以省 token 不是理由；省掉 199 次/天的失败噪音才是
+  //
+  // 关掉之后**所有确定性层原样保留**（precheck / cooldown / continuation /
+  // talk-value / defer），只是走到这里不再问 LLM，直接 continue 让下游的
+  // reply 主路径自己判断——那本来就是单决策点的位置。
+  //
+  // 默认 true（现行为，零变化）。翻它之前要看的数在金丝雀的分群对照里。
+  // 注意用 `=== false` 而不是 `!`：这些测试把 env() mock 成不含该字段的普通对象，
+  // 取到 undefined。default-true 的旗标必须"只有显式 false 才关"，
+  // 否则任何漏加字段的 mock 都等于关掉了功能——那正是本仓库文档化过的坑。
+  if (e.TIMING_GATE_LLM_ENABLED === false) {
+    return makeShortCircuit('continue', 'gate_llm_removed', start);
+  }
+
   let raw: string;
   try {
     // Real abort on timeout (not Promise.race fire-and-forget) + external
@@ -377,7 +432,11 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ],
-      maxTokens: 200,
+      // 不能写死 200：gate 的 usage（reflection → step-3.7-flash）是 reasoning
+      // 模型，reasoning_content 计入 completion。200 会被思维链吃光，
+      // content 为空 → parse failed → fail-closed 沉默。实测见 env.ts 的
+      // TIMING_GATE_MAX_TOKENS 注释（61% 的"解析失败"全是这么来的）。
+      maxTokens: e.TIMING_GATE_MAX_TOKENS ?? 1200,
       temperature: 0,
       // H4.1: jsonMode（与 heart/decision.ts 同因——stepfun 类小模型吐脏 JSON
       // 是 parse_failed_closed 529 次的主因）。provider 层已支持，gate 两次
@@ -423,7 +482,9 @@ export async function runTimingGate(input: GateInput): Promise<GateDecision> {
           { role: 'assistant', content: raw.slice(0, 300) },
           { role: 'user', content: '上面的输出不是合法 JSON。只输出一个 JSON 对象,不要任何其他文字。' },
         ],
-        maxTokens: 200,
+        // 重试同样不能给 200——首判已经因为 200 被思维链吃光而失败，
+        // 重试再给 200 只是把同一个失败做两遍（还多烧一次 LLM）。
+        maxTokens: e.TIMING_GATE_MAX_TOKENS ?? 1200,
         temperature: 0,
         jsonMode: true,
         signal: input.signal,

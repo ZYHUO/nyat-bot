@@ -226,7 +226,19 @@ export class PostTaskWindowManager {
       const decision = await judgeFollowUpBatch(win, candidates);
       if (this.windows.get(chatId) !== win) return; // 判定期间窗口已关
       for (const m of candidates) win.judgedIds.add(m.messageId);
-      if (!decision?.hasFollowUp) return;
+      if (!decision?.hasFollowUp) {
+        // **这一笔必须记**。2026-09-21：session-report 的「任务后追话」产出率算出来
+        // 是 10.7%，那个数是假的——分母只数了"失败 + 派发续答"，
+        // 而"判过了、结论是不用接话"这一路（绝大多数情况）**一条日志都没有**。
+        // 于是失败率被放大成将近 10 倍，看起来像这个功能几乎全是坏的，
+        // 实际它只是在正确地大部份时间选择沉默。
+        // 判据同一个：**算比率的两个数必须覆盖全部出口**，否则分母是编的。
+        // info 不是 debug：LOG_LEVEL=info 时 debug 一律不可见，那这一笔又等于没记，
+        // 分母重新漏掉它。频率约每天百来次（post-task window opened 三天 345 次），
+        // 远不到刷屏的程度。
+        logger.info({ chatId, candidates: candidates.length }, 'post-task judge: no follow-up');
+        return;
+      }
       const trigger =
         candidates.find((m) => m.messageId === decision.triggerMessageId) ??
         candidates[candidates.length - 1];
@@ -293,6 +305,19 @@ export class PostTaskWindowManager {
       { chatId: win.chatId, taskId: task.id, trigger: trigger.messageId, continuations: win.continuations },
       'post-task continuation dispatched',
     );
+    // 入账：这条续答**绕过了 Meta/心流**（设计如此：接住话头要顺势，不值得再问一轮）。
+    // 但不入账会让 live_outcome 账本漏掉整个绕过路径——2026-09-19 实测近 24h 有
+    // 122 条 post-task 续答 + 279 条 same_speaker_burst 从未入账，占决策事件约 23%。
+    // 而 Phase 1 要测的是"判定点 vs 心流"，漏掉绕过路径等于把被测对象排除在样本外。
+    void import('../nyatos/shadow.js')
+      .then(({ isNyatosShadowChat, recordLiveOutcome }) => {
+        if (!isNyatosShadowChat(win.chatId, {
+          enabled: env().NYATOS_SHADOW_ENABLED,
+          chatIds: env().NYATOS_SHADOW_CHAT_IDS,
+        })) return;
+        recordLiveOutcome({ chatId: win.chatId, messageId: trigger.messageId, outcome: 'intercepted' });
+      })
+      .catch(() => { /* telemetry only */ });
   }
 }
 
@@ -330,6 +355,12 @@ async function judgeFollowUpBatch(
     maxTimeoutMs: 10_000,
     allowHedge: false,
     rejectEmpty: true,
+    // 这个调用要 JSON（parseJudgeResult 只认 JSON），但 reflection usage 没配
+    // jsonMode——2026-09-21 实测：post-task follow-up 批次失败 2104 次，其中
+    // "Empty response" 1407 次（maxTokens 200 被 reasoning 模型吃光，
+    // 已由 provider 层的 token 下限接住），剩下的栽在"模型回的是散文"。
+    // prompt 里写"输出 JSON"不够——得有机制逼它。显式传，不依赖 usage 配置。
+    jsonMode: true,
     chatId: win.chatId,
   });
   return parseJudgeResult(res.content);

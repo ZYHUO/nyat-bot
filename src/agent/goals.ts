@@ -8,9 +8,10 @@
 // ────────────────────────────────────────
 
 import { getDb } from '../db/sqlite.js';
+import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 
-export type GoalStatus = 'active' | 'achieved' | 'stale' | 'dropped';
+export type GoalStatus = 'active' | 'achieved' | 'stale' | 'dropped' | 'pending_close';
 
 export interface GoalRow {
   id: number;
@@ -29,6 +30,10 @@ export interface GoalRow {
   long_term: number;
   created_at: number;
   updated_at: number;
+  /** 进入 pending_close 的时间；NULL = 没进过。 */
+  close_requested_at?: number | null;
+  /** 靠「观察期内无人再提」关掉的次数（与 verified_achievements 分开记，不混）。 */
+  silence_closures?: number;
 }
 
 export interface GoalSubtaskRow {
@@ -55,6 +60,24 @@ export interface CreateGoalInput {
 export const GOAL_STALE_AFTER_SEC = 7 * 86400;
 /** 长期目标的 stale 窗口(30 天,跨周持续关注不轻易放弃)。 */
 export const GOAL_LONG_TERM_STALE_AFTER_SEC = 30 * 86400;
+
+/**
+ * 长期目标语义（AGI Level 5 Phase 3）开不开。
+ *
+ * 2026-09-21：`GOAL_LONG_TERM_ENABLED` 这个旗标此前是**死的**——env.ts 里声明了、
+ * .env 里开着，而全仓库没有一个地方读它。长期目标的 30 天 stale 窗口是写死的常量，
+ * 也就是说"可以关掉长期目标语义"这件事是假的：设 false 没有任何效果。
+ *
+ * 现在它真的门控这一步：关时 long_term=1 的目标按普通 7 天窗口 stale
+ * （= 长期目标退化成普通目标，不是报错、不是消失）。
+ */
+export function longTermEnabled(): boolean {
+  try {
+    return env().GOAL_LONG_TERM_ENABLED === true;
+  } catch {
+    return false;
+  }
+}
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -197,12 +220,14 @@ export function recordCheck(id: number, finding: string | null): void {
     } else {
       db.prepare(`UPDATE goals SET last_check_at = ?, check_count = check_count + 1, updated_at = ? WHERE id = ?`).run(ts, ts, id);
       // 零发现且活够久了 → stale(保留可复活,不再轮询)。
-      // 长期目标(long_term=1)的 stale 窗口放宽到 30 天(跨周持续关注不轻易放弃)。
+      // 长期目标(long_term=1)的 stale 窗口放宽到 30 天——但只在旗标开着时。
+      // 关掉长期目标语义 → long_term 目标按普通 7 天窗口 stale（退化，不报错）。
+      const ltWindow = longTermEnabled() ? GOAL_LONG_TERM_STALE_AFTER_SEC : GOAL_STALE_AFTER_SEC;
       db.prepare(
         `UPDATE goals SET status = 'stale', updated_at = ?
          WHERE id = ? AND status = 'active' AND findings_count = 0
            AND created_at + CASE long_term WHEN 1 THEN ? ELSE ? END <= ?`,
-      ).run(ts, id, GOAL_LONG_TERM_STALE_AFTER_SEC, GOAL_STALE_AFTER_SEC, ts);
+      ).run(ts, id, ltWindow, GOAL_STALE_AFTER_SEC, ts);
     }
   } catch (err) {
     logger.warn({ err, id }, 'recordCheck failed');
@@ -231,6 +256,67 @@ export function markGoalAchieved(id: number, evidence: 'verified' | 'failed' | '
   } catch (err) {
     logger.warn({ err, id }, 'markGoalAchieved failed');
   }
+}
+
+/**
+ * 模型声称完成、但没有独立证据：不放宽证据门，也不让它占着活跃名额——进入观察期。
+ *
+ * 观察期满后由 host 看世界的反应（resolvePendingCloseGoals）：有人又提起 → 回 active，
+ * 没有 → achieved（last_evidence='silence'，与 verified 分开记账）。
+ * 幂等：已经是 pending_close 的不重复刷新 close_requested_at（否则每次检查都把观察期重置，永远关不掉）。
+ */
+export function requestGoalClose(id: number, note?: string): boolean {
+  try {
+    const ts = nowSec();
+    const r = getDb().prepare(
+      `UPDATE goals SET status = 'pending_close', close_requested_at = ?,
+         unverified_completions = unverified_completions + 1,
+         last_evidence = 'unverified', last_finding = COALESCE(?, last_finding), updated_at = ?
+       WHERE id = ? AND status = 'active'`,
+    ).run(ts, note?.slice(0, 500) ?? null, ts, id) as { changes?: number };
+    return r.changes === 1;
+  } catch (err) {
+    logger.warn({ err, id }, 'requestGoalClose failed');
+    return false;
+  }
+}
+
+/**
+ * 模型在 goal 检查里声称「已完成」、但没有独立证据时，怎么落账。executor 调这个，不自己判断。
+ * 抽成函数是为了能被行为测试直接调到——executor 的 runCodeActTask 太大，没法在单测里跑。
+ *
+ *   observe=true  且 goal 当前 active → 进 pending_close（不占名额），返回 'pending_close'
+ *   其它（flag 关 / goal 已不是 active）→ 原行为：只记一次未验证完成，goal 保持原状，返回 'stays_active'
+ */
+export function settleUnverifiedCompletion(
+  id: number,
+  note: string,
+  observe: boolean,
+): 'pending_close' | 'stays_active' {
+  if (observe && requestGoalClose(id, note)) return 'pending_close';
+  recordUnverifiedCompletion(id, note);
+  return 'stays_active';
+}
+
+/** goal 话题的匹配词：归一化后的 topic 切成字符 bigram（与 createGoal 查重同一套归一化）。 */
+export function goalTopicGrams(topic: string): string[] {
+  const norm = normalizeGoalTopic(topic);
+  const out = new Set<string>();
+  for (let i = 0; i < norm.length - 1; i++) out.add(norm.slice(i, i + 2));
+  return [...out];
+}
+
+/**
+ * 一段**人类**消息文本是否在重新提起这个 goal。确定性的字符重叠，不是语义判断：
+ * 命中的 bigram 数 ≥ max(3, 总数的 40%)。局限（写在这里，别让它被当成理解）：
+ * 只能发现「有人又提起」，发现不了「没人提但其实没做完」。
+ */
+export function mentionsGoalTopic(text: string, grams: string[]): boolean {
+  if (grams.length < 3) return false;
+  const norm = text.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  let hit = 0;
+  for (const g of grams) if (norm.includes(g)) hit++;
+  return hit >= Math.max(3, Math.ceil(grams.length * 0.4));
 }
 
 /** Model-claimed completion without verification stays open and counted, never achieved. */

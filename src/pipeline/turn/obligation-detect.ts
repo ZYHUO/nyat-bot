@@ -30,6 +30,8 @@ export function isObligationCancelMessage(message: FormattedMessage, active?: Re
   if (!text) return false;
   if (!CANCEL_PHRASES.some((phrase) => text.includes(phrase))) return false;
   if (!active) return false;
+  // Quoting another person's anchor grants no right to cancel their work.
+  if (active.targetUid !== message.uid || active.anchorUid !== message.uid) return false;
   const replyToAnchor =
     message.replyTo?.messageId !== undefined &&
     active.relatedMessageIds.includes(message.replyTo.messageId);

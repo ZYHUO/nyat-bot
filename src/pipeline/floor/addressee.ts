@@ -52,7 +52,7 @@ export function classifyAddressee(
   // 1. 回复 bot → to_me
   if (msg.replyTo?.uid === botUid) return { verdict: "to_me", reason: "reply_to_self" };
   // 2. @bot / 叫名字 → to_me
-  if (isMentioningSelf(text, botUsername, botNicknames)) {
+  if (isMentioningSelf(text, botUsername, botNicknames, botUid)) {
     return { verdict: "to_me", reason: "mention_self" };
   }
   // 3. 转发 → not_me

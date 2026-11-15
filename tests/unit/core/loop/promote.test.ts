@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let db: Database.Database;
+const envMock = vi.hoisted(() => ({ CORE_BLACKBOARD_ENABLED: true }));
+vi.mock('../../../../src/env.js', () => ({ env: () => envMock }));
 vi.mock('../../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -13,6 +15,7 @@ import { promoteProposal, pendingIntents, executeIntent } from '../../../../src/
 import { _resetGateForTest } from '../../../../src/core/permission/gate.js';
 
 beforeEach(() => {
+  envMock.CORE_BLACKBOARD_ENABLED = true;
   db = new Database(':memory:');
   db.exec(readFileSync('migrations/0084_core_blackboard.sql', 'utf8'));
   _resetGateForTest();
@@ -62,6 +65,19 @@ describe('gate promotion', () => {
 });
 
 describe('L2 executeIntent (dry-run)', () => {
+  it('总闸关闭后不再提升 proposal 或执行已存在的 intent', async () => {
+    const first = proposal(JSON.stringify({ tool: 'memory.search', args: {}, why: '查' }));
+    const promoted = promoteProposal(first);
+    expect(promoted.promoted).toBe(true);
+    const pending = proposal(JSON.stringify({ tool: 'web.search', args: {}, why: '查' }));
+    envMock.CORE_BLACKBOARD_ENABLED = false;
+    expect(promoteProposal(pending)).toEqual({ promoted: false, reason: 'proposal not found' });
+    expect(pendingIntents(-100)).toEqual([]);
+    expect(await executeIntent(promoted.intentId!)).toEqual({ executed: false, reason: 'intent not found' });
+    expect(db.prepare("SELECT COUNT(*) AS c FROM core_blackboard WHERE kind='execution_receipt'").get()).toEqual({ c: 0 });
+    expect(db.prepare('SELECT status FROM core_blackboard WHERE id = ?').get(promoted.intentId!)).toEqual({ status: 'open' });
+  });
+
   it('只读 intent 全链跑通：intent → receipt(consumed) → intent consumed', async () => {
     const pid = proposal(JSON.stringify({ tool: 'web.search', args: { q: 'x' }, why: '查' }));
     const { intentId } = promoteProposal(pid);

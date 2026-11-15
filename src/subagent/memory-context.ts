@@ -11,11 +11,13 @@
 // 同源。CodeAct 这一层是 getContextEngine(`subagent:${chatId}`) 按会话独立、任务
 // 也按会话,输出只发给那个会话,结构上没有这条路。
 //
-// 隐私硬守卫不在本文件 —— 在 memory/chroma.ts 的 searchMemoryForInjection 里,
-// 那是唯一出口,调用方绕不过去(C-2 事故复盘的结论)。本文件只负责渲染与预算。
+// 普通召回遵守 searchMemoryForInjection 的会话边界。主人私聊另走
+// searchOwnerMemory 的显式授权出口；其结果只渲染进当前私聊，不改写来源。
 
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { resolveOwnerDmReadContext } from '../shared/owner-memory-scope.js';
+import type { OwnerMemoryHit, ScoredMessage } from '../memory/chroma.js';
 
 /** 单条渲染后的最大字符数。 */
 const LINE_CHARS = 100;
@@ -114,19 +116,38 @@ async function buildInner(input: MemoryContextInput, isTimedOut: () => boolean):
   const { chatId, query, excludeMessageIds } = input;
   const e = env();
 
-  const { searchMemoryForInjection } = await import('../memory/chroma.js');
+  const memory = await import('../memory/chroma.js');
   // 内层超时留出余量,让 searchMemory 自己先返回,而不是被外层竞速切掉。
-  const hits = await searchMemoryForInjection(
-    chatId, query, e.SUBAGENT_MEMORY_TOPK, Math.max(50, e.SUBAGENT_MEMORY_TIMEOUT_MS - 50),
-  );
+  const timeout = Math.max(50, e.SUBAGENT_MEMORY_TIMEOUT_MS - 50);
+  // Authority comes from the host-bound private peer, never a task target/user
+  // supplied by the model. Search rechecks this authority at the storage boundary.
+  const owner = resolveOwnerDmReadContext(chatId);
+  const [localHits, ownerHits] = await Promise.all([
+    memory.searchMemoryForInjection(chatId, query, e.SUBAGENT_MEMORY_TOPK, timeout).catch(() => [] as ScoredMessage[]),
+    owner ? memory.searchOwnerMemory(chatId, query, e.SUBAGENT_MEMORY_TOPK, timeout).catch(() => [] as OwnerMemoryHit[]) : [],
+  ]);
+  // Interleave the additional owner sources so a full local top-k cannot hide
+  // them. All sources still share the existing total prompt character budget.
+  const hits: Array<ScoredMessage | OwnerMemoryHit> = [];
+  for (let i = 0; i < Math.max(localHits.length, ownerHits.length); i++) {
+    if (localHits[i]) hits.push(localHits[i]!);
+    if (ownerHits[i]) hits.push(ownerHits[i]!);
+  }
   if (isTimedOut() || hits.length === 0) return '';
 
+  const seen = new Set<string>();
   const kept = hits.filter((m) => {
-    // bot 自己说过的话不算"往事" —— 它已经在「最近聊天」里,重复注入会诱发复读。
-    if (m.role === 'assistant') return false;
+    // Current-chat bot speech already appears in recent context. The verified
+    // other owner DM may supply its bot replies as explicitly labelled history;
+    // storage never grants this exception to group bot speech or legacy replies.
+    if (m.role === 'assistant' && (!('ownerRecall' in m) || m.sourceChatId === chatId)) return false;
     // 已在最近聊天里出现过的,不重复贴。
-    if (excludeMessageIds?.has(m.messageId)) return false;
-    return Boolean(m.textContent?.trim());
+    if ((m.sourceChatId ?? chatId) === chatId && excludeMessageIds?.has(m.messageId)) return false;
+    if (!m.textContent?.trim()) return false;
+    const identity = JSON.stringify([m.sourcePlatform ?? null, m.sourceAccountId ?? null, m.sourceChatId ?? chatId, m.messageId]);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
   });
   if (kept.length === 0) return '';
 
@@ -137,7 +158,8 @@ async function buildInner(input: MemoryContextInput, isTimedOut: () => boolean):
   let used = 0;
   for (const m of kept) {
     const who = m.username ? `@${m.username}` : (m.fullName || `uid:${m.uid}`);
-    const line = `- [${shortDate(m.timestamp)}] ${who}: ${inlineForPrompt(m.textContent)}`;
+    const source = 'ownerRecall' in m ? `[${inlineForPrompt(m.ownerRecall.label)}; 会话 ${m.ownerRecall.sourceChatId}] ` : '';
+    const line = `- [${shortDate(m.timestamp)}] ${source}${inlineForPrompt(who)}: ${inlineForPrompt(m.textContent)}`;
     if (used + line.length + 1 > budget) break;
     lines.push(line);
     used += line.length + 1;

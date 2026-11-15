@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDeliveryIntentRedis } from '../../helpers/delivery-intent-redis.js';
+const intentRedis = createDeliveryIntentRedis();
 
 const MASTER = 6251541967;
 const GROUP = -1002450361141;
@@ -21,6 +23,7 @@ const redisGet = vi.fn(async () => null);
 const redisSet = vi.fn(async () => 'OK');
 
 const envBase: Record<string, unknown> = {
+  BOT_TOKEN: '123:synthetic-test-token',
   PROMISE_LOOP_ENABLED: true,
   MASTER_UID: MASTER,
   CODEACT_BANNED_WORDS: [],
@@ -28,6 +31,7 @@ const envBase: Record<string, unknown> = {
   POST_TASK_WINDOW_ENABLED: false,
   MEMORY_CROSS_CONTEXT_ENABLED: false,
   MEMORY_VISIBILITY_ENABLED: false,
+  MEMORY_SENSITIVE_CHAT_IDS: [],
   DIGEST_PERSIST_ENABLED: true,
   GOAL_MAX_ACTIVE: 20,
 };
@@ -45,7 +49,7 @@ vi.mock('../../../src/sandbox/paths.js', () => ({
 }));
 vi.mock('../../../src/bot/bot.js', () => ({
   getBot: () => ({ api: { getChat: (...args: unknown[]) => getChat(...args), getChatMember: (...args: unknown[]) => getChatMember(...args) } }),
-  getBotUid: () => 999,
+  getBotUid: () => 123,
   getBotDisplayName: () => '啾咪囝',
 }));
 vi.mock('../../../src/db/sqlite.js', () => ({
@@ -93,7 +97,11 @@ vi.mock('../../../src/tracking/person-identity.js', () => ({
 }));
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
+    ...intentRedis,
     zrange: (...args: unknown[]) => zrange(...args),
+    zrevrange: (...args: unknown[]) => zrange(...args),
+    hscan: vi.fn(async () => ['0', []]),
+    mget: vi.fn(async () => []),
     get: (...args: unknown[]) => redisGet(...args),
     set: (...args: unknown[]) => redisSet(...args),
   }),
@@ -105,9 +113,11 @@ vi.mock('../../../src/meta/attention.js', () => ({
 
 describe('promise loop (承诺闭环)', () => {
   beforeEach(() => {
+    intentRedis.reset();
     vi.clearAllMocks();
     envBase.PROMISE_LOOP_ENABLED = true;
     envBase.MASTER_UID = MASTER;
+    envBase.MEMORY_SENSITIVE_CHAT_IDS = [];
     let mid = 100;
     sendMessage.mockImplementation(async () => ++mid);
     createGoal.mockReturnValue(42);
@@ -117,6 +127,7 @@ describe('promise loop (承诺闭环)', () => {
     dbAll.mockReturnValue([]);
     zrange.mockResolvedValue([String(GROUP)]);
     redisGet.mockResolvedValue(null);
+    getRecent.mockResolvedValue([]);
   });
 
   async function makeApi(chatId = MASTER) {
@@ -145,7 +156,8 @@ describe('promise loop (承诺闭环)', () => {
     getChat.mockResolvedValue({ id: 7916374789 });
     const r = await api.telegram.sendToChat(7916374789, '券给你喵');
     expect(r.messageId).toBeGreaterThan(0);
-    expect(sendMessage).toHaveBeenCalledWith(7916374789, '券给你喵');
+    expect(sendMessage).toHaveBeenCalledWith(7916374789, '券给你喵', undefined, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function) }));
   });
 
   it('sendToChat: bot not in group → not_member', async () => {
@@ -158,7 +170,8 @@ describe('promise loop (承诺闭环)', () => {
     const { api } = await makeApi();
     const r1 = await api.telegram.sendToChat(GROUP, '七夕快乐喵');
     expect(r1.messageId).toBeGreaterThan(0);
-    expect(sendMessage).toHaveBeenCalledWith(GROUP, '七夕快乐喵');
+    expect(sendMessage).toHaveBeenCalledWith(GROUP, '七夕快乐喵', undefined, undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function) }));
     expect(addAssistant).toHaveBeenCalledWith(GROUP, expect.objectContaining({ textContent: '七夕快乐喵' }));
     expect(persistDigest).toHaveBeenCalled();
     await api.telegram.sendToChat(GROUP, '第二条');
@@ -169,21 +182,25 @@ describe('promise loop (承诺闭环)', () => {
     const { api } = await makeApi();
     const r = await api.telegram.sendToChat(GROUP, '七夕券给你喵', 'coupon.png');
     expect(r.messageId).toBe(777);
-    expect(tgSendFile).toHaveBeenCalledWith(GROUP, '/sandbox/coupon.png', { caption: '七夕券给你喵' });
+    expect(tgSendFile).toHaveBeenCalledWith(GROUP, '/sandbox/coupon.png',
+      expect.objectContaining({ caption: '七夕券给你喵', beforeSend: expect.any(Function) }));
     expect(addAssistant).toHaveBeenCalledWith(
       GROUP,
       expect.objectContaining({ textContent: expect.stringContaining('[file] coupon.png') }),
     );
   });
 
-  it('chats.find: fuzzy matches group title, caches title', async () => {
-    const { api } = await makeApi();
+  it('chats.find: verifies the current group and reports coverage instead of implying a complete inventory', async () => {
+    zrange.mockResolvedValue(['-1002', String(GROUP)]);
+    getChat.mockResolvedValue({ id: GROUP, type: 'supergroup', title: '乐乐猫的快乐老家' });
+    getChatMember.mockResolvedValue({ user: { id: 123 }, status: 'member' });
+    const { api } = await makeApi(GROUP);
     const hits = await api.chats.find('乐乐猫');
-    expect(hits).toEqual([{ chatId: GROUP, title: '乐乐猫的快乐老家' }]);
-    expect(redisSet).toHaveBeenCalledWith(`xxb:chat_title:${GROUP}`, '乐乐猫的快乐老家', 'EX', 21600);
+    expect(hits).toMatchObject({ status: 'matched', scope: 'current_group', groups: [{ chatId: GROUP, title: '乐乐猫的快乐老家', contentAccess: 'not_granted' }] });
+    expect(getChat.mock.calls.map(call => call[0])).toEqual([GROUP]);
     const miss = await api.chats.find('不存在的群');
-    expect(String(miss)).toContain('没查到');
-    expect(String(miss)).toContain('members.find');
+    expect(miss).toMatchObject({ status: 'no_match', groups: [] });
+    expect(miss.note).toContain('不能推断');
   });
 
   it('goals.add: creates goal with task chat default; flag off disabled', async () => {
@@ -199,12 +216,38 @@ describe('promise loop (承诺闭环)', () => {
     expect(r2.reason).toBe('promise_loop_disabled');
   });
 
+  it('goals.add: even a master-DM task cannot schedule its content in another chat', async () => {
+    const { api } = await makeApi();
+    expect(await api.goals.add('private task', GROUP)).toEqual({ goalId: null, reason: 'goal_target_chat_mismatch' });
+    expect(await api.goals.add('invalid target', 0)).toEqual({ goalId: null, reason: 'goal_target_chat_mismatch' });
+    expect(createGoal).not.toHaveBeenCalled();
+    expect(await api.goals.add('same chat follow-up', MASTER)).toEqual({ goalId: 42, reason: 'created' });
+    expect(createGoal).toHaveBeenCalledWith(expect.objectContaining({ chatId: MASTER }), 20);
+  });
+
+  it.each([false, true])('metadata lookup grants owner DM no right to foreign member or message content, sensitive=%s', async (sensitive) => {
+    envBase.MEMORY_SENSITIVE_CHAT_IDS = sensitive ? [GROUP] : [];
+    dbAll.mockReturnValue([{ chat_id: GROUP, uid: 7, username: 'private_marker', full_name: 'private name', sender_tag: null }]);
+    getChat.mockResolvedValue({ id: GROUP, type: 'supergroup', title: '乐乐猫的快乐老家' });
+    getChatMember.mockResolvedValue({ user: { id: 123 }, status: 'member' });
+    const { api } = await makeApi();
+    const chats = await api.chats.find('乐乐猫');
+    expect(chats).toMatchObject({ status: 'matched', groups: [{ chatId: GROUP, contentAccess: 'not_granted', sensitive }] });
+    getChat.mockClear(); getChatMember.mockClear(); redisGet.mockClear();
+    const members = await api.members.find('private_marker');
+    expect(await api.chats.recentMessages(GROUP)).toBe('(private context unavailable)');
+    expect(Array.isArray(members) ? members : []).toEqual([]);
+    expect(getChatMember).not.toHaveBeenCalled();
+    expect(getChat).not.toHaveBeenCalled();
+    expect(redisGet).not.toHaveBeenCalled();
+  });
+
   it('backstop: LLM judges unfulfilled promise → auto goal on endTask', async () => {
     callWithFallback.mockResolvedValue({ content: '{"promise": true, "topic": "去乐乐猫群喊缪缪送券"}' });
     const { api, onEnd } = await makeApi();
     await api.telegram.sendText('知道啦～那本喵等下去那个群里喊她一声喵');
     api.runtime.endTask('短回完成');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(onEnd).toHaveBeenCalled();
     expect(callWithFallback).toHaveBeenCalled();
     expect(createGoal).toHaveBeenCalledWith(
@@ -224,7 +267,7 @@ describe('promise loop (承诺闭环)', () => {
     await api.telegram.sendText('七夕快乐喵～');
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(createGoal).not.toHaveBeenCalled();
   });
 
@@ -234,7 +277,7 @@ describe('promise loop (承诺闭环)', () => {
     await api.telegram.sendText('那本喵等下去群里喊她喵');
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(createGoal).not.toHaveBeenCalled();
   });
 
@@ -245,7 +288,7 @@ describe('promise loop (承诺闭环)', () => {
     callWithFallback.mockClear();
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(createGoal).not.toHaveBeenCalled();
   });
@@ -257,15 +300,16 @@ describe('promise loop (承诺闭环)', () => {
     callWithFallback.mockClear();
     createGoal.mockClear();
     api.runtime.endTask('done');
-    await new Promise((r) => setTimeout(r, 10));
+    await api.runtime.flushBookkeeping();
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(createGoal).not.toHaveBeenCalled();
   });
 
-  it('members.find: DB 画像 → 成员确认 → DM 可达性，返回在群列表', async () => {
+  it('members.find: 本群画像 → 成员确认，异群画像不能覆盖本群名字或暴露成员', async () => {
     dbAll.mockReturnValue([
+      { chat_id: -1002, uid: 7916374789, username: 'FOREIGN_NAME_MARKER', full_name: 'foreign name', sender_tag: null },
+      { chat_id: -1002, uid: 888, username: 'FOREIGN_USER_MARKER', full_name: 'foreign user', sender_tag: null },
       { chat_id: GROUP, uid: 7916374789, username: 'auto_ccb', full_name: 'CCB', sender_tag: null },
-      { chat_id: -1002, uid: 7916374789, username: 'auto_ccb', full_name: 'CCB', sender_tag: null },
     ]);
     getChatMember.mockImplementation(async (cid: unknown) =>
       cid === -1002 ? { status: 'left' } : { status: 'member' },
@@ -273,7 +317,7 @@ describe('promise loop (承诺闭环)', () => {
     getChat.mockImplementation(async (cid: unknown) =>
       cid === 7916374789 ? { id: 7916374789 } : { title: '乐乐猫游乐场' },
     );
-    const { api } = await makeApi();
+    const { api } = await makeApi(GROUP);
     const hits = await api.members.find('ccb');
     expect(hits).toHaveLength(1);
     expect(hits[0]).toMatchObject({
@@ -282,6 +326,9 @@ describe('promise loop (承诺闭环)', () => {
       groups: [{ chatId: GROUP, title: '乐乐猫游乐场' }],
       dmAvailable: true,
     });
+    expect(getChatMember.mock.calls).toEqual([[GROUP, 7916374789]]);
+    expect(getChat.mock.calls).toEqual([[GROUP], [7916374789]]);
+    expect(JSON.stringify(hits)).not.toContain('FOREIGN_');
   });
 
   it('members.find: 查无此人 → 指路字符串', async () => {
@@ -291,13 +338,17 @@ describe('promise loop (承诺闭环)', () => {
     expect(await api.members.find('')).toEqual([]);
   });
 
-  it('chats.recentMessages: 读另一个群的最近消息', async () => {
+  it('chats.recentMessages: 本群内容可读，异群请求在访问上下文前拒绝', async () => {
     getRecent.mockResolvedValue([
       { role: 'user', uid: 1, username: 'ccb', fullName: 'CCB', timestamp: 1, messageId: 1, textContent: '压抑', isForwarded: false },
     ]);
-    const { api } = await makeApi();
+    const { api } = await makeApi(GROUP);
     const out = await api.chats.recentMessages(GROUP, 5);
     expect(out).toContain('压抑');
+    expect(getRecent).toHaveBeenCalledWith(GROUP, 5, undefined);
+    getRecent.mockClear();
+    expect(await api.chats.recentMessages(-1002, 5)).toBe('(private context unavailable)');
+    expect(getRecent).not.toHaveBeenCalled();
     getRecent.mockResolvedValue([]);
     expect(await api.chats.recentMessages(GROUP, 5)).toBe('(那个群最近没有记录)');
     expect(await api.chats.recentMessages(0, 5)).toBe('(invalid chatId)');

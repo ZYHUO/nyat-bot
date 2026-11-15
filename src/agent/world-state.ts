@@ -93,6 +93,37 @@ function appendRevision(
 }
 
 /** upsert 一个实体(按 name+kind 去重,合并属性)。 */
+/**
+ * Reject names that are not entity-like.
+ *
+ * A world entity is a short, stable noun phrase ("Rust", "显示器选购", "@awei").
+ * Reply *instructions* ("@x 用 reply+@ 点了你上一句 #80208… 禁止空问候…") are not
+ * world facts. On 2026-09-18 the table was found to contain 2,711 rows that were
+ * ALL instructions, because callers passed `contentDirection` straight through —
+ * and those rows were rendered into the live prompt as "[相关世界实体]".
+ *
+ * Validating here (rather than at each call site) means no future caller can
+ * reintroduce the pollution.
+ */
+function isEntityLikeName(name: string): boolean {
+  // Length is a weak signal on its own: measured against the 2,710 polluted rows
+  // from the 2026-09-18 backup, the shape rules below reject 100% of them at
+  // every limit from 40 to 80, while a real group title
+  // ("Uzumaru公群 | 音游交流群版 🔥东南亚上押1920U…", 41 chars) needs headroom.
+  // So keep the cap generous and let shape do the discriminating.
+  if (name.length < 2 || name.length > 80) return false;
+  if (/[\n\r#]/.test(name)) return false;
+  // Imperative / instructional phrasing that only appears in reply directives.
+  if (/(禁止|必须|不要|请|回气泡|复读|空问候|接话|回应|短回|自然|语气)/.test(name)) return false;
+  // A quoted message body means this is a task description, not a name.
+  if (/「|」/.test(name)) return false;
+  // Sentence-shaped: real entity names do not contain clause punctuation or
+  // second-person/verb-final instructions like "…再回".
+  if (/[，。；、！？,;!?]/.test(name)) return false;
+  if (/(再回|再说|再答|先看|先弄清|然后|接着)/.test(name)) return false;
+  return true;
+}
+
 export function upsertEntity(
   name: string,
   kind: 'person' | 'project' | 'topic' | 'place',
@@ -103,6 +134,10 @@ export function upsertEntity(
 ): number | null {
   const nm = name.trim().slice(0, 100);
   if (!nm) return null;
+  if (!isEntityLikeName(nm)) {
+    logger.debug({ name: nm.slice(0, 60), kind }, 'world-state: rejected non-entity name');
+    return null;
+  }
   try {
     const db = getDb();
     const ts = nowSec();

@@ -11,7 +11,7 @@ export { getGlobalState, _resetGlobalState } from './global-state.js';
 export { MetaSandbox } from './sandbox.js';
 export { buildMetaApiContext } from './meta-api.js';
 export { runMetaSession } from './session.js';
-export { startMetaLoop, stopMetaLoop, metaTick } from './loop.js';
+export { startMetaLoop, stopMetaLoop, drainMetaLoop, metaTick, isMetaLoopRunning } from './loop.js';
 export {
   scheduleMetaDeferReeval,
   drainDueMetaDefers,

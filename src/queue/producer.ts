@@ -8,6 +8,7 @@ import type { MessageJobData } from './jobs.js';
 import type { PendingEntry } from '../pipeline/turn/types.js';
 import { getRedis } from '../db/redis.js';
 import { logger } from '../shared/logger.js';
+import { eventHash, canonicalJson } from '../shared/event-identity.js';
 
 let _queue: Queue<MessageJobData> | undefined;
 
@@ -28,8 +29,9 @@ export function getQueue(): Queue<MessageJobData> {
 
 export async function enqueue(data: MessageJobData): Promise<string | undefined> {
   const queue = getQueue();
-  const editSuffix = data.isEdit ? '-edit' : '';
-  const jobId = data.messageId
+  const version = data.eventIdentity ?? data.update.__nyatEventIdentity;
+  const editSuffix = data.isEdit ? '-edit-' + eventHash(canonicalJson(data.update)) : '';
+  const jobId = version ? `event-${version.eventId}` : data.messageId
     ? `msg-${data.chatId}-${data.messageId}${editSuffix}`
     : `msg-${data.chatId}-${Date.now()}`;
 

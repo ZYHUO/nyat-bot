@@ -1,3 +1,4 @@
+import type { PendingIntentRef } from './pending-intent.js';
 // Meta path timing-gate adapter — reuse pipeline timing FSM without Turn Actor.
 // L0 (incl. nickname): allow into Attention immediately — burst batching is
 // META_L0_COALESCE_MS in Attention.flush (quiet window), NOT TIMING_TALK_VALUE
@@ -28,10 +29,15 @@ import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
 import { scheduleMetaDeferReeval } from './defer.js';
 import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
+import { createHash } from 'node:crypto';
+import { checkCodeActActivation } from '../subagent/activation-policy.js';
+import { findMessageRef, isPlatformInternalId } from '../platform/identity-store.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
 export interface MetaWaitAnchor {
+  pendingIntent?: PendingIntentRef;
+  messageThreadId?: number;
   chatId: number;
   layer: AttentionLayer;
   reason: string;
@@ -47,6 +53,19 @@ export interface MetaWaitAnchor {
 
 function waitAnchorKey(chatId: number): string {
   return `xxb:meta:wait-anchor:${chatId}`;
+}
+
+// A temporary Redis failure must not turn held work back into runnable input.
+const pendingHeldAnchors = new Map<string, string>();
+async function flushHeldAnchors(): Promise<void> {
+  try {
+    for (const [id, raw] of pendingHeldAnchors) {
+      await getRedis().hsetnx('xxb:meta:activation-held', id, raw);
+      pendingHeldAnchors.delete(id);
+    }
+  } catch {
+    logger.warn({ pending: pendingHeldAnchors.size }, 'Meta wait archive unavailable; rejected anchors retained for retry');
+  }
 }
 
 export async function setMetaWaitAnchor(anchor: MetaWaitAnchor, ttlSec: number): Promise<void> {
@@ -78,15 +97,56 @@ export async function takeMetaWaitAnchor(chatId: number): Promise<MetaWaitAnchor
 /** After timing wait-resume: re-feed Attention so Meta can reconsider. */
 export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> {
   if (!env().META_SUBAGENT_ENABLED || !env().TIMING_GATE_ENABLED) return false;
+  await flushHeldAnchors();
   const anchor = await takeMetaWaitAnchor(chatId);
   if (!anchor) return false;
+  const decision = checkCodeActActivation(anchor);
+  if (!decision.allowed || anchor.chatId !== chatId) {
+    const reason = !decision.allowed ? decision.reason : 'anchor_chat_mismatch';
+    const id = `wait:${createHash('sha256').update(JSON.stringify(anchor)).digest('hex')}`;
+    pendingHeldAnchors.set(id, JSON.stringify({ kind: 'wait', reason, heldAt: Date.now(), input: anchor }));
+    await flushHeldAnchors();
+    logger.warn({ chatId, reason }, 'Meta wait anchor held before replay');
+    // Handled, not resumed: the timing caller must not fall through to its
+    // legacy Turn Actor replay after we reject the Meta anchor.
+    return true;
+  }
   try {
     const { getAttentionAccumulator } = await import('./attention.js');
+    const rawBatch = anchor.payload?.['qqBatch'];
+    if (isPlatformInternalId(chatId) && Array.isArray(rawBatch)) {
+      // This is host-written metadata, but never trust it to change scope or
+      // invent quote identities after a delayed replay.
+      for (const entry of rawBatch.slice(0, 32)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const item = entry as Record<string, unknown>;
+        if (typeof item.messageId !== 'number' || !Number.isSafeInteger(item.messageId)
+          || !findMessageRef(chatId, item.messageId)) continue;
+        const quote = item.replyTo && typeof item.replyTo === 'object' ? item.replyTo as Record<string, unknown> : undefined;
+        const replyTo = quote && typeof quote.messageId === 'number' && Number.isSafeInteger(quote.messageId)
+          && findMessageRef(chatId, quote.messageId) ? {
+            messageId: quote.messageId, uid: typeof quote.uid === 'number' ? quote.uid : 0,
+            fullName: typeof quote.fullName === 'string' ? quote.fullName : undefined,
+            textSnippet: typeof quote.textSnippet === 'string' ? quote.textSnippet.slice(0, 200) : undefined,
+          } : undefined;
+        await getAttentionAccumulator().ingestAsync({
+          chatId, layer: anchor.layer, reason: `wait_resume:${anchor.reason}`,
+          messageId: item.messageId,
+          pendingIntent: item.pendingIntent as PendingIntentRef | undefined, messageThreadId: typeof item.messageThreadId === "number" ? item.messageThreadId : undefined,
+          userId: typeof item.userId === 'number' && Number.isSafeInteger(item.userId) ? item.userId : undefined,
+          textPreview: typeof item.textPreview === 'string' ? item.textPreview.slice(0, 200) : undefined,
+          pressure: anchor.pressure, cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
+          payload: { ...anchor.payload, qqBatch: undefined, replyTo, username: item.username, fullName: item.fullName },
+        });
+      }
+      return true;
+    }
     await getAttentionAccumulator().ingestAsync({
       chatId: anchor.chatId,
       layer: anchor.layer,
       reason: `wait_resume:${anchor.reason}`,
       messageId: anchor.messageId,
+      pendingIntent: anchor.pendingIntent, messageThreadId: anchor.messageThreadId,
       userId: anchor.userId,
       textPreview: anchor.textPreview,
       pressure: anchor.pressure,
@@ -200,8 +260,8 @@ export async function evaluateMetaTiming(opts: {
     message: formatted,
     recentMessages,
     judgeResult: stubJudge(false),
-    botUid: getBotUid() || 0,
-    botName: getBotDisplayName(),
+    botUid: getBotUid(chatId) || 0,
+    botName: getBotDisplayName(chatId),
     botPersona,
     isDirectInteraction: false,
     lastSpokeSecAgo,
@@ -230,6 +290,7 @@ export async function evaluateMetaTiming(opts: {
           layer,
           reason: decision.reason,
           messageId: formatted.messageId,
+          pendingIntent: formatted.pendingIntent, messageThreadId: formatted.messageThreadId,
           userId: formatted.uid,
           textPreview: (formatted.textContent || '').slice(0, 200),
           pressure: layer === 'L1' ? 60 : 30,
@@ -276,6 +337,7 @@ export async function evaluateMetaTiming(opts: {
         layer,
         reason: decision.reason,
         messageId: formatted.messageId,
+        pendingIntent: formatted.pendingIntent, messageThreadId: formatted.messageThreadId,
         userId: formatted.uid,
         textPreview: (formatted.textContent || '').slice(0, 200),
         pressure: layer === 'L1' ? 60 : 30,

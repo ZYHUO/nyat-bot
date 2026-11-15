@@ -24,11 +24,11 @@ const mockDb = {
         },
       };
     }
-    if (sql.startsWith('SELECT affinity, interaction_count FROM chat_relationships')) {
+    if (sql.startsWith('SELECT affinity, interaction_count, last_interaction_at FROM chat_relationships')) {
       return {
         get: (chatId: number, uid: number) => {
           const r = store.get(k(chatId, uid));
-          return r ? { affinity: r.affinity, interaction_count: r.interaction_count } : undefined;
+          return r ? { affinity: r.affinity, interaction_count: r.interaction_count, last_interaction_at: r.last_interaction_at } : undefined;
         },
       };
     }

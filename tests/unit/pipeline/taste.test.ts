@@ -51,6 +51,15 @@ describe('taste scoring', () => {
     expect(s.score).toBeGreaterThanOrEqual(SHARE_THRESHOLD);
   });
 
+  it('疑问词不算"有用"（USEFUL_RE 原来含 怎么|如何，把普通提问算成 0.35）', () => {
+    // 2026-09-21：摘掉 怎么/如何 之前，这两句各拿 0.35，看着"差一口气就够转"；
+    // 摘掉之后是 0——它们只是提问，不是可转发的有用内容。
+    expect(scoreTaste(msg('kddi怎么没解锁claude吗？')).score).toBe(0);
+    expect(scoreTaste(msg('怎么那么多waifu')).score).toBe(0);
+    // 真正的有用内容照旧命中
+    expect(scoreTaste(msg('这个避坑指南建议收藏，我亲测有效')).score).toBeGreaterThan(0.3);
+  });
+
   it('bot own / command / ad → 0', () => {
     expect(scoreTaste({ ...msg('哈哈哈'), role: 'assistant' as const }).score).toBe(0);
     expect(scoreTaste(msg('/start')).score).toBe(0);

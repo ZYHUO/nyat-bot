@@ -3,6 +3,7 @@
 // ────────────────────────────────────────
 
 import type { UpdateLike } from '../shared/types.js';
+import type { MessageEventIdentity } from '../shared/event-identity.js';
 import type { PendingEntry, TurnJobPayload } from '../pipeline/turn/types.js';
 
 export const QUEUE_NAME = 'xxb-messages';
@@ -27,6 +28,7 @@ export interface MessageJobData {
   isEdit?: boolean;
   update: UpdateLike;
   enqueuedAt: number;
+  eventIdentity?: MessageEventIdentity;
   /** Phase 1: debounce coalesce metadata */
   coalesce?: CoalesceInfo;
   /**

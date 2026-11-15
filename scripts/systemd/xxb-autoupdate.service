@@ -1,5 +1,5 @@
 [Unit]
-Description=xxb-ts auto-update (align with GitHub origin/main; rebuilds NyatDB native when needed)
+Description=xxb-ts approved immutable release requests (opt-in controller required)
 After=network-online.target
 
 [Service]

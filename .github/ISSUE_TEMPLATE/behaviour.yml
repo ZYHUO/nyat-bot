@@ -1,0 +1,77 @@
+name: Behaviour report
+description: The bot works, but it talks too much / repeats itself / answers the wrong thing
+labels: [behaviour]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is for when nothing is *broken* — the bot just behaves in a way you
+        don't want. **These are the most useful issues in this repo**, because
+        behaviour is the product.
+
+        Before filing, run this and paste the output — it turns "it's too chatty"
+        into numbers we can act on:
+
+        ```bash
+        npm run measure:voice -- --since 00:00
+        ```
+
+        The two numbers that matter are **different problems**:
+
+        | You see | The number |
+        |---|---|
+        | "it hogs the conversation" | ① reply rate |
+        | "it speaks up every few minutes" | **msgs/hour** in the per-chat table |
+
+        ① is often *fine* in a busy group. The second one is what people mean by
+        "too chatty". See [docs/voice-tuning.md](https://github.com/ZYHUO/nyat-bot/blob/nyatos/docs/voice-tuning.md).
+  - type: input
+    id: version
+    attributes:
+      label: NyatBot version / commit
+      placeholder: v1.1 / 1a2b3c4
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Which kind of behaviour
+      options:
+        - Talks too much
+        - Repeats itself / same anchor twice
+        - Answers the wrong message
+        - Sounds wrong (tone, not content)
+        - Stays silent when it shouldn't
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: chat
+    attributes:
+      label: Chat ID (or "several")
+      description: Telegram chat id, e.g. -1001234567890. Omit if you'd rather not share it.
+    validations:
+      required: false
+  - type: textarea
+    id: measure
+    attributes:
+      label: "`npm run measure:voice` output"
+      description: Paste the whole block. If you can't run it, say so — a description still helps.
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: What it did, and what you wanted instead
+      placeholder: |
+        It replied to 6 of the last 20 messages in a quiet group.
+        I wanted it to only join when someone asked.
+    validations:
+      required: true
+  - type: textarea
+    id: window
+    attributes:
+      label: When did you see it?
+      description: Include the date and roughly what time (and your timezone). Behaviour varies a lot by time of day — the bot has a sleep schedule.
+    validations:
+      required: true

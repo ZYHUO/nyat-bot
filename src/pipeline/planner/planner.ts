@@ -34,7 +34,9 @@ export async function planReply(input: PlannerInput): Promise<ToolPlan> {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: buildPlannerUserPrompt(input) },
       ],
-      maxTokens: 300,
+      // round 26: 去掉写死的 maxTokens: 300。usage=judge, 链头 step-3.7-flash 是
+      // reasoning 模型, 思维链吃光 300 -> 空正文 -> rejectEmpty -> 全链被试完。
+      // 同 round 19/26 一路: 写死会压过 .env 配置。
       temperature: 0,
     });
 

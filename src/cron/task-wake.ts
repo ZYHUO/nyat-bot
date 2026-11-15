@@ -5,10 +5,12 @@
 // ────────────────────────────────────────
 import { Queue } from 'bullmq';
 import { getRedis } from '../db/redis.js';
-import { listDueTasks, getTask } from '../agent/task-store.js';
+import { listDueTasks, getTask, researchJobId, tasksEnabled } from '../agent/task-store.js';
 import { TASK_QUEUE_NAME } from '../queue/task-worker.js';
 import type { TaskJobData } from '../queue/task-worker.js';
 import { logger } from '../shared/logger.js';
+import { env } from '../env.js';
+import { checkProactiveActivation } from './activation-policy.js';
 
 let _queue: Queue<TaskJobData> | undefined;
 function getWakeQueue(): Queue<TaskJobData> {
@@ -16,8 +18,9 @@ function getWakeQueue(): Queue<TaskJobData> {
   return _queue;
 }
 
-/** 每分钟 cron: 找出到点的任务,派发执行。幂等: worker 端 getTask 判 state。 */
+/** Stable wake generation deduplicates queue submissions; SQLite fences execution. */
 export async function wakeDueTasks(): Promise<number> {
+  if (!tasksEnabled()) return 0;
   const due = listDueTasks();
   if (!due.length) return 0;
   let dispatched = 0;
@@ -25,14 +28,17 @@ export async function wakeDueTasks(): Promise<number> {
     // 已 done/cancelled 的不会在 listDueTasks 里;再防一手竞态
     const fresh = getTask(t.id);
     if (!fresh || fresh.state === 'done' || fresh.state === 'cancelled') continue;
+    if (env().PROACTIVE_ACTIVATED_AT_SEC && fresh.created_at <= env().PROACTIVE_ACTIVATED_AT_SEC) continue;
+    if (!(await checkProactiveActivation(fresh.chat_id)).allowed) continue;
     await getWakeQueue().add('task_execute', {
       type: 'task_execute',
-      taskId: t.id,
-      chatId: t.chat_id,
-      ownerUid: t.owner_uid,
-    });
+      taskId: fresh.id,
+      chatId: fresh.chat_id,
+      ownerUid: fresh.owner_uid,
+      wakeGeneration: fresh.wake_generation,
+    }, { jobId: researchJobId(fresh), removeOnComplete: true, removeOnFail: true });
     dispatched++;
-    logger.info({ taskId: t.id, goal: t.goal, trigger: t.wake_trigger }, 'task woken');
+    logger.info({ taskId: fresh.id, wakeGeneration: fresh.wake_generation }, 'task woken');
   }
   return dispatched;
 }

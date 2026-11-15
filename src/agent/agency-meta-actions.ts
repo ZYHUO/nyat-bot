@@ -19,7 +19,12 @@ export type MetaActionName =
   | "todo.remove"
   | "agents.listStatus"
   | "conversations.query"
-  | "memory.searchEntities";
+  | "memory.searchEntities"
+  | "cognition.proposeMission"
+  | "cognition.proposeSensor"
+  | "cognition.proposeValue"
+  | "cognition.proposeAffect"
+  | "cognition.proposeCircuit";
 
 export type MetaActionOutcome = "proposed" | "completed" | "skipped" | "failed";
 

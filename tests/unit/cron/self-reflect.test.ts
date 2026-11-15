@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
 
 let db: Database.Database;
 const callWithFallbackMock = vi.fn();
@@ -20,20 +21,21 @@ vi.mock('../../../src/shared/config.js', () => ({
   loadCachedPrompt: () => 'self-reflect system prompt',
 }));
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({ SELF_REFLECT_ENABLED: true, SELF_REFLECT_USAGE: 'judge', MASTER_UID: 6251541967 }),
+  env: () => ({ SELF_REFLECT_ENABLED: true, SELF_REFLECT_USAGE: 'judge', MASTER_UID: 6251541967, BOT_TOKEN: '123:test' }),
 }));
 
 const { parseSelfReflectOutput, runSelfReflect } = await import('../../../src/cron/self-reflect.js');
 const { saveSelfNotes, getActiveSelfNotes, pruneSelfNotes } = await import('../../../src/tracking/self-model.js');
+const candidates = (): { note: string; evidence: string | null }[] => db.prepare(
+  'SELECT note, evidence FROM self_model_notes ORDER BY created_at DESC, id DESC',
+).all() as { note: string; evidence: string | null }[];
 
 beforeEach(() => {
   db = new Database(':memory:');
-  db.exec(`
-    CREATE TABLE self_model_notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      note TEXT NOT NULL, evidence TEXT, created_at INTEGER NOT NULL
-    );
-  `);
+  db.pragma('foreign_keys = ON');
+  for (const name of ['0056_self_model.sql', '0109_hypothesis_update_audit.sql', '0124_self_note_provenance.sql']) {
+    db.exec(readFileSync(`migrations/${name}`, 'utf8'));
+  }
   callWithFallbackMock.mockReset();
   getRecentMock.mockReset().mockResolvedValue([
     { role: 'user', uid: 6251541967, textContent: '帮我看下这个报错', timestamp: 1, messageId: 1 },
@@ -44,12 +46,13 @@ beforeEach(() => {
 });
 
 describe('self-model storage', () => {
-  it('saves notes and retrieves newest first with limit', () => {
+  it('saves candidates without promoting model text into active notes', () => {
     saveSelfNotes([
       { note: '技术问题直接给答案', evidence: '主人说「直接说原因」' },
       { note: '深夜回复要短' },
     ]);
-    const notes = getActiveSelfNotes(5);
+    const notes = candidates();
+    expect(getActiveSelfNotes(5)).toEqual([]);
     expect(notes.length).toBe(2);
     expect(notes[0]!.note).toBe('深夜回复要短');
     expect(notes[0]!.evidence).toBeNull();
@@ -63,7 +66,7 @@ describe('self-model storage', () => {
   it('prunes to keep most recent N', () => {
     for (let i = 0; i < 25; i++) saveSelfNotes([{ note: `note number ${i}` }]);
     pruneSelfNotes(20);
-    const notes = getActiveSelfNotes(100);
+    const notes = candidates();
     expect(notes.length).toBe(20);
     expect(notes[0]!.note).toBe('note number 24');
   });
@@ -88,7 +91,7 @@ describe('parseSelfReflectOutput', () => {
 });
 
 describe('runSelfReflect', () => {
-  it('full flow: samples → LLM → notes saved', async () => {
+  it('full flow: mixed samples become auditable candidates, never global active notes', async () => {
     callWithFallbackMock.mockResolvedValue({
       content: JSON.stringify({
         notes: [{ note: '技术问题直接给原因别卖萌', evidence: '主人说「...直接说原因」' }],
@@ -98,9 +101,16 @@ describe('runSelfReflect', () => {
     expect(callWithFallbackMock).toHaveBeenCalledOnce();
     const arg = callWithFallbackMock.mock.calls[0]![0] as { usage: string };
     expect(arg.usage).toBe('judge');
-    const notes = getActiveSelfNotes(5);
+    const notes = candidates();
     expect(notes.length).toBe(1);
     expect(notes[0]!.note).toContain('直接给原因');
+    expect(getActiveSelfNotes(5, undefined, 6251541967)).toEqual([]);
+    expect(getActiveSelfNotes(5, undefined, -1001234567890)).toEqual([]);
+    const provenance = db.prepare('SELECT state, scope_key, source_refs_json FROM self_model_note_provenance').get() as {
+      state: string; scope_key: string; source_refs_json: string;
+    };
+    expect(provenance).toMatchObject({ state: 'candidate', scope_key: 'candidate:unscoped' });
+    expect(JSON.parse(provenance.source_refs_json)).toHaveLength(2);
   });
 
   it('skips silently on unparseable output and LLM failure', async () => {

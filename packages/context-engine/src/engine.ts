@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   AssembleResult,
   ContextManifest,
@@ -53,6 +54,7 @@ export class ContextEngine {
 
   async assemble(providers: ContextProvider[]): Promise<AssembleResult> {
     const enabled = this.opts.enabled ?? globalOpts.enabled;
+    if (!enabled) this.lastFingerprints.clear();
     const log = this.opts.logger ?? globalOpts.logger;
     const collected: ContextPart[] = [];
 
@@ -89,9 +91,10 @@ export class ContextEngine {
     const texts: string[] = [];
 
     for (const part of collected) {
-      const fp = part.fingerprint ?? part.text;
+      // Equality metadata must not retain the chat/prompt plaintext indefinitely.
+      const fp = createHash('sha256').update(part.fingerprint ?? part.text).digest('hex');
       const prev = this.lastFingerprints.get(part.id);
-      const cacheHit = prev !== undefined && prev === fp;
+      const cacheHit = enabled && prev !== undefined && prev === fp;
       if (enabled) this.lastFingerprints.set(part.id, fp);
 
       const chars = part.text.length;
@@ -103,6 +106,8 @@ export class ContextEngine {
       if (cacheHit) cacheHitChars += chars;
       texts.push(part.text);
     }
+    const present = new Set(collected.map(part => part.id));
+    for (const id of this.lastFingerprints.keys()) if (!present.has(id)) this.lastFingerprints.delete(id);
 
     const totalChars = staticChars + deltaChars + ephemeralChars + volatileChars;
     const manifest: ContextManifest = {
@@ -136,13 +141,16 @@ export class ContextEngine {
 }
 
 const engines = new Map<string, ContextEngine>();
+const MAX_ENGINES = 256;
 
 export function getContextEngine(name: string, opts?: ContextEngineOptions): ContextEngine {
   let eng = engines.get(name);
   if (!eng) {
     eng = new ContextEngine(name, opts);
-    engines.set(name, eng);
   }
+  engines.delete(name);
+  engines.set(name, eng);
+  if (engines.size > MAX_ENGINES) engines.delete(engines.keys().next().value!);
   return eng;
 }
 

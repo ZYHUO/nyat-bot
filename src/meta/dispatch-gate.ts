@@ -1,3 +1,4 @@
+import type { PendingIntentRef } from './pending-intent.js';
 // ────────────────────────────────────────
 // Meta dispatch 期 timing gate —— 老 pipeline「judge=REPLY 之后、reply 之前」
 // 节奏闸在 meta+subagent 世界的等价物。
@@ -27,7 +28,7 @@
 import type { FormattedMessage, JudgeResult } from '../shared/types.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { getBotDisplayName, getBotUid } from '../bot/bot.js';
+import { getBotDisplayName, getBotIdentity, getBotUid } from '../bot/bot.js';
 import { runTimingGate } from '../pipeline/timing/gate.js';
 import {
   getChatState,
@@ -47,7 +48,17 @@ export interface DispatchGateResult {
   reason: string;
 }
 
+/** Nicknames for the pre-check; never throws when the bot is not initialised. */
+function safeBotNicknames(chatId: number): string[] {
+  try {
+    return getBotIdentity(chatId).nicknames ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function evaluateDispatchGate(opts: {
+  pendingIntent?: PendingIntentRef;
   chatId: number;
   layer: AttentionLayer;
   /** 触发来源（heart:… / meta_llm_dispatch / defer_replay:…），进 anchor/defer 条目。 */
@@ -134,9 +145,12 @@ export async function evaluateDispatchGate(opts: {
       message: trigger,
       recentMessages,
       judgeResult,
-      botUid: getBotUid() || 0,
-      botName: getBotDisplayName(),
+      botUid: getBotUid(chatId) || 0,
+      botName: getBotDisplayName(chatId),
       botPersona,
+      // Nicknames let the pre-check recognise a mention by name, not just @handle.
+      // Defensive: a missing identity must not break the gate call itself.
+      botNicknames: safeBotNicknames(chatId),
       isDirectInteraction: false,
       lastSpokeSecAgo,
       prefetchedState,
@@ -166,6 +180,7 @@ export async function evaluateDispatchGate(opts: {
             // autoDispatch 的 heartForce 判断（reason.includes('heart:')）才能再接住。
             reason: `dispatch_gate:${opts.reason}`,
             messageId: opts.messageId,
+            pendingIntent: opts.pendingIntent, messageThreadId: opts.messageThreadId,
             userId: opts.userId,
             textPreview: (opts.textPreview ?? '').slice(0, 200),
             pressure: layer === 'L1' ? 60 : 30,
@@ -217,6 +232,7 @@ export async function evaluateDispatchGate(opts: {
           // 同上：保留来源 reason 让 defer 重放能被 autoDispatch 的 heartForce 接住。
           reason: `dispatch_gate:${opts.reason}`,
           messageId: opts.messageId,
+            pendingIntent: opts.pendingIntent, messageThreadId: opts.messageThreadId,
           userId: opts.userId,
           textPreview: (opts.textPreview ?? '').slice(0, 200),
           pressure: layer === 'L1' ? 60 : 30,

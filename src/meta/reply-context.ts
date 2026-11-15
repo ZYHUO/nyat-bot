@@ -101,10 +101,14 @@ export function buildL0ContentDirection(opts: {
   /** Parent bubble is the bot's own prior message. */
   replyToIsSelf?: boolean;
   burstHint?: string;
+  /** Host-verified owner hint; never populate this from user claims or model output. */
   masterHint?: string;
 }): string {
   const burst = opts.burstHint ?? '';
   const master = opts.masterHint ?? '';
+  // The dispatch sanitizer keeps only the beginning of this direction. Keep the
+  // host-verified identity next to the speaker so long IDs/quotes cannot erase it.
+  const who = master ? `${opts.who}（本会话已核验的主人）` : opts.who;
   // 中性方向：只给事实（谁/哪条/上下文），「闲聊还是干活」完全交给 executor 判断。
   // 历史教训（2026-08-19 七夕券事故）：写死「短回…接一句」会把「快去发」这类
   // 行动指令压成闲聊——弱模型听方向不听规则，撒娇完事不办事。
@@ -126,36 +130,36 @@ export function buildL0ContentDirection(opts: {
     if (opts.replyToIsSelf) {
       if (isBarePingText(opts.textPreview)) {
         return (
-          `${opts.who} 用 reply+@ 点了你上一句 #${rt.messageId}${snipBit}。` +
+          `${who} 用 reply+@ 点了你上一句 #${rt.messageId}${snipBit}。` +
           `针对那句短评/接话，禁止空问候（在呢/怎么啦/啥事）。` +
           `回气泡 quote 用户这条 ${mid || '消息'}。${tail}`
         );
       }
       return (
-        `${opts.who} 在回复你的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}${previewBit}（内容见最近聊天）。` +
+        `${who} 在回复你的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}${previewBit}（内容见最近聊天）。` +
         `先弄清对方这一句和你上一句的关系再回；禁止臆造对方没提到的结论，禁止「没事/本喵看着」式糊弄。${tail}`
       );
     }
     if (isBarePingText(opts.textPreview)) {
       return (
-        `${opts.who} 用 reply+@ 点了你：原消息是 ${whoRt} 的 #${rt.messageId}${snipBit}。` +
+        `${who} 用 reply+@ 点了你：原消息是 ${whoRt} 的 #${rt.messageId}${snipBit}。` +
         `针对那条内容短评/接话（读懂论点再回），禁止空问候（在呢/怎么啦/啥事）。` +
         `回气泡 quote 用户这条 ${mid || '消息'}。${tail}`
       );
     }
     return (
-      `${opts.who} 在回复 ${whoRt} 的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}${previewBit}（内容见最近聊天）。` +
+      `${who} 在回复 ${whoRt} 的 #${rt.messageId}${snipBit} 的前提下发了 ${mid || '消息'}${previewBit}（内容见最近聊天）。` +
       `回应要扣住被引用的那条，别当闲聊打招呼；禁止臆造未出现在最近聊天里的结论。${tail}`
     );
   }
   if (isShortFollowUpText(opts.textPreview)) {
     return (
-      `${opts.who} 发了短接话 ${mid || ''}「${String(opts.textPreview).slice(0, 40)}」——` +
+      `${who} 发了短接话 ${mid || ''}「${String(opts.textPreview).slice(0, 40)}」——` +
       `必须接上你/对方上一两句话题继续聊，禁止当新开场（在听/怎么啦/想听什么）。${tail}`
     );
   }
   if (opts.messageId) {
-    return `回应 ${opts.who} 的消息 #${opts.messageId}（内容见最近聊天）。${tail}`;
+    return `回应 ${who} 的消息 #${opts.messageId}（内容见最近聊天）。${tail}`;
   }
-  return `回应 ${opts.who}（内容见最近聊天）。${tail}`;
+  return `回应 ${who}（内容见最近聊天）。${tail}`;
 }

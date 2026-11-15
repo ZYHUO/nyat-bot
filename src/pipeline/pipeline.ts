@@ -27,6 +27,12 @@ import { pushSleepPending } from "../tracking/sleep-queue.js";
 import { runHeartBranch } from "./heart/heart.js";
 import { classifyAddressee } from "./floor/addressee.js";
 import { recordFloorDecision } from "./floor/store.js";
+import { isSocialActShadowChat, recordLegacySocialActShadow } from "../agent/social-act.js";
+import { isKernelShadowChat } from "../agent/cognitive-kernel.js";
+import {
+  cognitiveTurnRuntime,
+  type CognitiveTurn,
+} from "../agent/cognitive-turn-runtime.js";
 
 // ── Main pipeline orchestrator ──────────────────────────────────────
 
@@ -57,7 +63,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
 
     // Skip bot's own messages — prevents self-reply loops
-    if (formatted.uid === getBotUid()) {
+    if (formatted.uid === getBotUid(job.chatId)) {
       logger.debug({ chatId: job.chatId, messageId: formatted.messageId }, "Skipping own message");
       return;
     }
@@ -81,7 +87,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     // 2. Media stage — vision / sticker / multimodal / replyTo attachments
     const tmedia = performance.now();
-    await processMedia(formatted);
+    await processMedia(formatted, job.chatId);
     if (formatted.imageFileId || formatted.sticker || formatted.audioFileId ||
         formatted.voiceFileId || formatted.documentFileId || formatted.videoFileId ||
         formatted.videoNoteFileId) {
@@ -89,8 +95,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
 
   const e = env();
-  const botUid = getBotUid();
-  const botIdentity = getBotIdentity();
+  const botUid = getBotUid(job.chatId);
+  const botIdentity = getBotIdentity(job.chatId);
 
     // 3.0 bot 消息分类(地基,shadow:只打标 + 日志,不改行为)。其他 bot
     // 的入站消息打 botClass,供后续 A 互动 / D 降噪 / 命令学习共用一个判定。
@@ -111,6 +117,30 @@ export async function processPipeline(job: ChatJob): Promise<void> {
 
     // D 降噪:ad/verify/echo 类其他 bot 消息 → 不进 digest/学习、不烧 judge
     //(但保留进 ctx)。在 bookkeeping 与 judge 前都要用,故在此作用域声明。
+    // 反广告授权：**per-chat 键存在即可**，不再要求全局 ANTIAD_ENABLED。
+    //
+    // 2026-09-22 round 3。subagent 审计定位的第二个洞：原来这里是
+    //   `ANTIAD_ENABLED === true && (chatIds.includes || redisKey)`
+    // 而 ANTIAD_ENABLED 默认 false 且 .env 里没配。于是：
+    //   · 群主在群里说"开反广告" → tryAntiAdCommand 写 Redis per-chat 键 ✓
+    //   · 但 noteInbound（唯一的数据写入方）被全局闸挡着 → 一条都不记
+    //   · renderAdPressure 的读者只看 per-chat 键 → 授权群永远渲染空 `[噪声]`
+    // **给了钥匙但门后面是空的。**
+    //
+    // per-chat 键本身就是授权动作（群主/管理员明确开的），全局 flag 再多设一道
+    // 没有任何安全收益——它只是让"按群授权"这个设计失效。
+    // 全局 flag 留着：它仍然能把**没配 per-chat 键的群**整批打开（env 灰名单那条路）。
+    const antiAdOn =
+      (((e.ANTIAD_CHAT_IDS as number[] | undefined)?.includes(job.chatId)) ?? false) ||
+      (await (async () => {
+        try {
+          const { antiAdEnabled } = await import("../nyatos/ad-pressure.js");
+          return await antiAdEnabled(job.chatId);
+        } catch {
+          return false;
+        }
+      })());
+
     const isDenoiseBot = e.BOT_DENOISE_ENABLED &&
       (formatted.botClass === "ad" || formatted.botClass === "verify" || formatted.botClass === "echo");
 
@@ -163,6 +193,18 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // 3.965 D 降噪:ad/verify/echo 类其他 bot 消息(已在 ctx,不删)→ tracking-only,
     // 不烧 judge/heart。顺序在代发回执(3.96)之后:cmd_result 先被回执认领,
     // 这里只拦广告/验证/复读。
+    // 反广告 · 行为气压：只在该群已被群主授权时记录行为样本。
+    // 记录的是计数与内容指纹，不存原文；四个信号全是行为化的（burst/echo/repeat/spread），
+    // 没有内容关键词——语料显示本生态的"广告"是行为问题不是内容问题。
+    if (antiAdOn) {
+      try {
+        const { noteInbound } = await import("../nyatos/ad-pressure.js");
+        await noteInbound(job.chatId, formatted.uid ?? 0, formatted.textContent ?? "", Math.floor(Date.now() / 1000));
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId }, "antiad noteInbound failed (non-critical)");
+      }
+    }
+
     if (isDenoiseBot) {
       logger.info(
         { chatId: job.chatId, bot: formatted.username, botClass: formatted.botClass },
@@ -329,6 +371,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
         formatted.textContent || formatted.captionContent || '',
         botIdentity.username,
         botIdentity.nicknames,
+        botUid,
       );
       if (mentioned) {
         // Phase 13.5: 关联闭环优先于新建 —— 对进行中任务的追问/催促/取消
@@ -360,7 +403,21 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // not_me → 同 ambient,但 reason 区分(duet/forwarded/bot_message);
     // to_me / to_other → 走原 judge 链(Heart LLM 看全文自己决断)。
     // 注意:to_other 不短路 —— 只是不找我,不代表不值得听(Heart 会判)。
-    if (e.FLOOR_ENABLED && job.chatId < 0 && !formatted.isBot) {
+    //
+    // 例外:**指向本 bot 的**斜杠命令永不被 floor 沉默。命令是事务性请求(签到/
+    // 图鉴/游戏要出回执),而 floor 的 ambient 只是"没点名"的启发式。生产实证:
+    // /cards 这类自有白名单命令被 floor 判 ambient 后在这里 return,根本走不到
+    // 下面的 dispatchCommand(pre-mute 拦截层),用户敲命令拿不到任何回执。
+    //
+    // 只放行"无 @ 后缀或明确 @ 本 bot"的命令(`/cards`、`/cards@nyatbot`)。带
+    // **其他 bot** @ 后缀的(`/play@AnitaBriso_bot`)继续走 floor:那是别人家的
+    // 命令,L0 判定 unknown_command 之前不该多绕规则链。L0 的 getCommandName 保证
+    // 只有白名单命令会 REPLY,其余 0ms IGNORE,故放行不引入抢话风险。
+    const rawCommandText = formatted.textContent || formatted.captionContent || "";
+    const slashMatch = rawCommandText.match(/^\s*\/(\w+)(?:@(\w+))?/);
+    const isOwnSlashCommand = Boolean(slashMatch) &&
+      (!slashMatch?.[2] || slashMatch[2].toLowerCase() === botIdentity.username.toLowerCase());
+    if (e.FLOOR_ENABLED && job.chatId < 0 && !formatted.isBot && !isOwnSlashCommand) {
       try {
         const addr = classifyAddressee(
           formatted, recentMessages, botUid,
@@ -431,6 +488,137 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
     timings["judge"] = Math.round(performance.now() - t3);
 
+    // NyatOS kernel shadow: give every Telegram turn one trigger/frame/action
+    // chain. The legacy judge and sender remain authoritative until a canary
+    // explicitly opts into a different transport.
+    let kernelTurn: CognitiveTurn | undefined;
+    let kernelActionEnvelopeId: string | undefined;
+    if (isKernelShadowChat(job.chatId, { enabled: e.COGNITIVE_KERNEL_ENABLED, chatIds: e.COGNITIVE_KERNEL_CHAT_IDS })) {
+      try {
+        const scope = { visibility: "chat" as const, chatId: job.chatId };
+        const openedTurn = cognitiveTurnRuntime.open({
+          scope,
+          kind: "telegram_message",
+          source: "telegram",
+          ...(job.cognitiveAnchorEventId ? { anchorEventId: job.cognitiveAnchorEventId } : {}),
+          correlationId: `kernel:telegram:${job.chatId}:${formatted.messageId}`,
+          dedupeKey: `kernel:telegram:${job.chatId}:${formatted.messageId}`,
+          occurredAt: formatted.timestamp,
+          metadata: {
+            messageId: formatted.messageId,
+            userId: formatted.uid,
+            hasMedia: Boolean(formatted.imageFileId || formatted.sticker || formatted.audioFileId || formatted.documentFileId),
+            addressed: Boolean(formatted.replyTo?.uid === botUid),
+          },
+        });
+        kernelTurn = openedTurn ?? undefined;
+        if (kernelTurn) {
+          const action = cognitiveTurnRuntime.propose(kernelTurn, {
+            lane: judgeResult.action === "REPLY" ? "social" : "reflection",
+            kind: judgeResult.action === "REPLY" ? "speak" : "wait",
+            payload: {
+              source: "legacy_judge",
+              action: judgeResult.action,
+              level: judgeResult.level,
+              rule: judgeResult.rule ?? null,
+              replyPath: judgeResult.replyPath ?? null,
+              triggerMessageId: formatted.messageId,
+              targetUserId: formatted.uid > 0 ? formatted.uid : null,
+            },
+            ...(judgeResult.action === "REPLY"
+              ? { prediction: { expectedEffect: "deliver a relevant social response", watchFor: ["follow_up", "reaction", "correction", "silence"] } }
+              : {}),
+            idempotencyKey: `telegram-reply:${job.chatId}:${formatted.messageId}`,
+          });
+          kernelActionEnvelopeId = action?.id;
+          if (action) {
+            const board = cognitiveTurnRuntime.arbitrate(kernelTurn, { nowSec: formatted.timestamp });
+            logger.debug(
+              { chatId: job.chatId, messageId: formatted.messageId, selected: board?.selected?.id ?? null, deferred: board?.deferredCount ?? 0, rejected: board?.rejectedCount ?? 0 },
+              "NyatOS action board shadow",
+            );
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: job.chatId, messageId: formatted.messageId }, "NyatOS kernel shadow failed (non-critical)");
+      }
+    }
+
+    // Phase 1 SocialAct shadow: adapt the existing Heart/legacy judge decision
+    // into the action contract without copying message text or changing the
+    // sender path. Meta's direct path has its own metadata observation bridge.
+    if (isSocialActShadowChat(job.chatId, {
+      enabled: e.SOCIAL_ACT_SHADOW_ENABLED,
+      chatIds: e.SOCIAL_ACT_SHADOW_CHAT_IDS,
+    })) {
+      // Shadow collection includes Redis/SQLite reads and (when the cache is
+      // cold) one Telegram membership probe. Keep it off the reply critical
+      // path: the legacy judge/sender must not wait for telemetry.
+      void (async () => {
+       try {
+        const { collectConversationField, deriveInnerStateFromConversationField } = await import("../agent/conversation-field.js");
+        const { recordCapabilitySnapshot, recordInnerState } = await import("../agent/nyatos-state.js");
+        const { buildHostCapabilitySnapshot } = await import("../agent/nyatos-contracts.js");
+        const { observeTelegramCapabilitySnapshot } = await import("../agent/capability-observer.js");
+        const conversationField = await collectConversationField({
+          chatId: job.chatId,
+          recent: recentMessages,
+          botUid,
+          ...(formatted.messageThreadId ? { threadId: formatted.messageThreadId } : {}),
+          botAddressed:
+            job.chatId > 0 ||
+            formatted.replyTo?.uid === botUid ||
+            isMentioningSelf(
+              formatted.textContent || formatted.captionContent || "",
+              botIdentity.username,
+              botIdentity.nicknames,
+              botUid,
+            ),
+          ...(job.cognitiveAnchorEventId ? { asOfEventId: job.cognitiveAnchorEventId } : {}),
+        });
+        const { projectInnerStateFromConversationField } = await import('../agent/emotion-continuity.js');
+        const projectedInner = e.EMOTION_CONTINUITY_ENABLED
+          ? projectInnerStateFromConversationField(conversationField, { causationId: job.cognitiveAnchorEventId }) : null;
+        const innerState = projectedInner?.value ?? deriveInnerStateFromConversationField(conversationField);
+        const scope = { visibility: 'chat' as const, chatId: job.chatId };
+        const capabilitySnapshot = await observeTelegramCapabilitySnapshot({
+          scope,
+          ...(formatted.messageThreadId ? { threadId: formatted.messageThreadId } : {}),
+        }) ?? buildHostCapabilitySnapshot({
+          scope,
+          observedAt: conversationField.asOf,
+          chatKind: job.chatId > 0 ? 'private' : 'group',
+          // No host probe result is not evidence of a permission. Keep every
+          // effect unknown until Telegram or a real receipt says otherwise.
+        });
+        const recorded = recordLegacySocialActShadow({
+          chatId: job.chatId,
+          message: formatted,
+          judgeResult,
+          ...(job.cognitiveAnchorEventId ? { cognitiveAnchorEventId: job.cognitiveAnchorEventId } : {}),
+          ...(job.turnContext?.obligationTargetUid ? { obligationTargetUid: job.turnContext.obligationTargetUid } : {}),
+          ...(formatted.messageThreadId ? { threadId: formatted.messageThreadId } : {}),
+          conversationField,
+          innerState,
+          capability: capabilitySnapshot,
+        });
+        if (!e.EMOTION_CONTINUITY_ENABLED) recordInnerState(innerState, {
+          scope: { visibility: 'chat', chatId: job.chatId },
+          ...(job.cognitiveAnchorEventId ? { causationId: job.cognitiveAnchorEventId } : {}),
+          occurredAt: conversationField.asOf,
+        });
+        recordCapabilitySnapshot(capabilitySnapshot, {
+          ...(job.cognitiveAnchorEventId ? { causationId: job.cognitiveAnchorEventId } : {}),
+        });
+        if (recorded) {
+          logger.debug({ chatId: job.chatId, messageId: formatted.messageId, eventId: recorded.eventId, inserted: recorded.inserted }, 'SocialAct shadow recorded');
+        }
+       } catch (err) {
+         logger.debug({ err, chatId: job.chatId, messageId: formatted.messageId }, 'SocialAct shadow failed (non-critical)');
+       }
+      })();
+    }
+
     // Core v2 Phase 1 shadow: graylist 群里，旧判之后跑 core 分层判，
     // 只记日志对比（agree/分歧），不改行为。fire-and-forget，失败静默。
     // CORE_V2_CHAT_IDS 为空 → isCoreChat 全 false → 零开销。
@@ -462,6 +650,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
       releaseHeldChatLock,
       sleepBypass,
       burstHint,
+      kernelTurn,
+      kernelActionEnvelopeId,
     });
     if (postResult.completed) return;
   } finally {

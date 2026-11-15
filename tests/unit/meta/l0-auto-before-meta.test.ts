@@ -11,6 +11,13 @@ const tryClaimQuote = vi.fn(async () => true);
 const tryMarkCodeActActive = vi.fn(async () => true);
 const allQuotesAnswered = vi.fn(async () => false);
 const isMetaSubagentChat = vi.fn(() => true);
+const suppressHeartDispatch = vi.fn(async (_chatId: number) => false);
+const markMessageAnswered = vi.fn(async (_chatId: number, _messageId: number) => undefined);
+// Deliberately synthetic identity constants test scheduling, not SQLite routing.
+// Real mapping rejection and acceptance are exercised by input-scope.test.
+vi.mock('../../../src/meta/input-scope.js', () => ({ inspectMetaAttention: (value: unknown) => ({ status: 'valid', value }),
+  inspectMetaChatScope: (value: number) => ({ status: 'valid', value }), holdMetaScopeInput: async () => true,
+  inspectMetaTaskScope: (value: unknown) => ({ status: 'valid', value }) }));
 
 vi.mock('../../../src/ai/fallback.js', () => ({
   callWithFallback: (...args: unknown[]) => callWithFallback(...args),
@@ -28,16 +35,27 @@ vi.mock('../../../src/subagent/task-store.js', () => ({
 vi.mock('../../../src/meta/answered.js', () => ({
   allQuotesAnswered: (...args: unknown[]) => allQuotesAnswered(...args),
   isMessageAnswered: vi.fn(async () => false),
-  markMessageAnswered: vi.fn(async () => undefined),
+  markMessageAnswered: (chatId: number, messageId: number) => markMessageAnswered(chatId, messageId),
 }));
 vi.mock('../../../src/meta/flags.js', () => ({
   isMetaSubagentChat: (...args: unknown[]) => isMetaSubagentChat(...args),
 }));
 vi.mock('../../../src/meta/heart-refractory.js', () => ({
-  shouldSuppressMetaHeartDispatch: vi.fn(async () => false),
+  shouldSuppressMetaHeartDispatch: (chatId: number) => suppressHeartDispatch(chatId),
 }));
 vi.mock('../../../src/bot/bot.js', () => ({
-  getBotUid: () => 999001,
+  getBotUid: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 2 ** 52 + 11 : 999001,
+}));
+vi.mock('../../../src/platform/owner-context.js', () => ({
+  isConversationOwner: (chatId: number, uid: number) => chatId === -(2 ** 52 + 10)
+    ? uid === 2 ** 52 + 12 : uid === 6251541967,
+}));
+vi.mock('../../../src/shared/master-identity.js', () => ({
+  buildMasterIdentityBlock: () => 'synthetic owner identity', masterShortHint: () => 'synthetic owner',
+}));
+vi.mock('../../../src/context-engine/index.js', () => ({
+  getContextEngine: () => ({ assemble: async () => ({ prompt: 'synthetic scoped context', manifest: { cacheHitRatio: 0 } }) }),
+  staticText: vi.fn(), ephemeralText: vi.fn(), volatileText: vi.fn(), deltaText: vi.fn(),
 }));
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
@@ -45,6 +63,10 @@ vi.mock('../../../src/env.js', () => ({
     META_USAGE: 'judge',
     CODEACT_TIMEOUT_MS: 5000,
     CODEACT_BANNED_WORDS: [],
+    META_SUBAGENT_ENABLED: true,
+    CODEACT_ISOLATION_ENABLED: true,
+    META_SUBAGENT_CHAT_IDS: [],
+    META_ACTIVATED_AT_SEC: 1,
   }),
 }));
 vi.mock('../../../src/db/redis.js', () => ({
@@ -72,6 +94,45 @@ describe('L0 autoDispatch before Meta LLM', () => {
     tryClaimQuote.mockResolvedValue(true);
     tryMarkCodeActActive.mockClear();
     tryMarkCodeActActive.mockResolvedValue(true);
+    suppressHeartDispatch.mockReset().mockResolvedValue(false);
+    markMessageAnswered.mockClear();
+  });
+
+  it.each(['L0', 'L1'] as const)('recent-reply suppression applies only to passive Heart, not addressed %s', async layer => {
+    suppressHeartDispatch.mockResolvedValue(true);
+    const chatId = -(2 ** 52 + 10), messageId = 2 ** 52 + 13;
+    await runMetaSession([{
+      id: 'qq-heart-priority', chatId, layer, pressure: layer === 'L0' ? 100 : 70,
+      reason: 'heart:reply', messageId, userId: 2 ** 52 + 12,
+      textPreview: '这是新补充的问题', createdAt: Date.now(),
+    }], []);
+    if (layer === 'L0') {
+      expect(callWithFallback).not.toHaveBeenCalled();
+      expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+      expect(markMessageAnswered).not.toHaveBeenCalled();
+    } else {
+      expect(enqueueCodeActJob).not.toHaveBeenCalled();
+      expect(markMessageAnswered).toHaveBeenCalledWith(chatId, messageId);
+    }
+  });
+
+  it.each([true, false])('QQ L0 reply ownership uses scoped self instead of Telegram self (%s)', async ownReply => {
+    const result = await runMetaSession([{
+      id: 'qq-a1', chatId: -(2 ** 52 + 10), layer: 'L0', pressure: 100,
+      reason: 'direct:mention', messageId: 2 ** 52 + 13, userId: 2 ** 52 + 12,
+      textPreview: '帮我看看', createdAt: Date.now(), payload: { replyTo: {
+        messageId: 2 ** 52 + 14, uid: ownReply ? 2 ** 52 + 11 : 999001,
+        fullName: 'speaker', textSnippet: 'previous message',
+      } },
+    }], []);
+    expect(result.digest).toBe('l0_auto_only');
+    expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+    const task = enqueueCodeActJob.mock.calls[0]![0] as { contentDirection: string; chatId: number };
+    expect(task.chatId).toBe(-(2 ** 52 + 10));
+    expect(task.contentDirection).toContain('本会话已核验的主人');
+    expect(task.contentDirection).not.toContain('Zh_Taiwan');
+    if (ownReply) expect(task.contentDirection).toContain(`回复你的 #${2 ** 52 + 14}`);
+    else expect(task.contentDirection).not.toContain(`回复你的 #${2 ** 52 + 14}`);
   });
 
   it('dispatches L0 with replyTo-self direction and skips Meta LLM', async () => {

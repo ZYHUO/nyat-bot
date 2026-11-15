@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+const { isolatedRunner } = vi.hoisted(() => ({ isolatedRunner: vi.fn() }));
+vi.mock('../../../src/sandbox/codeact/runner.js', () => ({ executeIsolatedCode: isolatedRunner }));
 
 // 2026-08-21 goal_2 事故回归：web.search 明明返回 1247 字，模型没 return →
 // 只看到 'ok' → 向主人报「工具只回 ok，办不到」。机制修复：host 给查询类工具
@@ -62,7 +64,8 @@ vi.mock('../../../src/tracking/person-identity.js', () => ({
   getPersonIdentity: vi.fn(() => null),
   buildCrossGroupInjection: vi.fn(() => ''),
 }));
-vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined) }));
+vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined),
+  answeredTimestamps: vi.fn(async () => [] as number[]) }));
 vi.mock('../../../src/meta/attention.js', () => ({
   getAttentionAccumulator: () => ({ ingestAsync: vi.fn(async () => undefined) }),
 }));
@@ -80,10 +83,17 @@ async function makeHostAndRunner() {
 describe('unviewed tool results (「只回 ok」机制修复)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    isolatedRunner.mockReset().mockResolvedValue({ value: undefined, logs: [] });
     envBase.CODEACT_WEB_SEARCH_ENABLED = true;
   });
 
   it('调了 web.search 但没 return → output 捡回结果摘要并提示下次 return', async () => {
+    // Executor postprocessing uses a fake RPC transport; real process execution
+    // is independently exercised by scripts/sandbox/verify-isolation.mts.
+    isolatedRunner.mockImplementationOnce(async (_code, capabilities) => {
+      await capabilities.get('web.search')('DeepSeek 价格调整 最新进展');
+      return { value: undefined, logs: [] };
+    });
     const { run } = await makeHostAndRunner();
     const r = await run(`await web.search('DeepSeek 价格调整 最新进展');`);
     expect(r.ok).toBe(true);
@@ -93,6 +103,9 @@ describe('unviewed tool results (「只回 ok」机制修复)', () => {
   }, 20_000);
 
   it('return 了搜索结果 → 正常输出，不附提示', async () => {
+    isolatedRunner.mockImplementationOnce(async (_code, capabilities) => ({
+      value: await capabilities.get('web.search')('DeepSeek 价格'), logs: [],
+    }));
     const { run } = await makeHostAndRunner();
     const r = await run(`return await web.search('DeepSeek 价格');`);
     expect(r.ok).toBe(true);
@@ -106,4 +119,10 @@ describe('unviewed tool results (「只回 ok」机制修复)', () => {
     expect(r.ok).toBe(true);
     expect(r.output).toBe('ok');
   }, 20_000);
+
+  it('child console logs are returned to the model through the bounded RPC result', async () => {
+    isolatedRunner.mockResolvedValueOnce({ value: undefined, logs: ['observed tool result'] });
+    const { run } = await makeHostAndRunner();
+    expect((await run('console.log("observed tool result");')).output).toContain('observed tool result');
+  });
 });

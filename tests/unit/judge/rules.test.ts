@@ -4,11 +4,11 @@ import type { RuleContext } from "../../../src/pipeline/judge/rules.js";
 import type { FormattedMessage } from "../../../src/shared/types.js";
 
 vi.mock("../../../src/env.js", () => {
+  // 2026-09-21：JUDGE_PROACTIVE_RATE / MIN_INTERVAL_SEC / MIN_RECENT_MSGS 三个
+  // 参数已删除（随机主动插话机制整个删掉了，见 rules.ts 的"全部删除"注释）。
+  // 留着 ENABLED —— 它仍门控 lastBotReplyAt / recentHumanMsgCount 的预计算。
   const envValues: Record<string, unknown> = {
     JUDGE_PROACTIVE_ENABLED: false,
-    JUDGE_PROACTIVE_RATE: 0.05,
-    JUDGE_PROACTIVE_MIN_INTERVAL_SEC: 600,
-    JUDGE_PROACTIVE_MIN_RECENT_MSGS: 3,
   };
   return { env: () => envValues, _testEnvValues: envValues };
 });

@@ -5,10 +5,12 @@
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { Agent } from 'undici';
-import type { AILabel, AICallResult, ContentPart } from './types.js';
+import type { AILabel, AICallResult, ContentPart, AIProviderOptions } from './types.js';
 import { AIError } from '../shared/errors.js';
+import { acquireConcurrency, AI_MAX_CONCURRENCY_PER_ACCOUNT } from './concurrency.js';
 import { mergeAbortSignals, isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
+import { assertBudgetAlive, budgetedProviderFetch, strictBudgetError, strictMaxTokens } from './request-budget.js';
 
 // 仅供**显式标记 insecureTLS 的供应商**(如自签证书的自建端点)使用的 dispatcher:
 // 跳过证书校验。绝不设为全局 dispatcher —— 其它端点(Claude/StepFun 等)照常
@@ -41,6 +43,8 @@ interface ClaudeMessage {
 interface ClaudeResponse {
   content: Array<{ type: string; text: string }>;
   model: string;
+  /** 'end_turn' | 'max_tokens' | … —— 空正文时区分"截断"和"模型没话说"就靠它。 */
+  stop_reason?: string;
   usage: {
     input_tokens: number;
     output_tokens: number;
@@ -50,26 +54,198 @@ interface ClaudeResponse {
   error?: { type: string; message: string };
 }
 
+/**
+ * reasoning 模型的 max_tokens 下限。
+ *
+ * 2026-09-21 加。起因是一次读数：`claude: 空正文` 诊断上线后 50 分钟内出现 193 次，
+ * 全部是 `label: stepfun` + `stop_reason: max_tokens` + `blocks: ['thinking']`，
+ * 而 maxTokens 的值是 **24 / 48 / 1200 / 4000 / 800 / 400 / 120 / 60**。
+ *
+ * 24 是哪来的：`src/cron/topic-scan.ts` 让模型"用 4-12 个汉字给当前主话题起个短标签"，
+ * 于是写了 `maxTokens: 24`。听上去很合理——输出就那么点长。但 step-3.7-flash 是
+ * reasoning 模型，思维链先烧 token：24 个 token 连一句"让我想想"都不够，
+ * content 自然是空的。topic-scan 因此**静默地什么都没产出**，每 4 分钟 × 21 个群。
+ *
+ * 上一轮加的"截断就翻倍重试"在这里也不够：24 → 48 还是不够（诊断里 48 出现 73 次）。
+ *
+ * 所以改成**下限**而不是倍数：已知会截断的 label，max_tokens 一律抬到这个下限。
+ * 1200 是实测值——step-3.7-flash 在短 prompt 上 reasoning + 正文合计约 840 token。
+ *
+ * 进程内记忆（不落盘）：重启后第一次截断会重新教会它，而截断本身就会打 warn，
+ * 所以"学不会"是不可能的。不落盘是为了不给每条 LLM 调用加一次 Redis 读。
+ */
+// round 72：1200 → 4000。
+//
+// 上面写着"1200 是实测值——step-3.7-flash 在短 prompt 上 reasoning + 正文
+// 合计约 840 token"。那句当时对。但 prompt 变长之后，生产实测（09-23）：
+//   maxTokens=1200  outputTokens=1200   ← 1200 不够
+//   maxTokens=2400  outputTokens=2400   ← 2400 也不够
+//   maxTokens=8192  outputTokens=8192   ← 长 prompt 上连 8192 都被吃光
+//
+// 而且这个下限是**反应式**的（进程内记忆，label 要先截断一次才学会），
+// 所以每次重启都要重新交一遍学费。4000 让首轮就不再触顶。
+//
+// 为什么改下限而不是改那 20+ 个调用点：它们多数是故意的
+//（draft-selector 20 = "挑一个"、jargon-explainer 200 = "解释一个词"），
+// 逐个改既改不全也会把故意改大。下限是一处覆盖全部，且只对撞过顶的 label 生效。
+const REASONING_TOKEN_FLOOR = 4000;
+
+
+/** 观测到过"思维链吃光额度"的 label —— 之后给它下限而不是调用方写的小值。 */
+const truncatingLabels = new Set<string>();
+
+/** 测试用：清空记忆。 */
+export function __resetTruncatingLabelsForTest(): void {
+  truncatingLabels.clear();
+}
+
+/**
+ * 这个 label 是不是 reasoning 模型（思维链计入 completion）。
+ *
+ * 为什么要一个判断而不只靠"观测到截断"：下限原本是**反应式**的——撞了才学。
+ * 但 round 12 把 topic-scan 的 24 修掉之后，**唯一在触发的那个也不触发了**，
+ * 下限随之失效，于是 post-task 的 `maxTokens: 200` 又开始被吃光
+ * （24h 内 1480 次 `Empty response`）。
+ * 反应式下限的问题是：它依赖"有别人在撞"，而别人都被修好那天它就瞎了。
+ *
+ * StepFun 全系（step-3.5/3.7-flash、step-5-preview）都是 reasoning，
+ * 而 judge/summarize/reflection 的默认 label 正是它们。按模型名认，
+ * 不硬编码 label 名单——label 会增删，模型名不会。
+ */
+/**
+ * 解析"这次调用该传什么 temperature"。三态：
+ *   · label.temperature 是数字     → 用它（per-label 强制覆盖，调用方显式值也让位）
+ *   · label.temperature === 'omit' → 返回 undefined，调用方别把 temperature 放进 body
+ *   · 否则                        → opts.temperature
+ *
+ * round 12（新 goal）加。dshkimi 传 1 会引入不确定性（同 judge prompt 6 次翻 1 次），
+ * 不传反而 6/6 一致——详见 AILabel.temperature 的注释。
+ */
+function resolveTemperature(
+  labelTemp: number | 'omit' | undefined,
+  optsTemp: number | undefined,
+): number | undefined {
+  if (labelTemp === 'omit') return undefined;
+  return labelTemp ?? optsTemp;
+}
+
+function isReasoningModel(label: AILabel): boolean {
+  return /^step-/i.test(label.model);
+}
+
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  opts: AIProviderOptions,
 ): Promise<AICallResult> {
+  // round 75：一行排查用的观测点（debug 级，只在 LOG_LEVEL=debug 时出）。
+  //
+  // 起因是 round 73/74 一个排不光的现象：`claude: 空正文` warn 打了
+  // （证明确实进了 callClaudeOnce），但紧接着的
+  // `思维链吃光额度导致空正文 → 抬到下限重试一次` 一条都没有。
+  // round 74 逐项验证十二环全对（进程唯一/pid 匹配/dist floor=4e3/
+  // 重试分支在/truncated 回传在/label fmt=claude/isReasoning=true/
+  // 同文件 info 通路正常/无日志丢失/单测通过），结论仍矛盾。
+  //
+  // 静态推演到头，改成加观测点再观察：这一行能回答
+  // "callClaude 到底进没进、进的时候 asked 是多少"。
+  logger.debug({ label: label.name, model: label.model, asked: opts.maxTokens ?? null }, 'callClaude: enter');
+  const asked = opts.maxTokens ?? 4096;
+  // reasoning 模型一律托底下限：**不是**只对撞过的。
+  // 上面 isReasoningModel 的注释解释了为什么反应式不够。
+  const needsFloor = !opts.beforeProviderRequest && (isReasoningModel(label) || truncatingLabels.has(label.name));
+  const budget = needsFloor ? Math.max(asked, REASONING_TOKEN_FLOOR) : asked;
+  const first = await callClaudeOnce(label, messages, { ...opts, maxTokens: budget });
+
+  // 截断重试：`stop_reason === 'max_tokens'` 且正文为空 = 思维链把额度吃光，
+  // 模型还没轮到输出就结束了。这在 StepFun reasoning 模型上是**最高频的失败模式**——
+  // 日志里 `Empty response` 2882 次（stepfunthink 1481 / stepfunvision 685 /
+  // stepfun 583 / stepfunjudge 133），是心流 "All labels exhausted"（占心流失败
+  // 64%）的主要来源。旧行为把它当普通空响应交给 fallback 链，而 fallback 往往是
+  // 同一个账号的另一个 label，撞的是同一个限额，于是一次性全灭。
+  //
+  // 只在这一种形状下重试（截断且空），加一倍额度、最多一次。别的情况不重试——
+  // 内容审查/超时/限流重试没有意义，只会把延迟翻倍。
+  if (first.truncated && !opts.beforeProviderRequest) {
+    // 记住这个 label 会截断——之后它的每次调用都直接拿下限，不再先撞一次。
+    const firstTime = !truncatingLabels.has(label.name);
+    truncatingLabels.add(label.name);
+    // 重试额度用**下限**而不是 2×：调用方写 24 时 2× 只有 48，照样不够
+    // （诊断里 48 出现 73 次，就是重试也失败了）。下限是实测够用的值。
+    const retryBudget = Math.min(Math.max(budget * 2, REASONING_TOKEN_FLOOR), 32_000);
+    // round 75：**截断重试这条固定走 warn**（原来是 firstTime ? info : debug）。
+    //
+    // 改成固定的理由是 round 73/74 那个排不光的矛盾：warn 打了而重试日志
+    // 一条没有。若它走的是 debug，而 LOG_LEVEL=info，那我**永远看不到**——
+    //  observed 0 条不能区分"没走到"和"走了但被过滤"。
+    // 这是个观测设计错误：把待诊断的事件放在会被过滤的级别上。
+    //
+    // 用 warn 而不是 info：截断是异常路径，且频率已经被下限压住
+    //（round 72 后 37.8 → 12.2 次/h），warn 不会刷屏。
+    // 原注释的顾虑（50 分钟 193 次）是 1200 下限时代的事，现在不成立。
+    const log = logger.warn.bind(logger);
+    log(
+      { label: label.name, model: label.model, budget, retryBudget, floor: REASONING_TOKEN_FLOOR, firstTime },
+      'claude: 思维链吃光额度导致空正文 → 抬到下限重试一次',
+    );
+    try {
+      const second = await callClaudeOnce(label, messages, { ...opts, maxTokens: retryBudget });
+      if (!second.truncated) return second.result;
+    } catch {
+      // 重试失败就交回第一次的错误形状，别吞。
+      // 只区分"调用方打断"（要上抛给 actor 重规划）和"重试也挂了"（用第一次的结果）。
+      throwIfExternallyAborted(label, opts.signal);
+    }
+  }
+  return first.result;
+}
+
+/** callClaude 的一次尝试。`truncated` = stop_reason 是 max_tokens 且正文为空。 */
+async function callClaudeOnce(
+  label: AILabel,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  opts: AIProviderOptions,
+): Promise<{ result: AICallResult; truncated: boolean }> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
   if (!apiKey) throw new AIError('No API key configured', label.name, label.model, 'AI_NO_KEY');
 
   // Extract system prompt — wrap in array with cache_control to enable prompt caching
   const systemMsg = messages.find(m => m.role === 'system');
-  const chatMessages: ClaudeMessage[] = messages
+  let chatMessages: ClaudeMessage[] = messages
     .filter(m => m.role !== 'system')
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }));
+
+  // ── jsonMode：Anthropic 没有 response_format，用 assistant 预填实现 ──────
+  //
+  // 2026-09-21 加。起因是一次读数：`dreaming output unparseable — skipped`
+  // **805 次，而 `dreaming consolidated` 一次都没出现过**（0% 产出）；
+  // `distill output unparseable` 473 次 vs `episode distilled` 73 次（13.4%）。
+  //
+  // 病因：这两个 usage（judge / summarize）默认 `jsonMode: true`，而它们的 label
+  // 是 `stepfun`，`FORMAT=claude`。**`jsonMode` 此前只对裸 fetch 的 OpenAI 路径
+  // 生效**（那里设 `response_format`）；claude 分支根本不看这个参数——于是模型
+  // 收到一个"请输出 JSON"的 prompt，却没有任何机制逼它，回中文散文，
+  // 解析器 `JSON.parse` 失败，整次调用被丢弃。
+  //
+  // 这和 round 3 修的 ASI 假度量是同一个病根（那次靠换一个 OpenAI 格式的 label
+  // 绕开）；这次在 provider 层修，所有 claude 格式 label 的 jsonMode 调用一起受益。
+  //
+  // 做法是 Anthropic 官方推荐的 prefill：末尾追加一条 assistant 消息，内容只有
+  // "{"。模型只能接着这个括号往下写，输出必然是 JSON 的剩余部分。
+  // 拿回来的正文要**把 "{" 拼回去**，否则调用方拿到的是 "{...}" 少了头。
+  let jsonPrefill = false;
+  if (opts.jsonMode && chatMessages.length > 0 && chatMessages[chatMessages.length - 1]!.role === 'user') {
+    chatMessages = [...chatMessages, { role: 'assistant', content: '{' }];
+    jsonPrefill = true;
+  }
 
   const body: Record<string, unknown> = {
     model: label.model,
     messages: chatMessages,
     max_tokens: opts.maxTokens ?? 4096,
   };
+
 
   // Wrap system prompt as a content block with cache_control. The 5-layer
   // system prompt (persona + guardrails + schema + tone + task) is reused
@@ -85,10 +261,10 @@ async function callClaude(
     ];
   }
 
-  const claudeTemp = label.temperature ?? opts.temperature;
+  const claudeTemp = resolveTemperature(label.temperature, opts.temperature);
   if (claudeTemp !== undefined) body['temperature'] = claudeTemp;
 
-  const res = await fetch(`${label.endpoint}/messages`, {
+  const res = await budgetedProviderFetch(label, opts, `${label.endpoint}/messages`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -133,8 +309,30 @@ async function callClaude(
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
     .trim();
+  // 预填的 "{" 要拼回去——调用方的解析器期待一个完整 JSON 对象。
+  const finalText = jsonPrefill && text && !text.startsWith('{') ? `{${text}` : text;
 
+  // 空正文时把**为什么空**记下来。此前这里只有一个结论性的注释，没有任何观测——
+  // 2882 次 Empty response 到底是"思维链吃光额度"还是"模型真的不回话"，
+  // 从日志里看不出来。现在能看出来，下一次就不用猜。
   const usage = data.usage;
+  if (!finalText) {
+    logger.warn(
+      {
+        label: label.name,
+        model: label.model,
+        stopReason: data.stop_reason,
+        blocks: data.content.map((c) => c.type),
+        outputTokens: usage.output_tokens,
+        maxTokens: body['max_tokens'],
+      },
+      data.stop_reason === 'max_tokens'
+        ? 'claude: 空正文 —— 思维链吃光 max_tokens（截断）'
+        : 'claude: 空正文 —— 模型未产出 text block',
+    );
+  }
+  const truncated = !finalText && data.stop_reason === 'max_tokens';
+
   const cacheRead = usage.cache_read_input_tokens ?? 0;
   const cacheWrite = usage.cache_creation_input_tokens ?? 0;
   if (cacheRead > 0 || cacheWrite > 0) {
@@ -145,16 +343,19 @@ async function callClaude(
   }
 
   return {
-    content: text,
-    tokenUsage: {
-      prompt: usage.input_tokens + cacheRead + cacheWrite,
-      completion: usage.output_tokens,
-      total: usage.input_tokens + cacheRead + cacheWrite + usage.output_tokens,
-      cached: cacheRead,
+    result: {
+      content: finalText,
+      tokenUsage: {
+        prompt: usage.input_tokens + cacheRead + cacheWrite,
+        completion: usage.output_tokens,
+        total: usage.input_tokens + cacheRead + cacheWrite + usage.output_tokens,
+        cached: cacheRead,
+      },
+      model: label.model,
+      label: label.name,
+      latencyMs,
     },
-    model: label.model,
-    label: label.name,
-    latencyMs,
+    truncated,
   };
 }
 
@@ -163,7 +364,9 @@ async function callClaude(
 /** Check if any message carries non-text media (image/audio) — forces the raw fetch path */
 function hasMediaContent(messages: Array<{ content: string | ContentPart[] }>): boolean {
   return messages.some(
-    m => Array.isArray(m.content) && m.content.some(p => p.type === 'image' || p.type === 'audio'),
+    m =>
+      Array.isArray(m.content) &&
+      m.content.some(p => p.type === 'image' || p.type === 'audio' || p.type === 'video_url'),
   );
 }
 
@@ -173,9 +376,29 @@ function serializeContent(content: string | ContentPart[]): string | Array<Recor
   return content.map(p => {
     if (p.type === 'text') return { type: 'text', text: p.text };
     if (p.type === 'audio') return { type: 'input_audio', input_audio: { data: p.audio, format: p.format } };
-    // detail 默认 high:stepfun step-3.7-flash 识图必须带 detail=high(否则返回空);
-    // OpenAI 系(sub2gpt54mini 等)也兼容 detail 字段,无副作用。
-    return { type: 'image_url', image_url: { url: p.image, detail: p.detail ?? 'high' } };
+    // 视频：OpenAI 兼容口的 video_url part（2026-09-21，step-5-preview 实测可用）。
+    if (p.type === 'video_url') return { type: 'video_url', video_url: { url: p.video_url.url } };
+    // 图片必须是**最后一条显式分支**，不是兜底。
+    //
+    // 2026-09-21 改。旧写法把 image 当成 `return` 兜底：任何没被前面分支命中的
+    // part 都会变成 `{type:'image_url', image_url:{url: undefined}}`。本会话已经
+    // 吃过一次这个形状的亏——claude 分支把图片/音频/视频一律映射成空字符串，
+    // 模型只收到文字，于是回"我没看到图片呀"，而 prompt token 数还对得上。
+    //
+    // 兜底的问题是**静默**：现在四种 part 都显式处理，看起来没问题；但只要有人
+    // 给 ContentPart 加第五种（比如 document / sticker），它就会静默降级成
+    // image_url 且 url 是 undefined，上游报一个看不懂的 400，或者更糟——当成
+    // 空内容发出去。所以这里用 `never` 收口：加新 part 而没改这个函数，
+    // **typecheck 直接红**，逼你到这里来做决定，而不是留到线上。
+    if (p.type === 'image') {
+      // detail 默认 high:stepfun step-3.7-flash 识图必须带 detail=high(否则返回空);
+      // OpenAI 系(sub2gpt54mini 等)也兼容 detail 字段,无副作用。
+      return { type: 'image_url', image_url: { url: p.image, detail: p.detail ?? 'high' } };
+    }
+    // 穷尽性检查：p 在此处应是 never。若 ContentPart 新增类型而此处未分支，
+    // 这行会因 `Type 'X' is not assignable to type 'never'` 而编译失败。
+    const _exhaustive: never = p;
+    throw new Error(`serializeContent: 未处理的 content part 类型 ${JSON.stringify(_exhaustive)}`);
   });
 }
 
@@ -193,7 +416,7 @@ function sanitizeErrText(raw: string): string {
 async function callOpenAIRaw(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; stream?: boolean; signal?: AbortSignal; jsonMode?: boolean },
+  opts: AIProviderOptions & { stream?: boolean },
 ): Promise<AICallResult> {
   const start = performance.now();
   const apiKey = label.apiKeys[0];
@@ -207,7 +430,7 @@ async function callOpenAIRaw(
     messages: messages.map(m => ({ role: m.role, content: serializeContent(m.content) })),
   };
   if (opts.maxTokens != null) body['max_tokens'] = opts.maxTokens;
-  const rawTemp = label.temperature ?? opts.temperature;
+  const rawTemp = resolveTemperature(label.temperature, opts.temperature);
   if (rawTemp != null) body['temperature'] = rawTemp;
   if (opts.stream) body['stream'] = true;
   if (label.reasoningEffort) body['reasoning_effort'] = label.reasoningEffort;
@@ -224,7 +447,7 @@ async function callOpenAIRaw(
     if (hasJson) body['response_format'] = { type: 'json_object' };
   }
 
-  const res = await fetch(chatUrl, {
+  const res = await budgetedProviderFetch(label, opts, chatUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
     body: JSON.stringify(body),
@@ -405,7 +628,27 @@ function stripThinkingBlocks(s: string): string {
 export async function callModel(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
-  opts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal; jsonMode?: boolean } = {},
+  opts: AIProviderOptions = {},
+): Promise<AICallResult> {
+  if (opts.beforeProviderRequest) {
+    assertBudgetAlive(opts.signal);
+    opts = { ...opts, maxTokens: strictMaxTokens(opts.maxTokens) };
+  }
+  // 客户端并发闸：别把 provider 的限额撞爆（见 concurrency.ts 的实测数据）。
+  // 按 (endpoint, apiKey) 分组——同一账号共享额度，不同账号各算各的。
+  const cKey = `${label.endpoint}|${label.apiKeys[0] ?? ''}`;
+  const release = await acquireConcurrency(cKey, AI_MAX_CONCURRENCY_PER_ACCOUNT);
+  try {
+    return await callModelInner(label, messages, opts);
+  } finally {
+    release();
+  }
+}
+
+async function callModelInner(
+  label: AILabel,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>,
+  opts: AIProviderOptions = {},
 ): Promise<AICallResult> {
   // MaiBot 借鉴:纯空白片段会让部分供应商返回 400/422(格式错)。
   // 文本消息空白 → 整条丢弃;内容数组里空白 text part → 滤掉该 part,
@@ -426,7 +669,19 @@ export async function callModel(
       return keep;
     });
 
-  if (label.apiFormat === 'claude') {
+  // 带媒体（图片/音频/视频）时**不走 claude 分支**，哪怕 label 声明了 FORMAT=claude。
+  //
+  // 2026-09-21 发现的静默 bug：下面那个 claude 分支把 content parts 映射成
+  // `p.type === 'text' ? p.text : ''` —— 图片、音频、视频**全被换成空字符串**。
+  // 调用方以为发了图，模型只收到文字，于是回"我没看到图片/视频呀"，
+  // 而 prompt token 数也对得上（只有文字那部分）。没有任何报错。
+  //
+  // 而 StepFun 的 /step_plan/v1 同时提供 /messages（Anthropic 格式）和
+  // /chat/completions（OpenAI 兼容），后者**收 video_url**（实测 step-5-preview
+  // 可以；Anthropic 原生 video block 在那个端点上回 400 input_invalid）。
+  // 所以带媒体就统一走 OpenAI 兼容的裸路径，让 serializeContent 去映射。
+  const carriesMedia = hasMediaContent(messages);
+  if (label.apiFormat === 'claude' && !carriesMedia) {
     const textMessages = messages.map(m => ({
       role: m.role,
       content: typeof m.content === 'string' ? m.content : m.content.map(p => p.type === 'text' ? p.text : '').join(''),
@@ -434,6 +689,7 @@ export async function callModel(
     try {
       return await callClaude(label, textMessages, opts);
     } catch (err) {
+      const denied = strictBudgetError(err); if (denied) throw denied;
       throwIfExternallyAborted(label, opts.signal);
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof AIError) throw err;
@@ -471,6 +727,8 @@ export async function callModel(
     baseURL: label.endpoint,
     apiKey,
     compatibility: 'compatible',
+    ...(opts.beforeProviderRequest ? { fetch: (input: string | URL | Request, init?: RequestInit) =>
+      budgetedProviderFetch(label, opts, input, init ?? {}) } : {}),
   });
 
   try {
@@ -478,8 +736,11 @@ export async function callModel(
       model: provider(label.model),
       messages: messages as Parameters<typeof generateText>[0]['messages'],
       maxTokens: opts.maxTokens,
-      temperature: label.temperature ?? opts.temperature,
+      // round 12：omit 时整个字段都不给（AI SDK 的 generateText 对 undefined
+      // 就是不传该字段，实测 dshkimi 这条路走得通）。
+      temperature: resolveTemperature(label.temperature, opts.temperature),
       abortSignal: mergeAbortSignals(opts.timeout, opts.signal),
+      ...(opts.beforeProviderRequest ? { maxRetries: 0 } : {}),
     });
 
     const latencyMs = Math.round(performance.now() - start);
@@ -506,6 +767,7 @@ export async function callModel(
       latencyMs,
     };
   } catch (err) {
+    const denied = strictBudgetError(err); if (denied) throw denied;
     const latencyMs = Math.round(performance.now() - start);
     const message = err instanceof Error ? err.message : String(err);
 

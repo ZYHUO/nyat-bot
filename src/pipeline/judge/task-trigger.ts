@@ -9,7 +9,7 @@
 // ────────────────────────────────────────
 import { Queue } from 'bullmq';
 import { getRedis } from '../../db/redis.js';
-import { createTask, listActiveTasks, cancelTask, appendLedger, type TaskRow } from '../../agent/task-store.js';
+import { createTask, getTask, researchJobId, listActiveTasks, cancelTask, appendLedger, type TaskRow } from '../../agent/task-store.js';
 import { TASK_QUEUE_NAME } from '../../queue/task-worker.js';
 import type { TaskJobData } from '../../queue/task-worker.js';
 import { sendMessage } from '../../bot/sender/telegram.js';
@@ -157,7 +157,9 @@ export async function tryCreateResearchTask(
 
   try {
     const taskId = createTask({ ownerUid: uid, chatId, goal });
-    await getTaskQueue().add('task_execute', { type: 'task_execute', taskId, chatId, ownerUid: uid });
+    const task = getTask(taskId)!;
+    await getTaskQueue().add('task_execute', { type: 'task_execute', taskId, chatId, ownerUid: uid, wakeGeneration: task.wake_generation },
+      { jobId: researchJobId(task), removeOnComplete: true, removeOnFail: true });
     await sendMessage(chatId, `🔍 我去查「${goal}」,查到就回来告诉你。`);
     logger.info({ taskId, chatId, uid, goal }, 'research task created');
     return true;

@@ -124,7 +124,9 @@ impl Engine {
         if engine.msg_index.size() == 0 {
             engine.rebuild_msg_index()?;
         }
-        engine.replay_wal(&replay)?;
+        if engine.replay_wal(&replay)? {
+            engine.rebuild_recovered_chat_ownership()?;
+        }
         engine.warm_chat_rings()?;
         if opts.verify_on_open {
             engine.verify()?;
@@ -292,14 +294,61 @@ impl Engine {
         Ok(lsn)
     }
 
-    fn replay_wal(&mut self, records: &[crate::wal::WalRecord]) -> Result<()> {
+    fn replay_wal(&mut self, records: &[crate::wal::WalRecord]) -> Result<bool> {
+        let mut changed_chats = false;
         for record in records {
             if record.lsn < self.checkpoint_lsn {
                 continue;
             }
             self.apply_wal(record.ty, &record.payload, record.lsn)?;
+            if matches!(record.ty, WalType::InsertTuple | WalType::LinkChatPage | WalType::TrimChat) {
+                changed_chats = true;
+            }
             self.lsn = self.lsn.max(record.lsn + 1);
         }
+        Ok(changed_chats)
+    }
+
+    /// Recovered dirty frames, not pre-replay disk headers, own chat scope.
+    fn rebuild_recovered_chat_ownership(&mut self) -> Result<()> {
+        let mut chats: HashMap<i64, Vec<u32>> = HashMap::new();
+        for id in 1..self.heap.size_pages() {
+            let page = self.pool.peek(&mut self.heap, id)?;
+            if page.page_type() == PageType::Chat {
+                chats.entry(page.read_i64_at(32)).or_default().push(id);
+            }
+        }
+        self.chat_tips.clear();
+        self.chat_recent_ring.clear();
+        for (chat_id, ids) in chats {
+            let mut count = 0;
+            for (index, &id) in ids.iter().enumerate() {
+                let frame = self.pool.get(&mut self.heap, id)?;
+                count += frame.page.nslots() as u32;
+                frame.page.set_next(ids.get(index + 1).copied().unwrap_or(0));
+                self.pool.unpin(id, true);
+            }
+            self.chat_tips.insert(chat_id, ChatTip {
+                head: ids[0], tail: *ids.last().unwrap(), count,
+            });
+        }
+        // Preserve exact version choices made in WAL order; prune stale owners.
+        let mut entries = Vec::new();
+        self.msg_index.for_each(|chat_id, message_id, page_id, slot| {
+            entries.push((chat_id, message_id, page_id, slot));
+        });
+        let mut retained = CompactMsgIndex::new();
+        for (chat_id, message_id, page_id, slot) in entries {
+            if page_id >= self.heap.size_pages() { continue; }
+            let page = self.pool.peek(&mut self.heap, page_id)?;
+            if page.page_type() != PageType::Chat || page.read_i64_at(32) != chat_id { continue; }
+            if let Some(tuple) = page.get_tuple(slot) {
+                if decode_chat_tuple(&tuple)?.message_id == message_id {
+                    retained.set(chat_id, message_id, page_id, slot);
+                }
+            }
+        }
+        self.msg_index = retained;
         Ok(())
     }
 
@@ -315,20 +364,29 @@ impl Engine {
                 let msg = decode_chat_tuple(tuple)?;
                 self.heap.ensure_page_count(page_id + 1)?;
                 let frame = self.pool.get(&mut self.heap, page_id)?;
-                if frame.page.page_type() == PageType::Free || frame.page.nslots() == 0 {
-                    frame.page.set_type(PageType::Chat);
-                    frame.page.write_i64_at(32, chat_id);
-                }
-                let existing = (0..frame.page.nslots()).find(|&slot| {
-                    frame
-                        .page
-                        .get_tuple(slot)
-                        .and_then(|v| decode_chat_tuple(&v).ok())
-                        .is_some_and(|item| item.message_id == msg.message_id)
-                });
-                let slot = existing.or_else(|| frame.page.insert(tuple));
-                frame.page.set_lsn(lsn);
-                self.pool.unpin(page_id, true);
+                let dirty = frame.page.lsn() < lsn;
+                let slot = if dirty {
+                    if frame.page.page_type() == PageType::Free || frame.page.nslots() == 0 {
+                        frame.page.set_type(PageType::Chat);
+                        frame.page.write_i64_at(32, chat_id);
+                    }
+                    if frame.page.page_type() != PageType::Chat || frame.page.read_i64_at(32) != chat_id {
+                        self.pool.unpin(page_id, false);
+                        return Err(NyatError::Msg("wal chat scope mismatch".into()));
+                    }
+                    let slot = frame.page.insert(tuple);
+                    if slot.is_none() {
+                        self.pool.unpin(page_id, false);
+                        return Err(NyatError::Msg("wal chat page full".into()));
+                    }
+                    frame.page.set_lsn(lsn);
+                    slot
+                } else if frame.page.page_type() == PageType::Chat && frame.page.read_i64_at(32) == chat_id {
+                    (0..frame.page.nslots()).rev().find(|&slot| {
+                        frame.page.get_tuple(slot).is_some_and(|value| value.as_slice() == tuple)
+                    })
+                } else { None };
+                self.pool.unpin(page_id, dirty);
                 if let Some(slot) = slot {
                     self.msg_index.set(chat_id, msg.message_id, page_id, slot);
                     let tip = self.chat_tips.entry(chat_id).or_insert(ChatTip {
@@ -336,7 +394,7 @@ impl Engine {
                         tail: page_id,
                         count: 0,
                     });
-                    if existing.is_none() {
+                    if dirty {
                         tip.count += 1;
                     }
                     tip.tail = tip.tail.max(page_id);
@@ -351,17 +409,23 @@ impl Engine {
                 let prev_tail = u32::from_le_bytes(payload[12..16].try_into().unwrap());
                 self.heap.ensure_page_count(page_id + 1)?;
                 let frame = self.pool.get(&mut self.heap, page_id)?;
-                frame.page.set_type(PageType::Chat);
-                frame.page.write_i64_at(32, chat_id);
-                frame.page.set_lsn(lsn);
-                self.pool.unpin(page_id, true);
-                if prev_tail != 0 {
-                    self.pool
-                        .get(&mut self.heap, prev_tail)?
-                        .page
-                        .set_next(page_id);
-                    self.pool.unpin(prev_tail, true);
+                let dirty = frame.page.lsn() < lsn;
+                if dirty {
+                    frame.page.set_type(PageType::Chat);
+                    frame.page.write_i64_at(32, chat_id);
+                    frame.page.set_next(0);
+                    frame.page.set_lsn(lsn);
                 }
+                let owned = frame.page.page_type() == PageType::Chat && frame.page.read_i64_at(32) == chat_id;
+                self.pool.unpin(page_id, dirty);
+                if prev_tail != 0 {
+                    let previous = self.pool.get(&mut self.heap, prev_tail)?;
+                    let relink = previous.page.lsn() < lsn && previous.page.page_type() == PageType::Chat
+                        && previous.page.read_i64_at(32) == chat_id;
+                    if relink { previous.page.set_next(page_id); previous.page.set_lsn(lsn); }
+                    self.pool.unpin(prev_tail, relink);
+                }
+                if !owned { return Ok(()); }
                 let tip = self.chat_tips.entry(chat_id).or_insert(ChatTip {
                     head: page_id,
                     tail: page_id,
@@ -470,7 +534,7 @@ impl Engine {
         loop {
             let cf = self.pool.get(&mut self.heap, chain_page_id)?;
             for t in cf.page.all_tuples() {
-                if let Some((existing, _, _)) = decode_hot(&t) {
+                if let Ok((existing, _, _)) = decode_hot(&t) {
                     if existing != key {
                         kept.push(t);
                     }
@@ -653,19 +717,23 @@ impl Engine {
     fn warm_chat_rings(&mut self) -> Result<()> {
         self.chat_recent_ring.clear();
         for (&chat_id, &tip) in &self.chat_tips.clone() {
-            let all = self.read_chat_chain(tip)?;
+            let all = self.read_chat_chain(chat_id, tip)?;
             let start = all.len().saturating_sub(self.chat_ring_max as usize);
             self.chat_recent_ring.insert(chat_id, all[start..].to_vec());
         }
         Ok(())
     }
 
-    fn read_chat_chain(&mut self, tip: ChatTip) -> Result<Vec<ChatTuple>> {
+    fn read_chat_chain(&mut self, chat_id: i64, tip: ChatTip) -> Result<Vec<ChatTuple>> {
         let mut page_id = tip.head;
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         while page_id != 0 && seen.insert(page_id) {
             let frame = self.pool.get(&mut self.heap, page_id)?;
+            if frame.page.page_type() != PageType::Chat || frame.page.read_i64_at(32) != chat_id {
+                self.pool.unpin(page_id, false);
+                return Err(NyatError::Msg("chat scope mismatch".into()));
+            }
             let next = frame.page.next_page_id();
             for tuple in frame.page.all_tuples() {
                 if let Ok(item) = decode_chat_tuple(&tuple) {
@@ -692,13 +760,13 @@ impl Engine {
                 let Some(tip) = self.chat_tips.get(&chat_id).copied() else {
                     return Ok(Vec::new());
                 };
-                self.read_chat_chain(tip)?
+                self.read_chat_chain(chat_id, tip)?
             }
         } else {
             let Some(tip) = self.chat_tips.get(&chat_id).copied() else {
                 return Ok(Vec::new());
             };
-            self.read_chat_chain(tip)?
+            self.read_chat_chain(chat_id, tip)?
         };
         // Dual-write hole backfills may append out of arrival order — order by time/id.
         all.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.message_id.cmp(&b.message_id)));
@@ -715,6 +783,7 @@ impl Engine {
         };
         let (page_id, slot) = unpack_loc(packed);
         let page = self.pool.peek(&mut self.heap, page_id)?;
+        if page.page_type() != PageType::Chat || page.read_i64_at(32) != chat_id { return Ok(None); }
         let Some(tuple) = page.get_tuple(slot) else {
             return Ok(None);
         };
@@ -737,6 +806,9 @@ impl Engine {
             };
             let (page_id, slot) = unpack_loc(packed);
             let page = self.pool.peek(&mut self.heap, page_id)?;
+            if page.page_type() != PageType::Chat || page.read_i64_at(32) != chat_id {
+                raw.push(None); continue;
+            }
             match page.get_tuple(slot) {
                 Some(tuple) => raw.push(Some((message_id, tuple))),
                 None => raw.push(None),
@@ -776,7 +848,7 @@ impl Engine {
         if tip.count as usize <= keep {
             return Ok(());
         }
-        let all = self.read_chat_chain(tip)?;
+        let all = self.read_chat_chain(chat_id, tip)?;
         let kept = all[all.len().saturating_sub(keep)..].to_vec();
         let mut old = Vec::new();
         let mut page_id = tip.head;
@@ -1117,6 +1189,80 @@ mod tests {
             recovered.chat_get(-100, 7).unwrap().unwrap().text,
             "recover me"
         );
+        assert!(recovered.chat_recent(0, 1).unwrap().is_empty());
+        assert!(recovered.chat_get(0, 7).unwrap().is_none());
+        assert_eq!(recovered.stats().chats, 1);
+    }
+
+    #[test]
+    fn wal_two_new_scopes_never_share_a_ghost_tip() {
+        let dir = tempdir().unwrap();
+        Engine::open(opts(dir.path().to_path_buf())).unwrap().close(false).unwrap();
+        {
+            let mut writing = Engine::open(opts(dir.path().to_path_buf())).unwrap();
+            for chat_id in [-300, -400] {
+                writing.chat_append(chat_id, 51, 1, 7, 0, format!("private:{chat_id}"), false).unwrap();
+            }
+            writing.crash_without_flush_for_test().unwrap();
+        }
+        let mut recovered = Engine::open(opts(dir.path().to_path_buf())).unwrap();
+        assert_eq!(recovered.stats().chats, 2);
+        assert!(recovered.chat_recent(0, 1).unwrap().is_empty());
+        assert!(recovered.chat_get(0, 51).unwrap().is_none());
+        for chat_id in [-300, -400] {
+            let recent = recovered.chat_recent(chat_id, 5).unwrap();
+            assert_eq!(recent.len(), 1);
+            assert_eq!(recent[0].text, format!("private:{chat_id}"));
+            assert_eq!(recovered.chat_get(chat_id, 51).unwrap().unwrap().text, format!("private:{chat_id}"));
+        }
+    }
+
+    fn wal_revision_case(flushed: bool) {
+        let dir = tempdir().unwrap();
+        Engine::open(opts(dir.path().to_path_buf())).unwrap().close(false).unwrap();
+        let meta = fs::read(dir.path().join("ENGINE.json")).unwrap();
+        let index = fs::read(dir.path().join("snap/msg.idx")).unwrap();
+        {
+            let mut writing = Engine::open(opts(dir.path().to_path_buf())).unwrap();
+            writing.chat_append(-300, 51, 200, 7, 0, "first-version".into(), false).unwrap();
+            writing.chat_append(-300, 51, 100, 7, 0, "edited-version".into(), false).unwrap();
+            let wal = fs::read(dir.path().join("wal/redo.wal")).unwrap();
+            if flushed {
+                writing.close(false).unwrap();
+                fs::write(dir.path().join("ENGINE.json"), &meta).unwrap();
+                fs::write(dir.path().join("snap/msg.idx"), &index).unwrap();
+                fs::write(dir.path().join("wal/redo.wal"), &wal).unwrap();
+            } else {
+                writing.crash_without_flush_for_test().unwrap();
+            }
+        }
+        for _ in 0..3 {
+            let mut recovered = Engine::open(opts(dir.path().to_path_buf())).unwrap();
+            assert_eq!(recovered.chat_get(-300, 51).unwrap().unwrap().text, "edited-version");
+            let recent = recovered.chat_recent(-300, 10).unwrap();
+            assert_eq!(recent.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(), vec!["edited-version", "first-version"]);
+            assert_eq!(recovered.stats().indexed, 1);
+            assert!(recovered.chat_recent(0, 1).unwrap().is_empty());
+            recovered.crash_without_flush_for_test().unwrap();
+        }
+    }
+
+    #[test]
+    fn wal_revisions_preserve_append_order_without_flush() { wal_revision_case(false); }
+
+    #[test]
+    fn wal_revisions_are_idempotent_with_flushed_pages() { wal_revision_case(true); }
+
+    #[test]
+    fn point_and_batch_lookup_reject_stale_other_scope_index() {
+        let dir = tempdir().unwrap();
+        let mut engine = Engine::open(opts(dir.path().to_path_buf())).unwrap();
+        engine.chat_append(-300, 51, 1, 7, 0, "private-source".into(), false).unwrap();
+        engine.msg_index.set(0, 51, 5, 0);
+        assert!(engine.chat_get(0, 51).unwrap().is_none());
+        assert!(engine.chat_get_batch(0, &[51]).unwrap()[0].is_none());
+        assert!(engine.chat_recent(0, 1).unwrap().is_empty());
+        assert_eq!(engine.chat_recent(-300, 1).unwrap()[0].text, "private-source");
     }
 
     #[test]

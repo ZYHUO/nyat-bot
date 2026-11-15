@@ -12,6 +12,7 @@ const redisLists = new Map<string, string[]>();
 vi.mock('../../../src/db/redis.js', () => ({
   getRedis: () => ({
     zrange: async () => ['-1001234567890'],
+    zrevrange: async () => ['-1001234567890'],
     get: async (k: string) => redisStore.get(k) ?? null,
     set: async (k: string, v: string, ..._rest: unknown[]) => { redisStore.set(k, v); },
     keys: async (p: string) => [...redisLists.keys()].filter((k) => k.startsWith(p.replace('*', ''))),
@@ -117,7 +118,7 @@ describe('decideTick', () => {
         score: 0,
         signals: [],
         primarySignal: null,
-        reason: 'no_complexity_signal',
+        reason: 'CANARY_PRIVATE_ROUTING_REASON',
         shouldUseWorkspace: true,
       },
     };
@@ -125,8 +126,16 @@ describe('decideTick', () => {
     await decideTick(state);
     const request = callWithFallbackMock.mock.calls[0]?.[0] as { messages?: Array<{ content?: unknown }> };
     expect(String(request.messages?.[1]?.content)).toContain('后台认知路由：background');
-    expect(String(request.messages?.[1]?.content)).toContain('reason=no_complexity_signal');
+    expect(String(request.messages?.[1]?.content)).toContain('score=0');
+    expect(String(request.messages?.[1]?.content)).not.toContain('CANARY_PRIVATE_ROUTING_REASON');
     expect(String(request.messages?.[1]?.content)).toContain('不授予发送、工具或 Agency 权限');
+
+    state.cognitiveRoute.route = 'CANARY_INVALID_ROUTE' as 'background';
+    await decideTick(state);
+    expect(JSON.stringify(callWithFallbackMock.mock.calls.at(-1))).not.toContain('CANARY_INVALID_ROUTE');
+    state.cognitiveRoute.route = 'background'; state.cognitiveRoute.score = Number.POSITIVE_INFINITY;
+    await decideTick(state);
+    expect(JSON.stringify(callWithFallbackMock.mock.calls.at(-1))).not.toContain('score=Infinity');
   });
 });
 
@@ -137,8 +146,10 @@ describe('runUnifiedTick execution mapping', () => {
       { role: 'user', uid: 1, fullName: '主人', username: 'm', textContent: '先忙去了', timestamp: now - 5 * 3600, messageId: 1 },
     ]);
     callWithFallbackMock.mockResolvedValue({ content: '{"action":"care_master","text":"主人忙完没~","reason":"x"}' });
+    personaTextMock.mockResolvedValue('主人忙完没~');
     await runUnifiedTick();
     expect(sendMessageMock).toHaveBeenCalledWith(6251541967, '主人忙完没~');
+    expect(personaTextMock).toHaveBeenCalledWith(6251541967, 999, expect.stringContaining('[主动关心]'));
     expect(acquireSlotMock).toHaveBeenCalled();
   });
 
@@ -197,13 +208,19 @@ describe('runUnifiedTick execution mapping', () => {
       { role: 'user', uid: 1, fullName: '主人', username: 'm', textContent: '先忙去了', timestamp: now - 5 * 3600, messageId: 1 },
     ]);
     callWithFallbackMock.mockResolvedValue({
-      content: '{"action":"care_master","text":"主人～头像还喜欢吗？要不要再画一个？","reason":"x"}',
+      content: '{"action":"care_master","text":"全局调度正文不应发送","reason":"x"}',
     });
+    // The DM writer now owns the final text. Its output must still pass the
+    // anti-peddle guard; rejecting only the ignored global draft proves nothing.
+    personaTextMock.mockResolvedValue('主人～头像还喜欢吗？要不要再画一个？');
     await runUnifiedTick();
+    expect(personaTextMock).toHaveBeenCalledOnce();
     expect(sendMessageMock).not.toHaveBeenCalled();
+    expect(acquireSlotMock).not.toHaveBeenCalled();
   });
 
   it('self_play dispatches CodeAct and sets cooldown key', async () => {
+    envFlags.META_SUBAGENT_ENABLED = true;
     callWithFallbackMock.mockResolvedValue({ content: '{"action":"self_play","idea":"写个贪吃蛇","plan":["写","跑"],"reason":"x"}' });
     await runUnifiedTick();
     expect(enqueueMock).toHaveBeenCalledOnce();
@@ -217,6 +234,7 @@ describe('runUnifiedTick execution mapping', () => {
   });
 
   it('self_play vetoed when cooldown active', async () => {
+    envFlags.META_SUBAGENT_ENABLED = true;
     redisStore.set('xxb:selfplay:last', String(now - 100)); // 100s ago, cooldown 4h
     callWithFallbackMock.mockResolvedValue({ content: '{"action":"self_play","idea":"x idea","plan":[],"reason":"x"}' });
     await runUnifiedTick();

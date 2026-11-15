@@ -15,6 +15,7 @@ import { searchMemory, searchMemoryByUser, type ScoredMessage } from '../../memo
 import type { SelfReply } from '../../tracking/self-history.js';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
+import { scrubMemoryHits } from '../../memory/visibility.js';
 
 // ── Semantic relevance gating ────────────────────────────────
 // This is a RECALL-favoring bot (it must remember facts/people), so we keep
@@ -132,7 +133,10 @@ async function retrieveSemantic(
   query: string,
   topK: number,
 ): Promise<FormattedMessage[]> {
-  const raw: ScoredMessage[] = await searchMemory(chatId, query, topK, 500);
+  const candidates = await searchMemory(chatId, query, topK, 500);
+  const raw: ScoredMessage[] = scrubMemoryHits(
+    candidates.filter(hit => hit.sourceChatId === chatId), chatId,
+  ).kept;
 
   // Importance ranking boost: memories recalled often before rank higher now.
   let getScore = (m: ScoredMessage): number | undefined => m.score;
@@ -177,7 +181,9 @@ async function retrieveCrossContext(
   // "uid" 桶,当成"同一个人"跨群召回是错的(实况观察发现)。真实用户 uid 恒为正。
   if (!message.uid || message.uid <= 0 || message.isBot) return [];
   // searchMemoryByUser 内部已按 uid 检索 + 剔除同会话(#7)+ 强制 scrubMemoryHits。
-  const hits = await searchMemoryByUser(message.uid, query, chatId, topK, 500);
+  const candidates = await searchMemoryByUser(message.uid, query, chatId, topK, 500);
+  const hits = scrubMemoryHits(candidates.filter(hit => hit.uid === message.uid
+    && hit.sourceChatId !== chatId), chatId).kept;
   // 可观测性:这条特性只在真正召回到"别处说过的"内容时才 info 打点(不刷屏),
   // 便于在生产(LOG_LEVEL=info)确认 DM↔群记忆连结在灰度群里真的生效了。
   if (hits.length > 0) {
@@ -186,8 +192,7 @@ async function retrieveCrossContext(
         chatId,
         uid: message.uid,
         recalled: hits.length,
-        fromChats: [...new Set(hits.map((h) => h.sourceChatId))],
-        sample: (hits[0]?.textContent ?? '').slice(0, 40),
+        sourceCount: new Set(hits.map((h) => h.sourceChatId)).size,
       },
       'cross-context memory recalled',
     );

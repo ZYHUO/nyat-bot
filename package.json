@@ -1,6 +1,6 @@
 {
   "name": "nyat-bot",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "description": "NyatBot — a Telegram group-chat agent on the path from chatLLM to AGI",
   "type": "module",
   "private": true,
@@ -20,7 +20,21 @@
     "test:watch": "vitest",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "demo": "tsx scripts/demo.mts",
+    "measure:voice": "tsx scripts/measure-voice.mts",
+    "measure:voice:compare": "node scripts/voice-compare.mjs",
+    "measure:engage": "tsx scripts/measure-engage.mts",
+    "measure:timing": "tsx scripts/measure-timing.mts",
+    "gate:evidence": "bash scripts/check-gate-evidence.sh",
+    "gate:log": "tsx scripts/gate-evidence.mts",
+    "tamper:audit": "tsx scripts/tamper-audit.mts --changed",
+    "log:count": "tsx scripts/log-count.mts",
+    "voice:phase": "node scripts/voice-phase.mjs",
+    "session:report": "tsx scripts/session-report.mts",
+    "verify:deploy": "npx tsx scripts/verify-deploy.mts",
+    "verify:integration": "npx tsx scripts/verify-integration.mts",
+    "verify": "npm run typecheck && npm run lint && npm run build && npm run verify:deploy && npm run verify:integration"
   },
   "engines": {
     "node": ">=22.0.0 <23"
@@ -40,15 +54,17 @@
     "fast-xml-parser": "^5.10.1",
     "grammy": "^1.35.0",
     "hono": "^4.7.10",
+    "hpagent": "^1.2.0",
     "ioredis": "^5.6.1",
     "lru-cache": "^11.1.0",
     "nanoid": "^5.1.5",
-    "sharp": "^0.32.6",
     "node-cron": "^3.0.3",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
+    "sharp": "^0.32.6",
     "tiktoken": "^1.0.21",
     "undici": "^6.27.0",
+    "ws": "^8.23.0",
     "zod": "^3.25.34"
   },
   "devDependencies": {
@@ -56,6 +72,7 @@
     "@types/fast-levenshtein": "^0.0.4",
     "@types/node": "^22.20.1",
     "@types/node-cron": "^3.0.11",
+    "@types/ws": "^8.18.2",
     "chromadb": "^3.4.3",
     "eslint": "^9.39.5",
     "prettier": "^3.9.6",

@@ -2,7 +2,7 @@
 // Dreaming 做梦 (CGM background-agent 简化版, DREAMING_ENABLED 默认关)
 //
 // 凌晨 cron 触发:把「上次成功做梦以来」的素材(本周期 CodeAct 任务 /
-// 高好感的人 / 全局 session digest / 活跃群)打包成 digest,派发**一个**
+// 高好感的人 / session digest)仅按主人私聊同源打包,派发**一个**
 // 特权长 CodeAct 任务到主人 DM,让它夜里自主干活(查资料/准备小惊喜/写东西),
 // 最后给主人留张字条(或安静收尾)。
 //
@@ -21,10 +21,12 @@
 // ────────────────────────────────────────
 
 import { env } from '../env.js';
+import { prepareBackgroundTask } from '../agent/background-publication.js';
 import { logger } from '../shared/logger.js';
 import { getDb } from '../db/sqlite.js';
 import { getRedis } from '../db/redis.js';
 import { getGlobalState } from '../meta/global-state.js';
+import { digestBelongsToChat, isDigestSourceChatId } from '../meta/digest-scope.js';
 import { enqueueCodeActJob } from '../subagent/queue.js';
 import { loadCachedPrompt } from '../shared/config.js';
 import type { DispatchTask } from '../meta/types.js';
@@ -39,14 +41,11 @@ const MAX_TASKS_IN_CONTEXT = 40;
 const TOP_PEOPLE_LIMIT = 8;
 /** session digest 纳入条数。 */
 const MAX_DIGESTS = 30;
-/** 活跃群展示上限。 */
-const MAX_GROUPS = 8;
 /** 没有任何历史 run 时,素材窗口默认回看 24h。 */
 const DEFAULT_WINDOW_SEC = 86400;
 
 const TASKS_HASH = 'xxb:codeact:tasks';
 const DIGESTS_LIST = 'xxb:meta:digests';
-const ACTIVE_GROUPS_ZSET = 'xxb:active_groups';
 
 export type DreamingRunStatus = 'done' | 'failed' | 'skipped';
 
@@ -88,14 +87,16 @@ function fmtTs(ms: number): string {
 // ── 素材源 (全部 best-effort) ─────────────────
 
 /** 本周期 CodeAct 任务: Redis hash (durable) ∪ 进程内 global-state,按 id 去重。 */
-async function collectTasks(sinceMs: number): Promise<DispatchTask[]> {
+async function collectTasks(sinceMs: number, sourceChatId: number): Promise<DispatchTask[]> {
   const byId = new Map<string, DispatchTask>();
   try {
     const raw = await getRedis().hgetall(TASKS_HASH);
     for (const v of Object.values(raw)) {
       try {
         const t = JSON.parse(v) as DispatchTask;
-        if (t && typeof t.id === 'string' && t.id) byId.set(t.id, t);
+        if (t && t.chatId === sourceChatId && typeof t.id === 'string' && t.id) {
+          byId.set(t.id, t);
+        }
       } catch {
         /* 单行坏 JSON 跳过 */
       }
@@ -105,7 +106,9 @@ async function collectTasks(sinceMs: number): Promise<DispatchTask[]> {
   }
   try {
     // 进程内状态更新(终态 summary 最新),覆盖 redis 同 id 行。
-    for (const t of getGlobalState().listTasks()) byId.set(t.id, t);
+    for (const t of getGlobalState().listTasks(sourceChatId)) {
+      if (t.chatId === sourceChatId) byId.set(t.id, t);
+    }
   } catch (err) {
     logger.debug({ err }, 'dreaming: global-state tasks unreadable');
   }
@@ -123,7 +126,7 @@ interface PersonRow {
 }
 
 /** 高好感的人: RELATIONSHIP_QUANT_ENABLED 时用量化分/tier,否则退回 affinity。 */
-function collectTopPeople(): PersonRow[] {
+function collectTopPeople(sourceChatId: number): PersonRow[] {
   const nameExpr = `COALESCE(
     NULLIF(TRIM(p.sender_tag), ''),
     NULLIF(TRIM(p.full_name), ''),
@@ -137,10 +140,10 @@ function collectTopPeople(): PersonRow[] {
           `SELECT r.chat_id, r.uid, ${nameExpr} AS name, r.quant_score AS score, r.quant_tier AS tier
            FROM chat_relationships r
            LEFT JOIN user_profiles p ON p.chat_id = r.chat_id AND p.uid = r.uid
-           WHERE r.uid > 0 AND r.quant_score > 0
+           WHERE r.chat_id = ? AND r.uid > 0 AND r.quant_score > 0
            ORDER BY r.quant_score DESC LIMIT ?`,
         )
-        .all(TOP_PEOPLE_LIMIT) as PersonRow[];
+        .all(sourceChatId, TOP_PEOPLE_LIMIT) as PersonRow[];
     } catch (err) {
       logger.debug({ err }, 'dreaming: quant people query failed, falling back to affinity');
     }
@@ -151,25 +154,28 @@ function collectTopPeople(): PersonRow[] {
         `SELECT r.chat_id, r.uid, ${nameExpr} AS name, r.affinity AS score, NULL AS tier
          FROM chat_relationships r
          LEFT JOIN user_profiles p ON p.chat_id = r.chat_id AND p.uid = r.uid
-         WHERE r.uid > 0
+         WHERE r.chat_id = ? AND r.uid > 0
          ORDER BY r.affinity DESC LIMIT ?`,
       )
-      .all(TOP_PEOPLE_LIMIT) as PersonRow[];
+      .all(sourceChatId, TOP_PEOPLE_LIMIT) as PersonRow[];
   } catch (err) {
     logger.debug({ err }, 'dreaming: affinity people query failed');
     return [];
   }
 }
 
-async function collectDigests(): Promise<string[]> {
+async function collectDigests(sourceChatId: number): Promise<string[]> {
   try {
     const raw = await getRedis().lrange(DIGESTS_LIST, 0, MAX_DIGESTS - 1);
     return raw
       .map((r) => {
         try {
-          const o = JSON.parse(r) as { at?: number; text?: string };
+          const o = JSON.parse(r) as { at?: number; text?: string; sourceChatId?: unknown };
+          if (!digestBelongsToChat(o.sourceChatId, sourceChatId) || typeof o.text !== 'string') {
+            return '';
+          }
           const when = o.at ? fmtTs(o.at) : '?';
-          return `- [${when}] ${clip(String(o.text ?? '').replace(/\s+/g, ' ').trim(), 300)}`;
+          return `- [${when}] ${clip(o.text.replace(/\s+/g, ' ').trim(), 300)}`;
         } catch {
           return '';
         }
@@ -181,30 +187,24 @@ async function collectDigests(): Promise<string[]> {
   }
 }
 
-async function collectActiveGroups(): Promise<number[]> {
-  try {
-    const raw = await getRedis().zrange(ACTIVE_GROUPS_ZSET, 0, -1);
-    return raw.map(Number).filter((n) => Number.isFinite(n) && n < 0).slice(-MAX_GROUPS);
-  } catch (err) {
-    logger.debug({ err }, 'dreaming: active groups unreadable');
-    return [];
-  }
-}
-
 // ── 素材组装 ─────────────────────────────────
 
 /**
- * 构建做梦素材 digest。sinceSec = 上次成功做梦的 started_at(unix 秒)。
+ * 构建主人私聊同源的做梦素材。sinceSec = 上次成功做梦的 started_at(unix 秒)。
+ * 主人身份不代表其他会话授权;缺来源的旧素材保留但不注入。
  * 总量超 DREAMING_MAX_CONTEXT_CHARS 时确定性裁剪:先丢最旧的 digest 行
  * (二手叙述),再丢最旧的任务行(第一手回忆,尽量保最新),最后硬切。
  */
 export async function buildDreamingContext(sinceSec: number): Promise<DreamingContext> {
+  const sourceChatId = env().MASTER_UID;
+  if (!isDigestSourceChatId(sourceChatId) || sourceChatId <= 0) {
+    return { text: '# 做梦素材\n\n(缺少有效的主人私聊来源)', tasksReviewed: 0 };
+  }
   const sinceMs = sinceSec * 1000;
-  const [tasksAll, people, digestLines, groups] = await Promise.all([
-    collectTasks(sinceMs),
-    Promise.resolve().then(() => collectTopPeople()),
-    collectDigests(),
-    collectActiveGroups(),
+  const [tasksAll, people, digestLines] = await Promise.all([
+    collectTasks(sinceMs, sourceChatId),
+    Promise.resolve().then(() => collectTopPeople(sourceChatId)),
+    collectDigests(sourceChatId),
   ]);
 
   let sampledOut = 0;
@@ -230,7 +230,7 @@ export async function buildDreamingContext(sinceSec: number): Promise<DreamingCo
   const header = [
     `# 做梦素材（${new Date(sinceMs).toISOString()} 以来）`,
     '',
-    `这是上次做梦以来你实际做过的事、你在乎的人、最近的意识流。读它像回忆今天——可以作为今晚行动的起点，但不用被它牵着走。`,
+    `这是当前主人私聊中你实际做过的事、你在乎的人、最近的意识流。只包含此会话素材，不代表其他会话的经历或授权。`,
   ].join('\n');
 
   const assemble = (taskLs: string[], digLs: string[]): string =>
@@ -245,9 +245,6 @@ export async function buildDreamingContext(sinceSec: number): Promise<DreamingCo
       '',
       `## 最近的意识流 digest`,
       ...(digLs.length ? digLs : ['(无)']),
-      '',
-      `## 活跃群`,
-      groups.length ? groups.join(', ') : '(无)',
     ].join('\n');
 
   let droppedTasks = 0;
@@ -356,7 +353,7 @@ export async function runDreaming(): Promise<DreamingResult> {
 
   try {
     const master = env().MASTER_UID;
-    if (master <= 0) {
+    if (!isDigestSourceChatId(master) || master <= 0) {
       finishRun(runId, nowSec, 'failed', 0, 'no_master_uid');
       return { status: 'failed', reason: 'no_master_uid', runId };
     }
@@ -366,19 +363,22 @@ export async function runDreaming(): Promise<DreamingResult> {
     const prompt = loadDreamingPrompt();
 
     const taskId = `dreaming_${nowSec}_${Math.floor(Math.random() * 1e6)}`;
-    await enqueueCodeActJob({
+    await enqueueCodeActJob(prepareBackgroundTask({
       id: taskId,
       // 主人 DM:沙盒/记忆挂靠身份;prompt 里的硬边界约束 sendText 只来这儿。
       // 不带 messageThreadId —— DM 无 forum topic。
       chatId: master,
       contentDirection:
+        env().BACKGROUND_PUBLICATION_ENABLED
+          ? `夜间复盘。没有人在等回复；只读取和反思，有可注册的新来源才提交发布草稿并 endTask("finding")，否则 endTask("no_update")。\n${ctx.text}`
+          :
         `[dreaming] 凌晨做梦任务（特权后台，主人私聊）。\n\n` +
         `${prompt}\n\n` +
         `## 今晚的素材\n${ctx.text}`,
       toneGuidance: '安静、自主，像夜里做梦一样',
       createdAt: Date.now(),
       status: 'queued',
-    });
+    },{kind:'dreaming',key:'dreaming',sinceAt:since * 1000}));
 
     finishRun(runId, Math.floor(Date.now() / 1000), 'done', ctx.tasksReviewed, `dispatched: ${taskId}`);
     logger.info({ runId, taskId, tasksReviewed: ctx.tasksReviewed }, 'dreaming task dispatched');

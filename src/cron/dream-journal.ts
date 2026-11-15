@@ -3,10 +3,16 @@
 // Model decides WRITE/SKIP; multiple entries per day OK (append).
 // Preferred slots: morning wake / bedtime (also hooked from sleep-cycle).
 // Grounded in real Redis chat ctx — no fabrication.
+//
+// 2026-09-21：第三档 `free`（随手）从"代码里有、配置上走不到"变成真能用。
+// 之前默认两个 cron 槽都落在 morning/bedtime 窗口里，free 从未触发，而且它的
+// 语气指引是空的——所以用户看到的只有早晚两篇日记，没有随笔记。现在：
+//   · slotGuidance() 给三档各自的样子（随手档明确"不是日记、可以只有两三句"）
+//   · .env 的 DREAM_JOURNAL_CRON 加了 04:00 UTC（上海 12:00）那个 free 槽
 // ────────────────────────────────────────
 
 import { mkdir, writeFile, readFile, appendFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
@@ -14,6 +20,10 @@ import { getGlobalState } from '../meta/global-state.js';
 import { sendMessage } from '../bot/sender/telegram.js';
 import { getBot } from '../bot/bot.js';
 import type { FormattedMessage } from '../shared/types.js';
+import { digestBelongsToChat, isDigestSourceChatId } from '../meta/digest-scope.js';
+import type { DigestReadScope } from '../meta/digest-scope.js';
+import { effectiveJournalConfig } from '../admin/business-config.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
 
 export type DreamSlot = 'morning' | 'bedtime' | 'free';
 
@@ -49,10 +59,9 @@ export function normalizeJournalChatId(raw: number): number {
 }
 
 /** Look up channel/supergroup username via Telegram getChat — no invite needed. */
-export async function resolveJournalChatLink(): Promise<string | null> {
+export async function resolveJournalChatLink(chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID)): Promise<string | null> {
   try {
-    const chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
-    if (chatId === 0) return null;
+    if (chatId === 0 || isPlatformInternalId(chatId)) return null;
     const bot = getBot();
     const info = await bot.api.getChat(chatId);
     if ('username' in info && info.username) return `https://t.me/${info.username}`;
@@ -66,17 +75,44 @@ export async function resolveJournalChatLink(): Promise<string | null> {
 }
 
 /** Resolve both the display link and the numeric chatId for telegram.sendToChat. */
-export async function getJournalChannelInfo(): Promise<{ link: string; chatId: number } | null> {
-  const chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
+export async function getJournalChannelInfo(scope?: DigestReadScope): Promise<{ link: string; chatId: number } | null> {
+  if (scope) {
+    const config = effectiveJournalConfig(scope.sourceChatId);
+    if (!config.settings.enabled || !config.settings.publishToSource) return null;
+  }
+  const chatId = scope?.sourceChatId ?? normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
   if (chatId === 0) return null;
-  const link = await resolveJournalChatLink();
+  const link = await resolveJournalChatLink(chatId);
   if (!link) return null;
   return { link, chatId };
 }
 
-export function dreamJournalPath(day?: string): string {
+/** Omitting the scope returns the legacy archive path, never an automatic reader. */
+export function dreamJournalPath(day?: string, scope?: DigestReadScope): string {
   const dir = env().DREAM_JOURNAL_DIR;
+  if (scope) {
+    if (!isDigestSourceChatId(scope.sourceChatId)) throw new Error('invalid journal source');
+    return join(dir, 'scoped', String(scope.sourceChatId), `${day ?? todayStamp()}.md`);
+  }
   return join(dir, `${day ?? todayStamp()}.md`);
+}
+
+function journalSourceHeader(sourceChatId: number): string {
+  return `<!-- nyatbot-journal-source:v1:${sourceChatId} -->`;
+}
+
+/** Unknown/legacy provenance is preserved on disk, but is never a prompt source. */
+function scopedJournalBody(document: string, sourceChatId: number): string | null {
+  const header = journalSourceHeader(sourceChatId);
+  if (!document.startsWith(`${header}\n`)) return null;
+  return document.slice(header.length + 1);
+}
+
+/** Only internal cron/sleep callers omit scope; their default is the master's DM. */
+function resolveJournalSource(sourceChatId: number | undefined): number | undefined {
+  if (sourceChatId !== undefined) return isDigestSourceChatId(sourceChatId) ? sourceChatId : undefined;
+  const master = env().MASTER_UID;
+  return isDigestSourceChatId(master) && master > 0 ? master : undefined;
 }
 
 function formatEvidenceLine(m: FormattedMessage): string {
@@ -91,33 +127,13 @@ function formatEvidenceLine(m: FormattedMessage): string {
   return text ? `- ${who}: ${text}` : '';
 }
 
-async function loadChatEvidence(day: string): Promise<{ text: string; msgCount: number }> {
+async function loadChatEvidence(day: string, sourceChatId: number): Promise<{ text: string; msgCount: number }> {
   const dayStart = shanghaiDayStartSec(day);
-  const chatIds = new Set<number>();
-
-  try {
-    const { getRedis } = await import('../db/redis.js');
-    const redis = getRedis();
-    const groups = await redis.zrange('xxb:active_groups', -8, -1);
-    for (const g of groups) {
-      const id = Number(g);
-      if (Number.isFinite(id) && id < 0) chatIds.add(id);
-    }
-  } catch {
-    /* ignore */
-  }
-
-  const master = env().MASTER_UID;
-  if (master > 0) chatIds.add(master);
-
-  const journalChat = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
-  if (journalChat !== 0) chatIds.delete(journalChat);
-
   const { getRecent } = await import('../pipeline/context/manager.js');
   const chunks: string[] = [];
   let msgCount = 0;
 
-  for (const chatId of chatIds) {
+  for (const chatId of [sourceChatId]) {
     let msgs: FormattedMessage[] = [];
     try {
       msgs = await getRecent(chatId, 60);
@@ -142,9 +158,10 @@ async function loadChatEvidence(day: string): Promise<{ text: string; msgCount: 
   };
 }
 
-async function loadDigestContext(): Promise<string> {
+async function loadDigestContext(sourceChatId: number): Promise<string> {
   const local = getGlobalState()
-    .recentDigests(20)
+    .recentDigests(20, { sourceChatId })
+    .filter((d) => digestBelongsToChat(d.sourceChatId, sourceChatId))
     .map((d) => `- ${new Date(d.at).toISOString()} ${d.text}`)
     .join('\n');
   try {
@@ -153,8 +170,9 @@ async function loadDigestContext(): Promise<string> {
     const fromRedis = raw
       .map((r) => {
         try {
-          const o = JSON.parse(r) as { at?: number; text?: string };
-          return `- ${o.at ? new Date(o.at).toISOString() : '?'} ${o.text ?? ''}`;
+          const o = JSON.parse(r) as { at?: number; text?: string; sourceChatId?: number };
+          if (!digestBelongsToChat(o.sourceChatId, sourceChatId) || typeof o.text !== 'string') return '';
+          return `- ${o.at ? new Date(o.at).toISOString() : '?'} ${o.text.slice(0, 2000)}`;
         } catch {
           return '';
         }
@@ -187,7 +205,32 @@ const DIARY_SYSTEM = `你是啾咪囝，决定要不要写一段日记，以及�
 function slotLabel(slot: DreamSlot): string {
   if (slot === 'morning') return '起床/早上';
   if (slot === 'bedtime') return '睡前';
-  return '随时';
+  return '随手';
+}
+
+/**
+ * 时段专属的语气指引。
+ *
+ * 2026-09-21 之前只有 morning/bedtime 有指引，`free` 那一档是空的——而生产里
+ * `free` **一次都没触发过**：DREAM_JOURNAL_CRON 默认两个槽（23:00/15:00 UTC）
+ * 落在上海 07:00 和 23:00，按 inferDreamSlot() 分别算 morning 和 bedtime。
+ * 代码里有"随手记一段"的能力，配置上却永远走不到，用户看到的就只有早晚两篇日记。
+ *
+ * 所以这里给 free 补上它自己的样子：不是"收一天"，是**当下这一下**——
+ * 刷群刷到的一个梗、被怼了一句、蹲到某个更新、突然想起某个人。可以只有两三句。
+ */
+function slotGuidance(slot: DreamSlot): string {
+  if (slot === 'morning') {
+    return '这是早上那一篇：醒来碎碎念、昨晚余温、眼皮还沉着的那种语气。';
+  }
+  if (slot === 'bedtime') {
+    return '这是睡前那一篇：收一天、困了、跟群友告别的语气。';
+  }
+  return (
+    '这是**随手**那一篇，不是日记：写当下这一下的事——刚刷到的一个梗、被怼了一句、' +
+    '蹲到某个更新、突然想起某个人、听到一首歌。可以只有两三句，不用开头不用收尾，' +
+    '别写成"今天总体来说"。没素材就 SKIP，别为了凑一段把早/晚写过的再概括一遍。'
+  );
 }
 
 function stripDiaryFences(raw: string): string {
@@ -338,31 +381,39 @@ export function parseDiaryDecision(raw: string): {
 
 export type DreamJournalRunResult = { path: string | null; reason: string };
 
-async function runDreamJournalInner(opts?: { slot?: DreamSlot }): Promise<DreamJournalRunResult> {
-  if (!env().DREAM_JOURNAL_ENABLED) {
-    return { path: null, reason: 'disabled' };
-  }
+const journalInFlight = new Set<number>();
 
+async function runDreamJournalInner(opts?: { slot?: DreamSlot; sourceChatId?: number }): Promise<DreamJournalRunResult> {
+  const sourceChatId = resolveJournalSource(opts?.sourceChatId);
+  if (sourceChatId === undefined) return { path: null, reason: 'missing_source_chat' };
+  if (journalInFlight.has(sourceChatId)) return { path: null, reason: 'in_flight' };
+  journalInFlight.add(sourceChatId);
+  try {
+    return await runDreamJournalAttempt({ ...opts, sourceChatId });
+  } finally {
+    journalInFlight.delete(sourceChatId);
+  }
+}
+
+async function runDreamJournalAttempt(opts?: { slot?: DreamSlot; sourceChatId?: number }): Promise<DreamJournalRunResult> {
   const slot: DreamSlot = opts?.slot ?? 'free';
+  const sourceChatId = resolveJournalSource(opts?.sourceChatId);
+  if (sourceChatId === undefined) return { path: null, reason: 'missing_source_chat' };
+  const config = effectiveJournalConfig(sourceChatId);
+  if (!config.settings.enabled) return { path: null, reason: 'disabled' };
   const day = todayStamp();
   const clock = shanghaiClock();
-  const outPath = dreamJournalPath(day);
-  await mkdir(env().DREAM_JOURNAL_DIR, { recursive: true });
+  const outPath = dreamJournalPath(day, { sourceChatId });
+  await mkdir(dirname(outPath), { recursive: true });
 
-  const [evidence, digests] = await Promise.all([loadChatEvidence(day), loadDigestContext()]);
-
-  let activeGroups = '';
-  try {
-    const { getRedis } = await import('../db/redis.js');
-    const raw = await getRedis().zrange('xxb:active_groups', -8, -1);
-    activeGroups = raw.join(', ');
-  } catch {
-    /* ignore */
-  }
+  const [evidence, digests] = await Promise.all([loadChatEvidence(day, sourceChatId), loadDigestContext(sourceChatId)]);
 
   let existing = '';
   try {
-    existing = await readFile(outPath, 'utf8');
+    const document = await readFile(outPath, 'utf8');
+    const scoped = scopedJournalBody(document, sourceChatId);
+    if (scoped === null) return { path: null, reason: 'unverified_existing_source' };
+    existing = scoped;
   } catch {
     existing = '';
   }
@@ -381,8 +432,10 @@ async function runDreamJournalInner(opts?: { slot?: DreamSlot }): Promise<DreamJ
         {
           role: 'user',
           content: `日期: ${day}（上海）现在 ${clock}
-时段暗示: ${slotLabel(slot)}（${slot}）—— 偏好此时写，但你可以 SKIP。
-活跃群 id: ${activeGroups || '(未知)'}
+时段: ${slotLabel(slot)}（${slot}）
+${slotGuidance(slot)}
+偏好此时写，但你可以 SKIP。
+来源会话: ${sourceChatId}（只使用本会话资料，不混入其他群或私聊）
 今日已有日记段落数: ${(existing.match(/^## /gm) ?? []).length}
 
 ## 真实聊天记录（唯一事实来源，共 ${evidence.msgCount} 条）
@@ -437,8 +490,12 @@ ${existing.slice(0, 2500) || '(空)'}
 
   const heading = `## ${clock} · ${slotLabel(slot)}`;
   const chunk = `${heading}\n\n${body}\n`;
+  const current = effectiveJournalConfig(sourceChatId);
+  if (!current.settings.enabled || current.revision !== config.revision) {
+    return { path: null, reason: 'configuration_changed' };
+  }
   if (!existing.trim()) {
-    await writeFile(outPath, `# ${day}\n\n${chunk}\n`, 'utf8');
+    await writeFile(outPath, `${journalSourceHeader(sourceChatId)}\n# ${day}\n\n${chunk}\n`, 'utf8');
   } else {
     const sep = existing.endsWith('\n') ? '\n' : '\n\n';
     await appendFile(outPath, `${sep}${chunk}\n`, 'utf8');
@@ -456,7 +513,7 @@ ${existing.slice(0, 2500) || '(空)'}
   // bypasses entirely) and was skipped by force:true (which sleep-edge uses).
   try {
     const { getRedis } = await import('../db/redis.js');
-    const cdKey = `xxb:dream:meta-cd:${day}:${slot}`;
+    const cdKey = `xxb:dream:meta-cd:${sourceChatId}:${day}:${slot}`;
     const cdSec = slot === 'free' ? 900 : 1800;
     await getRedis().set(cdKey, '1', 'EX', cdSec);
   } catch {
@@ -465,31 +522,20 @@ ${existing.slice(0, 2500) || '(空)'}
 
   const postText = `📔 ${day} ${clock}（${slotLabel(slot)}）\n\n${body.slice(0, 3500)}`;
 
-  const channelId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
-  if (channelId !== 0) {
+  const publish = effectiveJournalConfig(sourceChatId);
+  if (publish.settings.enabled && publish.settings.publishToSource && publish.revision === config.revision) {
     try {
-      await sendMessage(channelId, postText);
-      logger.info({ channelId, slot }, 'Dream journal posted to channel');
+      await sendMessage(sourceChatId, postText);
+      logger.info({ channelId: sourceChatId, slot }, 'Dream journal posted to channel');
     } catch (err) {
-      logger.warn({ err, channelId }, 'Dream journal channel post failed');
-    }
-  }
-
-  if (env().DREAM_JOURNAL_DM) {
-    const master = env().MASTER_UID;
-    if (master > 0) {
-      try {
-        await sendMessage(master, postText);
-      } catch (err) {
-        logger.warn({ err }, 'Dream journal DM failed');
-      }
+      logger.warn({ err, channelId: sourceChatId }, 'Dream journal channel post failed');
     }
   }
 
   return { path: outPath, reason: 'wrote' };
 }
 
-export async function runDreamJournal(opts?: { slot?: DreamSlot }): Promise<string | null> {
+export async function runDreamJournal(opts?: { slot?: DreamSlot; sourceChatId?: number }): Promise<string | null> {
   return (await runDreamJournalInner(opts)).path;
 }
 
@@ -503,14 +549,19 @@ export function inferDreamSlot(d = new Date()): DreamSlot {
   return 'free';
 }
 
-export async function readRecentDreamSnippet(maxChars = 400): Promise<string | null> {
+export async function readRecentDreamSnippet(maxChars = 400, scope?: DigestReadScope): Promise<string | null> {
+  if (!isDigestSourceChatId(scope?.sourceChatId)) return null;
+  const limit = Math.max(0, Math.min(4000, Math.floor(maxChars) || 0));
+  if (!limit) return null;
   try {
-    const today = await readFile(dreamJournalPath(), 'utf8').catch(() => '');
-    if (today.trim().length > 30) return today.trim().slice(0, maxChars);
+    const todayDoc = await readFile(dreamJournalPath(undefined, scope), 'utf8').catch(() => '');
+    const today = scopedJournalBody(todayDoc, scope.sourceChatId)?.trim() ?? '';
+    if (today.length > 30) return today.slice(0, limit);
     const y = new Date(Date.now() - 86400_000);
-    const yPath = dreamJournalPath(todayStamp(y));
-    const yest = await readFile(yPath, 'utf8').catch(() => '');
-    return yest.trim().length > 30 ? yest.trim().slice(0, maxChars) : null;
+    const yPath = dreamJournalPath(todayStamp(y), scope);
+    const yestDoc = await readFile(yPath, 'utf8').catch(() => '');
+    const yest = scopedJournalBody(yestDoc, scope.sourceChatId)?.trim() ?? '';
+    return yest.length > 30 ? yest.slice(0, limit) : null;
   } catch {
     return null;
   }
@@ -530,8 +581,7 @@ export async function nudgeMetaForDream(slot?: DreamSlot | string): Promise<bool
   if (!env().DREAM_JOURNAL_ENABLED || !env().META_SUBAGENT_ENABLED) return false;
   const resolved = normalizeSlot(slot);
   const master = env().MASTER_UID;
-  const channel = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
-  const chatId = master > 0 ? master : channel;
+  const chatId = master > 0 ? master : 0;
   if (!chatId) {
     logger.debug({ slot: resolved }, 'Dream journal Meta nudge skipped (no chatId)');
     return false;
@@ -562,15 +612,20 @@ export async function nudgeMetaForDream(slot?: DreamSlot | string): Promise<bool
 /** Meta/host entry: cooldown + runDreamJournal. */
 export async function tryWriteDreamJournal(opts?: {
   slot?: DreamSlot | string;
+  sourceChatId?: number;
   /** Skip Redis cooldown (cron/tests). */
   force?: boolean;
 }): Promise<{ wrote: boolean; path: string | null; slot: DreamSlot; reason?: string }> {
-  if (!env().DREAM_JOURNAL_ENABLED) {
-    return { wrote: false, path: null, slot: 'free', reason: 'disabled' };
-  }
   const slot = normalizeSlot(opts?.slot);
+  const sourceChatId = resolveJournalSource(opts?.sourceChatId);
+  if (sourceChatId === undefined) {
+    return { wrote: false, path: null, slot, reason: 'missing_source_chat' };
+  }
+  if (!effectiveJournalConfig(sourceChatId).settings.enabled) {
+    return { wrote: false, path: null, slot, reason: 'disabled' };
+  }
   const day = todayStamp();
-  const cdKey = `xxb:dream:meta-cd:${day}:${slot}`;
+  const cdKey = `xxb:dream:meta-cd:${sourceChatId}:${day}:${slot}`;
   const cdSec = slot === 'free' ? 900 : 1800;
 
   if (!opts?.force) {
@@ -585,7 +640,7 @@ export async function tryWriteDreamJournal(opts?: {
     }
   }
 
-  const result = await runDreamJournalInner({ slot });
+  const result = await runDreamJournalInner({ slot, sourceChatId });
   return {
     wrote: !!result.path,
     path: result.path,

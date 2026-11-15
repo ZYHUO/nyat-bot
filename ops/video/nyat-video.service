@@ -1,0 +1,29 @@
+[Unit]
+Description=NyatBot isolated video frame compute
+After=network.target
+
+[Service]
+Type=simple
+User=nyatvideo
+Group=nyatvideo
+WorkingDirectory=/opt/nyatbot-video-compute
+EnvironmentFile=/etc/nyat-video/compute.env
+# Installer must use a verified Node 22 binary at this fixed path.
+ExecStart=/opt/nyatbot-video-compute/node /opt/nyatbot-video-compute/video-compute.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitCORE=0
+LimitNOFILE=128
+LimitNPROC=128
+MemoryLimit=768M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

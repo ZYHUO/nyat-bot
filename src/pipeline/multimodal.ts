@@ -7,15 +7,27 @@ import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import type { FormattedMessage } from '../shared/types.js';
+import { transcribeAudio, MAX_AUDIO_BYTES } from '../ai/transcription.js';
 
 // MaiBot 借鉴:超大文件直接丢弃 —— 发给 LLM 会 413/超时,卡住整条管线。
 // Telegram 文件上限 50MB,base64 后 ×1.33;10MB 已远超任何视觉模型需要。
-const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+const MAX_MEDIA_BYTES = MAX_AUDIO_BYTES;
 
-async function downloadTelegramFile(fileId: string): Promise<{ buffer: ArrayBuffer; mimeType: string } | null> {
+async function downloadTelegramFile(
+  fileId: string,
+  signal: AbortSignal = AbortSignal.timeout(30_000),
+  chatId?: number,
+): Promise<{ buffer: ArrayBuffer; mimeType: string; filePath: string; assertAvailable?: () => void } | null> {
   try {
+    if (fileId.startsWith('qq-media:')) {
+      const { resolveOneBotMedia } = await import('../platform/onebot-media.js');
+      const media = await resolveOneBotMedia(fileId, chatId, { signal, maxBytes: MAX_MEDIA_BYTES });
+      return { buffer: Uint8Array.from(media.bytes).buffer, mimeType: media.mimeType, filePath: media.fileName, assertAvailable: media.assertAvailable };
+    }
     const bot = getBot();
-    const file = await bot.api.getFile(fileId);
+    // grammY's declaration still names abort-controller; Node 22's native signal
+    // implements the same runtime cancellation contract used by its HTTP client.
+    const file = await bot.api.getFile(fileId, signal as unknown as Parameters<typeof bot.api.getFile>[1]);
     const filePath = file.file_path;
     if (!filePath) return null;
     if (file.file_size && file.file_size > MAX_MEDIA_BYTES) {
@@ -25,18 +37,37 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: ArrayBuff
 
     const token = bot.token;
     const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
-    const response = await fetch(fileUrl);
+    const response = await fetch(fileUrl, { signal, redirect: 'error' });
     if (!response.ok) return null;
-
-    const buffer = await response.arrayBuffer();
+    const contentLength = Number(response.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_MEDIA_BYTES) { await response.body?.cancel(); return null; }
+    // Enforce the limit while streaming, including missing/false Content-Length.
+    const reader = response.body?.getReader();
+    let buffer: ArrayBuffer;
+    if (reader) {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        total += chunk.value.byteLength;
+        if (total > MAX_MEDIA_BYTES) { await reader.cancel(); return null; }
+        chunks.push(chunk.value);
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      buffer = bytes.buffer;
+    } else buffer = await response.arrayBuffer();
     if (buffer.byteLength > MAX_MEDIA_BYTES) {
       logger.info({ fileId, bytes: buffer.byteLength }, 'Media too large after download, dropping');
       return null;
     }
     const mimeType = response.headers.get('content-type') ?? 'application/octet-stream';
-    return { buffer, mimeType };
-  } catch (err) {
-    logger.warn({ fileId, err }, 'downloadTelegramFile failed');
+    return { buffer, mimeType, filePath };
+  } catch {
+    // The file URL contains the bot token; transport errors may repeat that URL.
+    logger.warn({ fileId }, 'downloadTelegramFile failed');
     return null;
   }
 }
@@ -51,18 +82,24 @@ function audioFormatFromMime(mime: string): string {
   return sub;
 }
 
-async function describeAudio(fileId: string, label: string): Promise<string> {
-  const downloaded = await downloadTelegramFile(fileId);
+async function describeAudio(fileId: string, label: string, chatId?: number): Promise<string> {
+  if (!env().AUDIO_TRANSCRIBE_ENABLED) return `[${label}]`;
+  const signal = AbortSignal.timeout(30_000);
+  const downloaded = await downloadTelegramFile(fileId, signal, chatId);
   // 下不动(多半文件太大)≠ 内容不存在:文件已在群里、别人收得到。用中性占位,
   // 别写"无法下载"——否则 bot 会把别的 bot 发来的歌/语音误读成"失败了"。
   if (!downloaded) return `[${label}]`;
 
-  // 默认不转写:当前所有 input_audio 供应商在本环境都不可用,发出去必 400/超时,
-  // 白白吃满 timeout + 双 backup 重试 + 刷日志。开关关 → 直接中性占位,不发调用。
-  // (旧实现把 audio/ogg 当 image 丢给 GPT vision,每条语音都注定失败 —— 已根治。)
-  if (!env().AUDIO_TRANSCRIBE_ENABLED) return `[${label}]`;
-
   try {
+    if (env().AUDIO_TRANSCRIBE_API_MODE === 'transcriptions') {
+      const result = await transcribeAudio({ buffer: downloaded.buffer, mimeType: downloaded.mimeType, fileName: downloaded.filePath, signal });
+      if (result.status === 'ok') {
+        logger.info({ label: result.label, chars: result.text.length }, 'Audio transcribed');
+        return `[${label}内容：${result.text}]`;
+      }
+      logger.info({ status: result.status, reason: result.reason }, 'Audio transcription placeholder used');
+      return `[${label}]`;
+    }
     const base64 = Buffer.from(downloaded.buffer).toString('base64');
     const format = audioFormatFromMime(downloaded.mimeType);
 
@@ -78,11 +115,14 @@ async function describeAudio(fileId: string, label: string): Promise<string> {
         },
       ],
       maxTokens: 300,
+      maxTimeoutMs: 30_000,
+      signal,
     });
-
-    return `[${label}内容：${result.content.trim()}]`;
-  } catch (err) {
-    logger.warn({ fileId, err }, 'Audio description failed');
+    const text = result.content.trim();
+    if (!text) { logger.info('Audio chat transcription empty — placeholder used'); return `[${label}]`; }
+    return `[${label}内容：${text}]`;
+  } catch {
+    logger.warn({ fileId }, 'Audio description failed');
     // 失败也用中性占位,别写"无法识别"——以免把别人的语音误读成 bot 出错。
     return `[${label}]`;
   }
@@ -92,8 +132,9 @@ async function describeDocument(
   fileId: string,
   mimeType: string | undefined,
   fileName: string | undefined,
+  chatId?: number,
 ): Promise<string> {
-  const downloaded = await downloadTelegramFile(fileId);
+  const downloaded = await downloadTelegramFile(fileId, undefined, chatId);
   if (!downloaded) return '[文档]'; // 下不动≠不存在;中性占位,别误导成失败
 
   const effectiveMime = mimeType ?? downloaded.mimeType;
@@ -261,18 +302,169 @@ function extractXlsxText(buffer: ArrayBuffer): string {
 
 /**
 /**
+ * Telegram 文件路径 → 视频 MIME。
+ *
+ * downloadTelegramFile 从 HTTP 响应头取 content-type，而 Telegram 的 file 端点
+ * 经常回 `application/octet-stream`（不猜类型）。视频理解按 MIME 分派，
+ * 拿到 octet-stream 就废了——所以这里按扩展名兜一道。
+ */
+function videoMimeFromPath(filePath: string, fallback: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  const byExt: Record<string, string> = {
+    mp4: 'video/mp4',
+    m4v: 'video/mp4',
+    mov: 'video/quicktime',
+    webm: 'video/webm',
+    mkv: 'video/x-matroska',
+    avi: 'video/x-msvideo',
+    '3gp': 'video/3gpp',
+    ogv: 'video/ogg',
+  };
+  if (byExt[ext]) return byExt[ext];
+  if (fallback.startsWith('video/')) return fallback;
+  return 'video/mp4'; // Telegram 视频事实上的默认容器
+}
+
+/**
+ * 描述一段视频。
+ *
+ * 2026-09-21：这里原来只有一行 `[视频：用户发送了一段视频]` + 一句
+ * "description not supported yet"。那个判断**曾经是对的，现在过期了**——
+ * 实测 step-5-preview（1M context）吃 base64 video_url，6 秒测试视频
+ * 准确描述了内容（彩色条纹/彩虹斜线/移动方块/左上角计时器）。
+ *
+ * 三个必须注意的实际约束（都实测过）：
+ *   ① **只有部分供应商支持视频**。同一个 video_url part 发给 dsv4flash
+ *      （vision 链主选）连不上（那个端口整个是死的，见下），发给 step-3.7-flash
+ *      返回 200 但 content 为空——它把全部 token 烧在 reasoning 上，
+ *      finish_reason=length。所以视频走**独立的 video usage**，不蹭 vision 链。
+ *   ② **max_tokens 必须给够**：reasoning 计入 completion，给 400 会得到空正文。
+ *   ③ **时长有硬上限**（模型侧 5 分钟）。Telegram 侧还有更紧的一条：
+ *      bot 下载上限 20MB、代码里 MAX_MEDIA_BYTES=10MB——5 分钟视频几乎必然超。
+ *      所以现实里能描述的是"短视频"，超限的给中性占位并说明时长，
+ *      不写"无法识别"（那会让 bot 以为是自己出错）。
+ *
+ * ⚠️ 不使用 Telegram file URL 直喂供应商：那个 URL 形如
+ * `https://api.telegram.org/file/bot<TOKEN>/<path>`，把 bot token 交给第三方。
+ * 必须 base64 内联，宁可付 1.33 倍体积。
+ */
+async function describeVideo(
+  fileId: string,
+  durationSec: number | undefined,
+  label: string,
+  chatId?: number,
+): Promise<string> {
+  const maxSec = env().VIDEO_MAX_DURATION_SEC;
+  // 时长已知且超限 → 不下白下载（Telegram 侧下载 + base64 都要花钱）。
+  if (durationSec !== undefined && durationSec > maxSec) {
+    logger.debug({ fileId, durationSec, maxSec }, 'Video too long for description');
+    return `[${label}（${durationSec} 秒，超过 ${maxSec} 秒不上传）]`;
+  }
+
+  const downloaded = await downloadTelegramFile(fileId, undefined, chatId);
+  // 下不动（多半太大）≠ 内容不存在。中性占位，别误导成失败。
+  if (!downloaded) {
+    // 2026-09-21：这个出口**一条日志都没有**。于是"下载失败"和"没收到过视频"
+    // 在日志里长得一模一样——视频功能上线后生产零样本，而我分不清是它坏了
+    // 还是压根没有视频消息进来。补一行 info，让"跑了但没成"变得可见。
+    logger.info({ fileId, durationSec }, 'Video description skipped: download unavailable');
+    return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  }
+
+  if (!env().VIDEO_DESCRIBE_ENABLED) {
+    logger.info({ fileId }, 'Video description skipped: flag off');
+    return `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  }
+
+  try {
+    downloaded.assertAvailable?.();
+    const base64 = Buffer.from(downloaded.buffer).toString('base64');
+    const mimeType = videoMimeFromPath(downloaded.filePath, downloaded.mimeType);
+
+    const result = await callWithFallback({
+      usage: 'video',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '请描述这段视频的内容：画面里有什么、在发生什么、有没有文字或语音。3 句以内，用中文，口语化。' },
+            { type: 'video_url', video_url: { url: `data:${mimeType};base64,${base64}` } },
+          ],
+        },
+      ],
+      // reasoning 计入 completion：给小了会拿到空正文（实测 step-3.7-flash
+      // max_tokens=400 → content 为空、finish_reason=length）。
+      maxTokens: env().VIDEO_DESCRIBE_MAX_TOKENS,
+      // maxTimeoutMs 会钳住每一次尝试（含 backup），不是共享一个 signal——
+      // 视频慢（base64 上传 + reasoning），默认 usage timeout 可能不够。
+      maxTimeoutMs: env().VIDEO_DESCRIBE_TIMEOUT_MS,
+    });
+
+    downloaded.assertAvailable?.();
+    const text = result.content.trim();
+    if (!text) {
+      logger.info({ fileId, label: result.label }, 'Video description empty — placeholder used');
+      return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId, downloaded.assertAvailable);
+    }
+    // 成功也记一笔：没有它，"这个功能到底跑过没有"只能靠翻 textContent。
+    logger.info(
+      { fileId, label: result.label, ms: result.latencyMs, chars: text.length },
+      'Video described',
+    );
+    return `[${label}内容：${text}]`;
+  } catch {
+    logger.warn({ fileId }, 'Video description failed');
+    // 失败同样用中性占位——别把群友发的视频误读成 bot 出了故障。
+    return describeVideoFrameFallback(downloaded.buffer, label, durationSec, chatId, downloaded.assertAvailable);
+  }
+}
+
+async function describeVideoFrameFallback(
+  buffer: ArrayBuffer, label: string, durationSec: number | undefined, chatId?: number, assertAvailable?: () => void,
+): Promise<string> {
+  const placeholder = `[${label}${durationSec ? `（${durationSec} 秒）` : ''}]`;
+  if (!env().VIDEO_FRAME_FALLBACK_ENABLED) return placeholder;
+  try {
+    const { extractVideoFrames } = await import('./video-frames.js');
+    assertAvailable?.();
+    const frames = await extractVideoFrames(new Uint8Array(buffer));
+    // A source recalled while a remote replica ran must not reach the model.
+    assertAvailable?.();
+    const result = await callWithFallback({
+      usage: 'vision', chatId,
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: `以下是同一段视频按时间顺序抽取的${frames.length}张画面。仅根据可见画面描述人物、物体、场景和文字，3句以内，用中文。没有提供音轨，不要推断语音或声响，也不要声称看过完整视频。采样时间（秒）：${frames.map(frame => frame.atSeconds.toFixed(2)).join('、')}。` },
+        ...frames.map(frame => ({ type: 'image' as const, image: `data:image/png;base64,${frame.png.toString('base64')}` })),
+      ] }],
+      maxTokens: env().VIDEO_DESCRIBE_MAX_TOKENS,
+      maxTimeoutMs: Math.min(30_000, env().VIDEO_DESCRIBE_TIMEOUT_MS),
+    });
+    assertAvailable?.();
+    const text = result.content.trim();
+    if (!text) return placeholder;
+    logger.info({ label: result.label, frames: frames.length }, 'Video frame fallback described');
+    return `[${label}采样画面：${text}]`;
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+      && /^video_frames_[a-z_]+$/.test(error.code) ? error.code : 'video_frames_failed';
+    logger.info({ code }, 'Video frame fallback unavailable');
+    return placeholder;
+  }
+}
+
+/**
  * Describe any multimodal content in a message (audio, voice, document, video).
  * Returns a descriptive string to inject into context, or null if none.
  */
-export async function describeMultimodal(formatted: FormattedMessage): Promise<string | null> {
+export async function describeMultimodal(formatted: FormattedMessage, chatId?: number): Promise<string | null> {
   const parts: string[] = [];
 
   // Voice message (highest priority — user is speaking)
   if (formatted.voiceFileId) {
-    const desc = await describeAudio(formatted.voiceFileId, '语音消息');
+    const desc = await describeAudio(formatted.voiceFileId, '语音消息', chatId);
     parts.push(desc);
   } else if (formatted.audioFileId) {
-    const desc = await describeAudio(formatted.audioFileId, '音频');
+    const desc = await describeAudio(formatted.audioFileId, '音频', chatId);
     parts.push(desc);
   }
 
@@ -282,16 +474,16 @@ export async function describeMultimodal(formatted: FormattedMessage): Promise<s
       formatted.documentFileId,
       formatted.documentMimeType,
       formatted.documentFileName,
+      chatId,
     );
     parts.push(desc);
   }
 
-  // Video
+  // Video — 2026-09-21 接上真描述（step-5-preview 支持 base64 video_url）
   if (formatted.videoFileId || formatted.videoNoteFileId) {
     const fileId = formatted.videoFileId ?? formatted.videoNoteFileId!;
     const label = formatted.videoNoteFileId ? '圆形视频' : '视频';
-    parts.push(`[${label}：用户发送了一段视频]`);
-    logger.debug({ fileId }, 'Video received — description not supported yet');
+    parts.push(await describeVideo(fileId, formatted.videoDurationSec, label, chatId));
   }
 
   if (parts.length === 0) return null;

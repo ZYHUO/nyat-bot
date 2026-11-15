@@ -74,7 +74,7 @@ describe('reply prompt files', () => {
       expect(prompt, `${f} missing heard-but-pass`).toContain('听见了但不想理');
       expect(prompt, `${f} missing heard_but_pass marker`).toContain('heard_but_pass');
     }
-    expect(readPrompt('task/judge.md')).toContain('第 3 次必须 REPLY');
-    expect(readPrompt('task/heart.md')).toContain('第 3 次必须接');
+    expect(readPrompt('task/judge.md')).not.toContain('第 3 次必须 REPLY');
+    expect(readPrompt('task/heart.md')).not.toContain('第 3 次必须接');
   });
 });

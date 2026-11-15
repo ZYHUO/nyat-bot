@@ -19,6 +19,15 @@ import { isAsleep } from '../tracking/sleep.js';
 import { isWithinActiveHours } from './active-hours.js';
 import { classifyCognitiveRoute, shouldApplyCognitiveRoute, type CognitiveRoutingDecision } from '../agent/cognitive-routing.js';
 import { getLatestTelegramMessageEventId } from '../agent/cognitive-events.js';
+import { checkProactiveActivation } from './activation-policy.js';
+import { prepareBackgroundTask } from '../agent/background-publication.js';
+
+// The global planner can choose a different destination, so it cannot receive
+// DM or sensitive-group content. Those chats keep their own scoped Meta context.
+function isGlobalPlanningChat(chatId: number | null | undefined): boolean {
+  return typeof chatId === 'number' && Number.isSafeInteger(chatId) && chatId < 0
+    && !(env().MEMORY_SENSITIVE_CHAT_IDS ?? []).includes(chatId);
+}
 
 // Phase 3：TickAction → CandidateAction（suppressor 打分形状）。quiet 无映射。
 function toCandidate(a: TickAction): import('../core/drives/score.js').CandidateAction | null {
@@ -26,7 +35,7 @@ function toCandidate(a: TickAction): import('../core/drives/score.js').Candidate
     case 'care_master':
       return { type: 'care_master' };
     case 'group_speak':
-      return { type: 'group_speak', chatId: a.chatId };
+      return { type: 'group_speak', chatId: a.chatId, ...(a.about === undefined ? {} : { about: a.about }) };
     case 'remember_user':
       return { type: 'remember_user', chatId: a.chatId };
     case 'self_play':
@@ -35,6 +44,11 @@ function toCandidate(a: TickAction): import('../core/drives/score.js').Candidate
       return { type: 'check_goal', goalId: a.goalId };
     case 'share':
       return { type: 'share', fromChatId: a.fromChatId, toChatId: a.toChatId };
+    // 在场但静默的参与：不对外发声，所以没有"文本"要传，也没有 suppress 的社交分量
+    case 'note_impulse':
+      return { type: 'note_impulse', chatId: a.chatId, about: a.about };
+    case 'remember_thread':
+      return { type: 'remember_thread', chatId: a.chatId, about: a.about };
     case 'quiet':
       return null;
   }
@@ -44,11 +58,15 @@ function toCandidate(a: TickAction): import('../core/drives/score.js').Candidate
 
 export type TickAction =
   | { type: 'care_master'; text: string }
-  | { type: 'group_speak'; chatId: number }
+  | { type: 'group_speak'; chatId: number; /** 它自己没说出口的念头，供 LLM 参考 */ about?: string }
   | { type: 'remember_user'; chatId: number; name: string; absentDays: number }
   | { type: 'self_play'; idea: string; plan: string[] }
   | { type: 'check_goal'; goalId: number }
   | { type: 'share'; fromChatId: number; messageId: number; toChatId: number }
+  // 在场但静默的参与（不对外发声）。给主体一件"有人时也能做的事"，
+  // 否则它的自主性永远只能寄生在无人时。
+  | { type: 'note_impulse'; chatId: number; about: string }
+  | { type: 'remember_thread'; chatId: number; about: string }
   | { type: 'quiet'; reason: string };
 
 export interface TickVerdict {
@@ -62,11 +80,8 @@ export interface WorldState {
   hourBeijing: number;
   masterSilentSec: number | null; // null = MASTER_UID 未配
   masterLastText: string;
-  groups: { chatId: number; silentSec: number; lastTexts: string }[];
-  /**
-   * H3.1 转发候选(taste 确定性打分 ≥阈值 的真人消息,每群 ≤2 条)。
-   * LLM 只能从这里选 share 目标,不许编造 messageId。
-   */
+  groups: { chatId: number; silentSec: number; lastTexts: string; botSilentSec?: number }[];
+  /** Legacy input only. Unverified original messages are never global share candidates. */
   shareCandidates?: { fromChatId: number; messageId: number; text: string; score: number }[];
   /** 3+ 天没出现的熟面孔(交互≥5 次)——"想起某人"的数据源。 */
   absentUsers: { chatId: number; uid: number; name: string; absentDays: number }[];
@@ -131,7 +146,7 @@ function hourBeijing(): number {
 
 async function discoverGroups(): Promise<number[]> {
   const redis = getRedis();
-  const raw = await redis.zrange('xxb:active_groups', 0, -1);
+  const raw = await redis.zrevrange('xxb:active_groups', 0, -1);
   return raw.map(Number).filter((n) => !Number.isNaN(n) && n < 0);
 }
 
@@ -143,16 +158,12 @@ export async function buildWorldState(): Promise<WorldState> {
 
   // 主人 DM
   let masterSilentSec: number | null = null;
-  let masterLastText = '(无)';
+  const masterLastText = '(私聊正文仅在原会话内使用)';
   if (e.MASTER_UID > 0) {
     try {
       const recent = await getRecent(e.MASTER_UID, 6);
-      if (recent.length) {
+      if (recent.length && (await checkProactiveActivation(e.MASTER_UID, { recentMessages: recent, nowSec: now })).allowed) {
         masterSilentSec = now - (recent[recent.length - 1]!.timestamp ?? now);
-        masterLastText = recent
-          .slice(-4)
-          .map((m) => `${m.role === 'assistant' ? '[bot]' : '[主人]'} ${(m.textContent ?? '').slice(0, 60)}`)
-          .join(' / ');
       }
     } catch { /* keep defaults */ }
   }
@@ -160,17 +171,25 @@ export async function buildWorldState(): Promise<WorldState> {
   // 群（最多 5 个，取最近活跃的）
   const groups: WorldState['groups'] = [];
   try {
-    const chatIds = (await discoverGroups()).slice(0, 5);
+    const chatIds = await discoverGroups();
     for (const chatId of chatIds) {
+      if (groups.length >= 5) break;
+      if (!isGlobalPlanningChat(chatId)) continue;
       try {
         const recent = await getRecent(chatId, 6);
         if (!recent.length) continue;
+        if (!(await checkProactiveActivation(chatId, { recentMessages: recent, nowSec: now })).allowed) continue;
         const silentSec = now - (recent[recent.length - 1]!.timestamp ?? now);
+        // 我自己多久没在这个群开口——和"群多久没人说话"是两件事。
+        // "自主只在无人时启动"的根源就是把前者错当成后者；
+        // 一个人不会因为房间安静才说话，他是因为自己有话、且没在连续念叨。
+        const own = recent.filter((m) => m.role === 'assistant');
+        const botSilentSec = own.length > 0 ? now - (own[own.length - 1]!.timestamp ?? now) : Number.POSITIVE_INFINITY;
         const lastTexts = recent
           .slice(-3)
           .map((m) => `${m.role === 'assistant' ? '[bot]' : (m.fullName || m.username || '?')}: ${(m.textContent ?? '').slice(0, 50)}`)
           .join(' / ');
-        groups.push({ chatId, silentSec, lastTexts });
+        groups.push({ chatId, silentSec, lastTexts, botSilentSec });
       } catch { /* skip chat */ }
     }
     groups.sort((a, b) => a.silentSec - b.silentSec);
@@ -180,7 +199,11 @@ export async function buildWorldState(): Promise<WorldState> {
   let dueGoals: WorldState['dueGoals'] = [];
   try {
     const { listDueGoals } = await import('../agent/goals.js');
-    dueGoals = listDueGoals(now).map((g) => ({ id: g.id, topic: g.topic, lastFinding: g.last_finding }));
+    dueGoals = listDueGoals(now)
+      .filter((g) => !e.PROACTIVE_ACTIVATED_AT_SEC || g.created_at > e.PROACTIVE_ACTIVATED_AT_SEC)
+      .map((g) => ({ id: g.id,
+        topic: isGlobalPlanningChat(g.chat_id) ? g.topic : '(私密或来源不明的目标，仅在原会话处理)',
+        lastFinding: isGlobalPlanningChat(g.chat_id) ? g.last_finding : null }));
   } catch { /* keep empty */ }
 
   // 到期认知债务（CSR Phase B）——只暴露 chat-level obligations；task 私有债务
@@ -392,49 +415,14 @@ export async function buildWorldState(): Promise<WorldState> {
     }
   } catch { /* keep empty */ }
 
-  let recentDigests: string[] = [];
+  // Scoped digests remain available to their own Meta session. A global planner
+  // must never fall back to the legacy Redis list containing mixed private text.
+  const recentDigests: string[] = [];
 
-  // H3.1 转发候选:各活跃群近 30 条里 taste ≥阈值 且 7 天内没转过的,每群 ≤2。
-  // 确定性打分先行 —— LLM 只做"转哪条到哪群"的选择,不做品味判断。
+  // A taste score, group membership or a short excerpt is not public provenance.
+  // Keep legacy state shape without collecting original-message forwarding candidates.
+  // Public RSS/web knowledge uses the separate group_speak path.
   const shareCandidates: NonNullable<WorldState['shareCandidates']> = [];
-  try {
-    const { scoreTaste, wasForwardedRecently, SHARE_THRESHOLD } = await import('../pipeline/rhythm/taste.js');
-    for (const g of groups.slice(0, 5)) {
-      try {
-        const recent = await getRecent(g.chatId, 30);
-        let picked = 0;
-        for (let i = recent.length - 1; i >= 0 && picked < 2; i--) {
-          const m = recent[i]!;
-          if (m.role === 'assistant' || m.isBot) continue;
-          const s = scoreTaste(m);
-          if (s.score < SHARE_THRESHOLD) continue;
-          if (wasForwardedRecently(g.chatId, m.messageId)) continue;
-          shareCandidates.push({
-            fromChatId: g.chatId,
-            messageId: m.messageId,
-            text: (m.textContent || m.captionContent || '').slice(0, 80),
-            score: s.score,
-          });
-          picked++;
-        }
-      } catch { /* skip chat */ }
-    }
-  } catch { /* keep empty */ }
-  try {
-    if (e.DIGEST_PERSIST_ENABLED) {
-      const { recentDigests: rd } = await import('../meta/session-digest.js');
-      recentDigests = rd(3).map((d) => d.text.slice(0, 120));
-    }
-    if (recentDigests.length === 0) {
-      const raw = await redis.lrange('xxb:meta:digests', 0, 2);
-      for (const r of raw) {
-        try {
-          const parsed = JSON.parse(r) as { text?: string };
-          if (parsed.text) recentDigests.push(parsed.text.slice(0, 120));
-        } catch { /* skip */ }
-      }
-    }
-  } catch { /* keep empty */ }
 
   return {
     hourBeijing: hourBeijing(),
@@ -469,18 +457,19 @@ function parseTickVerdict(raw: string): TickVerdict | null {
     const obj = JSON.parse(m[0]) as Record<string, unknown>;
     const type = obj['action'];
     const reason = typeof obj['reason'] === 'string' ? (obj['reason'] as string).slice(0, 150) : '';
-    if (type === 'care_master' && typeof obj['text'] === 'string' && (obj['text'] as string).trim()) {
-      return { action: { type, text: (obj['text'] as string).trim().slice(0, 300) }, reason };
+    if (type === 'care_master') {
+      // Legacy text is deliberately ignored: scheduling cannot author a DM reply.
+      return { action: { type, text: '' }, reason };
     }
     if (type === 'group_speak' && typeof obj['chatId'] === 'number') {
       return { action: { type, chatId: obj['chatId'] as number }, reason };
     }
-    if (type === 'remember_user' && typeof obj['chatId'] === 'number' && typeof obj['name'] === 'string') {
+    if (type === 'remember_user' && typeof obj['chatId'] === 'number') {
       return {
         action: {
           type,
           chatId: obj['chatId'] as number,
-          name: (obj['name'] as string).slice(0, 40),
+          name: typeof obj['name'] === 'string' ? obj['name'].slice(0, 40) : '',
           absentDays: typeof obj['absentDays'] === 'number' ? (obj['absentDays'] as number) : 3,
         },
         reason,
@@ -515,27 +504,63 @@ function parseTickVerdict(raw: string): TickVerdict | null {
   }
 }
 
+/** decideTick 的外壳超时（ms）。必须 < ai/labels.ts 里 tick usage 的 timeout(45s)，且不能紧于真实延迟。 */
+const TICK_RACE_TIMEOUT_MS = 40_000;
+
 const TICK_SYSTEM = `你是一个 AI 猫娘的「节律中枢」。每 5 分钟你醒一次，看一眼世界，决定这一个周期做**一件**事——或者继续安静。
 
 可选动作（只能选一个）：
-- care_master: 主人沉默很久了，主动关心一句。text=要说的话（像朋友，别像客服）。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
-- group_speak: 有真实想分享的就开口——跟进群里在聊的话题、分享你最近做的有意思的事（见 session digest）、或群里冷场超过 20 分钟去自然冒个泡。chatId=目标群。**没料的硬冒泡不如安静**；别复读你 digest 里刚分享过的同一件事。
-- remember_user: 世界状态里有熟面孔（群友）好几天没出现了，在对应群里自然地提一句（如"xx 好久没来喵"）。chatId=群，name=对方称呼，absentDays=缺席天数。这是"想起朋友"不是"查户口"，语气要自然。没有 absentUsers 时不该选。
+- care_master: 主人沉默很久了，选择在主人私聊里关心一下。只选动作，最终正文由主人私聊的独立上下文生成。**硬规则：主人沉默 <4h、或上次关心 <4h → 禁止选**。禁止追问自己刚做过的自玩产物（头像/工具/沙盒），禁止复读「喜欢吗/要不要再画」。
+- group_speak: 根据群的活跃度、冷场时间和公开资讯，选择一个适合自然开口的目标群。chatId=目标群。只做调度，话题和正文由目标群独立上下文生成，仍可决定保持安静。**没料的硬冒泡不如安静**。
+- remember_user: 世界状态里有熟面孔好几天没出现了，在对应群里自然地提一句。只选 chatId；实际称呼和缺席天数由目标会话的宿主查询提供，不编造人名。这是"想起朋友"不是"查户口"。没有缺席记录时不该选。
 - self_play: 大家都沉默、自己也休息够了，自己找点事做（写代码/探索/搜点有意思的东西）。idea+plan。自玩是私下练习，别为了表演而自玩；但玩出了真有意思的东西（画了好玩的/挖到冷知识/写成个小工具）可以自然地分享给群里或主人一次。
 - check_goal: 有到期关注目标，去查查进展。goalId。
-- share: A 群有条真有意思的消息（见「值得转发的」），转到 B 群给那边的人看。fromChatId=来源群，messageId=那条消息，toChatId=目标群。**只能选候选列表里的，不许编 id；目标群选当前话题能接住它的（别往正经群倒梗、别往梗群倒正经）；A 转 A（同群）禁止**。
 - quiet: 没什么值得做的——这是最常见的答案，硬找事做不如安静。深夜、刚说过话、没什么新鲜事时选它。
+- note_impulse: 你自己起过个念头但还没说出口（见「你自已没说出口的念头」），而现在**不是开口的时候**。选它=把那个念头记下来，**不会发给任何人**。这是你唯一的"做了但没人看见"的动作——真人也会把话咽回去但记在心里。
+- remember_thread: 有一件你想回头再管的事（同上来源），选它=挂到"以后再说"的清单上，**不会发给任何人**。
 
 判断原则（像真人，不像机器）：
 - 真人不会每 5 分钟都想说话。quiet 仍是常见答案，但**有料就该动**——群里的话题可以跟进、自己刚做成的事可以分享、冷场可以自然冒泡。
 - 深夜（23-8 点）除非主人刚发过消息，否则 quiet。
 - 一个 tick 只干一件事。多件都想做时挑最重要的，其他的下个 tick 再说。
 - 上下文里刚出现过你自己的自玩汇报时，下一周期优先 quiet，不要用 care_master 继续推销。
+- 不自动跨会话转发聊天原文：普通群不代表公开来源，兴趣打分也不是分享许可。公开网页、RSS 新闻等知识可以通过 group_speak 自然分享；同会话的正常引用回复不受影响。
 
-只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|share", "chatId": 数字(可选), "goalId": 数字(可选), "name": "…"(remember_user 时), "absentDays": 数字(可选), "text": "…"(可选), "idea": "…"(可选), "plan": ["…"](可选), "fromChatId": 数字(share 时), "messageId": 数字(share 时), "toChatId": 数字(share 时), "reason": "一句话为什么"}`;
+只输出 JSON：{"action": "quiet|care_master|group_speak|remember_user|self_play|check_goal|note_impulse|remember_thread", "chatId": 数字(可选), "goalId": 数字(可选), "idea": "…"(可选), "plan": ["…"](可选), "about": "…"(note_impulse/remember_thread 时写你要记的是什么), "reason": "一句话为什么"}`;
+
+/** Global scheduling needs cadence metadata, never conversation prose from another scope. */
+function projectGlobalPlanningState(state: WorldState): WorldState {
+  const route = state.cognitiveRoute;
+  const cognitiveRoute: CognitiveRoutingDecision | undefined = route
+    && ['fast', 'deep', 'background'].includes(route.route) && Number.isFinite(route.score)
+    ? { route: route.route, score: Math.max(0, Math.min(100, route.score)), signals: [],
+      primarySignal: null, reason: '', shouldUseWorkspace: false }
+    : undefined;
+  return {
+    hourBeijing: state.hourBeijing,
+    masterSilentSec: state.masterSilentSec,
+    masterLastText: '',
+    groups: state.groups.map(g => ({ chatId: g.chatId, silentSec: g.silentSec, botSilentSec: g.botSilentSec, lastTexts: '' })),
+    absentUsers: (state.absentUsers ?? []).map(u => ({ chatId: u.chatId, uid: u.uid, absentDays: u.absentDays, name: '' })),
+    dueGoals: state.dueGoals.map(g => ({ id: g.id, topic: '(在目标会话内读取)', lastFinding: null })),
+    dueDebts: (state.dueDebts ?? []).map(d => ({ id: d.id, kind: 'scoped', chatId: d.chatId, statement: '' })),
+    missed: (state.missed ?? []).map(m => ({ chatId: m.chatId, name: '', text: '', ageMin: m.ageMin, kind: m.kind })),
+    // These inputs originate in the public RSS/weather feed and the bot's own clock.
+    rssNewCount: state.rssNewCount,
+    rssTopTitles: state.rssTopTitles,
+    weather: state.weather,
+    lifeTransition: state.lifeTransition,
+    selfPlayCooldownLeftSec: state.selfPlayCooldownLeftSec,
+    lastCareAgoSec: state.lastCareAgoSec,
+    cognitiveRoute,
+  };
+}
 
 /** 单次 LLM 决策。失败 → quiet（fail-closed）。 */
 export async function decideTick(state: WorldState): Promise<TickVerdict> {
+  // Project before both prompt rendering and agenda generation. Keep the caller's
+  // full state intact for the chosen target's local generation after scheduling.
+  state = projectGlobalPlanningState(state);
   const groupLines = state.groups.length
     ? state.groups
         .map((g) => `  群 ${g.chatId}: 沉默 ${Math.floor(g.silentSec / 60)} 分钟。最近: ${g.lastTexts.slice(0, 150)}`)
@@ -545,7 +570,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ? (state.cognitiveWorkspaces ?? []).slice(0, 3).map((workspace) => `  群 ${workspace.chatId}:\n${workspace.text.slice(0, 1200)}`).join('\n')
     : '  (工作区未启用或暂无 projection)';
   const routeLine = state.cognitiveRoute
-    ? `后台认知路由：${state.cognitiveRoute.route}（score=${state.cognitiveRoute.score}, reason=${state.cognitiveRoute.reason}）。它只决定是否读取有范围的工作区，不授予发送、工具或 Agency 权限。`
+    ? `后台认知路由：${state.cognitiveRoute.route}（score=${state.cognitiveRoute.score}）。仅保留调度元数据，不授予发送、工具或 Agency 权限。`
     : '后台认知路由：未启用（保持统一唤醒的 legacy 读取预算）。';
   const goalLines = state.dueGoals.length
     ? state.dueGoals.map((g) => `  goal#${g.id}: 「${g.topic}」${g.lastFinding ? `上次发现: ${g.lastFinding.slice(0, 60)}` : '(首次检查)'}`).join('\n')
@@ -555,7 +580,7 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     : '  (没有到期债务)';
   const absentLines = (state.absentUsers ?? []).length
     ? state.absentUsers
-        .map((u) => `  ${u.name}(群 ${u.chatId})已 ${u.absentDays} 天没出现`)
+        .map((u) => `  群 ${u.chatId} 有熟面孔已 ${u.absentDays} 天没出现（称呼仅在原会话读取）`)
         .join('\n')
     : '  (没有长时间缺席的熟面孔)';
   const topicLines = (state.topics ?? []).length
@@ -573,12 +598,10 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         )
         .join('\n')
     : '  (没有)';
-  const shareLines = (state.shareCandidates ?? []).length
-    ? state.shareCandidates!
-        .map((c) => `  群 ${c.fromChatId} #${c.messageId} (分${c.score}): 「${c.text}」`)
-        .join('\n')
-    : '  (没有值得转的)';
-  // Phase 3 drives（只做 scorer + suppressor 提示，不决策）：世界状态派生
+  // Per-chat impulse prose remains in its own conversation; the global planner
+  // must not turn an unspoken thought from A into a reason to speak in B.
+
+// Phase 3 drives（只做 scorer + suppressor 提示，不决策）：世界状态派生
   // drive 值 → 候选动作按期望增益排序 → 拼进 prompt 给 LLM 看。fail-soft：
   // 任一步抛错 → driveLines 空，prompt 与改造前逐字节一致。
   let driveLines: string[] = [];
@@ -609,10 +632,12 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
         absentUsers: state.absentUsers ?? [],
         selfPlayCooldownLeftSec: state.selfPlayCooldownLeftSec,
         lifeTransition: state.lifeTransition ?? null,
-        shareCandidates: (state.shareCandidates ?? []).map((c) => ({
-          fromChatId: c.fromChatId,
-          messageId: c.messageId,
-        })),
+        // Ignore even caller-supplied legacy candidates: they have no public provenance.
+        shareCandidates: [],
+        // 它自己起过、没说出口的念头：影子判定 speak 而线上最终静默的那批。
+        // 这是目前唯一现成的"我有自己的事"来源（goals.origin='self' 是 0 行），
+        // 而且内容就是它当时自己想说的话，不是我替它编的。
+        unactedImpulses: [],
       },
       masterConfigured: env().MASTER_UID > 0,
     });
@@ -651,6 +676,9 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     `当时冲你来但你没接的话头 / 群里新发生的事（想起来了可以自然捡回一句/欢迎新人，别刻意补账）:`,
     missedLines,
     ``,
+    `你自已没说出口的念头（你当时想接却没接的；不是现在必须说，可以记下、可以装作没想过）:`,
+    '  （仅在原会话读取）',
+    ``,
     `你最近做的事（session digest）:`,
     digestLines,
     ``,
@@ -662,9 +690,6 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
     ``,
     `欠着的认知债务（相关群出现合适时机时可自然偿还——兑现/核实/承认错了；别硬提）:`,
     debtLines,
-    ``,
-    `值得转发的（A 群看到的好东西，可以转到 B 群——只能选下面列的，不许编 id）:`,
-    shareLines,
     ``,
     `RSS 新资讯: ${state.rssNewCount} 条待消化${(state.rssTopTitles ?? []).length ? `：\n${(state.rssTopTitles ?? []).map((t) => `  - ${t}`).join('\n')}` : ''}`,
     `self-play 冷却: ${state.selfPlayCooldownLeftSec > 0 ? `还有 ${Math.floor(state.selfPlayCooldownLeftSec / 60)} 分钟` : '已就绪'}`,
@@ -685,29 +710,143 @@ export async function decideTick(state: WorldState): Promise<TickVerdict> {
             { role: 'system', content: TICK_SYSTEM },
             { role: 'user', content: attempt === 0 ? user : `${user}\n\n(上次输出无法解析。这次只输出一个 JSON 对象,不要任何其他文字/围栏/解释。)` },
           ],
-          maxTokens: 400,
+          // Token budget must cover the largest legal answer. The verdict schema
+          // carries up to 9 fields, and `text`/`idea`/`plan`/`reason` are all
+          // free-form Chinese — measured 2026-09-18: at 400 tokens this failed
+          // 1057 times in 24h, 1033 of them returning EMPTY content and the rest
+          // truncated mid-field (e.g. `{"action": "care_master", "text`).
+          // Same class of bug as the shadow's 600-token budget.
+          maxTokens: 1500,
           temperature: attempt === 0 ? 0.7 : 0.3,
+          // tick 是 5 分钟一次的后台决策，不怕等。judge 链被十几个后台调用共用，到点常撞上
+          // 别人占满的在飞坑：09-25→10-01 共 797 次 quiet 里 794 次 llm_failed（skipped 的
+          // coolingForSec 全是 0——是在飞上限，不是冷却）。不等的话自主决策循环实际上不在运转。
+          waitIfCooling: true,
         }),
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('tick_timeout')), 25_000)),
+        // 外壳超时要比底层请求的 usage.timeout（tick = 45s）略短、且不能比真实延迟还紧。
+        // 原来 25s：改用独立 tick 链（mimo）后，线上 usage=tick 的平均延迟是 18.7s（n=35，
+        // prompt 带世界状态/群摘要/目标/债务/工作区，比探针长得多），3 小时 36 次里 10 次是
+        // tick_timeout——外壳先到就放弃，底层请求却还占着在飞坑到 45s。放宽到 40s。
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('tick_timeout')), TICK_RACE_TIMEOUT_MS)),
       ]);
       const verdict = parseTickVerdict(res.content ?? '');
+      // 每次决策调用的真实耗时留痕：metrics 只有 sum/count（平均 18.7s），看不出尾部。
+      // 要判断外壳超时该放多宽，需要分布，不是平均值。
+      logger.info({ attempt, latencyMs: res.latencyMs, parsed: verdict !== null }, 'tick decision call finished');
       if (verdict) return verdict;
       logger.warn({ attempt, raw: (res.content ?? '').slice(0, 120) }, 'tick verdict unparseable, retrying');
     }
     return { action: { type: 'quiet', reason: 'parse_failed' }, reason: 'parse_failed' };
   } catch (err) {
-    logger.debug({ err }, 'decideTick failed (fail-quiet)');
+    // 原来是 debug 级，而线上 LOG_LEVEL=info：tick 失败时看不到真实原因，只能靠相邻日志间接推断
+    // （797 次 llm_failed 追了两轮才定位到在飞上限，第一版修复又因为看不见原因而改错了 label）。
+    // 一个 5 分钟一次的决策循环，失败就该让人看见——量级最多每天几百行，不是噪声。
+    const e = err instanceof Error ? err : new Error(String(err));
+    logger.warn(
+      { usage: env().UNIFIED_TICK_USAGE, errName: e.name, errMsg: e.message.slice(0, 200) },
+      'decideTick failed (fail-quiet)',
+    );
     return { action: { type: 'quiet', reason: 'llm_failed' }, reason: 'llm_failed' };
   }
 }
 
 // ── 动作执行（映射到既有执行器，执行保留）─────
 
+/**
+ * 把这次 tick 的判断写进认知账本。
+ *
+ * 此前 unified-tick 全文 0 次写 cognitive_events——它选了什么、被哪条否决链
+ * veto 掉、为什么 quiet，全部只落在日志里。后果是结构性的：`own_action_result`
+ * 32 条而 `bot_delivery` 1092 条（2.9%），且 32 条 causation_id 全空，
+ * 系统没有任何办法回答"这是我自己的选择吗"。
+ * 在账本看不见自己的选择之前，"主观能动性"的任何指标都不可测。
+ *
+ * 纯 host 写入，零 token。fail-soft：写失败不影响 tick 本身。
+ */
+async function recordTickVerdict(input: {
+  chosen: string;
+  vetoed: Array<{ action: string; reason: string }>;
+  reason: string;
+  goalId?: number;
+}): Promise<void> {
+  try {
+    const { appendCognitiveEvent } = await import('../agent/cognitive-events.js');
+    if (!appendCognitiveEvent) return;
+    const now = Math.floor(Date.now() / 1000);
+    appendCognitiveEvent({
+      type: 'tick_verdict',
+      source: 'scheduler',
+      scope: { visibility: 'global' },
+      occurredAt: now,
+      correlationId: `tick:${now}`,
+      fact: {
+        schema: 'tick_verdict.v1',
+        chosen: input.chosen,
+        vetoed: input.vetoed.slice(0, 6),
+        reason: input.reason.slice(0, 120),
+        ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
+      },
+    });
+  } catch (err) {
+    // 记账失败的可见性很重要：这个功能的全部意义就是"账本能看见 tick 的选择"，
+    // 静默失败会让它看起来像 tick 没做决定。绝不拦 tick，但必须留痕。
+    logger.warn({ err: err instanceof Error ? err.message : String(err), chosen: input.chosen }, 'tick verdict NOT recorded');
+  }
+}
+
+/**
+ * Nyat Trench · L1 沟壁——tick 路径的发送前硬闸。
+ *
+ * 为什么必须在这里也有一道：**生产里 1572 次群发送全部带引用锚点**，也就是说
+ * "主动发言"根本不走 host-api 的 sendText（那是被点名才走的路），而是走这里
+ * 直接调 telegram.sendMessage。第一版闸门只加在 host-api，等于加在没有流量的
+ * 那条路上——这正是"接上了但是死的"的又一种形态。
+ *
+ * 判据与 host-api 完全一致：**只拦主动发言**（tick 的这几个分支天生全是主动发言），
+ * 拦下时把"你嗓子有点哑"作为事实写进 tick_verdict 的 vetoed，而不是静默丢弃。
+ */
+async function trenchGateAllows(chatId: number): Promise<{ ok: boolean; why?: string }> {
+  // Nyat Trench L1 包络：tick 的发送不走 host-api（那是被点名才走的路），
+  // 所以包络必须在这里也接一次——否则主动发言全在边界之外。
+  if (env().TRENCH_ENVELOPE_MODE === 'enforce') {
+    try {
+      const { checkEnvelope } = await import('../nyatos/envelope.js');
+      const v = await checkEnvelope(chatId, false);   // tick 的发言天生是主动发言
+      if (!v.ok) return { ok: false, why: `envelope:${v.why ?? 'blocked'}` };
+    } catch { /* fail-open */ }
+  }
+  if (!env().TRENCH_GATE_ENABLED) return { ok: true };
+  try {
+    const { canSpeakActively, activeSpeechCooldownRemainingSec } = await import('../nyatos/budget.js');
+    const [allowed, cooldownLeft] = await Promise.all([
+      canSpeakActively(chatId),
+      activeSpeechCooldownRemainingSec(chatId),
+    ]);
+    if (!allowed) return { ok: false, why: 'budget_spent' };
+    if (cooldownLeft > 0) return { ok: false, why: 'just_spoke' };
+    return { ok: true };
+  } catch {
+    return { ok: true }; // 闸门读失败不拦路（fail-open，别让 Redis 抖动静音 bot）
+  }
+}
+
 async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<void> {
   const e = env();
   const redis = getRedis();
   const now = Math.floor(Date.now() / 1000);
   const a = verdict.action;
+
+  // Restored history cannot itself authorize a new proactive destination.
+  const destinations = a.type === 'care_master' || a.type === 'self_play' ? [e.MASTER_UID]
+    : a.type === 'group_speak' || a.type === 'remember_user' ? [a.chatId]
+      : a.type === 'share' ? [a.fromChatId, a.toChatId] : [];
+  for (const chatId of destinations) {
+    const activation = await checkProactiveActivation(chatId, { nowSec: now });
+    if (!activation.allowed) {
+      logger.info({ action: a.type, reason: activation.reason }, 'unified tick: destination awaiting new human activity');
+      return;
+    }
+  }
 
   // Phase 3 suppressor（host 侧，LLM 绕不过）：动作所服务的 drive 处于
   // satiation 高位（刚做过同类事）→ 否决，转 quiet。fail-soft：suppressor
@@ -725,6 +864,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
             { action: a.type, reason },
             'unified tick: vetoed by drive satiation suppressor',
           );
+          await recordTickVerdict({
+            chosen: 'quiet',
+            vetoed: [{ action: a.type, reason }],
+            reason: 'vetoed_by_suppressor',
+          });
           return;
         }
       }
@@ -734,8 +878,47 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
   }
 
   switch (a.type) {
+    // ── 在场但静默的参与 ────────────────────────────────────────
+    // 这两个分支**没有任何 telegram 发送**。它们让主体在有人的环境里也能
+    // 做自己的事：把起过的念头记进账本、把想回头的事约下去。
+    // 用户侧零可见变化——这是"可以先跑起来再谈开口"的那一层。
+    case 'note_impulse': {
+      try {
+        const { appendCognitiveEvent } = await import('../agent/cognitive-events.js');
+        appendCognitiveEvent({
+          type: 'tick_verdict',
+          source: 'scheduler',
+          scope: { visibility: 'chat', chatId: a.chatId },
+          occurredAt: now,
+          correlationId: `impulse:${a.chatId}:${now}`,
+          fact: {
+            schema: 'tick_verdict.v1',
+            chosen: 'note_impulse',
+            vetoed: [],
+            reason: verdict.reason,
+            about: a.about.slice(0, 120),
+          },
+        });
+        logger.info({ chatId: a.chatId, about: a.about.slice(0, 40) }, 'unified tick: noted own impulse (silent)');
+      } catch { /* 记账失败不影响 */ }
+      return;
+    }
+
+    case 'remember_thread': {
+      try {
+        const { rememberThread } = await import('../tracking/open-threads.js');
+        rememberThread({ chatId: a.chatId, uid: 0, note: a.about, kind: 'waiting' });
+        logger.info({ chatId: a.chatId, about: a.about.slice(0, 40) }, 'unified tick: remembered own thread (silent)');
+      } catch (err) {
+        logger.debug({ err, chatId: a.chatId }, 'remember_thread failed (non-critical)');
+      }
+      await recordTickVerdict({ chosen: 'remember_thread', vetoed: [], reason: verdict.reason }).catch(() => undefined);
+      return;
+    }
+
     case 'quiet':
       logger.info({ reason: verdict.reason }, 'unified tick: quiet');
+      await recordTickVerdict({ chosen: 'quiet', vetoed: [], reason: verdict.reason });
       return;
 
     case 'care_master': {
@@ -744,24 +927,41 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       // 世界状态已算好 silent/lastCare，这里强制执行，不再赌 LLM 自律。
       if (state.masterSilentSec !== null && state.masterSilentSec < CARE_MASTER_MIN_SILENT_SEC) {
         logger.info(
-          { silentSec: state.masterSilentSec, text: a.text.slice(0, 40) },
+          { silentSec: state.masterSilentSec },
           'unified tick: care_master vetoed — master not silent long enough',
         );
         return;
       }
       if (state.lastCareAgoSec < CARE_MASTER_MIN_INTERVAL_SEC) {
         logger.info(
-          { lastCareAgoSec: state.lastCareAgoSec, text: a.text.slice(0, 40) },
+          { lastCareAgoSec: state.lastCareAgoSec },
           'unified tick: care_master vetoed — cared too recently',
         );
         return;
       }
-      if (a.text.includes('[object Object]')) {
-        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — corrupt text');
+      const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
+      const { getBotUid } = await import('../bot/bot.js');
+      const text = await generatePersonaProactiveText(e.MASTER_UID, getBotUid(e.MASTER_UID),
+        '[主动关心] 主人已经沉默很久，可以基于这段私聊自然关心一句。不要复读问候，不要追问自玩产物；没有合适的话就保持安静。');
+      if (!text) return;
+      if (text.includes('[object Object]')) {
+        logger.info('unified tick: care_master vetoed — corrupt text');
         return;
       }
-      if (CARE_PEDDLE_RE.test(a.text)) {
-        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: care_master vetoed — self-play peddle');
+      // L1 沟壁：主动开口（哪怕是私聊主人）也要过硬闸。私聊不是豁免理由——
+      // 豁免给的是"有人叫我"，不是"这个频道是我的"。
+      const careGate = await trenchGateAllows(e.MASTER_UID);
+      if (!careGate.ok) {
+        logger.info({ why: careGate.why }, 'unified tick: care_master BLOCKED by trench gate');
+        await recordTickVerdict({
+          chosen: 'quiet',
+          vetoed: [{ action: 'care_master', reason: `trench_gate:${careGate.why}` }],
+          reason: verdict.reason,
+        });
+        return;
+      }
+      if (CARE_PEDDLE_RE.test(text)) {
+        logger.info('unified tick: care_master vetoed — self-play peddle');
         return;
       }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
@@ -769,18 +969,33 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       try {
         const { sendMessage } = await import('../bot/sender/telegram.js');
         const { addAssistant } = await import('../pipeline/context/manager.js');
-        const messageId = await sendMessage(e.MASTER_UID, a.text);
+      // Proactive willingness gate — see the group_speak site for rationale.
+      try {
+        const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+        const { getRecent } = await import('../pipeline/context/manager.js');
+        const recent = await getRecent(e.MASTER_UID, 12).catch(() => []);
+        const gateVerdict = await runRewardGate(e.MASTER_UID, recent, text, 'proactive');
+        if (!gateVerdict.accept) {
+          logger.info({ chatId: e.MASTER_UID, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: proactive rejected by reward gate');
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: e.MASTER_UID }, 'reward gate failed (fail-open)');
+      }
+        const messageId = await sendMessage(e.MASTER_UID, text);
         if (messageId) {
-          await addAssistant(e.MASTER_UID, { textContent: a.text, messageId });
+          await addAssistant(e.MASTER_UID, { textContent: text, messageId });
         }
         await redis.set(LAST_CARE_KEY + e.MASTER_UID, String(now));
         await markProactiveSent(e.MASTER_UID, 'unified-tick');
-        // Phase 3 satiate：刚关心过主人 → connection 抑制
-        try {
-          const { satiate } = await import('../core/drives/store.js');
-          satiate('connection');
-        } catch { /* non-critical */ }
-        logger.info({ text: a.text.slice(0, 60) }, 'unified tick: cared for master');
+        // 注意：这里**不** satiate('connection')。care_master 是 DM，connection 是
+        // 全局 drive；在私聊里关心一次主人就把全局 connection 打满，会让接下来最多
+        // 一个半衰期（6h）内所有群里的主动发言（group_speak 同样服务 connection）
+        // 全被 suppressor 否决——实测后果：DM 越关心，群里越安静。
+        // 防重复由本分支自己的 masterSilentSec / lastCareAgoSec 两道护栏负责，
+        // 不需要靠全局 drive 饱和。
+        await recordTickVerdict({ chosen: 'care_master', vetoed: [], reason: verdict.reason });
+        logger.info('unified tick: cared for master');
       } catch (err) {
         logger.warn({ err }, 'unified tick: care_master send failed');
       }
@@ -845,11 +1060,42 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         : '';
       const text = await generatePersonaProactiveText(
         a.chatId,
-        getBotUid(),
+        getBotUid(a.chatId),
         `[主动开口] ${why}${topicHint}${missedHint}群里已经沉默 ${silentMin} 分钟。你可以接着群里的话题随口说一句、分享你最近做的有意思的事、或自然发起新话题。禁止自我介绍、禁止「大家好」式开场。`,
       );
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined group speak');
+        return;
+      }
+      // Proactive willingness gate (reward model): the text is written but not
+      // yet sent — exactly the moment this judge exists for. Its own header says
+      // it "replaces a flat probability with a content-aware decision", and the
+      // #1 failure mode of proactive bots is interrupting when unwanted.
+      // Fail-OPEN by design: a gate outage must never silence the bot.
+      try {
+        const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+        const { getRecent } = await import('../pipeline/context/manager.js');
+        const recent = await getRecent(a.chatId, 12).catch(() => []);
+        const verdict2 = await runRewardGate(a.chatId, recent, text, 'proactive');
+        if (!verdict2.accept) {
+          logger.info(
+            { chatId: a.chatId, why: verdict2.reasoning.slice(0, 80) },
+            'unified tick: group_speak rejected by reward gate',
+          );
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: a.chatId }, 'reward gate failed (fail-open)');
+      }
+      // L1 沟壁：主动发言的发送前硬闸（见 trenchGateAllows 的说明）
+      const gate = await trenchGateAllows(a.chatId);
+      if (!gate.ok) {
+        logger.info({ chatId: a.chatId, why: gate.why }, 'unified tick: group_speak BLOCKED by trench gate');
+        await recordTickVerdict({
+          chosen: 'quiet',
+          vetoed: [{ action: 'group_speak', reason: `trench_gate:${gate.why}` }],
+          reason: verdict.reason,
+        });
         return;
       }
       const { sendMessage } = await import('../bot/sender/telegram.js');
@@ -869,6 +1115,29 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           const m = topicHint.match(/优先跟「(.+?)」/);
           if (m?.[1]) recordPull(a.chatId, m[1]);
         } catch { /* non-critical */ }
+        // ── 主动发言进账（2026-09-19）────────────────────────────
+        // 此前 unified-tick 一次都没写过 self_replies / pending，于是"主动开口被无视"
+        // 这件事**在系统里不存在**：2828 行 self_replies 里 34 行有 outcome，
+        // 34 行全部是 reactive（trigger_uid<>0）；trigger_uid=0 的 7 行全 unknown。
+        // 折衷方案（"想不想不变、时机学会"）的第一周工作量就是这条线——
+        // 没有它，"被无视"连判定都产不出，遑论学习。
+        // trigger_uid=0 = 主动，trigger_msg_id=null = 无触发消息。
+        try {
+          const { recordSelfReply } = await import('../tracking/self-history.js');
+          recordSelfReply(a.chatId, 0, null, text, messageId);
+        } catch (err) {
+          logger.debug({ err, chatId: a.chatId }, 'unified tick: recordSelfReply failed (non-critical)');
+        }
+        try {
+          const { recordReply } = await import('../tracking/outcome.js');
+          // 位置参数：botMessageId / triggerMessageId(null=无触发) / triggerUserId(0=主动)
+          // / triggerText('' 因为没人触发) / replyText / action
+          // triggerMessageId=0 / triggerUserId=0 是本仓库"没有触发者"的既有记号
+          // （outcome.ts 自己用 `?? 0`），主动发言本来就没有触发消息。
+          await recordReply(a.chatId, messageId, 0, 0, '', text, 'group_speak');
+        } catch (err) {
+          logger.debug({ err, chatId: a.chatId }, 'unified tick: outcome recordReply failed (non-critical)');
+        }
       }
       if (missedHere.length) {
         try {
@@ -878,18 +1147,22 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       await redis.set(LAST_POKE_PREFIX + a.chatId, String(now));
       await markProactiveSent(a.chatId, 'unified-tick');
+      if (env().TRENCH_ENVELOPE_MODE !== 'off') void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(a.chatId)).catch(() => {});
+      // L0：主动发言也要抽气压（同 host-api 的发送路径，两条路都不能漏）
+      void import('../nyatos/trench.js').then((m) => m.releasePressure(a.chatId)).catch(() => {});
       // Phase 3 satiate：刚主动开过口 → connection 抑制（防连 tick 刷屏）
       try {
         const { satiate } = await import('../core/drives/store.js');
         satiate('connection');
       } catch { /* non-critical */ }
+      await recordTickVerdict({ chosen: 'group_speak', vetoed: [], reason: verdict.reason });
       logger.info({ chatId: a.chatId }, 'unified tick: spoke in group');
       return;
     }
 
     case 'remember_user': {
       const match = state.absentUsers.find(
-        (u) => u.chatId === a.chatId && (u.name === a.name || u.name.includes(a.name) || a.name.includes(u.name)),
+        (u) => u.chatId === a.chatId && (!a.name || u.name === a.name || u.name.includes(a.name) || a.name.includes(u.name)),
       );
       if (!match) {
         logger.info(
@@ -921,18 +1194,42 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           }
         }
       } catch { /* fail-open */ }
+      // L1 沟壁：想起某人也是主动开口，同样过硬闸
+      const remGate = await trenchGateAllows(a.chatId);
+      if (!remGate.ok) {
+        logger.info({ chatId: a.chatId, why: remGate.why }, 'unified tick: remember_user BLOCKED by trench gate');
+        await recordTickVerdict({
+          chosen: 'quiet',
+          vetoed: [{ action: 'remember_user', reason: `trench_gate:${remGate.why}` }],
+          reason: verdict.reason,
+        });
+        return;
+      }
       const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
       if (!(await tryAcquireProactiveSlot(a.chatId, 'unified-tick-remember'))) return;
       const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
       const { getBotUid } = await import('../bot/bot.js');
       const text = await generatePersonaProactiveText(
         a.chatId,
-        getBotUid(),
+        getBotUid(a.chatId),
         `[主动开口·想起某人] ${match.name} 已经 ${match.absentDays} 天没在这个群出现了。自然地提一句 TA(像朋友想起朋友,不是查户口,也别刷屏)。如果群里正好在聊 TA 相关的话题就顺带带一句,否则简单问候一下。禁止自我介绍、禁止「大家好」式开场。`,
       );
       if (!text) {
         logger.debug({ chatId: a.chatId }, 'unified tick: persona declined remember_user');
         return;
+      }
+      // Proactive willingness gate — see the group_speak site for rationale.
+      try {
+        const { runRewardGate } = await import('../pipeline/reward/reward-model.js');
+        const { getRecent } = await import('../pipeline/context/manager.js');
+        const recent = await getRecent(a.chatId, 12).catch(() => []);
+        const gateVerdict = await runRewardGate(a.chatId, recent, text, 'proactive');
+        if (!gateVerdict.accept) {
+          logger.info({ chatId: a.chatId, why: gateVerdict.reasoning.slice(0, 80) }, 'unified tick: proactive rejected by reward gate');
+          return;
+        }
+      } catch (err) {
+        logger.debug({ err, chatId: a.chatId }, 'reward gate failed (fail-open)');
       }
       const { sendMessage } = await import('../bot/sender/telegram.js');
       const { addAssistant } = await import('../pipeline/context/manager.js');
@@ -957,6 +1254,10 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
     }
 
     case 'self_play': {
+      if (!e.META_SUBAGENT_ENABLED) {
+        logger.debug('unified tick: self_play requires the CodeAct worker');
+        return;
+      }
       if (state.selfPlayCooldownLeftSec > 0) {
         logger.info('unified tick: self_play vetoed by cooldown');
         return;
@@ -967,12 +1268,15 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
       }
       const { enqueueCodeActJob } = await import('../subagent/queue.js');
       const planText = a.plan.length ? `\n计划:\n${a.plan.map((p, i) => `${i + 1}. ${p}`).join('\n')}` : '';
-      await enqueueCodeActJob({
+      await enqueueCodeActJob(prepareBackgroundTask({
         id: `selfplay_${now}_${Math.floor(Math.random() * 1e6)}`,
         // chatId 仍用主人：沙盒/记忆挂靠身份；host 层 maxText/File=1，
         // 做完有意思可以给主人分享一句(+一个产物文件)，没意思就安静结束（2026-08-19 自主性修复）。
         chatId: e.MASTER_UID,
         contentDirection:
+          e.BACKGROUND_PUBLICATION_ENABLED
+            ? `自主检查：${a.idea}${planText}。没有人在等回复；只读取和检查。有新的已注册来源时提交发布草稿并 endTask("finding")；没有则 endTask("no_update")。`
+            :
           `[selfplay] 自主行动：${a.idea}${planText}\n` +
           `没有人在等你。专心做完，做完了自己评判：` +
           `有意思/值得给主人看 → sendText 分享一句（最多一条；有产物文件可 sendFile 一个），然后 runtime.endTask("做了什么/学到什么")。` +
@@ -980,7 +1284,7 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
         toneGuidance: '自主、专注、做完再说',
         createdAt: Date.now(),
         status: 'queued',
-      });
+      },{kind:'self_play',key:'self_play',sinceAt:now * 1000}));
       await redis.set(SELFPLAY_LAST_KEY, String(now));
       // Phase 3 satiate：自玩已派出 → autonomy 抑制（防连着开新坑）
       try {
@@ -992,6 +1296,10 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
     }
 
     case 'check_goal': {
+      if (!e.META_SUBAGENT_ENABLED) {
+        logger.debug('unified tick: goal checks require the CodeAct worker');
+        return;
+      }
       if (!state.dueGoals.some((g) => g.id === a.goalId)) {
         logger.info({ goalId: a.goalId }, 'unified tick: check_goal rejected — not due');
         return;
@@ -1007,15 +1315,27 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           : '';
         const targetChat = goal.chat_id ?? (e.MASTER_UID > 0 ? e.MASTER_UID : 0);
         if (!targetChat) return;
+        if (!(await checkProactiveActivation(targetChat, { nowSec: now })).allowed) return;
         const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
-        if (!(await tryAcquireProactiveSlot(targetChat, 'unified-tick-goal'))) return;
+        if (!e.BACKGROUND_PUBLICATION_ENABLED && !(await tryAcquireProactiveSlot(targetChat, 'unified-tick-goal'))) return;
         // 派发即占坑，避免下个 tick 同一 goal 再入队（真正 finding 仍由 executor 终态覆盖）。
         recordCheck(goal.id, null);
+        // 记账：这是 tick 自己的选择。check_goal 是当前最高频的自发动作
+        // （日志里连续出现），不记下来账本依旧看不见它在干什么。
+        await recordTickVerdict({
+          chosen: 'check_goal',
+          vetoed: [],
+          reason: verdict.reason,
+          goalId: goal.id,
+        }).catch(() => undefined);
         const { enqueueCodeActJob } = await import('../subagent/queue.js');
-        await enqueueCodeActJob({
+        await enqueueCodeActJob(prepareBackgroundTask({
           id: `goal_${goal.id}_${now}_${Math.floor(Math.random() * 1e6)}`,
           chatId: targetChat,
           contentDirection:
+            e.BACKGROUND_PUBLICATION_ENABLED
+              ? `持续检查目标 ${goal.id}：「${goal.topic}」。${subtaskContext}只读检查；有已注册同会话来源的真实新版本才能提交发布草稿并 endTask("finding")。没有可证明变化就 endTask("no_update")；失败也不自动外发。`
+              :
             `[goal:${goal.id}] 持续关注：「${goal.topic}」。` +
             `用 web.search 搜一下最新进展，或翻看最近聊天里有没有相关话题。` +
             (goal.last_finding ? `上次发现：${goal.last_finding}。` : `这是第一次检查。`) +
@@ -1029,8 +1349,8 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
           toneGuidance: '自然分享，不像新闻播报',
           createdAt: Date.now(),
           status: 'queued',
-        });
-        await markProactiveSent(targetChat, 'unified-tick-goal');
+        },{kind:'goal',key:String(goal.id),sinceAt:(goal.last_check_at ?? goal.created_at) * 1000}));
+        if (!e.BACKGROUND_PUBLICATION_ENABLED) await markProactiveSent(targetChat, 'unified-tick-goal');
         logger.info({ goalId: goal.id, topic: goal.topic.slice(0, 60) }, 'unified tick: goal check dispatched');
       } catch (err) {
         logger.warn({ err, goalId: a.goalId }, 'unified tick: check_goal failed');
@@ -1039,57 +1359,11 @@ async function executeVerdict(verdict: TickVerdict, state: WorldState): Promise<
     }
 
     case 'share': {
-      // H3.1 跨群转发：四道硬门（LLM 只做选择，安全由代码兜底）。
-      const cand = (state.shareCandidates ?? []).find(
-        (c) => c.fromChatId === a.fromChatId && c.messageId === a.messageId,
-      );
-      if (!cand) {
-        logger.info({ from: a.fromChatId, msg: a.messageId }, 'unified tick: share rejected — not in candidates');
-        return;
-      }
-      if (a.toChatId === a.fromChatId) {
-        logger.info('unified tick: share rejected — same chat');
-        return;
-      }
-      if (!state.groups.some((g) => g.chatId === a.toChatId)) {
-        logger.info({ to: a.toChatId }, 'unified tick: share rejected — unknown target');
-        return;
-      }
-      try {
-        const { wasForwardedRecently, recordForward } = await import('../pipeline/rhythm/taste.js');
-        if (wasForwardedRecently(a.fromChatId, a.messageId)) {
-          logger.info('unified tick: share rejected — forwarded recently');
-          return;
-        }
-        const { tryAcquireProactiveSlot, markProactiveSent } = await import('./proactive-coordinator.js');
-        if (!(await tryAcquireProactiveSlot(a.toChatId, 'unified-tick-share'))) return;
-        const { forwardMessage, sendMessage } = await import('../bot/sender/telegram.js');
-        const { addAssistant } = await import('../pipeline/context/manager.js');
-        const fwdId = await forwardMessage(a.toChatId, a.fromChatId, a.messageId);
-        if (!fwdId) {
-          logger.info('unified tick: share forward failed');
-          return;
-        }
-        recordForward(a.fromChatId, a.messageId, cand.score, { toChatId: a.toChatId, toMessageId: fwdId });
-        // 转发后跟一句人话（像真人"诶这个好笑转给你们看"），失败也认——转发本身已落地。
-        try {
-          const { generatePersonaProactiveText } = await import('../pipeline/turn/proactive-turn.js');
-          const { getBotUid } = await import('../bot/bot.js');
-          const line = await generatePersonaProactiveText(
-            a.toChatId,
-            getBotUid(),
-            `[转发跟话] 你刚把一条有意思的消息转到这个群。自然地跟一句为什么转（比如"这个太好笑了转给你们看看"），一句话，别复述转发内容，别自我介绍。`,
-          );
-          if (line) {
-            const mid = await sendMessage(a.toChatId, line);
-            if (mid) await addAssistant(a.toChatId, { textContent: line, messageId: mid });
-          }
-        } catch { /* follow-up optional */ }
-        await markProactiveSent(a.toChatId, 'unified-tick-share');
-        logger.info({ from: a.fromChatId, msg: a.messageId, to: a.toChatId }, 'unified tick: shared');
-      } catch (err) {
-        logger.warn({ err }, 'unified tick: share failed');
-      }
+      // Legacy/model-invented actions still reach a hard host denial. There is no
+      // verified public provenance or complete payload for forwarding by messageId;
+      // neither an excerpt nor ordinary-group membership can grant that authority.
+      logger.info({ from: a.fromChatId, msg: a.messageId, to: a.toChatId,
+        reason: 'source_provenance_unverified' }, 'unified tick: original-message share blocked');
       return;
     }
   }
@@ -1114,7 +1388,7 @@ export async function runUnifiedTick(): Promise<void> {
     // AGI L5 L3: 群氛围推断 —— 活跃群且 norms 过期/缺失时补一次(便宜链,失败静默)。
     // H4.2: buildWorldState 只取 6 条(3 条拼 lastTexts, recent.slice(-3))，
     // 拼完 split('\n') 只剩 1 行 → recent.length>=5 恒假 → norms 表线上 0 行。
-    // 改直查 getRecent 30 条(与 H3.1 shareCandidates 同窗)，够 5 条才 infer。
+    // 改直查 getRecent 30 条，够 5 条才 infer。
     if (e.GROUP_NORMS_ENABLED) {
       try {
         const { needsRefresh, inferGroupNorms } = await import('../agent/group-norms.js');

@@ -104,6 +104,7 @@ export function applyMoodEvent(
   chatId: number,
   delta: number,
   summary: string,
+  options: { strict?: boolean } = {},
 ): void {
   if (!env().MOOD_ENABLED) return;
   if (!Number.isFinite(delta) || delta === 0) return;
@@ -143,6 +144,7 @@ export function applyMoodEvent(
       'Mood event applied',
     );
   } catch (err) {
+    if (options.strict) throw err;
     logger.debug({ err, chatId }, 'applyMoodEvent failed (non-critical)');
   }
 }
@@ -153,21 +155,26 @@ export function applyMoodEvent(
  */
 export function moodPromptHint(state: MoodState): string {
   if (!env().MOOD_INJECT_ENABLED) return '';
-  const threshold = env().MOOD_INJECT_THRESHOLD;
+  const subtle = env().EMOTION_CONTINUITY_ENABLED === true;
+  const threshold = subtle ? Math.min(4, env().MOOD_INJECT_THRESHOLD) : env().MOOD_INJECT_THRESHOLD;
+  if (!Number.isFinite(state.valence) || state.valence === 0) return '';
   if (Math.abs(state.valence) < threshold) return '';
 
   // 裸叙述,不带标签:唯一消费方是 composeSelfState 的第一人称叙事,
   // 带【标签】会原样嵌进句子中间(strip 正则只认半角 [])
   switch (state.bucket) {
     case 'cheerful':
-      return '今天群里气氛好,你心情飘飘的,说话轻快爱接梗';
+      return '你此刻心情比较轻快，容易对有趣的话生出回应的兴致；不必刻意表现热情';
     case 'good':
-      return '最近群里互动不错,你心情还行,比平时松弛一点';
+      return '你现在比平时松弛一点，可以顺着眼前的话自然聊';
     case 'down':
-      return '最近被晾了几次,你有点蔫,话偏短偏冷,懒得接梗';
+      return '你此刻有点低落，想慢一点说';
     case 'grumpy':
-      return '最近被怼得不轻,你心里有点烦,说话短促没耐心(但不骂回去)';
+      return '你此刻有些烦躁，想缓一缓、少说几句';
     case 'calm':
+      return subtle ? (state.valence > 0
+        ? '你心里有一点舒展，不需要特意把这种小变化说出来'
+        : '你心里有一点紧绷，想先缓一缓') : '';
     default:
       return '';
   }

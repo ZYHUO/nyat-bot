@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // ── 可变的 env,让每个用例单独调 flag ────────────────────────
 const envState = {
+  BOT_TOKEN: '123:synthetic',
   MEMORY_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
   MEMORY_COLLECTION: 'xxb_group_history',
   MEMORY_MIN_SCORE: 0,
@@ -64,6 +65,10 @@ vi.mock('@qdrant/js-client-rest', () => ({
 // ── 假的嵌入模型 ────────────────────────────────────────────
 const loadedModels: string[] = [];
 vi.mock('@xenova/transformers', () => ({
+  // chroma.ts 的 getEmbedder() 读 env.cacheDir 判断 onnx 权重是否已在本地
+  // （在就给它传 local_files_only 锁死离线）。指向一个空目录 = 本地没权重。
+  // 「权重在 ⇒ 离线」这条本身在 chroma-embed-weights.test.ts 里锁。
+  env: { cacheDir: '/nonexistent-embed-cache-dir-for-tests' },
   pipeline: async (_task: string, model: string) => {
     loadedModels.push(model);
     return async () => ({ data: new Float32Array(384).fill(0.1) });
@@ -86,6 +91,7 @@ function msg(text: string, messageId = 1) {
 describe('chroma 检索与写入', () => {
   beforeEach(() => {
     Object.assign(envState, {
+      MEMORY_EMBED_MODEL: 'Xenova/all-MiniLM-L6-v2',
       MEMORY_MIN_SCORE: 0, MEMORY_COLLECTION: 'xxb_group_history',
       MEMORY_HYBRID_ENABLED: false, MEMORY_DEDUP_ENABLED: false, MEMORY_DEDUP_THRESHOLD: 0.93,
     });
@@ -143,7 +149,9 @@ describe('chroma 检索与写入', () => {
       searchHits = [hit('x', 0.9)];
       await fresh.searchMemory(CHAT, '查询');
       envState.MEMORY_EMBED_MODEL = 'Xenova/some-other-model';
-      await fresh.searchMemory(CHAT, '再查一次');
+      searchSpy.mockClear();
+      expect(await fresh.searchMemory(CHAT, '再查一次')).toEqual([]);
+      expect(searchSpy).not.toHaveBeenCalled();
       expect(loadedModels).toHaveLength(1);
     });
 
@@ -292,21 +300,21 @@ describe('chroma 检索与写入', () => {
       };
     }
 
-    it('私聊(chatId > 0)一律不注入,且根本不查', async () => {
-      searchHits = [injHit('私聊内容')];
-      expect(await searchMemoryForInjection(12345, '查询')).toEqual([]);
-      expect(searchSpy).not.toHaveBeenCalled();
+    it('私聊记忆可回到其自己的会话，不因private标签失去记忆', async () => {
+      searchHits = [injHit('私聊内容', { mid: '12345_1', chatId: 12345, sourceChatId: 12345, visibility: 'private' })];
+      expect((await searchMemoryForInjection(12345, '查询')).map(m => m.textContent)).toEqual(['私聊内容']);
+      expect(searchSpy).toHaveBeenCalledOnce();
     });
 
-    it('visibility=private 的命中被丢', async () => {
+    it('同会话 private 命中保留', async () => {
       searchHits = [injHit('私密', { visibility: 'private' })];
-      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+      expect(await searchMemoryForInjection(CHAT, '查询')).toHaveLength(1);
     });
 
     // 存量点写入时还没有 visibility 字段 —— 无法证明它安全,所以宁严勿松。
-    it('缺 visibility 字段的存量点被丢', async () => {
+    it('旧数据有可证明同会话来源时保留，缺visibility不授予跨界权限', async () => {
       searchHits = [{ payload: payload('存量', 1), score: 0.8 }];
-      expect(await searchMemoryForInjection(CHAT, '查询')).toEqual([]);
+      expect(await searchMemoryForInjection(CHAT, '查询')).toHaveLength(1);
     });
 
     it('public 与 contextual 放行', async () => {
@@ -336,5 +344,16 @@ describe('chroma 检索与写入', () => {
       expect(await searchMemoryForInjection(CHAT, '  ')).toEqual([]);
       expect(searchSpy).not.toHaveBeenCalled();
     });
+  });
+
+  it('BM25 retrieval rejects foreign and conflicting payloads despite matching lexical IDs', async () => {
+    envState.MEMORY_HYBRID_ENABLED = true;
+    lexicalRows = [1, 2, 3].map(id => ({ chromaId: `${CHAT}_${id}`, rank: -id }));
+    retrievePoints = [
+      { payload: { ...payload('foreign source', 1), sourceChatId: -200 } },
+      { payload: { ...payload('foreign account scope', 2), chatId: -200, sourceChatId: -200 } },
+      { payload: payload('valid local keyword match', 3) },
+    ];
+    expect((await searchMemory(CHAT, '查询')).map(row => row.textContent)).toEqual(['valid local keyword match']);
   });
 });

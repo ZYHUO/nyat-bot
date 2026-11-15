@@ -23,6 +23,7 @@
 
 ### 搜索（不会就搜）
 - `await web.search(query)` — 联网搜索。卡住了、不知道 API 怎么用、报错看不懂 → 先搜再试。
+- `await web.fetchToFile(url, 'data/x.xml')` — 宿主替你抓一个文本资源（RSS/JSON/CSV/网页，≤512KB）写进沙盒文件，返回 `{ok, path, bytes}`。**沙盒里没有网络**——脚本里直接 requests/urllib/fetch 一定 name resolution 失败。要处理外部数据：先 fetchToFile，再 `computer.run('python3 parse.py')` 读那个文件。
 
 ### 收尾（唯一出口）
 - `runtime.endTask("做了什么 / 学到什么 / 产物路径")` — **必须调用**；不要发消息给任何人

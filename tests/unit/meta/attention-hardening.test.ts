@@ -1,19 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { softTruncate } from '../../../src/shared/soft-truncate.js';
 import { classifyAttentionLayer } from '../../../src/meta/classify-layer.js';
-
-describe('softTruncate', () => {
-  it('does not cut mid-CJK sentence when punctuation is nearby', () => {
-    const s = '本喵觉得这样不行啦，你怎么还在说这种话啊啊啊啊啊啊啊啊';
-    const out = softTruncate(s, 20);
-    expect(out.length).toBeLessThanOrEqual(20);
-    expect(out.includes('，') || out.endsWith('啦') || !/[啊]{3}$/.test(out)).toBe(true);
-  });
-
-  it('returns unchanged when short enough', () => {
-    expect(softTruncate('短', 10)).toBe('短');
-  });
-});
 
 describe('classifyAttentionLayer', () => {
   it('DM and direct → L0', () => {

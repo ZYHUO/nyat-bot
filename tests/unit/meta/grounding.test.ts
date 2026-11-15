@@ -1,8 +1,10 @@
 /**
  * grounding.ts — 启发式触发 / 脱敏 / Redis 存取 / 无证据丢弃 / 限流。
- * Redis 手 mock（Map -backed），executeSearch / callWithFallback mock。
+ * Redis 手 mock（Map -backed），typed search / callWithFallback mock。
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { WebSearchOutcome } from '../../../src/pipeline/tools/search.js';
 
 // env flags per-test mutable
 const envState = { GROUNDING_ENABLED: true, GROUNDING_USAGE: 'judge' };
@@ -28,8 +30,9 @@ const redisMock = {
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 
 const executeSearch = vi.fn();
-vi.mock('../../../src/pipeline/tools/search.js', () => ({
-  executeSearch: (...args: unknown[]) => executeSearch(...args),
+vi.mock('../../../src/pipeline/tools/search.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/pipeline/tools/search.js')>(),
+  executeSearchDetailed: (...args: unknown[]) => executeSearch(...args),
 }));
 
 const callWithFallback = vi.fn();
@@ -38,14 +41,18 @@ vi.mock('../../../src/ai/fallback.js', () => ({
 }));
 
 import {
-  isGroundingPending,
   looksFactualQuestion,
   maybeStartGrounding,
   sanitizeForGrounding,
   takeGrounding,
+  takeGroundingBlock,
 } from '../../../src/meta/grounding.js';
 
-const EVIDENCE = '关于"新政策"的搜索结果：\n该政策确有其事，已于上月发布。\n来源：某新闻网';
+const EVIDENCE: WebSearchOutcome = {
+  status: 'ok', provider: 'DDG-Lite',
+  results: [{ title: '政策公告', snippet: '该政策已于上月发布。', url: 'https://example.org/policy' }],
+  attempts: [{ provider: 'DDG-Lite', status: 'success' }],
+};
 
 describe('looksFactualQuestion heuristic', () => {
   it('accepts question with ？', () => {
@@ -101,6 +108,14 @@ describe('sanitizeForGrounding', () => {
 });
 
 describe('maybeStartGrounding / takeGrounding', () => {
+  it('does not export a DM or identifying group question to search or summarization', async () => {
+    vi.clearAllMocks();
+    await maybeStartGrounding({ chatId: 101, messageId: 42, text: '最新的 iPhone 什么时候发布？' });
+    await maybeStartGrounding({ chatId: -100, messageId: 43, text: '我的邮箱 private@example.org 是不是泄露了？' });
+    await maybeStartGrounding({ chatId: -100, messageId: 44, text: '保密：刚才私聊内容是什么？' });
+    expect(executeSearch).not.toHaveBeenCalled();
+    expect(callWithFallback).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     store.clear();
     counters.clear();
@@ -121,8 +136,8 @@ describe('maybeStartGrounding / takeGrounding', () => {
     expect(digest).toBe('是的，该新政策确有其事，上月已发布。');
     // one-shot: second take returns null
     expect(await takeGrounding(-100, 42)).toBeNull();
-    // pending marker cleaned up
-    expect(await isGroundingPending(-100, 42)).toBe(false);
+    // 键已删（2026-09-22 撤销轮询后 pending 标记也一并移除，清理只剩 del digest）
+    expect(store.has('xxb:grounding:-100:42')).toBe(false);
   });
 
   it('searches with the sanitized query (no @/uid leakage)', async () => {
@@ -138,15 +153,31 @@ describe('maybeStartGrounding / takeGrounding', () => {
     expect(q).toContain('什么补贴是真的吗');
   });
 
-  it('stores nothing when search has no evidence', async () => {
-    executeSearch.mockResolvedValue('没有找到与"xxx"相关的结果。');
+  it.each(['empty', 'unavailable'] as const)('never summarizes or stores %s outcomes, even with stray text/results', async (status) => {
+    executeSearch.mockResolvedValue({ ...EVIDENCE, status, answer: '搜索不可用：blocked。' });
     await maybeStartGrounding({ chatId: -100, messageId: 8, text: '某地昨天是不是地震了？' });
     expect(callWithFallback).not.toHaveBeenCalled();
     expect(await takeGrounding(-100, 8)).toBeNull();
+  });
 
-    executeSearch.mockResolvedValue('搜索失败: boom');
+  it('requires source rows even for an ok status', async () => {
+    executeSearch.mockResolvedValue({ ...EVIDENCE, results: [], answer: '没有引用的答案不是证据' });
     await maybeStartGrounding({ chatId: -100, messageId: 9, text: '某地昨天是不是又地震了？' });
+    expect(callWithFallback).not.toHaveBeenCalled();
     expect(await takeGrounding(-100, 9)).toBeNull();
+  });
+
+  it('keeps a host-written partial-search warning outside the LLM digest', async () => {
+    executeSearch.mockResolvedValue({ ...EVIDENCE, attempts: [
+      { provider: 'SearxNG', status: 'failed', code: 'timeout' }, ...EVIDENCE.attempts,
+    ] });
+    await maybeStartGrounding({ chatId: -100, messageId: 9, text: '这次发布的新政策是什么？' });
+    const digest = await takeGrounding(-100, 9);
+    expect(digest).toContain('部分搜索来源未能完成查询');
+    expect(digest).toContain('未作独立事实核验');
+    expect(digest).toContain('该新政策确有其事');
+    expect(JSON.stringify(callWithFallback.mock.calls[0])).toContain('https://example.org/policy');
+    expect(JSON.stringify(callWithFallback.mock.calls[0])).not.toContain('timeout');
   });
 
   it('stores nothing when LLM returns empty digest', async () => {
@@ -193,7 +224,69 @@ describe('maybeStartGrounding / takeGrounding', () => {
       maybeStartGrounding({ chatId: -100, messageId: 4, text: '最新的 iPhone 什么时候发布？' }),
     ).resolves.toBeUndefined();
     expect(await takeGrounding(-100, 4)).toBeNull();
-    // pending marker still cleaned up after failure
-    expect(await isGroundingPending(-100, 4)).toBe(false);
+    // 失败路径不写 digest，也不留 pending 标记（已移除）
+    expect(store.has('xxb:grounding:-100:4')).toBe(false);
+    expect([...store.keys()].some((k) => k.includes(':pending:'))).toBe(false);
+  });
+});
+
+// 2026-09-22 段⑤整治：executor 侧短轮询已撤销。这里锁死"单次 take、拿不到就没有"
+// —— 任何等待都必须有上界（这里是 0），否则 6s 轮询会悄悄回来。
+describe('takeGroundingBlock（executor 拾取：单次 take，不轮询）', () => {
+  beforeEach(() => {
+    store.clear();
+    counters.clear();
+    vi.clearAllMocks();
+    envState.GROUNDING_ENABLED = true;
+    executeSearch.mockResolvedValue(EVIDENCE);
+    callWithFallback.mockResolvedValue({ content: '是的，该新政策确有其事，上月已发布。' });
+  });
+
+  it('digest 已就绪 → 渲染成 prompt 块（有 digest 仍能注入）', async () => {
+    store.set('xxb:grounding:-100:55', '要点：确有此事。');
+    const block = await takeGroundingBlock({ chatId: -100, messageId: 55, taskId: 'task-1' });
+    expect(block).toContain('## 联网核查参考（已脱敏，可能不准）');
+    expect(block).toContain('要点：确有此事。');
+    expect(block).toContain('别提「根据搜索结果」');
+    // 一次性：take 即删，第二次拿不到了
+    expect(await takeGroundingBlock({ chatId: -100, messageId: 55, taskId: 'task-1' })).toBe('');
+  });
+
+  it('digest 没到 → 空串，且**不轮询**（推进 10s 也只读一次 Redis）', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = takeGroundingBlock({ chatId: -100, messageId: 77, taskId: 'task-2' });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await p).toBe('');
+      expect(redisMock.get).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flag 关 → 空串，不碰 Redis', async () => {
+    envState.GROUNDING_ENABLED = false;
+    store.set('xxb:grounding:-100:55', '本不该被读到');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: 55 })).toBe('');
+    expect(redisMock.get).not.toHaveBeenCalled();
+  });
+
+  it('无锚点/非法 messageId → 空串', async () => {
+    store.set('xxb:grounding:-100:55', '要点');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: undefined })).toBe('');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: 0 })).toBe('');
+    expect(await takeGroundingBlock({ chatId: -100, messageId: -3 })).toBe('');
+    expect(redisMock.get).not.toHaveBeenCalled();
+  });
+
+  it('Redis 炸了 → 空串（fail-soft，绝不抛进主链路）', async () => {
+    redisMock.get.mockRejectedValueOnce(new Error('redis down'));
+    await expect(takeGroundingBlock({ chatId: -100, messageId: 55 })).resolves.toBe('');
+  });
+
+  it('executor 侧不再引用 isGroundingPending（轮询门已移除，防回归）', async () => {
+    const src = readFileSync('src/subagent/prompt-inputs.ts', 'utf8');
+    expect(src).not.toContain('isGroundingPending');
+    expect(src).not.toContain('setTimeout');
   });
 });

@@ -11,6 +11,10 @@
 import { env } from '../env.js';
 import { runDailyReport } from './report.js';
 import { runModelCheck } from './model-check.js';
+// round 85: 进程忩命量纸——把“重启很频”变成可见的行。
+// round 84 把它列为“待排期”而且斩此会脚应喝的是调度的代价（一个告警）；
+// round 85 发现它其实不费——差的只是轮次号，所以当轮做。
+import { reportProcessLifetime, sweepStaleAgentTasks } from './restart-hygiene.js';
 import { runCleanup, type CleanupDeps } from './cleanup.js';
 import { runKnowledgeSync } from './knowledge-sync.js';
 import { runUserProfileSync } from '../tracking/user-profile.js';
@@ -43,6 +47,19 @@ export function startCronJobs(deps?: CronDeps): void {
 
   // Model status check — every 5 minutes
   reg({ name: 'model-check', everySec: 5 * 60, run: runModelCheck });
+  // round 85：进程忩命量纸（每小时一行，不存状态不告警）
+  reg({ name: 'process-lifetime', everySec: 3600, run: async () => { reportProcessLifetime(); } });
+  // round 114: **启动后立即执行一次摧拦**——不等第一个小时。
+  //
+  // round 110 给 sweep 加了健康日志，但它还是每小时才一次；
+  // 重启后的第一个小时里日志是空的（round 191 那个块的又一种形态）。
+  // 而这个摧拦防的是 round 102-106 那个死亢任务４5 小时收打断）——
+  // **死亢往往就是在频繁重启期间重生的**，所以启动时就该扫一漠。
+  // 代价：一次 KEYS + 若干 HGET（索引数量级，不是消息级）。
+  void sweepStaleAgentTasks().catch(() => {});
+  // round 105: **残留活动任务索引的自慈摧拦**——round 102-104 那个 5 小时的死任任务。
+  // 放在同一个 1h tick 上（残留不急），不额外开一个调度。
+  reg({ name: 'stale-agent-sweep', everySec: 3600, run: async () => { await sweepStaleAgentTasks(); } });
 
   // Daily report — every day at 23:55 Beijing time
   reg({ name: 'daily-report', dailyAt: { hour: 23, minute: 55 }, run: runDailyReport });
@@ -91,6 +108,18 @@ export function startCronJobs(deps?: CronDeps): void {
     },
   });
 
+  // Goal 待关闭观察期结算（默认关）：观察期满后看「群里有没有人再提」决定真关还是回 active。
+  if (env().GOAL_CLOSE_OBSERVE_ENABLED) {
+    reg({
+      name: 'goal-close-sweep',
+      everySec: 1800,
+      run: async () => {
+        const { runGoalCloseSweep } = await import('./goal-close-sweep.js');
+        await runGoalCloseSweep();
+      },
+    });
+  }
+
   // Debt sweep — 认知债务过期/到期扫描 + 预测误差摘要（CSR，默认关）
   if (env().DEBT_SWEEP_ENABLED) {
     reg({
@@ -108,6 +137,7 @@ export function startCronJobs(deps?: CronDeps): void {
   if (env().COGNITIVE_OUTBOX_ENABLED === true) {
     reg({
       name: 'cognitive-outbox',
+      retrySafe: true,
       everySec: 15,
       run: async () => {
         const { drainCognitiveOutbox } = await import('../agent/cognitive-outbox-worker.js');
@@ -119,6 +149,202 @@ export function startCronJobs(deps?: CronDeps): void {
           { workerId: `cron:cognitive:${process.pid}`, batchSize: 50, leaseSec: 90, maxAttempts: 5 },
         );
         if (result.claimed > 0) logger.info({ result }, 'cognitive outbox projection tick');
+      },
+    });
+  }
+
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true) {
+    reg({ name: 'memory-projection', everySec: 15, retrySafe: true,
+      run: async () => {
+        const { drainMemoryProjectionOutbox } = await import('../memory/chroma.js');
+        const { memoryProjectionStats } = await import('../memory/source-store.js');
+        const result = await drainMemoryProjectionOutbox();
+        const backlog = memoryProjectionStats();
+        if (result.claimed > 0 || backlog.failed > 0) logger.info({ result, backlog }, 'memory projection tick');
+        return { status: result.claimed > 0 ? 'completed' : 'skipped',
+          reason: `completed=${result.completed};pending=${backlog.pending};failed=${backlog.failed};oldest=${backlog.oldestPendingAt ?? 'none'}` };
+      },
+    });
+  }
+
+  // Belief verification — consumes the `stale_belief` debts the outbox above
+  // creates. Without it those debts accumulated unread (20 open, measured
+  // 2026-09-19) and beliefs the world had invalidated stayed in the prompt.
+  // Slow on purpose: beliefs do not go stale by the minute.
+  if (env().BELIEF_VERIFY_ENABLED === true) {
+    reg({
+      name: 'belief-verify',
+      everySec: 1800,
+      run: async () => {
+        const { verifyStaleBeliefs } = await import('../agent/belief-verify.js');
+        verifyStaleBeliefs();
+      },
+    });
+  }
+
+  // Nyat Trench · L0 时间泵。
+  //
+  // 论文 §3.2：海床积分器的唯一衰减方。气压 P 若只增不减，r=clamp(θ·g(P)) 会
+  // 永久钉在上界——那正是 satiation latch 事故的形状（时钟被绕 → 永久饱和 →
+  // 4 天 0 主动发言无人知）。泵每 PUMP_HALFLIFE_SEC 内部去重，所以这里每 30 分钟
+  // 调一次是安全的 guard，不是额外衰减。
+  //
+  // 零 token、零 LLM：一次 Redis 读 + 一次写 + 一条 JSONL。
+  if (env().TRENCH_PUMP_ENABLED === true) {
+    reg({
+      name: 'trench-pump',
+      everySec: 1800,
+      run: async () => {
+        const { pump } = await import('../nyatos/trench.js');
+        // 同一份活跃群集合（unified-tick 的 discoverGroups 是私有的，不新导公共接口）
+        const { getRedis } = await import('../db/redis.js');
+        const raw = await getRedis().zrange('xxb:active_groups', 0, 19);
+        let pumped = 0;
+        let stuckReset = 0;
+        for (const id of raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0)) {
+          // 卡死自恢复：P 连续顶在 P_MAX 若干小时 → 硬复位。
+          //
+          // **在泵浦之前查**（round 84 加）。曾经 pump() 先跑再查，于是泵浦减半的
+          // 那些 tick 上 recoverIfStuck 会读到减半后的值而漏判。但注意 round 101 的
+          // 实证修正：**它不是"结构上不可达"**——cron 30 分钟一次而半衰期 60 分钟，
+          // 约每隔一个 tick 泵浦不减半，那些 tick 上旧顺序照样检测得到。
+          // 真实缺陷是"最多延迟一个 tick（30 分钟）"，对 6 小时阈值是 8% 延迟。
+          // 提前查让它变成即时检测，不是从不可用变成可用。
+          //
+          // 策略在 trench.ts 的 recoverIfStuck() 里（可测），cron 只负责调用。
+          try {
+            const { recoverIfStuck } = await import('../nyatos/trench.js');
+            if (await recoverIfStuck(id)) stuckReset += 1;
+          } catch { /* per-chat fail-soft */ }
+          try {
+            if (await pump(id)) pumped += 1;
+          } catch { /* per-chat fail-soft */ }
+        }
+        // 压力轨迹：每次泵浦记录相位 + P 最高的几个群。
+        //
+        // **这段曾经被我自己吃掉**：round 48 加进来，后来某次编辑把整块替换掉了，
+        // 而日志里那 3 条 pump tick 全是旧进程的（20:03/20:33/21:03），当前进程
+        // 一条都没有。我据那些陈旧日志判断过"P 全零 = 睡眠积压没生效"——
+        // 那是一次拿旧进程的显示当现状的诊断。
+        //
+        // **按 P 降序取前 5，不是取 active_groups 的前 5 个**：zrange 头部的群恰好
+        // P=0（实测 6 个群有气压，而日志里 5 个全是 0），不排序的话轨迹是一条假零线。
+        try {
+          const { readTrench } = await import('../nyatos/trench.js');
+          const { getLifeState } = await import('../tracking/life-state.js');
+          const phase = getLifeState().state;
+          const allIds = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0);
+          const top = (await Promise.all(
+            allIds.map(async (id) => ({ id, p: (await readTrench(id)).p })),
+          ))
+            .sort((a, b) => b.p - a.p)
+            .slice(0, 5);
+          logger.info({ phase, pumped, stuckReset, top }, 'trench pump tick: phase + top pressures');
+        } catch { /* 观测失败不影响泵浦 */ }
+        if (pumped > 0) logger.debug({ pumped }, 'trench pump: halved pressure');
+        if (stuckReset > 0) logger.warn({ stuckReset }, 'trench: pressure stuck at P_MAX for 6h — hard reset');
+      },
+    });
+  }
+
+  // Nyat Trench · 醒来检测（独立 2 分钟快 tick）。
+  //
+  // **为什么必须独立**：时间泵每 30 分钟一次且先减半 P。若复用它，0:14 醒来要等
+  // 0:34 才记录，P 已被减半两次，记录值只剩实际醒来值的四分之一——那会让
+  // "睡眠积压"这个特性看起来完全没生效。
+  //
+  // **为什么差点又没有**：这功能在 round 48 加进泵浦 cron，round 49 我抽取
+  // recoverIfStuck 时把整块内联检测一起吃掉了，而没有任何东西报警——
+  // 它没有一个测试在跑。round 71 才发现。现在的守护是 tests/unit/nyatos/
+  // trench-exports.test.ts（导出必须有 src 调用方）。
+  if (env().TRENCH_PUMP_ENABLED === true) {
+    reg({
+      name: 'trench-wake-detect',
+      everySec: 120,
+      run: async () => {
+        const { detectWakeTransition } = await import('../nyatos/trench.js');
+        const { getRedis } = await import('../db/redis.js');
+        const raw = await getRedis().zrange('xxb:active_groups', 0, 19);
+        const ids = raw.map(Number).filter((n) => Number.isSafeInteger(n) && n < 0);
+        const woke = await detectWakeTransition(ids);
+        logger.info({ woke, active: ids.length }, 'trench cron: wake-detect ran');
+      },
+    });
+  }
+
+  // Nyat Trench · L2 反射：Echo 回填 + E 更新 + P 脉冲。  // Nyat Trench · L2 反射：Echo 回填 + E 更新 + P 脉冲。
+  //
+  // 修的是一个纯写入侧缺漏：主动发言（trigger_uid=0）从不进 outcome.ts 的
+  // pending 队列，所以那条闭合管道对它从未生效——实测 self_replies 3,337 行里
+  // 98.7% 永远是 unknown。本任务用 bot_interactions 做一次纯 SQL 回扫。
+  // 零 LLM、零 token。
+  if (env().ECHO_ENABLED === true) {
+    reg({
+      name: 'echo-backfill',
+      everySec: 1800,
+      run: async () => {
+        const { backfillEcho } = await import('../agent/echo.js');
+        const n = await backfillEcho();
+        // 无条件心跳：backfillEcho 只在 settled>0 时自己打日志，于是"在跑但结算 0 条"
+        // 和"没在跑"在日志里完全无法区分。2026-09-19 我就因此分不清——
+        // echo: backfilled 一次都没出现过，而我无法判断这是不是又一个静默死亡。
+        logger.info({ settled: n }, 'trench cron: echo-backfill ran');
+      },
+    });
+
+  // 同时段对照基线采集（Phase 1 的归判前提）。每天 12:30 UTC = 20:30 北京拍一张
+  // 各群发送率快照，落 var/control-baseline.jsonl。**纯只读**：不翻开关、不改行为，
+  // 所以可以一直跑；论文 §九·补七 算出候选群同期 σ=19%，单日读数不可归因，
+  // 需要 ~5 天/组，这个 cron 就是让基线自己长出来而不用谁记得。
+  if (env().CONTROL_BASELINE_ENABLED !== false) {
+    reg({
+      name: 'control-baseline',
+      dailyAt: { hour: 12, minute: 30 },
+      run: async () => {
+        const { execSync } = await import('node:child_process');
+        execSync('npx tsx scripts/control-baseline.mts record', {
+          cwd: process.cwd(),
+          encoding: 'utf8',
+          timeout: 120_000,
+        });
+        logger.info({}, 'trench cron: control-baseline recorded');
+      },
+    });
+  }
+  }
+
+  // Event-backed mission/process continuity. This tick only claims due wake
+  // records and schedules durable process work; it never calls a model, tool,
+  // or Telegram adapter by itself.
+  if (env().COGNITIVE_CONTINUITY_ENABLED === true) {
+    reg({
+      name: 'cognitive-continuity',
+      everySec: env().COGNITIVE_CONTINUITY_INTERVAL_SEC,
+      run: async () => {
+        const { runCognitiveContinuityTick } = await import('../agent/cognitive-continuity.js');
+        const result = runCognitiveContinuityTick();
+        let processResult: Record<string, number> | undefined;
+        if (env().COGNITIVE_PROCESS_RUNTIME_ENABLED === true) {
+          const { runCognitiveProcessTick } = await import('../agent/cognitive-process-runtime.js');
+          processResult = { ...await runCognitiveProcessTick() };
+        }
+        if (result.missionsWoken > 0 || result.processesWoken > 0 || (processResult?.claimed ?? 0) > 0) {
+          logger.info({ ...result, processResult }, 'cognitive continuity wake tick');
+        }
+      },
+    });
+  }
+
+  // Kernel crash recovery. A turn that reached `dispatched` and then lost its
+  // process has no terminal outcome; this tick closes only the actions whose
+  // host budget has expired, as `interrupted`, and never re-sends anything.
+  if (env().COGNITIVE_KERNEL_RECOVERY_ENABLED === true) {
+    reg({
+      name: 'cognitive-kernel-recovery',
+      everySec: 60,
+      run: async () => {
+        const { recoverStaleKernelActions } = await import('../agent/cognitive-recovery.js');
+        recoverStaleKernelActions();
       },
     });
   }
@@ -217,6 +443,7 @@ export function startCronJobs(deps?: CronDeps): void {
   if (env().TASK_EXECUTOR_ENABLED) {
     reg({
       name: 'task-wake',
+      retrySafe: true,
       everySec: 60,
       run: async () => {
         const { wakeDueTasks } = await import('./task-wake.js');
@@ -317,15 +544,15 @@ export function startCronJobs(deps?: CronDeps): void {
     },
   });
 
-  // Dream journal — multi slot (北京时间,逗号分隔); model WRITE/SKIP; append entries
-  if (env().DREAM_JOURNAL_ENABLED) {
+  // DREAM_JOURNAL_CRON uses UTC; heartbeat dailyAt uses Beijing time.
+  if (env().DREAM_JOURNAL_ENABLED || env().BUSINESS_CONFIG_ENABLED) {
     const slots = env()
       .DREAM_JOURNAL_CRON.split(',')
       .map((s) => s.trim())
       .filter(Boolean);
     let any = false;
     for (const djCron of slots) {
-      const at = parseCronToDaily(djCron);
+      const at = parseCronToDaily(djCron, 8);
       if (!at) {
         logger.warn({ expr: djCron }, 'Invalid DREAM_JOURNAL_CRON entry, skipped');
         continue;
@@ -335,8 +562,17 @@ export function startCronJobs(deps?: CronDeps): void {
         name: `dream-journal:${at.hour}:${at.minute}`,
         dailyAt: at,
         run: async () => {
-          const { runDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
-          await runDreamJournal({ slot: inferDreamSlot() });
+          const { tryWriteDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
+          const { scheduledJournalSources } = await import('../admin/business-config.js');
+          let wrote = false;
+          let failed = false;
+          for (const sourceChatId of scheduledJournalSources()) {
+            const result = await tryWriteDreamJournal({ slot: inferDreamSlot(), sourceChatId });
+            wrote ||= result.wrote;
+            failed ||= result.reason === 'llm_failed';
+          }
+          if (failed) throw new Error('Diary model call failed');
+          return wrote ? { status: 'completed' as const } : { status: 'skipped' as const, reason: 'model_skip' };
         },
       });
     }
@@ -473,11 +709,12 @@ export function startCronJobs(deps?: CronDeps): void {
     });
   }
 
-  // 爱好蒸馏: 每天一次从群友爱好蒸馏 bot 自己的爱好(慢变量)
+  // Scope-bounded sweep; each source refreshes at most once per three days.
   if (env().HOBBY_DISTILL_ENABLED) {
     reg({
       name: 'hobby-distill',
-      dailyAt: { hour: 5, minute: 41 },
+      retrySafe: true,
+      everySec: 3600,
       run: async () => {
         const { distillHobbies } = await import('../tracking/hobbies.js');
         await distillHobbies();
@@ -554,7 +791,7 @@ export { isStarted };
 // ── cron 表达式兼容解析(迁移期 .env 里还是 cron 写法) ────────────────────
 
 /** 把简单 cron 表达式解析成「每天 h:m」;解析不了返回 null。 */
-function parseCronToDaily(expr: string): { hour: number; minute: number } | null {
+export function parseCronToDaily(expr: string, utcOffsetHours = 0): { hour: number; minute: number } | null {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return null;
   const [min, hour, dom, mon, dow] = parts;
@@ -563,7 +800,7 @@ function parseCronToDaily(expr: string): { hour: number; minute: number } | null
   const m = Number(min);
   const h = Number(hour);
   if (m > 59 || h > 23) return null;
-  return { hour: h, minute: m };
+  return { hour: ((h + utcOffsetHours) % 24 + 24) % 24, minute: m };
 }
 
 /** 把简单 cron 表达式解析成间隔分钟数;解析不了返回 null。 */

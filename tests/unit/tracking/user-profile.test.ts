@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { getOrCreateConversationId, getOrCreateUserId } from '../../../src/platform/identity-store.js';
 
 let testDb: Database.Database;
 const mockCallWithFallback = vi.fn();
@@ -20,7 +21,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 }));
 
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({ PROFILE_SYNC_BATCH_SIZE: 20 }),
+  env: () => ({ PROFILE_SYNC_BATCH_SIZE: 20, BOT_TOKEN: '123:synthetic' }),
 }));
 
 const {
@@ -31,6 +32,7 @@ const {
   runUserProfileSync,
   muteUser,
   getBotTagForAddressing,
+  getAggregatedUserTag,
   setBotTag,
   clearBotTag,
   _flushAllBuffers,
@@ -44,6 +46,7 @@ function initSchema(db: Database.Database): void {
     'migrations/0011_mute_expires.sql',
     'migrations/0025_profile_sections.sql',
     'migrations/0046_bot_tag.sql',
+    'migrations/0118_platform_identity.sql',
   ];
   for (const migration of migrations) {
     db.exec(readFileSync(resolve(process.cwd(), migration), 'utf-8'));
@@ -289,7 +292,7 @@ describe('user-profile', () => {
   });
 });
 
-describe('bot_tag — bot 对用户本人的称呼(per-chat, DM 默认回退)', () => {
+describe('bot_tag — private names stay in their conversation', () => {
   beforeEach(() => {
     testDb = new Database(':memory:');
     initSchema(testDb);
@@ -309,13 +312,13 @@ describe('bot_tag — bot 对用户本人的称呼(per-chat, DM 默认回退)', 
     expect(getBotTagForAddressing(999, 888)).toBe('阿强');
   });
 
-  it('群行无 bot_tag → 回退 DM 默认行 (uid,uid) 的 bot_tag', () => {
-    // DM 里设的称呼(chat_id=uid)作跨群默认
+  it('群行无 bot_tag 不泄露 DM 私密称呼', () => {
     setBotTag(777, 777, '猫哥');
     // 群行存在但没 bot_tag
     recordUserMessage(-1001, 777, 'u', 'U', null, 'msg');
     _flushAllBuffers();
-    expect(getBotTagForAddressing(-1001, 777)).toBe('猫哥');
+    expect(getBotTagForAddressing(-1001, 777)).toBeNull();
+    expect(getBotTagForAddressing(777, 777)).toBe('猫哥');
   });
 
   it('群行有 bot_tag → 优先于 DM 默认行', () => {
@@ -330,11 +333,11 @@ describe('bot_tag — bot 对用户本人的称呼(per-chat, DM 默认回退)', 
     expect(getBotTagForAddressing(-1001, 42)).toBeNull();
   });
 
-  it('clearBotTag 清掉群行 bot_tag → 回退到 DM 默认', () => {
+  it('clearing a group name does not re-expose a private name', () => {
     setBotTag(777, 777, '猫哥');
     setBotTag(-1001, 777, '群里的猫哥');
     clearBotTag(-1001, 777);
-    expect(getBotTagForAddressing(-1001, 777)).toBe('猫哥');
+    expect(getBotTagForAddressing(-1001, 777)).toBeNull();
   });
 
   it('setBotTag 截 32 字 + trim', () => {
@@ -343,5 +346,25 @@ describe('bot_tag — bot 对用户本人的称呼(per-chat, DM 默认回退)', 
     const got = getBotTagForAddressing(1, 1)!;
     expect(got.length).toBeLessThanOrEqual(32);
     expect(got.startsWith('猫')).toBe(true);
+  });
+
+  it('aggregated display names read only the requested conversation', () => {
+    recordUserMessage(-1001, 777, 'u', 'U', '群内专属名字', 'hi');
+    _flushAllBuffers();
+    expect(getAggregatedUserTag(777)).toBeNull();
+    expect(getAggregatedUserTag(777, -1001)).toBe('群内专属名字');
+  });
+
+  it('a misbound legacy row cannot expose one QQ account user in another account or Telegram', () => {
+    const user = getOrCreateUserId({ platform: 'qq', accountId: '41', idNamespace: 'qq-number', id: '7' });
+    const group = (accountId: string) => getOrCreateConversationId({ platform: 'qq', accountId,
+      idNamespace: 'qq-number', conversationKind: 'group', id: '100' });
+    const own = group('41'), other = group('42');
+    setBotTag(own, user, '同账号本群称呼');
+    setBotTag(other, user, '错误绑定的遗留秘密');
+    setBotTag(-100, user, '错误跨平台称呼');
+    expect(getBotTagForAddressing(own, user)).toBe('同账号本群称呼');
+    expect(getBotTagForAddressing(other, user)).toBeNull();
+    expect(getBotTagForAddressing(-100, user)).toBeNull();
   });
 });

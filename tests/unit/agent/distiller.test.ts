@@ -101,14 +101,34 @@ describe('parseDistillOutput', () => {
 });
 
 describe('distillEpisode evidence gate', () => {
-  it('maps unverified lifecycle-done to failed episode outcome', async () => {
-    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+  it('unverified lifecycle-done 记 done（没被证实 ≠ 失败），但血缘仍是 unverified', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({
+      summary: 's',
+      experience: [{ kind: 'trick', content: 'unverified-done lineage', tags: ['t'] }],
+    }) });
     const unverified = { ...baseTask, assessment: { status: 'unverified', reasons: ['no_contract'], checks: [] } };
     await distillEpisode({ task: unverified, outcome: 'done', progressSummary: 's', tailText: 't' });
     const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
-    expect(ep['outcome']).toBe('failed');
+    expect(ep['outcome']).toBe('done');
     const prompt = String(callWithFallbackMock.mock.calls[0]![0]['messages'][1]['content']);
-    expect(prompt).toContain('outcome: failed');
+    expect(prompt).toContain('outcome: done');
+    const entries = db.prepare('SELECT * FROM experience_entries').all() as Array<Record<string, unknown>>;
+    expect(entries[0]!['source_assessment']).toBe('unverified');
+  });
+
+  it('host 明确判 failed 的 lifecycle-done 仍记 failed', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+    const failed = { ...baseTask, assessment: { status: 'failed', reasons: ['acceptance_check_failed'], checks: [] } };
+    await distillEpisode({ task: failed, outcome: 'done', progressSummary: 's', tailText: 't' });
+    const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
+    expect(ep['outcome']).toBe('failed');
+  });
+
+  it('lifecycle failed 永远记 failed（即使 assessment 是 verified）', async () => {
+    callWithFallbackMock.mockResolvedValue({ content: JSON.stringify({ summary: 's' }) });
+    await distillEpisode({ task: baseTask, outcome: 'failed', progressSummary: 's', tailText: 't' });
+    const ep = db.prepare('SELECT * FROM episodes WHERE task_id = ?').get('task-1') as Record<string, unknown>;
+    expect(ep['outcome']).toBe('failed');
   });
 
   it('keeps verified done as done', async () => {
@@ -177,7 +197,10 @@ describe('distillEpisode', () => {
     expect(callWithFallbackMock).toHaveBeenCalledOnce();
     const callArg = callWithFallbackMock.mock.calls[0]![0] as { usage: string; maxTokens: number };
     expect(callArg.usage).toBe('summarize');
-    expect(callArg.maxTokens).toBeLessThanOrEqual(1200);
+    // 3000，不是 1200。2026-09-21 实测 1287 次 `distill output unparseable`
+    // 全是 JSON 被 max_tokens 从中间切断（len 61/85/…/911）。这条断言原来是
+    // `<= 1200`——**它把导致失败的额度当成了正确行为钉住**。
+    expect(callArg.maxTokens).toBe(3000);
   });
 
   it('returns null and writes nothing on unparseable LLM output', async () => {
@@ -241,5 +264,67 @@ describe('distillEpisode', () => {
     expect(r).not.toBeNull();
     const rows = db.prepare('SELECT content FROM experience_entries').all() as { content: string }[];
     expect(rows).toHaveLength(1);
+  });
+
+  // 2026-09-21：生产实测 `distill output unparseable` 1287 次，带原始输出的 14 条
+  // len 是 61/85/112/…/911——**全是 JSON 被从中间截断**。模型形状一直对，
+  // 是 maxTokens 不够写完；而 provider 层的截断重试只在"正文全空"时触发，
+  // 半个 JSON 看着是非空正文，重试从不发生。
+  describe('截断自救（max_tokens 把 JSON 切一半）', () => {
+    it('① summary 写完就被切 → 至少救回 summary', () => {
+      const r = parseDistillOutput('{\n  "summary": "本次任务要求自然接话回应群内@GundamWarrior的#245609消息，禁止复读原话');
+      expect(r).not.toBeNull();
+      expect(r!.summary).toContain('GundamWarrior');
+    });
+
+    it('② lessons 数组写了一半 → 救回 summary + 已完整的那些', () => {
+      const r = parseDistillOutput('{\n  "summary": "完成短回#245596。",\n  "lessons": [\n    "不能只做简单附和，要顺着核心点延续话题');
+      expect(r).not.toBeNull();
+      expect(r!.summary).toBe('完成短回#245596。');
+      expect(r!.lessons).toEqual(['不能只做简单附和，要顺着核心点延续话题']);
+    });
+
+    it('③ 完整 JSON 不受影响（不靠自救也能解析）', () => {
+      const r = parseDistillOutput('{"summary":"ok","experience":["a"],"lessons":["b"]}');
+      expect(r!.summary).toBe('ok');
+      expect(r!.lessons).toEqual(['b']);
+    });
+
+    it('④ 完全不是 JSON → 仍然 null（不硬造）', () => {
+      expect(parseDistillOutput('模型在这里说人话')).toBeNull();
+      expect(parseDistillOutput('')).toBeNull();
+    });
+
+    it('⑤ 嵌套对象被切也能闭合（summary 里带对象）', () => {
+      const r = parseDistillOutput('{"summary":"s","meta":{"a":1,"b":[1,2');
+      expect(r).not.toBeNull();
+      expect(r!.summary).toBe('s');
+    });
+  });
+
+  // 2026-09-21 生产实测形状：模型先吐一个孤零零的 `{`，然后才开 ```json 围栏。
+  // 剥完围栏变成 `{ { "summary": …` —— JSON.parse 不认（外层对象的 key 不能是 `{`），
+  // 截断自救也救不了（补完括号还是 `{ {...}}`）。近 24h distill 失败 360 次。
+  describe('围栏前面有散落字符', () => {
+    it('⑨ `{```json` 这种形状能解析出 summary', () => {
+      const r = parseDistillOutput('{```json\n{\n  "summary": "任务要求自然回应@wcnmb_69的消息#60584。助手连续发送触发限制，最终调整策略成功结束。过程中还出');
+      expect(r).not.toBeNull();
+      expect(r!.summary).toContain('wcnmb_69');
+    });
+
+    it('⑩ 模型先说话再给围栏 JSON，也认', () => {
+      const r = parseDistillOutput('好的，我来复盘一下。\n```json\n{"summary":"x","lessons":["a"]}\n```');
+      expect(r!.summary).toBe('x');
+    });
+
+    it('⑪ 纯围栏（无散落字符）不受影响', () => {
+      const r = parseDistillOutput('```json\n{"summary":"完成短回","lessons":["b"]}\n```');
+      expect(r!.summary).toBe('完成短回');
+    });
+
+    it('⑫ 完全不是 JSON 仍然 null（不硬造）', () => {
+      expect(parseDistillOutput('模型在说人话')).toBeNull();
+      expect(parseDistillOutput('')).toBeNull();
+    });
   });
 });

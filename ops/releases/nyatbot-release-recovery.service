@@ -1,0 +1,16 @@
+[Unit]
+Description=Recover interrupted release selection before NyatBot starts on boot
+Before=nyatbot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+# Only resets a stopped unit's selection; never starts the dependent bot here.
+ExecStart=/usr/bin/python3 /opt/nyatbot-release-control/release-controller.py --config /etc/nyatbot-release-control/config.json recover-selection
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

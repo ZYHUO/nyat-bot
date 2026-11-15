@@ -1,0 +1,18 @@
+{
+  "name": "GITHUB_REPO",
+  "description": "查一个公开 GitHub 仓库的元信息（简介、star、语言、最近推送）。群里出现 owner/name 形状的仓库名、或有人问'某项目是干什么的'时用。语法：owner/name，例如 ZYHUO/nyat-bot。",
+  "parameters": {
+    "repo": {
+      "type": "string",
+      "description": "仓库，owner/name 形式，例如 ZYHUO/nyat-bot",
+      "required": true
+    }
+  },
+  "trusted": true,
+  "execute": {
+    "type": "http",
+    "method": "GET",
+    "url": "https://api.github.com/repos/{{repo}}",
+    "allowedHosts": ["api.github.com"]
+  }
+}

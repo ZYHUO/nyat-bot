@@ -23,3 +23,16 @@ native/**/target/
 # 一次性导出物 —— 曾把真实群聊记录(群 ID + 成员显示名 + 对话原文)
 # 和运营者 uid/username 随公开仓库分发。历史里已存在的需 git filter-repo 清。
 exports/
+
+# 运行时观测产物（trench JSONL 等）
+var/
+
+# trench 的 VITEST 观测改道文件（生产日志 var/trench.jsonl 已由 var/ 覆盖）
+.probe/
+__pycache__/
+*.pyc
+
+# npm run demo -- --html 的产物（生成物，不入库）
+demo.html
+# Local operator backups are not source releases.
+*.bak-*

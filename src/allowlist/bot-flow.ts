@@ -66,7 +66,7 @@ export async function defaultGetRecentContext(
     const { getBotUid } = await import('../bot/bot.js');
     const msgs = await getRecent(chatId, limit);
     if (!msgs.length) return '';
-    const botUid = getBotUid() || 0;
+    const botUid = getBotUid(chatId) || 0;
     return msgs
       .map((m) => slimSingleMessage(m, botUid))
       .join('\n')

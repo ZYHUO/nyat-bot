@@ -7,6 +7,7 @@ import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 import { env } from '../env.js';
 import { scopeKey } from '../shared/cognitive-scope.js';
+import { resolveConversationScope } from '../shared/privacy-scope.js';
 import type { CognitiveScope, ScopeVisibility } from '../shared/cognitive-scope.js';
 import type { UpdateLike } from '../shared/types.js';
 
@@ -23,7 +24,49 @@ export type CognitiveEventType =
   | 'user_followup'
   | 'world_change'
   | 'social_interaction'
-  | 'social_prediction';
+  | 'social_act_proposed'
+  | 'social_act_outcome'
+  | 'inner_state_updated'
+  | 'affect_episode_updated'
+  | 'mission_proposed'
+  | 'mission_observed'
+  | 'mission_wake_requested'
+  | 'sensor_proposed'
+  | 'sensor_observed'
+  | 'value_proposed'
+  | 'value_evaluated'
+  | 'value_adopted'
+  | 'cognitive_process_wake'
+  | 'cognitive_process_checkpoint'
+  | 'cognitive_process_stopped'
+  | 'action_circuit_proposed'
+  | 'action_circuit_evaluated'
+  | 'action_circuit_published'
+  | 'capability_observed'
+  | 'social_prediction'
+  | 'cognitive_trigger'
+  | 'cognitive_frame_observed'
+  | 'action_envelope_proposed'
+  | 'action_envelope_transition'
+  | 'action_envelope_outcome'
+  // The two event types that close the cognitive loop (NyatOS Phase 1.4).
+  //
+  // `own_action_result` is the bot's own act coming back with an observed
+  // outcome. Without it the model cannot see what it just did — the blind spot
+  // behind the documented self-reinforcing loop (heart.ts:66-76: 69 replies,
+  // only 12 went through the heart).
+  //
+  // `self_scheduled_wake` is the bot deciding when to think next. Without it,
+  // the host owns attention and the system stays a passive responder: it only
+  // exists while being addressed.
+  | 'own_action_result'
+  | 'self_scheduled_wake'
+  // The tick's own decision. unified-tick used to write nothing to this ledger at
+  // all — what it chose, what its veto chain rejected, why it went quiet lived only
+  // in logs. Without it there is no queryable "this is what I chose", so none of the
+  // agency metrics (self-attribution, cost of preference, continuity of choice) can
+  // be computed. Host-side only: zero tokens.
+  | 'tick_verdict';
 
 export type CognitiveEventSource = 'telegram' | 'host' | 'scheduler' | 'tool' | 'model' | 'import';
 
@@ -57,6 +100,7 @@ export interface CognitiveEventInput {
 }
 
 export interface TelegramMessageEventInput {
+  platform?: 'telegram' | 'qq';
   update: UpdateLike;
   chatId: number;
   messageId: number;
@@ -73,10 +117,13 @@ export interface ListCognitiveEventsOptions {
   correlationId?: string;
   scope?: CognitiveScope;
   afterSequence?: number;
+  /** Global scope replay cursor. `sequence` is only correlation-local. */
+  afterOccurredAt?: number;
+  afterEventId?: string;
   type?: CognitiveEventType;
   limit?: number;
   /** Use occurred-at order for bounded projections that are not replay streams. */
-  order?: 'replay' | 'occurred_at_desc';
+  order?: 'replay' | 'occurred_at' | 'occurred_at_desc';
 }
 
 export interface CognitiveOutboxItem {
@@ -107,7 +154,38 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'user_followup',
   'world_change',
   'social_interaction',
+  'social_act_proposed',
+  'social_act_outcome',
+  'inner_state_updated',
+  'affect_episode_updated',
+  'mission_proposed',
+  'mission_observed',
+  'mission_wake_requested',
+  'sensor_proposed',
+  'sensor_observed',
+  'value_proposed',
+  'value_evaluated',
+  'value_adopted',
+  'cognitive_process_wake',
+  'cognitive_process_checkpoint',
+  'cognitive_process_stopped',
+  'action_circuit_proposed',
+  'action_circuit_evaluated',
+  'action_circuit_published',
+  'capability_observed',
   'social_prediction',
+  'cognitive_trigger',
+  'cognitive_frame_observed',
+  'action_envelope_proposed',
+  'action_envelope_transition',
+  'action_envelope_outcome',
+  'own_action_result',
+  'self_scheduled_wake',
+  // 注意：这个 Set 是手写的运行时就闸，与上面 TS 的 CognitiveEventType 联合体
+  // **不是同一处**。2026-09-19 加了 tick_verdict 只改联合体，这里漏了 →
+  // normalizeInput 抛 unknown cognitive event type，而调用方的 fail-soft catch
+  // 把它吞掉，账本静默 0 行（看起来像"tick 没跑"，其实跑了）。
+  'tick_verdict',
 ]);
 const EVENT_SOURCES: ReadonlySet<string> = new Set(['telegram', 'host', 'scheduler', 'tool', 'model', 'import']);
 const MAX_FACT_BYTES = 8 * 1024;
@@ -242,6 +320,19 @@ export function appendCognitiveEvent(input: CognitiveEventInput): AppendCognitiv
         const duplicate = db.prepare('SELECT * FROM cognitive_events WHERE dedupe_key = ?').get(normalized.dedupeKey) as Record<string, unknown> | undefined;
         if (duplicate) return { inserted: false, event: rowToEvent(duplicate) };
       }
+      // Provenance is host-observed at creation time, never repaired on duplicate
+      // reads. A model-supplied label cannot promote its own hypothesis to fact.
+      let factJson = normalized.factJson;
+      if (input.fact?.['hypothesisKind'] === 'self') {
+        const fact = JSON.parse(factJson) as Record<string, unknown>;
+        delete fact['conversationScope'];
+        if (input.source !== 'model' && normalized.chatId !== null) {
+          const source = resolveConversationScope(normalized.chatId);
+          if (source?.accountId) fact['conversationScope'] = source;
+        }
+        factJson = JSON.stringify(fact);
+        if (Buffer.byteLength(factJson, 'utf8') > MAX_FACT_BYTES) throw new Error('self fact exceeds limit');
+      }
       const next = db
         .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM cognitive_events WHERE correlation_id = ?')
         .get(normalized.correlationId) as { next: number };
@@ -265,7 +356,7 @@ export function appendCognitiveEvent(input: CognitiveEventInput): AppendCognitiv
         normalized.causationId,
         normalized.correlationId,
         normalized.dedupeKey,
-        normalized.factJson,
+        factJson,
         createdAt,
       );
       if (outboxEnabled() && hasOutboxTable(db)) {
@@ -287,11 +378,13 @@ export function appendCognitiveEvent(input: CognitiveEventInput): AppendCognitiv
 export function appendTelegramMessageEvent(input: TelegramMessageEventInput): string | undefined {
   try {
     const raw = input.update as Record<string, unknown>;
+    const platform = input.platform ?? 'telegram';
     const isEdit = Boolean(raw['edited_message'] || raw['edited_channel_post']);
     const telegramMessage = (raw['edited_message'] ?? raw['edited_channel_post'] ?? raw['message'] ?? raw['channel_post']) as Record<string, unknown> | undefined;
     const updateId = typeof raw['update_id'] === 'number' ? raw['update_id'] : undefined;
     const telegramKey = updateId === undefined ? `${input.chatId}:${input.messageId}` : String(updateId);
     const versionKey = isEdit ? String(telegramMessage?.['edit_date'] ?? telegramKey) : telegramKey;
+    const identity = input.update.__nyatEventIdentity;
     const result = appendCognitiveEvent({
       type: isEdit ? 'message_edited' : 'message_received',
       scope: {
@@ -299,16 +392,18 @@ export function appendTelegramMessageEvent(input: TelegramMessageEventInput): st
         chatId: input.chatId,
         ...(input.userId !== undefined && input.userId > 0 ? { userId: input.userId } : {}),
       },
-      source: 'telegram',
+      source: platform === 'telegram' ? 'telegram' : 'host',
       occurredAt: input.occurredAt,
-      correlationId: `telegram:${input.chatId}:${telegramKey}`,
-      dedupeKey: `telegram:${input.chatId}:${input.messageId}:${isEdit ? `edit:${versionKey}` : `message:${versionKey}`}`,
+      correlationId: identity ? `message:${identity.eventId}` : `${platform}:${input.chatId}:${telegramKey}`,
+      dedupeKey: identity ? `inbound:${identity.eventId}` : `${platform}:${input.chatId}:${input.messageId}:${isEdit ? `edit:${versionKey}` : `message:${versionKey}`}`,
       fact: {
+        ...(platform === 'qq' ? { platform } : {}),
         chatId: input.chatId,
         messageId: input.messageId,
         userId: input.userId ?? null,
         updateId: updateId ?? null,
         isEdit,
+        ...(identity ? { eventIdentity: identity } : {}),
       },
     });
     return result?.event.id;
@@ -454,6 +549,16 @@ export function listCognitiveEvents(opts: ListCognitiveEventsOptions = {}): Cogn
       where.push('sequence > ?');
       params.push(opts.afterSequence);
     }
+    if (opts.afterOccurredAt !== undefined) {
+      const afterEventId = opts.afterEventId?.trim();
+      if (afterEventId) {
+        where.push('(occurred_at > ? OR (occurred_at = ? AND id > ?))');
+        params.push(opts.afterOccurredAt, opts.afterOccurredAt, afterEventId);
+      } else {
+        where.push('occurred_at > ?');
+        params.push(opts.afterOccurredAt);
+      }
+    }
     if (opts.type) {
       where.push('type = ?');
       params.push(opts.type);
@@ -462,6 +567,8 @@ export function listCognitiveEvents(opts: ListCognitiveEventsOptions = {}): Cogn
     const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const order = opts.order === 'occurred_at_desc'
       ? 'occurred_at DESC, id DESC'
+      : opts.order === 'occurred_at'
+        ? 'occurred_at ASC, id ASC'
       : 'correlation_id ASC, sequence ASC';
     const rows = db.prepare(`SELECT * FROM cognitive_events ${filter} ORDER BY ${order} LIMIT ?`).all(...params, limit) as Record<string, unknown>[];
     return rows.map(rowToEvent);

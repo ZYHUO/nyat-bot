@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/onebot-qq]
   pull_request:
-    branches: [main]
+    branches: [main, codex/onebot-qq]
   workflow_dispatch:
 
 jobs:
@@ -31,12 +31,33 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run build
       - run: npm run test
+      - run: node --import tsx scripts/verify-integration.mts --offline
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests/ops -p 'test_*.py' -v
+
+  rust-recovery:
+    name: NyatDB Rust recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    defaults:
+      run:
+        working-directory: native/nyatdb
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - run: cargo check --locked --all-targets
+      - run: cargo test --locked --lib -- --test-threads=1
 
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, rust-recovery]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,3 +66,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: node --import tsx scripts/verify-deploy.mts

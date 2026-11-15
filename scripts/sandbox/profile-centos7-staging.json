@@ -1,0 +1,14 @@
+{
+  "bwrapPath": "/opt/nyatbot-staging/sandbox-build/private/bin/bwrap",
+  "prlimitPath": "/usr/bin/prlimit",
+  "nodePath": "/opt/nyatbot-runtime/bin/node",
+  "runtimeFiles": [
+    "/opt/nyatbot-runtime/sysroot/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/opt/nyatbot-runtime/sysroot/lib/x86_64-linux-gnu/libdl.so.2",
+    "/opt/nyatbot-runtime/sysroot/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+    "/opt/nyatbot-runtime/sysroot/lib/x86_64-linux-gnu/libm.so.6",
+    "/opt/nyatbot-runtime/sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1",
+    "/opt/nyatbot-runtime/sysroot/lib/x86_64-linux-gnu/libpthread.so.0",
+    "/opt/nyatbot-runtime/sysroot/lib/x86_64-linux-gnu/libc.so.6"
+  ]
+}

@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   socialStateHint: vi.fn(),
   getMind: vi.fn(),
   getObsession: vi.fn(),
+  getHobbyFlavor: vi.fn(),
+  getInnerStateTendencies: vi.fn(),
+  continuity: false,
 }));
 
 vi.mock('../../../../src/tracking/life-state.js', () => ({ getLifeState: mocks.getLifeState }));
@@ -22,6 +25,8 @@ vi.mock('../../../../src/pipeline/turn/focus.js', () => ({ getFocus: mocks.getFo
 vi.mock('../../../../src/tracking/social-needs.js', () => ({ socialStateHint: mocks.socialStateHint }));
 vi.mock('../../../../src/pipeline/heart/mind.js', () => ({ getMind: mocks.getMind }));
 vi.mock('../../../../src/tracking/obsessions.js', () => ({ getObsession: mocks.getObsession }));
+vi.mock('../../../../src/tracking/hobbies.js', () => ({ getHobbyFlavor: mocks.getHobbyFlavor }));
+vi.mock('../../../../src/agent/emotion-continuity.js', () => ({ getInnerStateTendencies: mocks.getInnerStateTendencies }));
 // 上学日程源(A0/A3)与本组「源顺序」用例无关 —— 关掉,保持叙述确定性
 vi.mock('../../../../src/tracking/school-state.js', () => ({ getSchoolSelfStateLine: () => null }));
 // 天气源（2026-08-22）：mock 行为源本身——vi.mock(env) 对深层动态 import 链
@@ -30,7 +35,7 @@ vi.mock('../../../../src/shared/weather.js', () => ({ getWeatherHint: async () =
 // 昨日回忆源（2026-08-22）：同理 mock 掉数据访问，别依赖「:memory: 报表不存在」的巧合。
 vi.mock('../../../../src/meta/session-digest.js', () => ({ digestsSince: () => [] }));
 vi.mock('../../../../src/db/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
-vi.mock('../../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: false }) }));
+vi.mock('../../../../src/env.js', () => ({ env: () => ({ SCHOOL_SCHEDULE_ENABLED: false, EMOTION_CONTINUITY_ENABLED: mocks.continuity }) }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
@@ -46,9 +51,31 @@ beforeEach(() => {
   mocks.socialStateHint.mockResolvedValue(null);
   mocks.getMind.mockResolvedValue({});
   mocks.getObsession.mockResolvedValue({ hint: '' });
+  mocks.getHobbyFlavor.mockResolvedValue(null);
+  mocks.continuity = false;
+  mocks.getInnerStateTendencies.mockReturnValue([]);
 });
 
 describe('composeSelfState (#38)', () => {
+  it('uses at most two inner tendencies rather than broadcasting all internal state', async () => {
+    mocks.continuity = true;
+    mocks.moodPromptHint.mockReturnValue('你还有些高兴');
+    mocks.getInnerStateTendencies.mockReturnValue(['想慢慢听完对方的话', '很想插话']);
+    mocks.getFocus.mockResolvedValue(0.9);
+    mocks.socialStateHint.mockResolvedValue('你有点想找人说话');
+    mocks.getObsession.mockResolvedValue({ hint: 'UNRELATED_OBSESSION' });
+    const snapshot = await composeSelfState(-123, '继续说刚才的事情');
+    expect(mocks.getInnerStateTendencies).toHaveBeenCalledExactlyOnceWith(-123);
+    expect(snapshot.narration).toContain('你还有些高兴；想慢慢听完对方的话');
+    expect(snapshot.narration).not.toContain('很想插话');
+    expect(snapshot.narration).not.toContain('UNRELATED_OBSESSION');
+    expect(snapshot.background?.join(' ')).toContain('UNRELATED_OBSESSION');
+    expect(snapshot.narration).not.toContain('被晾');
+  });
+  it('binds derived interests to the actual target conversation', async () => {
+    await composeSelfState(-123);
+    expect(mocks.getHobbyFlavor).toHaveBeenCalledExactlyOnceWith(-123);
+  });
   it('assembles parts in fixed order: mood → focus → social → thought → stance → obsession', async () => {
     mocks.moodPromptHint.mockReturnValue('[群心情] 群里气氛不错');
     mocks.getFocus.mockResolvedValue(0.9);

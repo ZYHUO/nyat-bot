@@ -2,7 +2,9 @@
 // Fallback chain + hedged request
 // ────────────────────────────────────────
 
-import type { AICallOptions, AICallResult } from './types.js';
+import type { AICallOptions, AICallResult, AIProviderOptions } from './types.js';
+import { assertBudgetAlive, requestBudgetError, strictBudgetError, strictMaxTokens,
+  STRICT_AI_DEADLINE_MS, STRICT_AI_MAX_REQUESTS, withinBudgetSignal } from './request-budget.js';
 import { callModel } from './provider.js';
 import { getUsage, getLabel } from './labels.js';
 import { emitLlmResult, emitLlmError } from './events.js';
@@ -14,8 +16,128 @@ import { getRedis } from '../db/redis.js';
 import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
 import { smartGroupReorder, recordSmartGroupResult, smartGroupAutoAssign, isAutoAssignEnabled } from './smart-group.js';
+import { acquireAiLease, getAiWorkload } from './workload.js';
+import type { AiInFlightLease } from './workload.js';
+
+/**
+ * round 83：403 / 账号级限流的冷却时长。
+ *
+ * 默认 60s / 熔断 120s 对「concurrent request limit」不够——那种限流
+ * REST 解除取决于在飞的请求跑完，不是墙上时钟。实测 dshkimi 一天 570 次
+ * 失败里 491 次是这个形状（86%），平均每 2.4 分钟一次循环。
+ *
+ * 5 分钟是折中：够长到让在飞请求跑完，又不至于一个账号被罚站半小时。
+ */
+const RATE_LIMIT_COOLDOWN_SEC = 300;
+
+// round 198：**每个 model 的在飞上限**（原子的那一半）。
+//
+// 已验证的根因（不是假说）：1275 次 concurrent-limit 报错里，
+// **178 次是"同一秒内同一个 label 被打多次"**，553 次是"同 label 间隔 <=5 秒"。
+// 一条串行链不可能在同一秒内打同一个 label 两次——那只能是多个并发的
+// callWithFallback（不同 chat/任务/usage）在同一刻都通过了冷却检查，然后一起发车。
+//
+// round 83 的冷却天生拦不住：check-then-launch 不是原子的。它只阻止
+// "新的尝试"，阻止不了"已经并行发出去的那批"，而账号级并发上限是被那一批撞开的。
+//
+// INCR 是原子的，所以多个并发调用里只有一个能拿到最后一个坑。
+// Redis 出错时放行——这是限流优化不是正确性前提（同 dedup 的 catch 放行）。
+const INFLIGHT_KEY = (model: string): string => `xxb:ai:inflight:${model}`;
+const INFLIGHT_TTL_SEC = 120;   // 泄漏保护：忘了 DECR 也会自己消掉
+
+async function acquireInFlight(model: string, timeoutMs: number | undefined): Promise<AiInFlightLease | null> {
+  const config = env();
+  if (config.AI_WORKLOAD_BUDGET_ENABLED) {
+    try {
+      const lease = await acquireAiLease(getRedis(), {
+        model,
+        workload: getAiWorkload(),
+        totalLimit: config.AI_MAX_INFLIGHT_PER_MODEL,
+        backgroundLimit: config.AI_MAX_BACKGROUND_INFLIGHT_PER_MODEL,
+        // Every fallback attempt has a usage timeout. Refuse unbounded attempts
+        // instead of admitting one whose lease could expire while it still runs.
+        timeoutMs: timeoutMs ?? 0,
+      });
+      if (!lease) {
+        incrCounter('llm_workload_cap_skipped_total', { model, workload: getAiWorkload() });
+        return null;
+      }
+      return {
+        async release(): Promise<void> {
+          try { await lease.release(); } catch (err) {
+            logger.warn({ model, err }, 'AI workload lease release failed; expiry will recover it');
+          }
+        },
+      };
+    } catch (err) {
+      logger.warn({ model, workload: getAiWorkload(), err }, 'AI workload admission unavailable');
+      incrCounter('llm_workload_admission_error_total', { model, workload: getAiWorkload() });
+      return null;
+    }
+  }
+
+  // Flag off: preserve legacy cap and Redis failure fail-open behavior.
+  try {
+    const redis = getRedis();
+    const cap = config.AI_MAX_INFLIGHT_PER_MODEL;
+    const key = INFLIGHT_KEY(model);
+    const n = await redis.incr(key);
+    if (n > cap) { await redis.decr(key); return null; }
+    // 只在第一个占坑者身上设 TTL：只要有一个人在飞，key 就在。
+    if (n === 1) await redis.expire(key, INFLIGHT_TTL_SEC);
+    let released = false;
+    return {
+      async release(): Promise<void> {
+        if (released) return;
+        released = true;
+        try { await redis.decr(key); } catch { /* Legacy TTL fallback. */ }
+      },
+    };
+  } catch { return { release: async () => {} }; }
+}
+
+/** Include provider account-queue wait in the lease's finite attempt budget. */
+async function callModelWithinLeaseTimeout(
+  label: ReturnType<typeof getLabel>,
+  messages: AICallOptions['messages'],
+  opts: NonNullable<Parameters<typeof callModel>[2]>,
+): Promise<AICallResult> {
+  if (!env().AI_WORKLOAD_BUDGET_ENABLED) return callModel(label, messages, opts);
+  const deadline = new AbortController();
+  const timer = setTimeout(() => {
+    deadline.abort(new DOMException('AI attempt timed out', 'TimeoutError'));
+  }, opts.timeout);
+  timer.unref();
+  const signal = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
+  try {
+    return await callModel(label, messages, { ...opts, signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function callWithFallback(options: AICallOptions): Promise<AICallResult> {
+  if (!options.beforeProviderRequest) return callWithFallbackInner(options);
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), STRICT_AI_DEADLINE_MS);
+  timer.unref();
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
+  let consumed = 0;
+  const beforeProviderRequest = async () => {
+    assertBudgetAlive(signal);
+    if (consumed >= STRICT_AI_MAX_REQUESTS) throw requestBudgetError('EXHAUSTED');
+    consumed++; // Synchronous reservation also bounds concurrent admission.
+    await options.beforeProviderRequest!(); // Durable driver CAS; no refund, including unknown outcomes.
+    assertBudgetAlive(signal);
+  };
+  try {
+    assertBudgetAlive(signal);
+    return await withinBudgetSignal(callWithFallbackInner({ ...options, signal, beforeProviderRequest,
+      maxTokens: strictMaxTokens(options.maxTokens), allowHedge: false, waitIfCooling: false }), signal);
+  } finally { clearTimeout(timer); }
+}
+
+async function callWithFallbackInner(options: AICallOptions): Promise<AICallResult> {
   const usage = getUsage(options.usage);
   const manualNames = [usage.label, ...usage.backups];
 
@@ -29,7 +151,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
 
   // Smart Group: reorder candidates by health/latency/cost if enabled.
   // getLabels 由 smart-group 内部惰性 import —— 默认关闭时零开销,也不碰测试 mock。
-  const smartOrderedNames = await smartGroupReorder(candidateNames);
+  // 第二个参数传 usage 名：声明 respectManualOrder 的 usage（画摊子）不参与重排,
+  // 否则手动链的顺序会被延迟排序翻回"最快但不会干这活"的模型。
+  const smartOrderedNames = await smartGroupReorder(candidateNames, options.usage);
 
   const cooldown = new CooldownTracker(getRedis());
   // 后台批任务(allowHedge:false)不 hedge —— 2s 后双发对延迟无感,纯翻倍账单。
@@ -49,10 +173,22 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     // H4.2: usage 级 jsonMode 默认（judge/summarize 已开）——调用方显式值优先，
     // 未传时跟 usage 走。根治 stepfun 系脏 JSON（gate 529/norms 6-9/tick 同因）。
     jsonMode: options.jsonMode ?? usage.jsonMode,
+    ...(options.beforeProviderRequest ? { beforeProviderRequest: options.beforeProviderRequest } : {}),
   };
 
   const errors: Error[] = [];
   let hedgeTriedLabel: string | undefined;
+  /** 全链被冷却跳过时，最短的那个剩余冷却（秒）；0 表示没有候选被冷却跳过。 */
+  let shortestCooldownSec = 0;
+  /** 是否真的等过一次（等完仍全冷却时用来分开记账）。 */
+  let waitedOnce = false;
+  /**
+   * 有候选是被**在飞上限**挡下的（不是冷却）。在飞上限没有"剩余秒数"——占坑的请求跑完就放，
+   * 所以 shortestCooldownSec 对它恒为 0，下面"等一等再试"的分支永远进不去。
+   * 实测：unified-tick（judge 链，十几个后台调用共用）每次到点撞上别人占满的坑，
+   * 797 次里 794 次 llm_failed，日志里 skipped 的 coolingForSec 全是 0。
+   */
+  let blockedByInFlight = false;
 
   // P2 多模态:带图调用跳过明确声明 VISION=false 的 label(纯文本模型收到
   // image_url 必 400,白烧一跳还刷熔断)。undefined(未声明)照发,保持现状。
@@ -61,6 +197,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
   );
 
   for (let i = 0; i < smartOrderedNames.length; i++) {
+    if (options.beforeProviderRequest) assertBudgetAlive(options.signal);
     const labelName = smartOrderedNames[i]!;
 
     // Skip label already tried as a hedge
@@ -77,28 +214,38 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
     // Skip if cooling down
     if (await cooldown.isCoolingDown(label.model)) {
       logger.debug({ label: labelName, model: label.model }, 'Skipping cooled-down model');
+      // 记下最短的剩余冷却——全被跳过时用它决定要不要等一下（见函数尾部）。
+      const rem = await cooldown.getRemainingSeconds(label.model).catch(() => 0);
+      if (rem > 0 && (shortestCooldownSec === 0 || rem < shortestCooldownSec)) shortestCooldownSec = rem;
       continue;
     }
 
-    // per-label 覆盖:给慢/推理模型(如 mundo,回复链里需几分钟 + 大 maxTokens 防
-    // 推理截断成空)单独放宽,而不动 usage 配置(正常回复的快模型照旧 60s/小 maxTokens)。
-    // 超时仍受调用方 maxTimeoutMs 上限约束(heart/gate 等延迟敏感路径设了 maxTimeoutMs
-    // → 即便落到 mundo 也不会久等,会按上限超时后继续 fallback)。
+    // Use the actual label timeout for lease expiry, including caller caps.
     const attemptOpts = attemptOptsFor(label, callOpts, options.maxTimeoutMs);
+    const lease = await acquireInFlight(label.model, attemptOpts.timeout);
+    if (!lease) {
+      logger.debug({ label: labelName, model: label.model, cap: env().AI_MAX_INFLIGHT_PER_MODEL },
+        'Skipping model at in-flight cap');
+      incrCounter('llm_inflight_cap_skipped_total', { label: labelName, model: label.model });
+      blockedByInFlight = true;
+      const rem = await cooldown.getRemainingSeconds(label.model).catch(() => 0);
+      if (rem > 0 && (shortestCooldownSec === 0 || rem < shortestCooldownSec)) shortestCooldownSec = rem;
+      continue;
+    }
+    let leaseOwnedByHedge = false;
 
     try {
       // Hedged request: if this is the primary and there's a backup,
       // race with a delayed backup call.
-      // Note: hedgeTriedLabel is set before the call. If hedgedCall throws,
-      // both primary and hedge have been attempted, so skipping the hedge
-      // label in the fallback loop is correct.
+      // Only skip a backup in the next iteration if it actually started.
       if (i === 0 && smartOrderedNames.length > 1 && hedgeDelayMs > 0) {
-        hedgeTriedLabel = smartOrderedNames[1]!;
-        const hedgeLabel = getLabel(hedgeTriedLabel);
+        const hedgeLabel = getLabel(smartOrderedNames[1]!);
+        leaseOwnedByHedge = true;
         const result = await hedgedCall(
           label, hedgeLabel, options.messages, callOpts, hedgeDelayMs, cooldown,
           options.rejectEmpty ?? false, options.maxTimeoutMs,
           options.usage, options.suppressMetrics ?? false, options.chatId,
+          lease, () => { hedgeTriedLabel = hedgeLabel.name; },
         );
         // rejectEmpty 已在 hedgedCall 内对两跳都施加;这里再兜一层,空则落到下个 backup。
         if (options.rejectEmpty && !result.content.trim()) {
@@ -108,7 +255,7 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
         return result;
       }
 
-      const result = await callModel(label, options.messages, attemptOpts);
+      const result = await callModelWithinLeaseTimeout(label, options.messages, attemptOpts);
       if (options.rejectEmpty && !result.content.trim()) {
         throw new AIError('Empty response', labelName, label.model, 'AI_EMPTY');
       }
@@ -127,6 +274,9 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       void recordSmartGroupResult(labelName, result.latencyMs, true);
       return result;
     } catch (err) {
+      const denied = strictBudgetError(err);
+      if (denied) throw denied;
+      if (options.beforeProviderRequest) assertBudgetAlive(options.signal);
       errors.push(err instanceof Error ? err : new Error(String(err)));
 
       // External abort (turn interrupt) — don't fallback, surface immediately.
@@ -138,18 +288,105 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       }
 
       // Content safety rejection — **继续试下一个 provider**,不再一拒就放弃整条链。
-      if (err instanceof AIError && err.code === 'AI_CONTENT_REJECTED') {
-        logger.warn({ label: labelName, err: err.message }, 'Content rejected by safety filter, trying next provider');
+      //
+      // round 10（新 goal）：**不记熔断**。
+      //
+      // 2026-09-22 07:16 实测：stepfunvision 连续 5 次被 safety filter 拒
+      // （群里在聊洗钱/广告类内容），3 次即达 DEFAULT_FAILURE_THRESHOLD
+      // → 熔断 120s → 那 120s 内 **20 次 judge 调用全部 skipped**，
+      // 用户侧看到的是"没回复"而不是"慢回复"。
+      //
+      // 根因是判据错位：safety filter 拒的是**这条内容**，不是 provider 的
+      // 健康状态。同一个 model 对别的内容可能完全正常——拿内容问题罚 provider，
+      // 等于"这条消息里有敏感词 ⇒ 这个模型坏了"。而 safety filter 本身已经
+      // 给出了正确行为（换下一个 provider 试），再叠一层熔断是双重惩罚。
+      //
+      // 429 仍然记（那是真的 provider 侧限流，和内容无关）。
+      const isContentRejected = err instanceof AIError && err.code === 'AI_CONTENT_REJECTED';
+      if (isContentRejected) {
+        logger.warn({ label: labelName, chatId: options.chatId, usage: options.usage, err: err.message }, 'Content rejected by safety filter, trying next provider (not counted against breaker)');
+        // round 12（新 goal）：**把 censorship 拒绝记成独立计数器**。
+        //
+        // 2026-09-22 用户问"洗钱/广告那种会 safety 的该不该从 context 删除、
+        // 该不该记为 ad"。实测（logs/app.log 13:00-13:20）：
+        //   · 22 次 censorship_blocked，其中 15 次 stepfunthink
+        //   · 时段内心流裁决全是 chat=-1003821093564 —— 那个群在聊
+        //     '看他跳钢管舞' / 代理 / 节点 / 套餐 / grok，**是正常群聊**
+        //   · 另一条可疑内容是 13:19:53 的 `www.kcna.kp / www.rodong.rep.kp/`
+        //     （朝鲜通讯社，中国 provider 的敏感词）
+        //
+        // 也就是说 censorship 拒绝的内容**不等于是广告**——可能是政治敏感、
+        // 色情暴力，也可能只是 provider 误伤。所以绝不能无差别记进 adP
+        // （ad-pressure.ts:207 已经为"反安静"付过一次学费）。
+        //
+        // 但**完全丢掉更错**：provider 是独立的第三方判定，这条信号现在
+        // 一丝不剩（Label failed → 换 label → 什么都不留）。先让它可观测，
+        // 才能回答"哪个群/哪个 label 最常被拒、拒的可能是什么"。
+        //
+        // ⚠️ 这是第一步（可观测）。**没有**把它接进 anti-ad 的 adP 公式——
+        // 那是第二步，改核心判据，要用户先拍板（选项见 commit message）。
+        // **不带 chat 维度**：群有几百个，带上去 Prometheus 基数爆炸。
+        // 要按群看就用日志（上面那条 warn 已带 label，加 chatId 更准）。
+        incrCounter('llm_content_rejected_total', { label: labelName, usage: options.usage ?? 'unknown' });
       }
 
       // 429 → 短期冷却
       if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
         await cooldown.setCooldown(label.model);
       }
+      // round 83：**403 concurrent limit（账号级限流）→ 冷却久一点。**
+      //
+      // 实测 09-23：dshkimi 一天 570 次失败，其中 **491 次（86%）是
+      // `HTTP 403: You've reached your concurrent request limit`，
+      // 平均每 2.4 分钟一次。而默认冷却只有 60s、熔断 120s——
+      //  REST 解除需要的是「在飞的请求跑完」，不是墙上时钟走到 120s。
+      // 于是形成循环：熔断 120s → 回链 → 立刻再被打 → 403 → 再熔断。
+      //
+      // 403 用 5 分钟（RATE_LIMIT_COOLDOWN_SEC），是账号级信号不是单次抖动。
+      // 只影响这一个错误码，其余照旧。
+      //
+      // round 182：**把"并发限流"和"别的限流"分开。** 上面那个正则
+      // （concurrent request limit|rate.?limit|too many requests）把普通
+      // RPM 限流也一并打成 5 分钟——而 429 上面已经有 60s 短期冷却，这一行
+      // 把它覆盖成 300s。于是：
+      //   · 09-20 起 All labels exhausted 从 138/天 涨到 1600-2700/天
+      //     （round 148 量的），这里有份功劳：每个 label 的不可用时间 x5
+      //   · 链越短（reflection 只有 1 个 label）越容易整批全灭
+      //     （round 147：deep-reflection 产出率掉到 35%）
+      //
+      // 分开的判据是**解除条件的物理形状**，不是错误码：
+      //   · concurrent limit —— 等在飞请求跑完，与墙上时钟无关 → 长冷却
+      //   · RPM / too many requests —— 滚动窗口，等一等就好 → 交给上面的 60s
+      // 不缩短并发限流那一档：round 83 的实测就是说 120s 不够，
+      // 改回去就是回到 403 死循环。
+      const msg0 = err instanceof AIError ? err.message : '';
+      // round 71: 加上 `access_terminated_error` 和 `overloaded`。
+      // round 70 实测 dshkimi 的 403 变成：消息体仍然写 concurrent request limit，
+      // 但 error **type** 换成 `access_terminated_error`。现在能命中（文案还在），
+      // 但如果有一天只剥出 type、文案换掉，分级就会漏到短冷却去。
+      if (/concurrent request limit|in-flight|concurrent requests/i.test(msg0)
+        || /access_terminated_error|overloaded/i.test(msg0)) {
+        await cooldown.setCooldown(label.model, RATE_LIMIT_COOLDOWN_SEC);
+        // round 197：**把"冷却已上架"打到 info。**
+        //
+        // 实测（已知问题里）：同 model 相邻两次被打的间隔，87% 落在 300s 冷却期内，
+        // 甚至有 0-1 秒的。也就是说 setCooldown 写了、isCoolingDown 也读了，
+        // 同一个 model 在冷却期内仍然被反复尝试。
+        //
+        // 假说是"check-then-launch 不是原子的，并发的多个 callWithFallback 在
+        // 同一刻都读到'没在冷却'，然后一起发车"——但那条路之前没有任何日志，
+        // 无法验证。这条 info 让下一次能看到"冷却上了 / 多久之后又被试"。
+        logger.info({ label: labelName, model: label.model, cooldownSec: RATE_LIMIT_COOLDOWN_SEC },
+          'llm: concurrent-limit cooldown armed');
+      } else if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
+        // 普通限流只保留 60s 短期冷却（上面那行已经设过，这里不再覆盖）。
+        incrCounter('llm_short_cooldown_total', { label: labelName });
+      }
 
-      // 所有失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）
+      // 其余失败类型 → 熔断器记录（429 已有短期冷却，也记一笔加速熔断）。
+      // **content rejected 例外**：它拒的是内容不是 provider 健康，见上。
       const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
-      const tripped = await cooldown.recordFailure(label.model, errCode);
+      const tripped = isContentRejected ? false : await cooldown.recordFailure(label.model, errCode);
       if (tripped) {
         const remaining = await cooldown.getRemainingSeconds(label.model);
         logger.warn({ label: labelName, model: label.model, errCode, breakerSec: remaining }, 'Circuit breaker tripped');
@@ -160,27 +397,117 @@ export async function callWithFallback(options: AICallOptions): Promise<AICallRe
       // Smart Group: always record failure (decoupled from suppressMetrics)
       void recordSmartGroupResult(labelName, 0, false);
       logger.warn({ label: labelName, err: errors.at(-1)?.message }, 'Label failed, trying next');
+    } finally {
+      // Hedge attempts own their leases until EACH provider promise settles,
+      // including a loser that ignores abort after the winner has returned.
+      // Cleanup is best effort: a reconnecting Redis must not hold a completed
+      // model result hostage. Exact-token expiry still bounds a lost release.
+      if (!leaseOwnedByHedge) void lease.release();
     }
   }
 
+  // 等过但仍全冷却：结局和不抛一样是错，只是晚了十几秒。分开记才看得出值不值。
+  if (waitedOnce) incrCounter('llm_wait_retry_total', { usage: options.usage, outcome: 'still_cooling' });
+
   const lastErr = errors.at(-1);
-  throw lastErr ?? new AIError('All labels exhausted', 'unknown', 'unknown', 'AI_ALL_FAILED');
+  if (lastErr) throw lastErr;
+
+  // 一条都没试成，且原因全是"在冷却"→ 等最短的那个醒来再试一次。
+  //
+  // 2026-09-21 加。实测 awake 窗口里 `all candidates skipped by cooldown/breaker`
+  // 出现 31 次（reflection 15 / vision 7 / judge 6 / summarize 3 / asi 1），
+  // 被跳过的剩余冷却是 2-46 秒——**等十几秒就有一条能用了**，而旧行为是立刻失败。
+  //
+  // 只等一次、只等最短剩余冷却（上界 15s，别把调用方熬死）；调用方带了
+  // maxTimeoutMs 的延迟敏感路径（heart/gate）不等——它们本来就该快速失败。
+  // `waitIfCooling` 让后台批任务覆盖"有 maxTimeoutMs/signal 就不等"的默认——
+  // 它们不怕等，却因为设了那两条而被排除在这个重试之外。
+  const mayWait = !options.beforeProviderRequest && (options.waitIfCooling || (!options.maxTimeoutMs && !options.signal));
+  // 被在飞上限挡下时没有剩余冷却可参照：占坑的请求通常几秒内跑完，等一小会再试一次。
+  // 只对**明确声明不怕等**的调用方（waitIfCooling）开放——默认路径（没有 maxTimeoutMs/signal
+  // 的调用也算 mayWait）保持原行为，不因为这条改动多等；延迟敏感路径照旧立刻失败。
+  const inFlightWaitSec = blockedByInFlight && shortestCooldownSec === 0 && options.waitIfCooling ? 3 : 0;
+  if ((shortestCooldownSec > 0 || inFlightWaitSec > 0) && mayWait) {
+    waitedOnce = true;
+    const waitSec = shortestCooldownSec > 0 ? Math.min(shortestCooldownSec + 1, 15) : inFlightWaitSec;
+    logger.debug(
+      { usage: options.usage, waitSec, candidates: smartOrderedNames },
+      'all candidates cooling — waiting for the shortest to recover, then retrying once',
+    );
+    await new Promise((r) => setTimeout(r, waitSec * 1000));
+    for (const labelName of smartOrderedNames) {
+      const label = getLabel(labelName);
+      if (await cooldown.isCoolingDown(label.model)) continue;
+      // 重试也要占坑：否则等完之后直接发车，会绕过在飞上限（被挡下的那批正是为了不撞账号并发上限）。
+      // 占不到就跳过这个候选，由下一个候选或最终的全灭路径兜。
+      const attemptOpts = attemptOptsFor(label, callOpts, options.maxTimeoutMs);
+      const lease = await acquireInFlight(label.model, attemptOpts.timeout);
+      if (!lease) {
+        incrCounter('llm_inflight_cap_skipped_total', { label: labelName, model: label.model });
+        continue;
+      }
+      try {
+        const result = await callModelWithinLeaseTimeout(label, options.messages, attemptOpts);
+        if (options.rejectEmpty && !result.content.trim()) continue;
+        await cooldown.recordSuccess(label.model);
+        if (!options.suppressMetrics) emitLlmResult(options.usage, result, options.chatId);
+        // 记账：这个重试到底救没救回来。2026-09-21 实测它在生产里已触发 46 次
+        // （MainPID 1979127），但触发次数不等于有用——等完仍全冷却的话，
+        // 结局和不等一样是抛错，只是晚了十几秒。没这个计数器，"我加了个重试"
+        // 和"这个重试有用"看起来一模一样。
+        incrCounter('llm_wait_retry_total', { usage: options.usage, outcome: 'ok' });
+        return result;
+      } catch (err) {
+        errors.push(err instanceof Error ? err : new Error(String(err)));
+        if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(label.model);
+        void cooldown.recordFailure(label.model, err instanceof AIError ? err.code : 'AI_UNKNOWN');
+      } finally {
+        void lease.release();
+      }
+    }
+  }
+
+  // 一次都没尝试过就"全灭"——所有候选都被熔断/429 冷却跳过。
+  //
+  // 2026-09-21 加。这个分支此前抛的错和"每个 label 都真失败了"完全一样
+  // （都是 `All labels exhausted`，label/model 都是 'unknown'），但两者的病因
+  // 和处置相反：
+  //   · 真失败 → 该看 provider 的 key/endpoint/额度
+  //   · 全跳过 → 该等冷却过去，或者链里全是同一个模型（stepfun/stepfunjudge/
+  //     stepfunvision/stepfunthink/stepfunasi 五个 label 共用 step-3.7-flash，
+  //     一个熔断全死）
+  // 不区分的时候，后者看起来像前者，于是一次"等 45 秒就好"的故障会被当成
+  // "provider 全挂了"去查。实测触发路径：连跑几个探针把 step-3.7-flash 的
+  // 熔断打满，之后 dreaming 的 4 个候选（stepfun/dsv4flash/grok43vision/grok45）
+  // 全部在冷却中 → 25ms 内失败，零条 per-label 日志。
+  const skipped = await Promise.all(
+    smartOrderedNames.map(async (n) => {
+      const l = getLabel(n);
+      const remaining = await cooldown.getRemainingSeconds(l.model);
+      return { label: n, model: l.model, coolingForSec: remaining };
+    }),
+  );
+  logger.warn(
+    { usage: options.usage, candidates: smartOrderedNames, skipped },
+    'all candidates skipped by cooldown/breaker — nothing was attempted',
+  );
+  throw new AIError('All labels exhausted (all candidates cooling down)', 'unknown', 'unknown', 'AI_ALL_FAILED');
 }
 
 /** 单跳尝试参数:给有 per-label timeout/maxTokens 覆盖的 label 套上(顺序 fallback 与
  *  hedge 共用同一逻辑,修 codex #1:原来 hedge 直接用 callOpts、丢了 per-label 覆盖)。 */
 function attemptOptsFor(
   label: ReturnType<typeof getLabel>,
-  callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  callOpts: AIProviderOptions,
   maxTimeoutMs: number | undefined,
-): { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal } {
+): AIProviderOptions {
   if (label.timeout === undefined && label.maxTokens === undefined) return callOpts;
   return {
     ...callOpts,
     timeout: label.timeout === undefined
       ? callOpts.timeout
       : (maxTimeoutMs !== undefined ? Math.min(label.timeout, maxTimeoutMs) : label.timeout),
-    maxTokens: label.maxTokens ?? callOpts.maxTokens,
+    maxTokens: callOpts.beforeProviderRequest ? strictMaxTokens(callOpts.maxTokens) : label.maxTokens ?? callOpts.maxTokens,
   };
 }
 
@@ -188,7 +515,7 @@ async function hedgedCall(
   primaryLabel: ReturnType<typeof getLabel>,
   hedgeLabel: ReturnType<typeof getLabel>,
   messages: AICallOptions['messages'],
-  callOpts: { maxTokens?: number; temperature?: number; timeout?: number; signal?: AbortSignal },
+  callOpts: AIProviderOptions,
   hedgeDelayMs: number,
   cooldown: CooldownTracker,
   rejectEmpty: boolean,
@@ -196,6 +523,8 @@ async function hedgedCall(
   usage: string,
   suppressMetrics: boolean,
   chatId: number | undefined,
+  primaryLease: AiInFlightLease,
+  onHedgeStarted: () => void,
 ): Promise<AICallResult> {
   const toError = (err: unknown) => (err instanceof Error ? err : new Error(String(err)));
 
@@ -221,37 +550,41 @@ async function hedgedCall(
   // 单跳:用该 label 自己的 attemptOpts(修 #1:per-label timeout/maxTokens 覆盖);
   // rejectEmpty 时空内容视为失败**在这里 reject**(修 #1:否则 Promise.any 把空当成功,
   // heart/gate 解析失败 → fail-open pass → 吞回复)。
-  const attempt = (label: ReturnType<typeof getLabel>): Promise<AICallResult> => {
-    const ac = new AbortController();
-    controllers.set(label.name, ac);
-    const opts = attemptOptsFor(label, callOpts, maxTimeoutMs);
-    const signal = callOpts.signal
-      ? AbortSignal.any([callOpts.signal, ac.signal])
-      : ac.signal;
-    return callModel(label, messages, { ...opts, signal }).then((r) => {
-      // abort 之前就已经完成的输家(两跳几乎同时返回)仍然被 provider 计费过。原实现让
-      // 它的 rejection/resolution 被 Promise.any 吞掉,既不 emitLlmResult 也不 emitLlmError
-      // —— 于是 llm_token_daily 与 llm_tokens_total 系统性少算了 hedge 那一份,
-      // 这也正是"hedge 不取消输家"能长期没被发现的原因。这里把它记成 discarded。
-      if (settledWinner !== null && settledWinner !== label.name && !suppressMetrics) {
-        if (!emittedUsageLabels.has(label.name)) {
-          emittedUsageLabels.add(label.name);
-          emitLlmResult(usage, r, chatId);
-          logger.info(
-            { usage, label: label.name, tokens: r.tokenUsage.total },
-            'Hedge loser completed anyway — tokens billed, counted as discarded',
-          );
+  const attempt = async (label: ReturnType<typeof getLabel>, lease: AiInFlightLease): Promise<AICallResult> => {
+    try {
+      const ac = new AbortController();
+      controllers.set(label.name, ac);
+      const opts = attemptOptsFor(label, callOpts, maxTimeoutMs);
+      const signal = callOpts.signal
+        ? AbortSignal.any([callOpts.signal, ac.signal])
+        : ac.signal;
+      return await callModelWithinLeaseTimeout(label, messages, { ...opts, signal }).then((r) => {
+        // abort 之前就已经完成的输家(两跳几乎同时返回)仍然被 provider 计费过。原实现让
+        // 它的 rejection/resolution 被 Promise.any 吞掉,既不 emitLlmResult 也不 emitLlmError
+        // —— 于是 llm_token_daily 与 llm_tokens_total 系统性少算了 hedge 那一份,
+        // 这也正是"hedge 不取消输家"能长期没被发现的原因。这里把它记成 discarded。
+        if (settledWinner !== null && settledWinner !== label.name && !suppressMetrics) {
+          if (!emittedUsageLabels.has(label.name)) {
+            emittedUsageLabels.add(label.name);
+            emitLlmResult(usage, r, chatId);
+            logger.info(
+              { usage, label: label.name, tokens: r.tokenUsage.total },
+              'Hedge loser completed anyway — tokens billed, counted as discarded',
+            );
+          }
         }
-      }
-      if (rejectEmpty && !r.content.trim()) {
-        throw new AIError('Empty response', label.name, label.model, 'AI_EMPTY');
-      }
-      return r;
-    });
+        if (rejectEmpty && !r.content.trim()) {
+          throw new AIError('Empty response', label.name, label.model, 'AI_EMPTY');
+        }
+        return r;
+      });
+    } finally {
+      void lease.release();
+    }
   };
 
   // Wrap each call to handle rate-limit cooldown side-effects and normalize errors
-  const primaryPromise = attempt(primaryLabel).catch((err: unknown) => {
+  const primaryPromise = attempt(primaryLabel, primaryLease).catch((err: unknown) => {
     if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') {
       void cooldown.setCooldown(primaryLabel.model);
     }
@@ -267,33 +600,53 @@ async function hedgedCall(
   let hedgeStarted = false;
   const hedgePromise = new Promise<AICallResult>((resolve, reject) => {
     const timer = setTimeout(async () => {
-      // caller 已 abort(turn 打断/关机)时不再发射 hedge——否则白烧一跳还会给 hedge label 刷熔断(P1 fix 2026-08-22)
-      if (isCallerAbort(callOpts.signal)) {
-        reject(new AIError('Hedge skipped (caller aborted)', 'unknown', 'unknown', 'AI_ABORTED'));
-        return;
-      }
-      if (await cooldown.isCoolingDown(hedgeLabel.model)) {
-        reject(new AIError('Hedge skipped (cooldown)', 'unknown', 'unknown', 'AI_HEDGE_FAILED'));
-        return;
-      }
-      hedgeStarted = true;
-      attempt(hedgeLabel).then((r) => {
-        void cooldown.recordSuccess(hedgeLabel.model);
-        return r;
-      }).then(resolve, (err: unknown) => {
-        // 2026-08-07 事故修复:hedge 输掉 race 被 abort 不是真实故障,不计熔断。
-        // 原实现把输家的 abort 也 recordFailure —— k27code "Empty response"(真故障)
-        // + hedge 输家 timeout(无辜)双杀,把熔断退避刷到 405s+,冻死 summarize 链,
-        // deep-reflection 12 群全灭。settledWinner 非空说明已有赢家,hedge 是被掐掉的。
-        if (settledWinner === null || settledWinner === hedgeLabel.name) {
-          if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
-          const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
-          void cooldown.recordFailure(hedgeLabel.model, errCode).then((tripped) => {
-            if (tripped) logger.warn({ label: hedgeLabel.name, model: hedgeLabel.model, errCode }, 'Circuit breaker tripped (hedge backup)');
-          });
+      try {
+        // caller 已 abort(turn 打断/关机)时不再发射 hedge——否则白烧一跳还会给 hedge label 刷熔断(P1 fix 2026-08-22)
+        if (isCallerAbort(callOpts.signal)) {
+          reject(new AIError('Hedge skipped (caller aborted)', 'unknown', 'unknown', 'AI_ABORTED'));
+          return;
         }
+        if (await cooldown.isCoolingDown(hedgeLabel.model)) {
+          reject(new AIError('Hedge skipped (cooldown)', 'unknown', 'unknown', 'AI_HEDGE_FAILED'));
+          return;
+        }
+        if (settledWinner !== null) return;
+        // Acquire when the hedge actually starts, not during its delay. Denial
+        // rejects only this branch; Promise.any still waits for the primary.
+        const opts = attemptOptsFor(hedgeLabel, callOpts, maxTimeoutMs);
+        const lease = await acquireInFlight(hedgeLabel.model, opts.timeout);
+        if (!lease) {
+          incrCounter('llm_inflight_cap_skipped_total', { label: hedgeLabel.name, model: hedgeLabel.model });
+          reject(new AIError('Hedge skipped (in-flight cap)', hedgeLabel.name, hedgeLabel.model, 'AI_HEDGE_FAILED'));
+          return;
+        }
+        if (settledWinner !== null || isCallerAbort(callOpts.signal)) {
+          await lease.release();
+          reject(new AIError('Hedge cancelled before start', hedgeLabel.name, hedgeLabel.model, 'AI_HEDGE_FAILED'));
+          return;
+        }
+        hedgeStarted = true;
+        onHedgeStarted();
+        attempt(hedgeLabel, lease).then((r) => {
+          void cooldown.recordSuccess(hedgeLabel.model);
+          return r;
+        }).then(resolve, (err: unknown) => {
+          // 2026-08-07 事故修复:hedge 输掉 race 被 abort 不是真实故障,不计熔断。
+          // 原实现把输家的 abort 也 recordFailure —— k27code "Empty response"(真故障)
+          // + hedge 输家 timeout(无辜)双杀,把熔断退避刷到 405s+,冻死 summarize 链,
+          // deep-reflection 12 群全灭。settledWinner 非空说明已有赢家,hedge 是被掐掉的。
+          if (settledWinner === null || settledWinner === hedgeLabel.name) {
+            if (err instanceof AIError && err.code === 'AI_RATE_LIMIT') void cooldown.setCooldown(hedgeLabel.model);
+            const errCode = err instanceof AIError ? err.code : 'AI_UNKNOWN';
+            void cooldown.recordFailure(hedgeLabel.model, errCode).then((tripped) => {
+              if (tripped) logger.warn({ label: hedgeLabel.name, model: hedgeLabel.model, errCode }, 'Circuit breaker tripped (hedge backup)');
+            });
+          }
+          reject(toError(err));
+        });
+      } catch (err) {
         reject(toError(err));
-      });
+      }
     }, hedgeDelayMs);
 
     // If primary resolves before the timer fires, cancel the hedge

@@ -1,0 +1,18 @@
+[Unit]
+Description=NyatBot quiesced encrypted backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStartPre=/usr/bin/install -d -m700 -o root -g root /var/lib/nyatbot-backup
+ExecStart=/opt/nyatbot-python/bin/python3.12 /opt/nyatbot-backup/app/scripts/backup-controller.py --config /etc/nyatbot-backup/config.json capture-if-due
+ExecStopPost=/opt/nyatbot-python/bin/python3.12 /opt/nyatbot-backup/app/scripts/backup-controller.py --config /etc/nyatbot-backup/config.json recover-writers
+TimeoutStartSec=3h
+TimeoutStopSec=90min
+Nice=15
+IOSchedulingClass=idle
+PrivateTmp=true
+NoNewPrivileges=true

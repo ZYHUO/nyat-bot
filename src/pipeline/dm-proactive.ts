@@ -72,7 +72,7 @@ export async function sendDmGreeting(uid: number, kind: 'goodnight' | 'morning')
   try {
     const { generatePersonaProactiveText } = await import('./turn/proactive-turn.js');
     // ctx 可能已过期(7天 TTL)→ persona 生成拿不到上下文返回 null,用固定池兜底(review #9/#10)
-    const text = (await generatePersonaProactiveText(uid, getBotUid(), intent)) || fallbackGreeting(kind, uid);
+    const text = (await generatePersonaProactiveText(uid, getBotUid(uid), intent)) || fallbackGreeting(kind, uid);
     await sender.sendDirect(uid, text);
     logger.info({ uid, kind }, 'Proactive DM greeting sent');
     return true;
@@ -129,7 +129,7 @@ export async function flushDmPendingOnInbound(uid: number): Promise<boolean> {
   const intent = `[终于私聊上了] 你之前一直攒着想跟TA说的:${body}。现在TA私聊你了,自然地把这些说出来,像憋了好久终于逮着机会,别像念清单${nick}`;
   try {
     const { generatePersonaProactiveText } = await import('./turn/proactive-turn.js');
-    const text = await generatePersonaProactiveText(uid, getBotUid(), intent);
+    const text = await generatePersonaProactiveText(uid, getBotUid(uid), intent);
     if (!text) {
       await redis.del(flushKey); // 没生成出来,放开冷却下次再试,攒话不丢
       return false;

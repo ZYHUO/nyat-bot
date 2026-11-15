@@ -1,0 +1,13 @@
+[Unit]
+Description=Consume approved NyatBot release requests and recover interrupted handoffs
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /opt/nyatbot-release-control/release-controller.py --config /etc/nyatbot-release-control/config.json consume-request
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+# Do not use PrivateTmp here: the deployment lock is shared with the backup controller.
