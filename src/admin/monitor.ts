@@ -5,12 +5,16 @@ import type { Env } from '../env.js';
 import { timingSafeEqual } from 'crypto';
 import { listObligationSnapshots } from './obligations.js';
 import { getRecent } from '../pipeline/context/manager.js';
+import { parseContextRedisKey } from '../pipeline/context/storage-scope.js';
 import { getCognitiveRouteWindow } from '../agent/cognitive-route-observations.js';
 import { listAgencyRunSummaries } from '../agent/agency-runtime.js';
 import type { AgencyRunStatus } from '../agent/agency-runtime.js';
 import { getTaskRecoverySummary } from '../agent/task-runtime-events.js';
 import { listSkillRevisionVerificationSummaries } from '../core/skills/revisions.js';
 import type { SkillRevisionStatus } from '../core/skills/revisions.js';
+import { getFeatureStatusReport } from './feature-status.js';
+import { getOneBotRuntimeStatus } from '../platform/onebot-runtime.js';
+import { findConversationRef, isPlatformInternalId } from '../platform/identity-store.js';
 
 interface MonitorDeps {
   redis: Redis;
@@ -31,6 +35,10 @@ const _titleCache = new Map<number, { title: string; ts: number }>();
 const TITLE_CACHE_TTL = 300_000; // 5 min
 
 async function getCachedTitle(bot: Bot, chatId: number): Promise<string> {
+  if (isPlatformInternalId(chatId)) {
+    const ref = findConversationRef(chatId);
+    return ref ? `QQ ${ref.conversationKind === 'group' ? '群' : '私聊'} ${ref.id}` : '未解析的平台会话';
+  }
   const cached = _titleCache.get(chatId);
   if (cached && Date.now() - cached.ts < TITLE_CACHE_TTL) return cached.title;
   const chat = await tryGetChat(bot, chatId);
@@ -52,8 +60,14 @@ async function listActiveChatIds(redis: Redis): Promise<number[]> {
     const [next, batch] = await redis.scan(cursor, 'MATCH', 'xxb:ctx:*', 'COUNT', 200);
     cursor = next;
     for (const key of batch) {
-      const chatId = Number(key.replace('xxb:ctx:', ''));
-      if (Number.isFinite(chatId)) ids.add(chatId);
+      if (key.startsWith('xxb:ctx:v2:')) {
+        const scope = parseContextRedisKey(key);
+        if (scope) ids.add(scope.chatId);
+      } else if (/^xxb:ctx:-?[1-9]\d*$/.test(key)) {
+        // Legacy metadata remains discoverable; getRecent separately proves each body source.
+        const chatId = Number(key.slice('xxb:ctx:'.length));
+        if (Number.isSafeInteger(chatId)) ids.add(chatId);
+      }
     }
   } while (cursor !== '0');
   return [...ids];
@@ -74,6 +88,16 @@ export function createMonitorApi(deps: MonitorDeps): Hono {
       return c.json({ ok: false, error: 'unauthorized' }, 401);
     }
     await next();
+  });
+
+  api.get('/features', async (c) => {
+    c.header('Cache-Control', 'no-store');
+    return c.json({ ok: true, ...await getFeatureStatusReport(deps.env, deps.redis) });
+  });
+
+  api.get('/onebot', (c) => {
+    c.header('Cache-Control', 'no-store');
+    return c.json({ ok: true, ...getOneBotRuntimeStatus() });
   });
 
   // List all chats with last message preview

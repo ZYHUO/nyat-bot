@@ -53,14 +53,14 @@ beforeEach(() => {
 describe('reflectChat', () => {
   it('足够消息 → LLM 摘要写入 chat_reflection,可读回', async () => {
     getRecentMock.mockResolvedValue(msgs(40));
-    const tok = await reflectChat(-1001);
+    const tok = (await reflectChat(-1001)).tokens;
     expect(tok).toBeGreaterThan(0);
     expect(getChatReflection(-1001)).toContain('光帆拉');
   });
 
   it('消息太少 → 不反思(不调 LLM)', async () => {
     getRecentMock.mockResolvedValue(msgs(5));
-    const tok = await reflectChat(-1001);
+    const tok = (await reflectChat(-1001)).tokens;
     expect(tok).toBe(0);
     expect(callWithFallbackMock).not.toHaveBeenCalled();
   });
@@ -78,25 +78,25 @@ describe('reflectChat', () => {
   it('LLM 输出太短 → 不写', async () => {
     getRecentMock.mockResolvedValue(msgs(40));
     callWithFallbackMock.mockResolvedValue({ content: '短' });
-    expect(await reflectChat(-1001)).toBe(0);
+    expect((await reflectChat(-1001)).tokens).toBe(0);
     expect(getChatReflection(-1001)).toBeNull();
   });
 
   it('LLM 链全灭 → 进失败冷却,冷却中不再调 LLM;成功后冷却清除', async () => {
     getRecentMock.mockResolvedValue(msgs(40));
     callWithFallbackMock.mockRejectedValue(new Error('All labels exhausted'));
-    expect(await reflectChat(-1001)).toBe(0);
+    expect((await reflectChat(-1001)).tokens).toBe(0);
     expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
     expect(redisKv.get('xxb:reflect:fail:-1001')).toBe('1');
 
     // 冷却中:直接跳过,不再烧链
-    expect(await reflectChat(-1001)).toBe(0);
+    expect((await reflectChat(-1001)).tokens).toBe(0);
     expect(callWithFallbackMock).toHaveBeenCalledTimes(1);
 
     // 链恢复后(冷却过期/被成功清除)正常反思
     redisKv.clear();
     callWithFallbackMock.mockResolvedValue({ content: '本群最近在聊显卡和原神,氛围活跃,有个"光帆拉"的梗。' });
-    expect(await reflectChat(-1001)).toBeGreaterThan(0);
+    expect((await reflectChat(-1001)).tokens).toBeGreaterThan(0);
     expect(redisKv.has('xxb:reflect:fail:-1001')).toBe(false);
   });
 });

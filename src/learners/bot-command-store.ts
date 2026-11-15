@@ -35,8 +35,25 @@ const HARD_DENY_COMMANDS = new Set([
 const HARD_DENY_KEYWORDS = /(ban|kick|mute|admin|wallet|pay|transfer|withdraw|invite|lottery|抽奖|封禁|踢|禁言|转账|提现|管理员)/i;
 
 // 成熟度闸:观察够 N 次 + 置信度够,才允许首次真用
+/**
+ * 成熟门槛：观察次数 + 置信度**两个都要过**。
+ *
+ * ⚠️ 这两个数必须互相配着看，否则常数是说谎的。round 6（subagent 审计）实测：
+ * 初始置信度 0.35、每次观察 +0.15，于是 0.35 / 0.50 / **0.65** / 0.80——
+ * `MATURITY_MIN_OBSERVATIONS = 3` 写着 3，但 count=3 时置信度只有 0.65 < 0.7，
+ * **实际门槛是 4**。78 个 learning 行全部 count ≤ 3，一个都没被这道坎放过。
+ *
+ * 修法选"调初始置信度"而不是"把常数改成 4"：`MATURITY_MIN_OBSERVATIONS` 是
+ * 有意设的"至少看过三次"，那个意图是对的；错的是置信度阶梯没配上。
+ * 0.45 起步 → 0.45 / 0.60 / **0.75** / 0.90：count=2 时 0.60 不过，
+ * count=3 时 0.75 过 —— 常数 3 从此是真的 3。
+ */
 export const MATURITY_MIN_OBSERVATIONS = 3;
 export const MATURITY_MIN_CONFIDENCE = 0.7;
+/** 首次观察的置信度。必须让 `MIN_OBSERVATIONS` 次后刚好越过 `MIN_CONFIDENCE`。 */
+const CONFIDENCE_INITIAL = 0.45;
+const CONFIDENCE_STEP = 0.15;
+const CONFIDENCE_CAP = 0.95;
 // 可代发的回执形态(callback 按钮后的数据 bot 够不到)
 const USABLE_OUTPUT_TYPES = new Set(['text', 'url', 'media', 'mixed']);
 
@@ -85,11 +102,23 @@ export function upsertCommandObservation(p: {
         bot, cmd,
         p.usageSyntax ?? '', p.useScenario ?? '',
         p.needsReply ? 1 : 0,
-        // needs_admin 保守默认 1(需要→禁),只有明确学到不需要才 0
-        p.needsAdmin === false ? 0 : 1,
+        // needs_admin：**没表态就按"不知道"存，不要默认 1。**
+        //
+        // 2026-09-22 round 5。原来是 `p.needsAdmin === false ? 0 : 1`——
+        // LLM 返回 null/漏字段时存 1（需要管理员），而 1 是**永久不可派发**的
+        // （`whyNotInvocable` 直接返回 'needs_admin'）。subagent 审计实测：
+        // 30 个 profile（18 learning + 12 blocked）因为一次含糊的 LLM 回答
+        // 永远不能借力，其中 16 个 blocked 行的 needs_admin 其实是 0。
+        //
+        // 一次没看懂就永久判刑，比漏放行危险得多——漏放行只是少用一次，
+        // 误判是这条命令永远学不来。所以：
+        //   false → 0（明确不需要）
+        //   true  → 1（明确需要）
+        //   其它  → null（不知道，不参与 whyNot 的拒绝判据）
+        p.needsAdmin === undefined || p.needsAdmin === null ? null : (p.needsAdmin ? 1 : 0),
         p.outputType ?? 'unknown',
         p.peerAcceptsBot === undefined ? null : p.peerAcceptsBot ? 1 : 0,
-        0.35,
+        CONFIDENCE_INITIAL,
         blocked ? 'blocked' : 'learning',
         now,
       );
@@ -98,7 +127,7 @@ export function upsertCommandObservation(p: {
 
     // 已存在:观察 +1,置信度爬升(封顶 0.95),字段择新更新
     const newCount = existing.observation_count + 1;
-    const newConf = Math.min(0.95, existing.confidence + 0.15);
+    const newConf = Math.min(CONFIDENCE_CAP, existing.confidence + CONFIDENCE_STEP);
     // blocked 永远是 blocked;否则成熟后转 ready
     const newStatus =
       existing.status === 'blocked' || blocked
@@ -116,8 +145,11 @@ export function upsertCommandObservation(p: {
       p.usageSyntax || existing.usage_syntax,
       p.useScenario || existing.use_scenario,
       p.needsReply === undefined ? existing.needs_reply : p.needsReply ? 1 : 0,
-      // needs_admin 只会从 1→0(学到不需要),不会无故收紧回 1
-      p.needsAdmin === false ? 0 : existing.needs_admin,
+      // needs_admin：明确不需要 → 0；**不明确就保持原值**（可能是 null=不知道）。
+      // round 5 修正：原来这里是 `=== false ? 0 : existing`，看着"只松不紧"，
+      // 但它和 insert 那条合起来的效果是"含糊一次就永久是 1"——
+      // insert 存 1，这条永远不把它改回 null。见 insert 处的长注释。
+      p.needsAdmin === false ? 0 : (p.needsAdmin === true ? 1 : existing.needs_admin),
       p.outputType && p.outputType !== 'unknown' ? p.outputType : existing.output_type,
       p.peerAcceptsBot === undefined ? null : p.peerAcceptsBot ? 1 : 0,
       newConf, newCount, newStatus, now,
@@ -149,6 +181,67 @@ export function listAllProfiles(limit = 100): BotCommandProfile[] {
   return getDb()
     .prepare('SELECT * FROM bot_command_profiles ORDER BY confidence DESC LIMIT ?')
     .all(limit) as BotCommandProfile[];
+}
+
+/**
+ * 能不能**回复着**代发这条命令（回复式代发闸）。
+ *
+ * 和 whyNotInvocable 的差别只有一处：needs_reply 从"一票否决"变成"必须满足"。
+ * 理由——bot 点不了别人消息上的 inline 按钮（Telegram 硬限制：callback_query
+ * 只能由真人点击产生），所以"必须回复某条消息才生效"的命令原本永远走不通。
+ * 但我们**自己就是那条被回复消息的回复者**时路就通了：回复广告消息发 /spam，
+ * 等于替群成员按下 nmbot 键盘上的「拒绝并举报骚扰」。
+ *
+ * 仍然是纯闸口，不判断"这条命令该不该用"——那交给模型。
+ */
+export function whyNotReplyInvocable(profile: BotCommandProfile | undefined): string | null {
+  if (!profile) return 'unknown_command';
+  if (profile.status === 'blocked') return 'blocked_by_safety';
+  if (profile.needs_admin === 1) return 'needs_admin';
+  // 回复式代发的全部意义就是"有可回复的目标"；不需要回复的命令走普通代发。
+  if (profile.needs_reply !== 1) return 'not_reply_command';
+  if (profile.observation_count < MATURITY_MIN_OBSERVATIONS) return 'not_mature_count';
+  if (profile.confidence < MATURITY_MIN_CONFIDENCE) return 'not_mature_confidence';
+  if (!USABLE_OUTPUT_TYPES.has(profile.output_type)) return 'output_unreachable';
+  if (profile.peer_accepts_bot === 0) return 'peer_ignores_bots';
+  return null;
+}
+
+/**
+ * 全部"回复式可代发"的命令（needs_reply=1 且过闸）。用于给模型指路——
+ * 它选错命令时把合法清单回给它，而不是只说"不行"。
+ */
+export function listReplyInvocableCommands(): Array<{
+  bot: string;
+  command: string;
+  usageSyntax: string;
+  useScenario: string;
+}> {
+  const rows = getDb()
+    .prepare(
+      `SELECT bot_username, command_name, usage_syntax, use_scenario
+       FROM bot_command_profiles
+       WHERE needs_reply = 1 AND status = 'ready'
+       ORDER BY observation_count DESC`,
+    )
+    .all() as Array<{
+    bot_username: string;
+    command_name: string;
+    usage_syntax: string;
+    use_scenario: string;
+  }>;
+  const out: Array<{ bot: string; command: string; usageSyntax: string; useScenario: string }> = [];
+  for (const r of rows) {
+    const profile = getCommandProfile(r.bot_username, r.command_name);
+    if (whyNotReplyInvocable(profile)) continue;
+    out.push({
+      bot: r.bot_username,
+      command: r.command_name,
+      usageSyntax: r.usage_syntax,
+      useScenario: r.use_scenario,
+    });
+  }
+  return out;
 }
 
 /**

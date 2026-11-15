@@ -11,6 +11,8 @@ const envState: Record<string, unknown> = {
   AGENCY_FAIL_CLOSED: true,
   COGNITIVE_EVENTS_ENABLED: true,
   COGNITIVE_OUTBOX_ENABLED: true,
+  // store 边界总闸；不开则 blackboard 写不进，本文件测的 intent 通路全断
+  CORE_BLACKBOARD_ENABLED: true,
 };
 
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => db }));

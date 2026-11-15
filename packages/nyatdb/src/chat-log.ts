@@ -26,6 +26,15 @@ export type ChatLogLikeMessage = {
   fullName: string;
   timestamp: number;
   messageId: number;
+  messageThreadId?: number;
+  /** Host-established storage provenance; never infer it from a legacy bucket. */
+  contextScope?: {
+    platform: 'telegram' | 'qq';
+    accountId: string;
+    chatId: number;
+    conversationKind: 'private' | 'group';
+    threadId: number;
+  };
   textContent: string;
   captionContent?: string;
   sticker?: {
@@ -76,6 +85,8 @@ export type ChatLogPayload = Pick<
       | 'anonymousType'
       | 'viaBot'
       | 'botClass'
+      | 'messageThreadId'
+      | 'contextScope'
     >
   >;
 
@@ -126,6 +137,8 @@ export function toChatLogPayload(message: ChatLogLikeMessage): ChatLogPayload {
   if (message.anonymousType) payload.anonymousType = message.anonymousType;
   if (message.viaBot) payload.viaBot = message.viaBot;
   if (message.botClass) payload.botClass = message.botClass;
+  if (message.messageThreadId !== undefined) payload.messageThreadId = message.messageThreadId;
+  if (message.contextScope !== undefined) payload.contextScope = { ...message.contextScope };
   return payload;
 }
 
@@ -162,6 +175,8 @@ export function packChatLogBody(message: ChatLogLikeMessage): string {
     messageId: payload.messageId,
     textContent: utf8ByteSlice(payload.textContent ?? '', 1200),
     isForwarded: payload.isForwarded,
+    ...(payload.messageThreadId !== undefined ? { messageThreadId: payload.messageThreadId } : {}),
+    ...(payload.contextScope !== undefined ? { contextScope: payload.contextScope } : {}),
     ...(payload.sticker
       ? { sticker: { emoji: payload.sticker.emoji, fileId: '', fileUniqueId: '' } }
       : {}),
@@ -214,6 +229,8 @@ export function unpackChatLogRow(row: ChatLogRow): ChatLogLikeMessage {
         anonymousType: p.anonymousType,
         viaBot: p.viaBot,
         botClass: p.botClass,
+        messageThreadId: p.messageThreadId,
+        contextScope: p.contextScope,
       };
     } catch {
       // fall through to plain text

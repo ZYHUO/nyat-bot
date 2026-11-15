@@ -37,6 +37,7 @@ import { isGroupAllowed } from '../allowlist/allowlist.js';
 import type { AllowlistConfig } from '../allowlist/types.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { checkProactiveActivation } from './activation-policy.js';
 
 const LAST_STATE_KEY = 'xxb:sleep:laststate';
 const NIGHT_WAKE_KEY = (nightDate: string): string => `xxb:sleep:nightwake:${nightDate}`;
@@ -171,6 +172,7 @@ async function pickActiveChats(windowSec: number, extra: number[] = []): Promise
     try {
       if (allowlistConfig && !(await isGroupAllowed(redis, allowlistConfig, chatId))) continue;
       const recent = await getRecent(chatId, 5);
+      if (!(await checkProactiveActivation(chatId, { recentMessages: recent, nowSec: now })).allowed) continue;
       const lastTs = recent.at(-1)?.timestamp ?? 0;
       // 欠着回复的群(extra)即使超窗也保留 —— 问候是补回的开场
       if (now - lastTs > windowSec && !extra.includes(chatId)) continue;
@@ -190,7 +192,7 @@ async function greetingText(chatId: number, kind: 'goodnight' | 'morning'): Prom
     const intent = kind === 'goodnight'
       ? '[到点睡觉] 你困了,准备去睡了。跟群里道个晚安——可以顺着最近聊的话题随口带一句,也可以就打个哈欠说去睡了。'
       : '[刚睡醒] 你刚起床,睡眼惺忪地冒个泡说早安——可以提一嘴睡得怎么样,或者顺着昨晚群里聊的话题接半句。';
-    const text = await generatePersonaProactiveText(chatId, getBotUid(), intent);
+    const text = await generatePersonaProactiveText(chatId, getBotUid(chatId), intent);
     if (text) return text;
   }
   return pick(kind === 'goodnight' ? GOODNIGHT_POOL : MORNING_POOL);
@@ -201,6 +203,7 @@ async function announce(chatIds: number[], kind: 'goodnight' | 'morning'): Promi
   const date = bjDateStr();
   for (const chatId of chatIds) {
     try {
+      if (!(await checkProactiveActivation(chatId)).allowed) continue;
       // 每群每种问候每个北京日一次(NX 抢占,边沿抖动/重启都安全)
       const ok = await redis.set(GREETED_KEY(chatId, kind, date), '1', 'EX', 36 * 3600, 'NX');
       if (ok === null) continue;
@@ -219,7 +222,11 @@ async function announce(chatIds: number[], kind: 'goodnight' | 'morning'): Promi
 
 /** 回放一个 chat 的最欠回条目;返回是否还有下一个 */
 async function drainOneChat(): Promise<boolean> {
-  const queues = await peekSleepQueues(); // 点名优先,其次最新
+  const queued = await peekSleepQueues(); // 点名优先,其次最新
+  const queues = [] as typeof queued;
+  for (const queue of queued) {
+    if ((await checkProactiveActivation(queue.chatId)).allowed) queues.push(queue);
+  }
   if (queues.length === 0) return false;
   const { chatId } = queues[0]!;
 

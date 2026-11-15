@@ -1,0 +1,53 @@
+title: "Q&A"
+labels: ["q&a"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提问前先翻 [`docs/flag-census.md`](docs/flag-census.md) —— 有大约 500 个 env key，
+        很多"行为不对"其实是某个开关没开或开了不该开的。
+        **贴日志前把 bot token 和 API key 删掉**，写成 `KEY=***`。
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider / model
+      options:
+        - StepFun
+        - OpenAI
+        - Claude / Anthropic
+        - Grok / xAI
+        - Kimi
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: chattype
+    attributes:
+      label: Chat type
+      options:
+        - Private
+        - Small group
+        - Large group (100+ members)
+    validations:
+      required: true
+  - type: textarea
+    id: want
+    attributes:
+      label: 你期望它怎么表现
+      description: 说交互，不只是说现象
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际怎么表现的
+    validations:
+      required: true
+  - type: textarea
+    id: flags
+    attributes:
+      label: 你改过的 env 开关
+      description: 非默认值的那些，最关键
+      render: shell
+    validations:
+      required: false

@@ -25,7 +25,8 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
 
-import { describeImage, describeImageCached } from '../../../src/pipeline/vision.js';
+import { describeImage, describeImageCached, fetchImageDataUrl } from '../../../src/pipeline/vision.js';
+import { logger } from '../../../src/shared/logger.js';
 
 const fakeFetch = () =>
   vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -35,10 +36,42 @@ const fakeFetch = () =>
   })));
 
 beforeEach(() => {
+  vi.clearAllMocks();
   callMock.mockReset();
   getDbMock.mockReset();
   fakeFetch();
   callMock.mockResolvedValue({ content: '一张商品截图,标价 39 元', model: 'v', latencyMs: 1, usage: {} });
+});
+
+describe('bounded image downloads', () => {
+  it('uses a deadline and rejects redirects on the Telegram credential URL', async () => {
+    expect(await fetchImageDataUrl('fid')).toMatch(/^data:image\/jpeg;base64,/);
+    expect(fetch).toHaveBeenCalledWith(expect.any(String), { signal: expect.any(AbortSignal), redirect: 'error' });
+  });
+
+  it('cancels declared oversized bodies before reading or sending them to the model', async () => {
+    const cancel = vi.fn();
+    const arrayBuffer = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, headers: new Headers({ 'content-length': String(11 * 1024 * 1024) }), body: { cancel }, arrayBuffer })));
+    expect(await describeImage('fid')).toBe('[图片]');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(callMock).not.toHaveBeenCalled();
+  });
+
+  it('bounds streaming bodies even when no length header is supplied', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array(10 * 1024 * 1024 + 1), { headers: { 'content-type': 'image/jpeg' } })));
+    expect(await describeImage('fid')).toBe('[图片]');
+    expect(callMock).not.toHaveBeenCalled();
+  });
+
+  it('does not log file URLs embedded in transport exceptions', async () => {
+    const secret = 'telegram-download-secret';
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error(`https://api.telegram.org/file/bot${secret}/photos/x.jpg`); }));
+    expect(await describeImage('fid')).toBe('[图片]');
+    expect(await fetchImageDataUrl('fid')).toBeNull();
+    expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(secret);
+  });
 });
 
 describe('describeImage 问题聚焦 (P2-A)', () => {

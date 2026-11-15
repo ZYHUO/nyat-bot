@@ -2,15 +2,24 @@
 // 全局类型定义
 // ────────────────────────────────────────
 
+import type { MessageEventIdentity } from './event-identity.js';
+import type { PendingIntentRef } from '../meta/pending-intent.js';
+import type { ContextScope } from '../context-engine/scope.js';
+
 export interface FormattedMessage {
   role: 'user' | 'assistant' | 'system';
   uid: number;
   username: string;
   fullName: string;
   timestamp: number;
+  /** Source identity and four UTC millisecond times; legacy timestamp remains seconds. */
+  eventIdentity?: MessageEventIdentity;
+  pendingIntent?: PendingIntentRef;
   messageId: number;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
+  /** Exact host-established account/conversation/topic provenance of stored context. */
+  contextScope?: ContextScope;
   textContent: string;
   captionContent?: string;
   sticker?: {
@@ -34,6 +43,11 @@ export interface FormattedMessage {
   documentFileName?: string;
   videoFileId?: string;
   videoNoteFileId?: string;
+  /**
+   * 视频时长（秒）。Telegram 的 Video/VideoNote 都带 duration，这里接住它——
+   * 视频理解有硬时长上限（模型侧），没这个数就只能下载完再判，白下一次。
+   */
+  videoDurationSec?: number;
   /** inline keyboard 按钮(主要用于"看见"其他 bot 回执的按钮:命令档案学习 + 代发可达性) */
   inlineKeyboard?: Array<{ text: string; callbackData?: string; url?: string; switchInline?: string }>;
   /** 经某 bot inline 模式发出(Telegram "via @xxx");代发回执认领用 */
@@ -81,6 +95,21 @@ export interface ReplyOutput {
   hesitateBefore?: boolean;
   /** P5: 用 TTS 语音发送而非文字 */
   voice?: boolean;
+  /**
+   * 模型自定的媒体计划(贴纸/图片/语音/投票/反应 + 相对文字的位置)。
+   * 宿主只做现实校验(素材存在/权限/体积),不用冷却表或随机数改写模型选择。
+   */
+  media?: {
+    kind: 'sticker' | 'photo' | 'voice' | 'poll' | 'reaction';
+    ref?: string | string[];
+    options?: string[];
+    emoji?: string;
+    position?: 'before' | 'after' | 'instead';
+  };
+  /** 模型自定的气泡间隔(ms)。omit = 默认打字节奏。 */
+  delayMs?: number;
+  /** 模型自述"打了一半想算了"：宿主呈现 typing 后不发。 */
+  typingGhost?: boolean;
 }
 
 export interface RetrievedContext {
@@ -105,6 +134,8 @@ export interface RetrievedContext {
 // strongly-typed Update and ad-hoc test fixtures while keeping field names
 // statically known at the formatter boundary.
 export interface UpdateLike {
+  /** Trusted host ingress metadata, never accepted from platform JSON verbatim. */
+  __nyatEventIdentity?: MessageEventIdentity;
   update_id?: unknown;
   message?: unknown;
   edited_message?: unknown;

@@ -56,6 +56,29 @@ describe('skill-distill evidence gate', () => {
     expect(saveSkill).toBeDefined();
   });
 
+  it('回退只对「没有任何 task_evidence 行」的老 episode 开放；有证据行但 unverified 的 done 不进素材', async () => {
+    // distiller 现在把 lifecycle-done 且未被判 failed 的任务记成 outcome=done，
+    // 所以光看 outcome='done' 会把「有证据行、unverified」的新 episode 也放进来——证据门被绕开。
+    const now = Math.floor(Date.now() / 1000);
+    const ins = db.prepare(
+      `INSERT INTO episodes (task_id, chat_id, goal, outcome, summary, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    ins.run('t-legacy', 1, 'LEGACY_NO_EVIDENCE_GOAL', 'done', 'old row', now - 60);
+    ins.run('t-unv', 1, 'NEW_UNVERIFIED_GOAL', 'done', 'new row', now - 60);
+    db.prepare(
+      `INSERT INTO task_evidence (task_id, chat_id, lifecycle, assessment, updated_at) VALUES (?, ?, ?, ?, ?)`,
+    ).run('t-unv', 1, 'done', 'unverified', now - 60);
+    const { callWithFallback } = await import('../../../src/ai/fallback.js');
+    let seen = '';
+    (callWithFallback as ReturnType<typeof vi.fn>).mockImplementationOnce(async (args: { messages: { content: string }[] }) => {
+      seen = args.messages.map((m) => m.content).join('\n');
+      return { content: 'null' };
+    });
+    await runSkillDistill();
+    expect(seen).toContain('LEGACY_NO_EVIDENCE_GOAL');
+    expect(seen).not.toContain('NEW_UNVERIFIED_GOAL');
+  });
+
   it('P3-1: experience material only includes verified lineage', async () => {
     const now = Math.floor(Date.now() / 1000);
     db.prepare(`INSERT INTO experience_entries (kind, content, tags, source_episode_id, source_assessment, created_at) VALUES (?, ?, ?, ?, ?, ?)`)

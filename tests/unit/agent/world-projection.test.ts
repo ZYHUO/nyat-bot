@@ -9,10 +9,23 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 vi.mock('../../../src/env.js', () => ({
-  env: () => ({ RELATIONSHIP_ENABLED: true }),
+  env: () => ({ RELATIONSHIP_ENABLED: true, BOT_TOKEN: '123:synthetic-test-token' }),
 }));
 
 import { buildScopedWorldProjection } from '../../../src/agent/world-projection.js';
+import { appendCognitiveEvent } from '../../../src/agent/cognitive-events.js';
+import { saveVerifiedSelfNotes } from '../../../src/tracking/self-model.js';
+
+function verifiedSelf(note: string, at: number): void {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(at * 1000);
+  try {
+    const notes = [{ note }], evidence = { approved: true };
+    const scope = { visibility: 'global' as const };
+    const event = appendCognitiveEvent({ type: 'task_observation', source: 'host', scope,
+      fact: { hypothesisKind: 'self', notes, evidence, selfNoteGlobalApproved: true } })!.event;
+    expect(saveVerifiedSelfNotes(notes, { scope, source: 'host', sourceEventId: event.id, evidence })).toBe(1);
+  } finally { clock.mockRestore(); }
+}
 
 function migration(name: string): string {
   return readFileSync(resolve(process.cwd(), `migrations/${name}`), 'utf8');
@@ -33,6 +46,9 @@ beforeEach(() => {
     '0083_core_belief_view.sql',
     '0090_scope_boundaries.sql',
     '0096_world_model_history.sql',
+    '0089_cognitive_events.sql',
+    '0109_hypothesis_update_audit.sql',
+    '0124_self_note_provenance.sql',
   ]) db.exec(migration(name));
 });
 
@@ -44,6 +60,8 @@ describe('scoped Self/Person/Group/World projection', () => {
       `INSERT INTO user_profiles (chat_id, uid, profile_prompt, updated_at)
        VALUES (?, ?, ?, ?)`,
     ).run(-100, 7, '偏好短句，关注数据库', now);
+    db.prepare('INSERT INTO user_profiles (chat_id, uid, profile_prompt, updated_at) VALUES (?, ?, ?, ?)')
+      .run(-200, 7, 'FOREIGN_PROFILE_MARKER', now);
     db.prepare(
       `INSERT INTO chat_relationships (chat_id, uid, affinity, interaction_count, last_interaction_at, last_summary, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -60,9 +78,11 @@ describe('scoped Self/Person/Group/World projection', () => {
     ).run('project-x', 'project', JSON.stringify({ status: 'active' }), -100, now, now, 'chat:-100', 'chat', 2, 'event-world-1', 0.85, now + 3600);
 
     const projection = buildScopedWorldProjection({ visibility: 'task', chatId: -100, taskId: 'task-1', userId: 7 });
-    expect(projection.self[0]).toMatchObject({ kind: 'self', scopeKey: 'global', status: 'unverified', evidence: ['feedback:event-1'] });
+    expect(projection.self).toEqual([]); // Unverified/legacy notes are retained, never prompt authority.
     expect(projection.person[0]).toMatchObject({ kind: 'person', scopeKey: 'user:7@chat:-100', status: 'unverified', expiresAt: now + 30 * 24 * 3600, evidence: ['profile:-100:7', 'chat_relationships:-100:7'] });
     expect(projection.person[0]?.statement).toContain('互动记录：已互动 12 次');
+    expect(projection.person[0]?.statement).toContain('偏好短句，关注数据库');
+    expect(projection.person[0]?.statement).not.toContain('FOREIGN_PROFILE_MARKER');
     expect(projection.group[0]).toMatchObject({ kind: 'group', scopeKey: 'chat:-100', status: 'unverified', expiresAt: now + 6 * 3600 });
     expect(projection.world[0]).toMatchObject({ kind: 'world', subject: 'project:project-x', source: 'world_event:event-world-1', scopeKey: 'chat:-100', confidence: 0.85 });
     expect(projection.worldEntities).toHaveLength(1);
@@ -86,7 +106,7 @@ describe('scoped Self/Person/Group/World projection', () => {
 
   it('keeps Self available globally but refuses unscoped person/group/world data', () => {
     const now = Math.floor(Date.now() / 1000);
-    db.prepare('INSERT INTO self_model_notes (note, evidence, created_at) VALUES (?, ?, ?)').run('遇到不确定先核实', 'feedback:event-2', now);
+    verifiedSelf('遇到不确定先核实', now);
     const projection = buildScopedWorldProjection({ visibility: 'global' });
     expect(projection.self).toHaveLength(1);
     expect(projection.person).toEqual([]);
@@ -98,8 +118,8 @@ describe('scoped Self/Person/Group/World projection', () => {
   it('reconstructs world and self state at an event timestamp', () => {
     const now = Math.floor(Date.now() / 1000);
     const asOf = now - 50;
-    db.prepare('INSERT INTO self_model_notes (note, evidence, created_at) VALUES (?, ?, ?)').run('锚点之前的自我笔记', 'event:self-old', asOf - 10);
-    db.prepare('INSERT INTO self_model_notes (note, evidence, created_at) VALUES (?, ?, ?)').run('锚点之后的新笔记', 'event:self-new', now);
+    verifiedSelf('锚点之前的自我笔记', asOf - 10);
+    verifiedSelf('锚点之后的新笔记', now);
     db.prepare('INSERT INTO user_profiles (chat_id, uid, profile_prompt, updated_at) VALUES (?, ?, ?, ?)')
       .run(-100, 7, '锚点前的用户画像', asOf - 20);
     db.prepare(

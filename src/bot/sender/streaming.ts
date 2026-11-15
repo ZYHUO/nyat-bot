@@ -2,7 +2,8 @@
 // Streaming Sender — editMessage-based streaming
 // ────────────────────────────────────────
 
-import { sendMessage, editMessage } from './telegram.js';
+import { sendMessageDetailed, editMessage } from './telegram.js';
+import { deliveryFailureStatus, requireSentDelivery, type DeliveryResult, type SentDelivery } from '../../shared/delivery-result.js';
 import { logger } from '../../shared/logger.js';
 
 export interface StreamingConfig {
@@ -31,9 +32,12 @@ export class StreamingSender {
     chatId: number,
     stream: AsyncIterable<string>,
     replyToId?: number,
-  ): Promise<{ messageId: number; text: string }> {
+  ): Promise<DeliveryResult & { messageId?: number; text: string }> {
     // 1. Send placeholder message
-    const messageId = await sendMessage(chatId, this.config.placeholder, replyToId);
+    const initial = await sendMessageDetailed(chatId, this.config.placeholder, replyToId, undefined, { markAnswered: false });
+    if (initial.status !== 'sent') return { ...initial, text: '' };
+    const messageId = requireSentDelivery(initial).messageId;
+    let confirmedText = this.config.placeholder;
     let buffer = '';
     let lastEditTime = 0;
     let lastEditLength = 0;
@@ -51,6 +55,7 @@ export class StreamingSender {
         if (timeDelta >= this.config.minEditInterval && charDelta >= this.config.minCharDelta) {
           try {
             await editMessage(chatId, messageId, buffer);
+            confirmedText = buffer;
             lastEditTime = now;
             lastEditLength = buffer.length;
           } catch (err) {
@@ -63,26 +68,28 @@ export class StreamingSender {
       // 4. Final edit with complete text
       if (buffer && buffer.length !== lastEditLength) {
         await editMessage(chatId, messageId, buffer);
+        confirmedText = buffer;
       }
 
       // If buffer is empty, replace placeholder
       if (!buffer) {
         buffer = '…';
         await editMessage(chatId, messageId, buffer);
+        confirmedText = buffer;
       }
     } catch (err) {
       logger.error({ chatId, messageId, err }, 'Stream send error');
-      // Try to finalize with whatever we have
-      if (buffer && buffer.length !== lastEditLength) {
-        try {
-          await editMessage(chatId, messageId, buffer);
-        } catch {
-          // Best effort
-        }
-      }
+      // The buffer is intent; only the last acknowledged edit is historical fact.
+      return { ...initial, status: deliveryFailureStatus(err, true), error: err,
+        reason: 'stream_unconfirmed', messageId, text: confirmedText,
+        parts: [{ messageId, text: confirmedText, partIndex: 0 }] };
     }
 
-    return { messageId, text: buffer };
+    if (replyToId && replyToId > 0) {
+      void import('../../meta/answered.js').then(({ markMessageAnswered }) => markMessageAnswered(chatId, replyToId)).catch(() => {});
+    }
+    return { ...initial, messageId, text: confirmedText,
+      parts: [{ messageId, text: confirmedText, partIndex: 0 }] };
   }
 
   /**
@@ -92,8 +99,8 @@ export class StreamingSender {
     chatId: number,
     text: string,
     replyToId?: number,
-  ): Promise<{ messageId: number }> {
-    const messageId = await sendMessage(chatId, text, replyToId);
-    return { messageId };
+    options?: { markAnswered?: boolean },
+  ): Promise<SentDelivery> {
+    return requireSentDelivery(await sendMessageDetailed(chatId, text, replyToId, undefined, options));
   }
 }

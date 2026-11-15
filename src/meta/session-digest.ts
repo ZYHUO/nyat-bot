@@ -2,11 +2,11 @@
 // Session Digest 持久化 (CGM consciousness-memory 借鉴)
 //
 // Meta 的 [SESSION_DIGEST]、Subagent 的 endTask 摘要、dispatch 事件本身,
-// 都作为一条 digest 落 session_digests 表(migrations/0067),构成全局叙事流:
+// 都作为一条 digest 落 session_digests 表(migrations/0067),按来源会话读取:
 // 重启不丢、FTS 可检索、后续 session 从这里做 delta 注入。
 //
-// 全部能力由 DIGEST_PERSIST_ENABLED 控制(默认关)。写入侧在 persistDigest 内部
-// 检查 flag —— 调用方不需要各自判一次;读取侧不判 flag(只读、fail-soft)。
+// DIGEST_PERSIST_ENABLED 控制新写入；读取无论开关状态都必须提供同会话来源。
+// 旧 NULL 来源和混合来源记录保留，但不进入会话提示词或检索结果。
 // 所有函数永不抛出:persistence/检索失败只允许 warn/debug 日志,绝不能炸 session。
 //
 // 时间约定:created_at / digestsSince(ts) 均为 unix **秒**(与 episodes/tasks 的
@@ -17,6 +17,8 @@ import { getDb } from '../db/sqlite.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { segment } from '../memory/lexical.js';
+import { isDigestSourceChatId } from './digest-scope.js';
+import type { DigestReadScope } from './digest-scope.js';
 
 export type DigestKind = 'meta' | 'subagent' | 'dispatch';
 
@@ -105,7 +107,7 @@ export function persistDigest(input: PersistDigestInput): number | null {
         )
         .run(
           input.kind,
-          input.sourceChatId ?? null,
+          isDigestSourceChatId(input.sourceChatId) ? input.sourceChatId : null,
           input.taskId ?? null,
           text,
           tags,
@@ -128,16 +130,17 @@ export function persistDigest(input: PersistDigestInput): number | null {
 }
 
 /** 最近 limit 条,按时间升序(最旧在前,与 global-state.recentDigests 的语义一致)。 */
-export function recentDigests(limit = 8, opts?: { excludeKinds?: DigestKind[] }): SessionDigest[] {
+export function recentDigests(limit = 8, opts?: DigestReadScope & { excludeKinds?: DigestKind[] }): SessionDigest[] {
+  if (!isDigestSourceChatId(opts?.sourceChatId)) return [];
   try {
     const n = Math.max(1, Math.min(200, limit | 0));
     const exclude = opts?.excludeKinds?.length
       ? ` AND kind NOT IN (${opts.excludeKinds.map(() => '?').join(',')})`
       : '';
-    const args: Array<string | number> = [...(opts?.excludeKinds ?? []), n];
+    const args: Array<string | number> = [opts.sourceChatId, ...(opts.excludeKinds ?? []), n];
     const rows = getDb()
       .prepare(
-        `SELECT * FROM (SELECT * FROM session_digests WHERE 1=1${exclude} ORDER BY created_at DESC, id DESC LIMIT ?)
+        `SELECT * FROM (SELECT * FROM session_digests WHERE source_chat_id = ?${exclude} ORDER BY created_at DESC, id DESC LIMIT ?)
          ORDER BY created_at ASC, id ASC`,
       )
       .all(...args) as DigestDbRow[];
@@ -149,14 +152,15 @@ export function recentDigests(limit = 8, opts?: { excludeKinds?: DigestKind[] })
 }
 
 /** ts(unix 秒)以来的 digest,时间升序。 */
-export function digestsSince(ts: number, limit = 30): SessionDigest[] {
+export function digestsSince(ts: number, limit = 30, opts?: DigestReadScope): SessionDigest[] {
+  if (!isDigestSourceChatId(opts?.sourceChatId)) return [];
   try {
     const n = Math.max(1, Math.min(500, limit | 0));
     const rows = getDb()
       .prepare(
-        `SELECT * FROM session_digests WHERE created_at >= ? ORDER BY created_at ASC, id ASC LIMIT ?`,
+        `SELECT * FROM session_digests WHERE source_chat_id = ? AND created_at >= ? ORDER BY created_at ASC, id ASC LIMIT ?`,
       )
-      .all(ts | 0, n) as DigestDbRow[];
+      .all(opts.sourceChatId, ts | 0, n) as DigestDbRow[];
     return rows.map(toDigest);
   } catch (err) {
     logger.debug({ err }, 'digestsSince failed (non-fatal)');
@@ -168,7 +172,8 @@ export function digestsSince(ts: number, limit = 30): SessionDigest[] {
  * FTS 检索(可作为未来 memory 工具)。查询与写入共用 segment() 分词,
  * 多 token 按 OR 匹配,FTS5 rank(BM25,越小越相关)排序。失败/空查询 → []。
  */
-export function searchDigests(query: string, limit = 5): SessionDigest[] {
+export function searchDigests(query: string, limit = 5, opts?: DigestReadScope): SessionDigest[] {
+  if (!isDigestSourceChatId(opts?.sourceChatId)) return [];
   try {
     const terms = segment(String(query ?? ''))
       .split(' ')
@@ -182,11 +187,11 @@ export function searchDigests(query: string, limit = 5): SessionDigest[] {
       .prepare(
         `SELECT d.* FROM session_digests_fts f
          JOIN session_digests d ON d.id = f.digest_id
-         WHERE session_digests_fts MATCH ?
+         WHERE session_digests_fts MATCH ? AND d.source_chat_id = ?
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(`seg : (${terms.join(' OR ')})`, n) as DigestDbRow[];
+      .all(`seg : (${terms.join(' OR ')})`, opts.sourceChatId, n) as DigestDbRow[];
     return rows.map(toDigest);
   } catch (err) {
     logger.debug({ err }, 'searchDigests failed (non-fatal)');

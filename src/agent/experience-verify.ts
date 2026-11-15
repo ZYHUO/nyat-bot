@@ -7,6 +7,7 @@
 // 结果好但路径脏(done + path_quality < 0.7)不算证实。
 // ────────────────────────────────────────
 
+import { env } from '../env.js';
 import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 import { isPathQualityGood } from './path-quality.js';
@@ -23,8 +24,24 @@ export interface InjectOutcomeArgs {
 }
 
 /** 记录一次注入后任务结果。返回更新到的 verified 状态(按 id)。 */
+/** EXPERIENCE_VERIFY_MIN_SUCCESS；env 不可用时退回 2（与改动前一致）。 */
+function readMinSuccess(): number {
+  try {
+    const n = Number(env().EXPERIENCE_VERIFY_MIN_SUCCESS ?? 2);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2;
+  } catch {
+    return 2;
+  }
+}
+
 export function recordInjectOutcome(args: InjectOutcomeArgs): Map<number, VerifiedState> {
-  const { experienceIds, taskOutcome, pathQualityScore, minSuccess = 2 } = args;
+  // minSuccess 未显式传入时读 env（EXPERIENCE_VERIFY_MIN_SUCCESS，默认 2）。
+  //
+  // 2026-09-21：这个旗标声明了、.env 里也配了（2），而唯一的调用方
+  // （subagent/executor.ts 的 recordInjectOutcome）不传 minSuccess，
+  // 于是永远落在这里的硬编码默认 2 上。值和 .env 恰好一样，接上不改变行为。
+  const minSuccess = args.minSuccess ?? readMinSuccess();
+  const { experienceIds, taskOutcome, pathQualityScore } = args;
   const states = new Map<number, VerifiedState>();
   if (!experienceIds.length) return states;
   try {

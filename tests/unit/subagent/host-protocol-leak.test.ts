@@ -22,6 +22,7 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({
 
 vi.mock('../../../src/meta/answered.js', () => ({
   markMessageAnswered: vi.fn(async () => {}),
+  answeredTimestamps: vi.fn(async () => [] as number[]),
 }));
 
 vi.mock('../../../src/pipeline/reply/anti-repeat.js', () => ({
@@ -102,6 +103,7 @@ describe('host sendText protocol-leak guard', () => {
       '本喵上课摸鱼写了篇CERN换系统的八卦笔记（真的超有意思）',
       undefined,
       undefined,
+      expect.objectContaining({ beforeSend: expect.any(Function), onReceipt: expect.any(Function), markAnswered: false }),
     );
   });
 });

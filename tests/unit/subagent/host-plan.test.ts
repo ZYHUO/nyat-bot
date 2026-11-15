@@ -44,7 +44,8 @@ vi.mock('../../../src/tracking/scratchpad.js', () => ({
   setScratch: vi.fn(async () => undefined),
   clearScratch: vi.fn(async () => undefined),
 }));
-vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined) }));
+vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: vi.fn(async () => undefined),
+  answeredTimestamps: vi.fn(async () => [] as number[]) }));
 vi.mock('../../../src/meta/attention.js', () => ({
   getAttentionAccumulator: () => ({ ingestAsync: vi.fn(async () => undefined) }),
 }));
@@ -75,16 +76,13 @@ describe('runtime.setPlan（auto+plan 模式）', () => {
     expect(api.runtime.getPlan?.()?.steps).toHaveLength(8);
   });
 
-  it('CodeAct 沙盒里 runtime.setPlan 可用', async () => {
+  it('RPC 白名单保留 setPlan，内部 getPlan 不暴露', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
-    const { runHostCodeForTest } = await import('../../../src/subagent/executor.js');
+    const { selectCodeActCapabilities, CODEACT_CAPABILITY_METHODS } = await import('../../../src/sandbox/codeact/capabilities.js');
     const host = createHostApi(MASTER, { onEnd: vi.fn(), taskId: 't-plan' });
-    const r = await runHostCodeForTest(
-      `runtime.setPlan(['第一步','第二步']); return runtime.getPlan().steps.join(',');`,
-      host,
-      { isClosed: () => false, onTimeout: () => undefined, timeoutMs: 30_000 },
-    );
-    expect(r.ok).toBe(true);
-    expect(r.output).toBe('第一步,第二步');
+    const capabilities = selectCodeActCapabilities(host, CODEACT_CAPABILITY_METHODS);
+    await capabilities.get('runtime.setPlan')!(['第一步', '第二步']);
+    expect(host.runtime.getPlan()?.steps.join(',')).toBe('第一步,第二步');
+    expect(capabilities.has('runtime.getPlan')).toBe(false);
   }, 20_000);
 });

@@ -189,6 +189,7 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
     // 编辑事件用 edit_date:date 是原始发送时间,陈年消息的 typo 修正若按
     // 原时间入册,上下文里会把几小时前的行当成"刚发的"渲染(review #0)
     timestamp: msg.edit_date ?? msg.date,
+    ...(update.__nyatEventIdentity ? { eventIdentity: update.__nyatEventIdentity } : {}),
     messageId: msg.message_id,
     textContent,
     isForwarded,
@@ -242,10 +243,17 @@ export function formatMessage(update: UpdateLike): FormattedMessage | null {
 
   if (msg.video) {
     formatted.videoFileId = msg.video.file_id;
+    // 时长一起接住：视频理解有硬上限，下载前就该能判（见 multimodal.ts 的 describeVideo）。
+    if (typeof msg.video.duration === 'number' && msg.video.duration > 0) {
+      formatted.videoDurationSec = Math.floor(msg.video.duration);
+    }
   }
 
   if (msg.video_note) {
     formatted.videoNoteFileId = msg.video_note.file_id;
+    if (typeof msg.video_note.duration === 'number' && msg.video_note.duration > 0) {
+      formatted.videoDurationSec ??= Math.floor(msg.video_note.duration);
+    }
   }
 
   // Inline keyboard — 让 bot "看得见"别的 bot 回执上的按钮(命令档案学习 +

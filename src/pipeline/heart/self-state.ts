@@ -15,6 +15,7 @@
 
 import { getLifeState } from '../../tracking/life-state.js';
 import { logger } from '../../shared/logger.js';
+import { env } from '../../env.js';
 
 export interface SelfState {
   /** 第一人称叙述,2-5 句(含「你刚才心里想的是…」,如有) */
@@ -26,12 +27,14 @@ export interface SelfState {
   narrationNoThought: string;
   /** 0..1(life-state energy × focus 融合,供调试/遥测) */
   energy: number;
+  /** Read-only background, not a script to narrate in every conversation. */
+  background?: readonly string[];
 }
 
-export async function composeSelfState(chatId: number): Promise<SelfState> {
+export async function composeSelfState(chatId: number, relevantText = ''): Promise<SelfState> {
   // 四个独立异步源并行取;组装仍按固定顺序(life → mood → focus →
   // social → thought → stance → obsession),叙述与旧版逐字一致。
-  const [moodPart, focusVal, socialPart, mindData, obsessionPart, hobbyPart, schoolNarrative, weatherPart, yesterdayPart] = await Promise.all([
+  const [moodPart, focusVal, socialPart, mindData, obsessionPart, hobbyPart, schoolNarrative, weatherPart, yesterdayPart, innerTendencies] = await Promise.all([
     (async (): Promise<string | null> => {
       try {
         const { getChatMood, moodPromptHint } = await import('../../tracking/mood.js');
@@ -86,7 +89,7 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
     (async (): Promise<string | null> => {
       try {
         const { getHobbyFlavor } = await import('../../tracking/hobbies.js');
-        return await getHobbyFlavor();
+        return await getHobbyFlavor(chatId);
       } catch (err) {
         logger.debug({ err, chatId }, 'self-state: hobby source failed');
         return null;
@@ -131,21 +134,31 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
             const { schoolNarrativeKey } = await import('../../cron/school-day-plan.js');
             const yDate = new Date(yesterdayStartSec * 1000 + 8 * 3600_000).toISOString().slice(0, 10);
             const narr = await getRedis().get(schoolNarrativeKey(yDate));
-            if (narr) parts.push(`昨天你的日子：「${narr.slice(0, 80)}」`);
+            if (narr) parts.push(`昨天的角色生活设定（模拟）：「${narr.slice(0, 80)}」`);
           }
         } catch { /* optional */ }
         // 昨日最后一条 digest（bot 昨天实际做成的事）
         try {
           const { digestsSince } = await import('../../meta/session-digest.js');
-          const yesterday = digestsSince(yesterdayStartSec, 60).filter((d) => d.createdAt < todayStartSec);
+          const yesterday = digestsSince(yesterdayStartSec, 60, { sourceChatId: chatId }).filter((d) => d.createdAt < todayStartSec);
           const last = yesterday[yesterday.length - 1];
-          if (last) parts.push(`昨天你做过：「${last.text.slice(0, 80)}」`);
+          if (last) parts.push(`昨天的经历记录（结果以记录为准）：「${last.text.slice(0, 80)}」`);
         } catch { /* optional */ }
         if (!parts.length) return null;
         return parts.join('；') + '（都是昨天的事，心里有数就好，别当今天的话题硬提）';
       } catch (err) {
         logger.debug({ err, chatId }, 'self-state: yesterday recall source failed');
         return null;
+      }
+    })(),
+    (async (): Promise<string[]> => {
+      if (!env().EMOTION_CONTINUITY_ENABLED) return [];
+      try {
+        const { getInnerStateTendencies } = await import('../../agent/emotion-continuity.js');
+        return getInnerStateTendencies(chatId);
+      } catch (err) {
+        logger.debug({ err, chatId }, 'self-state: continuous disposition unavailable');
+        return [];
       }
     })(),
   ]);
@@ -222,6 +235,20 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
   if (yesterdayPart) after.push(yesterdayPart);
 
   const make = (withThought: boolean): string => {
+    if (env().EMOTION_CONTINUITY_ENABLED) {
+      const candidates = [moodPart, ...innerTendencies, withThought ? thoughtPart : null,
+        mindData?.stance ? `你仍记得自己的看法：${mindData.stance}；有新证据时可以改主意` : null, socialPart];
+      const selected = [...new Set(candidates.filter((x): x is string => !!x))].slice(0, 2).map(x => x.slice(0, 180));
+      // These are simulated character-setting facts. They are never promoted
+      // to evidence of an actual school day, meal or offline encounter.
+      if (/学校|上课|吃饭|睡觉|作息/u.test(relevantText) && schoolNarrative) {
+        selected.push(`角色设定里的生活片段（模拟，不是真实经历）：${schoolNarrative.slice(0, 120)}`);
+      } else if (/昨天|前一天|前两天/u.test(relevantText) && yesterdayPart) {
+        selected.push(yesterdayPart.slice(0, 200));
+      }
+      return (selected.length ? selected.join('；') + '。' : '此刻没有特别强烈的情绪，顺着眼前的人和话题说就好。')
+        + '让感受自然影响语气和选择，不必逐项汇报内心状态，也不必每句重复口癖。';
+    }
     const all = [...before, ...(withThought && thoughtPart ? [thoughtPart] : []), ...after];
     return all.length > 0 ? all.join('；') + '。' : '你状态正常,精神还不错。';
   };
@@ -233,5 +260,6 @@ export async function composeSelfState(chatId: number): Promise<SelfState> {
     { chatId, energy, parts: before.length + after.length + (thoughtPart ? 1 : 0) },
     'Self-state composed',
   );
-  return { narration, narrationNoThought, energy };
+  return { narration, narrationNoThought, energy,
+    ...(env().EMOTION_CONTINUITY_ENABLED ? { background: [...before, ...after] } : {}) };
 }

@@ -29,8 +29,9 @@ vi.mock('../../../src/meta/answered.js', () => ({
   markMessageAnswered: (...args: unknown[]) => markMessageAnswered(...args),
 }));
 vi.mock('../../../src/bot/bot.js', () => ({
-  getBotUid: () => 1,
-  getBotDisplayName: () => '啾咪囝',
+  getBotUid: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 2 ** 52 + 11 : 1,
+  getBotDisplayName: (chatId?: number) => chatId === -(2 ** 52 + 10) ? 'QQ喵' : '啾咪囝',
+  getBotIdentity: (chatId?: number) => ({ nicknames: chatId === -(2 ** 52 + 10) ? ['QQ喵'] : ['啾咪囝'] }),
 }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
   getRecent: vi.fn(async () => []),
@@ -64,6 +65,15 @@ describe('evaluateDispatchGate', () => {
     userId: 42,
     textPreview: '群里在聊猫',
   };
+
+  it('passes the QQ conversation identity to timing instead of Telegram identity', async () => {
+    runTimingGate.mockResolvedValueOnce({ action: 'continue', reason: 'ok', shortCircuited: false, latencyMs: 1 });
+    const { evaluateDispatchGate } = await import('../../../src/meta/dispatch-gate.js');
+    await evaluateDispatchGate({ ...base, chatId: -(2 ** 52 + 10) });
+    expect(runTimingGate).toHaveBeenCalledWith(expect.objectContaining({
+      botUid: 2 ** 52 + 11, botName: 'QQ喵', botNicknames: ['QQ喵'],
+    }));
+  });
 
   it('flag off → allow without calling gate', async () => {
     envBase.META_DISPATCH_GATE_ENABLED = false;

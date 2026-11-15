@@ -91,11 +91,29 @@ describe('drive scorer', () => {
   it('suppress: 刚满足过的 drive 否决同类动作，quiet 永不拦', () => {
     satiate('connection');
     const states = getDrives();
-    expect(suppress({ type: 'care_master' }, states)).toContain('satiated:connection');
     expect(suppress({ type: 'group_speak', chatId: -100 }, states)).toContain('satiated');
+    expect(suppress({ type: 'remember_user', chatId: -100 }, states)).toContain('satiated:connection');
     // check_goal 服务 competence（没被 satiate）→ 放行
     expect(suppress({ type: 'check_goal', goalId: 1 }, states)).toBeNull();
     expect(suppress({ type: 'quiet' }, states)).toBeNull();
+  });
+
+  it('care_master（私聊主人）不被群里的 group_speak 造成的 connection 饱和连带封住', () => {
+    // 群里说了一句话 → connection 被打满。主人 DM 的关心不该因此被封 6 小时
+    // （线上：care_master 被 satiated:connection 否决 39 次，而它自己只发出过 12 次）。
+    satiate('connection');
+    const states = getDrives();
+    expect(states.find((s) => s.name === 'connection')!.satiation).toBeGreaterThanOrEqual(0.5);
+    expect(suppress({ type: 'care_master' }, states)).toBeNull();
+    // 对照：群内发言仍被同一个饱和拦住（防刷屏的核心没动）
+    expect(suppress({ type: 'group_speak', chatId: -100 }, states)).toContain('satiated:connection');
+    expect(suppress({ type: 'remember_user', chatId: -100 }, states)).toContain('satiated:connection');
+    expect(suppress({ type: 'share', fromChatId: -1, toChatId: -2 }, states)).toContain('satiated');
+  });
+
+  it('autonomy 饱和仍拦 self_play（它自己的闸没被这次改动放松）', () => {
+    satiate('autonomy');
+    expect(suppress({ type: 'self_play' }, getDrives())).toContain('satiated:autonomy');
   });
 
   it('drivesServedBy 覆盖全部动作类型', () => {

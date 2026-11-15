@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily NyatBot backup at 04:00 Shanghai time
+
+[Timer]
+# Compatible with systemd 219; the controller owns the UTC+8 04:00 cutoff.
+OnCalendar=hourly
+Persistent=true
+Unit=nyatbot-backup.service
+
+[Install]
+WantedBy=timers.target

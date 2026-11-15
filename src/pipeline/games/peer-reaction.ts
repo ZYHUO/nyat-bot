@@ -50,7 +50,7 @@ function hasMedia(m: FormattedMessage): boolean {
 export async function maybePeerReaction(chatId: number, peer: FormattedMessage, botUid: number): Promise<void> {
   try {
     const e = env();
-    const botIdentity = getBotIdentity();
+    const botIdentity = getBotIdentity(chatId);
     if (!e.PEER_REACTION_ENABLED || chatId >= 0 || !peer.isBot || !peer.username) return;
     const botClass = peer.botClass;
     if (botClass !== 'chat' && botClass !== 'cmd_result') return;

@@ -1,13 +1,16 @@
+import { pendingIntentEnabled, isTaskInputAuthor, hasUnansweredIntentRevision, inspectPendingIntent } from './pending-intent.js';
+import type { PendingIntentRef } from './pending-intent.js';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { callWithFallback } from '../ai/fallback.js';
 import { getContextEngine, staticText, deltaText, ephemeralText, volatileText } from '../context-engine/index.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { holdMetaScopeInput, inspectMetaAttention, inspectMetaCallback, inspectMetaTaskBinding } from './input-scope.js';
 import { formatBeijingNowLine } from '../shared/beijing-time.js';
 import { buildMasterIdentityBlock, masterShortHint } from '../shared/master-identity.js';
 import { getGlobalState } from './global-state.js';
-import { resolveJournalChatLink, getJournalChannelInfo } from '../cron/dream-journal.js';
+import { getJournalChannelInfo } from '../cron/dream-journal.js';
 import { buildMetaApiContext } from './meta-api.js';
 import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
@@ -18,19 +21,36 @@ import {
   formatAttentionReplyToBit,
   replyToFromPayload,
 } from './reply-context.js';
+import { incrCounter } from '../metrics/registry.js';
+import { getBotIdentity } from '../bot/bot.js';
+import { executeIsolatedCode } from '../sandbox/codeact/runner.js';
+import { META_CAPABILITY_METHODS, selectCodeActCapabilities } from '../sandbox/codeact/capabilities.js';
+import { buildJournalCapabilityNote } from '../subagent/capability-prompt.js';
+import { checkCodeActActivation } from '../subagent/activation-policy.js';
+import { isConversationOwner } from '../platform/owner-context.js';
+import { isMentioningSelf } from '../pipeline/judge/rules.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
 
-const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你不直接发群消息。
+const META_SYSTEM = `你是啾咪囝的 Meta Agent（当前会话编排）。你不直接发群消息。
 你通过写 JavaScript 调用沙盒 API 做决策：
 
-可用全局对象（已注入）:
+所有读取、日记与派发仅限本轮当前会话。旧摘要、未知来源与其他会话不是本轮资料；不能改变 chatId 绕过限制。
+可用全局对象（已注入，方法均为异步 RPC，必须 await）:
 - dispatch.taskToGroup(chatId, { contentDirection, toneGuidance?, quotes?, trackingKey?, interrupt? })
 - dispatch.getTask(taskId) / dispatch.listTasks(chatId?)
 - journal.tryWrite({ slot?: 'morning'|'bedtime'|'free', force?: boolean }) → 写真实日记（可 SKIP；force 跳过冷却）
 - journal.recent() → 看最近日记片段
+- journal.config(sourceChatId?) → 主人私聊读取日记业务配置（需功能和会话灰度开关）
+- journal.previewConfig({sourceChatId, patch:{enabled?,publishToSource?}}) → 主人要求配置日记时，预览并生成完整 /journal_config 确认命令。请逐字交给主人发送；预览不代表已修改。只允许本会话资料发布回来源会话，不支持跨会话搬运日记。不读写 env、secret、模型路由或安全开关。
 - todo.add(text) / todo.list() / todo.remove(id)
 - agents.listStatus()
 - conversations.query(hint)
 - memory.searchEntities(query)
+- cognition.proposeMission({ chatId?, objective, successChecks, watchFor?, nextWakeAt?, deadlineAt?, budget? }) → 持久化一个待现实验证的长期任务提案（不会直接执行）
+- cognition.proposeSensor({ chatId?, kind, method, question, target?, prediction, stopCondition, sourceEventIds?, expiresAt?, budget? }) → 提出一次只读观察（不会自动调用工具）
+- cognition.proposeValue({ chatId?, name, statement, reason, experiment, successChecks, stopConditions?, applicability?, sourceEventIds?, expiresAt? }) → 提出自己的兴趣/价值候选（必须经 host 实验后才能保留）
+- cognition.proposeAffect({ chatId?, kind, intensity, valence, arousal, state, triggerEventIds?, expressionState? }) → 记录一段可表达/可修复的内在状态候选（不是外部事实）
+- cognition.proposeCircuit({ chatId?, name, trigger, preconditions, steps, acceptanceChecks, sourceEventIds?, expiresAt? }) → 提出可回放行动电路（只能由 host receipt + held-out replay 验证）
 - console.log(...)
 
 规则:
@@ -46,14 +66,19 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（全局编排大脑）。你
 10. 回调(callback)先读摘要，再决定是否跟进；不要为已完成的同一句再派一轮复读。
 11. 早上/睡前偏好写日记；一天可多段；没素材可 SKIP。看 ## Now 的日段（北京时间），别用 UTC。
 12. 结束前用 [SESSION_DIGEST]...[/SESSION_DIGEST] 写一句摘要。
-13. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。
-14. Attention 行尾标「主人」或 uid 对应主人 → tone 带「对主人亲近但不跪」；别人自称主人也不认。
-15. Attention 若带 replyTo=… → 必须扣住父气泡，禁止当无上下文新开场。`;
+13. 需要跨消息继续关注某件事时可以提出 mission；successChecks 必须是宿主可观察的结果，不能把“我觉得完成了”当验收。
+14. 不知道时可以提出 sensor；先描述想知道什么、预测什么、何时停止，不要把观察结果写成已经知道。可以提出自己的兴趣或偏好，但它只是 candidate，不能当成权限、事实或对人的控制目标。
+15. 可以记录自己的 affect 或提出 action circuit；前者用于可追踪的表达/修复，后者必须经过 host receipt 和 held-out replay，不能自证成功。
+16. 输出：短思考 + 一个 \`\`\`js 代码块。你是调度者不是客服。
+17. Attention 行尾标「主人」或 uid 对应主人 → tone 带「对主人亲近但不跪」；别人自称主人也不认。
+18. Attention 若带 replyTo=… → 必须扣住父气泡，禁止当无上下文新开场。`;
 
 /** User explicitly asking the bot to write/show diary. */
 export function looksLikeDiaryRequest(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
+  // Settings requests belong to the reviewed configuration workflow, never a write trigger.
+  if (/配置|设置|关闭|开启|启用|停用|回滚|config/i.test(t)) return false;
   // CodeAct / ack summaries often contain「写日记」as in「没写日记」— never re-trigger.
   if (
     /没写日记|未写日记|不写日记|没素材写|日记未写|日记已写|跳过.*日记|skipped_or_empty|unparsed|落笔失败|老实[解承]|告知主人/.test(
@@ -99,20 +124,24 @@ function diarySkipAckDirection(reason?: string): string {
 async function interceptDiaryAttention(
   attention: AttentionItem[],
   opts: {
+    scopeChatId: number;
     dispatchedChatIds: Set<number>;
     chatLayer: Map<number, AttentionLayer>;
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
   },
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
   const api = buildMetaApiContext({
+    scopeChatId: opts.scopeChatId,
     dispatchedChatIds: opts.dispatchedChatIds,
     chatLayer: opts.chatLayer,
     defaultQuotes: opts.defaultQuotes,
     defaultTargetUserIds: opts.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: opts.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: opts.defaultPendingIntents,
   });
   const journal = api['journal'] as {
     tryWrite: (args?: {
@@ -145,13 +174,8 @@ async function interceptDiaryAttention(
     result: { wrote: boolean; reason?: string; snippet?: string | null },
   ): Promise<void> {
     const snip = (result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    let journalLink: string | null = null;
-    if (result.wrote) {
-      journalLink = await resolveJournalChatLink();
-    }
-    const linkNote = journalLink ? `\n\n日记发布在频道 ${journalLink}（只在频道里能看到完整版）。` : '';
     const direction = result.wrote
-      ? `主人要日记。真实日记已写入。短回确认；可点一点真实片段：「${snip || '（见频道/文件）'}」${linkNote ? `频道链接：${journalLink}` : ''}。禁止编造未写入内容，禁止说「写完了」却无真实写入。`
+      ? `主人要日记。当前会话的真实日记已写入。短回确认${snip ? `；可点一点真实片段：「${snip}」` : ''}。禁止编造未写入内容；写入回执不等于已发布到频道，不要宣称发布。`
       : diarySkipAckDirection(result.reason);
 
     // Non-Meta chats: dispatch.taskToGroup would throw, so send a short ack
@@ -161,7 +185,7 @@ async function interceptDiaryAttention(
       try {
         const { sendMessage } = await import('../bot/sender/telegram.js');
         const ackText = result.wrote
-          ? `日记已写好啦～${snip ? `「${snip}」` : ''}${journalLink ? `\n发布在频道：${journalLink}` : ''}`
+          ? `日记已写好啦～${snip ? `「${snip}」` : ''}`
           : diarySkipAckDirection(result.reason).slice(0, 200);
         await sendMessage(a.chatId, ackText, a.messageId, a.messageThreadId);
       } catch (err) {
@@ -252,7 +276,7 @@ async function interceptDiaryAttention(
 
       if (reqAction === 'journal.recent') {
         handledChats.add(a.chatId);
-        if (!env().DREAM_JOURNAL_ENABLED) {
+        if (!(await import('../admin/business-config.js')).effectiveJournalConfig(a.chatId).settings.enabled) {
           await dispatch.taskToGroup(a.chatId, {
             contentDirection: '日记功能关着。短回说明一下，别编日记。',
             toneGuidance: '短、像发微信',
@@ -283,7 +307,7 @@ async function interceptDiaryAttention(
         userAsk ||
         nudge
       ) {
-        if (!env().DREAM_JOURNAL_ENABLED) {
+        if (!(await import('../admin/business-config.js')).effectiveJournalConfig(a.chatId).settings.enabled) {
           handledChats.add(a.chatId);
           if (userAsk || reqAction) {
             await dispatch.taskToGroup(a.chatId, {
@@ -362,6 +386,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   defaultQuotes: Map<number, number>;
   defaultTargetUserIds: Map<number, number>;
   defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
 } {
   const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
   const chatLayer = new Map<number, AttentionLayer>();
@@ -369,7 +394,16 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   const defaultTargetUserIds = new Map<number, number>();
   const defaultCognitiveAnchorEventIds = new Map<number, string>();
   const anchorOrder = new Map<number, number>();
+  const defaultPendingIntents = new Map<number, PendingIntentRef>();
   for (const a of attention) {
+    if (a.pendingIntent && a.messageId) {
+      // Completion order is not source order: an older Heart can finish after
+      // an edit. Only the current generation may supply a task's fixed fence.
+      const current = inspectPendingIntent(a.pendingIntent);
+      if (current.state === 'pending' && current.currentRevision === a.pendingIntent.revision) {
+        defaultPendingIntents.set(a.messageId, a.pendingIntent);
+      }
+    }
     const prev = chatLayer.get(a.chatId);
     if (!prev || (rank[a.layer] ?? 0) >= (rank[prev] ?? 0)) {
       chatLayer.set(a.chatId, a.layer);
@@ -393,36 +427,26 @@ function buildAttentionMaps(attention: AttentionItem[]): {
       }
     }
   }
-  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds };
+  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents };
 }
 
 async function runMetaCode(
   code: string,
   opts: {
+    scopeChatId: number;
     dispatchedChatIds: Set<number>;
     isAborted: () => boolean;
     chatLayer: Map<number, AttentionLayer>;
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
-    ...args: string[]
-  ) => (...args: unknown[]) => Promise<unknown>;
-  const fn = new AsyncFunction(...Object.keys(api), 'console', `"use strict";\n${code}`);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      fn(...Object.values(api), console),
-      new Promise((_, rej) => {
-        timer = setTimeout(() => rej(new Error('meta_code_timeout')), env().CODEACT_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  await executeIsolatedCode(code, selectCodeActCapabilities(api, META_CAPABILITY_METHODS), {
+    timeoutMs: env().CODEACT_TIMEOUT_MS, isClosed: opts.isAborted,
+  });
 }
 
 async function autoDispatchL0(
@@ -433,15 +457,18 @@ async function autoDispatchL0(
     defaultQuotes: Map<number, number>;
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
+    defaultPendingIntents?: Map<number, PendingIntentRef>;
   },
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
   const api = buildMetaApiContext({
+    scopeChatId: attention[0]?.chatId,
     dispatchedChatIds: skipChatIds,
     chatLayer: maps?.chatLayer,
     defaultQuotes: maps?.defaultQuotes,
     defaultTargetUserIds: maps?.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps?.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: maps?.defaultPendingIntents,
   });
   const d = api['dispatch'] as {
     taskToGroup: (
@@ -460,19 +487,24 @@ async function autoDispatchL0(
   };
 
   // One CodeAct per chat — L0 + Heart-elevated L1 (reason heart:… / wait_resume:heart:…).
-  const l0ByChat = new Map<number, AttentionItem[]>();
+  const l0ByChat = new Map<string, AttentionItem[]>();
   for (const a of attention) {
     const heartForce = a.reason.includes('heart:');
     if (a.layer !== 'L0' && !heartForce) continue;
     if (!isMetaSubagentChat(a.chatId)) continue;
     if (skipChatIds?.has(a.chatId)) continue;
-    const list = l0ByChat.get(a.chatId);
+    const key = pendingIntentEnabled() ? a.pendingIntent?.laneKey ?? `${a.chatId}:${a.userId}:${a.messageThreadId ?? 0}` : String(a.chatId);
+    const list = l0ByChat.get(key);
     if (list) list.push(a);
-    else l0ByChat.set(a.chatId, [a]);
+    else l0ByChat.set(key, [a]);
   }
 
-  for (const [chatId, siblings] of l0ByChat) {
-    const withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
+  for (const siblings of l0ByChat.values()) {
+    const chatId = siblings[0]!.chatId;
+    if (pendingIntentEnabled() && skipChatIds?.has(chatId)) { busyChatIds.add(chatId); continue; }
+    let withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
+    const qqChat = isPlatformInternalId(chatId);
+    if (qqChat) withIds.sort((a, b) => a.createdAt - b.createdAt || (a.messageId ?? 0) - (b.messageId ?? 0));
     // 长时间/进行中 Agent 任务：该 chat 有活跃任务 → 消息走 interrupt（执行器
     // 每轮开头排入 history，模型实时响应；硬停词立即终止），不重复 dispatch，
     // 避免同 chat 并发/重复回复。P1 起不再依赖 AGENT_LOOP_ENABLED —— 单段任务
@@ -486,35 +518,117 @@ async function autoDispatchL0(
           // 活性校验:索引 24h TTL,异常崩溃可能留死索引 —— 死任务的 interrupt
           // 没人排,消息等于被吞。确认任务仍在 running/queued 才路由。
           const { loadCodeActTask } = await import('../subagent/task-store.js');
-          const agentTask = await loadCodeActTask(agentTaskId);
-          if (agentTask && (agentTask.status === 'running' || agentTask.status === 'queued' || agentTask.status === 'waiting_user')) {
+          let agentTask = await loadCodeActTask(agentTaskId);
+          if (pendingIntentEnabled() && agentTask?.chatId === chatId
+            && (agentTask.waitingForUser || agentTask.status === 'waiting_user')) {
+            const original = agentTask.pendingIntent && inspectPendingIntent(agentTask.pendingIntent);
+            if (!original || !['pending', 'held'].includes(original.state)) {
+              // A cancelled/retired clarification cannot adopt a fresh intent
+              // and resume its old checkpoint. Retire it, then dispatch anew.
+              agentTask.status = 'failed'; agentTask.resultSummary = 'failed_input_superseded';
+              agentTask.waitingForUser = false; agentTask.waitingReason = undefined;
+              agentTask.pendingUserInput = undefined;
+              const { persistCodeActTask, clearCodeActActive } = await import('../subagent/task-store.js');
+              const { clearCheckpoint, unregisterAgentChat } = await import('../agent/checkpoint.js');
+              getGlobalState().putTask(agentTask);
+              await persistCodeActTask(agentTask);
+              await unregisterAgentChat(chatId, agentTask.id);
+              await clearCodeActActive(chatId, agentTask.id);
+              if (agentTask.checkpointKey) await clearCheckpoint(agentTask.checkpointKey);
+              agentTask = null;
+            }
+          }
+          if (agentTask && agentTask.chatId === chatId
+            && (agentTask.status === 'running' || agentTask.status === 'queued' || agentTask.status === 'waiting_user')) {
+            if (pendingIntentEnabled()) {
+              withIds = withIds.filter(item => isTaskInputAuthor(agentTask, item));
+              if (!withIds.length) { busyChatIds.add(chatId); continue; }
+              // A running draft keeps its captured revision. Let it close under
+              // its send fence; requeue these inputs for a fresh generation.
+              if (agentTask.pendingIntent && !agentTask.waitingForUser && agentTask.status !== 'waiting_user'
+                && withIds.some(item => item.pendingIntent?.revision !== agentTask.pendingIntent!.revision
+                  || item.pendingIntent.intentId !== agentTask.pendingIntent!.intentId)) {
+                busyChatIds.add(chatId); continue;
+              }
+            }
             if (agentTask.waitingForUser || agentTask.status === 'waiting_user') {
+              if (pendingIntentEnabled()) {
+                withIds = withIds.filter(item => item.pendingIntent?.intentId === agentTask!.pendingIntent?.intentId);
+                if (!withIds.length) { busyChatIds.add(chatId); continue; }
+                const incoming = withIds.reduce((best, item) =>
+                  (item.pendingIntent?.revision ?? 0) > (best.pendingIntent?.revision ?? 0) ? item : best).pendingIntent;
+                const current = incoming && inspectPendingIntent(incoming);
+                if (!current || current.state !== 'pending' || current.currentRevision !== incoming!.revision) {
+                  busyChatIds.add(chatId); continue;
+                }
+                agentTask.pendingIntent = incoming;
+              }
               agentTask.waitingForUser = false;
               agentTask.waitingReason = undefined;
               agentTask.pendingUserInput = withIds.map((s) => ({
                 text: (s.textPreview ?? '').slice(0, 500),
                 from: s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人',
                 messageId: s.messageId,
+                userId: s.userId, messageThreadId: s.messageThreadId,
                 at: Date.now(),
               }));
               agentTask.status = 'queued';
               const { enqueueResumeCodeActJob } = await import('../subagent/queue.js');
               await enqueueResumeCodeActJob(agentTask);
+              getGlobalState().putTask(agentTask);
               logger.info({ chatId, agentTaskId, intercepted: withIds.length }, 'agent: clarification answer resumed waiting task');
             } else {
               for (const s of withIds) {
                 const from = s.payload?.['username'] ? `@${s.payload['username']}` : s.userId ? `uid:${s.userId}` : '某人';
+                // round 177（计划 (b) 的观测半边）：打标 + 分桶计数。
+                //
+                // 判据用全仓同一个寻址定义（detectDirectInteraction：点名 @bot /
+                // 昵称 / 回复 bot / 自身是命令），不新造第二套。
+                // 这里只有 textPreview 和 payload，拿不到原始 Update，
+                // 所以退化成文本判据：@bot / 昵称命中，或 payload 里有 replyTo。
+                // **判不出来的一律算未寻址**（宁可少拦，不可误拦）。
+                const raw = s.textPreview ?? '';
+                const p2 = s.payload ?? {};
+                const ident = getBotIdentity(chatId);
+                const repliedTo = typeof p2['replyTo'] === 'object' && p2['replyTo'] !== null
+                  && ident.uid > 0 && (p2['replyTo'] as Record<string, unknown>)['uid'] === ident.uid;
+                // 点名判据：@username 或任一昵称。用 getBotIdentity 拿当前身份，
+                // 不在模块顶层缓存——bot 身份可能被热更新。
+                const mentioned = isMentioningSelf(raw, ident.username, ident.nicknames ?? [], ident.uid);
+                const addressed = repliedTo || mentioned;
                 await pushInterrupt(agentTaskId, {
-                  text: (s.textPreview ?? '').slice(0, 500),
+                  text: raw.slice(0, 500),
                   from,
                   messageId: s.messageId,
+                  userId: s.userId, messageThreadId: s.messageThreadId,
+                  addressed,
                 });
+                incrCounter(
+                  addressed ? 'agent_interrupt_addressed_total' : 'agent_interrupt_background_total',
+                  { chat: String(chatId) },
+                );
+                // round 92：分桶也要有**日志行**。之前只有 counter，而 counter 是进程内的
+                // —— 重启归零，且 /metrics 只给当前值。round 91 查出
+                // agent_interrupt_addressed_total=3 / background=6，但日志 grep 0 行，
+                // 于是"这个分桶在生产有没有跑过"只能看一个会归零的数。
+                logger.info({
+                  chatId,
+                  agentTaskId,
+                  addressed,
+                  bucket: addressed ? 'addressed' : 'background',
+                  count: withIds.length,
+                }, addressed
+                  ? 'agent interrupt triage: addressed (directly at the bot)'
+                  : 'agent interrupt triage: background (chat noise while task runs)');
               }
               logger.info(
                 { chatId, agentTaskId, intercepted: withIds.length },
                 'agent: message routed to running long task as interrupt',
               );
             }
+            // This QQ batch has already reached the existing task. Do not let
+            // Meta see it again or enqueue a second task after the interrupt.
+            if (qqChat) skipChatIds?.add(chatId);
             continue;
           }
         }
@@ -523,17 +637,23 @@ async function autoDispatchL0(
       }
     }
 
+    const currentIds = pendingIntentEnabled() ? withIds.filter(item => {
+      if (!item.pendingIntent) return false;
+      const current = inspectPendingIntent(item.pendingIntent);
+      return current.state === 'pending' && current.currentRevision === item.pendingIntent.revision;
+    }) : withIds;
     const latest =
-      withIds.length > 0
-        ? withIds.reduce((best, cur) =>
-            (cur.messageId ?? 0) >= (best.messageId ?? 0) ? cur : best,
+      currentIds.length > 0
+        ? currentIds.reduce((best, cur) =>
+            (pendingIntentEnabled() ? (cur.pendingIntent?.revision ?? 0) >= (best.pendingIntent?.revision ?? 0)
+              : (cur.messageId ?? 0) >= (best.messageId ?? 0)) ? cur : best,
           )
         : siblings[0]!;
 
     // Heart pile-on: if CodeAct busy or bot just spoke, drop heart: items
     // (mark answered) so the next tick doesn't fire a near-duplicate reply.
     // L0/@ siblings still dispatch normally.
-    const heartOnly = siblings.every((s) => s.reason.includes('heart:'));
+    const heartOnly = siblings.every((s) => s.layer !== 'L0' && s.reason.includes('heart:'));
     if (heartOnly && (await shouldSuppressHeartAutoDispatch(chatId))) {
       try {
         const { markMessageAnswered } = await import('./answered.js');
@@ -561,8 +681,8 @@ async function autoDispatchL0(
           ? `uid:${latest.userId}`
           : '用户';
     const masterHint =
-      latest.userId && latest.userId === env().MASTER_UID
-        ? '对方是主人(@Zh_Taiwan)：亲近但不跪，指令真执行，蠢了照样嫌弃。'
+      latest.userId && isConversationOwner(chatId, latest.userId)
+        ? '对方是本会话已核验的主人：亲近但不跪，在本会话能力与权限内执行，蠢了照样嫌弃。'
         : '';
     const burstHint =
       withIds.length > 1
@@ -580,7 +700,7 @@ async function autoDispatchL0(
     if (replyTo?.uid) {
       try {
         const { getBotUid } = await import('../bot/bot.js');
-        const botUid = getBotUid();
+        const botUid = getBotUid(chatId);
         replyToIsSelf = !!botUid && replyTo.uid === botUid;
       } catch {
         /* optional */
@@ -600,7 +720,15 @@ async function autoDispatchL0(
     // Dispatch 期 timing gate：整组都是非 L0（heart 插话等被动回复）时，
     // 派发前过一道节奏闸（wait → 挂起等 resume；no_action/defer → 本次不说）。
     // 混入任何 L0 direct（@/DM/回复 bot）整组 bypass，对齐老 gate 语义。
-    if (siblings.every((s) => s.layer !== 'L0')) {
+    //
+    // HEART_DECIDES_TIMING (2026-09-18): heart 已经带着冷却/占比/近况事实
+    // 做过时机判断（它自己就是 gate，见 heart.ts:352 的 gateBypass 注释）。
+    // 再跑一次 dispatch gate 等于让模型白烧那次调用——实测 6h 内 68 次
+    // cooldown + 38 次 talk-value 短路都发生在 heart 决定 reply 之后。
+    // 开=heart 来源的派发不再重复过闸（模型自己控制）；关=旧行为。
+    const heartAlreadyJudged =
+      env().HEART_DECIDES_TIMING && siblings.every((s) => s.reason.includes('heart:'));
+    if (siblings.every((s) => s.layer !== 'L0') && !heartAlreadyJudged) {
       try {
         const { evaluateDispatchGate } = await import('./dispatch-gate.js');
         const gate = await evaluateDispatchGate({
@@ -608,6 +736,7 @@ async function autoDispatchL0(
           layer: latest.layer,
           reason: latest.reason,
           messageId: latest.messageId,
+          pendingIntent: latest.pendingIntent,
           userId: latest.userId,
           textPreview: latest.textPreview,
           messageThreadId: latest.messageThreadId,
@@ -683,14 +812,17 @@ async function requeueBusyL0(
     if (a.messageId && a.messageId > 0) {
       try {
         const { isMessageAnswered } = await import('./answered.js');
-        if (await isMessageAnswered(a.chatId, a.messageId)) continue;
+        if (!hasUnansweredIntentRevision(a.pendingIntent) && await isMessageAnswered(a.chatId, a.messageId)) continue;
       } catch {
         /* fail-open */
       }
       const inflight = state
         .listTasks(a.chatId)
         .filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'waiting_user')
-        .some((t) => t.quoteMessageIds?.includes(a.messageId!));
+        .some((t) => [...(t.quoteMessageIds ?? []), ...(t.relatedQuoteIds ?? []),
+          ...(t.pendingUserInput ?? []).flatMap(input => input.messageId ? [input.messageId] : [])].includes(a.messageId!)
+          && (!pendingIntentEnabled() || (t.pendingIntent?.intentId === a.pendingIntent?.intentId
+            && (t.pendingIntent?.revision ?? -1) >= (a.pendingIntent?.revision ?? 0))));
       if (inflight) continue;
     }
     toRequeue.push(a);
@@ -751,6 +883,63 @@ export async function runMetaSession(
   attention: AttentionItem[],
   callbacks: SubagentCallback[],
 ): Promise<{ digest: string | null; codeRan: boolean }> {
+  // Partition before diary interception, context reads or any LLM call. Merely
+  // tagging the final digest cannot undo disclosure in a mixed model context.
+  const scopes = new Map<number, { attention: AttentionItem[]; callbacks: SubagentCallback[] }>();
+  for (const original of attention) {
+    if (!checkCodeActActivation(original).allowed) continue;
+    const inspected = inspectMetaAttention(original);
+    if (inspected.status !== 'valid') {
+      if (inspected.status === 'unavailable' || !await holdMetaScopeInput('attention', original, inspected.reason)) {
+        const { getAttentionAccumulator } = await import('./attention.js');
+        await getAttentionAccumulator().requeue([original]);
+      }
+      continue;
+    }
+    const item = inspected.value;
+    if (item.layer === 'L1_CALLBACK' || item.reason.startsWith('callback:') || item.reason.startsWith('subagent_request:')) {
+      const binding = await inspectMetaTaskBinding(item.chatId, item.payload?.['taskId']);
+      if (binding.status !== 'valid') {
+        if (binding.status === 'unavailable' || !await holdMetaScopeInput('attention', original, binding.reason)) {
+          const { getAttentionAccumulator } = await import('./attention.js');
+          await getAttentionAccumulator().requeue([original]);
+        }
+        continue;
+      }
+    }
+    const scope = scopes.get(item.chatId) ?? { attention: [], callbacks: [] };
+    scope.attention.push(item);
+    scopes.set(item.chatId, scope);
+  }
+  for (const item of callbacks) {
+    if (!checkCodeActActivation(item).allowed) continue;
+    const inspected = await inspectMetaCallback(item);
+    if (inspected.status !== 'valid') {
+      if (inspected.status === 'unavailable' || !await holdMetaScopeInput('callback', item, inspected.reason)) {
+        await getGlobalState().enqueueCallbackAsync(item);
+      }
+      continue;
+    }
+    const scope = scopes.get(item.chatId) ?? { attention: [], callbacks: [] };
+    scope.callbacks.push(item);
+    scopes.set(item.chatId, scope);
+  }
+  const results: Array<{ digest: string | null; codeRan: boolean }> = [];
+  for (const [chatId, scope] of scopes) {
+    results.push(await runScopedMetaSession(chatId, scope.attention, scope.callbacks));
+  }
+  return {
+    // Do not recreate an unscoped mixed summary for a caller to reuse.
+    digest: results.length === 1 ? results[0]!.digest : results.length ? `scoped_sessions:${results.length}` : null,
+    codeRan: results.some((result) => result.codeRan),
+  };
+}
+
+async function runScopedMetaSession(
+  scopeChatId: number,
+  attention: AttentionItem[],
+  callbacks: SubagentCallback[],
+): Promise<{ digest: string | null; codeRan: boolean }> {
   if (attention.length === 0 && callbacks.length === 0) {
     return { digest: null, codeRan: false };
   }
@@ -761,11 +950,13 @@ export async function runMetaSession(
 
   // Hard-intercept user diary asks / diary:* nudges before Meta LLM (Subagent has no journal tool).
   const workAttention = await interceptDiaryAttention(attention, {
+    scopeChatId,
     dispatchedChatIds,
     chatLayer: maps.chatLayer,
     defaultQuotes: maps.defaultQuotes,
     defaultTargetUserIds: maps.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: maps.defaultPendingIntents,
   });
   let codeRan = dispatchedChatIds.size > 0;
 
@@ -807,17 +998,15 @@ export async function runMetaSession(
     return { digest: 'l0_auto_only', codeRan };
   }
 
-  const engine = getContextEngine('meta');
+  const engine = getContextEngine(`meta:${scopeChatId}`);
   const dreaming = await loadBackgroundDreaming();
 
-  // Resolve the dream journal channel link + numeric chatId for this session.
+  // Resolve the configured journal link without granting cross-chat sending.
   let journalChannelLink: string | null = null;
-  let journalChatId: number = 0;
   try {
-    const info = await getJournalChannelInfo();
-    if (info) {
+    const info = await getJournalChannelInfo({ sourceChatId: scopeChatId });
+    if (info?.chatId === scopeChatId) {
       journalChannelLink = info.link;
-      journalChatId = info.chatId;
     }
   } catch {
     /* non-critical */
@@ -837,8 +1026,8 @@ export async function runMetaSession(
       .join('; ')
       .slice(0, 240);
     if (digest) {
-      state.addDigest(digest);
-      persistDigest({ kind: 'meta', text: digest });
+      state.addDigest(digest, scopeChatId);
+      persistDigest({ kind: 'meta', text: digest, sourceChatId: scopeChatId });
     }
     logger.info(
       { callbacks: callbacks.length, alreadyDispatched: codeRan },
@@ -853,7 +1042,7 @@ export async function runMetaSession(
         typeof a.payload?.['username'] === 'string' && a.payload['username']
           ? `@${a.payload['username']}`
           : '';
-      const master = a.userId && a.userId === env().MASTER_UID ? ' 主人' : '';
+      const master = a.userId && isConversationOwner(a.chatId, a.userId) ? ' 主人' : '';
       return (
         `- [${a.layer} p=${a.pressure}] chat=${a.chatId} msg=${a.messageId ?? '-'} uid=${a.userId ?? '-'}${un ? ` ${un}` : ''}${master} reason=${a.reason}` +
         (a.textPreview ? ` text="${a.textPreview.slice(0, 120)}"` : '') +
@@ -871,12 +1060,11 @@ export async function runMetaSession(
 
   const workspaceBlock = await buildMetaWorkspaceBlock(metaAttention, callbacks);
 
-  // flag 开 → digest 注入改读 SQLite session_digests(全局叙事流,重启不丢);
-  // flag 关 → 维持内存 40 条旧路径。SQLite 读取失败时 recentPersistedDigests 返回 []。
+  // Both persistent and in-memory summaries must belong to this exact chat.
   const digestBlock = (
     env().DIGEST_PERSIST_ENABLED
-      ? recentPersistedDigests(6).map((d) => ({ at: d.createdAt * 1000, text: d.text }))
-      : state.recentDigests(6)
+      ? recentPersistedDigests(6, { sourceChatId: scopeChatId }).map((d) => ({ at: d.createdAt * 1000, text: d.text }))
+      : state.recentDigests(6, { sourceChatId: scopeChatId })
   )
     .map((d) => `- ${formatBeijingNowLine(new Date(d.at))} ${d.text.slice(0, 160)}`)
     .join('\n');
@@ -884,20 +1072,20 @@ export async function runMetaSession(
   const { prompt, manifest } = await engine.assemble([
     staticText('meta-system', META_SYSTEM),
     staticText('meta-persona-direction', dreaming || '（无人设方向文件）'),
-    ephemeralText('meta-master', buildMasterIdentityBlock()),
+    ephemeralText('meta-master', buildMasterIdentityBlock(scopeChatId)),
     deltaText('meta-digests', `## Recent session digests\n${digestBlock || '(none)'}`),
     ephemeralText('meta-attention', `## Attention set\n${attentionBlock || '(none)'}`),
     ephemeralText('meta-callbacks', `## Callbacks\n${callbackBlock}`),
     ephemeralText('meta-workspaces', workspaceBlock ? `## Scoped cognitive workspaces\n${workspaceBlock}` : ''),
     volatileText(
       'meta-now',
-      `## Now\n${formatBeijingNowLine()}\n${masterShortHint()}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
+      `## Now\n${formatBeijingNowLine()}\n${masterShortHint(scopeChatId)}\nL0/Heart 多半已 autoDispatch；只编排剩余 Attention/Callbacks。tone 默认短回；看日段。Write JS if needed.`,
     ),
     ...(journalChannelLink
       ? [
           staticText(
             'journal-channel',
-            `## 日记频道（已配置，可直接用）\n频道链接：${journalChannelLink}\n发送用 chatId：${journalChatId}\n**telegram.sendToChat(${journalChatId}, "内容", "图片路径") 可以直接发，bot 有权限。**`,
+            buildJournalCapabilityNote(journalChannelLink, 'meta'),
           ),
         ]
       : []),
@@ -929,7 +1117,16 @@ export async function runMetaSession(
             '根据剩余 Attention / Callbacks 做本轮编排。L2 默认沉默；dispatch 时务必 quotes:[msgId]，contentDirection 只写短方向不写台词。只在需要时写 js。',
         },
       ],
-      maxTokens: 1200,
+      // round 18（新 goal，用户："架构问题比上一个多太多"）：
+      // 这里原来写死 maxTokens: 1200。**Meta 编排是推理任务**，
+      // 而 stepfun 系的思维链把 1200 全烧光 → 空正文 →
+      // `claude: 空正文 —— 思维链吃光 max_tokens（截断）`。
+      // 白天实测 705 次截断、694 次 `heart LLM failed, fail-closed pass`、
+      // 2210 次 `all candidates skipped`——用户侧看到的是"没回复"。
+      //
+      // 不在这里调大数字：写死的值压过 usage/label 配置，
+      // 而配置在 .env 里、改完即生效。去掉写死让它落回去。
+      //（decision.ts 早在 round 6 就为同一件事去掉过写死，这边漏了。）
       temperature: 0.3,
     });
   } catch (err) {
@@ -946,12 +1143,14 @@ export async function runMetaSession(
   if (code) {
     try {
       await runMetaCode(code, {
+        scopeChatId,
         dispatchedChatIds,
         isAborted: () => aborted,
         chatLayer: metaMaps.chatLayer,
         defaultQuotes: metaMaps.defaultQuotes,
         defaultTargetUserIds: metaMaps.defaultTargetUserIds,
         defaultCognitiveAnchorEventIds: metaMaps.defaultCognitiveAnchorEventIds,
+    defaultPendingIntents: metaMaps.defaultPendingIntents,
       });
       codeRan = true;
     } catch (err) {
@@ -978,15 +1177,15 @@ export async function runMetaSession(
 
   const digest = extractDigest(text) ?? text.slice(0, 240);
   if (digest) {
-    state.addDigest(digest);
+    state.addDigest(digest, scopeChatId);
     // CGM: digest 永久落 SQLite(FTS 可检索);内存/Redis 写法保持不动做兼容。
     // flag 关时 persistDigest 内部 no-op,且永不抛出。
-    persistDigest({ kind: 'meta', text: digest });
+    persistDigest({ kind: 'meta', text: digest, sourceChatId: scopeChatId });
     // Persist for dream-journal cron (may run same process; Redis survives restart)
     try {
       const { getRedis } = await import('../db/redis.js');
       const redis = getRedis();
-      await redis.lpush('xxb:meta:digests', JSON.stringify({ at: Date.now(), text: digest.slice(0, 2000) }));
+      await redis.lpush('xxb:meta:digests', JSON.stringify({ at: Date.now(), sourceChatId: scopeChatId, text: digest.slice(0, 2000) }));
       await redis.ltrim('xxb:meta:digests', 0, 39);
     } catch {
       /* non-critical */

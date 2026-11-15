@@ -8,6 +8,8 @@ import type { UpdateLike } from '../../shared/types.js';
 interface UpdateMessage {
   text?: unknown;
   caption?: unknown;
+  entities?: unknown;
+  caption_entities?: unknown;
   chat?: { type?: unknown };
   reply_to_message?: {
     from?: { id?: unknown };
@@ -87,6 +89,16 @@ export function detectDirectInteraction(
   const text =
     (typeof msg.text === 'string' ? msg.text : '') ||
     (typeof msg.caption === 'string' ? msg.caption : '');
+
+  const entities = typeof msg.text === 'string' ? msg.entities : msg.caption_entities;
+  if (ctx.botUid > 0 && Array.isArray(entities) && entities.some(value => {
+    if (!value || typeof value !== 'object') return false;
+    const entity = value as { type?: unknown; offset?: unknown; length?: unknown; user?: { id?: unknown } };
+    return entity.type === 'text_mention' && entity.user?.id === ctx.botUid
+      && Number.isInteger(entity.offset) && Number.isInteger(entity.length)
+      && Number(entity.offset) >= 0 && Number(entity.length) > 0
+      && Number(entity.offset) + Number(entity.length) <= text.length;
+  })) return 'mention';
 
   if (text) {
     const trimmed = text.trim();

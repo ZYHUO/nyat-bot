@@ -1,47 +1,113 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ReplyOutput",
-  "description": "回复输出:单条对象,或 1-5 个元素的数组(多条短泡泡按顺序发出)",
-  "oneOf": [
-    { "$ref": "#/$defs/singleReply" },
-    {
-      "type": "array",
-      "items": { "$ref": "#/$defs/singleReply" },
-      "minItems": 1,
-      "maxItems": 5
-    }
-  ],
-  "$defs": {
-    "singleReply": {
-      "type": "object",
-      "required": ["replyContent", "targetMessageId"],
-      "properties": {
-        "replyContent": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096,
-          "description": "回复文本,纯文本为主。只发贴纸不发字时填 \"[sticker]\" 并必须同时给 stickerIntent"
-        },
-        "targetMessageId": {
-          "type": "integer",
-          "description": "回复指向的消息 ID(上下文里每条消息开头的 #数字)"
-        },
-        "stickerIntent": {
-          "oneOf": [
-            { "type": "string" },
-            { "type": "array", "items": { "type": "string" }, "maxItems": 3 }
-          ],
-          "description": "贴纸意图(英文词,如 \"laughing\" 或 [\"happy\",\"excited\"] 按优先级排列)。绝大多数回复省略"
-        },
-        "replyQuote": {
-          "type": "boolean",
-          "description": "false = 不引用任何消息直接发(主动开口/插嘴);省略 = 引用 targetMessageId 那条"
-        },
-        "hesitateBefore": {
-          "type": "boolean",
-          "description": "true = 发这句之前先停顿酝酿一拍(用在重点/转折/不好开口的那句;整组最多 1 处)"
-        }
+ "description": "回复输出:单条对象,或 1-5 个元素的数组(多条短泡泡按顺序发出)。媒体、位置、节奏由模型决定,宿主只做现实校验。",
+ "shape": "单个 object，或 1-5 个 object 的数组",
+ "properties": {
+  "replyContent": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 4096,
+   "description": "回复文本,纯文本为主。只发贴纸不发字时填 \"[sticker]\" 并同时给 media"
+  },
+  "targetMessageId": {
+   "type": "integer",
+   "description": "回复指向的消息 ID(上下文里每条消息开头的 #数字)"
+  },
+  "media": {
+   "type": "object",
+   "description": "这条要附的媒体及其相对文字的位置。什么时候配什么图由模型判断,没有频率配额。",
+   "required": [
+    "kind"
+   ],
+   "properties": {
+    "kind": {
+     "type": "string",
+     "enum": [
+      "sticker",
+      "photo",
+      "voice",
+      "poll",
+      "reaction"
+     ],
+     "description": "媒体类型"
+    },
+    "ref": {
+     "oneOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "maxItems": 3
       }
+     ],
+     "description": "sticker 填 intent(英文词);photo/voice 填沙盒相对路径;poll 填问题"
+    },
+    "options": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 10,
+     "description": "kind=poll 时的选项"
+    },
+    "emoji": {
+     "type": "string",
+     "description": "kind=reaction 时的 emoji,只能使用 Telegram 支持的那组;非法值会被丢弃"
+    },
+    "position": {
+     "type": "string",
+     "enum": [
+      "before",
+      "after",
+      "instead"
+     ],
+     "description": "before=先媒体后文字;after=先文字后媒体(默认);instead=只发媒体"
     }
+   }
+  },
+  "delayMs": {
+   "type": "integer",
+   "minimum": 0,
+   "maximum": 60000,
+   "description": "这条发出去之前的停顿(ms)。省略=默认打字节奏;0=立即发。超范围会被忽略而非截断。"
+  },
+  "typingGhost": {
+   "type": "boolean",
+   "description": "true = 打了一半决定算了:对方看到\"正在输入…\"但这条不发。只有模型能触发,宿主不会随机取消消息。"
+  },
+  "stickerIntent": {
+   "oneOf": [
+    {
+     "type": "string"
+    },
+    {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 3
+    }
+   ],
+   "description": "贴纸意图的兼容写法,等价于 media.kind=sticker。新代码用 media"
+  },
+  "replyQuote": {
+   "type": "boolean",
+   "description": "false = 不引用任何消息直接发(主动开口/插嘴);省略 = 引用 targetMessageId 那条"
+  },
+  "hesitateBefore": {
+   "type": "boolean",
+   "description": "true = 发这句之前先停顿酝酿一拍(用在重点/转折/不好开口的那句;整组最多 1 处)"
+  },
+  "voice": {
+   "type": "boolean",
+   "description": "兼容写法,等价于 media.kind=voice"
   }
+ },
+ "required": [
+  "replyContent",
+  "targetMessageId"
+ ]
 }

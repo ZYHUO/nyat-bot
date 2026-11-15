@@ -510,7 +510,7 @@ export async function generateReply(
       // heartWhy 在场时不再读 mind.lastThought —— 那是同一个念头,
       // [你的念头] 已注入,自我状态里再写一遍是双倍复读(review #14)。
       // 心流分支已拼装过 → 直接复用快照(审计 #38:不再二次取 4 个源)
-      const self = callOpts?.selfState ?? await composeSelfState(chatId);
+      const self = callOpts?.selfState ?? await composeSelfState(chatId, message.textContent || message.captionContent || '');
       const narration = callOpts?.heartWhy ? self.narrationNoThought : self.narration;
       // P1:自我反思(长期回复规律)并入「此刻的你」——两者都是"当下的我"的
       // 底色,语义重叠;合并后不再在静态块顶端单列一块离 CURRENT_MESSAGE 老远。
@@ -619,8 +619,15 @@ export async function generateReply(
   // L1: 内心独白压轴(order=99,离 CURRENT_MESSAGE 最近) —— 写手顺着决定
   // 接话的那个念头开笔,而不是失忆后重新猜一个角度。keep=2(必留,永不被裁)。
   // (旧 bug:念头用 priority 2 入列被排到块最前,正好和这条意图相反。)
-  const heartPart = callOpts?.heartWhy
-    ? `[你的念头] 你看到这条消息时心里想的是:「${callOpts.heartWhy}」。顺着这个念头说,别另起炉灶。`
+  // round 59：**空/无效的念头不注入**。
+  //
+  // cleanWhy 之后仍可能是空串（模型给了 `{}` 或只有 JSON 残片）。
+  // 空字符串在模板字符串里会渲染成 `心里想的是:「」。` —— 写手收到一个
+  // 空洞的指令，比没有这条更糟（它会去猜"空"是什么意思）。
+  // 所以：trim 后为空就不注入，让写手自己读上下文。
+  const heartWhyClean = (callOpts?.heartWhy ?? '').trim();
+  const heartPart = heartWhyClean
+    ? `[你的念头] 你看到这条消息时心里想的是:「${heartWhyClean}」。顺着这个念头说,别另起炉灶。`
     : undefined;
   // AGI L5 L4: ToM 心智状态 —— 回复前先想 3 行:对方想要什么/什么情绪/期待什么反应。
   // 白捡的收益:让回复更有针对性,而不是答录机。(群聊 + flag 开启)
@@ -698,11 +705,24 @@ export async function generateReply(
   // P3:direct 路径也可挂工具(REPLY_DIRECT_TOOLS_ENABLED,默认关)——只给只读子集,
   // 让普通闲聊能查实时信息/回忆,又不给闲聊写手建投票/定时器/指挥别的 bot 的副作用口子。
   const directToolsActive = effectiveReplyPath === 'direct' && env().REPLY_DIRECT_TOOLS_ENABLED;
+  // **只在 direct 路径挂合并写手，不在 planned 上挂。**
+  //
+  // 2026-09-21 实测：round 45 把 reply_tools 链修好之后，合并写手第一次真跑起来了
+  // （7 次成功，全部 label=spark13）。但它的延迟是 15103 / 28363 / 21503 / 32608 ms，
+  // 而从它完成到消息真正发出去还要再等 1942 / 19853 / 29782 / 43418 ms
+  // ——**端到端 19-43 秒**。而 7 次里 `toolsUsed` 全是 `[]`：一个工具都没用上。
+  //
+  // 修好之前它链全灭、立刻回退纯文本写手（3-9s），所以这个延迟一直被回退挡着。
+  // 修好之后挡没了，代价就露出来了：**为一个"可能用工具"的机会，让每条 planned
+  // 回复都多等 15-32 秒，而实际一个工具都没用。**
+  //
+  // direct 路径保留——那条本来就是"给闲聊开只读工具"的设计，用不用工具是它的目的；
+  // planned 路径回退纯文本写手，那儿要的是快。
   const mergedToolsActive =
     env().REPLY_MERGED_TOOLS_ENABLED &&
     !toolResultsBlock &&
     !orchestratorHandled &&
-    (effectiveReplyPath === 'planned' || directToolsActive);
+    directToolsActive;
   // direct 路径的只读工具白名单(副作用工具一律不给)
   const DIRECT_TOOL_SUBSET = [
     'SEARCH', 'FETCH', 'RECALL', 'QUERY_MEMORY', 'QUERY_PERSON_PROFILE',
@@ -771,7 +791,7 @@ export async function generateReply(
   }
 
   // 中期记忆 pinned 块(flag off 时为 null,零开销)
-  const midTermMemory = await getMidTermBlock(chatId).catch(() => null);
+  const midTermMemory = await getMidTermBlock(chatId, message.messageThreadId).catch(() => null);
   const cognitiveWorkspaceHint = await cognitiveWorkspacePromise;
 
   const buildMessageArgs = [
@@ -806,7 +826,7 @@ export async function generateReply(
     if (imgFileId) {
       try {
         const { fetchImageDataUrl } = await import('../vision.js');
-        const dataUrl = await fetchImageDataUrl(imgFileId);
+        const dataUrl = await fetchImageDataUrl(imgFileId, chatId);
         if (dataUrl) {
           for (let i = messages.length - 1; i >= 0; i--) {
             const m = messages[i]!;
@@ -855,7 +875,11 @@ export async function generateReply(
     if (mergedToolsActive) {
       const { generateReplyWithTools } = await import('./reply-with-tools.js');
       const merged = await generateReplyWithTools({
-        messages, usage, chatId, userId: message.uid, signal: interruptSignal,
+        messages, chatId, userId: message.uid, signal: interruptSignal,
+        // 合并写手走 AI SDK tools，只吃 OpenAI 兼容格式；reply 主链是 claude 原生。
+        // 用同一个 usage 会让链上每个 label 都被跳过（2026-09-21：195 次 exhausted、
+        // 0 次 finished）。REPLY_TOOLS_USAGE 可覆盖。
+        usage: env().REPLY_TOOLS_USAGE,
         toolsOnly: directToolsActive ? DIRECT_TOOL_SUBSET : undefined,
       });
       // strip <think> 后再判空:think-only 响应原始 content 非空但剥完是空,以前会漏过空兜底变静默

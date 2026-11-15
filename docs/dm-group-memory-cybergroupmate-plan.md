@@ -1,3 +1,5 @@
+> 历史设计记录：其中“单平台”和普通群 contextual 可跨群的假设已被替代。当前规则见[记忆来源边界](privacy-memory-boundaries.md)。
+
 验证完毕,三份报告的关键事实与源码一致(chroma.ts:240 强制 chatId 过滤且 payload 无 visibility 字段;person-identity.ts 只取 primary 群画像、chat_count>1 闸;manager.ts:73-77 反向索引仅 chatId<0 收录即结构性排除 DM;user-profile PK=(chat_id,uid);迁移号已到 0046,新迁移从 0047 起)。以下是落地方案。
 
 ---

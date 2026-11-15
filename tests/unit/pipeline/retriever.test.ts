@@ -1,17 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { FormattedMessage } from '../../../src/shared/types.js';
+import type { ScoredMessage } from '../../../src/memory/chroma.js';
 
 // Mock the context manager and token counter
 const mockGetRecent = vi.fn<(chatId: number, count: number) => Promise<FormattedMessage[]>>();
 const mockGetAll = vi.fn<(chatId: number) => Promise<FormattedMessage[]>>();
 const mockSearchMemory = vi.fn<
-  (chatId: number, query: string, topK: number, timeoutMs: number) => Promise<FormattedMessage[]>
+  (chatId: number, query: string, topK: number, timeoutMs: number) => Promise<ScoredMessage[]>
 >();
 const mockSearchMemoryByUser = vi.fn<
-  (uid: number, query: string, boundChatId: number, topK: number, timeoutMs: number) => Promise<Array<FormattedMessage & { sourceChatId?: number | null }>>
+  (uid: number, query: string, boundChatId: number, topK: number, timeoutMs: number) => Promise<ScoredMessage[]>
 >();
 
-const envValues: Record<string, unknown> = { MEMORY_CROSS_CONTEXT_ENABLED: false, MEMORY_VISIBILITY_ENABLED: false };
+const envValues: Record<string, unknown> = { BOT_TOKEN: '123:synthetic', MEMORY_CROSS_CONTEXT_ENABLED: false, MEMORY_VISIBILITY_ENABLED: false };
 vi.mock('../../../src/env.js', () => ({ env: () => envValues }));
 
 vi.mock('../../../src/pipeline/context/manager.js', () => ({
@@ -83,11 +84,11 @@ describe('Context Retriever', () => {
         textContent: 'hi',
       }),
     );
-    const semanticHit = makeMsg({
+    const semanticHit = { ...makeMsg({
       messageId: 501,
       timestamp: 1700001000,
       textContent: 'semantic hit',
-    });
+    }), sourceChatId: 1 };
     mockGetRecent.mockResolvedValue(recent);
     mockSearchMemory.mockResolvedValue([semanticHit]);
 
@@ -312,7 +313,8 @@ describe('Context Retriever', () => {
       envValues['MEMORY_VISIBILITY_ENABLED'] = true;
       mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1, timestamp: 1700000001 })]);
       mockSearchMemoryByUser.mockResolvedValue([
-        { ...makeMsg({ messageId: 50, timestamp: 1700000050, textContent: '别的群里说过的公开事' }), sourceChatId: -2002 },
+        { ...makeMsg({ messageId: 50, timestamp: 1700000050, textContent: '别的群里说过的公开事' }), sourceChatId: -2002,
+          visibility: 'public', sourcePlatform: 'telegram', sourceAccountId: '123' },
       ]);
       const result = await retrieveContext(
         1, makeMsg({ messageId: 3, uid: 1001, textContent: '我上次说的那个' }), 9999,
@@ -351,7 +353,8 @@ describe('Context Retriever', () => {
       mockGetRecent.mockResolvedValue([makeMsg({ messageId: 1, timestamp: 1700000001 })]);
       mockGetAll.mockResolvedValue([]);
       mockSearchMemoryByUser.mockResolvedValue([
-        { ...makeMsg({ messageId: 12345, textContent: '别处的旧发言' }), sourceChatId: -2002 },
+        { ...makeMsg({ messageId: 12345, textContent: '别处的旧发言' }), sourceChatId: -2002,
+          visibility: 'public', sourcePlatform: 'telegram', sourceAccountId: '123' },
       ]);
       const result = await retrieveContext(
         1, makeMsg({ messageId: 3, uid: 1001, textContent: 'hi' }), 9999, { mode: 'planned' } as never,
@@ -359,6 +362,20 @@ describe('Context Retriever', () => {
       expect(result.crossContext).toHaveLength(1);
       expect(result.merged.some((m) => m.messageId === 12345)).toBe(false);
       expect(result.contextStr).toContain('别处的旧发言');
+    });
+
+    it('does not inject unproven or contextual foreign material even if a retrieval adapter returns it', async () => {
+      envValues['MEMORY_CROSS_CONTEXT_ENABLED'] = true;
+      envValues['MEMORY_VISIBILITY_ENABLED'] = true;
+      mockSearchMemory.mockResolvedValue([{ ...makeMsg({ textContent: 'wrong local source' }), sourceChatId: -2002 }]);
+      mockSearchMemoryByUser.mockResolvedValue([
+        { ...makeMsg({ textContent: 'foreign contextual' }), sourceChatId: -2002, visibility: 'contextual' },
+        { ...makeMsg({ textContent: 'legacy public unproven' }), sourceChatId: -2002, visibility: 'public' },
+      ]);
+      const result = await retrieveContext(1, makeMsg({ uid: 1001 }), 9999);
+      expect(result.semantic).toEqual([]);
+      expect(result.crossContext).toEqual([]);
+      expect(result.contextStr).not.toMatch(/wrong local source|foreign contextual|legacy public unproven/);
     });
   });
 });

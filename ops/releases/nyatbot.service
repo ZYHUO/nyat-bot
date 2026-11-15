@@ -1,0 +1,26 @@
+[Unit]
+Description=NyatBot single state authority from a sealed release
+After=network-online.target nyatbot-release-recovery.service
+Requires=nyatbot-release-recovery.service
+
+[Service]
+Type=simple
+User=nyatbot
+Group=nyatbot
+WorkingDirectory=/var/lib/nyatbot/runtime
+EnvironmentFile=/etc/nyatbot/bot.env
+ExecStart=/usr/bin/python3 /opt/nyatbot-release-control/release-launcher.py /opt/nyatbot-releases /var/lib/nyatbot/runtime /opt/node22/bin/node
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=150
+KillMode=control-group
+SendSIGKILL=yes
+NoNewPrivileges=true
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/nyatbot/runtime/data /var/lib/nyatbot/runtime/var /var/lib/nyatbot/runtime/logs /var/lib/nyatbot/runtime/skills /var/lib/nyatbot/runtime/prompts /var/lib/nyatbot-release-requests
+
+[Install]
+WantedBy=multi-user.target

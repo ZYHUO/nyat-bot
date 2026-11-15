@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const envStore = {
   SANDBOX_ALLOWED_COMMANDS: '',
@@ -23,8 +23,23 @@ const HAS_BWRAP = existsSync('/usr/bin/bwrap');
 const HAS_BWRAP_RUNTIME = HAS_BWRAP && spawnSync('/usr/bin/bwrap', [
   '--unshare-all', '--die-with-parent', '--ro-bind', '/usr', '/usr', '--proc', '/proc', '--dev', '/dev', '--', '/bin/true',
 ], { stdio: 'ignore' }).status === 0;
+afterEach(() => vi.unstubAllEnvs());
 
 describe('buildBwrapSpec', () => {
+  it('never gives a child the host environment, including secrets and runtime injection flags', () => {
+    vi.stubEnv('NYATBOT_FAKE_SECRET_CANARY', 'synthetic-never-forward');
+    vi.stubEnv('NODE_OPTIONS', '--trace-warnings');
+    const spec = buildBwrapSpec('env', '/tmp/sb-test', 5000);
+    expect(spec.args).toContain('--clearenv');
+    // Execute a real child with the exact environment in the spawn contract.
+    // This proves environment isolation; bwrap namespace isolation is tested below.
+    const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify({canary:process.env.NYATBOT_FAKE_SECRET_CANARY??null,nodeOptions:process.env.NODE_OPTIONS??null,home:process.env.HOME}))'], {
+      env: spec.environment, encoding: 'utf8', timeout: 5000,
+    });
+    expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout)).toEqual({ canary: null, nodeOptions: null, home: '/sandbox' });
+    expect(child.stderr).not.toContain('synthetic-never-forward');
+  });
   it('binds only the sandbox cwd writable, isolates namespaces', () => {
     const spec = buildBwrapSpec('echo hi', '/tmp/sb-test', 5000);
     expect(spec.bin).toBe('/usr/bin/bwrap');
@@ -45,6 +60,15 @@ describe('buildBwrapSpec', () => {
 });
 
 describe('executeCommand isolation (live bwrap)', () => {
+  it.skipIf(!HAS_BWRAP_RUNTIME)('does not expose fake host credentials to the actual sandbox process', async () => {
+    // Requires a Linux host with usable bwrap user namespaces; no real secret is used.
+    vi.stubEnv('NYATBOT_FAKE_SECRET_CANARY', 'synthetic-never-forward');
+    const result = await executeCommand('env');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('NYATBOT_FAKE_SECRET_CANARY');
+    expect(result.stdout + result.stderr).not.toContain('synthetic-never-forward');
+    expect(result.stdout).toContain('HOME=/sandbox');
+  });
   it.skipIf(!HAS_BWRAP_RUNTIME)('sees an empty /root and cannot read host .env', async () => {
     // 沙盒内 /root 不存在(没绑定) → ls 失败; 宿主 /root/xxb-ts/.env 不可读
     const r1 = await executeCommand('ls /root 2>&1; echo LS_EXIT:$?');

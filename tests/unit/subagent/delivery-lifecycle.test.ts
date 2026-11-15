@@ -2,8 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 const sendMessage = vi.fn(async () => 101);
 const sendChatAction = vi.fn(async () => undefined);
+const intents = new Map<string, string>();
 vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage, sendChatAction }));
-vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ get: vi.fn(), set: vi.fn(), del: vi.fn(), hget: vi.fn() }) }));
+vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ get: vi.fn(), set: vi.fn(), del: vi.fn(),
+  hget: vi.fn(async (_key: string, id: string) => intents.get(id) ?? null),
+  hsetnx: vi.fn(async (_key: string, id: string, value: string) => {
+    if (intents.has(id)) return 0; intents.set(id, value); return 1;
+  }),
+  eval: vi.fn(async (_lua: string, _keys: number, _key: string, id: string, expected: string) => {
+    if (intents.get(id) !== expected) return 0; intents.delete(id); return 1;
+  }),
+}) }));
 vi.mock('../../../src/env.js', () => ({ env: () => ({
   BOT_TOKEN: 'x', BOT_USERNAME: 'bot', REDIS_URL: 'redis://127.0.0.1:6379/0', SQLITE_PATH: ':memory:',
   SANDBOX_ENABLED: false, CODEACT_BANNED_WORDS: [], PROMISE_LOOP_ENABLED: false,

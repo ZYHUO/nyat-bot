@@ -17,7 +17,7 @@ import type { DriveState } from './types.js';
 export interface ScoreWorld {
   masterSilentSec: number | null;
   lastCareAgoSec: number;
-  groups: { chatId: number; silentSec: number }[];
+  groups: { chatId: number; silentSec: number; /** bot 自己多久没在这个群开口（与群沉默不同） */ botSilentSec?: number }[];
   dueGoals: { id: number }[];
   rssNewCount: number;
   absentUsers: { chatId: number; uid: number }[];
@@ -28,11 +28,17 @@ export interface ScoreWorld {
 /** 候选动作（与 TickAction 同构的子集；Phase 3 只给已有动作打分，不发明新动作）。 */
 export type CandidateAction =
   | { type: 'care_master' }
-  | { type: 'group_speak'; chatId: number }
+  | { type: 'group_speak'; chatId: number; /** 它自己没说出口的念头（有则带上，LLM 可据此说话） */ about?: string }
   | { type: 'remember_user'; chatId: number }
   | { type: 'self_play' }
   | { type: 'check_goal'; goalId: number }
   | { type: 'share'; fromChatId: number; toChatId: number }
+  // 在场但静默的参与：**不对外发声**的自发动作。之前 tick 的候选集里
+  // 没有任何东西是"我可以在有人时做的事"——所有候选要么对外说，要么 quiet，
+  // 于是"自主"只能寄生在无人时。这两个类型让主体在有人的环境里也有事可做：
+  // 把起过的念头记下来、把想回头的事约下去。用户侧零可见变化。
+  | { type: 'note_impulse'; chatId: number; about: string }
+  | { type: 'remember_thread'; chatId: number; about: string }
   | { type: 'quiet' };
 
 const HOUR = 3600;
@@ -84,6 +90,12 @@ export function drivesServedBy(a: CandidateAction): DriveName[] {
       return ['competence'];
     case 'share':
       return ['curiosity', 'connection'];
+    // 内部动作不对外发声，因而不服务 connection/curiosity 的"社交"分量——
+    // 它们服务 autonomy（这是我自己的事），这正是"在场但静默的参与"该有的驱动归属。
+    case 'note_impulse':
+      return ['autonomy'];
+    case 'remember_thread':
+      return ['autonomy', 'curiosity'];
     case 'quiet':
       return [];
   }
@@ -101,6 +113,18 @@ export function scoreAction(a: CandidateAction, drives: Record<DriveName, number
  */
 export function suppress(a: CandidateAction, states: DriveState[]): string | null {
   if (a.type === 'quiet') return null;
+  // care_master（私聊主人）不受**全局** connection 饱和约束。
+  //
+  // connection 只在 group_speak 成功后被 satiate（全日志 3 次），每次封 6 小时；care_master 和
+  // remember_user 自己从不 satiate。于是群里说一句话，主人 DM 的关心也被连带封 6 小时：
+  // 全日志 care_master 被 satiated:connection 否决 39 次（39/39 都落在上一次 group_speak 之后
+  // 0.5–5.7h），而它自己只成功发出过 12 次。（对称的另一半早就处理过：care_master 成功后不 satiate
+  // connection，注释写着「DM 越关心，群里越安静」。）
+  //
+  // 不会因此失控：care_master 在本函数之外还有自己的护栏——lastCareAgoSec 最小间隔、
+  // masterSilentSec 硬规则、trench 闸、reward 闸、tryAcquireProactiveSlot、peddle 过滤。
+  // remember_user 是**群内**发言，仍和 group_speak 共享「别刷屏」的约束，所以保持不变。
+  if (a.type === 'care_master') return null;
   const served = drivesServedBy(a);
   for (const d of served) {
     const st = states.find((s) => s.name === d);

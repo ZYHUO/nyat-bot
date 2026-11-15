@@ -48,7 +48,11 @@ export async function reviewPathDecision(input: {
         ].join('\n\n'),
       },
     ],
-    maxTokens: 200,
+    // round 26: 去掉写死的 maxTokens: 200.
+    // 这个调用走 usage=judge, 而 judge 链头是 step-3.7-flash (reasoning 模型),
+    // 思维链把 200 全烧光 -> 空正文 -> rejectEmpty -> 整条链被试完.
+    // 和 round 19 修的 session.ts/shadow.ts 同一病: 调用方写死会压过
+    // usage/label 配置, 而配置在 .env 里、改完即生效.
     temperature: 0,
   });
   return parsePathReflectionResponse(result.content);

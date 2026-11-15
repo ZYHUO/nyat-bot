@@ -330,6 +330,18 @@ function requestOnce(opts: {
       (res) => {
         const chunks: Buffer[] = [];
         let total = 0;
+        let truncatedByCap = false;
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          if (signal) signal.removeEventListener('abort', onAbort);
+          resolve({
+            statusCode: res.statusCode,
+            headers: res.headers,
+            text: Buffer.concat(chunks).toString('utf8'),
+          });
+        };
         res.on('data', (chunk: Buffer) => {
           const room = maxBytes - total;
           if (room <= 0) return;
@@ -339,17 +351,19 @@ function requestOnce(opts: {
           } else {
             chunks.push(chunk.subarray(0, room));
             total = maxBytes;
+            truncatedByCap = true;
             res.destroy();
           }
         });
-        res.on('end', () => {
-          if (signal) signal.removeEventListener('abort', onAbort);
-          resolve({
-            statusCode: res.statusCode,
-            headers: res.headers,
-            text: Buffer.concat(chunks).toString('utf8'),
-          });
-        });
+        res.on('end', finish);
+        // 超量时我们自己 res.destroy() 了：Node 对被销毁的响应只发 aborted / close，**不发 end 也不发 error**。
+        // 原来只听 end → 超过 maxBytes 的响应永远不 settle，调用方只能等外层 AbortSignal（20s）才返回，
+        // 且返回的是 Aborted 而不是已经读到的前 maxBytes。真实 http 对照实验：只有 aborted+close。
+        // 只在**确实是我们因超量主动截断**时才在 close 上收尾。（真实 Node 下对端中途断开是
+        // aborted → error('aborted') → close，error 先到、已 reject，所以这个条件在今天的 Node 上
+        // 不是承重的；留着是为了不依赖事件顺序这个实现细节——万一 error 不再先于 close，
+        // 半截响应也不会被当成完整结果返回。）
+        res.on('close', () => { if (truncatedByCap) finish(); });
         res.on('error', (err) => {
           if (signal) signal.removeEventListener('abort', onAbort);
           reject(err);

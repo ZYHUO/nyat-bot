@@ -59,11 +59,34 @@ describe('hedge loser abort 不计熔断 (2026-08-07 outage)', () => {
     });
     const r = await callWithFallback(opts);
     expect(r.content).toBe('hedge-win');
-    // primary 失败 → 计一次失败(熔断需要)
-    expect(recordFailureMock.mock.calls.filter((c) => c[0] === 'primary-model')).toHaveLength(1);
+    // The winner may return before the aborted loser's asynchronous lease cleanup
+    // completes. Keep the exact failure count, but observe it after settlement.
+    await vi.waitFor(() => {
+      expect(recordFailureMock.mock.calls.filter((c) => c[0] === 'primary-model')).toHaveLength(1);
+    });
     // hedge 被 abort 是"输家",不是真实故障 → 绝不能计失败
     expect(recordFailureMock.mock.calls.filter((c) => c[0] === 'hedge-model')).toHaveLength(0);
     expect(recordSuccessMock.mock.calls.filter((c) => c[0] === 'hedge-model').length).toBeGreaterThan(0);
+  });
+
+  it('primary 真正失败、hedge 后来成功 → 真实失败仍记录一次', async () => {
+    let failPrimary!: (error: Error) => void;
+    let finishHedge!: () => void;
+    callModelMock.mockImplementation((label?: { name: string }) => {
+      if (label?.name === 'primary') {
+        return new Promise((_resolve, reject) => { failPrimary = reject; });
+      }
+      return new Promise(resolve => { finishHedge = () => resolve(res('hedge-win', 'hedge')); });
+    });
+    const call = callWithFallback(opts);
+    await vi.waitFor(() => expect(finishHedge).toBeTypeOf('function'));
+    failPrimary(new Error('actual primary network failure'));
+    await vi.waitFor(() => {
+      expect(recordFailureMock.mock.calls.filter((c) => c[0] === 'primary-model')).toHaveLength(1);
+    });
+    finishHedge();
+    expect((await call).content).toBe('hedge-win');
+    expect(recordFailureMock.mock.calls.filter((c) => c[0] === 'primary-model')).toHaveLength(1);
   });
 
   it('主跳赢、hedge 在飞被 abort → hedge 不计失败', async () => {

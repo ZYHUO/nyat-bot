@@ -12,13 +12,28 @@ vi.mock('../../../src/db/redis.js', () => ({
   }),
 }));
 
-const { clearQuoteClaim } = await import('../../../src/subagent/task-store.js');
+const { clearQuoteClaim, clearCodeActActive } = await import('../../../src/subagent/task-store.js');
 
 beforeEach(() => {
   getMock.mockReset();
   getMock.mockResolvedValue(null);
   delMock.mockReset();
   delMock.mockResolvedValue(1);
+});
+
+describe('local CodeAct settlement requires a confirmed unlock', () => {
+  it.each(['get', 'del'])('propagates %s failures in strict mode while preserving best-effort callers', async (operation) => {
+    const failing = operation === 'get' ? getMock : delMock;
+    failing.mockRejectedValue(new Error('synthetic Redis failure'));
+    await expect(clearCodeActActive(-100, 'task-a', { throwOnError: true })).rejects.toThrow('synthetic Redis failure');
+    await expect(clearCodeActActive(-100, 'task-a')).resolves.toBeUndefined();
+  });
+
+  it('still leaves a different task claim intact in strict mode', async () => {
+    getMock.mockResolvedValue('task-b');
+    await clearCodeActActive(-100, 'task-a', { throwOnError: true });
+    expect(delMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('CodeAct quote claim cleanup', () => {

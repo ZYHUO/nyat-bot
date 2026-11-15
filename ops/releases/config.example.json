@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "enabled": false,
+  "branch": "codex/onebot-qq",
+  "unit": "nyatbot.service",
+  "release_root": "/opt/nyatbot-releases",
+  "control_dir": "/var/lib/nyatbot-release-control",
+  "lock_file": "/var/lib/nyatbot-release-control/deploy.lock",
+  "request_dir": "/var/lib/nyatbot-release-requests",
+  "result_dir": "/var/lib/nyatbot-release-results",
+  "request_uid": 1001,
+  "checkpoint_dir": "/var/lib/nyatbot/runtime/data/shutdown-checkpoints",
+  "health_url": "http://127.0.0.1:3001/ready",
+  "startup_seconds": 180,
+  "observe_seconds": 30,
+  "poll_seconds": 1,
+  "approved_releases": ["REPLACE_WITH_VERIFIED_FULL_COMMIT"]
+}

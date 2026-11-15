@@ -4,6 +4,7 @@
 // invents one. It records the decision as a bounded read-only `observe` action;
 // the intended judge action remains in expectedOutcome for replay/audit.
 
+import { env } from "../env.js";
 import { createAgencyRun, dispatchAgencyRun } from "./agency-runtime.js";
 import { createAnchoredAgencyEnvelope } from "./agency-action-semantics.js";
 import type { AgencyRunStatus } from "./agency-runtime.js";
@@ -114,9 +115,15 @@ export async function recordAgencyProposal(
   if (!created.ok || !created.run)
     return { ok: false, reason: created.reason ?? "agency_run_unavailable" };
 
-  const dispatched = await dispatchAgencyRun(created.run.id, {
-    observe: observeAdapter,
-  });
+  // The local stub below used to be the only adapter: it returned
+  // `{recorded: true}` without reading anything, because the host had no real
+  // implementation to give it. `runtimeAdaptersFromHost()` supplies the actual
+  // observe/remember/correct/stop operations; the stub remains the fallback when
+  // the feature is off, so behaviour is unchanged by default.
+  const adapters = env().AGENCY_CONTROL_ADAPTERS_ENABLED
+    ? (await import('./agency-host-adapters.js')).runtimeAdaptersFromHost()
+    : { observe: observeAdapter };
+  const dispatched = await dispatchAgencyRun(created.run.id, adapters);
   const run = dispatched.run ?? created.run;
   return {
     ok: true,

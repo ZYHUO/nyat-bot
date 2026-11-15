@@ -2,7 +2,7 @@
 # ═════════════════════════════════════════════════════════════════════════════
 #  🐱 NyatBot 一键安装 (bootstrap)
 #
-#    curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/main/install.sh | sudo bash
+#    curl -fsSL https://raw.githubusercontent.com/ZYHUO/nyat-bot/nyatos/install.sh | sudo bash
 #
 #  它负责：装 git → 拉源码 → 交给安装向导 scripts/install.sh（交互填配置，全自动）。
 #  向导可可选安装 Rust 并编译 NyatDB native（https://github.com/ZYHUO/nyatdb ，公开仓库）；
@@ -14,14 +14,14 @@
 #  可调环境变量：
 #    NYATBOT_DIR   安装目录（默认 /opt/nyatbot）
 #    NYATBOT_REPO  仓库地址（默认 GitHub；国内可换 gitee/ghproxy 镜像）
-#    NYATBOT_BRANCH 分支（默认 main）
+#    NYATBOT_BRANCH 分支（默认 nyatos，即仓库默认分支）
 #    HTTPS_PROXY   代理（git/curl 都认）
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 REPO="${NYATBOT_REPO:-https://github.com/ZYHUO/nyat-bot.git}"
 DIR="${NYATBOT_DIR:-/opt/nyatbot}"
-BRANCH="${NYATBOT_BRANCH:-main}"
+BRANCH="${NYATBOT_BRANCH:-nyatos}"
 
 if [ -t 1 ]; then B='\033[1;36m'; G='\033[1;32m'; Y='\033[1;33m'; R='\033[1;31m'; Z='\033[0m'; else B=''; G=''; Y=''; R=''; Z=''; fi
 say()  { printf "${B}▶ %s${Z}\n" "$*"; }

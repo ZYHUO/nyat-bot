@@ -93,15 +93,19 @@ export function extractSvg(text: string): string | null {
 /**
  * 校验 + 修补 SVG。返回 null=不可救药。
  * 修补：补 xmlns（librsvg 没它不渲染）；剥 <?xml?> 头部以外的东西。
+ * 安全禁令跑在**剥掉注释之后**的副本上：教学 prompt 明令分层写注释
+ * （`<!-- 背景层 -->`），而注释里出现 "href=" 这种字样不代表真有外链——
+ * 拿带注释的原文去匹配会把一张好稿冤杀。
  */
 export function sanitizeSvg(raw: string): string | null {
   let svg = raw.trim();
   // 安全禁令：脚本/外部引用/foreignObject（librsvg 支持差且是注入面）
-  if (/<\s*script/i.test(svg)) return null;
-  if (/<\s*foreignObject/i.test(svg)) return null;
-  if (/<\s*image/i.test(svg)) return null;
-  if (/(xlink:href|href)\s*=/i.test(svg)) return null;
-  if (/<\s*animate/i.test(svg)) return null;
+  const probe = svg.replace(/<!--[\s\S]*?-->/g, '');
+  if (/<\s*script/i.test(probe)) return null;
+  if (/<\s*foreignObject/i.test(probe)) return null;
+  if (/<\s*image/i.test(probe)) return null;
+  if (/(xlink:href|href)\s*=/i.test(probe)) return null;
+  if (/<\s*animate/i.test(probe)) return null;
   if (!/xmlns\s*=/.test(svg.slice(0, svg.indexOf('>')))) {
     svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
   }
@@ -137,11 +141,20 @@ async function callArtist(
   const res = await callWithFallback({
     usage: env().ARTIST_USAGE,
     messages,
-    // 4096 足够一张精心 SVG（篇幅纪律 ≤350 行）；关键是 CodeAct 单轮只有
-    // CODEACT_TIMEOUT_MS(30s) 预算——token 越少生成越快，别给画师拖稿的空间。
-    maxTokens: 4096,
+    // 8000：一张 ≤350 行的精心 SVG 实测 4-6k token，**再给 reasoning 模型留一截**
+    // （它的思维链走同一个 completion 额度）。原来写 4096，实测两个后果：
+    //   · step-3.7-flash 4096 全烧在思维链上 → `claude: 空正文 —— 思维链吃光
+    //     max_tokens（截断）` → 整次调用作废（no_svg_in_output 的近亲）
+    //   · 同一个模型，额度翻倍到 8192 之后就能吐出完整 SVG 了
+    // 顺带：画摊子默认走**异步自动送达**（不占 CodeAct 单轮那 30s 预算），
+    // 所以这里该给质量让路，不是给速度。
+    maxTokens: 8000,
     temperature: 0.7,
     allowHedge: false,
+    // 空正文算这一跳**失败**，让它退回链上下一个 label，不要把空串当成功交回来。
+    // 不设这个时，reasoning 模型"思维链吃光额度"返的是 content:''——
+    // 调用方只看到 no_svg_in_output，而真正该做的（换 provider）没发生。
+    rejectEmpty: true,
   });
   return res.content ?? '';
 }

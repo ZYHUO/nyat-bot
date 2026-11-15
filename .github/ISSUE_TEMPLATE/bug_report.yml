@@ -1,0 +1,72 @@
+name: Bug report
+description: Something isn't behaving the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a bot token, API key, or `.env` contents here.** Redact them as `KEY=***`.
+  - type: input
+    id: version
+    attributes:
+      label: NyatBot version / commit
+      placeholder: v1.1 / 1a2b3c4
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      placeholder: "22.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider / model
+      options:
+        - StepFun
+        - OpenAI
+        - Claude / Anthropic
+        - Grok / xAI
+        - Other (describe below)
+    validations:
+      required: true
+  - type: dropdown
+    id: chattype
+    attributes:
+      label: Chat type
+      options:
+        - Private
+        - Small group
+        - Large group (100+ members)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add bot to a group
+        2. Send "..." 
+        3. Bot responds with ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact all keys and tokens.
+      render: shell
+  - type: textarea
+    id: flags
+    attributes:
+      label: Non-default env flags you set
+      description: NyatBot has ~500 env keys, so the ones you changed matter most.
+      render: shell

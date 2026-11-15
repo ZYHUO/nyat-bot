@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
 
 let db: Database.Database;
 const envMock = vi.fn();
@@ -26,7 +25,7 @@ const { getTask, listActiveTasks } = await import('../../../../src/agent/task-st
 
 beforeEach(() => {
   db = new Database(':memory:');
-  db.exec(readFileSync(join(__dirname, '../../../../migrations/0065_tasks.sql'), 'utf8'));
+  for (const file of readdirSync('migrations').sort()) if (file.endsWith('.sql')) db.exec(readFileSync('migrations/' + file, 'utf8'));
   envMock.mockReturnValue({ TASK_EXECUTOR_ENABLED: true });
 });
 

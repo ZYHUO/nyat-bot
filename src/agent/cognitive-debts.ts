@@ -286,7 +286,7 @@ function openDebtCandidates(scope: CognitiveScope, limit: number, asOf?: number)
 }
 
 function normalizedGrams(value: string): Set<string> {
-  const chars = [...value.toLocaleLowerCase().replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim()];
+  const chars = [...value.toLocaleLowerCase().replace(/[ -]/g, ' ').replace(/\s+/g, ' ').trim()];
   const grams = new Set<string>();
   for (let i = 0; i < chars.length - 1; i++) {
     if (/[\p{L}\p{N}]/u.test(chars[i]!) && /[\p{L}\p{N}]/u.test(chars[i + 1]!)) {
@@ -312,7 +312,7 @@ export function findRelatedDebtsScoped(
   options: DebtMatchOptions = {},
 ): CognitiveDebtMatch[] {
   if (!validDebtScope(scope)) return [];
-  const query = text.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 800);
+  const query = text.replace(/[ -]/g, ' ').trim().slice(0, 800);
   const anchors = options.anchors ?? {};
   const anchorTask = anchors.taskId?.trim().slice(0, 120) || undefined;
   const anchorSource = anchors.sourceEventId?.trim().slice(0, 240) || undefined;
@@ -390,7 +390,7 @@ export async function findRelatedDebtsScopedWithSemantic(
   options: SemanticDebtMatchOptions,
 ): Promise<CognitiveDebtMatch[]> {
   if (!validDebtScope(scope) || typeof options.semanticScore !== 'function') return [];
-  const query = text.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 800);
+  const query = text.replace(/[ -]/g, ' ').trim().slice(0, 800);
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 3), 1), 50);
   const deterministic = findRelatedDebtsScoped(scope, query, {
     ...options,

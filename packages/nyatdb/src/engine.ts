@@ -21,7 +21,7 @@ import {
 } from './format/codec.js';
 import { BufferPool } from './storage/buffer-pool.js';
 import { HeapFile } from './storage/heap.js';
-import { RedoWal } from './storage/wal.js';
+import { RedoWal, type WalRecord } from './storage/wal.js';
 import { CompactMsgIndex, loadMsgIndex, saveMsgIndex } from './index/msg-index.js';
 
 export interface ChatTip {
@@ -124,6 +124,10 @@ export class NyatDb {
       onFlush: (id, page) => heap.writePage(id, page),
     });
 
+    const replay = RedoWal.replay(join(opts.path, 'wal', 'redo.wal'));
+    // A crash can leave valid records beyond the last ENGINE checkpoint. New
+    // appends must not reuse their LSNs after recovery (same rule as native).
+    for (const record of replay) if (record.lsn >= startLsn) startLsn = record.lsn + 1n;
     const wal = RedoWal.open(join(opts.path, 'wal'), startLsn);
     const db = new NyatDb(opts.path, heap, wal, pool, syncEvery, chatRingMax);
     db.lsn = startLsn;
@@ -136,7 +140,7 @@ export class NyatDb {
     } else {
       db.rebuildMsgIndex();
     }
-    db.replayWal();
+    if (db.replayWal(replay)) db.rebuildRecoveredChatOwnership();
     db.warmChatRings();
     if (opts.verifyOnOpen) db.verify();
     return db;
@@ -276,16 +280,53 @@ export class NyatDb {
     this.setFreelistHead(pageId);
   }
 
-  private replayWal(): void {
-    const records = RedoWal.replay(join(this.path, 'wal', 'redo.wal'));
+  private replayWal(records: WalRecord[]): boolean {
+    let changedChats = false;
     for (const rec of records) {
       if (rec.lsn < this.checkpointLsn) continue;
-      this.applyWal(rec.type, rec.payload, rec.lsn, false);
+      this.applyWal(rec.type, rec.payload, rec.lsn);
+      if ([WalType.InsertTuple, WalType.LinkChatPage, WalType.TrimChat].includes(rec.type)) changedChats = true;
       if (rec.lsn + 1n > this.lsn) this.lsn = rec.lsn + 1n;
     }
+    return changedChats;
   }
 
-  private applyWal(type: WalType, payload: Buffer, lsn: bigint, _fromLive: boolean): void {
+  /** WAL can change page ownership; pre-replay tips must never survive under an old scope. */
+  private rebuildRecoveredChatOwnership(): void {
+    const byChat = new Map<number, number[]>();
+    for (let id = 1; id < this.heap.sizePages; id++) {
+      const page = this.pool.peek(id); // Include recovered dirty frames, not only disk bytes.
+      if (page.type !== PageType.Chat) continue;
+      const chatId = Number(page.buf.readBigInt64LE(32));
+      const ids = byChat.get(chatId) ?? [];
+      ids.push(id); byChat.set(chatId, ids);
+    }
+    this.chatTips.clear();
+    this.chatRecentRing.clear();
+    for (const [chatId, ids] of byChat) {
+      let count = 0;
+      for (let index = 0; index < ids.length; index++) {
+        const id = ids[index]!, frame = this.pool.get(id);
+        count += frame.page.nslots;
+        frame.page.setNext(ids[index + 1] ?? 0);
+        this.pool.unpin(id, true);
+      }
+      this.chatTips.set(chatId, { head: ids[0]!, tail: ids[ids.length - 1]!, count });
+    }
+    // Preserve valid index version choices made in WAL order, rather than
+    // replacing them with timestamp or page-ID order. Remove stale ownership.
+    const retained = new CompactMsgIndex();
+    this.msgIndex.forEach((chatId, messageId, pageId, slot) => {
+      if (pageId >= this.heap.sizePages) return;
+      const page = this.pool.peek(pageId);
+      if (page.type !== PageType.Chat || Number(page.buf.readBigInt64LE(32)) !== chatId) return;
+      const tuple = page.getTupleView(slot);
+      if (tuple && decodeChatTuple(tuple).messageId === messageId) retained.set(chatId, messageId, pageId, slot);
+    });
+    this.msgIndex = retained;
+  }
+
+  private applyWal(type: WalType, payload: Buffer, lsn: bigint): void {
     switch (type) {
       case WalType.InsertTuple: {
         // payload: pageId u32 | chatId i64 | tuple
@@ -294,26 +335,30 @@ export class NyatDb {
         const tuple = payload.subarray(12);
         this.heap.ensurePageCount(pageId + 1);
         const f = this.pool.get(pageId);
-        if (f.page.type === PageType.Free || f.page.nslots === 0) {
-          f.page.setType(PageType.Chat);
-          f.page.buf.writeBigInt64LE(BigInt(chatId), 32);
-        }
-        // idempotent-ish: only insert if not already present same messageId
         const msgId = decodeChatTuple(tuple).messageId;
         let slot = -1;
-        for (let s = 0; s < f.page.nslots; s++) {
-          const t = f.page.getTuple(s);
-          if (t && decodeChatTuple(t).messageId === msgId) {
-            slot = s;
-            break;
+        let dirty = false;
+        if (f.page.lsn < lsn) {
+          if (f.page.type === PageType.Free || f.page.nslots === 0) {
+            f.page.setType(PageType.Chat);
+            f.page.buf.writeBigInt64LE(BigInt(chatId), 32);
           }
-        }
-        if (slot < 0) {
+          if (f.page.type !== PageType.Chat || Number(f.page.buf.readBigInt64LE(32)) !== chatId) {
+            this.pool.unpin(pageId, false);
+            throw new Error('nyatdb_wal_chat_scope_mismatch');
+          }
+          // A repeated ID is a new append/revision. Only page LSN proves this
+          // particular WAL record has already landed; timestamp does not.
           slot = f.page.insert(tuple);
+          if (slot < 0) { this.pool.unpin(pageId, false); throw new Error('nyatdb_wal_chat_page_full'); }
+          f.page.setLsn(lsn); dirty = true;
+        } else if (f.page.type === PageType.Chat && Number(f.page.buf.readBigInt64LE(32)) === chatId) {
+          // Disk already contains this record (or a later one). Recover its
+          // exact surviving version's index location without appending again.
+          for (let s = 0; s < f.page.nslots; s++) if (f.page.getTupleView(s)?.equals(tuple)) slot = s;
         }
         if (slot >= 0) this.msgIndex.set(chatId, msgId, pageId, slot);
-        f.page.setLsn(lsn);
-        this.pool.unpin(pageId, true);
+        this.pool.unpin(pageId, dirty);
         break;
       }
       case WalType.LinkChatPage: {
@@ -323,15 +368,23 @@ export class NyatDb {
         const prevTail = payload.readUInt32LE(12);
         this.heap.ensurePageCount(pageId + 1);
         const f = this.pool.get(pageId);
-        f.page.setType(PageType.Chat);
-        f.page.buf.writeBigInt64LE(BigInt(chatId), 32);
-        f.page.setLsn(lsn);
-        this.pool.unpin(pageId, true);
+        const dirty = f.page.lsn < lsn;
+        if (dirty) {
+          f.page.setType(PageType.Chat);
+          f.page.buf.writeBigInt64LE(BigInt(chatId), 32);
+          f.page.setNext(0);
+          f.page.setLsn(lsn);
+        }
+        const owned = f.page.type === PageType.Chat && Number(f.page.buf.readBigInt64LE(32)) === chatId;
+        this.pool.unpin(pageId, dirty);
         if (prevTail) {
           const pf = this.pool.get(prevTail);
-          pf.page.setNext(pageId);
-          this.pool.unpin(prevTail, true);
+          const relink = pf.page.lsn < lsn && pf.page.type === PageType.Chat
+            && Number(pf.page.buf.readBigInt64LE(32)) === chatId;
+          if (relink) { pf.page.setNext(pageId); pf.page.setLsn(lsn); }
+          this.pool.unpin(prevTail, relink);
         }
+        if (!owned) break;
         const tip = this.chatTips.get(chatId) ?? { head: pageId, tail: pageId, count: 0 };
         if (!tip.head) tip.head = pageId;
         tip.tail = pageId;
@@ -518,7 +571,7 @@ export class NyatDb {
       link.writeUInt32LE(pageId, 8);
       link.writeUInt32LE(0, 12);
       const lsn = this.log(WalType.LinkChatPage, link);
-      this.applyWal(WalType.LinkChatPage, link, lsn, true);
+      this.applyWal(WalType.LinkChatPage, link, lsn);
       tip = this.chatTips.get(chatId)!;
     }
 
@@ -536,7 +589,7 @@ export class NyatDb {
       link.writeUInt32LE(newId, 8);
       link.writeUInt32LE(pageId, 12);
       const lsnLink = this.log(WalType.LinkChatPage, link);
-      this.applyWal(WalType.LinkChatPage, link, lsnLink, true);
+      this.applyWal(WalType.LinkChatPage, link, lsnLink);
       pageId = newId;
       f = this.pool.get(pageId);
       slot = f.page.insert(tuple);
@@ -584,6 +637,9 @@ export class NyatDb {
       while (pageId && !guard.has(pageId)) {
         guard.add(pageId);
         const f = this.pool.get(pageId);
+        if (f.page.type !== PageType.Chat || Number(f.page.buf.readBigInt64LE(32)) !== chatId) {
+          this.pool.unpin(pageId, false); throw new Error('nyatdb_chat_scope_mismatch');
+        }
         for (const t of f.page.allTuples()) collected.push(decodeChatTuple(t));
         const next = f.page.nextPageId;
         this.pool.unpin(pageId, false);
@@ -612,6 +668,9 @@ export class NyatDb {
       while (pageId && !guard.has(pageId)) {
         guard.add(pageId);
         const f = this.pool.get(pageId);
+        if (f.page.type !== PageType.Chat || Number(f.page.buf.readBigInt64LE(32)) !== chatId) {
+          this.pool.unpin(pageId, false); throw new Error('nyatdb_chat_scope_mismatch');
+        }
         for (const t of f.page.allTuples()) all.push(decodeChatTuple(t));
         const next = f.page.nextPageId;
         this.pool.unpin(pageId, false);
@@ -638,6 +697,7 @@ export class NyatDb {
     const pageId = (packed / 0x10000) | 0;
     const slot = packed & 0xffff;
     const page = this.pool.peek(pageId);
+    if (page.type !== PageType.Chat || Number(page.buf.readBigInt64LE(32)) !== chatId) return null;
     const tup = page.getTupleView(slot);
     if (!tup) return null;
     const t = decodeChatTuple(tup);
@@ -762,7 +822,7 @@ export class NyatDb {
     const expiresAt = ttlMs > 0 ? Date.now() + ttlMs : 0;
     const tup = encodeHot(key, v, expiresAt);
     const lsn = this.log(WalType.SetHot, tup);
-    this.applyWal(WalType.SetHot, tup, lsn, true);
+    this.applyWal(WalType.SetHot, tup, lsn);
   }
 
   hotGet(key: string): Buffer | null {
@@ -798,7 +858,7 @@ export class NyatDb {
   hotDel(key: string): void {
     const payload = Buffer.from(key, 'utf8');
     const lsn = this.log(WalType.DelHot, payload);
-    this.applyWal(WalType.DelHot, payload, lsn, true);
+    this.applyWal(WalType.DelHot, payload, lsn);
   }
 
   private deleteHotLocal(key: string, lsn: bigint): void {
@@ -852,7 +912,7 @@ export class NyatDb {
       payload,
     });
     const lsn = this.log(WalType.EnqueueImpulse, tup);
-    this.applyWal(WalType.EnqueueImpulse, tup, lsn, true);
+    this.applyWal(WalType.EnqueueImpulse, tup, lsn);
   }
 
   impulseDue(now = Date.now(), limit = 32): ImpulseTuple[] {
@@ -876,7 +936,7 @@ export class NyatDb {
   impulseAck(id: string): void {
     const payload = Buffer.from(id, 'utf8');
     const lsn = this.log(WalType.AckImpulse, payload);
-    this.applyWal(WalType.AckImpulse, payload, lsn, true);
+    this.applyWal(WalType.AckImpulse, payload, lsn);
   }
 
   private removeImpulseLocal(id: string, lsn: bigint): void {
@@ -906,7 +966,7 @@ export class NyatDb {
   bondUpsert(b: BondTuple): void {
     const tup = encodeBond(b);
     const lsn = this.log(WalType.UpsertBond, tup);
-    this.applyWal(WalType.UpsertBond, tup, lsn, true);
+    this.applyWal(WalType.UpsertBond, tup, lsn);
   }
 
   bondList(limit = 100): BondTuple[] {
@@ -939,7 +999,7 @@ export class NyatDb {
     if (vector.length !== RECALL_DIM) throw new Error(`recall expects ${RECALL_DIM}-d`);
     const tup = encodeRecall(opts.chatId, opts.messageId, opts.visibility ?? 1, vector);
     const lsn = this.log(WalType.UpsertRecall, tup);
-    this.applyWal(WalType.UpsertRecall, tup, lsn, true);
+    this.applyWal(WalType.UpsertRecall, tup, lsn);
   }
 
   recallSearch(

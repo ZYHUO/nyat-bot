@@ -19,10 +19,37 @@ export interface AILabel {
   timeout?: number;
   /** per-label maxTokens 覆盖(给推理模型放宽,防截断成空);调用方显式 maxTokens 优先。 */
   maxTokens?: number;
-  /** per-label temperature 强制覆盖(调用方显式值也让位):只接受固定温度的模型用
-   *  (如 kimi-k3 只允许 temperature=1)。 */
-  temperature?: number;
-  capabilities?: { vision?: boolean; functionCalling?: boolean };
+  /**
+   * per-label temperature 强制覆盖(调用方显式值也让位):只接受固定温度的模型用
+   * (如 kimi-k3 只允许 temperature=1)。
+   *
+   * round 12（新 goal）：**新增 `'omit'`** —— 这个 label 不要传 temperature 字段。
+   *
+   * 2026-09-22 实测 dshkimi（kimi-for-coding）：
+   *   temperature=0    → 400 `invalid temperature: only 1 is allowed`
+   *   temperature=0.7  → 403（连续调用触发限流，非参数问题）
+   *   temperature=1    → 200，但**同一个 judge prompt 6 次里 1 次翻车**（reply×5/pass×1）
+   *   不传该字段       → 200，同 prompt 6 次**全部一致**（reply×6），中位 4109ms
+   *
+   * 也就是说"只接受 1"不等于"必须传 1"——**省掉字段让它用服务端默认**，
+   * 比强行传 1 更确定。round 9 我用"只接受 1 ⇒ judge 有 temperature=0 语义冲突"
+   * 把它从确定性 usage 里排掉了，那个判断漏了"omit"这个选项。
+   *
+   * 为什么这重要：dshkimi 是池子里**唯一跨账号且够快**的 provider
+   * （api.kimi.com，中位 4.1s）。排掉它之后 judge 只剩 api.stepfun.com 的
+   * stepfun + step5 —— 单账号，账号级劣化会同时打中两个。
+   */
+  temperature?: number | 'omit';
+  /**
+   * 能力声明。undefined = 未知（**保留**，不因此排除——本仓库多数 provider
+   * 没声明过，一律按"没声明"处理，只有显式 false 才排除）。
+   *
+   * video（2026-09-21）：能不能吃 `video_url` content part。**必须显式 true 才能
+   * 进 video usage 的候选池**——因为"返回 200"不等于"看得懂"：实测 step-3.7-flash
+   * 收下 video_url 但 content 为空（token 全烧在 reasoning 上）。不声明的一律
+   * 不当视频供应商用。
+   */
+  capabilities?: { vision?: boolean; functionCalling?: boolean; video?: boolean };
   /** Smart Group auto-assign 质量分层: high=主力回复, medium=中等, low=廉价快。 */
   tier?: 'high' | 'medium' | 'low';
 }
@@ -59,7 +86,11 @@ export interface HedgeConfig {
 export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image'; image: string; detail?: 'low' | 'high' | 'auto' } // data URL or URL; detail 默认 high(stepfun 识图需要)
-  | { type: 'audio'; audio: string; format: string }; // raw base64 (no data: prefix) + container format (wav/mp3/ogg/m4a)
+  | { type: 'audio'; audio: string; format: string } // raw base64 (no data: prefix) + container format (wav/mp3/ogg/m4a)
+  // 视频（2026-09-21）。data URL（含 base64）——**不要**用 Telegram 的 file URL，
+  // 那个 URL 里带着 bot token，交给第三方等于泄密。
+  // 只有部分供应商认这个 part（实测 step-5-preview 可以），所以走独立 `video` usage。
+  | { type: 'video_url'; video_url: { url: string } };
 
 export interface AICallOptions {
   usage: string;
@@ -87,14 +118,36 @@ export interface AICallOptions {
    */
   maxTimeoutMs?: number;
   /**
+   * 全链都在冷却时，等最短的那个醒来再试一次。
+   *
+   * 2026-09-21 加。`callWithFallback` 默认只在**没有** maxTimeoutMs / signal 时才等
+   * （那两条是延迟敏感路径的标志）。但后台批任务两者都设了——它们不怕等，
+   * 却因此拿不到这个重试。实测 deep-reflection 02:44 一次 tick 15 个群全灭，
+   * err 全是 `All labels exhausted (all candidates cooling down)`，而最短冷却只有十几秒。
+   *
+   * 后台任务显式传 true 覆盖那两条跳过条件。上界仍是 15s。
+   */
+  waitIfCooling?: boolean;
+  /**
    * Skip LLM metrics emission for this call (llmEvents). Used by synthetic/diagnostic
    * traffic (e.g. cache warmup) so it doesn't pollute the per-usage metrics it's meant to observe.
    */
   suppressMetrics?: boolean;
   /**
-   * Request strict JSON output (OpenAI/DeepSeek response_format json_object). Only takes effect
-   * on the openai-format raw path AND when the prompt contains "json" (DeepSeek requirement);
-   * ignored otherwise. Used by the reply writer to eliminate malformed/single-quoted output.
+   * Request strict JSON output. Two mechanisms, depending on the label's API format:
+   *   · OpenAI-format raw path → `response_format: json_object` (needs "json" in the
+   *     prompt for DeepSeek)
+   *   · Claude-format (`/messages`) → an assistant message prefilled with `{`
+   *     (Anthropic's documented prefill technique; the returned text has the brace
+   *     stitched back on)
+   *
+   * 2026-09-21 之前这里只写了"openai-format raw path"，而 claude 分支根本不看这个
+   * 参数——于是 `FORMAT=claude` 的 label（含 stepfun，judge/summarize 的默认主标签）
+   * 上所有 jsonMode 调用都是静默无效：模型收到"请输出 JSON"的 prompt 却没有任何机制
+   * 逼它，回散文，调用方 JSON.parse 失败。实测 dreaming 805 次 0% 产出就是这个病。
+   *
+   * 用法：**prompt 要求 JSON 且调用方会 parse 它，就该传 true。** 别依赖 usage 级
+   * 配置——`reflection` usage 就没配，而 post-task-window 的 judge 要 parse JSON。
    */
   jsonMode?: boolean;
   /**
@@ -116,7 +169,15 @@ export interface AICallOptions {
    * 不传的调用点(cron / 后台任务)不计入任何群。
    */
   chatId?: number;
+  /** Host-only durable admission immediately before each real provider request.
+   * Presence opts this call into the bounded background contract: <=2 requests,
+   * <=1200 output tokens/request, <=45s total, no hedge/implicit retry/token uplift.
+   * Throw to refuse. Consumption is never refunded after an uncertain outcome. */
+  beforeProviderRequest?: () => void | Promise<void>;
 }
+
+export type AIProviderOptions = Pick<AICallOptions,
+  'maxTokens' | 'temperature' | 'signal' | 'jsonMode' | 'beforeProviderRequest'> & { timeout?: number };
 
 export interface AICallResult {
   content: string;

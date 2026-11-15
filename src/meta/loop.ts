@@ -1,23 +1,85 @@
 import { env } from '../env.js';
+import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { getAttentionAccumulator } from './attention.js';
 import { getGlobalState } from './global-state.js';
 import { runMetaSession } from './session.js';
 import type { AttentionItem } from './types.js';
+import { checkCodeActActivation } from '../subagent/activation-policy.js';
+import type { CodeActActivationReason } from '../subagent/activation-policy.js';
+import { holdMetaScopeInput, inspectMetaCallback } from './input-scope.js';
+import { getStartupOwnership, ownsMetaLoop } from '../startup/ownership.js';
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
+let stopping = false;
+let activeTick: Promise<void> | null = null;
+// Keep a failed archive write in-process for retry; it must never become runnable
+// Attention with a fresh timestamp. Deployment also archives the original queues.
+const pendingHolds = new Map<string, { kind: 'callback' | 'defer'; raw: string; chatId: number; reason: CodeActActivationReason }>();
+
+async function flushActivationHolds(): Promise<void> {
+  if (!pendingHolds.size) return;
+  try {
+    const { getRedis } = await import('../db/redis.js');
+    for (const [id, held] of pendingHolds) {
+      await getRedis().hsetnx('xxb:meta:activation-held', id, held.raw);
+      pendingHolds.delete(id);
+      logger.warn({ kind: held.kind, chatId: held.chatId, reason: held.reason }, 'Meta replay input held by activation policy');
+    }
+  } catch {
+    logger.warn({ pending: pendingHolds.size }, 'Meta activation archive unavailable; retaining rejected inputs in memory for retry');
+  }
+}
+
+async function allowReplay(kind: 'callback' | 'defer', input: { chatId: number; createdAt?: number }): Promise<boolean> {
+  const decision = checkCodeActActivation(input);
+  if (decision.allowed) return true;
+  const serialized = JSON.stringify(input);
+  const id = `${kind}:${createHash('sha256').update(serialized).digest('hex')}`;
+  if (!pendingHolds.has(id)) pendingHolds.set(id, {
+    kind, chatId: input.chatId, reason: decision.reason,
+    raw: JSON.stringify({ kind, reason: decision.reason, heldAt: Date.now(), input }),
+  });
+  await flushActivationHolds();
+  return false;
+}
 
 export async function metaTick(): Promise<void> {
+  if (stopping) return;
+  if (!ownsMetaLoop(getStartupOwnership())) return;
   if (ticking) return;
   if (!env().META_SUBAGENT_ENABLED) return;
   ticking = true;
+  const work = runMetaTick();
+  activeTick = work;
+  try {
+    await work;
+  } finally {
+    if (activeTick === work) activeTick = null;
+    ticking = false;
+  }
+}
+
+async function runMetaTick(): Promise<void> {
   let flushed: AttentionItem[] = [];
   try {
     const state = getGlobalState();
-    const callbacks = await state.drainCallbacks();
+    await flushActivationHolds();
+    const drainedCallbacks = await state.drainCallbacks();
+    const callbacks = [] as typeof drainedCallbacks;
     const acc = getAttentionAccumulator();
-    for (const cb of callbacks) {
+    for (const cb of drainedCallbacks) {
+      // Check the original timestamp before ingestAsync assigns a new one.
+      if (!await allowReplay('callback', cb)) continue;
+      const scope = await inspectMetaCallback(cb);
+      if (scope.status !== 'valid') {
+        if (scope.status === 'unavailable' || !await holdMetaScopeInput('callback', cb, scope.reason)) {
+          await state.enqueueCallbackAsync(cb);
+        }
+        continue;
+      }
+      callbacks.push(cb);
       await acc.ingestAsync({
         chatId: cb.chatId,
         layer: 'L1_CALLBACK',
@@ -34,12 +96,15 @@ export async function metaTick(): Promise<void> {
       try {
         const { drainDueMetaDefers } = await import('./defer.js');
         const due = await drainDueMetaDefers();
+        let replayed = 0;
         for (const d of due) {
+          if (!await allowReplay('defer', d)) continue;
           await acc.ingestAsync({
             chatId: d.chatId,
             layer: d.layer,
             reason: `defer_replay:${d.reason}`,
             messageId: d.messageId,
+            pendingIntent: d.pendingIntent, messageThreadId: d.messageThreadId,
             userId: d.userId,
             textPreview: d.textPreview,
             pressure: d.pressure,
@@ -49,9 +114,10 @@ export async function metaTick(): Promise<void> {
               deferCount: d.deferCount,
             },
           });
+          replayed++;
         }
-        if (due.length) {
-          logger.info({ count: due.length }, 'Meta defer: re-ingested due items');
+        if (replayed) {
+          logger.info({ count: replayed }, 'Meta defer: re-ingested due items');
         }
       } catch (err) {
         logger.warn({ err }, 'Meta defer drain in metaTick failed (non-critical)');
@@ -67,13 +133,12 @@ export async function metaTick(): Promise<void> {
     if (flushed.length) {
       await getAttentionAccumulator().requeue(flushed);
     }
-  } finally {
-    ticking = false;
   }
 }
 
 export function startMetaLoop(): void {
   if (timer) return;
+  stopping = false;
   if (!env().META_SUBAGENT_ENABLED) {
     logger.info('Meta loop not started (META_SUBAGENT_ENABLED=false)');
     return;
@@ -90,8 +155,20 @@ export function startMetaLoop(): void {
 }
 
 export function stopMetaLoop(): void {
+  stopping = true;
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
+}
+
+/** Timer ownership only; a running loop does not imply a successful model call. */
+export function isMetaLoopRunning(): boolean {
+  return timer !== null && !stopping;
+}
+
+/** Stop admissions, then wait for the current session and any failure requeue. */
+export async function drainMetaLoop(): Promise<void> {
+  stopMetaLoop();
+  await activeTick;
 }

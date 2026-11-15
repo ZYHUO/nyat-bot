@@ -1,0 +1,343 @@
+/**
+ * Nyat Trench · 行为金丝雀（Behavioral Canary）
+ *
+ * 论文 §9：删除不是里程碑，是结果。每个删除以 shadow 对等测试为前置。
+ * 但"对等"在七子系统深度耦合的现实里没法做成逐条消息的 A/B（一天 5842 万
+ * token 无余量，且新旧并行本身就要双倍判定调用）。
+ *
+ * 所以这里的对等是**行为层面的**：一组零 token、纯 SQL/日志的指标，每次删除
+ * 前后各跑一次，任何指标越带即回滚。每条指标都标注了"它守的是哪一次事故"。
+ *
+ * 用法：npx tsx scripts/trench-canary.mts [天数]
+ */
+
+import { readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+
+const DAYS = Number(process.argv[2] ?? 7);
+// 时间窗（可选）：--since HH:MM --until HH:MM（UTC）。用于对比"旁路期间 vs 之前"——
+// 整段聚合的数字分不出这两者，而时限旁路的意义恰恰在于它是一个有界窗口。
+const si = process.argv.indexOf('--since');
+const ui = process.argv.indexOf('--until');
+// 接受两种写法：`HH:MM`（今天 UTC）或 `YYYY-MM-DD HH:MM`。
+// 第二种是为了做对照组：**同群、同时段、不同日期**——上一轮发现发送率按小时在
+// 21%~74% 之间跳，拿整段平均或全站平均都无法归因，只有同时段不同日期能比。
+function parseAt(spec: string): number {
+  const datePart = spec.match(/^(\d{4}-\d{2}-\d{2})\s+(.+)$/);
+  const d = new Date();
+  if (datePart) {
+    d.setUTCFullYear(Number(datePart[1]!.slice(0, 4)), Number(datePart[1]!.slice(5, 7)) - 1, Number(datePart[1]!.slice(8, 10)));
+    spec = datePart[2]!;
+  }
+  const [h, m] = spec.split(':').map(Number);
+  d.setUTCHours(h ?? 0, m ?? 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+const SINCE = si > 0 ? parseAt(process.argv[si + 1]!) : null;
+const UNTIL = ui > 0 ? parseAt(process.argv[ui + 1]!) : null;
+const DB = process.env.SQLITE_PATH ?? './data/xxb.db';
+const LOG = 'logs/app.log';
+
+interface Row { [k: string]: unknown }
+function sql(q: string): Row[] {
+  const out = execSync(`sqlite3 -json "${DB}" "${q.replace(/"/g, '\\"')}"`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  return out.trim() ? JSON.parse(out) : [];
+}
+function logCount(pattern: string, day?: string): number {
+  try {
+    const txt = readFileSync(LOG, 'utf8');
+    if (!day) return txt.split(pattern).length - 1;
+    // 按天过滤：全量计数跨进程跨历史，是存量不是速率，灰度实验不可用。
+    let n = 0;
+    for (const line of txt.split('\n')) {
+      if (!line.includes(pattern)) continue;
+      try {
+        const d = JSON.parse(line) as { time?: number };
+        if (typeof d.time === 'number' && new Date(d.time).toISOString().slice(0, 10) === day) n += 1;
+      } catch { /* 跳过坏行 */ }
+    }
+    return n;
+  } catch {
+    return -1;
+  }
+}
+
+const since = Math.floor(Date.now() / 1000) - DAYS * 86400;
+
+// ── 1. 安全面：守卫命中（这些数字掉下去 = 事故补丁被误删）────────────
+const TODAY = new Date().toISOString().slice(0, 10);
+const guards = {
+  'anchor dedup（同消息只回一次）': logCount('dropped duplicate reply anchor', TODAY),
+  '语义重复（6 条同义问候事故）': logCount('rejected semantic repeat', TODAY),
+  '字面自复读': logCount('rejected self-echo (local)', TODAY),
+  '内部记账泄漏（已回复 #id 事故）': logCount('sendText_status_ack_leak', TODAY),
+  '工具占位符泄漏（invalid chatId 事故）': logCount('sendText_tool_leak', TODAY),
+};
+
+// ── 2. 活性面：说与不说 ────────────────────────────────────────
+const act = sql(`
+  SELECT COUNT(*) n,
+         SUM(CASE WHEN trigger_uid=0 THEN 1 ELSE 0 END) proactive,
+         SUM(CASE WHEN outcome='unknown' THEN 1 ELSE 0 END) unknown_outcome
+  FROM self_replies WHERE ts >= ${since}`)[0] ?? {};
+
+// ── 3. 决策面：五层判定的当前真实用量 ──────────────────────────
+const decisions = {
+  'heart 判定（pipeline/heart）': logCount('"msg":"Heart decision"'),
+  'Meta heart': logCount('"msg":"Meta heart:'),
+  'gate LLM 判定': logCount('"msg":"Timing gate decision"'),
+  'gate 解析失败': logCount('gate parse failed'),
+  'shadow 判定': logCount('"msg":"Bot message classified (shadow)"'),
+  'tick 选择 quiet': logCount('"msg":"unified tick: quiet"'),
+};
+
+// ── 4. 真人感： persona 指标 ───────────────────────────────────
+const replies = sql(`SELECT reply_text FROM self_replies WHERE ts >= ${since} AND reply_text IS NOT NULL`);
+const n = replies.length || 1;
+const qRate = replies.filter((r) => /[？?]/.test(String(r.reply_text))).length / n;
+const maoRate = replies.filter((r) => /喵[~。！？!?,，\s]*$/.test(String(r.reply_text).trim())).length / n;
+const shortRate = replies.filter((r) => String(r.reply_text).replace(/\s/g, '').length <= 10).length / n;
+
+// ── 5. 海沟自身 ───────────────────────────────────────────────
+const trench = {
+  'tick_verdict 落账': sql(`SELECT COUNT(*) n FROM cognitive_events WHERE type='tick_verdict'`)[0]?.n ?? 0,
+  'own_action_result': sql(`SELECT COUNT(*) n FROM cognitive_events WHERE type='own_action_result'`)[0]?.n ?? 0,
+  'Echo 已结算的主动发言': sql(`SELECT COUNT(*) n FROM self_replies WHERE trigger_uid=0 AND outcome<>'unknown'`)[0]?.n ?? 0,
+  '发送前硬闸拦截': logCount('BLOCKED by trench gate'),
+};
+
+function pct(x: number): string { return `${(x * 100).toFixed(1)}%`; }
+
+// 睡眠相位：没有它，"发送 0"读起来像故障，实际是按设计在睡。
+// 2026-09-19 我因此误诊了好几轮"没有流量"——真相是 getSleepPhase()='night'，
+// 消息全部进 pending 队列（日志里是 Meta path: asleep）。先报相位再报数字。
+let phaseLine = '';
+try {
+  const { getLifeState } = await import('../src/tracking/life-state.js');
+  const ls = getLifeState();
+  if (ls.state === 'sleeping') {
+    // 找出醒来时刻
+    let wakeAt = '';
+    // **按 5 分钟步进，不是 1 小时**：小时粒度会让金丝雀报"北京 08:40"
+    // 而 wakeup-check.mts（5 分钟粒度）报"08:12"——同一个事实两台仪器两个值。
+    for (let m = 0; m <= 600; m += 5) {
+      const t = new Date(Date.now() + m * 60000);
+      if (getLifeState(t).state !== 'sleeping') {
+        wakeAt = new Date(t.getTime() + 8 * 3600000).toISOString().slice(11, 16);
+        break;
+      }
+    }
+    phaseLine = `（当前睡眠相位：**在睡**，醒来约北京 ${wakeAt}——本时段的发送量为 0 是设计使然，不是故障）`;
+  } else {
+    phaseLine = '（当前清醒）';
+  }
+} catch { /* 读不到相位就不报，不影响其余指标 */ }
+
+console.log(`\n═══ Nyat Trench 行为金丝雀 · 近 ${DAYS} 天 ${phaseLine} ═══\n`);
+console.log(`【安全面】守卫命中·今天 ${TODAY}（下降 = 事故补丁被误删，立刻回滚）`);
+for (const [k, v] of Object.entries(guards)) console.log(`  ${String(v).padStart(6)}  ${k}`);
+console.log('\n【活性面】');
+console.log(`  发送总数 ${act.n ?? 0}｜其中主动 ${act.proactive ?? 0}｜outcome 未结算 ${act.unknown_outcome ?? 0}`);
+// 结算率：整个架构的瓶颈数字。它上不去，Echo 学不到、selfState 没有身体事实、
+// 决策点永远拿不到"我刚说的话有人接没人接"——一切删除都因此不能做。
+// 只看近 2 小时：历史积压（3201 条陈年 unknown）永远结不掉，
+// 把它算进分母等于用沉没成本惩罚现在的管道。要测的是"管道现在还通不通"。
+const settleRow = sql(`SELECT COUNT(*) n, SUM(CASE WHEN outcome<>'unknown' THEN 1 ELSE 0 END) s FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 7200}`)[0] ?? {};
+const settleRate = (settleRow.n ?? 0) > 0 ? Number(settleRow.s ?? 0) / Number(settleRow.n ?? 1) : 0;
+console.log(`  **结算率：${(settleRate * 100).toFixed(1)}%** （论文 §7.2 指标 3 目标 <10% unknown，即 >90% 结算）`);
+console.log(`  Echo 目标：主动发言的 unknown 占比 < 10%（论文 §7.2 指标 3）`);
+console.log('\n【决策面】五层判定的真实用量（判断哪层可以死）');
+for (const [k, v] of Object.entries(decisions)) console.log(`  ${String(v).padStart(6)}  ${k}`);
+console.log('\n【真人感】（真人基准：问号 4-6% / 句末喵 ~1% / ≤10字 68%）');
+console.log(`  问号率 ${pct(qRate)}｜句末喵 ${pct(maoRate)}｜≤10字 ${pct(shortRate)}`);
+// Phase 2 准入数：判定点与线上行为的一致率。
+// 三个已修正过的口径错误，按发现顺序：
+//   ① messageId join → 时间邻域 join（14.2% → 53.3%）
+//   ② 全时段 → 剔除睡眠相位（53.3% → 40.0%）
+//      夜间 bot 按设计静眠，shadow 不看睡眠相位照样说 speak，
+//      那些样本不是分歧；而且它们方向是**抬高**一致率（两边都说 silent）。
+//   ③ 早退 break 的 acted 循环 → .some()（两种写法对未排序输入不一致）
+// 最终口径：清醒时段 + 时间邻域 + .some() = 40.0%（近 7 天 1458 样本）。
+try {
+  const shSql = `SELECT chat_id, occurred_at, json_extract(fact_json,'$.shadowVerdict') AS v FROM cognitive_events
+    WHERE type='social_prediction' AND json_extract(fact_json,'$.schema')='shadow_ingress.v1'
+      AND json_extract(fact_json,'$.shadowVerdict') IN ('speak','silent') AND occurred_at >= ${Math.floor(Date.now() / 1000) - 7 * 86400}`;
+  const sh = sql(shSql);
+  const sendsByChat = new Map<number, number[]>();
+  for (const r of sql(`SELECT chat_id AS c, ts FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 7 * 86400}`)) {
+    const c = Number(r.c), t = Number(r.ts);
+    if (!Number.isSafeInteger(c)) continue;
+    const list = sendsByChat.get(c) ?? []; list.push(t); sendsByChat.set(c, list);
+  }
+  const acted = (c: number, at: number) => (sendsByChat.get(c) ?? []).some((t) => t >= at && t <= at + 120);
+  // 睡眠相位剔除：bot 在夜间按设计静眠，那些样本不是分歧（且会抬高一致率）。
+  const sendTs = (sql(`SELECT ts FROM self_replies WHERE ts >= ${Math.floor(Date.now() / 1000) - 7 * 86400} ORDER BY ts ASC`) as Array<{ ts: number }>);
+  const w: Array<[number, number]> = [];
+  for (const st of sendTs) {
+    const last = w[w.length - 1];
+    if (last && st.ts - last[1] <= 3600) last[1] = st.ts + 2700;
+    else w.push([st.ts - 2700, st.ts + 2700]);
+  }
+  const awake = (t: number) => w.some(([a, b]) => t >= a && t <= b);
+  let ag = 0, dis = 0, sleep = 0;
+  for (const r of sh) {
+    const c = Number(r.chat_id), at = Number(r.occurred_at);
+    if (!Number.isSafeInteger(c) || !Number.isSafeInteger(at)) continue;
+    if (!awake(at)) { sleep += 1; continue; }
+    const a = acted(c, at);
+    if ((r.v === 'speak') === a) ag++; else dis++;
+  }
+  const rate = ag + dis > 0 ? ag / (ag + dis) : 0;
+  console.log(`\n【Phase 2 准入】判定点一致率 ${(rate * 100).toFixed(1)}%（清醒口径，目标 >85%；近 7 天 ${ag + dis} 可比对样本，剔除睡眠相位 ${sleep}）`);
+  if (rate < 0.5 && ag + dis > 50) fail.push(`判定点一致率仅 ${(rate * 100).toFixed(0)}%——两个决策点仍在互相打架`);
+} catch { /* 该指标依赖 shadow 覆盖群，读不到就跳过 */ }
+
+// 决策栈有效性：每层实测终止了多少条。这是"能不能删"的唯一硬指标 ——
+// 一层的净贡献 = 它终止的条数里，去掉更廉价的共享层（denoise/floor/asleep）也能抓到的。
+// 2026-09-19 实测：legacy pipeline 终止 807 次，其中 796 次被 denoise/floor/asleep
+// 干掉，只有 11 次是 judge+gate+heart 这 3770 行的独有贡献。
+console.log('\n【决策栈有效性】每层实测终止条数（净贡献 = 减去廉价共享层后剩下的）');
+const denoise = logCount('Pipeline complete (denoise');
+const floorN = logCount('Pipeline complete (floor');
+const asleepN = logCount('Pipeline complete (asleep');
+const heartPass = logCount('Pipeline complete (heart=pass');
+const cheap = denoise + floorN + asleepN;
+const stackOnly = heartPass;
+console.log(`  廉价共享层（denoise/floor/asleep）：${cheap}`);
+console.log(`  决策栈独有终止（heart=pass）：${stackOnly}  ← 删它可能丢的就是这些`);
+console.log(`  legacy 实际发送：${logCount('"msg":"Reply sent"')}｜Meta 路径发送：${logCount('"msg":"host sendText"')}`);
+console.log(`  读法：stackOnly 占 legacy 总终止的 ${(cheap + stackOnly) > 0 ? ((stackOnly / (cheap + stackOnly)) * 100).toFixed(1) : '0'}%。`);
+console.log(`        这个数越小，"删决策栈"越接近无行为变化——但它永远不该归零后才删。`);
+
+// 分群对照：按群灰度实验（META_HEART_BYPASS_CHAT_IDS）的唯一可读出口。
+// 没有它，"旁路了某个群"和"没旁路"在数字上分不开——而这个会话的教训是：
+// 一个读不出组间差异的实验等于没做。
+// ── 定向债读数（实验 B 的主判据，跑之前就已写死）─────────────────────
+// 醒来后回复里有多少瞄向债主。基线实测 0%（13 次回复 / 0 命中）。
+// 论文 §九·补六：实验 B（TRENCH_DEBT_ATTENTION_ENABLED）预测 ≥25%。
+console.log('\n【定向债】债主命中率（实验 B 的主判据）');
+try {
+  const { execSync } = await import('node:child_process');
+  const debtors: Record<string, Set<number>> = {};
+  const keys = execSync("redis-cli -n 5 --scan --pattern 'xxb:trench:owed:*'", { encoding: 'utf8' })
+    .split('\n').filter(Boolean);
+  for (const k of keys) {
+    const chat = k.replace('xxb:trench:owed:', '');
+    const uids = execSync(`redis-cli -n 5 hkeys ${k}`, { encoding: 'utf8' })
+      .split('\n').filter(Boolean).map(Number);
+    debtors[chat] = new Set(uids);
+  }
+  const since = SINCE ?? (Math.floor(Date.now() / 1000) - DAYS * 86400);
+  const rows = sql(`SELECT chat_id, trigger_uid FROM self_replies WHERE ts >= ${since}`) as unknown as
+    Array<{ chat_id: number; trigger_uid: number | null }>;
+  let total = 0, hit = 0, noAnchor = 0;
+  for (const r of rows) {
+    total += 1;
+    const uid = Number(r.trigger_uid);
+    if (!(uid > 0)) { noAnchor += 1; continue; }
+    if (debtors[String(r.chat_id)]?.has(uid)) hit += 1;
+  }
+  console.log(`  窗口内回复 ${total} 条｜命中债主 ${hit}（${total ? ((hit / total) * 100).toFixed(0) : 0}%）｜无锚点 ${noAnchor}`);
+  console.log(`  债主集合 ${Object.values(debtors).reduce((s, x) => s + x.size, 0)} 人 / ${Object.keys(debtors).length} 群`);
+  // **基线不能写死**：第一版这里印"基线 0%"，那个 0% 来自醒来后 30-60 分钟的
+  // 窄窗（13 次回复）；全天/三天窗口实测都是 18%。把窄窗读数当基线与第 79 轮
+  // 那个写死的醒来时间是同一类错误。真正的基线就是这个窗口自己。
+  const rate = total ? (hit / total) * 100 : 0;
+  console.log(`  【当前窗口基线 ${rate.toFixed(0)}%】实验 B 预测 ≥25%｜若命中率升但发言率翻倍且关系分降 → 回滚`);
+  console.log('  注意：醒来后 30-60 分钟的窄窗读数曾低到 0%，全天稳定在 18% —— 取基线要用同一个窗口');
+} catch (e) {
+  console.log('  （定向债读数失败）', String(e).slice(0, 120));
+}
+
+console.log('\n【分群对照】每群的发送率（旁路实验的读数）');
+let bypassList: number[] = [];
+try {
+  const { env } = await import('../src/env.js');
+  bypassList = env().META_HEART_BYPASS_CHAT_IDS;
+} catch { /* 读不到名单就只报分群，不标旁路 */ }
+try {
+  const cutoff = SINCE ?? (Math.floor(Date.now() / 1000) - DAYS * 86400);
+  const untilClause = UNTIL ? ` AND ts < ${UNTIL}` : '';
+  const untilClauseEvt = UNTIL ? ` AND occurred_at < ${UNTIL}` : '';
+  const win = SINCE || UNTIL ? `（${new Date(cutoff * 1000).toISOString().slice(11, 16)}${UNTIL ? `–${new Date(UNTIL * 1000).toISOString().slice(11, 16)}` : '–现在'} UTC）` : '';
+  // **必须判断 indexOf > 0**：不传 --chat 时 indexOf 返回 -1，argv[-1+1]=argv[0]
+  // 是 node 可执行文件路径，Number() 得 NaN，SQL 报 "no such column: NaN"，
+  // 而它被外层 catch 吞掉只显示"分群读数失败"——一个静默失效的对照出口。
+  const chatIdx = process.argv.indexOf('--chat');
+  const onlyChat = chatIdx > 0 ? process.argv[chatIdx + 1] : undefined;
+  const perChat = onlyChat
+    ? [{ chat_id: Number(onlyChat), sends: Number((sql(`SELECT COUNT(*) AS sends FROM self_replies
+        WHERE ts >= ${cutoff}${untilClause} AND chat_id=${Number(onlyChat)}`)[0]?.sends ?? 0)) }]
+    : sql(`
+        SELECT chat_id,
+               COUNT(*) AS sends
+        FROM self_replies WHERE ts >= ${cutoff}${untilClause}
+        GROUP BY chat_id ORDER BY sends DESC LIMIT 10`);
+  console.log(`  时间窗：${win || `近 ${DAYS} 天`}`);
+  for (const r of perChat) {
+    const chat = Number(r.chat_id);
+    const inbound = Number((sql(`SELECT COUNT(*) AS n FROM cognitive_events
+      WHERE type='message_received' AND chat_id=${chat} AND occurred_at >= ${cutoff}${untilClauseEvt}`)[0]?.n ?? 0));
+    const sends = Number(r.sends);
+    const rate = inbound > 0 ? (sends / inbound) * 100 : 0;
+    const tag = bypassList.includes(chat) ? '  ← 旁路中' : '';
+    console.log(`  chat ${chat}: 发送 ${sends} / 入站 ${inbound} = ${rate.toFixed(0)}%${tag}`);
+  }
+  if (bypassList.length === 0) {
+    console.log('  （当前无旁路群——这是对照组本身）');
+  } else {
+    const fired = logCount('Meta heart: BYPASSED');
+    console.log(`  旁路实际生效次数：${fired}${fired === 0 ? '  ← 名单非空但零触发，灰度没生效！' : '  ← 灰度已生效'}`);
+  }
+} catch (err) { console.log('  （分群读数失败）'); }
+
+// 决策来源分布：live_outcome 账本此前**只写不读**（round 56 发现，与观测日志同类）。
+// 给它一个消费方，同时这正是 Phase 1 需要的路径归因——绕过心流的三条路各占多少。
+console.log('\n【决策来源】live_outcome 分布（近 24h）');
+try {
+  const cutoff = Math.floor(Date.now() / 1000) - 86400;
+  const rows = sql(`SELECT json_extract(fact_json,'$.outcome') AS o, COUNT(*) AS n
+    FROM cognitive_events
+    WHERE type='social_prediction' AND json_extract(fact_json,'$.schema')='shadow_live_outcome.v1'
+      AND occurred_at >= ${cutoff}
+    GROUP BY o ORDER BY n DESC`);
+  let tot = 0;
+  for (const r of rows) tot += Number(r.n);
+  for (const r of rows) {
+    const label: Record<string, string> = {
+      spoke: '说了（心流放行/直接）',
+      silent: '没说（心流否决）',
+      wait: '等（心流 wait）',
+      legacy: 'legacy 路径',
+      intercepted: '被拦截（绕过心流）',
+      asleep: '在睡（作息，不是心流决定）',
+    };
+    console.log(`  ${String(r.o).padEnd(12)} ${String(r.n).padStart(6)}  ${(Number(r.n) / Math.max(tot, 1) * 100).toFixed(0).padStart(3)}%  ${label[String(r.o)] ?? ''}`);
+  }
+  console.log(`  合计 ${tot}`);
+  if (!rows.some((r) => r.o === 'intercepted')) {
+    console.log('  （无 intercepted —— 绕过路径未入账，或该窗口内没有绕过事件）');
+  }
+} catch { /* 读不到就跳过 */ }
+
+console.log('\n【海沟自身】');
+for (const [k, v] of Object.entries(trench)) console.log(`  ${String(v).padStart(6)}  ${k}`);
+
+// ── 判定 ─────────────────────────────────────────────────────
+const fail: string[] = [];
+if ((act.n ?? 0) === 0) fail.push('零发送——系统可能被闸静音了');
+if (guards['anchor dedup（同消息只回一次 · 167 次基线）'] === 0 && logCount('"msg":"host sendText"') > 100) {
+  // 不是每条都需要 anchor，但完全为 0 且发送量不小，说明守卫可能失效
+}
+if (settleRate < 0.05 && (settleRow.n ?? 0) > 20) fail.push(`结算率 ${pct(settleRate)}——outcome 管道又断了，Echo/selfState 会全部失明`);
+if (qRate > 0.2) fail.push(`问号率 ${pct(qRate)} 远超真人基准——prompt 纪律退化`);
+if (maoRate > 0.45) fail.push(`句末喵 ${pct(maoRate)}——又开始每句都喵`);
+
+console.log('');
+if (fail.length === 0) {
+  console.log('✅ 无越带。可以继续下一个删除切片。');
+} else {
+  console.log('❌ 越带，回到上一个 commit：');
+  for (const f of fail) console.log(`   - ${f}`);
+}
+console.log('');

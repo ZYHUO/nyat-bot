@@ -87,7 +87,13 @@ export async function runSkillConsolidate(): Promise<void> {
 
     const consolidated = parseSkillConsolidateOutput(res.content ?? '');
     if (consolidated === null) {
-      logger.warn('skill-consolidate: output unparseable — skip');
+      // 带原始输出。2026-09-21：distiller 同一个病（输出被 max_tokens 切一半）
+      // 在没有原始输出的情况下跑了 1287 次才查出原因。所有"解析失败"的日志
+      // 都必须带原始输出，否则下一次仍然是查不出形状的一句结论。
+      logger.warn(
+        { len: (res.content ?? '').length, head: (res.content ?? '').slice(0, 300) },
+        'skill-consolidate: output unparseable — skip',
+      );
       return;
     }
     if (consolidated.length === 0) {
@@ -127,7 +133,20 @@ export async function runSkillConsolidate(): Promise<void> {
     }
 
     pruneBigSkills(env().SKILL_MAX_BIG);
-    logger.info({ proposed, archived: archivedIds.length }, 'skill-consolidate: done');
+    // Recycle proposals that were never verified. `prune.ts` documents itself as
+    // "幂等，可定期跑（cron 或 tick 里顺手调）" but had no caller, so proposals
+    // accumulated as 'proposed' forever. This cron already writes proposals, so
+    // it is the natural place to retire the stale ones.
+    let pruned = 0;
+    if (env().SKILL_PRUNE_ENABLED) {
+      try {
+        const { pruneExpiredProposals } = await import('../core/skills/prune.js');
+        pruned = pruneExpiredProposals().expired;
+      } catch (err) {
+        logger.debug({ err }, 'skill-consolidate: prune failed (non-critical)');
+      }
+    }
+    logger.info({ proposed, archived: archivedIds.length, pruned }, 'skill-consolidate: done');
   } catch (err) {
     logger.warn({ err }, 'runSkillConsolidate failed');
   }

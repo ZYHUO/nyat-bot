@@ -12,6 +12,7 @@ import { getRedis } from '../db/redis.js';
 import { callWithFallback } from '../ai/fallback.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
+import { incrCounter } from '../metrics/registry.js';
 
 const RELATIONSHIP_REFRESH_AFTER_SEC = 6 * 3600;
 const MAX_EPISODES_PER_CHAT = 60;
@@ -39,6 +40,12 @@ export interface RealtimeLearnInput {
 export async function learnFromReply(input: RealtimeLearnInput): Promise<number> {
   const e = env();
   if (!e.REALTIME_LEARN_ENABLED) return 0;
+  // 可观测性：2026-09-21 接上 Meta 主路径后发现 `realtime-learn: episode saved`
+  // 依然是 0 次——分不清是"没跑"还是"跑了但没什么可记"。
+  // 探针直接调 learnFromReply（一次有内容的来回）也返回 0，确认是后者：
+  // 模型判"不值得记"就输出 []。所以计数器按 run / saved 分开记，
+  // 报告里看得出现在到底是哪种。
+  incrCounter('realtime_learn_runs_total', { scope: 'chat' });
   const trigger = (input.triggerText ?? '').trim();
   const reply = (input.replyText ?? '').trim();
   // L2:太短的琐碎寒暄不抽(避免低价值 episode 稀释记忆)。触发+回复合计 < 24 字跳过。
@@ -82,6 +89,7 @@ export async function learnFromReply(input: RealtimeLearnInput): Promise<number>
         saved++;
       }
       if (saved > 0) {
+        incrCounter('realtime_learn_episodes_total', { scope: 'chat' });
         // 超额清理:保留 salience+recall 最高的 MAX_EPISODES_PER_CHAT 条
         db.prepare(
           `DELETE FROM group_episodes WHERE chat_id = ? AND id NOT IN (

@@ -56,7 +56,6 @@ export async function reviewChatExpressions(chatId: number): Promise<{ approved:
     const result = await callWithFallback({
       usage: 'judge',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      maxTokens: 400,
       temperature: 0,
     });
     const verdicts = parseGateVerdicts(result.content);

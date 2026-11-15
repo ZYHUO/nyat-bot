@@ -22,6 +22,7 @@ beforeEach(() => {
   db.exec(sql);
   db.exec(readFileSync(join(__dirname, '../../../migrations/0057_experience_verify.sql'), 'utf8'));
   db.exec(readFileSync(join(__dirname, '../../../migrations/0061_experience_share.sql'), 'utf8'));
+  db.exec("INSERT INTO episodes (id, task_id, chat_id, goal, outcome, summary, created_at) VALUES (1, 'scoped-fixture', 1, 'synthetic', 'done', 'synthetic', 1)");
 });
 
 describe('episodes store', () => {
@@ -56,6 +57,23 @@ describe('episodes store', () => {
 });
 
 describe('experience entries', () => {
+  it('filters proven episode sources before ranking/limit, retaining local memories while hiding DM and unknown history', () => {
+    const foreign = saveEpisode({ taskId: 'foreign-private', chatId: 42, goal: 'private', outcome: 'done',
+      summary: 'private', lessons: [], tags: [], turns: 1, segments: 1 })!;
+    for (let n = 0; n < 10; n++) saveExperienceEntries([
+      { kind: 'trick', content: `验收 范例 关键词 private-${n}`, tags: ['验收'], sourceEpisodeId: foreign },
+    ]);
+    saveExperienceEntries([
+      { kind: 'trick', content: '验收 范例 关键词 unknown', tags: ['验收'], sourceEpisodeId: 9999 },
+      { kind: 'trick', content: '验收 local result', tags: ['验收'], sourceEpisodeId: 1 },
+    ]);
+    expect(findRelevantExperience('验收 范例 关键词', 1, { boundChatId: 1 }).map(row => row.content)).toEqual(['验收 local result']);
+    expect(findRelevantExperience('验收', 10)).toEqual([]);
+    expect(findRelevantExperience('验收', 10, { boundChatId: -(2 ** 52 + 10000) })).toEqual([]);
+    const used = db.prepare('SELECT content FROM experience_entries WHERE use_count > 0').all() as { content: string }[];
+    expect(used.map(row => row.content)).toEqual(['验收 local result']);
+  });
+
   it('saves entries and FTS retrieval finds them by keyword', () => {
     const epId = saveEpisode({
       taskId: 't3', chatId: 1, goal: 'g', outcome: 'done',
@@ -65,7 +83,7 @@ describe('experience entries', () => {
       { kind: 'pitfall', content: '写完 HTML 文件后必须调 telegram.sendFile 交付，只说写好了用户看不到', tags: ['文件交付', 'HTML'], sourceEpisodeId: epId },
       { kind: 'trick', content: 'sandbox 里跑 Python 先用 computer.run 验证输出再交付', tags: ['验证', 'python'], sourceEpisodeId: epId },
     ]);
-    const hits = findRelevantExperience('帮我写个 HTML 页面', 3);
+    const hits = findRelevantExperience('帮我写个 HTML 页面', 3, { boundChatId: 1 });
     expect(hits.length).toBeGreaterThanOrEqual(1);
     expect(hits[0]!.content).toContain('sendFile');
     expect(hits[0]!.kind).toBe('pitfall');
@@ -78,7 +96,7 @@ describe('experience entries', () => {
     const before = db.prepare('SELECT use_count, last_used_at FROM experience_entries').get() as { use_count: number; last_used_at: number | null };
     expect(before.use_count).toBe(0);
     expect(before.last_used_at).toBeNull();
-    const hits = findRelevantExperience('交付', 3);
+    const hits = findRelevantExperience('交付', 3, { boundChatId: 1 });
     expect(hits.length).toBe(1);
     const after = db.prepare('SELECT use_count, last_used_at FROM experience_entries').get() as { use_count: number; last_used_at: number };
     expect(after.use_count).toBe(1);
@@ -89,15 +107,15 @@ describe('experience entries', () => {
     saveExperienceEntries([
       { kind: 'trick', content: 'some experience', tags: ['tag'], sourceEpisodeId: 1 },
     ]);
-    expect(() => findRelevantExperience('"unclosed quote ( ) : *', 3)).not.toThrow();
+    expect(() => findRelevantExperience('"unclosed quote ( ) : *', 3, { boundChatId: 1 })).not.toThrow();
   });
 
   it('empty/short query returns nothing', () => {
     saveExperienceEntries([
       { kind: 'trick', content: 'some experience content', tags: ['tag'], sourceEpisodeId: 1 },
     ]);
-    expect(findRelevantExperience('', 3)).toEqual([]);
-    expect(findRelevantExperience('a b', 3)).toEqual([]);
+    expect(findRelevantExperience('', 3, { boundChatId: 1 })).toEqual([]);
+    expect(findRelevantExperience('a b', 3, { boundChatId: 1 })).toEqual([]);
   });
 
   it('skips blank content entries on save', () => {

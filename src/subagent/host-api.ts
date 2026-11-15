@@ -1,12 +1,79 @@
+import { assertPendingIntentCurrent, confirmPendingIntent } from '../meta/pending-intent.js';
+import { readBackgroundEvidence, proposeBackgroundPublication, type BackgroundRun } from '../agent/background-publication.js';
+import { BACKGROUND_CAPABILITY_METHODS } from './capability-prompt.js';
+import type { PendingIntentRef } from '../meta/pending-intent.js';
+import { incrCounter } from '../metrics/registry.js';
+import { assertOutboundText, assertPublicSearchQuery } from '../shared/outbound-privacy.js';
+import { samePlatformAccount } from '../shared/privacy-scope.js';
+import { resolveOwnerDmReadContext } from '../shared/owner-memory-scope.js';
+import type { ChatDirectoryResult } from './chat-directory.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { sendMessage, sendSticker, reactToMessage, sendChatAction } from '../bot/sender/telegram.js';
-import { searchMemory, searchMemoryByUser } from '../memory/chroma.js';
+import { searchMemory, searchMemoryByUser, searchOwnerMemory } from '../memory/chroma.js';
+import type { OwnerMemoryHit, ScoredMessage } from '../memory/chroma.js';
 import { getReadyStickersByIntent } from '../knowledge/sticker/store.js';
 import { getPersonIdentity, buildCrossGroupInjection } from '../tracking/person-identity.js';
+import { isCrossContextPrivate } from '../memory/visibility.js';
 import { isDM } from '../shared/chat.js';
 import { isEchoOf } from '../shared/echo-text.js';
-import { markMessageAnswered } from '../meta/answered.js';
+import { findTopicRepeat } from './topic-repeat.js';
+import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
+import { isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
+import { DeliveryError, type DeliveryResult } from '../shared/delivery-result.js';
+import { createQQAttachmentApi } from './qq-attachments.js';
+import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
+import { createQQBubbleBudget, planQQTextBubbles, resolveQQReplyAnchor } from './qq-delivery-policy.js';
+
+/**
+ * round 89：**同一锚点短时间内重复回复要拦。**
+ *
+ * 2026-09-23 抓到现行（用户："前言不搭后语 + 重复回复"）：
+ * mid=13862 在 7 分钟内被回了 4 次——
+ *   10:53:13 '不然呢，不然本喵怎么看得懂那些缩写喵'
+ *   10:56:51 '不然本喵怎么知道 CN 是中国喵'
+ *   10:59:52 '本喵是啾咪，不跟莹抢DeepSeekV4F的名号'
+ *   11:00:18 '本喵不是DeepSeekV4F，本喵是啾咪喵'
+ *
+ * Redis 里 `xxb:meta:answered:<chat>:13862` 存着 **5 个时间戳**——
+ * `markMessageAnswered` 一直在记，但读者只有 Heart decision 的 prompt 注入
+ * （"这条你已经回过 N 次"）。那是**提示，不是闸**；而那 5 次发送里只有 1 次
+ * 经过心流，其余 4 次走 subagent / CodeAct / self-continue，压根不读账本。
+ *
+ * 三轮去重修的是三个形状：同任务内（round 1 repliedAnchors）、
+ * 同文本 30s（round 65 前缀去重）、只记不拦（round 52）。
+ * 这个形状——**跨任务、跨分钟、同一锚点、文本不同**——一次都没被挡。
+ *
+ * 近 6 小时量化：207 条带锚发送里 12 组是这种（5.8%）。
+ *
+ * 判据（保守）：同一锚点在 REPEAT_ANCHOR_WINDOW_SEC 内已被标过
+ * REPEAT_ANCHOR_MAX 次 → 拦住第 N+1 次。窗口故意短（3 分钟）：
+ * 隔了很久再回同一条是合理的（有人追问），密集重复才是问题。
+ */
+const REPEAT_ANCHOR_WINDOW_SEC = 180;
+const REPEAT_ANCHOR_MAX = 2;
+
+// round 171（计划 3c 提前）：**同一任务两次开口之间的最小间隔（秒）。**
+//
+// 现场（2026-09-23 15:05）：一个 CodeAct 任务在 51 秒内 4 次 sendText 调用，
+// 每次 1-3 个气泡，共 11 个气泡。用户抱怨"说话太应激"。
+//
+// 为什么是 task 级而不是别的（k3 2026-09-24 裁决）：
+//   · 不能用 `NYATOS_BUDGET_MIN_GAP_ADDRESSED_SEC`（chat 级全局阀门）——
+//     那是"群里隔多久开一次口"，管不了"一个任务自己连开几次"；
+//     而且 30s 是 round 68 按用户"33% 被咽回去"的抱怨否决不用的值。
+//   · 不能用 `AGENT_TASK_SEND_BUDGET`（任务终身总额）——它数的是**调用**，
+//     而 incident 是 4 次远未触 6 的顶；且调小会走 failsafe → raw sendMessage
+//     → 绕过全部闸，用户收到的是"没搞定"的假失败（比连发更难解释）。
+//   · task 级 burst 闸与上面两个都正交，**不可能回归 round 68**。
+//
+// 闸只管"调用"，不管分片——分片是同一句话的多个气泡（round 71 的理由）。
+const TASK_BURST_GAP_SEC = 12;
+
+// task 级"上次开口时间"的 Redis 键。只在一次 sendText 调用**完成**后写，
+// 不在分片上写——否则同一调用的第 2 片会把第 1 片当上一次。
+const taskLastSendKey = (taskId: string): string => `xxb:agent:lastsend:${taskId}`;
 import type { ApplyOutcome, MasterActionOutcome } from '../allowlist/bot-flow.js';
 import { appendCognitiveEvent } from '../agent/cognitive-events.js';
 import { recordPrediction } from '../agent/predictions.js';
@@ -58,6 +125,16 @@ function makeSendAck(
   };
 }
 
+/**
+ * 连发事实注记：同一任务里距上一条发出仅 gapSec 秒时，sendText 回执里附一句
+ * 人话事实，让模型自己意识到在刷屏/同义改写。不拦截——只报事实，说不说由它决定。
+ * gapSec 为 null（本任务第一条）时不加注记。导出走纯函数是为了可单测。
+ */
+export function buildPacingAckSuffix(gapSec: number | null): string {
+  if (gapSec === null || gapSec >= 90) return '';
+  return `（距你上一条仅 ${gapSec} 秒——同一个意思别换个说法再发；真有新东西再说）`;
+}
+
 /** Record a delivery without copying user-visible text into the event log. */
 function persistBotDeliveryEvent(input: {
   chatId: number;
@@ -70,7 +147,7 @@ function persistBotDeliveryEvent(input: {
   try {
     const result = appendCognitiveEvent({
       type: 'bot_delivery',
-      source: 'telegram',
+      source: isPlatformInternalId(input.chatId) ? 'host' : 'telegram',
       scope: input.taskId
         ? { visibility: 'task', taskId: input.taskId, chatId: input.chatId }
         : { visibility: 'chat', chatId: input.chatId },
@@ -78,6 +155,7 @@ function persistBotDeliveryEvent(input: {
       dedupeKey: `delivery:${input.taskId ?? input.chatId}:${input.messageId}`,
       ...(input.cognitiveAnchorEventId ? { causationId: input.cognitiveAnchorEventId } : {}),
       fact: {
+        platform: isPlatformInternalId(input.chatId) ? 'qq' : 'telegram',
         chatId: input.chatId,
         messageId: input.messageId,
         taskId: input.taskId ?? null,
@@ -117,9 +195,102 @@ export function stripApiCallLines(text: string): { clean: string; stripped: numb
   return { clean: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), stripped };
 }
 
+// Tool-result placeholders: what host tools return when a call cannot be served
+// (bad argument, disabled feature, empty result). They are scaffolding for the
+// MODEL to read, never text to send — observed 2026-09-18: the bot passed
+// "(invalid chatId)" straight into the master's DM after calling
+// chats.recentMessages with a bad id and echoing the result.
+//
+// Kept as one list rather than a loose regex so a new placeholder is a
+// deliberate addition, and the guard stays exact instead of over-matching
+// legitimate messages that merely contain parentheses.
+const TOOL_PLACEHOLDERS: readonly string[] = [
+  '(invalid chatId)',
+  '(invalid uid)',
+  '(context unavailable)',
+  '(memory unavailable)',
+  '(digest persist disabled)',
+  '(empty query)',
+  '(empty topic)',
+  '(empty)',
+  '(no hits)',
+  '(pixiv disabled)',
+  '(web search disabled)',
+  '(linux.sb disabled)',
+  '(那个群最近没有记录)',
+  '(没有找到相关记录)',
+  '(检索失败)',
+  '(读取失败)',
+  '(谈资库读取失败)',
+];
+
+/**
+ * 工具**调用**语法的泄漏形态。
+ *
+ * 2026-09-20 生产事故：bot 把
+ *   <web.search><args><query>…</query></args></web.search>
+ * 原样发进了群。上面的 TOOL_PLACEHOLDERS 全是**结果**占位符（(invalid chatId) 等），
+ * 兜底正则也只认 `(invalid …)` / `(… unavailable)`——调用语法整类漏掉。
+ *
+ * 而且它当时在日志里不可见：sendText 的 preview 只截 60 字符，调用标签在后面
+ * 就被截掉了。所以守卫没触发 + 日志没痕迹 = 一个完全静默的泄漏类。
+ *
+ * 匹配要保守：要求「开标签 + 同名闭标签」且标签名形状像工具名（小写/点/数字），
+ * 或者出现 `<args>`。避免把正常聊天里的 HTML 引用误杀。
+ */
+// 标签名必须含点：本系统所有工具名都是 `xxx.yyy`（web.search / chats.find /
+// admin.mute / meta.request，见 logs 的 "host <tool>" 行）。要求点号后，
+// `<b>粗体</b>` 这类合法 HTML 不会再被误杀。
+const TOOL_CALL_TAG = /<([a-z][a-z0-9_]*\.[a-z0-9_.]+)\b[^>]*>[\s\S]*?<\/\1>/;
+
+/** First tool-result placeholder found in `text`, or null. */
+export function findToolPlaceholder(text: string): string | null {
+  for (const ph of TOOL_PLACEHOLDERS) {
+    if (text.includes(ph)) return ph;
+  }
+  // 工具**调用**语法（上面那类事故）。返回一个稳定标签便于日志定位。
+  const call = TOOL_CALL_TAG.exec(text);
+  // 必须返回**真实匹配串**：调用方用 `clean.split(leak).join('')` 按字面剥离，
+  // 返回合成标签会让嵌入句子里的调用原样留在文本里（等于没修）。
+  if (call) return call[0];
+  if (text.includes('<args>')) return '<args>';
+  if (text.includes('</args>')) return '</args>';
+  // A bare parenthesised `invalid …` / `… unavailable` is the same class even if
+  // a new tool invents one we have not listed yet.
+  const generic = text.match(/\((?:invalid [^()]{1,40}|[^()]{1,40} unavailable|no [a-z ]{1,30} found)\)/i);
+  return generic ? generic[0] : null;
+}
+
+// ────────────────────────────────────────
+// 内部记账格式泄漏 — "（已回复 #3193）"
+// ────────────────────────────────────────
+//
+// 2026-09-19 05:22 生产事故：Group 里 bot 先正常回了「2698 换块屏…」，
+// 紧接着又发了一条 `（已回复 #3193）`。这不是工具占位符——全仓源码里根本没有
+// 这个字符串。真正的来源是模型自己：`runtime.endTask(summary)` 的记录格式
+// 在 session_digests 里有 1104 条，全部长成「已回复 @谁 #id，做了什么」。
+// 模型把这条**写给自己看的记账摘要**当成了用户消息发了出去。
+//
+// 所以这属于第三类泄漏：不是工具脚手架，是"内部状态记账"滑进了用户通道。
+// 只拦"整条就是一个状态记账"的极窄形态——带 `#id` 的状态词 + 无其它内容，
+// 这样「已读不回是吧」这类正常吐槽不会误伤。
+const STATUS_ACK_HEADS = '(已回复|已答复|已读|已发送|已收到|已转达|已送到|已处理|已看)';
+/** 整条消息 ∈ {（已回复 #3193）/ 已回复 3193 / (已回复 #3193) } */
+const STATUS_ACK_RE = new RegExp(
+  `^[（(]?\\s*${STATUS_ACK_HEADS}\\s*#?\\s*\\d{1,12}\\s*[)）,，]?\\s*$`,
+);
+
+/** 整条是否只是一个"我已处理 #id"式内部记账；是则返回匹配串，否则 null。 */
+export function findInternalStatusAck(text: string): string | null {
+  const t = text.trim();
+  if (!t || t.length > 40) return null;
+  return STATUS_ACK_RE.test(t) ? t : null;
+}
+
 import { createExecutionAudit, attachExecutionAudit, type AuditSnapshot } from '../agent/execution-audit.js';
 import { markTaskVisible } from '../agent/task-progress.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
+import { recordSelfReply } from '../tracking/self-history.js';
 import type { AcceptanceContract, AcceptanceCheck, AcceptanceResult } from '../agent/task-evidence.js';
 import * as sandboxPaths from '../sandbox/paths.js';
 
@@ -134,6 +305,8 @@ export interface HostApi {
     sendFile: (path: string, caption?: string) => Promise<{ messageId: number }>;
     /** 把沙盒里的图片当**照片**发（内联显示，发图首选；文档/代码文件才用 sendFile）。 */
     sendPhoto: (path: string, caption?: string) => Promise<{ messageId: number }>;
+    readFile?: (handle: string) => Promise<{ fileName: string; mimeType: string; text: string; truncated: boolean }>;
+    sendTextFile?: (name: string, text: string) => Promise<{ messageId: number }>;
     /** Synthesize + send a voice message (TTS). Falls back to {skipped} when TTS disabled. */
     sendVoice: (text: string) => Promise<{ messageId: number } | { skipped: true; reason: string }>;
     /**
@@ -172,10 +345,44 @@ export interface HostApi {
     /** 置顶/取消置顶。pin 返回 pinnedPreview（实际被 pin 消息的前 80 字）——立刻核对，错了 unpin 重 pin。 */
     pin: (messageId: number) => Promise<{ ok: boolean; pinnedPreview: string }>;
     unpin: (messageId: number) => Promise<{ ok: boolean }>;
+    /**
+     * 踢人（ban + 立即 unban = Telegram 真正的"请出群"）。**默认不可用**：
+     * 要 ANTIAD_KICK_ENABLED，或该群已授权反广告（群主在群里说"开反广告"即可）。
+     * 与 bots.command 共用同一把钥匙。不可逆——对方要自己加回来，所以是最后手段。
+     */
+    kick: (uid: number, opts?: { deleteMessages?: boolean }) => Promise<{ ok: boolean }>;
+    /**
+     * 群主**自助**开关本群反广告。requesterUid 必须是本群管理员/群主，
+     * 否则抛 admin_not_group_admin。开了之后 Frame 才出现 [噪声] 行和 [授权] 行。
+     */
+    setAntiAd: (
+      on: boolean,
+      opts?: { minutes?: number; requesterUid?: number },
+    ) => Promise<{ ok: boolean; chatId: number; on: boolean; minutes?: number }>;
   };
-  /** 群目录（承诺闭环配套）：按**群名片段**找群。空命中返回指路字符串（找错对象的自救提示）。 */
+  /**
+   * 借力别的 bot（bots.command）—— 尤其是**回复式代发**。
+   *
+   * 为什么需要它：别的 bot 回执上的 inline 按钮（nmbot 的「通过 / 拒绝 /
+   * 拒绝并举报骚扰」）我们点不了——Telegram 的 callback_query 只能由真人点击
+   * 产生，没有 API 能合成一次点击。但那些 bot 同时认命令，其中几条"必须回复
+   * 某条消息才生效"。回复那条消息把命令发出去，效果就等于有人按了那个按钮。
+   *
+   * 不传 replyToMessageId = 普通代发（查股价/IP/歌那类，闸在 tryDelegateCommand）；
+   * 传了 = 回复式代罚（闸更严：与 admin.kick 同一把群主授权 + 每群每小时上限）。
+   */
+  bots: {
+    command: (opts: {
+      bot: string;
+      command: string;
+      args?: string;
+      /** 必填才会走回复式代罚；必须是最近 60 条里真实存在的 messageId。 */
+      replyToMessageId?: number;
+    }) => Promise<{ ok: boolean; text: string }>;
+  };
+  /** 群目录元数据与正文读取分别授权；查找结果包含范围、来源和不确定性。 */
   chats: {
-    find: (query: string) => Promise<Array<{ chatId: number; title: string }> | string>;
+    find: (query: string) => Promise<ChatDirectoryResult>;
     /** 读另一个群的最近消息（本 bot 自己的上下文库，只读）。查「ta 回话了吗」用。 */
     recentMessages: (chatId: number, limit?: number) => Promise<string>;
   };
@@ -251,6 +458,12 @@ export interface HostApi {
     search: (query: string) => Promise<string>;
     /** 本地 RSS 谈资库的最新条目（源/标题/链接）——找「我之前分享过的新闻出处」先翻这里。 */
     feed: () => Promise<string>;
+    /**
+     * 宿主侧抓取一个 http(s) 文本资源（RSS/JSON/CSV/HTML…，≤512KB）并写进沙盒路径。
+     * 沙盒本身没有网络——要处理外部数据：先 web.fetchToFile，再 computer.run 里的脚本读那个文件。
+     * 返回 { ok, path, bytes, truncated } 或 { ok:false, reason }。
+     */
+    fetchToFile: (url: string, path: string) => Promise<{ ok: boolean; path?: string; bytes?: number; contentType?: string; truncated?: boolean; reason?: string }>;
   };
   /** Pixiv 公开全年龄搜图（只读；图片下载到沙盒路径，发送走 telegram.sendPhoto）。 */
   pixiv: {
@@ -271,6 +484,8 @@ export interface HostApi {
     request: (args: { action: string; detail?: string }) => Promise<{ queued: boolean; action: string }>;
   };
   runtime: {
+    readPublicationEvidence: (request: { kind: 'message'; messageId: number }) => ReturnType<typeof readBackgroundEvidence>;
+    proposePublication: (text: string, handles: string[]) => ReturnType<typeof proposeBackgroundPublication>;
     endTask: (summary: string) => void;
     setAcceptance: (checks: AcceptanceCheck[]) => void;
     verifyAcceptance: () => Promise<AcceptanceResult>;
@@ -278,6 +493,8 @@ export interface HostApi {
     didSendText: () => boolean;
     /** A final delivery was explicitly sent or the task was ended. */
     didProduceFinal: () => boolean;
+    /** Unacknowledged QQ delivery closes this host; never treat it as a final receipt. */
+    hasUnknownDelivery?: () => boolean;
     /** An intermediate delivery happened without ending the task. */
     didSendIntermediate: () => boolean;
     /** The last delivery kind, if any. */
@@ -299,6 +516,20 @@ export interface HostApi {
     drainUnviewedResults?: () => string[];
     /** 工作记忆：记下「在等什么/答应了什么」，30 分钟自动过期。 */
     setScratch: (text: string) => Promise<void>;
+    /**
+     * 跨天的未了事：明确答应过、或明确在等的（"明天告诉你"）。
+     * 与 setScratch 的区别：那是本次对话的工作记忆（30 分钟），这是能记到明天的。
+     * 只记**明确承诺**——随口说的话不该变成明天的开场白。
+     */
+    rememberThread: (note: string, kind?: 'promised' | 'waiting') => Promise<void>;
+    /**
+     * 自己约自己："这事我过几分钟再想想" / "我打算晚点回去看一眼"。
+     * 这是 bot 唯一能主动发起未来的动作——不像 cron（host 定时）或 tick（周期
+     * 轮询），这是**它自己决定什么时候再想一件事**。到点后由宿主在下次心跳时
+     * 把这条唤醒呈现在它眼前（不是宿主替它做，是把"你当时约的事"还给它）。
+     * delaySec 有上下限（MIN/MAX_WAKE_DELAY_SEC），约得太近/太远会被夹住。
+     */
+    scheduleSelfWake: (about: string, delaySec?: number) => void;
     /** 事办完了清掉（prefix 匹配，省略 = 全清）。 */
     clearScratch: (prefix?: string) => Promise<void>;
     /**
@@ -343,6 +574,7 @@ function buildComputerApi(
       const { executeCommand } = await import('../sandbox/terminal.js');
       const v = await executeCommand(String(command));
       noteUnviewed?.(`computer.run(${String(command).slice(0, 40)})`, v);
+      countTool('computer.run');
       return v;
     },
     async writeFile(path: never, content: never) {
@@ -377,6 +609,7 @@ function buildComputerApi(
       const { browserGetText } = await import('../sandbox/browser.js');
       const v = await browserGetText(selector ? String(selector) : undefined);
       noteUnviewed?.('computer.getText', v);
+      countTool('computer.getText');
       return v;
     },
     async eval(js: never) {
@@ -407,10 +640,20 @@ export function createHostApi(
     relatedQuoteIds?: number[];
     isClosed?: () => boolean;
     taskId?: string;
+    backgroundRun?: BackgroundRun;
+    pendingIntent?: PendingIntentRef;
     /** User target used for prediction calibration dimensions. */
     targetUserId?: number;
     /** Max sendText calls (default 2; work mode may pass 5). */
     maxTextSends?: number;
+    /**
+     * 每发成功一条就调一次 —— executor 用它把发送数累计到 task.sendsUsed，
+     * 让预算**跨段**生效（原来每段重建 host，textSent 归零，6 条/段的限额
+     * 乘上 10 段就是 60 条，等于没拦）。
+     */
+    onSend?: () => void;
+    /** Called before returning an unknown delivery error to the guest. */
+    onDeliveryUnknown?: (code: string) => void | Promise<void>;
     /** Max sendFile calls (default unlimited; self-play passes 1). */
     maxFileSends?: number;
     /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
@@ -437,6 +680,8 @@ export function createHostApi(
   let ended = false;
   let textSent = 0;
   let finalSent = false;
+  let deliveryUnknown = false;
+  let deliveryTail: Promise<void> = Promise.resolve();
   let intermediateSent = false;
   let lastDeliveryKind: DeliveryKind | undefined;
   let waitingForUser = false;
@@ -450,12 +695,14 @@ export function createHostApi(
   let currentPlan: string[] | null = null;
   let planDirty = false;
   let lastSentNorm = '';
+  let lastTextSentAt = 0;
   let metaRequested = false;
   // 承诺闭环：本任务发出过的文字（backstop 扫承诺措辞用）、跨群送达次数、是否已立 goal。
   const sentTexts: string[] = [];
   let crossSends = 0;
   let goalAdded = false;
   const maxTextSends = opts.maxTextSends ?? 2;
+  const qqTextBudget = isPlatformInternalId(chatId) ? createQQBubbleBudget(maxTextSends) : undefined;
   const maxFileSends = opts.maxFileSends ?? Number.POSITIVE_INFINITY;
   const pendingBookkeeping: Promise<unknown>[] = [];
   /** In-flight telegram/web ops — models often forget `await` before endTask. */
@@ -469,9 +716,10 @@ export function createHostApi(
    */
   const promiseBackstop = async (): Promise<void> => {
     try {
-      if (!env().PROMISE_LOOP_ENABLED) return;
+      if (!env().PROMISE_LOOP_ENABLED || opts.backgroundRun) return;
       if (goalAdded || crossSends > 0) return;
       if (sentTexts.length === 0) return;
+      assertPendingIntentCurrent(opts.pendingIntent);
       const said = sentTexts.map((t) => t.slice(0, 200)).join('\n');
       const { callWithFallback } = await import('../ai/fallback.js');
       const res = await callWithFallback({
@@ -489,6 +737,7 @@ export function createHostApi(
         maxTimeoutMs: 8_000,
         allowHedge: false,
       });
+      assertPendingIntentCurrent(opts.pendingIntent);
       const m = (res.content || '').match(/\{[\s\S]*\}/);
       if (!m) return;
       let verdict: { promise?: boolean; topic?: string };
@@ -499,7 +748,13 @@ export function createHostApi(
       }
       const topic = String(verdict.topic ?? '').trim().slice(0, 60);
       if (!verdict.promise || !topic) return;
-      const { createGoal } = await import('../agent/goals.js');
+      const [{ createGoal }, { createDebt }] = await Promise.all([
+        import('../agent/goals.js'), import('../agent/cognitive-debts.js'),
+      ]);
+      // A cancelled or superseded promise must not come back as autonomous work.
+      // Both imports finish before this final synchronous source fence/write.
+      assertPendingIntentCurrent(opts.pendingIntent);
+      if (goalAdded || crossSends > 0) return;
       const id = createGoal({
         topic: `兑现承诺: ${topic}`,
         origin: `promise-backstop:${opts.taskId ?? ''}`.slice(0, 64),
@@ -510,7 +765,6 @@ export function createHostApi(
         logger.info({ chatId, goalId: id, topic }, 'promise backstop(llm): goal created from bot own text');
       }
       // Cognitive Debt：承诺同时是一笔未完成认知，goal 兑现/超时前始终可见。
-      const { createDebt } = await import('../agent/cognitive-debts.js');
       createDebt({
         chatId,
         taskId: opts.taskId,
@@ -527,8 +781,61 @@ export function createHostApi(
     }
   };
 
+  /**
+   * 本任务已经引用过的消息 id。
+   *
+   * 2026-09-19 实测：一个任务对「眼熟」连发 3 条，其中第 1、3 条都带
+   * replyTo=265827 —— 用户看到的就是"两条回复指向同一个人"，观感是复读+抢话。
+   * 既有规则"分句仅首条带 reply_to"只在**单次** sendText 内部生效，
+   * 挡不住模型发起多次独立 sendText。
+   *
+   * burst 分人要回复不同 id 的合法场景不受影响：那些 id 本来就是不同的。
+   */
+  const repliedAnchors = new Set<number>();
+  /** Nyat Trench L1：本任务被壳拦下的原因（空 = 没被拦）。供 endTask 时回灌给模型。 */
+  const blockedByGate: string[] = [];
+
   const assertOpen = () => {
+    if (opts.pendingIntent && (opts.pendingIntent.chatId !== chatId || opts.pendingIntent.senderId !== opts.targetUserId
+      || opts.pendingIntent.threadId !== (opts.messageThreadId ?? 0))) throw new Error('pending_intent_mismatch');
+    assertPendingIntentCurrent(opts.pendingIntent);
+    if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
     if (opts.isClosed?.()) throw new Error('host_closed');
+    if (isPlatformInternalId(chatId) && [opts.defaultReplyTo, ...(opts.quoteIds ?? []), ...(opts.relatedQuoteIds ?? [])]
+      .some(id => id !== undefined && isOneBotMessageRecalled(chatId, id))) throw new Error('qq_message_recalled');
+  };
+
+  const sendWithDeliveryGuard = <T>(operation: () => Promise<T>): Promise<T> => {
+    // Already-entered parallel guest calls wait here, then observe the closure
+    // from the first uncertain receipt before another external send can begin.
+    const pending = deliveryTail.then(async () => {
+      assertOpen();
+      try {
+        return await withCodeActDeliveryIntent(opts.taskId, chatId, () => {
+          // The durable claim awaits Redis. Input may change while it is being
+          // persisted, including for reactions without a sender callback.
+          try { assertOpen(); }
+          catch (cause) {
+            throw Object.assign(new Error('delivery_fence_changed', { cause }), {
+              code: 'delivery_fence_changed', delivery: 'not_sent' as const,
+            });
+          }
+          return operation();
+        });
+      } catch (error) {
+        if (isUnknownPlatformDelivery(chatId, error)) {
+          deliveryUnknown = true;
+          waitingForUser = false;
+          const code = 'code' in (error as object) && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code : 'delivery_unknown';
+          try { await opts.onDeliveryUnknown?.(code); }
+          catch { logger.error({ taskId: opts.taskId }, 'Unknown delivery hold persistence failed; host remains closed'); }
+        }
+        throw error;
+      }
+    });
+    deliveryTail = pending.then(() => undefined, () => undefined);
+    return pending;
   };
 
   const trackInflight = <T>(p: Promise<T>): Promise<T> => {
@@ -560,7 +867,11 @@ export function createHostApi(
     if (fallback) allowed.add(fallback);
 
     // 显式传了不在本任务 quotes 里的 id → 串台风险（DM 曾把群 messageId 贴进来），拦。
-    // 省略 = 不引用（2026-08-22 起群聊也不再自动补——真人不是每条回复都顶引用）。
+    //
+    // round 1（新 goal）：**显式 > 兜底 > 不引用**。原注释写的"省略 = 不引用"是
+    // 2026-08-22 的选择，那个选择在 20+ 秒延迟下让 56% 的群聊回复不带引用——
+    // 读者只能靠时间戳猜在回谁。见 1083 行 sendText 里的长注释。
+    // 兜底契约放这里做：显式给的才过白名单；兜底是宿主自己算的触发消息，必然合法。
     if (explicit !== undefined && allowed.size > 0 && !allowed.has(explicit)) {
       logger.warn(
         { chatId, fromModel: explicit, allowed: [...allowed], dm: isDM(chatId) },
@@ -611,7 +922,7 @@ export function createHostApi(
         aiCall: callAllowlistReviewModel,
         getRecentContext: botFlow.defaultGetRecentContext,
         masterUid: env().MASTER_UID,
-        botUid: getBotUid(),
+        botUid: getBotUid(chatId),
       },
     };
   };
@@ -632,6 +943,7 @@ export function createHostApi(
             }
             const rawText = String(text ?? '').trim();
             if (!rawText) throw new Error('empty text');
+            assertOutboundText(rawText); // Before candidate previews or guard-model calls.
             // 模型双转义事故（2026-08-24 做梦字条：整段话带着字面 \n 原样发给了主人）。
             // 模型在 JS 字符串里写了 \\n，eval 出来就是字面 backslash-n。签名：
             // 有字面 \n 序列且不含代码围栏（含围栏的可能是真代码片段，别动）。
@@ -657,10 +969,65 @@ export function createHostApi(
                 'sendText_object_coercion: text contains "[object Object]" — sendFile/sendText return {messageId}; send the file, then describe it in a separate plain-text sendText without interpolating the return value',
               );
             }
+            // Tool-result leakage: host tools return bracketed placeholders like
+            // "(invalid chatId)" / "(那个群最近没有记录)" on failure. When a model
+            // passes one straight through to sendText, the user receives internal
+            // scaffolding as a message — observed 2026-09-18: the bot sent
+            // "(invalid chatId)" verbatim into the master's DM because it had
+            // called chats.recentMessages with a bad id and echoed the result.
+            // Treat a payload that IS such a placeholder as a leak; strip it from
+            // a longer sentence (the model may have wrapped it in real words).
+            {
+              const leak = findToolPlaceholder(clean);
+              if (leak) {
+                const withoutPlaceholder = clean.split(leak).join('').trim();
+                if (!withoutPlaceholder) {
+                  // **必须打文本尾部**：sendText 的 preview 只截 60 字符，而工具调用标签
+                  // 通常出现在模型输出的后半段。2026-09-20 那次事故里「守卫没这条模式
+                  // + preview 截断」两者叠加，成一个完全静默的泄漏类。
+                  logger.warn(
+                    { chatId, leak, textLen: clean.length, textTail: clean.slice(-400) },
+                    'host sendText rejected: payload was a tool-result placeholder',
+                  );
+                  throw new Error('sendText_tool_leak: the text is a tool result placeholder, not something to say; call the tool with a valid argument, or say something in your own words');
+                }
+                logger.warn({ chatId, leak, kept: withoutPlaceholder.length }, 'host sendText: stripped tool-result placeholder from model text');
+                clean = withoutPlaceholder;
+              }
+              // 内部记账泄漏：整条只是「（已回复 #3193）」这种 endTask 摘要格式。
+              {
+                const ack = findInternalStatusAck(clean);
+                if (ack) {
+                  logger.warn({ chatId, ack }, 'host sendText rejected: internal status-ack leaked as message');
+                  throw new Error('sendText_status_ack_leak: 「已回复 #id」是写给自己看的记账摘要（runtime.endTask 的参数），不是发给用户的话；想记账就 endTask 收尾，真想跟用户说就用自己的话讲。');
+                }
+              }
+            }
             assertNotBanned(clean);
 
             // Reject parroting the user's latest line(s) — common when direction embeds user text.
             // Also reject copying the bot's own recent lines (跨任务复读「小鱼干」回怼到「病好了」).
+            // round 162：**话题词复用闸**（用户 2026-09-23 21:51 现场报的 bug）。
+            //
+            // 上面四个去重（isRecentBotEcho / 4 字前缀 / 语义相似度 / 同锚点）
+            // 全是"整句相同"族，抓不到"同一个词换着句子说"。现场是 30 秒 7 个气泡里
+            // "固定资产"出现 3 次，人眼一看就是重复，而那四个闸一次都没响。
+            //
+            // 判据：一个非停用中文二字组，连这条候选一起，在本群最近 6 条里
+            // 出现 >= 3 次。阈值取 3 是因为正常聊一个话题也会带同一个词——
+            // 只有密集到第 3 次才是机器形状。
+            const topicHit = findTopicRepeat(recentBotTextsByChat.get(chatId) ?? [], clean);
+            if (topicHit) {
+              logger.info(
+                { chatId, preview: clean.slice(0, 60), bigram: topicHit.bigram, hits: topicHit.hits, window: topicHit.window },
+                'host sendText rejected topic-word repeat',
+              );
+              incrCounter('send_topic_word_repeat_total', { chat: chatId });
+              throw new Error(
+                `未发送：「${topicHit.bigram}」这个词你在最近几条里已经说了 ${topicHit.hits} 次了，` +
+                '换个说法——同样的词翻来覆去说，读起来就是重复（宿主软闸，不是建议）。',
+              );
+            }
             const localHit = isRecentBotEcho(chatId, clean);
             if (localHit) {
               logger.info(
@@ -682,10 +1049,15 @@ export function createHostApi(
               );
               throw new Error('echo_self_text');
             }
+            // 语义守卫/接地性守卫要用到的群内上下文（下面的 try 里填，context 读失败就留空）
+            let recentChatMixed: string[] = [];
+            let recentUserLines: string[] = [];
+            let recentBotTexts: string[] = [];
+            let recentBotAtSec: number | null = null;
             try {
               const { getRecent } = await import('../pipeline/context/manager.js');
               // Wide window: dual-write holes + busy groups push prior bot lines out of 16.
-              const recent = await getRecent(chatId, 80);
+              const recent = await getRecent(chatId, 80, opts.messageThreadId);
               const userLines = recent
                 .filter((m) => m.role !== 'assistant')
                 .slice(-4)
@@ -700,6 +1072,18 @@ export function createHostApi(
                 .slice(-12)
                 .map((m) => String(m.textContent ?? '').trim())
                 .filter((t) => t.replace(/\s+/g, '').length >= 6);
+              // 供语义守卫（跨任务复读）与接地性守卫（幻觉断言）复用同一份上下文
+              recentChatMixed = recent
+                .slice(-15)
+                .map((m) => `${m.role === 'assistant' ? 'bot' : '用户'}: ${String(m.textContent ?? '').trim()}`)
+                .filter((l) => l.length > 6);
+              recentUserLines = userLines;
+              const recentBots = recent
+                .filter((m) => m.role === 'assistant')
+                .map((m) => ({ t: String(m.textContent ?? '').trim(), ts: Number(m.timestamp ?? 0) }))
+                .filter((m) => m.t.replace(/\s+/g, '').length >= 6);
+              recentBotTexts = recentBots.map((m) => m.t);
+              recentBotAtSec = recentBots.length > 0 ? (recentBots[recentBots.length - 1]?.ts ?? null) : null;
               const hitSelf = botLines.find((b) => isEchoOf(clean, b));
               if (hitSelf) {
                 logger.info(
@@ -742,11 +1126,71 @@ export function createHostApi(
               throw new Error('near_dup_reply');
             }
 
+            // 语义重复守卫：同义改写刷屏（「困到流口水了」→「困到打哈欠了」）字面相似度
+            // 只有 0.13~0.27，上面的字面守卫结构上抓不到，只能问语义。
+            // 触发条件二选一：① 本任务第 2+ 次发送；② 本任务首次发送，但**本群 bot 刚刚
+            // 说过话**（<=300s）——后者补的是跨任务复读：2026-09-19 事故里 bot 被用户
+            // 「什么——」触发的新任务复读了上一任务的幻觉结论，而原守卫只看本任务的 sentTexts。
+            // JeV 不可达一律 fail-open，绝不因检查失败吞消息。
+            const crossTaskEcho =
+              textSent === 0 &&
+              recentBotAtSec !== null &&
+              Math.floor(Date.now() / 1000) - recentBotAtSec <= 300;
+            if (env().SEMANTIC_DUP_ENABLED && (textSent > 0 || crossTaskEcho)) {
+              try {
+                const { checkSemanticRepeat, semanticRepeatError } = await import('./semantic-dup.js');
+                const priors = textSent > 0 ? sentTexts : recentBotTexts.slice(-1);
+                if (priors.length > 0) {
+                  const dup = await checkSemanticRepeat(priors, clean, { chatId });
+                  if (dup.isRepeat) {
+                    logger.info(
+                      { chatId, preview: clean.slice(0, 60), probability: dup.probability, prior: dup.collidedWith?.slice(0, 60), crossTask: textSent === 0 },
+                      'host sendText rejected semantic repeat',
+                    );
+                    throw new Error(semanticRepeatError(dup));
+                  }
+                }
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.startsWith('重复表达未发送')) throw err;
+                logger.debug({ err, chatId }, 'semantic-dup check failed — fail-open');
+              }
+            }
+
+            // 接地性守卫：断言一个聊天里没人提过、用户也没问的具体数字/事实 = 模型幻觉。
+            // 2026-09-19 事故：无锚点消息「（想到瞭不好的東西）」→「2698 换块屏，苹果这刀法确实狠喵」，
+            // 该话题在本群 441 条历史/Qdrant 全库/belief/图片里全部零命中。
+            // 确定性闸门（含具体数字才问）+ 一次 JeV 调用；不可达一律 fail-open。
+            if (env().GROUNDING_CHECK_ENABLED && recentChatMixed.length > 0) {
+              try {
+                const { checkUngroundedClaim, ungroundedClaimError } = await import('./grounding-check.js');
+                const g = await checkUngroundedClaim(
+                  clean,
+                  recentChatMixed,
+                  recentUserLines[recentUserLines.length - 1] ?? '',
+                  { chatId },
+                );
+                if (g.ungrounded) {
+                  logger.warn(
+                    { chatId, preview: clean.slice(0, 60), topicPresent: g.topicPresent, userAsked: g.userAsked },
+                    'host sendText rejected ungrounded claim',
+                  );
+                  throw new Error(ungroundedClaimError());
+                }
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.startsWith('未发送：')) throw err;
+                logger.debug({ err, chatId }, 'grounding check failed — fail-open');
+              }
+            }
+
             // MaiBot-style split (same segmenter as legacy reply). One sendText may
             // become multiple bubbles; only the first carries reply-to.
             const maxLen = chatId > 0 ? 280 : 160;
             let parts: string[] = [clean];
-            try {
+            if (qqTextBudget) {
+              parts = planQQTextBubbles(clean);
+            } else try {
               const { segmentReply, REPLY_SPLIT_CHAR_THRESHOLD } = await import(
                 '../pipeline/reply/segmenter.js'
               );
@@ -768,9 +1212,25 @@ export function createHostApi(
               logger.debug({ chatId, parts: parts.length, chars: clean.length }, 'host sendText preserving segmented text for sender sharding');
             }
 
+            const qqReplyTo = qqTextBudget
+              ? resolveQQReplyAnchor(replyToMessageId, [opts.defaultReplyTo, ...(opts.quoteIds ?? [])].filter((id): id is number => id !== undefined))
+              : undefined;
+            // Reserve all planned bubbles before any transport call. Concurrent
+            // guest calls cannot each spend the same remaining task allowance.
+            const qqReservation = qqTextBudget?.reserve(parts.length);
+            try {
+
             // Past gate: finish even if task closes (model often skips await before endTask).
             let lastMessageId = 0;
             let firstReplyTo: number | undefined;
+            // round 71：同一次 sendText 的分片共享一次过闸结果。
+            // 见下面 trench gate 那段的长注释。
+            let gatePassed = false;
+            let telegramSendCounted = false;
+            // round 173：burst 闸一次调用只判一次（分片豁免），和 gatePassed 同款。
+            // 没这个标志时，第 2 片会读到第 1 片 1 秒前写的键 → 自己吞掉自己
+            // 的后半句（k3 round 173 实测复现，行为测试 ⑦ 钉住）。
+            let burstChecked = false;
             for (let i = 0; i < parts.length; i++) {
               const part = parts[i]!;
               if (i > 0) {
@@ -784,9 +1244,48 @@ export function createHostApi(
                   await new Promise((r) => setTimeout(r, 300));
                 }
               }
-              await sendChatAction(chatId, 'typing', opts.messageThreadId);
+              // 多段发送只在**首条**前播"正在输入"：后续段之间已有
+              // calculateTypingDelay 的用户级节奏，再各发一次 sendChatAction
+              // 只是多一次 Telegram API 往返（2026-09-22 段⑤整治，每次多段
+              // 发送省 1–2 次往返）。
+              if (i === 0) await sendChatAction(chatId, 'typing', opts.messageThreadId);
               // 分句：仅首条带 reply_to；后续默认不带。另一次 sendText 若显式传 messageId 才 quote（特别许愿）。
-              const replyTo = i === 0 ? resolveReplyTo(replyToMessageId) : undefined;
+              // 同一任务里，同一条消息只允许被引用一次。第二次起再传同一个 id
+              // （显式或 fallback）一律不引用——不然就是两条回复戳同一个人。
+              const wanted = qqTextBudget ? qqReplyTo : (parseMsgId(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo));
+              const alreadyAnchored = wanted !== undefined && repliedAnchors.has(wanted);
+              if (i === 0 && alreadyAnchored) {
+                logger.info(
+                  { chatId, anchor: wanted, preview: part.slice(0, 60) },
+                  'host sendText: dropped duplicate reply anchor (already replied to this message in this task)',
+                );
+              }
+              // round 1（新 goal）：**首气泡没显式 anchor 时，用任务的触发消息兜底。**
+              //
+              // 2026-09-22 用户报："bot反应10-16秒…中间可能隔了好几个人的话，
+              // 显得bot说话迟钝、前言不搭后语，原本没带replyto的可能又要带上"。
+              //
+              // subagent 七天全量实测（n=2194，消息级精确配对）：
+              //   总 t0→sendText p50 27.8s / p90 54.4s，近 24h 差到 p50 38s
+              //   回复期间同群穿插消息 p50=2 条、p90=11 条、≥5 条占 30.1%
+              //   4,008 次 sendText 中 **56.2%（群内 56.5%）replyTo=null**，
+              //   而 **99.8% 有 defaultReplyTo 锚点**（executor.ts:426 的 replyAnchor）
+              //
+              // 也就是说：**锚点一直算得出来，只是从没被喂进实际发送。**
+              // `opts.defaultReplyTo` 只进了 allowed 集合和 gate/debt 判断
+              // （host-api.ts:730 的 fallback 变量），没变成 reply_parameters。
+              // 2026-08-22 起群聊改成"默认不引用"——那是当时的选择，
+              // 但 20+ 秒延迟配上不引用，读者只能靠时间戳猜 bot 在回谁。
+              //
+              // 管道本身完好：telegram.ts:315-338 已支持 reply_parameters，
+              // 且锚点消息不存在时会自动降级成无引用重发。缺的就是这一行。
+              //
+              // 兜底只在**首气泡**生效（分句后续条仍不带，避免连环引用）；
+              // 模型显式传的仍然优先；本任务已回过的锚点仍去重。
+              const replyTo = i === 0 && !alreadyAnchored
+                ? (qqTextBudget ? qqReplyTo : (resolveReplyTo(replyToMessageId) ?? parseMsgId(opts.defaultReplyTo)))
+                : undefined;
+              if (i === 0 && replyTo) repliedAnchors.add(replyTo);
               if (i === 0) firstReplyTo = replyTo;
               if (i === 0 && chatId < 0 && !replyTo && !opts.defaultReplyTo) {
                 logger.warn({ chatId }, 'host sendText: group send without reply_to anchor');
@@ -797,21 +1296,337 @@ export function createHostApi(
                     replyTo: replyTo ?? null,
                     fromModel: replyToMessageId ?? null,
                     fallback: opts.defaultReplyTo ?? null,
+                    // round 1：兜底命中要可测。否则"56% 无引用归零"这个结论
+                    // 只能从 replyTo 总数反推，分不清是模型变乖了还是兜底在工作。
+                    usedFallback: replyTo !== undefined && replyToMessageId === undefined,
                     dmNoDefault: isDM(chatId),
                     parts: parts.length,
+                    // round 170（计划第 3a）：**taskId 必须出现在发送日志里。**
+                    //
+                    // 之前这条日志没有 taskId。
+                    // 于是"一个任务发了几个气泡"
+                    // 这个对"说话太应激"最直接的指标，
+                    // 从日志里**算不出来**
+                    // ——只能按时间窗近似（round 106
+                    // 那么干过，那个"36% 的任务在 30-60s"
+                    // 其实混了不同任务）。
+                    //
+                    // session-report 的 per-task 分布能算，是因为它读
+                    // task-runtime-events；而那条路只有 opts.taskId 非空才写。
+                    // legacy / failsafe / 回执直答的发送两边都不记。加了这一行，
+                    // 从日志就能按 taskId 聚合，不需要另找一条路。
+                    taskId: opts.taskId ?? null,
                     preview: part.slice(0, 80),
+                    // round 206: 全文。round 204/205 量过：只给带 taskId 的发送加，
+                    // 每条约 360 字节、全日志 189 条 = 0.06 MB（现有 app.log 的 0.07%）。
+                    // 没有它，"前言不搭后语"只能拿 40 字 preview 做单边判断
+                    // （能证伪"完全无关"，不能证明"连贯"）。
+                    ...(env().SEND_LOG_FULL_TEXT ? { text: part } : {}),
                   },
                   'host sendText',
                 );
+                countTool('telegram.sendText');
               } else {
                 logger.info(
-                  { chatId, part: i + 1, of: parts.length, replyTo: null, preview: part.slice(0, 60) },
+                  { chatId, part: i + 1, of: parts.length, replyTo: null,
+                    taskId: opts.taskId ?? null,   // round 170：同上
+                    preview: part.slice(0, 60) },
                   'host sendText continuation',
                 );
+                countTool('telegram.sendText');
               }
-              const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId);
+              // Nyat Trench · L1 沟壁：发送前硬闸。
+              //
+              // 论文 §1.2 的实测：`canSpeakActively()` 在全仓库只有一个引用——它自己的
+              // 定义。此前"每小时 6 条 + 90 秒"靠 spendParticipation() 在**发送之后**
+              // fire-and-forget 计数 + Frame 里一句劝告执行，发送前没有任何东西能拦。
+              // 这里把它变成唯一发送出口的前置条件。
+              //
+              // 只拦**主动发言**（没有引用锚点 = 没人在叫我）。被 @/被回复/DM 一律放行：
+              // 无视直接提问是另一种失败（论文 §4 表 5 的既有豁免语义）。
+              //
+              // 拦下时不静默丢弃（那是旧 gate 的形态）：把"你撞到了什么"作为事实
+              // 回灌给模型，同一转可以改主意；同时记一条壳否决，成为 Echo 的负样本。
+              const isAddressed = replyTo !== undefined || opts.defaultReplyTo !== undefined;
+              // Nyat Trench L1 包络：对**所有**发言生效（含被叫到的）。
+              // 原 budget 只拦主动发言，而生产流量全在"被叫到"那条路上（全带锚点），
+              // 所以那 6 条/小时从来没拦到过任何东西。shadow 模式下只记录不拦。
+              const env0 = await import('../nyatos/envelope.js').then((m) => m.checkEnvelope(chatId, isAddressed)).catch(() => ({ ok: true, mode: 'off' }) as const);
+              if (!env0.ok) {
+                const { observeEnvelopeShadow, renderEnvelopeBlock } = await import('../nyatos/envelope.js');
+                observeEnvelopeShadow(chatId, isAddressed, env0 as never);
+                if (env0.mode === 'enforce') {
+                  logger.warn({ chatId, addressed: isAddressed, why: (env0 as { why?: string }).why }, 'host sendText: BLOCKED by envelope');
+                  throw new Error(renderEnvelopeBlock(env0 as never, isAddressed));
+                }
+              }
+              // round 71：**同一次 sendText 的分片不再重复过闸**。
+              //
+              // 8s 的修复（round 68）解决的是"整条被吞"（49%），但漏了"分片被吞"
+              // （35%）：第 1 片发出 → markActiveSpeech 写 lastact → 第 2 片带着
+              // 打字延迟到达 → 已超 8s → 被咽。群里看到的就是半句话。
+              //
+              // 而分片是**同一句话的多个气泡**，不是两次发言。闸的本意是分隔
+              // "两次开口"（"5 秒内连回三个人"那种机器形状），拿它切自己的一句话
+              // 是误用。实测 07:14-07:15（round 70 部署后）仍有 part=2/3、part=2/2
+              // 被咽，就是这条。
+              //
+              // round 171：**task 级 burst 闸**，放在 trench gate 之前，因为它和
+              // chat 级的被叫间隔是两个轴（见 TASK_BURST_GAP_SEC 的注释）。
+              //
+              // 判据：这个任务上一次 sendText 调用距现在 < TASK_BURST_GAP_SEC
+              //       → 抛回模型，让它把想说的合成一条或者先收尾。
+              // 键只在调用完成后写，所以同一次调用的分片不会互相触发。
+              //
+              // 形状：判定放 try 里、throw 放 try 外——否则自己的 catch 会把该抛的错
+              // 吞掉，闸就永远不生效（round 171 第一版就是这么写错的，测试没抓到，
+              // 因为测试查的是文本不是行为；靠读代码才发现）。
+              let burstGap: number | null = null;
+              if (opts.taskId && !burstChecked) {
+                burstChecked = true;   // 同一次调用的后续分片不再判（round 71 的形状）
+                try {
+                  const { getRedis } = await import('../db/redis.js');
+                  const br = getRedis();
+                  const last = await br.get(taskLastSendKey(opts.taskId)).catch(() => null);
+                  if (last) {
+                    const gap = Math.floor(Date.now() / 1000) - Number(last);
+                    if (Number.isFinite(gap) && gap >= 0 && gap < TASK_BURST_GAP_SEC) burstGap = gap;
+                  }
+                } catch (err) {
+                  // 防变胖的闸绝不能因为它自己出错挡住发送（round 75 家族的反面）。
+                  logger.debug({ err, chatId, taskId: opts.taskId }, 'task burst gate check failed — fail-open');
+                }
+              }
+              if (burstGap !== null) {
+                // round 84 的形状：挡住要**可数**，否则说不清"挡掉了"还是"没被调用"。
+                logger.info(
+                  { chatId, taskId: opts.taskId, gapSec: burstGap, limit: TASK_BURST_GAP_SEC, part: i + 1, of: parts.length },
+                  'host sendText rejected task burst (same task spoke moments ago)',
+                );
+                incrCounter('send_task_burst_total', { chat: chatId });
+                throw new Error(
+                  `未发送：你这个任务 ${burstGap} 秒前才在这个群说过话，一口气连说会显得很应激。` +
+                  `要么把想说的并成一条，要么先收尾等下一轮。（间隔阈值 ${TASK_BURST_GAP_SEC} 秒，宿主软闸，不是建议。）`
+                );
+              }
+              // 判据：本任务第 0 片过闸之后，后续片直接放行（gatePassed 已置位）。
+              if (chatId < 0 && env().TRENCH_GATE_ENABLED && !gatePassed) {
+                const { canSpeakActively, activeSpeechCooldownRemainingSec, addressedSpeechCooldownRemainingSec }
+                  = await import('../nyatos/budget.js');
+                // 三条尺寸不同的尺子：
+                //   计数额度 6/h   —— 只量主动发言（被叫到豁免，无视提问是另一种失败）
+                //   主动间隔 90s   —— 只量主动发言
+                //   被叫间隔 30s   —— **也量被叫到**。2026-09-21 之前这条路一点间隔都没有，
+                //                   实测 5 分钟窗 p90=8 / max=20，最忙群 19.4 条/小时。
+                const [allowed, cooldownLeft, addrLeft] = await Promise.all([
+                  isAddressed ? Promise.resolve(true) : canSpeakActively(chatId),
+                  isAddressed ? Promise.resolve(0) : activeSpeechCooldownRemainingSec(chatId),
+                  addressedSpeechCooldownRemainingSec(chatId),
+                ]);
+                if (!allowed || cooldownLeft > 0 || addrLeft > 0) {
+                  const why = !allowed ? 'budget_spent' : (cooldownLeft > 0 ? 'just_spoke' : 'just_answered');
+                  logger.warn(
+                    { chatId, why, part: i + 1, of: parts.length, preview: part.slice(0, 50) },
+                    'host sendText: BLOCKED by trench gate (active speech)',
+                  );
+                  blockedByGate.push(why);
+                  // 世界回弹：不静默丢弃（那是旧 gate 的形态），把"你撞到了什么"
+                  // 作为事实抛回给模型——同 semanticRepeatError 的既有形状，它会
+                  // 在 [observation:error] 里看到，然后自己决定重说什么或直接收尾。
+                  throw new Error(
+                    why === 'budget_spent'
+                      ? '未发送：这一个小时你主动说的话到额度了，嗓子有点哑（宿主硬闸，不是建议）。' +
+                        '被叫到的消息不受这个限，但这条没人叫你——那就等下个时段，或者直接就这事收尾。'
+                      : cooldownLeft > 0
+                        ? `未发送：你 ${Math.ceil(cooldownLeft)} 秒前刚在这个群说过话，嗓子还没缓过来。` +
+                          '不是不让你说，是这条没人叫你，而你刚开口过。'
+                        : `未发送：你 ${Math.ceil(addrLeft)} 秒前才在这个群回过话，连得太密了。` +
+                          '被叫到的该回，但不该 5 秒内连回三个人——等一下，或者把这几句合成一条说。',
+                  );
+                }
+              }
+              // 闸放过这一片了 → 同任务的后续分片不再问（round 71）
+              gatePassed = true;
+              // round 89（修 round 89）：短窗口内重复锚点闸，**必须在 sendMessage 之前**。
+              //
+              // 第一版把它放在了 `textSent += 1` 之后——那时消息已经发出去了，
+              // throw 只是让 markMessageAnswered 不执行，反而破坏了记账。
+              // 静态复查才发现：`const messageId = await sendMessage(...)` 在上面 200 行处。
+              //
+              // 只查**首气泡**的锚点——后续分句不带引用，不构成"又回了一次"。
+              if (i === 0 && firstReplyTo && firstReplyTo > 0) {
+                const stamped = await answeredTimestamps(chatId, firstReplyTo).catch(() => [] as number[]);
+                const nowSec = Math.floor(Date.now() / 1000);
+                const recent = stamped.filter((t) => nowSec - t <= REPEAT_ANCHOR_WINDOW_SEC).length;
+                if (recent >= REPEAT_ANCHOR_MAX) {
+                  logger.warn(
+                    { chatId, anchor: firstReplyTo, recent, windowSec: REPEAT_ANCHOR_WINDOW_SEC, preview: (parts[0] ?? '').slice(0, 50) },
+                    'sendText: 同一锚点短时间内已回过 — 拦下（别刷同一条）',
+                  );
+                  incrCounter('send_repeat_anchor_total', { chat: chatId });
+                  throw new Error(
+                    `未发送：这条消息你 ${Math.round((nowSec - stamped[stamped.length - 1]!) / 60)} 分钟内才回过，` +
+                    `连着回同一条会显得在刷屏。要么说点新的，要么就让这条过去。`,
+                  );
+                }
+              }
+
+              let receipt: DeliveryResult | undefined;
+              let sendError: unknown;
+              let returnedId = 0;
+              try {
+                returnedId = await sendWithDeliveryGuard(() => sendMessage(chatId, part, replyTo, opts.messageThreadId,
+                  { ...(opts.taskId ? { intentId: `${opts.taskId}:text:${textSent}:${i}`, revision: opts.pendingIntent?.revision ?? 0 } : {}),
+                    beforeSend: assertOpen,
+                    markAnswered: false, onReceipt: result => { receipt = result; } }));
+              } catch (error) {
+                if (!(error instanceof DeliveryError) && !receipt) throw error;
+                if (error instanceof DeliveryError) receipt = error.result;
+                sendError = error;
+              }
+              const acknowledged = receipt?.parts ?? (returnedId > 0 ? [{ messageId: returnedId, text: part, partIndex: 0 }] : []);
+              // Bookkeeping follows each real platform ACK, including a prefix
+              // acknowledged before a later shard failed. Never store the plan.
+              for (const acknowledgedPart of acknowledged) {
+              const messageId = acknowledgedPart.messageId;
+              confirmPendingIntent(opts.pendingIntent);
+              const part = acknowledgedPart.text;
+              if (messageId > 0) {
+                if (qqReservation) {
+                  qqReservation.acknowledge();
+                  textSent++;
+                  try { opts.onSend?.(); } catch { /* A bookkeeping failure never resends an acknowledged bubble. */ }
+                }
+                if (!qqReservation && !telegramSendCounted) {
+                  telegramSendCounted = true;
+                  textSent += 1;
+                  try { opts.onSend?.(); } catch { /* Count the ACK even if a later shard fails. */ }
+                }
+                void import('../nyatos/envelope.js').then((m) => m.spendEnvelope(chatId)).catch(() => {});
+                // Nyat Trench L0：说出口了 → 抽走 85% 气压。
+                //
+                // **这一行原本不存在。**`releasePressure` 写好了、单测绿着，
+                // 而全仓库唯一的引用是注释——于是积分器少了它主要的排水路径：
+                // P 只被时间泵每小时减半，从不在发言时被抽走。论文里"抽水速率严格
+                // 超过填充速率上界，稳态 P 有界"这句话，那 85% 在生产里从未发生。
+                //
+                // 这是我这个会话里第四次"写了没调用"（renderEcho / resetTrench /
+                // recentImpulses / releasePressure），而这次踩的是核心机制。
+                void import('../nyatos/trench.js').then((m) => m.releasePressure(chatId)).catch(() => {});
+              }
+              // 定向债销账：真的回给了锚点那个人，就还掉欠他的一句。
+              // 这是"衰减由闭环驱动而不是由时钟驱动"的兑现点。
+              // 用**生效的锚点**判断，不是只认模型显式传的 replyTo。
+              // 第一版写 `replyTo !== undefined`，而生产里多数发送的锚点是 host 用
+              // defaultReplyTo 兜底填的（模型常常不显式给），于是销账在多数发送上
+              // 根本不触发——债只增不减，定向债退化成单相思。
+              // 这和 round 11 的锚点修复是同一个教训：要认生效的那个值。
+              const anchorForDebt = replyTo ?? opts.defaultReplyTo ?? null;
+              if (anchorForDebt !== null && opts.targetUserId && opts.targetUserId > 0) {
+                void import('../nyatos/debt.js').then((m) => m.discharge(chatId, opts.targetUserId!, 1)).catch(() => {});
+              }
               if (opts.taskId) markTaskVisible(opts.taskId);
               logger.info({ chatId, taskId: opts.taskId, deliveryKind: kind, messageId }, 'task delivery recorded');
+              // Self-history: Meta is the production main path, so without this the
+              // model would only ever see its legacy-pipeline acts (checkin/cards)
+              // and never the conversation replies it actually sent — it could not
+              // notice its own repetition. Records the real receipt, not intent.
+              try {
+                // opts has no trigger message/uid: the task's quoteIds are the
+                // closest available provenance, and only the first bubble carries
+                // the quote anchor. trigger_msg_id is informational; failure to
+                // attribute it does not affect the behaviour feed.
+                // 锚点要记**生效的那个**：replyTo 为空时 host 会用 defaultReplyTo 兜底填，
+                // 而兜底之后这条其实就是"被叫到的"。只记 replyTo 会让兜底发送被
+                // 下游（Echo 判据、包络回测的主动/被叫到分类）误判成主动发言
+                // ——2026-09-19 回测因此把 413/425 条错判成"主动插话太密"。
+                const effectiveAnchor = replyTo ?? opts.defaultReplyTo ?? null;
+                recordSelfReply(chatId, opts.targetUserId ?? 0, effectiveAnchor, part, messageId, opts.taskId);
+              } catch (err) {
+                logger.debug({ err, chatId }, 'host sendText self-history failed (non-critical)');
+              }
+              // Nyat Trench · Outcome 管道的写入侧补漏。
+              //
+              // 98.6% 的 self_replies 永远 outcome='unknown' 的根因就在这一行缺失：
+              // `recordReply()` 建的 pending 哈希是 `checkOutcome()` 唯一的匹配源，
+              // 而它只在 legacy pipeline（deliver.ts）和 proactive tick 里被调——
+              // **生产主路径（98% 的发送）从来不建 pending**。于是它写的 self_replies
+              // 行没有对应的 pending 条目，观察器无从闭合，outcome 永远是 unknown。
+              //
+              // 后果不只是统计难看：Echo 学不到东西、selfState 的 unansweredStreak
+              // 永远是 0、决策点因此永远拿不到"我刚说的话有人接没人接"这个身体事实。
+              try {
+                await import('../tracking/outcome.js').then(({ recordReply }) =>
+                  recordReply(
+                    chatId,
+                    messageId,
+                    replyTo ?? 0,
+                    opts.targetUserId ?? 0,
+                    '',
+                    part,
+                    'codeact_speak',
+                  ),
+                );
+              } catch (err) {
+                logger.debug({ err, chatId }, 'host sendText outcome-pending failed (non-critical)');
+              }
+              // 实时学习 + 发送时 ASI 自评：**Meta 主路径也必须跑**。
+              //
+              // 2026-09-21 发现这两个只在 legacy 的 `pipeline/stages/deliver.ts:1331/1341`
+              // 被调用，而生产主路径（98% 的发送）走的是这里。日志证据：
+              //   realtime-learn: episode saved     0 次
+              //   REALTIME_LEARN_ENABLED=true 却一条 episode 都没存过
+              // 后果不是统计难看：Echo 学不到东西、selfState 拿不到"我刚说的话
+              // 有人接没人接"、ASI 自评的 EMA 永远不更新——而 self-improve 的
+              // humanizer 调参正是靠它。
+              //
+              // triggerText 从上下文里按**生效的锚点**取（模型常常不显式给
+              // replyTo，锚点是 host 用 defaultReplyTo 兜底填的——只认 replyTo
+              // 会在大部份发送上取不到trigger，这一轮就白跑）。
+              void (async () => {
+                try {
+                  const [{ getRecent }, { learnFromReply }, { scoreReplyAtSend, ASI_ENABLED, ASI_SAMPLE_RATE }] =
+                    await Promise.all([
+                      import('../pipeline/context/manager.js'),
+                      import('../tracking/realtime-learn.js'),
+                      import('../tracking/asi-scoring.js'),
+                    ]);
+                  const recent = await getRecent(chatId, 80, opts.messageThreadId).catch(() => []);
+                  const anchorId = replyTo ?? opts.defaultReplyTo ?? null;
+                  const triggerMsg = (anchorId
+                    ? recent.find((m) => m.messageId === anchorId)
+                    : undefined)
+                    ?? recent.filter((m) => !m.isBot && m.role !== 'assistant').at(-1);
+                  const triggerText = (triggerMsg?.textContent || triggerMsg?.captionContent || '').trim();
+                  if (!triggerText) return;   // 取不到trigger就别跑——learnFromReply 也会因空trigger返回0
+                  const uid = opts.targetUserId ?? triggerMsg?.uid ?? 0;
+                  if (env().REALTIME_LEARN_ENABLED) {
+                    await learnFromReply({ chatId, userId: uid, triggerText, replyText: part }).catch(() => {});
+                  }
+                  if (ASI_ENABLED && ASI_SAMPLE_RATE > 0 && Math.random() <= ASI_SAMPLE_RATE) {
+                    // signal 用 'sent'（与 legacy deliver.ts:1346 一致）——
+                    // 下游 computeReplyScores 用它决定 explicitNegative/repairLoop 的初值。
+                    await scoreReplyAtSend({ chatId, triggerText, replyText: part, signal: 'sent' }).catch(() => {});
+                  }
+                } catch (err) {
+                  logger.debug({ err, chatId }, 'host sendText realtime-learn failed (non-critical)');
+                }
+              })();
+              // NyatOS participation budget: this is where the Meta path — the
+              // production main path — actually sends, so this is where the
+              // throttle must be spent. Wiring it only into
+              // pipeline/stages/deliver.ts meant the budget never decreased on
+              // real traffic (measured 2026-09-18: 96 "speak" shadow verdicts in
+              // 23 minutes while Redis held zero budget keys, so every Frame
+              // still advertised a full "6/6 remaining").
+              if (env().NYATOS_BUDGET_ENABLED) {
+                void import('../nyatos/budget.js')
+                  .then(({ spendParticipation, markActiveSpeech }) => {
+                    spendParticipation(chatId);
+                    markActiveSpeech(chatId);
+                  })
+                  .catch((err) => logger.debug({ err, chatId }, 'budget spend failed (non-critical)'));
+              }
               // Task deliveries are already persisted by task-runtime-events;
               // normal legacy replies need the same durable delivery fact.
               const deliveryEventId = !opts.taskId
@@ -875,6 +1690,18 @@ export function createHostApi(
                 }
               }
               lastMessageId = messageId;
+              // round 171：这次调用说完了，记下时间给 burst 闸用。
+              // 只在这里写一次（不在分片上），理由见 TASK_BURST_GAP_SEC 的注释。
+              if (opts.taskId && i === 0) {
+                // 只记第 0 片的时间：若每片都写，"距上次开口"会被推到末片，
+                // 分片越多的调用闸越松（k3 round 173 指出的系统性放松）。
+                const burstTaskId = opts.taskId;   // 闭包里收窄，TS 才不会判 undefined
+                void import('../db/redis.js')
+                  .then(({ getRedis }) => getRedis().set(
+                    taskLastSendKey(burstTaskId), String(Math.floor(Date.now() / 1000)), 'EX', 3600,
+                  ))
+                  .catch(() => undefined);   // 遥测永不挡发送
+              }
               lastSentNorm = part;
               sentTexts.push(part);
               rememberBotText(chatId, part);
@@ -892,22 +1719,13 @@ export function createHostApi(
                   .catch((err) => logger.debug({ err, chatId }, 'host addAssistant failed')),
               );
               void import('../memory/chroma.js')
-                .then(({ memorizeMessage }) =>
-                  memorizeMessage(chatId, {
-                    role: 'assistant',
-                    uid: 0,
-                    username: '',
-                    fullName: '',
-                    timestamp: Math.floor(Date.now() / 1000),
-                    messageId,
-                    textContent: part,
-                    isForwarded: false,
-                  }),
-                )
+                .then(({ memorizeAcknowledgedDelivery }) => memorizeAcknowledgedDelivery(chatId, acknowledgedPart))
                 .catch((err) => logger.debug({ err, chatId }, 'host memorize assistant failed'));
+              }
+              if (sendError) throw sendError;
+              if (acknowledged.length === 0) throw new Error('delivery_receipt_missing');
             }
 
-            textSent += 1;
             lastDeliveryKind = kind;
             if (kind === 'final') finalSent = true;
             else intermediateSent = true;
@@ -944,7 +1762,12 @@ export function createHostApi(
               logger.debug({ err, chatId }, 'host post-task noteBotSpoke failed');
             }
 
-            return makeSendAck(`text_sent#${lastMessageId}`, lastMessageId);
+            const gapSec = lastTextSentAt > 0 ? Math.round((Date.now() - lastTextSentAt) / 1000) : null;
+            lastTextSentAt = Date.now();
+            const pacingSuffix =
+              env().SEND_PACING_FACT_ENABLED && gapSec !== null ? buildPacingAckSuffix(gapSec) : '';
+            return makeSendAck(`text_sent#${lastMessageId}${pacingSuffix}`, lastMessageId);
+            } finally { qqReservation?.release(); }
           })(),
         );
       },
@@ -962,7 +1785,7 @@ export function createHostApi(
             }
             await sendChatAction(chatId, 'typing', opts.messageThreadId);
             try {
-              const messageId = await sendSticker(chatId, id);
+              const messageId = await sendSticker(chatId, id, { beforeSend: assertOpen });
               if (messageId > 0) {
                 await track(
                   import('../pipeline/context/manager.js')
@@ -1019,8 +1842,25 @@ export function createHostApi(
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
-              const { messageId } = await tgSendFile(chatId, target, {
-                caption: caption ? String(caption).slice(0, 1000) : undefined,
+              const { messageId } = await tgSendFile(chatId, target, { beforeSend: assertOpen,
+                // A caption is user-visible text; strip tool scaffolding like any
+                // other send path.
+                caption: caption
+                  ? (() => {
+                      let c = String(caption).slice(0, 1000);
+                      const leak = findToolPlaceholder(c);
+                      if (leak) {
+                        c = c.split(leak).join('').trim();
+                        logger.warn({ chatId, leak }, 'sendFile: stripped tool-result placeholder from caption');
+                      }
+                      // 内部记账（「已回复 #3193」）不能借 caption 溜出去：丢 caption，文件照发
+                      if (findInternalStatusAck(c)) {
+                        logger.warn({ chatId, preview: c.slice(0, 40) }, 'sendFile: dropped internal status-ack caption');
+                        return undefined;
+                      }
+                      return c || undefined;
+                    })()
+                  : undefined,
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
               });
@@ -1075,7 +1915,7 @@ export function createHostApi(
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
-              const { messageId } = await tgSendPhoto(chatId, target, {
+              const { messageId } = await tgSendPhoto(chatId, target, { beforeSend: assertOpen,
                 caption: caption ? String(caption).slice(0, 1000) : undefined,
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
@@ -1113,21 +1953,40 @@ export function createHostApi(
       },
       sendVoice(text: string) {
         assertOpen();
+        assertOutboundText(String(text ?? ''));
         return trackInflight(
           (async () => {
-            const clean = String(text ?? '').trim();
+            let clean = String(text ?? '').trim();
             if (!clean) return { skipped: true as const, reason: 'empty_text' };
+            // Speaking a tool placeholder aloud is the same leak as typing it.
+            {
+              const leak = findToolPlaceholder(clean);
+              if (leak) {
+                clean = clean.split(leak).join('').trim();
+                if (!clean) return { skipped: true as const, reason: 'tool_leak' };
+                logger.warn({ chatId, leak }, 'sendVoice: stripped tool-result placeholder');
+              }
+              // 「已回复 #3193」念出来同样是泄漏
+              if (findInternalStatusAck(clean)) {
+                logger.warn({ chatId, preview: clean.slice(0, 40) }, 'sendVoice: rejected internal status-ack');
+                return { skipped: true as const, reason: 'status_ack_leak' };
+              }
+            }
             try {
               const { synthesizeVoice } = await import('../ai/tts.js');
               const { sendVoice: tgSendVoice } = await import('../bot/sender/telegram.js');
               const ogg = await synthesizeVoice(clean.slice(0, 500));
               if (!ogg) return { skipped: true as const, reason: 'tts_disabled' };
               await sendChatAction(chatId, 'record_voice', opts.messageThreadId);
-              const { messageId } = await tgSendVoice(chatId, ogg, {
+              const { messageId } = await sendWithDeliveryGuard(() => tgSendVoice(chatId, ogg, {
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
-              });
+                beforeSend: assertOpen,
+              }));
               if (messageId > 0) {
+                fileSent++;
+                persistBotDeliveryEvent({ chatId, messageId, taskId: opts.taskId, kind: 'voice',
+                  replyToMessageId: opts.defaultReplyTo, cognitiveAnchorEventId: opts.cognitiveAnchorEventId });
                 await track(
                   import('../pipeline/context/manager.js')
                     .then(({ addAssistant }) =>
@@ -1135,9 +1994,13 @@ export function createHostApi(
                     )
                     .catch((err) => logger.debug({ err, chatId }, 'host addAssistant voice failed')),
                 );
+                for (const id of new Set([opts.defaultReplyTo, ...(opts.relatedQuoteIds ?? [])])) {
+                  if (id && id > 0) await markMessageAnswered(chatId, id).catch(() => undefined);
+                }
               }
               return { messageId };
             } catch (err) {
+              if (isUnknownPlatformDelivery(chatId, err)) throw err;
               logger.warn({ err, chatId }, 'host sendVoice failed — fall back to text');
               return { skipped: true as const, reason: 'tts_error' };
             }
@@ -1146,7 +2009,7 @@ export function createHostApi(
       },
       react(messageId: number, emoji: string) {
         assertOpen();
-        return trackInflight(reactToMessage(chatId, messageId, emoji));
+        return trackInflight(sendWithDeliveryGuard(() => reactToMessage(chatId, messageId, emoji)));
       },
       sendPoll(question: string, options: string[]) {
         assertOpen();
@@ -1174,6 +2037,7 @@ export function createHostApi(
               return { messageId: 0 };
             }
             const { sendPoll } = await import('../bot/sender/telegram.js');
+            assertOpen();
             const messageId = await sendPoll(chatId, q, pollOpts, opts.messageThreadId);
             if (messageId > 0) {
               pollSent = true;
@@ -1218,6 +2082,7 @@ export function createHostApi(
               return { messageId: 0 };
             }
             const { forwardMessage } = await import('../bot/sender/telegram.js');
+            assertOpen();
             const outMessageId = await forwardMessage(tid, fid, mid);
             if (outMessageId > 0) {
               forwardsSent++;
@@ -1246,8 +2111,26 @@ export function createHostApi(
               throw new Error('sendToChat_invalid_target: group chatId (negative) or user uid (positive) required');
             }
             if (crossSends >= 2) throw new Error('sendToChat_limit:2');
-            const clean = String(text ?? '').trim();
+            let clean = String(text ?? '').trim();
             if (!clean) throw new Error('empty text');
+            // Same tool-result leak guard as host sendText: sending to another
+            // chat must not be a back door for scaffolding.
+            {
+              const leak = findToolPlaceholder(clean);
+              if (leak) {
+                const withoutPlaceholder = clean.split(leak).join('').trim();
+                if (!withoutPlaceholder) {
+                  throw new Error('sendText_tool_leak: the text is a tool result placeholder, not something to say; call the tool with a valid argument, or say something in your own words');
+                }
+                logger.warn({ chatId: tid, leak }, 'telegram.sendMessage: stripped tool-result placeholder');
+                clean = withoutPlaceholder;
+              }
+              const ack = findInternalStatusAck(clean);
+              if (ack) {
+                logger.warn({ chatId: tid, ack }, 'telegram.sendMessage: rejected internal status-ack');
+                throw new Error('sendText_status_ack_leak: 「已回复 #id」是 endTask 记账摘要，不是发给用户的话；用自己的话讲。');
+              }
+            }
             assertNotBanned(clean);
             // 确认目标可达：群→bot 必须在；个人→必须已有私聊（getChat 成功）。
             try {
@@ -1270,11 +2153,11 @@ export function createHostApi(
               const target = resolveInsideSandbox(rawPath); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(tid, 'upload_document', opts.messageThreadId);
-              const r = await tgSendFile(tid, target, { caption: clean.slice(0, 1000) });
+              const r = await tgSendFile(tid, target, { beforeSend: assertOpen, caption: clean.slice(0, 1000) });
               messageId = r.messageId;
               deliveredDesc = `[file] ${basename(target)}: ${clean}`;
             } else {
-              messageId = await sendMessage(tid, clean.slice(0, 500));
+              messageId = await sendMessage(tid, clean.slice(0, 500), undefined, undefined, { beforeSend: assertOpen });
             }
             crossSends++;
             // 目标群上下文/记忆/时间线全跟上——说过的话自己得记得。
@@ -1323,7 +2206,7 @@ export function createHostApi(
         perm: 'can_delete_messages' | 'can_restrict_members' | 'can_pin_messages',
       ): Promise<void> => {
         const { getBot, getBotUid } = await import('../bot/bot.js');
-        const member = (await getBot().api.getChatMember(chatId, getBotUid())) as unknown as Record<string, unknown>;
+        const member = (await getBot().api.getChatMember(chatId, getBotUid(chatId))) as unknown as Record<string, unknown>;
         const status = String(member['status'] ?? '');
         if (status !== 'administrator' || member[perm] !== true) {
           const permName = perm.replace(/^can_/i, '').replace(/_/g, ' ');
@@ -1354,6 +2237,7 @@ export function createHostApi(
           const { deleteMessage } = await import('../bot/sender/telegram.js');
           await deleteMessage(chatId, mid); // 现有 sender 静默失败版；权限自检已在前面真验证
           logger.info({ chatId, messageId: mid }, 'host admin.deleteMessage');
+          countTool('admin.deleteMessage');
           return { ok: true };
         },
         async mute(uid: number, minutes: number) {
@@ -1364,7 +2248,7 @@ export function createHostApi(
           if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
           if (target === env().MASTER_UID) throw new Error('admin_no_master: 不许对主人下手');
           const { getBotUid } = await import('../bot/bot.js');
-          if (target === getBotUid()) throw new Error('admin_no_self: 不能禁言我自己');
+          if (target === getBotUid(chatId)) throw new Error('admin_no_self: 不能禁言我自己');
           await assertAdminPerm('can_restrict_members');
           await rateGate();
           const { muteMember } = await import('../bot/sender/telegram.js');
@@ -1384,6 +2268,57 @@ export function createHostApi(
           logger.info({ chatId, uid: target, ok }, 'host admin.unmute');
           return { ok };
         },
+        async setAntiAd(on: boolean, opts?: { minutes?: number; requesterUid?: number }) {
+          assertOpen();
+          assertGroup();
+          // **群主自助授权**（objective: "作为 asi 怎么最好启用，根据群主需要"）。
+          // 群主在群里直接说"开/关反广告"即可，不必先去找 bot 的主人配 Redis。
+          // 但必须校验**发起这条命令的人**真的是本群管理员/群主——否则任何一个群成员
+          // 都能打开一个会删消息、会踢人的开关。fail-closed：查失败按非管理员处理。
+          const { getBot } = await import('../bot/bot.js');
+          const { isGroupAdmin } = await import('../admin/bot-permission.js');
+          const asker = Number(opts?.requesterUid ?? 0);
+          if (!(asker > 0) || !(await isGroupAdmin(getBot(), chatId, asker))) {
+            throw new Error('admin_not_group_admin: 只有本群管理员/群主能开关反广告');
+          }
+          const { setAntiAd } = await import('../nyatos/ad-pressure.js');
+          await setAntiAd(chatId, on, opts?.minutes);
+          logger.info(
+            { chatId, on, minutes: opts?.minutes, by: asker },
+            'host admin.setAntiAd (group-owner self-service)',
+          );
+          return { ok: true, chatId, on, minutes: opts?.minutes };
+        },
+        async kick(uid: number, opts?: { deleteMessages?: boolean }) {
+          assertOpen();
+          assertGroup();
+          // 踢人总闸：默认关。这是不可逆动作，群主明确开才可用；
+          // 开了也仍由模型按 Frame 的行为事实决定踢不踢，不是自动执行。
+          //
+          // **授权与反广告测量共用同一把钥匙**：如果这个群已经在 ANTIAD_CHAT_IDS
+          // 里（= 群主要了反广告），就认为群主也已授权踢人——否则群主开了反广告，
+          // bot 报了"此人在刷屏"却不能处理，是最差的一种半开状态。
+          // 反过来，全局 ANTIAD_KICK_ENABLED 仍可单独开（不必先开反广告）。
+          const { antiAdEnabled } = await import('../nyatos/ad-pressure.js');
+          const ownerGranted = env().ANTIAD_KICK_ENABLED === true || (await antiAdEnabled(chatId));
+          if (!ownerGranted) {
+            throw new Error('admin_kick_disabled: 群主没开踢人权限（ANTIAD_KICK_ENABLED，或该群未授权反广告）');
+          }
+          const target = Math.floor(Number(uid));
+          if (!Number.isFinite(target) || target <= 0) throw new Error('invalid uid');
+          if (target === env().MASTER_UID) throw new Error('admin_no_master: 不许对主人下手');
+          const { getBotUid } = await import('../bot/bot.js');
+          if (target === getBotUid(chatId)) throw new Error('admin_no_self: 不能踢我自己');
+          await assertAdminPerm('can_restrict_members');
+          await rateGate();
+          const { kickMember } = await import('../bot/sender/telegram.js');
+          const ok = await kickMember(chatId, target, opts?.deleteMessages === true);
+          logger.info(
+            { chatId, uid: target, deleteMessages: opts?.deleteMessages === true, ok },
+            'host admin.kick',
+          );
+          return { ok };
+        },
         async pin(messageId: number) {
           assertOpen();
           assertGroup();
@@ -1398,7 +2333,7 @@ export function createHostApi(
           let preview = '';
           try {
             const { getRecent } = await import('../pipeline/context/manager.js');
-            const msgs = await getRecent(chatId, 60);
+            const msgs = await getRecent(chatId, 60, opts.messageThreadId);
             const hit = msgs.find((m) => m.messageId === mid);
             preview = (hit?.textContent ?? '').slice(0, 80);
           } catch { /* best-effort */ }
@@ -1419,64 +2354,71 @@ export function createHostApi(
         },
       };
     })(),
+    bots: {
+      async command(opts: {
+        bot: string;
+        command: string;
+        args?: string;
+        replyToMessageId?: number;
+      }): Promise<{ ok: boolean; text: string }> {
+        // round 3：`bots.command` 此前**两个出口都没有计数也没有日志**——
+        // 成功走 tryDelegateCommand 内部那句 info，失败/拒绝则静默 return。
+        // 于是"这个工具用过几次"永远答不上来（subagent 审计原话：
+        // "real usage is unmeasurable"），而这个会话已经为"量的东西缺分母"
+        // 交过五次学费（round 26/81/96/125/128）。这次不重复。
+        countTool('bots.command');
+        const bot = String(opts.bot ?? '');
+        const cmd = String(opts.command ?? '');
+        const args = String(opts.args ?? '');
+        const replyTo = Number(opts.replyToMessageId ?? 0);
+        try {
+          assertOpen();
+          // assertGroup 是 admin 那个 IIFE 里的局部量，这里够不到——本地再判一次。
+          if (chatId > 0) throw new Error('admin_groups_only: 借别的 bot 办事只在群里');
+          const { tryDelegateReplyCommand, tryDelegateCommand } = await import(
+            '../pipeline/tools/bot-delegation.js'
+          );
+          // 回复式代罚（= 替群成员按下别的 bot 键盘上那个我们点不动的按钮）
+          if (Number.isFinite(replyTo) && replyTo > 0) {
+            const r = await tryDelegateReplyCommand(chatId, bot, cmd, args, replyTo);
+            logger.info({ chatId, bot, cmd, replyTo, sent: r.sent }, 'host bots.command (reply form)');
+            return { ok: r.sent, text: r.text };
+          }
+          // 普通代发（查类命令）。闸全在 tryDelegateCommand 里。
+          const r = await tryDelegateCommand(chatId, bot, cmd, args);
+          logger.info({ chatId, bot, cmd, sent: r.sent }, 'host bots.command');
+          return { ok: r.sent, text: r.text };
+        } catch (err) {
+          // 两个出口都记账。subagent 审计原话："real usage is unmeasurable"——
+          // 而这个会话已经为"量的东西缺分母"交过五次学费。
+          incrCounter('host_tool_calls_total', { tool: 'bots.command', outcome: 'error' });
+          logger.warn({ err, chatId, bot, cmd, replyTo: replyTo || undefined }, 'host bots.command failed');
+          throw err;
+        }
+      },
+    },
     chats: {
       async find(query: string) {
-        const q = String(query ?? '').trim().slice(0, 50);
-        if (!q) return [];
-        const norm = (s: string) => s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-        const nq = norm(q);
-        if (!nq) return [];
-        const { getRedis } = await import('../db/redis.js');
-        const redis = getRedis();
-        let ids: number[] = [];
-        try {
-          const raw = await redis.zrange('xxb:active_groups', 0, 39);
-          ids = [...new Set(raw.map(Number).filter((n) => Number.isFinite(n) && n < 0))];
-        } catch {
-          return [];
-        }
-        const out: Array<{ chatId: number; title: string }> = [];
-        for (const id of ids) {
-          let title = '';
-          try {
-            const cached = await redis.get(`xxb:chat_title:${id}`);
-            if (cached) {
-              title = cached;
-            } else {
-              const { getBot } = await import('../bot/bot.js');
-              const chat = (await getBot().api.getChat(id)) as { title?: string };
-              title = typeof chat.title === 'string' ? chat.title : '';
-              if (title) await redis.set(`xxb:chat_title:${id}`, title, 'EX', 21600);
-            }
-          } catch {
-            continue; // 已退群/不可达——跳过
-          }
-          const nt = norm(title);
-          if (nt && (nt.includes(nq) || nq.includes(nt))) {
-            out.push({ chatId: id, title });
-            if (out.length >= 3) break;
-          }
-        }
-        logger.info({ chatId, query: q, candidates: ids.length, hits: out.length }, 'host chats.find');
-        // 空命中时给指路而不是裸 []——模型拿「群名查不到」当「这个人不存在」用是
-        // 2026-08-19 的实测事故（找 ccb 却调了群名搜索）。
-        if (out.length === 0) {
-          return `群名里没查到「${q}」。注意：chats.find 是按**群名**找群；如果你要找的是**某个人**（ta 在哪些群/能不能私聊），用 members.find(名字)。`;
-        }
-        noteUnviewed(`chats.find(${q.slice(0, 30)})`, out);
-        return out;
+        assertOpen();
+        const { findBotGroups } = await import('./chat-directory.js');
+        const result = await findBotGroups(chatId, opts.targetUserId, query);
+        logger.info({ chatId, status: result.status, scope: result.scope, hits: result.groups.length }, 'host chats.find');
+        noteUnviewed('chats.find', result);
+        countTool('chats.find');
+        return result;
       },
       async recentMessages(targetChatId: number, limit = 12) {
         const tid = Number(targetChatId);
-        if (!Number.isFinite(tid) || tid === 0) return '(invalid chatId)';
+        if (!Number.isSafeInteger(tid) || tid === 0) return '(invalid chatId)';
+        if (isCrossContextPrivate({ sourceChatId: tid }, chatId)) return '(private context unavailable)';
         const n = Math.min(Math.max(Number(limit) || 12, 1), 30);
         try {
           const { getRecent } = await import('../pipeline/context/manager.js');
           const { slimSingleMessage } = await import('../pipeline/context/slim.js');
           const { getBotUid } = await import('../bot/bot.js');
-          const msgs = await getRecent(tid, n);
+          const msgs = await getRecent(tid, n, opts.messageThreadId);
           if (!msgs.length) return '(那个群最近没有记录)';
-          const botUid = getBotUid() || 0;
+          const botUid = getBotUid(chatId) || 0;
           const text = msgs.map((m) => slimSingleMessage(m, botUid)).join('\n');
           noteUnviewed(`chats.recentMessages(${tid})`, text);
           return text;
@@ -1504,6 +2446,7 @@ export function createHostApi(
         const byUid = new Map<number, { username: string; name: string; chatIds: number[] }>();
         for (const r of rows) {
           if (!(r.uid > 0)) continue;
+          if (isCrossContextPrivate({ sourceChatId: r.chat_id }, chatId)) continue;
           const cur = byUid.get(r.uid) ?? { username: r.username ?? '', name: r.full_name ?? '', chatIds: [] };
           if (!cur.username && r.username) cur.username = r.username;
           if (!cur.name && r.full_name) cur.name = r.full_name;
@@ -1612,13 +2555,14 @@ export function createHostApi(
                 '呜……画摊子翻车了，这张图没画成。换个说法再让我试一次？',
                 opts.defaultReplyTo,
                 opts.messageThreadId,
+                { beforeSend: assertOpen },
               ).catch(() => 0);
               return;
             }
             const { resolveInsideSandbox } = await import('../sandbox/paths.js');
             const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
             const target = resolveInsideSandbox(r.pngPath);
-            const { messageId } = await tgSendPhoto(chatId, target, {
+            const { messageId } = await tgSendPhoto(chatId, target, { beforeSend: assertOpen,
               caption: caption || undefined,
               replyToId: opts.defaultReplyTo,
               messageThreadId: opts.messageThreadId,
@@ -1663,12 +2607,12 @@ export function createHostApi(
         const t = String(topic ?? '').trim().slice(0, 100);
         if (!t) return { goalId: null, reason: 'empty_topic' };
         const cid = Number(targetChatId);
-        // 2026-08-22 审查修复: 目标群必须与任务同源(防跨群挂 goal), 主人 DM 任务可指定任意已开群。
-        const isMasterTask = env().MASTER_UID > 0 && chatId === env().MASTER_UID;
-        if (Number.isFinite(cid) && cid !== 0 && cid !== chatId && !isMasterTask) {
+        // The guest can schedule follow-up only in its bound conversation; a
+        // master-DM task is not authorization to publish its contents elsewhere.
+        if (targetChatId !== undefined && (!Number.isSafeInteger(cid) || cid !== chatId)) {
           return { goalId: null, reason: 'goal_target_chat_mismatch' };
         }
-        const goalChatId = Number.isFinite(cid) && cid !== 0 ? cid : chatId;
+        const goalChatId = chatId;
         const minutes = Number(checkInMinutes);
         const intervalSec = Math.min(Math.max(Number.isFinite(minutes) && minutes > 0 ? minutes : 15, 5), 1440) * 60;
         const { createGoal } = await import('../agent/goals.js');
@@ -1751,10 +2695,38 @@ export function createHostApi(
     memory: {
       async search(query: string) {
         try {
-          const hits = await searchMemory(chatId, String(query).slice(0, 200), 5, 1500);
+          // The host-bound private peer grants this read, not opts.targetUserId
+          // or a model-provided platform/chat label. Ordinary chats stay local.
+          const owner = resolveOwnerDmReadContext(chatId);
+          const searchQuery = String(query).slice(0, 200);
+          let hits: Array<ScoredMessage | OwnerMemoryHit>;
+          if (owner) {
+            // Linked recall supplements local history, including legacy local
+            // bot replies. Failure of either optional path cannot hide the other.
+            const [local, linked] = await Promise.allSettled([
+              searchMemory(chatId, searchQuery, 5, 1500),
+              searchOwnerMemory(chatId, searchQuery, 5, 1500),
+            ]);
+            if (local.status === 'rejected' && linked.status === 'rejected') throw local.reason;
+            const localHits = local.status === 'fulfilled' ? local.value : [];
+            const linkedHits = linked.status === 'fulfilled' ? linked.value : [];
+            hits = [];
+            const seen = new Set<string>();
+            for (let i = 0; i < Math.max(localHits.length, linkedHits.length) && hits.length < 5; i++) {
+              for (const hit of [localHits[i], linkedHits[i]]) {
+                if (!hit || hits.length >= 5) continue;
+                const identity = JSON.stringify([hit.sourcePlatform ?? null, hit.sourceAccountId ?? null, hit.sourceChatId ?? chatId, hit.messageId]);
+                if (seen.has(identity)) continue;
+                seen.add(identity);
+                hits.push(hit);
+              }
+            }
+          } else {
+            hits = await searchMemory(chatId, searchQuery, 5, 1500);
+          }
           if (!hits.length) return '(no hits)';
           const text = hits
-            .map((h, i) => `${i + 1}. ${String(h.textContent ?? '').slice(0, 200)}`)
+            .map((h, i) => `${i + 1}. ${'ownerRecall' in h ? `[${h.ownerRecall.label}; 会话 ${h.ownerRecall.sourceChatId}] ` : ''}${String(h.textContent ?? '').slice(0, 200)}`)
             .join('\n');
           noteUnviewed(`memory.search(${String(query).slice(0, 30)})`, text);
           return text;
@@ -1765,11 +2737,30 @@ export function createHostApi(
       },
       async recallPerson(uid: number, query: string) {
         const id = Number(uid);
-        if (!Number.isFinite(id) || id <= 0) return '(invalid uid)';
+        if (!Number.isSafeInteger(id) || id <= 0) return '(invalid or foreign uid)';
+        const owner = resolveOwnerDmReadContext(chatId);
+        // Only the two configured identities of this same owner can use linked
+        // recallPerson. An arbitrary uid does not widen a private read scope.
+        if (owner?.principals.some(principal => principal.uid === id)) {
+          try {
+            const hits = await searchOwnerMemory(chatId, String(query || '最近').slice(0, 200), 5, 2000);
+            const text = hits.length ? 'memories:\n' + hits.map((hit, i) =>
+              `${i + 1}. [${hit.ownerRecall.label}; 会话 ${hit.ownerRecall.sourceChatId}] ${String(hit.textContent ?? '').slice(0, 180)}`).join('\n') : '(no person recall)';
+            noteUnviewed(`memory.recallPerson(${id})`, text);
+            return text;
+          } catch {
+            return '(memory unavailable)';
+          }
+        }
+        if (!samePlatformAccount(id, chatId)) return '(invalid or foreign uid)';
         const bits: string[] = [];
         try {
-          const ident = getPersonIdentity(id);
-          if (ident?.impression) bits.push(`impression: ${ident.impression}`);
+          const ident = env().PERSON_IDENTITY_ENABLED ? getPersonIdentity(id) : null;
+          // Use the same source policy as memory/profile injection. Disabling the
+          // visibility flag never grants permission to disclose a private source.
+          if (ident?.impression && !isCrossContextPrivate({ sourceChatId: ident.primary_chat_id }, chatId)) {
+            bits.push(`impression: ${ident.impression.slice(0, 400)}`);
+          }
           const inj = buildCrossGroupInjection(id, chatId);
           if (inj) bits.push(inj);
         } catch { /* optional */ }
@@ -1801,7 +2792,7 @@ export function createHostApi(
           const { getBotUid } = await import('../bot/bot.js');
           const msgs = await getRecent(chatId, limit, opts.messageThreadId);
           if (!msgs.length) return '(empty)';
-          const botUid = getBotUid() || 0;
+          const botUid = getBotUid(chatId) || 0;
           const masterUid = env().MASTER_UID;
           const lines = msgs.map((m) => {
             const base = slimSingleMessage(m, botUid);
@@ -1825,7 +2816,7 @@ export function createHostApi(
         try {
           if (!env().DIGEST_PERSIST_ENABLED) return '(digest persist disabled)';
           const { searchDigests } = await import('../meta/session-digest.js');
-          const hits = searchDigests(q, 5);
+          const hits = searchDigests(q, 5, { sourceChatId: chatId });
           if (!hits.length) return '(没有找到相关记录)';
           const text = hits.map((h) => `- ${h.text.slice(0, 160)}`).join('\n');
           noteUnviewed(`memory.searchDigests(${q.slice(0, 30)})`, text);
@@ -1837,13 +2828,37 @@ export function createHostApi(
       },
     },
     stickers: {
+      // round 77：返回**可诊断的失败**，不再是裸 null。
+      //
+      // 实测 09-22/23：53 次 `host sendSticker rejected bad fileId`，
+      // fileId 全是空串。链条是：prompt 说"先 stickers.pick(mood) 拿贴纸
+      // 再 telegram.sendSticker"，而 pick 失口返回 null，模型把 null
+      // 当 fileId 传下去 → `String(null ?? '') === ''` → 被守卫拦下。
+      //
+      // 守卫工作正常（没崩），但**贴纸没发出去**——它的情绪出口少了一次，
+      // 而日志里只有一条 warn 说"fileId 不对"，没人知道根因是 pick 空了。
+      // 这跟 round 75 是同一个病：失败长得不像失败。
+      //
+      // 现在：返回一句人话原因（模型会在 [observation] 里看到，
+      // 然后自己决定换个 mood 或放弃贴纸），并打 warn 计数。
       async pick(mood = 'happy') {
         try {
-          const cands = getReadyStickersByIntent(mood);
-          if (!cands.length) return null;
+          const m = String(mood ?? '').trim().slice(0, 40);
+          if (!m) {
+            logger.warn({ chatId }, 'host stickers.pick: empty mood');
+            return '没有贴纸：mood 是空的。换个情绪词再试，或者这条就不发贴纸。';
+          }
+          const cands = getReadyStickersByIntent(m);
+          if (!cands.length) {
+            logger.warn({ chatId, mood: m }, 'host stickers.pick: no candidate for mood');
+            incrCounter('sticker_pick_empty_total', { chat: chatId });
+            return `没有贴纸：${m} 这个情绪的库存是空的。换个 mood（playful/cute/sleepy/teasing/shy 都有），或者这条纯文字。`;
+          }
+          countTool('stickers.pick');
           return cands[0]!.fileId;
-        } catch {
-          return null;
+        } catch (err) {
+          logger.warn({ err, chatId, mood: String(mood).slice(0, 40) }, 'host stickers.pick failed');
+          return '贴纸查找失败（库读不到）。这条就纯文字发，别卡在这里。';
         }
       },
     },
@@ -1851,18 +2866,41 @@ export function createHostApi(
       async search(query: string) {
         assertOpen();
         if (!env().CODEACT_WEB_SEARCH_ENABLED) return '(web search disabled)';
+        assertPublicSearchQuery(String(query ?? ''));
         const q = String(query ?? '').trim().slice(0, 200);
         if (!q) throw new Error('empty query');
         try {
           const { executeSearch } = await import('../pipeline/tools/search.js');
           const raw = await executeSearch(q);
           const out = String(raw ?? '').trim().slice(0, 3500);
-          logger.info({ chatId, q: q.slice(0, 80), chars: out.length }, 'host web.search');
+          logger.info({ chatId, queryChars: q.length, chars: out.length }, 'host web.search');
+          countTool('web.search');
           noteUnviewed(`web.search(${q.slice(0, 40)})`, out || '(no results)');
           return out || '(no results)';
         } catch (err) {
-          logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host web.search failed');
+          logger.warn({ err, chatId, queryChars: q.length }, 'host web.search failed');
+          incrCounter('host_tool_calls_total', { tool: 'web.search', outcome: 'error' });
           return `搜索失败: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+      async fetchToFile(url: string, path: string) {
+        assertOpen();
+        if (!env().CODEACT_WEB_FETCH_TO_FILE_ENABLED) return { ok: false, reason: 'web.fetchToFile disabled' };
+        if (!env().SANDBOX_ENABLED) return { ok: false, reason: 'sandbox disabled' };
+        const u = String(url ?? '').trim().slice(0, 500);
+        const p = String(path ?? '').trim().slice(0, 200);
+        try {
+          const { fetchToSandboxFile } = await import('../sandbox/fetch-to-file.js');
+          const r = await fetchToSandboxFile(u, p);
+          logger.info({ chatId, host: (() => { try { return new URL(u).hostname; } catch { return '?'; } })(), ok: r.ok, bytes: r.bytes, reason: r.reason }, 'host web.fetchToFile');
+          countTool('web.fetchToFile');
+          if (!r.ok) incrCounter('host_tool_calls_total', { tool: 'web.fetchToFile', outcome: 'error' });
+          noteUnviewed(`web.fetchToFile(${u.slice(0, 40)})`, r.ok ? `${r.path} ${r.bytes}B` : r.reason ?? 'failed');
+          return r;
+        } catch (err) {
+          logger.warn({ err, chatId }, 'host web.fetchToFile failed');
+          incrCounter('host_tool_calls_total', { tool: 'web.fetchToFile', outcome: 'error' });
+          return { ok: false, reason: `fetchToFile failed: ${err instanceof Error ? err.message.slice(0, 100) : 'unknown'}` };
         }
       },
       async feed() {
@@ -1898,6 +2936,7 @@ export function createHostApi(
       async search(query: string, limit?: number) {
         assertOpen();
         if (!env().CODEACT_PIXIV_ENABLED) return '(pixiv disabled)';
+        assertPublicSearchQuery(String(query ?? ''));
         const q = String(query ?? '').trim().slice(0, 100);
         if (!q) return '(empty query)';
         try {
@@ -1917,7 +2956,7 @@ export function createHostApi(
           noteUnviewed(`pixiv.search(${q.slice(0, 40)})`, out);
           return out;
         } catch (err) {
-          logger.warn({ err, chatId, q: q.slice(0, 80) }, 'host pixiv.search failed');
+          logger.warn({ err, chatId, queryChars: q.length }, 'host pixiv.search failed');
           return `Pixiv 搜索失败: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
@@ -2044,23 +3083,38 @@ export function createHostApi(
       },
     },
     runtime: {
+      readPublicationEvidence(request) {
+        assertOpen(); if (!opts.backgroundRun) throw new Error('background_mode_required');
+        return readBackgroundEvidence(opts.backgroundRun,request);
+      },
+      proposePublication(text, handles) {
+        assertOpen(); if (!opts.backgroundRun) throw new Error('background_mode_required');
+        return proposeBackgroundPublication(opts.backgroundRun,text,handles);
+      },
       setAcceptance(checks) { audit.propose(checks); },
       verifyAcceptance() { return audit.verify(); },
       endTask(summary: string) {
+        if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
         logger.info({ chatId, taskId: opts.taskId, summary: String(summary ?? '').slice(0, 160), deliveryKind: lastDeliveryKind ?? null }, 'task finalization requested');
         if (ended) return;
         if (!String(summary).startsWith('failed')) audit.assertCanEnd();
         ended = true;
         // 承诺闭环③ 兜底：说了「等下/我去…」但没立 goal 也没跨群送达 → 自动补 goal。
-        void promiseBackstop();
+        // Join this bounded check before executor terminal settlement. A valid
+        // promise may be recorded while its input is still current; stale or
+        // cancelled input cannot schedule a fresh goal after the task closes.
+        if (!String(summary).startsWith('failed') && summary !== 'user_stopped') {
+          pendingBookkeeping.push(promiseBackstop());
+        }
         opts.onEnd(String(summary ?? '').slice(0, 1000));
       },
       didSendText() {
         return textSent > 0;
       },
       didProduceFinal() {
-        return finalSent || ended;
+        return !deliveryUnknown && (finalSent || ended);
       },
+      hasUnknownDelivery() { return deliveryUnknown; },
       didSendIntermediate() {
         return intermediateSent;
       },
@@ -2068,6 +3122,7 @@ export function createHostApi(
         return lastDeliveryKind;
       },
       waitForUser(reason?: string) {
+        if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
         waitingForUser = true;
         waitingReason = String(reason ?? '').slice(0, 240);
         lastDeliveryKind = 'clarification';
@@ -2111,6 +3166,43 @@ export function createHostApi(
           await setScratch(chatId, text);
         } catch (err) {
           logger.debug({ err, chatId }, 'host setScratch failed');
+        }
+      },
+      async rememberThread(note: string, kind?: 'promised' | 'waiting') {
+        try {
+          const { rememberThread } = await import('../tracking/open-threads.js');
+          rememberThread({
+            chatId,
+            uid: opts.targetUserId ?? 0,
+            note,
+            kind: kind === 'waiting' ? 'waiting' : 'promised',
+          });
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host rememberThread failed');
+        }
+      },
+      scheduleSelfWake(about: string, delaySec?: number) {
+        const note = String(about ?? '').trim();
+        if (!note) return;
+        try {
+          void (async () => {
+            const { scheduleSelfWake } = await import('../agent/cognitive-clock.js');
+            const r = scheduleSelfWake({
+              scope: { visibility: 'chat', chatId },
+              about: note,
+              ...(Number.isFinite(delaySec) ? { delaySec: Number(delaySec) } : {}),
+              // 归因到本任务的消息，便于回溯"我那时候为什么想这事"
+              ...(opts.defaultReplyTo ? { causeEventId: undefined } : {}),
+            });
+            if (r) {
+              logger.info(
+                { chatId, about: note.slice(0, 40), wakeInSec: r.wakeAt - Math.floor(Date.now() / 1000) },
+                'self wake scheduled',
+              );
+            }
+          })();
+        } catch (err) {
+          logger.debug({ err, chatId }, 'host scheduleSelfWake failed (non-critical)');
         }
       },
       async clearScratch(prefix?: string) {
@@ -2178,6 +3270,41 @@ export function createHostApi(
       },
     },
   };
+  if (isPlatformInternalId(chatId) && env().ONEBOT_MEDIA_ENABLED) {
+    const attachments = createQQAttachmentApi({ chatId, replyToId: opts.defaultReplyTo,
+      assertOpen, guard: sendWithDeliveryGuard, maxSends: Math.min(maxFileSends, 4),
+      delivered: async (messageId, description) => {
+        fileSent++;
+        persistBotDeliveryEvent({ chatId, messageId, taskId: opts.taskId, kind: 'attachment',
+          replyToMessageId: opts.defaultReplyTo, cognitiveAnchorEventId: opts.cognitiveAnchorEventId });
+        const { addAssistant } = await import('../pipeline/context/manager.js');
+        await addAssistant(chatId, { textContent: description, messageId }, opts.messageThreadId);
+        for (const id of new Set([opts.defaultReplyTo, ...(opts.relatedQuoteIds ?? [])])) {
+          if (id && id > 0) await markMessageAnswered(chatId, id);
+        }
+      },
+    });
+    for (const [name, fn] of Object.entries(attachments)) {
+      Object.defineProperty(api.telegram, name, { configurable: true, enumerable: true,
+        value: (...args: unknown[]) => trackInflight(Reflect.apply(fn, attachments, args) as Promise<unknown>) });
+    }
+    api.telegram.sendSticker = (handle: string) => trackInflight(attachments.sendPhoto(handle));
+  }
+  if (opts.backgroundRun) {
+    // Defense in depth for direct host calls and future guest list mistakes.
+    // Internal runtime bookkeeping stays usable by the executor; guest-visible
+    // mutators and every other namespace are limited to the same read-only list.
+    const allowed = new Set<string>(BACKGROUND_CAPABILITY_METHODS);
+    const blockedRuntime = new Set(['waitForUser','predict','setScratch','clearScratch','rememberThread','scheduleSelfWake','setAcceptance']);
+    for (const [namespace, object] of Object.entries(api)) {
+      for (const name of Object.keys(object)) {
+        if ((namespace === 'runtime' ? blockedRuntime.has(name) : !allowed.has(`${namespace}.${name}`))
+          && typeof (object as Record<string,unknown>)[name] === 'function') {
+          Object.defineProperty(object,name,{configurable:true,enumerable:true,value:() => { throw new Error('background_direct_effect_forbidden'); }});
+        }
+      }
+    }
+  }
   // Runtime stays synchronous. All tool receipts originate from host-returned results.
   for (const key of Object.keys(api) as (keyof HostApi)[]) {
     if (key === 'runtime') continue;
@@ -2185,5 +3312,48 @@ export function createHostApi(
     namespaces[key] = audit.wrap(key, namespaces[key]!);
   }
   attachExecutionAudit(api, audit);
+  // ⚠️ **这里必须 return api 本身，不能包任何 Proxy。**
+  //
+  // round 126/130 的教训：`attachExecutionAudit(api, audit)` 用 **api 这个对象**
+  // 当 WeakMap 的键，而 executor.ts:445 `getExecutionAudit(host)!` 用的是**返回值**。
+  // round 126 我加了 `return withToolCounters(api)`（一个 Proxy），
+  // WeakMap 里存的是原 api、executor 拿到的是 Proxy——**键对不上**，
+  // getExecutionAudit 返回 undefined，`audit.hasContract()` 抛
+  // `Cannot read properties of undefined (reading 'hasContract')`。
+  //
+  // round 130 实测：部署后 8 个 CodeAct task **8 个全崩**，崩溃点全在这一行。
+  // round 127 我只回退了递归版，没回退这顶层一版，所以故障一直在。
+  //
+  // 计数器改用点式（countTool，加在各工具实现里），不横跨 API 表面。
   return api;
+}
+
+/**
+ * 给 host api 包一层**统一成败计数**。
+ *
+ * 2026-09-21 round 125 的发现：executor 广告了 79 个工具（剔掉 runtime.* 协议
+ * 内部件后是 60 个），而生产日志里只出现过 14 个，其中 3 个是坏的
+ * （web.search 237 次全灭、pixiv.search 失败、linuxsb.topic 失败）。
+ *
+ * 要查出这个事实，我得 grep 一整天的日志人肉比对——因为**没有任何计数器
+ * 记着"哪个工具被调过、成没成"**。这是 round 26（心流失败率要三个出口都数）
+ * 在工具层的同一次补课：量的东西缺了一个分母。
+ *
+ * 包在这里而不是每个工具里加一行，是因为 createHostApi 是所有子 api
+ * （telegram / memory / chats / web / admin / bots / …）唯一的汇合点。
+ * Proxy 对每个方法调用计一次数，不改任何业务逻辑。
+ */
+/**
+ * 工具调用计数。**加在每个工具的实现里，不横跨 API 表面。**
+ *
+ * round 126/127 的教训：我试过用 Proxy 包住 createHostApi 的返回值，
+ * 结果 (a) 只包了顶层而工具在第二层，8 个任务跑完 0 条计数；
+ * (b) 改递归又炸了 7 个测试——unviewed-results 机制靠沙盒侧识别
+ * "模型调过哪个工具"，我横跨一层包装让那个识别失焦。
+ *
+ * 所以改成点式：和 noteUnviewed / logger.info 那些既有插入点并排。
+ * 难看，但它加在机制旁边。
+ */
+function countTool(tool: string): void {
+  incrCounter('host_tool_calls_total', { tool, outcome: 'ok' });
 }

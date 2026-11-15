@@ -34,6 +34,7 @@ function initSchema(db: Database.Database): void {
 }
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
+const scope = { sourceChatId: -100123 };
 
 function rowCount(): number {
   return (testDb.prepare('SELECT COUNT(*) AS c FROM session_digests').get() as { c: number }).c;
@@ -115,7 +116,7 @@ describe('session-digest', () => {
         tags: ['research', '主人'],
         importance: 0.9,
       });
-      const [d] = recentDigests(1);
+      const [d] = recentDigests(1, { sourceChatId: 42 });
       expect(d?.kind).toBe('subagent');
       expect(d?.tags).toEqual(['research', '主人']);
       expect(d?.importance).toBe(0.9);
@@ -123,11 +124,14 @@ describe('session-digest', () => {
 
     it('defaults: tags [] and importance 0.5', () => {
       persistDigest({ kind: 'meta', text: '随便一条' });
-      const [d] = recentDigests(1);
-      expect(d?.tags).toEqual([]);
-      expect(d?.importance).toBe(0.5);
-      expect(d?.sourceChatId).toBeNull();
-      expect(d?.taskId).toBeNull();
+      const d = testDb.prepare('SELECT tags, importance, source_chat_id, task_id FROM session_digests').get() as {
+        tags: string | null; importance: number; source_chat_id: number | null; task_id: string | null;
+      };
+      expect(d.tags).toBeNull();
+      expect(d.importance).toBe(0.5);
+      expect(d.source_chat_id).toBeNull();
+      expect(d.task_id).toBeNull();
+      expect(recentDigests(1, scope)).toEqual([]);
     });
 
     it('blank / whitespace text is skipped', () => {
@@ -145,36 +149,36 @@ describe('session-digest', () => {
 
   describe('recentDigests / digestsSince', () => {
     it('recentDigests returns newest N in chronological order', () => {
-      persistDigest({ kind: 'meta', text: '第一条' });
-      persistDigest({ kind: 'subagent', text: '第二条', taskId: 't2' });
-      persistDigest({ kind: 'dispatch', text: '第三条', taskId: 't3' });
+      persistDigest({ kind: 'meta', text: '第一条', ...scope });
+      persistDigest({ kind: 'subagent', text: '第二条', taskId: 't2', ...scope });
+      persistDigest({ kind: 'dispatch', text: '第三条', taskId: 't3', ...scope });
 
-      const all = recentDigests(10);
+      const all = recentDigests(10, scope);
       expect(all.map((d) => d.text)).toEqual(['第一条', '第二条', '第三条']);
 
-      const last2 = recentDigests(2);
+      const last2 = recentDigests(2, scope);
       expect(last2.map((d) => d.text)).toEqual(['第二条', '第三条']);
     });
 
     it('recentDigests excludeKinds filters kinds out', () => {
-      persistDigest({ kind: 'meta', text: 'meta 的' });
-      persistDigest({ kind: 'dispatch', text: 'dispatch 的' });
-      const rows = recentDigests(10, { excludeKinds: ['dispatch'] });
+      persistDigest({ kind: 'meta', text: 'meta 的', ...scope });
+      persistDigest({ kind: 'dispatch', text: 'dispatch 的', ...scope });
+      const rows = recentDigests(10, { ...scope, excludeKinds: ['dispatch'] });
       expect(rows.map((d) => d.kind)).toEqual(['meta']);
     });
 
     it('digestsSince filters by timestamp (unix seconds), ascending', () => {
       testDb
         .prepare(
-          `INSERT INTO session_digests (kind, text, created_at) VALUES ('meta', '老 digest', 1000)`,
+          `INSERT INTO session_digests (kind, text, created_at, source_chat_id) VALUES ('meta', '老 digest', 1000, ?)`,
         )
-        .run();
-      persistDigest({ kind: 'meta', text: '新 digest' });
+        .run(scope.sourceChatId);
+      persistDigest({ kind: 'meta', text: '新 digest', ...scope });
 
-      const recent = digestsSince(nowSec() - 10, 10);
+      const recent = digestsSince(nowSec() - 10, 10, scope);
       expect(recent.map((d) => d.text)).toEqual(['新 digest']);
 
-      const everything = digestsSince(999, 10);
+      const everything = digestsSince(999, 10, scope);
       expect(everything.map((d) => d.text)).toEqual(['老 digest', '新 digest']);
     });
   });
@@ -184,24 +188,25 @@ describe('session-digest', () => {
       const id = persistDigest({
         kind: 'meta',
         text: '主人让本喵帮忙查了篮球比赛的赛程,已经发到群里',
+        ...scope,
       });
-      persistDigest({ kind: 'subagent', text: '晚饭吃了拉面,群里聊得很开心' });
+      persistDigest({ kind: 'subagent', text: '晚饭吃了拉面,群里聊得很开心', ...scope });
 
-      const hits = searchDigests('篮球', 5);
+      const hits = searchDigests('篮球', 5, scope);
       expect(hits.map((d) => d.id)).toEqual([id]);
       expect(hits[0]?.text).toContain('篮球');
 
       // 另一条的双字词也能独立命中(写入/查询同一分词器)。
-      expect(searchDigests('拉面', 5).map((d) => d.text)).toEqual([
+      expect(searchDigests('拉面', 5, scope).map((d) => d.text)).toEqual([
         '晚饭吃了拉面,群里聊得很开心',
       ]);
     });
 
     it('no match / empty query / FTS-special chars → empty, never throws', () => {
-      persistDigest({ kind: 'meta', text: '普通的摘要一条' });
-      expect(searchDigests('zzqnotfound', 5)).toEqual([]);
-      expect(searchDigests('', 5)).toEqual([]);
-      expect(() => searchDigests('" OR ( NEAR/', 5)).not.toThrow();
+      persistDigest({ kind: 'meta', text: '普通的摘要一条', ...scope });
+      expect(searchDigests('zzqnotfound', 5, scope)).toEqual([]);
+      expect(searchDigests('', 5, scope)).toEqual([]);
+      expect(() => searchDigests('" OR ( NEAR/', 5, scope)).not.toThrow();
     });
   });
 
@@ -212,9 +217,39 @@ describe('session-digest', () => {
         persistDigest({ kind: 'meta', text: '表都没了' }),
       ).not.toThrow();
       expect(persistDigest({ kind: 'meta', text: '表都没了' })).toBeNull();
-      expect(recentDigests(5)).toEqual([]);
-      expect(digestsSince(0, 5)).toEqual([]);
-      expect(searchDigests('篮球', 5)).toEqual([]);
+      expect(recentDigests(5, scope)).toEqual([]);
+      expect(digestsSince(0, 5, scope)).toEqual([]);
+      expect(searchDigests('篮球', 5, scope)).toEqual([]);
+    });
+  });
+
+  describe('conversation provenance', () => {
+    it('filters before limits and never exposes another group, a DM, or legacy unknown sources', () => {
+      const own = persistDigest({ kind: 'subagent', text: '篮球 本群允许回忆', ...scope });
+      persistDigest({ kind: 'meta', text: '篮球 私聊秘密', sourceChatId: 42 });
+      persistDigest({ kind: 'meta', text: '篮球 另一个群', sourceChatId: -100999 });
+      persistDigest({ kind: 'meta', text: '篮球 旧来源不明' });
+      persistDigest({ kind: 'meta', text: '篮球 无效来源', sourceChatId: 0 });
+      // Turning off persistence must not turn existing private records into public ones.
+      envState.DIGEST_PERSIST_ENABLED = false;
+      expect(recentDigests(1, scope).map((d) => d.id)).toEqual([own]);
+      expect(digestsSince(0, 1, scope).map((d) => d.id)).toEqual([own]);
+      expect(searchDigests('篮球', 1, scope).map((d) => d.id)).toEqual([own]);
+      expect(searchDigests('篮球', 10, { sourceChatId: 42 }).map((d) => d.text)).toEqual(['篮球 私聊秘密']);
+      expect(rowCount()).toBe(5);
+    });
+
+    it('missing or invalid caller scope fails closed without deleting archived rows', () => {
+      persistDigest({ kind: 'meta', text: '篮球 私聊秘密', sourceChatId: 42 });
+      expect(recentDigests()).toEqual([]);
+      expect(digestsSince(0)).toEqual([]);
+      expect(searchDigests('篮球')).toEqual([]);
+      for (const sourceChatId of [0, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(recentDigests(5, { sourceChatId })).toEqual([]);
+        expect(digestsSince(0, 5, { sourceChatId })).toEqual([]);
+        expect(searchDigests('篮球', 5, { sourceChatId })).toEqual([]);
+      }
+      expect(rowCount()).toBe(1);
     });
   });
 });

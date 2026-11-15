@@ -1,9 +1,10 @@
+import { getMemoryEmbedder } from './embedding.js';
 // ────────────────────────────────────────
 // 长期记忆向量库客户端 (Qdrant-backed)
 // ────────────────────────────────────────
-// - 写入：fire-and-forget，消息进 pipeline 后异步存入
+// - 写入：投影 outbox 开启时先落权威正文/意图，再异步投影；旧模式仍异步写入
 // - 读取：语义搜索，填 retriever.ts 的 semantic 路
-// - Embedding：@xenova/transformers 本地模型 (384-dim)，无外部 API。模型由
+// - Embedding：@xenova/transformers 384-dim，同模型本地引擎或显式配置的独立计算服务。模型由
 //   MEMORY_EMBED_MODEL 指定 —— 默认的 all-MiniLM-L6-v2 是**英文单语**模型，对中文
 //   实测同义/无关区分度仅 0.14(无关句对 0.72 高于英文同义句对 0.70)，即检索结果
 //   接近随机；paraphrase-multilingual-MiniLM-L12-v2 同为 384 维、区分度 0.56。
@@ -15,26 +16,37 @@
 
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { createHash } from 'node:crypto';
-import { LRUCache } from 'lru-cache';
+
+
+
 import type { FormattedMessage } from '../shared/types.js';
 import { logger } from '../shared/logger.js';
-import { defaultVisibilityForChat, isPrivateChat, scrubMemoryHits, type MemoryVisibility } from './visibility.js';
+import { defaultVisibilityForChat, scrubMemoryHits, type MemoryVisibility, type VisibilityFields } from './visibility.js';
 import { incrCounter } from '../metrics/registry.js';
 import { env } from '../env.js';
+import { isValidConversationScope, resolveConversationScope, samePlatformAccount } from '../shared/privacy-scope.js';
+import { inspectOwnerMemorySource, resolveOwnerDmReadContext, type OwnerDmReadContext, type OwnerMemoryPrincipal, type OwnerMemoryProvenance } from '../shared/owner-memory-scope.js';
+import { authoritativeMemoryPayload, hasMemorySourceAuthority, persistMemorySource, retractMemorySources } from './source-store.js';
+import { drainMemoryProjections } from './projection-worker.js';
+import type { ConfirmedDeliveryPart } from '../shared/delivery-result.js';
+import { createMessageEventIdentity } from '../shared/event-identity.js';
+import { findMessageRef } from '../platform/identity-store.js';
+import { fromTelegramChatId } from '../platform/identity.js';
 
 /**
  * A semantic-search result carrying its relevance score (0..1, higher = closer).
  * Qdrant returns cosine similarity directly (normalized embeddings ⇒ ~[0,1]); we
  * clamp it to [0,1]. Optional so callers that don't need it can ignore it.
  */
-export type ScoredMessage = FormattedMessage & {
+export type ScoredMessage = FormattedMessage & VisibilityFields & {
   score?: number;
-  /** 机制1:记忆级 visibility 与来源会话(跨上下文召回时 scrub 用)。 */
-  visibility?: MemoryVisibility;
-  sourceChatId?: number | null;
 };
 
+/** Separate owner audience; source fields are never relabelled as public/current. */
+export type OwnerMemoryHit = ScoredMessage & { sourceChatId: number; ownerRecall: OwnerMemoryProvenance };
+
 const VECTOR_SIZE = 384;
+export { findEmbedOnnxWeights, findMissingEmbedJson } from './embedding-weights.js';
 /** 去重查询的硬超时。写入是 fire-and-forget,但仍然跑在消息处理的任务里。 */
 const DEDUP_TIMEOUT_MS = 300;
 /** 混合检索时每一路的超取倍数 —— 融合后才截到 topK,单路取满 topK 会让融合无从选择。 */
@@ -72,87 +84,10 @@ export function midToPointId(mid: string): string {
 // Lazy singletons
 let _client: QdrantClient | undefined;
 let _ready: Promise<QdrantClient> | undefined;
-let _embedder: ((texts: string[]) => Promise<number[][]>) | undefined;
-// Promise singleton: concurrent callers await the same load; errors clear it so next call retries
-let _embedderPromise: Promise<(texts: string[]) => Promise<number[][]>> | undefined;
-
-// Embedding cache. The same text often gets embedded twice within a single
-// pipeline run — once for memorizeMessage (fire-and-forget write), once when
-// searchMemory uses similar query text. Local CPU embedding is ~10-50ms per
-// call, so caching cuts that. TTL keeps memory bounded; LRU drops cold keys.
-const EMBED_CACHE_MAX = 200;
-const EMBED_CACHE_TTL_MS = 5 * 60 * 1000;
-const _embedCache = new LRUCache<string, number[]>({
-  max: EMBED_CACHE_MAX,
-  ttl: EMBED_CACHE_TTL_MS,
-});
-
-// ── Embedder (local, lazy-loaded) ────────────────────────
-
-/**
- * 启动预热:把 ONNX session init(~23MB 量化模型,冷缓存时还要下载)从"第一条文本消息
- * 的关键路径"挪到进程启动期。不预热时每次 systemctl restart 后的第一条消息要当场阻塞
- * 0.5-2s,且 searchMemory 的 500ms 竞速会返回 [] —— 重启后头几条回复静默地完全没有长期记忆。
- */
 export function warmEmbedder(): void {
-  void getEmbedder().catch(() => { /* non-critical; getEmbedder 内部失败会清空 promise 以便重试 */ });
+  void getMemoryEmbedder().catch(() => { /* Lazy loads retry on the next call. */ });
 }
-
-function getEmbedder(): Promise<(texts: string[]) => Promise<number[][]>> {
-  if (_embedder) return Promise.resolve(_embedder);
-  if (_embedderPromise) return _embedderPromise;
-
-  _embedderPromise = (async () => {
-    // Dynamic import to avoid blocking startup
-    const { pipeline } = await import('@xenova/transformers');
-    const modelId = env().MEMORY_EMBED_MODEL;
-    const extractor = await pipeline('feature-extraction', modelId, {
-      progress_callback: undefined, // suppress download progress logs
-    });
-
-    _embedder = async (texts: string[]): Promise<number[][]> => {
-      // key 带长度前缀:两条不同长文本前 512 字符相同就会共享 embedding(review 指出的
-      // 截断碰撞)。长度不同 ⇒ key 必然不同;同长同前缀的残余碰撞概率可忽略。
-      const keys = texts.map((t) => `${t.length}:${t.slice(0, 512)}`);
-      const results: (number[] | null)[] = new Array(keys.length).fill(null);
-      const uncachedIndices: number[] = [];
-
-      // Check cache first
-      for (let i = 0; i < keys.length; i++) {
-        const cached = _embedCache.get(keys[i]!);
-        if (cached) {
-          results[i] = cached;
-        } else {
-          uncachedIndices.push(i);
-        }
-      }
-
-      // Batch-embed all uncached texts in one call
-      if (uncachedIndices.length > 0) {
-        const uncachedTexts = uncachedIndices.map((i) => keys[i]!);
-        for (let j = 0; j < uncachedTexts.length; j++) {
-          const out = await extractor(uncachedTexts[j]!, { pooling: 'mean', normalize: true });
-          const vector = Array.from(out.data as Float32Array);
-          const idx = uncachedIndices[j]!;
-          _embedCache.set(keys[idx]!, vector);
-          results[idx] = vector;
-        }
-      }
-
-      return results as number[][];
-    };
-
-    // 打真实模型名:写死的日志在换模型后会撒谎,而"检索质量变差"最先查的就是这一行。
-    logger.info({ model: modelId, dim: VECTOR_SIZE, collection: collectionName() }, 'Memory embedder loaded');
-    return _embedder;
-  })().catch((err) => {
-    // Clear promise so next call retries
-    _embedderPromise = undefined;
-    throw err;
-  });
-
-  return _embedderPromise;
-}
+const getEmbedder = getMemoryEmbedder;
 
 // ── Qdrant client + collection ───────────────────────────
 
@@ -227,14 +162,49 @@ export async function memorizeMessage(
   /** 机制1:覆盖默认 visibility(如频道帖显式传 'public');默认按会话私密性推断。 */
   visibilityOverride?: MemoryVisibility,
 ): Promise<void> {
+  const sourceScope = resolveConversationScope(chatId);
+  if (!sourceScope) return;
   const text = msg.textContent || msg.captionContent || '';
   if (!text.trim() || msg.isBot) return;
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true) {
+    persistMemorySource(chatId, msg, visibilityOverride);
+    return;
+  }
+
+  // 装载 embedding / 建 collection / 写 Qdrant 曾经共用一个 try/catch，于是它们全被
+  // 记成同一条 `Memory write failed (non-critical)`。后果就是一次彻底的误诊：上面那段
+  // 注释（和 chroma-write-retry.test.ts 的头注）都以为这些报错是**本地 Qdrant 抖**。
+  // 2026-09-21 的实测把 2280 条按 err.stack 分类后正好相反：
+  //   ① 2270 条是 @xenova/transformers 的 stack（getModelFile / AutoModel.from_pretrained），
+  //      因为 onnx 权重从未缓存，每次启动都去 huggingface.co 重拉，而本机 TLS 隧道
+  //      5 秒一断；undici 的 `terminated: other side closed` 栈里是 **TLSSocket**
+  //      ——Qdrant 是明文 HTTP，只可能报 Socket。
+  //   ② 只有 10 条栈里有 @qdrant/js-client-rest 的 upsert 帧。
+  // 所以：不是"Qdrant 写失败"，而是"embedding 装不上"。分阶段报，各打各的标签。
+  let embed: (texts: string[]) => Promise<number[][]>;
+  try {
+    embed = await getEmbedder();
+  } catch (err) {
+    logger.warn({ err, chatId, stage: 'embedder' }, 'Memory embedding unavailable (non-critical)');
+    return;
+  }
+  let store: QdrantClient;
+  try {
+    store = await getStore();
+  } catch (err) {
+    logger.warn({ err, chatId, stage: 'store' }, 'Memory store unavailable (non-critical)');
+    return;
+  }
+  let vector: number[] | undefined;
+  try {
+    [vector] = await embed([text]);
+  } catch (err) {
+    logger.warn({ err, chatId, messageId: msg.messageId, stage: 'embed' }, 'Memory embedding failed (non-critical)');
+    return;
+  }
+  if (!vector) return;
 
   try {
-    const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
-    const [vector] = await embed([text]);
-    if (!vector) return;
-
     const mid = `${chatId}_${msg.messageId}`;
 
     // 近重复合并:群聊里「哈哈哈」「+1」「同问」会被原样存成几万条独立记忆,
@@ -255,36 +225,84 @@ export async function memorizeMessage(
     // 机制1:无条件写 visibility + sourceChatId(前向兼容,让数据先积累;
     // scrub 由 MEMORY_VISIBILITY_ENABLED 门控,不影响默认锁 chatId 的检索)。
     const visibility: MemoryVisibility = visibilityOverride ?? defaultVisibilityForChat(chatId);
-    await store.upsert(collectionName(), {
-      wait: false,
-      points: [{
-        id: midToPointId(mid),
-        vector,
-        payload: {
-          mid,
-          chatId,
-          messageId: msg.messageId,
-          uid: msg.uid,
-          username: msg.username,
-          fullName: msg.fullName,
-          timestamp: msg.timestamp,
-          role: msg.role,
-          text,
-          visibility,
-          sourceChatId: chatId,
-        },
-      }],
-    });
     // Importance sidecar — track creation for later scoring / forgetting
     try {
       const { recordMemoryCreated } = await import('./importance.js');
       recordMemoryCreated(mid, chatId, msg.timestamp);
     } catch { /* non-critical */ }
+    // 向量写入套重试。这里的瞬断(重试)针对的是**真的** Qdrant 写失败 —— 实测
+    // 2270/2280 的告警不是这个来源，别因为这条注释再把 embedding 的失败当 Qdrant。
+    // 之所以进得了这个 catch 就重试：点 id 是 UUIDv5(`${chatId}_${messageId}`) 的
+    // 确定性映射，所以重试是**幂等覆盖**，绝不产生重复点（见
+    // chroma-write-retry.test.ts 里"重试写的是同一个 id"那条）。
+    //
+    // 只包向量这一路：词法索引走 SQLite，且 writeLexical 内部已经自己吞异常
+    // （它的失败本来就是 non-fatal），再套一层重试是死代码。
+    // 向量写成功了才写词法 —— 反过来会让 BM25 看见一条向量库没有的记忆。
+    await withQdrantRetry(() => store.upsert(collectionName(), {
+      wait: false,
+      points: [{
+        id: midToPointId(mid),
+        vector,
+        payload: {
+          mid, chatId, messageId: msg.messageId, uid: msg.uid,
+          username: msg.username, fullName: msg.fullName, timestamp: msg.timestamp,
+          role: msg.role, text, visibility, sourceChatId: chatId,
+          sourcePlatform: sourceScope.platform,
+          ...(sourceScope.accountId ? { sourceAccountId: sourceScope.accountId } : {}),
+        },
+      }],
+    }));
     // 词法索引与向量库必须同生同灭 —— 只写一边会让 BM25 与向量两路看到不同的库。
     await writeLexical(mid, chatId, text);
   } catch (err) {
-    logger.warn({ err, chatId, messageId: msg.messageId }, 'Memory write failed (non-critical)');
+    logger.warn({ err, chatId, messageId: msg.messageId, stage: 'vector-write' }, 'Memory write failed (non-critical)');
   }
+}
+
+/** Only called inside the actual sender-ACK bookkeeping loop, never for plans or
+ * historical backfills. A normal FormattedMessage cannot grant itself provenance.
+ */
+export async function memorizeAcknowledgedDelivery(chatId: number, part: ConfirmedDeliveryPart): Promise<void> {
+  const scope = resolveConversationScope(chatId);
+  if (!scope?.accountId || !Number.isSafeInteger(part.messageId) || part.messageId <= 0) throw new Error('memory_delivery_identity_unproven');
+  const ref = scope.platform === 'qq' ? findMessageRef(chatId, part.messageId)
+    : { conversation: fromTelegramChatId(scope.accountId, chatId), id: String(part.messageId) };
+  if (!ref) throw new Error('memory_delivery_identity_unmapped');
+  const now = Date.now();
+  await memorizeMessage(chatId, { role: 'assistant', uid: 0, username: '', fullName: '',
+    timestamp: Math.floor(now / 1000), messageId: part.messageId, textContent: part.text, isForwarded: false,
+    eventIdentity: createMessageEventIdentity({ ref, occurredAt: null, receivedAt: now }),
+  });
+}
+
+/**
+ * Qdrant 写的短重试。只对**连接级瞬断**重试，别的一律立刻抛——
+ * 内容是自己的问题（payload 非法/维度不对），重试只是翻倍同样的错。
+ *
+ * 三次尝试、退避 150/400ms。再失败就上抛给 memorizeMessage 的 catch
+ * （那条 warn 仍然会打，所以失败不会变安静，只是不再一抖就丢）。
+ */
+async function withQdrantRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const delays = [0, 150, 400];
+  let lastErr: unknown;
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i]! > 0) await new Promise((r) => setTimeout(r, delays[i]));
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientNetworkError(err)) throw err;
+      logger.debug({ attempt: i + 1, err: err instanceof Error ? err.message : String(err) }, 'qdrant write transient — retrying');
+    }
+  }
+  throw lastErr;
+}
+
+/** 连接级瞬断：值得重试的那一类。 */
+function isTransientNetworkError(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return /terminated|other side closed|ECONNRESET|ECONNREFUSED|Connect Timeout|socket disconnected|fetch failed|UND_ERR/i.test(m);
 }
 
 /**
@@ -345,7 +363,7 @@ export async function searchMemory(
   topK = 8,
   timeoutMs = 500,
 ): Promise<ScoredMessage[]> {
-  if (!query.trim()) return [];
+  if (!query.trim() || !isValidConversationScope(chatId)) return [];
 
   try {
     const result = await Promise.race([
@@ -388,19 +406,22 @@ async function _searchMemoryInner(
   const semantic: ScoredMessage[] = [];
   for (const hit of hits) {
     const m = hitToMessage(hit);
-    if (m) semantic.push(m);
+    // A backend filter is not provenance: damaged/imported payloads can disagree
+    // with it. Local recall must never turn a foreign hit into a current message.
+    if (m?.sourceChatId === chatId) semantic.push(m);
   }
+  const localSemantic = scrubMemoryHits(semantic, chatId).kept;
 
-  if (!hybrid) return applyMinScore(semantic, { chatId }).slice(0, topK);
+  if (!hybrid) return applyMinScore(localSemantic, { chatId }).slice(0, topK);
 
   // 词法路:384 维小模型对专有名词/黑话/型号天然弱,BM25 正好补这一块。
   const lexical = await lexicalPath(store, chatId, query, perPath);
-  if (lexical.length === 0) return applyMinScore(semantic, { chatId }).slice(0, topK);
+  if (lexical.length === 0) return applyMinScore(localSemantic, { chatId }).slice(0, topK);
 
   // 阈值只施加于语义路 —— 词法路没有可比的 [0,1] 分数,拿余弦阈值卡它没有意义。
   const { rrfFuse } = await import('./fusion.js');
   const fused = rrfFuse<ScoredMessage>(
-    [applyMinScore(semantic, { chatId }), lexical],
+    [applyMinScore(localSemantic, { chatId }), lexical],
     (m) => `${m.sourceChatId ?? chatId}_${m.messageId}`,
     { limit: topK },
   );
@@ -433,10 +454,18 @@ async function lexicalPath(
     const byMid = new Map<string, ScoredMessage>();
     for (const p of points) {
       const m = hitToMessage(p as { payload?: Record<string, unknown> | null; score?: number });
-      const mid = (p.payload ?? {})['mid'];
-      if (m && typeof mid === 'string') byMid.set(mid, m);
+      const authoritative = authoritativeMemoryPayload((p.payload ?? {}) as Record<string, unknown>);
+      const mid = authoritative?.['mid'];
+      const projectedId = authoritative?.['projectionId'];
+      if (m?.sourceChatId === chatId && typeof mid === 'string'
+        && mid === `${chatId}_${m.messageId}`) {
+        if (typeof projectedId === 'string') {
+          if (p.id === midToPointId(projectedId)) byMid.set(projectedId, m);
+        } else byMid.set(mid, m);
+      }
     }
-    return rows.map((r) => byMid.get(r.chromaId)).filter((m): m is ScoredMessage => m !== undefined);
+    const local = rows.map((r) => byMid.get(r.chromaId)).filter((m): m is ScoredMessage => m !== undefined);
+    return scrubMemoryHits(local, chatId).kept;
   } catch (err) {
     logger.debug({ err, chatId }, 'lexical path failed (non-critical, falling back to vector-only)');
     return [];
@@ -471,7 +500,8 @@ function applyMinScore<T extends ScoredMessage>(hits: T[], ctx: Record<string, u
 
 /** Qdrant hit → ScoredMessage(带 visibility/sourceChatId);无文本返回 null。 */
 function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: number }): ScoredMessage | null {
-  const meta = (hit.payload ?? {}) as Record<string, unknown>;
+  const meta = authoritativeMemoryPayload((hit.payload ?? {}) as Record<string, unknown>);
+  if (!meta) return null;
   // payload 来自外部存储,不做盲 cast:类型不符时回退默认值,uid 拿不到真实数字就
   // 归 0(与真实 uid=0 无法区分,但 payload 损坏时总好过把一个字符串当 number 用)。
   const asNum = (v: unknown): number | undefined =>
@@ -480,6 +510,21 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
     typeof v === 'string' ? v : undefined;
   const doc = asStr(meta['text']);
   if (!doc) return null;
+  const validChatId = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value !== 0;
+  // Historical chatId is an explicit source; absence of both is not. An invalid
+  // or conflicting *present* source must not be repaired by a different field.
+  const rawSource = meta['sourceChatId'];
+  const rawChat = meta['chatId'];
+  if (rawSource !== undefined && !validChatId(rawSource)) return null;
+  if (rawChat !== undefined && !validChatId(rawChat)) return null;
+  if (rawSource !== undefined && rawChat !== undefined && rawSource !== rawChat) return null;
+  const sourceChatId = rawSource ?? rawChat;
+  if (!validChatId(sourceChatId)) return null;
+  const sourcePlatform = meta['sourcePlatform'];
+  const sourceAccountId = meta['sourceAccountId'];
+  if (sourcePlatform !== undefined && sourcePlatform !== 'telegram' && sourcePlatform !== 'qq') return null;
+  if (sourceAccountId !== undefined && (typeof sourceAccountId !== 'string' || !/^[1-9]\d*$/.test(sourceAccountId))) return null;
   // Qdrant Cosine returns similarity directly (higher = closer); clamp to [0,1].
   const score = typeof hit.score === 'number'
     ? Math.max(0, Math.min(1, hit.score))
@@ -499,21 +544,101 @@ function hitToMessage(hit: { payload?: Record<string, unknown> | null; score?: n
     isForwarded: false,
     score,
     visibility,
-    sourceChatId: asNum(meta['sourceChatId']) ?? asNum(meta['chatId']) ?? null,
+    sourceChatId,
+    ...(sourcePlatform !== undefined ? { sourcePlatform } : {}),
+    ...(sourceAccountId !== undefined ? { sourceAccountId } : {}),
+  };
+}
+
+type OwnerMemoryFilter = NonNullable<Parameters<QdrantClient['search']>[1]['filter']>;
+
+function ownerMemoryFilter(principal: OwnerMemoryPrincipal): OwnerMemoryFilter {
+  const dm = { should: [{ key: 'chatId', match: { value: principal.dmChatId } },
+    { key: 'sourceChatId', match: { value: principal.dmChatId } }] };
+  const ownerWords = { must: [{ key: 'uid', match: { value: principal.uid } },
+    { key: 'role', match: { value: 'user' } },
+    { should: [dm, { key: 'chatId', range: { lt: 0 } }, { key: 'sourceChatId', range: { lt: 0 } }] }] };
+  const ownBotReply = principal.botUid === null ? [] : [{ must: [dm,
+    { key: 'uid', match: { value: principal.botUid } }, { key: 'role', match: { value: 'assistant' } },
+    // A legacy Telegram assistant row cannot prove which bot authored it.
+    ...(principal.platform === 'telegram' ? [{ key: 'sourceAccountId', match: { value: principal.accountId } }] : [])] }];
+  return {
+    must: [
+      { should: [ownerWords, ...ownBotReply] },
+      { should: [{ key: 'sourcePlatform', match: { value: principal.platform } }, { is_empty: { key: 'sourcePlatform' } }] },
+      { should: [{ key: 'sourceAccountId', match: { value: principal.accountId } }, { is_empty: { key: 'sourceAccountId' } }] },
+    ],
+    must_not: (env().MEMORY_SENSITIVE_CHAT_IDS ?? []).flatMap(chatId => [
+      { key: 'chatId', match: { value: chatId } }, { key: 'sourceChatId', match: { value: chatId } },
+    ]),
   };
 }
 
 /**
+ * Linked recall for the authenticated owner's private recipient only. This does
+ * not change ordinary public/cross-context permissions, write payloads, or give
+ * the owner access to other people's DMs or arbitrary group conversation text.
+ */
+export async function searchOwnerMemory(
+  boundChatId: number,
+  query: string,
+  topK = 5,
+  timeoutMs = 1000,
+  requesterUid?: number,
+): Promise<OwnerMemoryHit[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const context = resolveOwnerDmReadContext(boundChatId, requesterUid);
+    if (!context || !query.trim()) return [];
+    const limit = Number.isFinite(topK) ? Math.min(10, Math.max(1, Math.trunc(topK))) : 5;
+    const timeout = Number.isFinite(timeoutMs) ? Math.min(3000, Math.max(50, timeoutMs)) : 1000;
+    return await Promise.race([
+      searchOwnerMemoryInner(context, query.slice(0, 500), limit).catch(() => [] as OwnerMemoryHit[]),
+      new Promise<OwnerMemoryHit[]>(resolve => { timer = setTimeout(() => resolve([]), timeout); }),
+    ]);
+  } catch {
+    // Do not log queries, records or credentials on a failure of a private read.
+    logger.debug({ chatId: boundChatId }, 'owner memory search unavailable');
+    return [];
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+async function searchOwnerMemoryInner(context: OwnerDmReadContext, query: string, topK: number): Promise<OwnerMemoryHit[]> {
+  const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
+  const [vector] = await embed([query]);
+  if (!vector) return [];
+  const batches = await Promise.all(context.principals.map(principal => store.search(collectionName(), {
+    vector, limit: topK * 3, filter: ownerMemoryFilter(principal), with_payload: true,
+    params: { quantization: { rescore: true, oversampling: 2.0 } },
+  }).catch(() => [])));
+  const byMessage = new Map<string, OwnerMemoryHit>();
+  const floor = Math.max(Number(env().MEMORY_MIN_SCORE) || 0, INJECTION_MIN_SCORE_FLOOR);
+  for (const batch of batches) for (const hit of batch) {
+    const row = hitToMessage(hit);
+    // Do not normalize an absent/unknown payload role into an authenticated author.
+    if (!row || (hit.payload?.['role'] !== 'user' && hit.payload?.['role'] !== 'assistant')
+      || !Number.isSafeInteger(row.messageId) || row.messageId <= 0
+      || typeof row.score !== 'number' || !Number.isFinite(row.score) || row.score < floor) continue;
+    const ownerRecall = inspectOwnerMemorySource(row, context);
+    if (!ownerRecall) continue;
+    const key = `${ownerRecall.sourceChatId}:${row.messageId}`;
+    const previous = byMessage.get(key);
+    if (!previous || (previous.score ?? 0) < row.score) byMessage.set(key, { ...row, sourceChatId: ownerRecall.sourceChatId, ownerRecall });
+  }
+  return [...byMessage.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, topK);
+}
+
+/**
  * 机制4:per-uid 跨上下文记忆检索(旁路,不锁 chatId)。filter 改按 uid,
- * 返回**强制过 scrubMemoryHits(boundChatId)**——默认带 public + 非私密来源
- * contextual,private 一律剔除。
+ * 返回强制过 scrubMemoryHits(boundChatId)。跨会话只允许来源明确、同平台账号的
+ * public 记录；contextual 留在原会话，私聊和敏感来源不能跨出。
  *
  * **双 flag fail-closed 在本函数内收口**(不再靠调用方自觉)。原先的约定是"仅
  * MEMORY_CROSS_CONTEXT_ENABLED && MEMORY_VISIBILITY_ENABLED 同开时才应由调用方启用",
  * retriever.retrieveCrossContext 照做了,但 subagent 的 host-api.recallPerson 漏了 ——
- * 而 scrubMemoryHits 在 MEMORY_VISIBILITY_ENABLED=false(默认)时是**空操作**,于是
+ * 当时 scrubMemoryHits 在 MEMORY_VISIBILITY_ENABLED=false 时曾是空操作，于是
  * 任意群成员可让 CodeAct 模型对任意 uid 调 recallPerson,把受害者 DM 原文取回并念到群里。
- * 守卫放在唯一出口这里,新调用方不可能再绕过。
+ * 现在 scrub 永不关闭；两个 feature flag 只控制是否启用跨上下文召回。
  */
 export async function searchMemoryByUser(
   uid: number,
@@ -525,7 +650,8 @@ export async function searchMemoryByUser(
   const e = env();
   if (!e.MEMORY_CROSS_CONTEXT_ENABLED || !e.MEMORY_VISIBILITY_ENABLED) return [];
   // 负数 uid = sender_chat(匿名管理员/频道),不是真实的人,不做 per-person 检索。
-  if (!query.trim() || !uid || uid <= 0) return [];
+  if (!query.trim() || !Number.isSafeInteger(uid) || uid <= 0
+    || !samePlatformAccount(uid, boundChatId)) return [];
   try {
     return await Promise.race([
       _searchMemoryByUserInner(uid, query, boundChatId, topK),
@@ -543,6 +669,8 @@ async function _searchMemoryByUserInner(
   boundChatId: number,
   topK: number,
 ): Promise<ScoredMessage[]> {
+  const targetScope = resolveConversationScope(boundChatId);
+  if (!targetScope?.accountId) return [];
   const [embed, store] = await Promise.all([getEmbedder(), getStore()]);
   const [vector] = await embed([query]);
   if (!vector) return [];
@@ -552,10 +680,12 @@ async function _searchMemoryByUserInner(
     vector,
     limit: topK * 3,
     filter: {
-      must: [{ key: 'uid', match: { value: uid } }],
-      // 纵深:private 在**数据库侧**就剔掉,不要取回进程内存再靠 JS 过滤(取回即已是
-      // 泄漏面 —— 中途任何日志/异常都会带出原文)。存量点没有 visibility 字段时
-      // must_not 不会命中,仍由下面的 scrubMemoryHits 按 sourceChatId 兜底。
+      must: [{ key: 'uid', match: { value: uid } },
+        { key: 'visibility', match: { value: 'public' satisfies MemoryVisibility } },
+        { key: 'sourcePlatform', match: { value: targetScope.platform } },
+        { key: 'sourceAccountId', match: { value: targetScope.accountId } }],
+      // Database filters require public provenance before retrieval; the JS
+      // boundary still verifies source IDs and sensitive-chat policy per hit.
       must_not: [{ key: 'visibility', match: { value: 'private' satisfies MemoryVisibility } }],
     },
     with_payload: true,
@@ -567,7 +697,7 @@ async function _searchMemoryByUserInner(
     const m = hitToMessage(hit);
     // review #7:同会话命中由 semantic 路覆盖,这里只要"别的场景"的 —— 在
     // scrub/slice **之前**就剔除,否则本会话记忆挤占 topK 预算、跨上下文召回饿死。
-    if (m && m.sourceChatId !== boundChatId) raw.push(m);
+    if (m && m.uid === uid && m.sourceChatId !== boundChatId) raw.push(m);
   }
   // 阈值放在 scrub **之前**:低分噪声不该先占掉 topK 预算再被裁掉。
   const scored = applyMinScore(raw, { uid, boundChatId });
@@ -581,26 +711,10 @@ async function _searchMemoryByUserInner(
 }
 
 /**
- * 供**自动注入 prompt** 的检索出口。与 searchMemory 的区别不在检索,而在守卫。
- *
- * 为什么单独开一个出口而不是让调用方自己过滤:searchMemory 只锁 chatId,那保证的是
- * "检索没跨会话",**不等于"取出来的东西可以进这个 prompt"** —— DM 与
- * MEMORY_SENSITIVE_CHAT_IDS 群里的每一条记忆按 defaultVisibilityForChat 都是
- * private。而注入进 prompt 的内容会被模型复述、被摘要、被写进日记,再扩散到别处。
- * chroma.ts:493-501 那次事故(私聊原文被念到群里)的复盘结论就是:守卫必须放在唯一
- * 出口,靠调用方自觉一定会漏。所以这里是硬守卫,调用方无法绕过、也没有 flag 能关掉。
- *
- * 三道闸,全部 fail-closed:
- *  1. 私聊/敏感会话一律不返回 —— 它们的记忆整体是 private。
- *  2. 逐条丢弃 visibility !== public|contextual,**包括缺字段的存量点**(宁严勿松:
- *     存量点写入时还没有 visibility 字段,无法证明它安全)。
- *  3. sourceChatId 必须等于 chatId。Qdrant filter 用的是 payload.chatId,而渲染与
- *     记账用 sourceChatId,超级群迁移等场景下两者可能不一致 —— 那时"检索锁的会话"
- *     与"这条记忆真正的来源"就不是同一个。
- *
- * 另外强制一个非零相关性下限:MEMORY_MIN_SCORE 默认 0(纯 topK),那样这个函数的
- * 真实语义会变成"从本会话历史里随机抽几条塞进 prompt",越是无关的旧话被复述,
- * 参与者越预期不到。拿不到分数的命中(词法路/融合路)一律丢弃。
+ * Prompt recall stays in the current proven conversation, including its own
+ * private memory. Privacy is a source boundary, not a ban on remembering a DM
+ * inside that DM. Unknown/conflicting sources are rejected by searchMemory;
+ * relevance still needs a real score above the automatic-injection floor.
  */
 export async function searchMemoryForInjection(
   chatId: number,
@@ -608,8 +722,6 @@ export async function searchMemoryForInjection(
   topK = 4,
   timeoutMs = 400,
 ): Promise<ScoredMessage[]> {
-  // 闸 1:私聊 / 敏感群整体不参与自动注入。
-  if (isPrivateChat(chatId)) return [];
   if (!query.trim()) return [];
 
   const hits = await searchMemory(chatId, query, topK, timeoutMs);
@@ -617,9 +729,7 @@ export async function searchMemoryForInjection(
 
   const floor = Math.max(env().MEMORY_MIN_SCORE, INJECTION_MIN_SCORE_FLOOR);
   const kept = hits.filter((m) => {
-    // 闸 2:只放行明确标记为可共享的。缺字段 = 丢。
-    if (m.visibility !== 'public' && m.visibility !== 'contextual') return false;
-    // 闸 3:来源必须就是本会话。
+    // Local source proof is required even for public records.
     if (m.sourceChatId !== chatId) return false;
     return typeof m.score === 'number' && m.score >= floor;
   });
@@ -636,6 +746,12 @@ export async function searchMemoryForInjection(
 /** Delete memory entries by their string id (`${chatId}_${messageId}`). */
 export async function deleteMemories(ids: string[]): Promise<number> {
   if (ids.length === 0) return 0;
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true || hasMemorySourceAuthority()) retractMemorySources(ids);
+  if (env().MEMORY_PROJECTION_OUTBOX_ENABLED === true) {
+    // Retraction is immediate at the authority/read boundary; remote deletion is
+    // retryable. Never acknowledge forgetting before the tombstone is durable.
+    return ids.length;
+  }
   try {
     const store = await getStore();
     await store.delete(collectionName(), { points: ids.map(midToPointId), wait: false });
@@ -665,6 +781,40 @@ export async function deleteMemories(ids: string[]): Promise<number> {
     logger.warn({ err, count: ids.length }, 'deleteMemories failed (non-critical)');
     return 0;
   }
+}
+
+/** Registered in the shared heartbeat; no extra timer or independent singleton. */
+export async function drainMemoryProjectionOutbox(batchSize = 10) {
+  return drainMemoryProjections({
+    embed: async text => {
+      const embed = await getEmbedder();
+      const [vector] = await embed([text]);
+      if (!vector || vector.length !== VECTOR_SIZE) throw new Error('embedding_dimension_mismatch');
+      return vector;
+    },
+    upsert: async (source, job, vector) => {
+      const store = await getStore();
+      const body = JSON.parse(source.body_json) as Record<string, unknown>;
+      await store.upsert(job.collection, { wait: true, points: [{ id: midToPointId(job.projection_id), vector,
+        payload: { mid: job.projection_id, sourceId: source.source_id, sourceVersion: source.version,
+          chatId: source.chat_id, sourceChatId: source.chat_id, sourcePlatform: source.platform, sourceAccountId: source.account_id,
+          messageId: source.message_id, uid: body['uid'], role: body['role'], timestamp: body['timestamp'], visibility: source.visibility } }] });
+      // Removing superseded points cannot delete a newer version. A late stale
+      // RPC may leave garbage, but authority-version checks make it unreadable.
+      await store.delete(job.collection, { wait: true, filter: { must: [
+        { key: 'sourceId', match: { value: source.source_id } }, { key: 'sourceVersion', range: { lt: source.version } },
+      ] } });
+      const { recordMemoryCreated } = await import('./importance.js');
+      // Existing recall/protection/forget callers use the logical chat_message
+      // ID, not a versioned projection ID. Keep their ref counts connected.
+      recordMemoryCreated(source.legacy_id, source.chat_id, typeof body['timestamp'] === 'number' ? body['timestamp'] : 0);
+    },
+    remove: async (source, job) => {
+      const store = await getStore();
+      await store.delete(job.collection, { wait: true, filter: { must: [{ key: 'sourceId', match: { value: source.source_id } }] } });
+      await store.delete(job.collection, { wait: true, points: [midToPointId(source.legacy_id)] });
+    },
+  }, batchSize);
 }
 
 export async function isMemoryAvailable(): Promise<boolean> {

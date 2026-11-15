@@ -122,10 +122,10 @@ export async function runStepfunConsumer(): Promise<void> {
         if (Date.now() > deadline) { skipped++; return; }
         try {
           if (item.kind === 'group') {
-            const t = await reflectChat(item.id);
-            if (t > 0) {
+            const r = await reflectChat(item.id);
+            if (r.tokens > 0) {
               reflected++;
-              approxInputTokens += t;
+              approxInputTokens += r.tokens;
             }
           } else {
             const ok = await mergeGlobalProfile(item.id);

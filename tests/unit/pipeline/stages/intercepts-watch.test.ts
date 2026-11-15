@@ -10,7 +10,7 @@ vi.mock('../../../../src/db/sqlite.js', () => ({
 }));
 
 vi.mock('../../../../src/env.js', () => ({
-  env: () => ({ GOAL_MAX_ACTIVE: 5 }),
+  env: () => ({ GOAL_MAX_ACTIVE: 5, MASTER_UID: 6251541967 }),
 }));
 
 const sendDirectMock = vi.fn();

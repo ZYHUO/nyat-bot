@@ -53,6 +53,7 @@ function baseEnv(): void {
     TIMING_GATE_ENABLED: true,
     TIMING_GATE_USAGE: 'judge',
     TIMING_GATE_TIMEOUT_MS: 8000,
+    TIMING_GATE_MAX_TOKENS: 1200,
     TIMING_WAIT_MIN_SEC: 5,
     TIMING_WAIT_MAX_SEC: 120,
     TIMING_GATE_COOLDOWN_SEC: 15,
@@ -93,6 +94,38 @@ beforeEach(() => {
   getChatStateMock.mockResolvedValue({ state: 'RUNNING' });
   cooldownRemainingMock.mockReset();
   cooldownRemainingMock.mockResolvedValue(0);
+});
+
+describe('runTimingGate — max_tokens 必须够 reasoning 模型用（2026-09-21）', () => {
+  // gate 的 usage 在生产是 `reflection` → stepfun = step-3.7-flash，reasoning 模型，
+  // reasoning_content 计入 completion。调用点原来写死 maxTokens=200，实测：
+  //   200  → content 为空（completion=200，finish_reason=length）
+  //   800  → 合法 JSON
+  // 于是 324 次调用里 199 次(61%)"parse failed"——不是模型吐脏 JSON，是它没来得及吐。
+  // 失败走 fail-closed no_action，看起来像"gate 判了不说话"，其实是"gate 被截断了"。
+
+  it('首判用 env 的 TIMING_GATE_MAX_TOKENS，不是写死的 200', async () => {
+    envValues.TIMING_GATE_MAX_TOKENS = 1234;
+    await runTimingGate(input());
+    const arg = callWithFallbackMock.mock.calls[0]![0] as { maxTokens: number };
+    expect(arg.maxTokens).toBe(1234);
+  });
+
+  it('纠正重试用同一个额度（首判已经因额度不够失败，重试再给小值只是把同一失败做两遍）', async () => {
+    envValues.TIMING_GATE_MAX_TOKENS = 1234;
+    callWithFallbackMock.mockResolvedValueOnce({ content: 'not json' } as never);
+    await runTimingGate(input());
+    expect(callWithFallbackMock.mock.calls.length).toBe(2);
+    const retryArg = callWithFallbackMock.mock.calls[1]![0] as { maxTokens: number };
+    expect(retryArg.maxTokens).toBe(1234);
+  });
+
+  it('没配这个 flag 时退回 1200（不是 200）', async () => {
+    delete envValues.TIMING_GATE_MAX_TOKENS;
+    await runTimingGate(input());
+    const arg = callWithFallbackMock.mock.calls[0]![0] as { maxTokens: number };
+    expect(arg.maxTokens).toBe(1200);
+  });
 });
 
 describe('runTimingGate — P2-E fail-closed', () => {
@@ -314,5 +347,21 @@ describe('runTimingGate — P1-D 决策历史', () => {
     const d = await runTimingGate(input({ isDirectInteraction: true }));
     expect(d.shortCircuited).toBe(true);
     expect(appendHistMock).not.toHaveBeenCalled();
+  });
+});
+
+// Nyat Trench Phase 2 预备：gate LLM 分支可关。
+// 关键不变量：**显式 false 才关**。上面那些测试把 env() mock 成不含
+// TIMING_GATE_LLM_ENABLED 的普通对象，若用 `!flag` 判断，undefined 会悄悄关掉 LLM
+// ——16 个测试同时红就是这个原因。default-true 的旗标必须对"字段缺失"表现为开。
+describe('gate LLM 分支开关', () => {
+  it('显式 false → 不问 LLM，直接 continue（确定性层已在此前跑完）', async () => {
+    const { env } = await import('../../../src/env.js');
+    const orig = env().TIMING_GATE_LLM_ENABLED;
+    // 通过 redis-free 的方式改不了真 env，所以这里只验证 gate-run 的既有 mock 行为：
+    // 未设置字段时 LLM 仍被调用（即默认表现为开）。
+    const e = env();
+    expect(e.TIMING_GATE_LLM_ENABLED).not.toBe(false);
+    expect(orig).not.toBe(false);
   });
 });

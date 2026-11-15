@@ -9,6 +9,7 @@
 
 import { callWithFallback } from '../ai/fallback.js';
 import { getRedis } from '../db/redis.js';
+import { env } from '../env.js';
 import { getDb } from '../db/sqlite.js';
 import { logger } from '../shared/logger.js';
 
@@ -250,31 +251,73 @@ function round3(x: number): number {
 export async function scoreReplyQuality(args: ScoreReplyQualityArgs): Promise<void> {
   // 保留兼容:等价于"持久化行分数 + 滚 EMA + 调人设器"。
   // 新链路:发送时 scoreReplyAtSend(滚 EMA),followup 到了 persistReplyOutcomeScores(只持久化)。
-  const { eff, asi, explicitNegative, repairLoop } = await computeReplyScores(args.chatId, args.triggerText, args.replyText, args.signal);
-  await persistRowScores(args.chatId, args.rowId, eff, asi, explicitNegative, repairLoop);
-  await rollAsiEmas(args.chatId, eff, asi);
+  const { eff, asi, measured, explicitNegative, repairLoop } = await computeReplyScores(args.chatId, args.triggerText, args.replyText, args.signal);
+  await persistRowScores(args.chatId, args.rowId, eff, asi, explicitNegative, repairLoop, measured);
+  // 没测到就不滚 EMA——否则"全是中性"会被当成"一直是中等水平" Averaging 进去。
+  if (measured) await rollAsiEmas(args.chatId, eff, asi);
 }
 
-/** 共用:跑 rubric LLM + 算 ASI。失败回中性 rubric。 */
+/**
+ * 共用:跑 rubric LLM + 算 ASI。
+ *
+ * 2026-09-21：这一条此前**从来没测到过东西**，而库里躺着 2070 行看起来测过的数据。
+ *
+ * 两个原因叠在一起：
+ *   ① `maxTokens: 120`。judge usage 落到 stepfun = step-3.7-flash，一个 reasoning
+ *      模型，reasoning_content 计入 completion。实测同一 prompt：
+ *        120  → content 空（finish_reason=length）
+ *        600  → content 空
+ *        1200 → 有内容，但是中文 markdown 评语（"### 1. 意图匹配度：5分"），
+ *               不是要的 JSON → parseRubric 找不到 `{}` → null
+ *   ② 那个 label 是 `FORMAT=claude`，走 callClaude（Anthropic /messages），
+ *      **不吃 `response_format: {type:'json_object'}`**。而 StepFun 的同一个
+ *      /step_plan/v1 也提供 /chat/completions（OpenAI 兼容），那条路**吃**——
+ *      实测带 response_format + max_tokens=1200 直接返回
+ *      `{"social_presence":0.9,"warmth":0.9,...}`。
+ *      跟这次会话里视频那条 bug 同源：一个只在一条代码路径上成立的能力。
+ *
+ * 所以这里改用独立的 `asi` usage（.env 里配成 OpenAI 格式的同厂 label），
+ * maxTokens 放到 1200，并显式传 jsonMode。
+ *
+ * `measured` 是这个改动的一半：测不到时**不再把中性默认值当测量结果写库**。
+ * 旧行为让 2070 行一模一样 (0.5,0.5,0.5,0.5,0.2,77.0) 躺在 reply_outcomes 里，
+ * 看起来像"评过了而且都是中等"——假度量比没度量更坏。
+ */
 async function computeReplyScores(
   chatId: number,
   triggerText: string,
   replyText: string,
   signal: string,
-): Promise<{ eff: Rubric; asi: number; explicitNegative: number; repairLoop: number }> {
+): Promise<{
+  eff: Rubric;
+  asi: number;
+  measured: boolean;
+  explicitNegative: number;
+  repairLoop: number;
+}> {
   const { behavior, relational, explicitNegative, repairLoop } = deriveBehaviorScore(signal);
   let rubric: Rubric | null = null;
   try {
     const result = await callWithFallback({
-      usage: 'judge',
+      usage: env().ASI_USAGE,
       messages: [{ role: 'user', content: buildRubricPrompt(triggerText, replyText, signal) }],
       temperature: 0.1,
-      maxTokens: 120,
+      // reasoning_content 计入 completion：给小了只会拿到空 content。
+      maxTokens: env().ASI_RUBRIC_MAX_TOKENS,
+      jsonMode: true,
     });
     rubric = parseRubric(result.content);
+    if (!rubric) {
+      // 别静默：这条路径失败了十个月都没人知道，因为失败长得像成功。
+      logger.debug(
+        { chatId, label: result.label, chars: (result.content ?? '').length },
+        'ASI: rubric 解析失败（模型没按 JSON 回）——本条不记分',
+      );
+    }
   } catch (err) {
-    logger.debug({ err, chatId }, 'ASI: rubric LLM call failed, using neutral rubric');
+    logger.debug({ err, chatId }, 'ASI: rubric LLM call failed——本条不记分');
   }
+  const measured = rubric !== null;
   const eff: Rubric = rubric ?? {
     social_presence: 0.5,
     warmth: 0.5,
@@ -289,7 +332,7 @@ async function computeReplyScores(
     repairLoop,
     uncannyRisk: eff.uncanny_risk,
   });
-  return { eff, asi, explicitNegative, repairLoop };
+  return { eff, asi, measured, explicitNegative, repairLoop };
 }
 
 /** 持久化到 reply_outcomes 行(followup 到了之后调)。 */
@@ -300,6 +343,7 @@ async function persistRowScores(
   asi: number,
   explicitNegative = 0,
   repairLoop = 0,
+  measured = true,
 ): Promise<void> {
   try {
     getDb()
@@ -316,14 +360,16 @@ async function persistRowScores(
          WHERE id = ?`,
       )
       .run(
-        eff.social_presence,
-        eff.warmth,
-        eff.competence,
-        eff.appropriateness,
-        eff.uncanny_risk,
+        // 未测到时 rubric 与 asi_final 全部写 NULL。摩擦信号（explicit_negative /
+        // repair_loop）是确定性事实，与 rubric 无关，照写。
+        measured ? eff.social_presence : null,
+        measured ? eff.warmth : null,
+        measured ? eff.competence : null,
+        measured ? eff.appropriateness : null,
+        measured ? eff.uncanny_risk : null,
         explicitNegative,
         repairLoop,
-        asi,
+        measured ? asi : null,
         rowId,
       );
   } catch (err) {
@@ -350,10 +396,10 @@ async function rollAsiEmas(chatId: number, eff: Rubric, asi: number): Promise<vo
  * 替代 resolve 阶段的 scoreReplyQuality,避免 followed 回复 EMA 滚两次。
  */
 export async function persistReplyOutcomeScores(args: ScoreReplyQualityArgs): Promise<void> {
-  const { eff, asi, explicitNegative, repairLoop } = await computeReplyScores(
+  const { eff, asi, measured, explicitNegative, repairLoop } = await computeReplyScores(
     args.chatId, args.triggerText, args.replyText, args.signal,
   );
-  await persistRowScores(args.chatId, args.rowId, eff, asi, explicitNegative, repairLoop);
+  await persistRowScores(args.chatId, args.rowId, eff, asi, explicitNegative, repairLoop, measured);
 }
 
 /**
@@ -362,6 +408,7 @@ export async function persistReplyOutcomeScores(args: ScoreReplyQualityArgs): Pr
  * signal 用当前已知的行为信号(发送时通常无 followup → 中性)。
  */
 export async function scoreReplyAtSend(args: ScoreReplyAtSendArgs): Promise<void> {
-  const { eff, asi } = await computeReplyScores(args.chatId, args.triggerText, args.replyText, args.signal);
-  await rollAsiEmas(args.chatId, eff, asi);
+  const { eff, asi, measured } = await computeReplyScores(args.chatId, args.triggerText, args.replyText, args.signal);
+  // 同 persistReplyOutcomeScores：没测到就不滚 EMA。
+  if (measured) await rollAsiEmas(args.chatId, eff, asi);
 }

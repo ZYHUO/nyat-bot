@@ -1,7 +1,9 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: { index: 'src/index.ts', 'embedding-compute': 'src/compute/embedding-entry.ts',
+    'video-compute': 'src/compute/video-entry.ts',
+    'restore-nyatdb-probe': 'scripts/restore-nyatdb-probe.mts' },
   format: ['esm'],
   target: 'node22',
   outDir: 'dist',

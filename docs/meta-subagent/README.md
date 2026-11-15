@@ -5,6 +5,10 @@
 
 ## Flags（默认全关，行为与改造前一致）
 
+启用前必须通过实际服务用户的 OS 隔离检查，见 [执行隔离边界](./ISOLATION.md)。
+实际运行状态以最近一次部署预检为准，不能由下方示例推断已经启用。
+下面的历史开关示例不能替代隔离预检；缺失隔离时生成代码不会在宿主进程执行。
+
 ```bash
 META_SUBAGENT_ENABLED=true
 META_SUBAGENT_CHAT_IDS=          # 空=全群启用
@@ -51,6 +55,24 @@ Meta 可用 `journal.tryWrite({slot})` / `journal.recent()`；`diary:*` Attentio
 ```bash
 CODEACT_WEB_SEARCH_ENABLED=true   # Subagent web.search；复用 pipeline executeSearch
 ```
+
+## 会话来源边界
+
+Attention 在入队、出队和进入 Meta 会话时检查来源；Meta 按会话分别组装提示，
+不把 QQ/TG、不同 QQ 账号、群聊或私聊的待办内容合成一个模型上下文。
+QQ 内部 ID 必须能反查到当前账号，消息、发送者和引用也必须属于对应会话。
+不合法或已撤回的引用副本会移除，合法的同会话正文和引用仍可使用。
+
+回调与 Subagent 请求必须能核验原任务及其会话；仅有 callback.chatId 不足以证明来源。
+无法核验的旧记录保留在 Redis 的 `xxb:meta:scope-held` 中，等待审查，不自动重放。
+临时读取失败会保留输入等待重试，不允许退回到未验证的本地副本。
+持久任务执行前也检查账号、目标用户与引用；摘要仍按同一 sourceChatId 读取，未知来源不公开。
+
+全局唤醒只读取各会话的活跃度、冷场时间和任务编号等调度信息，不把聊天正文、
+人名、主题、摘要或未说出口的想法放进跨会话提示。选定群或主人私聊后，正文再由
+目标会话的上下文生成；同会话记忆和引用继续可用。缺少完整公开来源证明的原文
+跨会话转发会被拒绝，兴趣评分不能代替分享许可。公开网页和 RSS 资讯仍可正常分享。
+这些检查不改变 QQ 的短静默合并窗口或 Telegram 的原有调度节奏。
 
 ## Context Engine
 

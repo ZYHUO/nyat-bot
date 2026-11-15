@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let db: Database.Database;
+const envMock = vi.hoisted(() => ({ CORE_BLACKBOARD_ENABLED: true }));
+vi.mock('../../../../src/env.js', () => ({ env: () => envMock }));
 vi.mock('../../../../src/db/sqlite.js', () => ({ getDb: () => db }));
 vi.mock('../../../../src/shared/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -17,6 +19,7 @@ import {
 import { writeEntry } from '../../../../src/core/blackboard/store.js';
 
 beforeEach(() => {
+  envMock.CORE_BLACKBOARD_ENABLED = true;
   db = new Database(':memory:');
   db.exec(readFileSync('migrations/0084_core_blackboard.sql', 'utf8'));
   _resetGateForTest();
@@ -69,5 +72,15 @@ describe('permission gate', () => {
     // consumed，一次性：第二次再用同一个 intent → 拒绝
     gateConfirm(r.id!, { userId: 6251541967 });
     expect((await approve('irreversible', r.id!)).ok).toBe(false);
+  });
+
+  it('总闸关闭后既存 intent 与用户确认也不能放行写操作', async () => {
+    const r = writeEntry({ kind: 'authorized_intent', author: 'gate', content: '{}', chatId: -100 });
+    expect(r.ok).toBe(true);
+    gateConfirm(r.id!, { userId: 6251541967 });
+    envMock.CORE_BLACKBOARD_ENABLED = false;
+    expect((await approve('reversible_write', r.id!)).ok).toBe(false);
+    expect((await approve('irreversible', r.id!)).ok).toBe(false);
+    expect(db.prepare('SELECT status FROM core_blackboard WHERE id = ?').get(r.id!)).toEqual({ status: 'open' });
   });
 });

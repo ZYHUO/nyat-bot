@@ -171,15 +171,36 @@ describe('mood — get / apply with DB', () => {
   });
 
   it('applyMoodEvent persists and clamps to [-100, 100]', () => {
-    mod.applyMoodEvent(-300, 150, 'huge_positive');
-    let s = mod.getChatMood(-300);
-    expect(s.valence).toBe(100);
+    // This checks the clamp at zero elapsed time, independently of wall-clock boundaries.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_780_000_000_000);
+    try {
+      mod.applyMoodEvent(-300, 150, 'huge_positive');
+      let s = mod.getChatMood(-300);
+      expect(store.get(-300)?.valence).toBe(100);
+      expect(s.valence).toBe(100);
 
-    mod.applyMoodEvent(-300, -300, 'huge_negative');
-    s = mod.getChatMood(-300);
-    // 100 + (-300) → -200 → clamped to -100; but applied AFTER decay (~0 elapsed) ≈ -100
-    expect(s.valence).toBe(-100);
-    expect(s.bucket).toBe('grumpy');
+      mod.applyMoodEvent(-300, -300, 'huge_negative');
+      s = mod.getChatMood(-300);
+      expect(store.get(-300)?.valence).toBe(-100);
+      expect(s.valence).toBe(-100);
+      expect(s.bucket).toBe('grumpy');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('a clamped value decays on read when the clock advances one second', () => {
+    const now = 1_780_000_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      mod.applyMoodEvent(-301, 150, 'huge_positive');
+      clock.mockReturnValue(now + 1000);
+      expect(mod.getChatMood(-301).valence).toBe(100 * Math.pow(0.7, 1 / 3600));
+      expect(mod.getChatMood(-301).valence).toBeLessThan(100);
+      expect(store.get(-301)?.valence).toBe(100);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('successive events accumulate then clamp', () => {

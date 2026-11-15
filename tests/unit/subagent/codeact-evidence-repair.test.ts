@@ -18,30 +18,26 @@ vi.mock('../../../src/bot/bot.js', () => ({ getBot: () => ({}), getBotUid: () =>
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({}) }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => ({ prepare: () => ({ all: () => [] }) }) }));
 
-// Scripted model actions exercise the real CodeAct VM and real host filesystem tools.
-// This is integration regression coverage, NOT an LLM reasoning benchmark.
-describe('CodeAct evidence repair across executed turns', () => {
+// Host acceptance contract, using only a test-owned directory. Filesystem tools
+// are deliberately not exposed through the minimal isolated CodeAct RPC profile.
+describe('host evidence repair across actions', () => {
   beforeEach(async () => { state.root = await mkdtemp(join(tmpdir(), 'nyat-codeact-test-')); });
   afterEach(async () => { await rm(state.root, { recursive: true, force: true }); });
 
   it('rejects a premature success claim, executes a repair and only then permits completion', async () => {
     const { createHostApi } = await import('../../../src/subagent/host-api.js');
-    const { runHostCodeForTest } = await import('../../../src/subagent/executor.js');
     const onEnd = vi.fn();
     const host = createHostApi(1, { onEnd, taskId: 'real-codeact-repair', acceptance: {
       source: 'caller', checks: [{ kind: 'json_field', path: 'answer.json', field: ['value'], equals: 42 }],
     } });
-    const opts = { isClosed: () => false, onTimeout: () => undefined, timeoutMs: 5000 };
-    const wrong = await runHostCodeForTest(
-      `await computer.writeFile('answer.json', '{"value":0}'); await runtime.verifyAcceptance(); runtime.endTask('done');`, host, opts);
-    expect(wrong.ok).toBe(false);
+    await host.computer.writeFile('answer.json', '{"value":0}');
+    await host.runtime.verifyAcceptance();
+    expect(() => host.runtime.endTask('done')).toThrow();
     expect(onEnd).not.toHaveBeenCalled();
-    const repaired = await runHostCodeForTest(
-      `await computer.writeFile('answer.json', '{"value":42}'); return await runtime.verifyAcceptance();`, host, opts);
-    expect(repaired.ok).toBe(true);
-    expect(repaired.output).toContain('verified');
-    const finished = await runHostCodeForTest(`runtime.endTask('artifact checked');`, host, opts);
-    expect(finished.ok).toBe(true);
+    await host.computer.writeFile('answer.json', '{"value":42}');
+    const repaired = await host.runtime.verifyAcceptance();
+    expect(JSON.stringify(repaired)).toContain('verified');
+    host.runtime.endTask('artifact checked');
     expect(onEnd).toHaveBeenCalledWith('artifact checked');
   }, 20000);
 });

@@ -24,14 +24,76 @@ export interface DistillResult {
 }
 
 /** 解析 LLM 输出为 DistillResult；垃圾输出返回 null（不重试）。 */
+/**
+ * 把被 max_tokens 截断的 JSON 修到能解析：按栈补上未闭合的 `"`、`[`、`{`。
+ *
+ * 只在原样解析失败之后才会被尝试（见 candidates 最后一项），所以正常输出
+ * 走不到这里。修得好就救回一条 episode，修不好返回 ''（候选为空，跳过）。
+ */
+function repairTruncatedJson(raw: string): string {
+  const stack: string[] = [];
+  let inStr = false;
+  let esc = false;
+  for (const ch of raw) {
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '[' || ch === '{') stack.push(ch);
+    else if ((ch === ']' || ch === '}') && stack.length) stack.pop();
+  }
+  let out = raw;
+  if (inStr) out += '"';                       // 字符串写到一半
+  while (stack.length) {                       // 数组/对象没关
+    const open = stack.pop()!;
+    out += open === '[' ? ']' : '}';
+  }
+  return out;
+}
+
 export function parseDistillOutput(raw: string): DistillResult | null {
   try {
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    // **先剥围栏，再找 JSON。** 2026-09-21 实测生产里最新一条失败（len=655）的
+    // 原文开头是 `{```json`——模型先吐了一个孤零零的 `{`，然后才开围栏写 JSON。
+    // 原来的 `/^```(?:json)?\s*/i` 只剥**行首**的围栏，前面多一个字符就整个失效，
+    // 于是这条既没剥掉围栏、也匹配不到完整的 `{...}`，直接判失败。
+    //
+    // 近 24h distill 失败 360 次，带 len/head 的 26 条里能看到这种形状。
+    // 剥离改成： anywhere 的 ```json / ``` 都去，然后再 trim。
+    const cleaned = raw
+      .replace(/```(?:json)?/gi, ' ')
+      .trim();
+    // 再丢掉 JSON 之前的散落字符。生产实测那条是 `{```json` → 剥完围栏变成
+    // `{ {  "summary": …`——**两个连续的花括号**。JSON.parse 不认这种：
+    // 外层对象的 key 不能是 `{`。截断自救也救不了它（补完括号还是 `{ {...}}`）。
+    // 所以从第一个 `{"` / `{ "` 开始切，前面的一律当模型的口头禅丢掉。
+    const objStart = cleaned.match(/\{\s*"/);
+    if (objStart && objStart.index !== undefined && objStart.index > 0) {
+      return parseFrom(objStart.index === 0 ? cleaned : cleaned.slice(objStart.index));
+    }
+    return parseFrom(cleaned);
+  } catch (err) {
+    logger.debug({ err }, 'parseDistillOutput threw');
+    return null;
+  }
+}
+
+/** 从一段（可能带前缀/围栏/截断的）文本里解析出 DistillResult。 */
+function parseFrom(cleaned: string): DistillResult | null {
+  try {
     const candidates = [
       cleaned,
       cleaned.replace(/,\s*([}\]])/g, '$1'),
       cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '',
       (cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '').replace(/,\s*([}\]])/g, '$1'),
+      // 截断自救：模型写到一半被 max_tokens 切断时，把开着的引号/数组/对象补齐再解析。
+      // 上面的四个候选都要求有收尾的 `}`，截断输出一个都过不了——于是 1287 次
+      // 里带 len/head 的那 14 条全是这个形状。补一条"闭合后重试"的候选，
+      // 让"summary 已经拿到、lessons 只写了一半"这种情况也能留下记录。
+      repairTruncatedJson(cleaned),
     ];
     let obj: Record<string, unknown> | null = null;
     for (const candidate of candidates) {
@@ -95,9 +157,18 @@ export interface DistillEpisodeArgs {
  */
 export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillResult | null> {
   const { task, outcome, progressSummary, tailText } = args;
-  // Evidence gate: lifecycle done without host verification must not be distilled as success.
+  // 只有 host 明确判 failed 才把 lifecycle done 降成 failed。
+  //
+  // 原来是 `outcome==='done' && assessment==='verified' ? 'done' : 'failed'`——
+  // 群聊任务没有 contract，assessment 恒为 unverified（task_evidence 7038 条里 verified 仅 1 条），
+  // 于是 09-05 之后 episodes 表一条 done 都没有（日均 100–380 条全是 failed），
+  // 同期日志里 CodeAct task done 近 24h 是 199 done / 10 failed。成功的任务被当成失败来复盘，
+  // 经验库在从成功里挖"教训"。
+  //
+  // 「没被证实」≠「失败」。证据门仍在血缘列：source_assessment 保持 unverified，
+  // skill-distill 只吃 verified 血缘，所以这里放宽不会让未验证的经验流进技能。
   const assessed: 'done' | 'failed' =
-    outcome === 'done' && task.assessment?.status === 'verified' ? 'done' : 'failed';
+    outcome === 'done' && task.assessment?.status !== 'failed' ? 'done' : 'failed';
   try {
     const system = loadCachedPrompt('task/distill.md');
     const user = [
@@ -116,14 +187,28 @@ export async function distillEpisode(args: DistillEpisodeArgs): Promise<DistillR
         { role: 'system', content: system },
         { role: 'user', content: user },
       ],
-      maxTokens: 1200,
+      // 1200 → 3000。2026-09-21 实测：`distill output unparseable` 1287 次，
+      // 带原始输出的 14 条 len 分别是 61/85/112/172/183/236/262/267/283/457/477/605/688/911
+      // ——**全是 JSON 被从中间截断**（`{"summary": "本次任务要求…禁止复读原话` 就没了）。
+      // 模型输出形状一直是对的，是额度不够写完。
+      //
+      // 为什么 provider 层的截断重试没救它：`callModel` 只在 `!finalText`
+      // （正文全空）时才加额重试。这里正文非空、只是 JSON 不完整， provider 层
+      // 看不出问题，重试从不触发。这是 round 12（topic-scan 24）和 round 40
+      // （post-task 200）同一条病的第三例，但形状不同：前两例是"空正文"，
+      // 这例是"半个 JSON"。
+      maxTokens: 3000,
       temperature: 0.3,
       allowHedge: false, // fire-and-forget 复盘:hedge 双发纯翻倍账单
     });
 
     const parsed = parseDistillOutput(res.content ?? '');
     if (!parsed) {
-      logger.warn({ taskId: task.id }, 'distill output unparseable — skipping episode');
+      // 同上：2026-09-21 之前不带原始输出，473 次失败查不出形状。
+      logger.warn(
+        { taskId: task.id, len: (res.content ?? '').length, head: (res.content ?? '').slice(0, 300) },
+        'distill output unparseable — skipping episode',
+      );
       return null;
     }
 

@@ -92,7 +92,7 @@ export async function runBookkeeping(ctx: {
   // 3.1c Social graph — track member↔member reply ties (sync, cheap)
   if (job.chatId < 0 && !formatted.isBot && formatted.replyTo) {
     const r = formatted.replyTo;
-    if (r.uid && r.uid !== formatted.uid && r.uid !== getBotUid()) {
+    if (r.uid && r.uid !== formatted.uid && r.uid !== getBotUid(job.chatId)) {
       try {
         recordInteraction(job.chatId, formatted.uid, formatted.fullName, r.uid, r.fullName);
         recordSocialInteraction({
@@ -141,7 +141,7 @@ export async function runBookkeeping(ctx: {
     redis.set(onboardKey, '1', 'NX').then(async (set) => {
       if (set === null) return; // already onboarded
       const { buildOnboardingText } = await import('../../bot/handlers/help.js');
-      await sender.sendDirect(job.chatId, buildOnboardingText(), formatted.messageId).catch((err) => logger.debug({ err, chatId: job.chatId }, 'onboarding send failed (non-critical)'));
+      await sender.sendDirect(job.chatId, await buildOnboardingText(), formatted.messageId).catch((err) => logger.debug({ err, chatId: job.chatId }, 'onboarding send failed (non-critical)'));
     }).catch((err) => logger.debug({ err }, 'Onboarding check failed (non-critical)'));
   }
 
@@ -259,7 +259,7 @@ export async function runBookkeeping(ctx: {
   }
 
   // 3.9 Game input interception (before judge — reply to bot with number during active game)
-  if (job.chatId < 0 && hasActiveGame(job.chatId) && !formatted.isBot && formatted.replyTo?.uid === getBotUid()) {
+  if (job.chatId < 0 && hasActiveGame(job.chatId) && !formatted.isBot && formatted.replyTo?.uid === getBotUid(job.chatId)) {
     const gameResult = playGame(job.chatId, formatted.uid, formatted.textContent || "");
     if (gameResult) {
       await sender.sendDirect(job.chatId, gameResult, formatted.messageId);

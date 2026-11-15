@@ -18,6 +18,16 @@ beforeEach(() => {
 });
 
 describe('scoped beliefs', () => {
+  it('does not launder a merged private identity or unscoped goal into a group prompt', () => {
+    upsertBelief({ sourceTable: 'person_identity', sourceRowId: 7, predicate: 'person.trait', summary: 'PRIVATE_DM_CANARY', evidence: ['identity:7'], scope: { visibility: 'user', userId: 7 } });
+    upsertBelief({ sourceTable: 'user_profiles', sourceRowId: 7, predicate: 'person.trait', summary: 'LOCAL_GROUP_FACT', evidence: ['profile:-100:7'], scope: { visibility: 'user', userId: 7, chatId: -100 } });
+    upsertBelief({ sourceTable: 'goals', sourceRowId: 1, predicate: 'goal.state', summary: 'UNKNOWN_SOURCE_CANARY', evidence: ['goal:1'], scope: { visibility: 'global' } });
+    const scope = { visibility: 'task' as const, chatId: -100, userId: 7, taskId: 'current-task' };
+    expect(getActiveBeliefs('person.trait', { scope }).map(b => b.summary)).toEqual(['LOCAL_GROUP_FACT']);
+    expect(getActiveBeliefs('goal.state', { scope })).toEqual([]);
+    // Holding an unknown-source item does not delete the stored record.
+    expect(getActiveBeliefs('goal.state').map(b => b.summary)).toEqual(['UNKNOWN_SOURCE_CANARY']);
+  });
   it('keeps same-user profiles separate per chat', () => {
     upsertBelief({
       sourceTable: 'user_profiles', sourceRowId: 7, predicate: 'person.interest', summary: '群 A', evidence: ['profile:-100:7'],

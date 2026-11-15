@@ -13,17 +13,19 @@ NyatBot (`nyat-bot`) — a Telegram AI 群聊喵娘 bot. TypeScript, Node ≥22,
 
 Baseline: `npm run typecheck`, `npm run lint` and the vitest suite are **all clean** — zero warnings, zero failures. Any output is a real regression. (Earlier revisions of this file claimed two known unused-var warnings in `message.ts:57` / `prompt-builder.ts:169`, and AGENTS.md claimed one; both were stale — those warnings no longer exist.)
 
-⚠️ **Run tests with the same Node the service uses.** `/usr/local/bin/node` is v25.x, but the systemd unit runs `/root/.hermes/node/bin/node` (v22), and `better-sqlite3`'s prebuilt binary is compiled for the v22 ABI. Under v25 the native module fails to load and **226 tests fail spuriously** with `Module did not self-register`. Always:
+⚠️ **Run tests with the same Node the service uses.** The systemd unit runs `/opt/node22/bin/node` (v22.22.2) — confirm with `systemctl show xxb-ts -p ExecStart`. `better-sqlite3`'s prebuilt binary is compiled for the v22 ABI, so any other Node fails to load the native module and **113 files / 808 tests fail spuriously** with `Module did not self-register`. Always:
 
 ```bash
-export PATH=/root/.hermes/node/bin:$PATH && npm run test
+export PATH=/opt/node22/bin:$PATH && npm run test
 ```
+
+Do **not** use `/root/.hermes/node/bin/node`: that path was right historically but is now v26.8.2, and trusting it is why this warning kept getting re-learned. Verify against the systemd unit, not against a path written in a doc.
 
 ## Non-obvious conventions
 
 - **Everything new is `env` flag-gated, default OFF, and graylisted per chat.** Flags live in `src/env.ts` (a zod schema; read via the cached `env()` getter, never `process.env` directly). Graylist lists are comma-separated `chatId` → `number[]` (see `TURN_ACTOR_CHAT_IDS`). Cheap-LLM work routes via a `*_USAGE: z.string().default('summarize'|'judge')` flag. Secrets are in `.env` (gitignored — never commit it).
 - **chatId sign is the DM/group discriminator**: `chatId > 0` = DM/private, `chatId < 0` = group. Use `isDM`/`isGroup` from `src/shared/chat.ts` in new code.
-- **Migrations**: drop a new `migrations/NNNN_name.sql` (4-digit, next after the highest — currently 0049). Applied automatically on boot in **lexicographic filename order** (`src/db/sqlite.ts:runMigrations`), tracked in `_migrations`. Pure SQL, idempotent (`IF NOT EXISTS`/`ADD COLUMN`). Never edit an already-applied migration.
+- **Migrations**: drop a new `migrations/NNNN_name.sql` (4-digit, next after the highest — currently 0114). Applied automatically on boot in **lexicographic filename order** (`src/db/sqlite.ts:runMigrations`), tracked in `_migrations`. Pure SQL, idempotent (`IF NOT EXISTS`/`ADD COLUMN`). Never edit an already-applied migration.
 - **`src/memory/chroma.ts` is Qdrant, not ChromaDB** (renamed after migration; collection `xxb_group_history`, 384-dim local `@xenova/transformers` embeddings, no external embedding API). `src/memory/importance.ts` is the SQLite sidecar.
 - **AI routing**: `callWithFallback({ usage, messages, … })` in `src/ai/fallback.ts` resolves `usage` → a provider chain (`AI_USAGE_<NAME>_LABEL`/`_BACKUPS` in `.env`, defaults in `src/ai/labels.ts`). Providers are `AI_PROVIDER_<NAME>_*` env vars (ENDPOINT/KEY/MODEL/FORMAT/REASONING/THINKING/TIMEOUT/MAX_TOKENS/INSECURE), parsed by `getProviders()` in `env.ts`. Two API formats: OpenAI (default, `/chat/completions` + `Bearer`) and Claude-native (`FORMAT=claude` → `/v1/messages` + `x-api-key`, see `src/ai/provider.ts`). Redis key `xxb:admin:model_routing:override` overrides `.env` at runtime.
   - **Current reply chain** (2026-07): `reply` = **grok-4.5** (label `grok45`, OpenAI-format aggregator, `REASONING=low`) → `scnet` (SCNET 超算 DeepSeek-V4-Flash, Claude-format) → `sub2gpt55` → `stepfun`. `reply_pro` (hard/tool replies) = `grok45med` (grok reasoning=medium). `judge`/`heart` decision layer stays on **stepfun/stepfunjudge** (deliberately — cheap gate); `heart` has an optional post-decision **念头 reflection** (`HEART_REFLECT_ENABLED`, usage `heart_reflect` on a fast model). Provider-authenticity: verify with **weights-level behavioral fingerprints** (e.g. China-sensitivity: real Western models answer, domestic models censor). Self-report AND system-prompt leak are unreliable — a relay/proxy (e.g. CLIProxyAPI/CPA, which fronts the grok aggregator) can inject a Claude Code system prompt, making any backend parrot "I am Claude". See the `xxb-reply-model-grok` memory.

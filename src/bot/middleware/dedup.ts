@@ -21,10 +21,11 @@ export async function isDuplicate(
   messageId: number,
   isEdit = false,
   editDate?: number,
+  eventId?: string,
 ): Promise<boolean> {
   const redis = getRedis();
   // Include event type + edit generation in key so each edit is processed once.
-  const suffix = isEdit ? `:edit:${editDate ?? 0}` : '';
+  const suffix = isEdit ? `:edit:${eventId ?? editDate ?? 0}` : '';
   const key = `${DEDUP_PREFIX}${chatId}:${messageId}${suffix}`;
 
   // SET NX returns 'OK' if key was set (new), null if key already exists

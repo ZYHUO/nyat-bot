@@ -61,13 +61,16 @@ describe('social ledger (G8 A/B 基线)', () => {
     expect(report(OTHER)?.msgSeen).toBe(2);
   });
 
-  it('三种心流出口分别计数', () => {
+  // round 8：react 是第四个出口（心流点表情不说话）。上面的标题从"三种"改成
+  // "四种"，断言也把 react 算进去——它现在真的会被 recordDecision('react')。
+  it('四种心流出口分别计数', () => {
     recordDecision(CHAT, 'reply');
     recordDecision(CHAT, 'reply');
     recordDecision(CHAT, 'wait');
     recordDecision(CHAT, 'pass');
+    recordDecision(CHAT, 'react');
     flushSocialLedger();
-    expect(report(CHAT)?.decisions).toEqual({ reply: 2, wait: 1, pass: 1 });
+    expect(report(CHAT)?.decisions).toEqual({ reply: 2, wait: 1, pass: 1, react: 1 });
   });
 
   describe('四个 A/B 派生指标', () => {

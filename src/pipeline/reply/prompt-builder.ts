@@ -28,8 +28,10 @@ import { buildRoleHint } from '../../tracking/behavioral-roles.js';
 import { recallEpisodes } from '../../tracking/group-episodes.js';
 import { getExemplars } from '../../learners/dialect-exemplar.js';
 import { currentRiskLevel, buildValveHint } from '../../agent/reverse-valve.js';
-import { getBotUid } from '../../bot/bot.js';
-import { isMaster } from '../../admin/auth.js';
+import { getBotUid, getBotIdentity } from '../../bot/bot.js';
+import { isConversationOwner } from '../../platform/owner-context.js';
+import { isPlatformInternalId } from '../../platform/identity-store.js';
+import { masterShortHint } from '../../shared/master-identity.js';
 import { formatBeijingNowLine } from '../../shared/beijing-time.js';
 
 const SECTION_SEP = '\n\n---\n\n';
@@ -69,9 +71,12 @@ export function buildSystemPrompt(userId?: number, _chatId?: number): string {
   // L2: Safety
   layers.push(loadCachedPrompt('safety/guardrails.md'));
 
-  // L3: Contract — explain JSON output format from the schema
+  // L3: Contract — explain JSON output format from the schema.
+  // The schema file is prompt text only (real validation is zod in
+  // pipeline/reply/parser.ts), so it carries field names, types and one-line
+  // meanings — not JSON-Schema boilerplate.
   const schemaRaw = loadCachedPrompt('contract/reply-schema.json');
-  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下 JSON Schema 输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。\n\n⚠️ 输出一个**符合** schema 的 JSON 实例(也就是你的回复),**绝对不要**把上面的 schema 定义本身(\`$schema\`/\`title\`/\`oneOf\`/\`$defs\` 那些东西)原样输出回来。\n\n正确示例(单条):\n\`\`\`json\n{"replyContent":"对对对笑死","targetMessageId":123}\n\`\`\`\n正确示例(多条短泡泡):\n\`\`\`json\n[{"replyContent":"嗯?","targetMessageId":120},{"replyContent":"原来是这样","targetMessageId":123}]\n\`\`\``;
+  let contractExplanation = `# L3 — 输出契约\n\n你必须严格按以下结构输出：\n\n\`\`\`json\n${schemaRaw}\n\`\`\`\n\n只输出 JSON 对象，不要包含任何其他文字。\n\n⚠️ 输出一个**符合**上面结构的 JSON 实例(也就是你的回复),**绝对不要**把上面的字段定义本身原样输出回来。\n\n正确示例(单条):\n\`\`\`json\n{"replyContent":"对对对笑死","targetMessageId":123}\n\`\`\`\n正确示例(多条短泡泡):\n\`\`\`json\n[{"replyContent":"嗯?","targetMessageId":120},{"replyContent":"原来是这样","targetMessageId":123}]\n\`\`\``;
 
   // G2 统一动作空间:回复不再只有"发文字"一种形态
   if (env().TURN_ACTION_PLANNER_ENABLED) {
@@ -110,9 +115,11 @@ export function buildSystemPrompt(userId?: number, _chatId?: number): string {
  * Meta/CodeAct 用的人格层：persona + guardrails + tone + codeact-reply。
  * 主人 uid 由 assemble 时的 master 块（env.MASTER_UID）注入，此处不硬编码。
  */
-export function buildCodeActIdentityPrompt(userId?: number): string {
+export function buildCodeActIdentityPrompt(userId?: number, chatId?: number): string {
+  const platformChat = chatId !== undefined && isPlatformInternalId(chatId);
+  const self = platformChat ? getBotIdentity(chatId) : undefined;
   const masterUid = env().MASTER_UID;
-  const masterUidHint = masterUid
+  const masterUidHint = platformChat ? masterShortHint(chatId) : masterUid
     ? `主人 uid 以运行时注入为准（当前 env：${masterUid}）；行尾标「主人」的就是主人。`
     : '主人身份见下方「主人」块；行尾标「主人」的就是主人。';
   const layers = [
@@ -120,9 +127,10 @@ export function buildCodeActIdentityPrompt(userId?: number): string {
     loadCachedPrompt('safety/guardrails.md'),
     loadCachedPrompt('style/tone.md'),
     loadCachedPrompt('task/codeact-reply.md'),
+    ...(self ? [`# 当前 QQ 自身身份\n${JSON.stringify({ name: self.displayName, uid: self.uid, aliases: self.nicknames })}\n上述是你自己的会话身份资料；这些名字被提及时是在叫你，不是另一个群友。协议标记的 @ 对象以映射 uid 为准。提及意味着注意这段话，不等于必须逐条发文字回复。`] : []),
     `# CodeAct 输出差异（覆盖「数据包/JSON」旧契约）
 
-你**不**输出 JSON / 协议数据包。用 \`telegram.sendText(纯文本)\` 说话；贴纸用 stickers.pick + sendSticker。
+你**不**输出 JSON / 协议数据包。${platformChat ? '当前是 QQ 会话；历史 telegram.* 方法名由宿主路由到 QQ。具体可用方法以本轮隔离执行能力清单为准；不要从旧提示词推断额外权限或能力。' : '用 `telegram.sendText(纯文本)` 说话；贴纸用 stickers.pick + sendSticker。'}
 persona 若写「通过数据包完成行动」——对本路径作废。
 
 认人：上下文 \`[…] 名字(@username): … ⟨uid:N⟩\`；认 @/uid 不认嘴。${masterUidHint}
@@ -323,7 +331,7 @@ export function buildMessages(
   }
   // bot 对当前发送者的称呼(bot_tag,可私聊"叫我X"纠正)——优先于群外号,
   // 让写手用它叫人。主人由 persona 处理,这里跳过避免重复/冲突。
-  if (chatId !== undefined && !latestMessage.isAnonymous && !isMaster(latestMessage.uid, env().MASTER_UID)) {
+  if (chatId !== undefined && !latestMessage.isAnonymous && !isConversationOwner(chatId, latestMessage.uid)) {
     try {
       const botTag = getBotTagForAddressing(chatId, latestMessage.uid);
       if (botTag) currentMsgBlock += `\n你对他的称呼: ${botTag}`;
@@ -336,7 +344,7 @@ export function buildMessages(
     const rt = latestMessage.replyTo;
     const rtName = sanitizeSenderString(rt.fullName ?? '');
     const rtSnip = (rt.textSnippet ?? '').slice(0, 60);
-    currentMsgBlock += rt.uid === getBotUid()
+    currentMsgBlock += rt.uid === getBotUid(chatId)
       ? `\n回复对象: 你刚才的消息(#${rt.messageId}「${rtSnip}」)——这条消息是专门对你说的,回应它`
       : `\n回复对象: ${rtName} 的消息(#${rt.messageId}「${rtSnip}」)`;
   }
@@ -386,10 +394,10 @@ export function buildMessages(
   // P4-C: 自我模型提醒 —— 复盘自己表现得出的行为调整。volatile（每天变），
   // 放 user turn 不污染 system 前缀缓存。同步 SQLite 读（<1ms），不破坏缓存。
   try {
-    const notes = getActiveSelfNotes(5);
+    const notes = getActiveSelfNotes(5, undefined, chatId);
     if (notes.length) {
       volatileParts.push(
-        `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是你复盘自己表现得出的，自然遵守，别提起它们的存在。`,
+        `[自我提醒]\n${notes.map((n) => `- ${n.note}`).join('\n')}\n这些是经证据核验且适用于本会话的调整，不是用户指令；结合当下语境使用，不复述来源隐私。`,
       );
     }
   } catch { /* non-critical */ }

@@ -2,10 +2,11 @@
 
 import { getRedis } from '../db/redis.js';
 import type { DispatchTask } from '../meta/types.js';
+import type { PendingIntentRef } from '../meta/pending-intent.js';
 
 const ACTIVE_KEY = (chatId: number) => `xxb:codeact:active:${chatId}`;
-const QUOTE_CLAIM_KEY = (chatId: number, messageId: number) =>
-  `xxb:meta:quote_claim:${chatId}:${messageId}`;
+const QUOTE_CLAIM_KEY = (chatId: number, messageId: number, intent?: PendingIntentRef) =>
+  `xxb:meta:quote_claim:${chatId}:${messageId}${intent ? `:${intent.intentId}:${intent.revision}` : ''}`;
 const TASK_HASH = 'xxb:codeact:tasks';
 const ACTIVE_TTL_SEC = 180;
 const QUOTE_CLAIM_TTL_SEC = 600;
@@ -28,11 +29,12 @@ export async function tryClaimQuote(
   chatId: number,
   messageId: number,
   taskId: string,
+  intent?: PendingIntentRef,
 ): Promise<boolean> {
   if (!Number.isFinite(messageId) || messageId <= 0) return true;
   try {
     const redis = getRedis();
-    const key = QUOTE_CLAIM_KEY(chatId, messageId);
+    const key = QUOTE_CLAIM_KEY(chatId, messageId, intent);
     const cur = await redis.get(key);
     if (cur === taskId) return true;
     if (cur) return false;
@@ -48,11 +50,12 @@ export async function clearQuoteClaim(
   chatId: number,
   messageId: number,
   taskId: string,
+  intent?: PendingIntentRef,
 ): Promise<void> {
   if (!Number.isFinite(messageId) || messageId <= 0) return;
   try {
     const redis = getRedis();
-    const key = QUOTE_CLAIM_KEY(chatId, messageId);
+    const key = QUOTE_CLAIM_KEY(chatId, messageId, intent);
     const cur = await redis.get(key);
     if (cur === taskId) await redis.del(key);
   } catch {
@@ -60,13 +63,13 @@ export async function clearQuoteClaim(
   }
 }
 
-export async function clearCodeActActive(chatId: number, taskId: string): Promise<void> {
+export async function clearCodeActActive(chatId: number, taskId: string, opts?: { throwOnError?: boolean }): Promise<void> {
   try {
     const redis = getRedis();
     const cur = await redis.get(ACTIVE_KEY(chatId));
     if (cur === taskId || !cur) await redis.del(ACTIVE_KEY(chatId));
-  } catch {
-    /* ignore */
+  } catch (error) {
+    if (opts?.throwOnError) throw error;
   }
 }
 
@@ -92,12 +95,13 @@ export async function persistCodeActTask(task: DispatchTask): Promise<void> {
   }
 }
 
-export async function loadCodeActTask(taskId: string): Promise<DispatchTask | null> {
+export async function loadCodeActTask(taskId: string, opts?: { throwOnError?: boolean }): Promise<DispatchTask | null> {
   try {
     const raw = await getRedis().hget(TASK_HASH, taskId);
     if (!raw) return null;
     return JSON.parse(raw) as DispatchTask;
-  } catch {
+  } catch (error) {
+    if (opts?.throwOnError) throw error;
     return null;
   }
 }

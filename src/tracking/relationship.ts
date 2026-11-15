@@ -23,8 +23,8 @@ import { logger } from '../shared/logger.js';
 import { decayValence } from './mood.js';
 import { accumulateQualityEvent } from './relationship-quant.js';
 
-// Per-hour exponential decay applied to stored affinity on read (read-side only,
-// never written back). magnitude *= (1 - rate)^hoursSinceLastInteraction.
+// Reads project decay; the next write materializes it before applying a delta.
+// magnitude *= (1 - rate)^hoursSinceLastInteraction.
 // 0.002/hr ⇒ ~half-life ~14.4 天 (ln(0.5)/ln(0.998) ≈ 346h)，即两周左右减半。
 const RELATIONSHIP_DECAY_RATE = 0.002; // per-hour, tunable — ~halves in ~2 weeks
 
@@ -133,6 +133,7 @@ export function applyRelationshipEvent(
   uid: number,
   delta: number,
   summary?: string,
+  options: { strict?: boolean } = {},
 ): void {
   if (!env().RELATIONSHIP_ENABLED) return;
   if (!Number.isFinite(delta)) return;
@@ -141,10 +142,10 @@ export function applyRelationshipEvent(
     const now = Math.floor(Date.now() / 1000);
     const existing = db
       .prepare(
-        'SELECT affinity, interaction_count FROM chat_relationships WHERE chat_id = ? AND uid = ?',
+        'SELECT affinity, interaction_count, last_interaction_at FROM chat_relationships WHERE chat_id = ? AND uid = ?',
       )
       .get(chatId, uid) as
-      | { affinity: number; interaction_count: number }
+      | { affinity: number; interaction_count: number; last_interaction_at: number }
       | undefined;
 
     // Opus 评审: 好感慢升快降 —— 正 delta 缩水(需要很多次正交互才涨),
@@ -153,7 +154,10 @@ export function applyRelationshipEvent(
     const scaledDelta = asymEnabled
       ? delta * (delta > 0 ? env().RELATIONSHIP_ASYMMETRY_UP : env().RELATIONSHIP_ASYMMETRY_DOWN)
       : delta;
-    const nextAffinity = clampAffinity((existing?.affinity ?? 0) + scaledDelta);
+    const baseline = existing
+      ? decayValence(existing.affinity, Math.max(0, (now - existing.last_interaction_at) / 3600), RELATIONSHIP_DECAY_RATE)
+      : 0;
+    const nextAffinity = clampAffinity(baseline + scaledDelta);
     const nextCount = (existing?.interaction_count ?? 0) + 1;
     const nextSummary = summary && summary.trim() ? summary.slice(0, 200) : (existing ? undefined : '');
 
@@ -179,13 +183,14 @@ export function applyRelationshipEvent(
 
     // #2 量化评分: 事件映射为 quality delta 累积侧车, cron 重算时消费清零。
     // 必须在 upsert 之后 (accumulate 是 UPDATE, 需要行已存在)。flag 关时 no-op。
-    accumulateQualityEvent(chatId, uid, summary ?? '');
+    accumulateQualityEvent(chatId, uid, summary ?? '', options);
 
     logger.debug(
       { chatId, uid, delta, affinity: nextAffinity, count: nextCount },
       'Relationship event applied',
     );
   } catch (err) {
+    if (options.strict) throw err;
     logger.debug({ err, chatId, uid }, 'applyRelationshipEvent failed (non-critical)');
   }
 }
