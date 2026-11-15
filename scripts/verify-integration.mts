@@ -6,6 +6,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 export const OFFLINE_SUITES = [
+  'tests/unit/admin/business-config.test.ts',
+  'tests/unit/admin/update-requests.test.ts',
+  'tests/unit/startup/readiness.test.ts',
+  'tests/unit/subagent/local-codeact-shutdown.test.ts',
   'tests/unit/pipeline/tools/search-status.test.ts',
   'tests/unit/pipeline/tools/stepfun-search.test.ts',
   'tests/unit/nyatos/ad-pressure.test.ts',

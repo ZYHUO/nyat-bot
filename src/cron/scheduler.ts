@@ -545,7 +545,7 @@ export function startCronJobs(deps?: CronDeps): void {
   });
 
   // DREAM_JOURNAL_CRON uses UTC; heartbeat dailyAt uses Beijing time.
-  if (env().DREAM_JOURNAL_ENABLED) {
+  if (env().DREAM_JOURNAL_ENABLED || env().BUSINESS_CONFIG_ENABLED) {
     const slots = env()
       .DREAM_JOURNAL_CRON.split(',')
       .map((s) => s.trim())
@@ -563,12 +563,16 @@ export function startCronJobs(deps?: CronDeps): void {
         dailyAt: at,
         run: async () => {
           const { tryWriteDreamJournal, inferDreamSlot } = await import('./dream-journal.js');
-          const result = await tryWriteDreamJournal({ slot: inferDreamSlot() });
-          if (result.wrote) return { status: 'completed' as const };
-          if (result.reason === 'llm_failed') throw new Error('Diary model call failed');
-          const reason = result.reason === 'no_evidence' || result.reason === 'cooldown'
-            ? result.reason : 'model_skip';
-          return { status: 'skipped' as const, reason };
+          const { scheduledJournalSources } = await import('../admin/business-config.js');
+          let wrote = false;
+          let failed = false;
+          for (const sourceChatId of scheduledJournalSources()) {
+            const result = await tryWriteDreamJournal({ slot: inferDreamSlot(), sourceChatId });
+            wrote ||= result.wrote;
+            failed ||= result.reason === 'llm_failed';
+          }
+          if (failed) throw new Error('Diary model call failed');
+          return wrote ? { status: 'completed' as const } : { status: 'skipped' as const, reason: 'model_skip' };
         },
       });
     }

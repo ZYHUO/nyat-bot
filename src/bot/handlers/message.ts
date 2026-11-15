@@ -42,6 +42,8 @@ import type { UpdateLike } from '../../shared/types.js';
 import { processQqHeartBatch } from '../../meta/qq-heart-processor.js';
 import { trackIngressTask } from '../../ingress/background.js';
 import { observePendingIntent, pendingIntentForEvent, pendingIntentEnabled, inspectPendingIntent } from '../../meta/pending-intent.js';
+import { tryHandleUpdateCommand } from '../../admin/update-requests.js';
+import { tryHandleJournalConfigCommand } from '../../admin/business-config.js';
 
 /** Shared ingress after each platform has authenticated, filtered and mapped its event. */
 export async function ingestChatUpdate(update: Update): Promise<void> {
@@ -82,6 +84,9 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
   } catch (err) {
     logger.warn({ err, chatId, messageId }, 'Dedup check failed, proceeding');
   }
+
+  // Deterministic owner commands precede both Meta and legacy model routing.
+  if (await tryHandleUpdateCommand(update) || await tryHandleJournalConfigCommand(update)) return;
 
   if (pendingIntentEnabled() && isMetaSubagentChat(chatId)) {
     const input = formatMessage(hostUpdate);

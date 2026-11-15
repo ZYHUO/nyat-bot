@@ -40,6 +40,8 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（当前会话编排）。你
 - dispatch.getTask(taskId) / dispatch.listTasks(chatId?)
 - journal.tryWrite({ slot?: 'morning'|'bedtime'|'free', force?: boolean }) → 写真实日记（可 SKIP；force 跳过冷却）
 - journal.recent() → 看最近日记片段
+- journal.config(sourceChatId?) → 主人私聊读取日记业务配置（需功能和会话灰度开关）
+- journal.previewConfig({sourceChatId, patch:{enabled?,publishToSource?}}) → 主人要求配置日记时，预览并生成完整 /journal_config 确认命令。请逐字交给主人发送；预览不代表已修改。只允许本会话资料发布回来源会话，不支持跨会话搬运日记。不读写 env、secret、模型路由或安全开关。
 - todo.add(text) / todo.list() / todo.remove(id)
 - agents.listStatus()
 - conversations.query(hint)
@@ -75,6 +77,8 @@ const META_SYSTEM = `你是啾咪囝的 Meta Agent（当前会话编排）。你
 export function looksLikeDiaryRequest(text: string): boolean {
   const t = String(text || '').trim();
   if (!t) return false;
+  // Settings requests belong to the reviewed configuration workflow, never a write trigger.
+  if (/配置|设置|关闭|开启|启用|停用|回滚|config/i.test(t)) return false;
   // CodeAct / ack summaries often contain「写日记」as in「没写日记」— never re-trigger.
   if (
     /没写日记|未写日记|不写日记|没素材写|日记未写|日记已写|跳过.*日记|skipped_or_empty|unparsed|落笔失败|老实[解承]|告知主人/.test(
@@ -272,7 +276,7 @@ async function interceptDiaryAttention(
 
       if (reqAction === 'journal.recent') {
         handledChats.add(a.chatId);
-        if (!env().DREAM_JOURNAL_ENABLED) {
+        if (!(await import('../admin/business-config.js')).effectiveJournalConfig(a.chatId).settings.enabled) {
           await dispatch.taskToGroup(a.chatId, {
             contentDirection: '日记功能关着。短回说明一下，别编日记。',
             toneGuidance: '短、像发微信',
@@ -303,7 +307,7 @@ async function interceptDiaryAttention(
         userAsk ||
         nudge
       ) {
-        if (!env().DREAM_JOURNAL_ENABLED) {
+        if (!(await import('../admin/business-config.js')).effectiveJournalConfig(a.chatId).settings.enabled) {
           handledChats.add(a.chatId);
           if (userAsk || reqAction) {
             await dispatch.taskToGroup(a.chatId, {
@@ -1000,7 +1004,7 @@ async function runScopedMetaSession(
   // Resolve the configured journal link without granting cross-chat sending.
   let journalChannelLink: string | null = null;
   try {
-    const info = await getJournalChannelInfo();
+    const info = await getJournalChannelInfo({ sourceChatId: scopeChatId });
     if (info?.chatId === scopeChatId) {
       journalChannelLink = info.link;
     }

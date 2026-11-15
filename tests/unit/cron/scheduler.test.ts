@@ -8,6 +8,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+const diaryMocks = vi.hoisted(() => ({ sources: vi.fn(() => [-100, -200]),
+  write: vi.fn(async (_opts: unknown) => ({ wrote: true })) }));
+vi.mock('../../../src/admin/business-config.js', () => ({ scheduledJournalSources: diaryMocks.sources }));
+vi.mock('../../../src/cron/dream-journal.js', () => ({ tryWriteDreamJournal: diaryMocks.write, inferDreamSlot: () => 'free' }));
+
 // Mock cron job modules
 vi.mock('../../../src/cron/report.js', () => ({
   runDailyReport: vi.fn().mockResolvedValue(undefined),
@@ -109,6 +114,23 @@ describe('CronScheduler(tick 心跳版)', () => {
     expect(diary.map((task) => task.dailyAt)).toEqual([
       { hour: 7, minute: 0 }, { hour: 23, minute: 0 },
     ]);
+  });
+
+  it('registers runtime-configured diaries with the old env flag off and refreshes sources each tick', async () => {
+    envOverrides['BUSINESS_CONFIG_ENABLED'] = true;
+    envOverrides['DREAM_JOURNAL_CRON'] = '0 23 * * *';
+    startCronJobs();
+    const diary = getTickRegistry().find(task => task.name.startsWith('dream-journal:'))!;
+    expect(diary).toBeDefined();
+    diaryMocks.write.mockClear();
+    await diary.run();
+    expect(diaryMocks.write.mock.calls.map(call => call[0])).toEqual([
+      { slot: 'free', sourceChatId: -100 }, { slot: 'free', sourceChatId: -200 },
+    ]);
+    diaryMocks.sources.mockReturnValueOnce([-200]);
+    diaryMocks.write.mockClear();
+    await diary.run();
+    expect(diaryMocks.write).toHaveBeenCalledExactlyOnceWith({ slot: 'free', sourceChatId: -200 });
   });
 
   it('should not register jobs twice', () => {

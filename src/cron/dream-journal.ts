@@ -22,6 +22,8 @@ import { getBot } from '../bot/bot.js';
 import type { FormattedMessage } from '../shared/types.js';
 import { digestBelongsToChat, isDigestSourceChatId } from '../meta/digest-scope.js';
 import type { DigestReadScope } from '../meta/digest-scope.js';
+import { effectiveJournalConfig } from '../admin/business-config.js';
+import { isPlatformInternalId } from '../platform/identity-store.js';
 
 export type DreamSlot = 'morning' | 'bedtime' | 'free';
 
@@ -57,10 +59,9 @@ export function normalizeJournalChatId(raw: number): number {
 }
 
 /** Look up channel/supergroup username via Telegram getChat — no invite needed. */
-export async function resolveJournalChatLink(): Promise<string | null> {
+export async function resolveJournalChatLink(chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID)): Promise<string | null> {
   try {
-    const chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
-    if (chatId === 0) return null;
+    if (chatId === 0 || isPlatformInternalId(chatId)) return null;
     const bot = getBot();
     const info = await bot.api.getChat(chatId);
     if ('username' in info && info.username) return `https://t.me/${info.username}`;
@@ -74,10 +75,14 @@ export async function resolveJournalChatLink(): Promise<string | null> {
 }
 
 /** Resolve both the display link and the numeric chatId for telegram.sendToChat. */
-export async function getJournalChannelInfo(): Promise<{ link: string; chatId: number } | null> {
-  const chatId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
+export async function getJournalChannelInfo(scope?: DigestReadScope): Promise<{ link: string; chatId: number } | null> {
+  if (scope) {
+    const config = effectiveJournalConfig(scope.sourceChatId);
+    if (!config.settings.enabled || !config.settings.publishToSource) return null;
+  }
+  const chatId = scope?.sourceChatId ?? normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
   if (chatId === 0) return null;
-  const link = await resolveJournalChatLink();
+  const link = await resolveJournalChatLink(chatId);
   if (!link) return null;
   return { link, chatId };
 }
@@ -376,14 +381,26 @@ export function parseDiaryDecision(raw: string): {
 
 export type DreamJournalRunResult = { path: string | null; reason: string };
 
-async function runDreamJournalInner(opts?: { slot?: DreamSlot; sourceChatId?: number }): Promise<DreamJournalRunResult> {
-  if (!env().DREAM_JOURNAL_ENABLED) {
-    return { path: null, reason: 'disabled' };
-  }
+const journalInFlight = new Set<number>();
 
+async function runDreamJournalInner(opts?: { slot?: DreamSlot; sourceChatId?: number }): Promise<DreamJournalRunResult> {
+  const sourceChatId = resolveJournalSource(opts?.sourceChatId);
+  if (sourceChatId === undefined) return { path: null, reason: 'missing_source_chat' };
+  if (journalInFlight.has(sourceChatId)) return { path: null, reason: 'in_flight' };
+  journalInFlight.add(sourceChatId);
+  try {
+    return await runDreamJournalAttempt({ ...opts, sourceChatId });
+  } finally {
+    journalInFlight.delete(sourceChatId);
+  }
+}
+
+async function runDreamJournalAttempt(opts?: { slot?: DreamSlot; sourceChatId?: number }): Promise<DreamJournalRunResult> {
   const slot: DreamSlot = opts?.slot ?? 'free';
   const sourceChatId = resolveJournalSource(opts?.sourceChatId);
   if (sourceChatId === undefined) return { path: null, reason: 'missing_source_chat' };
+  const config = effectiveJournalConfig(sourceChatId);
+  if (!config.settings.enabled) return { path: null, reason: 'disabled' };
   const day = todayStamp();
   const clock = shanghaiClock();
   const outPath = dreamJournalPath(day, { sourceChatId });
@@ -473,6 +490,10 @@ ${existing.slice(0, 2500) || '(空)'}
 
   const heading = `## ${clock} · ${slotLabel(slot)}`;
   const chunk = `${heading}\n\n${body}\n`;
+  const current = effectiveJournalConfig(sourceChatId);
+  if (!current.settings.enabled || current.revision !== config.revision) {
+    return { path: null, reason: 'configuration_changed' };
+  }
   if (!existing.trim()) {
     await writeFile(outPath, `${journalSourceHeader(sourceChatId)}\n# ${day}\n\n${chunk}\n`, 'utf8');
   } else {
@@ -501,24 +522,13 @@ ${existing.slice(0, 2500) || '(空)'}
 
   const postText = `📔 ${day} ${clock}（${slotLabel(slot)}）\n\n${body.slice(0, 3500)}`;
 
-  const channelId = normalizeJournalChatId(env().DREAM_JOURNAL_CHAT_ID);
-  if (channelId !== 0 && channelId === sourceChatId) {
+  const publish = effectiveJournalConfig(sourceChatId);
+  if (publish.settings.enabled && publish.settings.publishToSource && publish.revision === config.revision) {
     try {
-      await sendMessage(channelId, postText);
-      logger.info({ channelId, slot }, 'Dream journal posted to channel');
+      await sendMessage(sourceChatId, postText);
+      logger.info({ channelId: sourceChatId, slot }, 'Dream journal posted to channel');
     } catch (err) {
-      logger.warn({ err, channelId }, 'Dream journal channel post failed');
-    }
-  }
-
-  if (env().DREAM_JOURNAL_DM) {
-    const master = env().MASTER_UID;
-    if (master > 0 && master === sourceChatId) {
-      try {
-        await sendMessage(master, postText);
-      } catch (err) {
-        logger.warn({ err }, 'Dream journal DM failed');
-      }
+      logger.warn({ err, channelId: sourceChatId }, 'Dream journal channel post failed');
     }
   }
 
@@ -606,13 +616,13 @@ export async function tryWriteDreamJournal(opts?: {
   /** Skip Redis cooldown (cron/tests). */
   force?: boolean;
 }): Promise<{ wrote: boolean; path: string | null; slot: DreamSlot; reason?: string }> {
-  if (!env().DREAM_JOURNAL_ENABLED) {
-    return { wrote: false, path: null, slot: 'free', reason: 'disabled' };
-  }
   const slot = normalizeSlot(opts?.slot);
   const sourceChatId = resolveJournalSource(opts?.sourceChatId);
   if (sourceChatId === undefined) {
     return { wrote: false, path: null, slot, reason: 'missing_source_chat' };
+  }
+  if (!effectiveJournalConfig(sourceChatId).settings.enabled) {
+    return { wrote: false, path: null, slot, reason: 'disabled' };
   }
   const day = todayStamp();
   const cdKey = `xxb:dream:meta-cd:${sourceChatId}:${day}:${slot}`;

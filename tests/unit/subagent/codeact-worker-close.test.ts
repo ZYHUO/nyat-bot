@@ -14,7 +14,9 @@ vi.mock('../../../src/subagent/task-store.js', () => ({
 vi.mock('../../../src/agent/task-runtime-events.js', () => ({ emitTaskRuntimeEvent: vi.fn() }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 import { closeCodeActWorker, getCodeActQueue, startCodeActWorker } from '../../../src/subagent/queue.js';
+import { _resetCodeActLifecycleForTest } from '../../../src/subagent/work-lifecycle.js';
 beforeEach(() => {
+  _resetCodeActLifecycleForTest();
   vi.useFakeTimers();
   f.workerClose.mockReset().mockResolvedValue(undefined);
   f.queueClose.mockReset().mockResolvedValue(undefined);

@@ -76,6 +76,10 @@ export const featuresSection = {
   CONTEXT_ENGINE_ENABLED: booleanFromEnv.default(true),
   // 日记 dream-journal(独立 flag,可不启 Meta 单独开)。
   DREAM_JOURNAL_ENABLED: booleanFromEnv.default(false),
+  // Owner-reviewed typed business settings are opt-in; empty rollout list denies all.
+  BUSINESS_CONFIG_ENABLED: booleanFromEnv.default(false),
+  BUSINESS_CONFIG_CHAT_IDS: z.string().default('').transform(value => value.trim() ? value.split(',').map(item => Number(item.trim())) : [])
+    .pipe(z.array(z.number().int().safe().refine(value => value !== 0)).max(100)),
   DREAM_JOURNAL_DIR: z.string().default('./data/dream-journal'),
   // 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。
   // 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。

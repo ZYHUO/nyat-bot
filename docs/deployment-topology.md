@@ -15,6 +15,8 @@
 
 同机组合多个角色是受支持的部署方式。独立计算服务不加载 bot 的环境、数据库或平台令牌；它只持有专用计算凭据。模板、固定依赖闭包及协议见 [独立计算运行时](../ops/embedding/README.md) 和 [计算服务契约](embedding-compute.md)。角色配置本身不是分布式租约，不允许将两个包含 SQLite/NyatDB 写者的 bot 实例当成 active-active 副本。
 
+仓库现提供默认关闭的 [日记业务配置](business-runtime-config.md) 和 [单机版本切换控制器](../ops/releases/README.md)。前者保存带审计、可回退的业务设置，后者在旧进程排空且整个 service cgroup 退出后切换已审核的不可变版本；失败时恢复旧代码，不恢复旧数据库。它们需要首次安装和迁移验收，本次代码修改不代表生产已经启用。计算副本滚动更新、主节点跨机接管和状态复制仍不在这个闭环内。
+
 ```mermaid
 flowchart LR
   TG[Telegram] --> A[authority: ingress / Meta / workers / cron]

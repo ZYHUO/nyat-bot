@@ -79,6 +79,11 @@ export async function dispatchCommand(
   cmd: string,
   arg: string,
 ): Promise<boolean> {
+  if (cmd === '/journal_config') {
+    // Mutations require the original fresh ingress envelope, not an old queue/LLM dispatch.
+    await sender.sendDirect(chatId, '请在主人私聊直接发送新的 /journal_config 命令确认配置。', formatted.messageId);
+    return true;
+  }
   if (cmd === "/watch" && arg) {
     // 仅 DM(主人)指派 → P4-B goals 表:周期性 CodeAct 去查进展并汇报。
     // 群聊关键词追踪(addWatch)已于 2026-08-19 删除——NL 路由把普通对话

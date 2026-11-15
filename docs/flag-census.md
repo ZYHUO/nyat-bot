@@ -15,7 +15,7 @@
 | 段 | 文件 | 键数 | 布尔 | 来源启用 | 管什么 |
 |---|---|---|---|---|---|
 | `ai` | [`src/env-sections/ai.ts`](../src/env-sections/ai.ts) | 11 | 2 | 0 | TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限 |
-| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 95 | 25 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
+| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 101 | 27 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 37 | 19 | 1 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 3 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 0 | 定型判断基座 + 深度反思 |
@@ -24,7 +24,7 @@
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 28 | 12 | 0 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 3 | Turn Actor + Agentic planner + 中期记忆 |
 | `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 58 | 23 | 3 | Meta + Subagent 编排层 |
-| `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 59 | 24 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
+| `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 61 | 25 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
 | `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 12 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 41 | 16 | 0 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
 
@@ -32,15 +32,15 @@
 
 | | |
 |---|---|
-| total_keys | 551 |
-| bool_flags | 237 |
+| total_keys | 559 |
+| bool_flags | 240 |
 | on_in_source | 41 |
-| set_in_source | 94 |
+| set_in_source | 102 |
 | dead_no_reader | 6 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 1 |
 
-**237 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**240 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -109,7 +109,7 @@
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 
-## 关着的布尔旗标（196 个）
+## 关着的布尔旗标（199 个）
 
 | 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -155,6 +155,7 @@
 | core | `WORLD_FACTS_ENABLED` | false | — | Record what Telegram reports about a chat (title/type/username/description) as host-observable world facts. This is the missing producer for `world_ch |
 | features | `ANTIAD_ENABLED` | false | — | ── 反广告 · 行为气压（Ad Pressure）───────────────────────────── 不是规则引擎：不做内容关键词匹配。宿主只测量"谁在以机器的方式刷屏" （burst / echo / repeat / spread 四个行为信号，合成有界标量 adP）， 模型在 Fra |
 | features | `ANTIAD_KICK_ENABLED` | false | — |  |
+| features | `BUSINESS_CONFIG_ENABLED` | false | false | Owner-reviewed typed business settings are opt-in; empty rollout list denies all. |
 | features | `CODEACT_LINUXSB_ENABLED` | false | — |  |
 | features | `CODEACT_PIXIV_ENABLED` | false | — | Subagent host pixiv/linux.sb 只读工具。默认关，按灰度开。 |
 | features | `CODEACT_WEB_FETCH_TO_FILE_ENABLED` | false | — | web.fetchToFile(url, path)：宿主侧（SSRF 守卫全沿用）抓取文本类资源并写进沙盒目录。 沙盒本身仍无网络（bwrap --unshare-all，有意为之）。默认关；见 sandbox/fetch-to-file.ts。 |
@@ -187,6 +188,8 @@
 | infra | `ONEBOT_MEDIA_ENABLED` | false | false |  |
 | infra | `OUTCOME_TRACKING_ENABLED` | false | false | Tracking |
 | infra | `PDF_VISION_ENABLED` | false | — | PDF 识别:同理默认关。当前 vision 路由实际落到 GPT(sub2gpt54mini), 读不了 PDF base64,这通调用必败。gemini/PDF-capable vision 恢复后置 true。 |
+| infra | `READINESS_ENABLED` | false | false | Host-level observation (no chat action); opt in when using the A/B controller. |
+| infra | `UPDATE_REQUESTS_ENABLED` | false | false | Opt-in host mailbox; only the independent controller may activate a release. |
 | infra | `VERIFY_ENABLED` | false | — | Join verification |
 | judge | `JUDGE_SUBSTRATE_ENABLED` | false | — | ── 定型判断基座 src/ai/judge-substrate.ts ─────────────────────── bot 每天 ~45M token 大多花在"换回一个小决定"（gate 三选一、heart 说/等/不说、 shadow、judge）。这里把这类判断收敛到一个可插拔基座：typ |
 | judge | `REFLECTION_ENABLED` | false | — | ── 深度反思(A:把 StepFun 配额花在"让 bot 记住群里发生过什么")── 后台 cron 对活跃群喂大窗口历史 → 产出每群"近况摘要"注入回复。吞吐可调: token/天 ≈ CHATS_PER_TICK × (WINDOW×~15) × (1440/INTERVAL_MIN)。默 |
@@ -310,7 +313,7 @@
 | turn | `TURN_UNANSWERED_REVISIT_ENABLED` | false | — | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | — | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 |
 
-## 非布尔参数（314 个）
+## 非布尔参数（319 个）
 
 | 段 | key | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -352,6 +355,7 @@
 | core | `MEMORY_STALE_AFTER_DAYS` | 90 | — |  |
 | core | `SOCIAL_ACT_SHADOW_CHAT_IDS` |  | — |  |
 | features | `ANTIAD_CHAT_IDS` | '' | — |  |
+| features | `BUSINESS_CONFIG_CHAT_IDS` | '' | — |  |
 | features | `CODEACT_BANNED_WORDS` |  | — | CodeAct 禁词(逗号分隔),出站文本命中则拒发并要求重写。 |
 | features | `DREAM_JOURNAL_CHAT_ID` | 0 | — | 日记发布频道/群 chatId。正数会规范成 -100{id}(超群/频道)；0=不发频道。 |
 | features | `DREAM_JOURNAL_CRON` | '0 23 * * *,0 15 * * *' | — | 一个或多个 cron(UTC,逗号分隔)。默认:23:00 UTC=北京07:00(早)、15:00 UTC=北京23:00(睡前)。 模型可 WRITE/SKIP；一天多段追加，无次数上限。也可用 sleep 边沿触发。 |
@@ -424,6 +428,7 @@
 | infra | `NYATDB_PATH` | './data/nyatdb' | — |  |
 | infra | `NYATDB_POOL_FRAMES` | 64 | — |  |
 | infra | `NYATDB_SYNC_EVERY` | 8 | — |  |
+| infra | `NYAT_RELEASE_ID` | '' | — | Set by the trusted release launcher, never by the model or business config. |
 | infra | `ONEBOT_ACCESS_TOKEN` | '' | — |  |
 | infra | `ONEBOT_ACCOUNT_ID` | '' | — |  |
 | infra | `ONEBOT_ACTION_TIMEOUT_MS` | 30000 | 30000 |  |
@@ -447,6 +452,9 @@
 | infra | `SQLITE_PATH` | './data/xxb.db' | &lt;redacted&gt; | SQLite |
 | infra | `TIMER_API_URL` |  | — |  |
 | infra | `TIMER_CALLBACK_URL` |  | — |  |
+| infra | `UPDATE_CONTROL_CHAT_IDS` | '' | — |  |
+| infra | `UPDATE_REQUEST_DIR` | '' | — |  |
+| infra | `UPDATE_RESULT_DIR` | '' | — |  |
 | infra | `VIDEO_DESCRIBE_MAX_TOKENS` | 2000 | — | reasoning 计入 completion:给小了会拿到空正文(实测 max_tokens=400 → 空)。 |
 | infra | `VIDEO_DESCRIBE_TIMEOUT_MS` | 120_000 | — |  |
 | infra | `VIDEO_MAX_DURATION_SEC` | 300 | — | 视频时长硬上限（秒）。模型侧 5 分钟；Telegram 侧还有更紧的 20MB 下载上限 （代码里 MAX_MEDIA_BYTES=10MB），5 分钟视频几乎必然超——所以现实里能描述的 是短视频。超限的不下载，直接给带时长的中性占位。 |

@@ -18,6 +18,7 @@ export const CODEACT_CAPABILITY_METHODS = [
 export const META_CAPABILITY_METHODS = [
   'dispatch.taskToGroup', 'dispatch.getTask', 'dispatch.listTasks',
   'journal.tryWrite', 'journal.recent', 'todo.add', 'todo.list', 'todo.remove',
+  'journal.config', 'journal.previewConfig',
   'agents.listStatus', 'conversations.query', 'memory.searchEntities',
   'cognition.proposeMission', 'cognition.proposeSensor', 'cognition.proposeValue',
   'cognition.proposeAffect', 'cognition.proposeCircuit',

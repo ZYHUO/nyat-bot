@@ -50,10 +50,11 @@ async function setIngressMode(redis: Redis, mode: IngressMode): Promise<void> {
  * getUpdates call. This is the liveness signal for polling — it fires each
  * long-poll cycle (~every 30s or on update), only when the call succeeds.
  */
-export function installPollHeartbeat(bot: Bot, redis: Redis): void {
+export function installPollHeartbeat(bot: Bot, redis: Redis, onSuccess?: () => void): void {
   bot.api.config.use(async (prev, method, payload, signal) => {
     const res = await prev(method, payload, signal);
-    if (method === 'getUpdates') {
+    if (method === 'getUpdates' && res.ok) {
+      onSuccess?.();
       redis.set(LASTOK_KEY, String(Date.now()), 'EX', LASTOK_TTL_SEC).catch(() => {});
     }
     return res;

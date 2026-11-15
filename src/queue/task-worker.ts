@@ -267,8 +267,9 @@ export async function executeTask(job: Job<TaskJobData>): Promise<string | null>
   }
 }
 
-export function startTaskWorker(): void {
-  if (_worker || !tasksEnabled()) return;
+export function startTaskWorker(): Worker<TaskJobData> | undefined {
+  if (_worker) return _worker;
+  if (!tasksEnabled()) return undefined;
   _worker = new Worker<TaskJobData>(
     TASK_QUEUE_NAME,
     async (job) => {
@@ -282,6 +283,7 @@ export function startTaskWorker(): void {
   );
   _worker.on('error', (err) => logger.error({ err }, 'task worker error event'));
   logger.info('Task executor worker started');
+  return _worker;
 }
 
 /** Graceful backup/shutdown must wait for this writer as well as chat workers. */

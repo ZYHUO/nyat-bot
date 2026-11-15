@@ -62,8 +62,9 @@ describe('env schema 拆段', () => {
     // including pending intent, life-project (two) and background publication.
     // Parsed default objects omit 19 optional keys and are not this denominator.
     // Five isolated video replica controls; standalone server settings are not bot keys.
-    expect(all.length).toBe(551);
-    expect(new Set(all).size).toBe(551);
+    // Recounted 559 unique keys: two business settings gates and six release/readiness controls.
+    expect(all.length).toBe(559);
+    expect(new Set(all).size).toBe(559);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -73,6 +74,14 @@ describe('env schema 拆段', () => {
     const parsed = parseEnv({ BOT_TOKEN: 'x', REDIS_URL: 'redis://127.0.0.1:6379/5' });
     // 抽几个不同段里的键，确认它们都还在且默认值没丢
     expect(parsed.BOT_TOKEN).toBe('x');                        // infra
+    expect(parsed.BUSINESS_CONFIG_ENABLED).toBe(false);
+    expect(parsed.BUSINESS_CONFIG_CHAT_IDS).toEqual([]);
+    expect(parsed.READINESS_ENABLED).toBe(false);
+    expect(parsed.NYAT_RELEASE_ID).toBe('');
+    expect(parsed.UPDATE_REQUESTS_ENABLED).toBe(false);
+    expect(parsed.UPDATE_CONTROL_CHAT_IDS).toEqual([]);
+    expect(parsed.UPDATE_REQUEST_DIR).toBe('');
+    expect(parsed.UPDATE_RESULT_DIR).toBe('');
     expect(parsed.TIMING_GATE_MAX_TOKENS).toBe(4000);          // timing (round 70: 1200 被思维链吃光)
     expect(parsed.CORE_V2_ENABLED).toBe(true);                 // core
     expect(parsed.AGENT_TASK_SEND_BUDGET).toBe(6);             // meta

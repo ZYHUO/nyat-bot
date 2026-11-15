@@ -85,6 +85,23 @@ export const infraSection = {
   // Server
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
+  // Host-level observation (no chat action); opt in when using the A/B controller.
+  READINESS_ENABLED: booleanFromEnv.default(false),
+  // Set by the trusted release launcher, never by the model or business config.
+  NYAT_RELEASE_ID: z.string().regex(/^(?:[a-f0-9]{40})?$/).default(''),
+  // Opt-in host mailbox; only the independent controller may activate a release.
+  UPDATE_REQUESTS_ENABLED: booleanFromEnv.default(false),
+  UPDATE_CONTROL_CHAT_IDS: z.string().default('').transform((value, ctx) => {
+    if (!value.trim()) return [] as number[];
+    const ids = value.split(',').map(part => Number(part.trim()));
+    if (ids.some(id => !Number.isSafeInteger(id) || id === 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'UPDATE_CONTROL_CHAT_IDS requires nonzero safe integers' });
+      return z.NEVER;
+    }
+    return [...new Set(ids)];
+  }),
+  UPDATE_REQUEST_DIR: z.string().default(''),
+  UPDATE_RESULT_DIR: z.string().default(''),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 

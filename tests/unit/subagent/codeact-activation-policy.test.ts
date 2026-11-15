@@ -27,14 +27,16 @@ vi.mock('bullmq', () => ({
   DelayedError: class extends Error {},
 }));
 
-import { checkCodeActActivation, holdCodeActTask } from '../../../src/subagent/activation-policy.js';
+import { checkCodeActActivation, holdCodeActTask, requireCodeActActivation } from '../../../src/subagent/activation-policy.js';
 import { enqueueCodeActJob, enqueueResumeCodeActJob, startCodeActWorker, closeCodeActWorker } from '../../../src/subagent/queue.js';
+import { CodeActAdmissionHeldError, _resetCodeActLifecycleForTest } from '../../../src/subagent/work-lifecycle.js';
 
 const activationMs = 1_800_000_000_000;
 const task = (overrides: Partial<DispatchTask> = {}): DispatchTask => ({
   id: 'test-task', chatId: 12345, createdAt: activationMs, status: 'queued', contentDirection: 'synthetic task', ...overrides,
 });
 beforeEach(() => {
+  _resetCodeActLifecycleForTest();
   vi.clearAllMocks();
   Object.assign(mocks.config, { META_SUBAGENT_ENABLED: true, CODEACT_ISOLATION_ENABLED: true,
     META_SUBAGENT_CHAT_IDS: [12345], META_ACTIVATED_AT_SEC: 1_800_000_000 });
@@ -48,6 +50,13 @@ beforeEach(() => {
 afterEach(async () => { await closeCodeActWorker(); });
 
 describe('CodeAct activation policy', () => {
+  it('marks a refusal safe for drain only after its archive is confirmed', async () => {
+    const old = task({ createdAt: activationMs - 1 });
+    await expect(requireCodeActActivation(old)).rejects.toBeInstanceOf(CodeActAdmissionHeldError);
+    mocks.archive.mockRejectedValueOnce(new Error('archive unavailable'));
+    await expect(requireCodeActActivation(old)).rejects.not.toBeInstanceOf(CodeActAdmissionHeldError);
+  });
+
   it('accepts only enabled, isolated, scoped work created at or after the fixed epoch', () => {
     expect(checkCodeActActivation(task())).toEqual({ allowed: true });
     expect(checkCodeActActivation(task({ createdAt: activationMs + 1 }))).toEqual({ allowed: true });

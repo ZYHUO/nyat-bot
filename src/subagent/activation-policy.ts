@@ -1,6 +1,7 @@
 import { env } from '../env.js';
 import type { DispatchTask } from '../meta/types.js';
 import { inspectMetaTaskScope } from '../meta/input-scope.js';
+import { CodeActAdmissionHeldError } from './work-lifecycle.js';
 
 interface ActivationConfig {
   META_SUBAGENT_ENABLED?: boolean;
@@ -54,7 +55,7 @@ export async function requireCodeActActivation(task: DispatchTask): Promise<void
   const decision = checkCodeActTaskActivation(task);
   if (decision.allowed) return;
   await holdCodeActTask(task, decision.reason);
-  throw new Error(`codeact_activation_denied:${decision.reason}`);
+  throw new CodeActAdmissionHeldError(`codeact_activation_denied:${decision.reason}`);
 }
 
 /** Durable tasks carry message/user references as well as a numeric chat label. */

@@ -30,6 +30,12 @@ function variants(pattern: string): string[] {
 }
 
 const CHECKS: Array<[string, string]> = [
+  ['日记配置版本与审计', 'business_config_revision_conflict'],
+  ['主人配置命令入口', 'tryHandleJournalConfigCommand'],
+  ['受限版本更新请求', 'tryHandleUpdateCommand'],
+  ['版本进程真实就绪', 'StartupReadiness'],
+  ['停机即撤销就绪', 'registerReadinessLifecycle'],
+  ['本地任务排空不伪造确认', 'codeact_local_pending_without_queue_receipt'],
   ['旧终端清空宿主环境', '--clearenv'],
   ['独立音频转写协议', 'AUDIO_TRANSCRIBE_API_MODE'],
   ['语音私有运行时', 'TTS_PYTHON_PATH'],

@@ -25,6 +25,8 @@ import { checkCodeActTaskActivation, holdCodeActTask } from './activation-policy
 import { isPlatformInternalId } from '../platform/identity-store.js';
 import { DELIVERY_UNKNOWN_SUMMARY, holdUnknownCodeActDelivery, isCodeActDeliveryHeld, isUnknownPlatformDelivery } from './delivery-hold.js';
 import { beginBackgroundTask, finishBackgroundTask, isBackgroundTask, assertBackgroundTaskCurrent, type BackgroundRun } from '../agent/background-publication.js';
+import { LocalCodeActQueue } from './local-queue.js';
+import { _resetCodeActLifecycleForTest, isCodeActDraining, registerLocalCodeActLifecycle, trackCodeActAdmission } from './work-lifecycle.js';
 
 /** Telegram typing 约 5s 过期；CodeAct 多轮期间持续刷新。 */
 function startTypingHeartbeat(chatId: number): () => void {
@@ -192,73 +194,38 @@ async function runHostCode(
 export const runHostCodeForTest = runHostCode;
 
 /** In-process fallback queue (BullMQ down / tests). Per-chat serial + global cap. */
-const localByChat = new Map<number, DispatchTask[]>();
-const localRunningChats = new Set<number>();
-let localActive = 0;
-let localPumping = false;
+const localQueue = new LocalCodeActQueue({
+  concurrency: () => env().CODEACT_CONCURRENCY,
+  claim: async task => {
+    const { tryMarkCodeActActive } = await import('./task-store.js');
+    return tryMarkCodeActActive(task.chatId, task.id);
+  },
+  run: runCodeActTask,
+  release: async task => {
+    const { clearCodeActActive } = await import('./task-store.js');
+    await clearCodeActActive(task.chatId, task.id, { throwOnError: true });
+  },
+  failed: (task, err) => logger.warn({ err, taskId: task.id }, 'local CodeAct failed'),
+});
+registerLocalCodeActLifecycle(localQueue);
 
 export function enqueueSubagentTaskLocal(task: DispatchTask): void {
-  const q = localByChat.get(task.chatId) ?? [];
-  q.push(task);
-  localByChat.set(task.chatId, q);
-  void pumpLocalQueue();
-}
-
-async function pumpLocalQueue(): Promise<void> {
-  if (localPumping) return;
-  localPumping = true;
-  try {
-    const max = env().CODEACT_CONCURRENCY;
-    let claim = true;
-    while (claim && localActive < max) {
-      claim = false;
-      for (const [chatId, q] of [...localByChat.entries()]) {
-        if (localActive >= max) break;
-        if (localRunningChats.has(chatId) || !q.length) {
-          if (!q.length) localByChat.delete(chatId);
-          continue;
-        }
-        const task = q.shift()!;
-        if (!q.length) localByChat.delete(chatId);
-        localRunningChats.add(chatId);
-        localActive += 1;
-        claim = true;
-        void (async () => {
-          try {
-            const { tryMarkCodeActActive, clearCodeActActive } = await import('./task-store.js');
-            const got = await tryMarkCodeActActive(task.chatId, task.id);
-            if (!got) {
-              enqueueSubagentTaskLocal(task);
-              return;
-            }
-            try {
-              await runCodeActTask(task);
-            } finally {
-              await clearCodeActActive(task.chatId, task.id);
-            }
-          } catch (err) {
-            logger.warn({ err, taskId: task.id }, 'local CodeAct failed');
-          } finally {
-            localRunningChats.delete(chatId);
-            localActive -= 1;
-            void pumpLocalQueue();
-          }
-        })();
-      }
-    }
-  } finally {
-    localPumping = false;
-  }
+  if (isCodeActDraining()) throw new Error('codeact_draining');
+  localQueue.enqueue(task);
 }
 
 /** Public enqueue — prefers durable BullMQ. */
 export function enqueueSubagentTask(task: DispatchTask): void {
-  void import('./queue.js')
-    .then(({ enqueueCodeActJob }) => enqueueCodeActJob(task))
-    .catch((err) => {
+  void trackCodeActAdmission(async () => {
+    try {
+      const { enqueueCodeActJob } = await import('./queue.js');
+      await enqueueCodeActJob(task);
+    } catch (err) {
+      if (isCodeActDraining()) throw err;
       logger.warn({ err, taskId: task.id }, 'CodeAct enqueue path failed — local');
       enqueueSubagentTaskLocal(task);
-    });
+    }
+  }).catch(err => logger.warn({ err, taskId: task.id }, 'CodeAct enqueue rejected'));
 }
 
 import { getExecutionAudit } from '../agent/execution-audit.js';
@@ -1347,8 +1314,6 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
 /** Test helper */
 export function _resetSubagentQueue(): void {
-  localByChat.clear();
-  localRunningChats.clear();
-  localActive = 0;
-  localPumping = false;
+  localQueue.resetForTest();
+  _resetCodeActLifecycleForTest();
 }

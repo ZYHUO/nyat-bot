@@ -63,13 +63,13 @@ export async function clearQuoteClaim(
   }
 }
 
-export async function clearCodeActActive(chatId: number, taskId: string): Promise<void> {
+export async function clearCodeActActive(chatId: number, taskId: string, opts?: { throwOnError?: boolean }): Promise<void> {
   try {
     const redis = getRedis();
     const cur = await redis.get(ACTIVE_KEY(chatId));
     if (cur === taskId || !cur) await redis.del(ACTIVE_KEY(chatId));
-  } catch {
-    /* ignore */
+  } catch (error) {
+    if (opts?.throwOnError) throw error;
   }
 }
 

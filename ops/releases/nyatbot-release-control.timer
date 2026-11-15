@@ -1,0 +1,10 @@
+[Unit]
+Description=Consume bounded NyatBot release requests
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+Unit=nyatbot-release-control.service
+
+[Install]
+WantedBy=timers.target

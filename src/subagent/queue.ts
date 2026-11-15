@@ -14,12 +14,14 @@ import {
 } from './task-store.js';
 import { emitTaskRuntimeEvent } from '../agent/task-runtime-events.js';
 import { checkCodeActTaskActivation, holdCodeActTask, requireCodeActActivation } from './activation-policy.js';
+import { beginCodeActDrain, drainLocalCodeActWork, finishCodeActAdmissions, isCodeActDraining, trackCodeActAdmission } from './work-lifecycle.js';
 
 export const CODEACT_QUEUE_NAME = 'xxb-codeact';
 
 let _queue: Queue<DispatchTask> | undefined;
 let _worker: Worker<DispatchTask> | undefined;
 const failureCleanups = new Set<Promise<void>>();
+let closing: Promise<void> | undefined;
 
 export function getCodeActQueue(): Queue<DispatchTask> {
   if (!_queue) {
@@ -37,7 +39,11 @@ export function getCodeActQueue(): Queue<DispatchTask> {
 }
 
 /** Persist + enqueue; falls back to in-process runner if Redis/BullMQ fails. */
-export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
+export function enqueueCodeActJob(task: DispatchTask): Promise<void> {
+  return trackCodeActAdmission(() => enqueueCodeActJobInner(task));
+}
+
+async function enqueueCodeActJobInner(task: DispatchTask): Promise<void> {
   await requireCodeActActivation(task);
   const state = getGlobalState();
   if (task.status !== 'running') task.status = 'queued';
@@ -49,6 +55,7 @@ export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
       jobId: `codeact-${task.id}`,
     });
   } catch (err) {
+    if (isCodeActDraining()) throw err;
     logger.warn({ err, taskId: task.id }, 'CodeAct BullMQ enqueue failed — in-process fallback');
     const { enqueueSubagentTaskLocal } = await import('./executor.js');
     enqueueSubagentTaskLocal(task);
@@ -66,7 +73,11 @@ export async function enqueueCodeActJob(task: DispatchTask): Promise<void> {
  * 长时间 Agent 循环：续跑入队。独立 jobId（避免覆盖正在跑的 segment job），
  * attempts=1（checkpoint 本身 durable，失败下段重入队即可，重试 8 次只会放大问题）。
  */
-export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void> {
+export function enqueueResumeCodeActJob(task: DispatchTask): Promise<void> {
+  return trackCodeActAdmission(() => enqueueResumeCodeActJobInner(task), true);
+}
+
+async function enqueueResumeCodeActJobInner(task: DispatchTask): Promise<void> {
   await requireCodeActActivation(task);
   const state = getGlobalState();
   task.status = 'queued';
@@ -83,6 +94,7 @@ export async function enqueueResumeCodeActJob(task: DispatchTask): Promise<void>
       },
     );
   } catch (err) {
+    if (isCodeActDraining()) throw err;
     logger.warn({ err, taskId: task.id }, 'CodeAct resume enqueue failed — in-process fallback');
     const { enqueueSubagentTaskLocal } = await import('./executor.js');
     enqueueSubagentTaskLocal(task);
@@ -178,15 +190,26 @@ export function startCodeActWorker(): Worker<DispatchTask> {
   return _worker;
 }
 
-export async function closeCodeActWorker(): Promise<void> {
+export function closeCodeActWorker(): Promise<void> {
+  if (closing) return closing;
+  beginCodeActDrain();
+  const pending = closeCodeActWorkerInner();
+  closing = pending;
+  void pending.then(() => { closing = undefined; }, () => { closing = undefined; });
+  return pending;
+}
+
+async function closeCodeActWorkerInner(): Promise<void> {
   // A bounded wait that silently succeeds leaves writers alive after DB close.
   // The process-level deadline exits nonzero; this function only succeeds after
-  // the worker, its failed-job handlers, and the queue have actually settled.
+  // the worker, fallback executions, producers and failed-job handlers settle.
   if (_worker) {
     logger.info({ step: 'codeact-worker' }, 'shutdown step');
     await _worker.close();
     _worker = undefined;
   }
+  await drainLocalCodeActWork();
+  await finishCodeActAdmissions();
   await Promise.all([...failureCleanups]);
   if (_queue) {
     logger.info({ step: 'codeact-queue' }, 'shutdown step');

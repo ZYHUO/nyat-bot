@@ -119,7 +119,7 @@ export async function collectPromptInputs(ctx: CollectPromptInputsCtx): Promise<
         const { readRecentDreamSnippet, getJournalChannelInfo } = await import('../cron/dream-journal.js');
         const [snippet, info] = await Promise.all([
           readRecentDreamSnippet(300, { sourceChatId: chatId }),
-          getJournalChannelInfo(),
+          getJournalChannelInfo({ sourceChatId: chatId }),
         ]);
         return {
           journal: snippet ?? '',

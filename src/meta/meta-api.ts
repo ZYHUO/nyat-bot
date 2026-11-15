@@ -670,6 +670,16 @@ export function buildMetaApiContext(opts?: {
   };
 
   const journal = {
+    async config(sourceChatId?: number) {
+      if (opts?.isAborted?.()) throw new Error('meta_aborted');
+      const { journalConfigView } = await import('../admin/business-config.js');
+      return journalConfigView(requireScope(), sourceChatId);
+    },
+    async previewConfig(input: unknown) {
+      if (opts?.isAborted?.()) throw new Error('meta_aborted');
+      const { previewJournalConfig } = await import('../admin/business-config.js');
+      return previewJournalConfig(requireScope(), input);
+    },
     /** Decide+append diary via dream-journal module (model WRITE/SKIP). */
     async tryWrite(args?: {
       slot?: string;

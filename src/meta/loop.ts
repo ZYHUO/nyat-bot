@@ -162,6 +162,11 @@ export function stopMetaLoop(): void {
   }
 }
 
+/** Timer ownership only; a running loop does not imply a successful model call. */
+export function isMetaLoopRunning(): boolean {
+  return timer !== null && !stopping;
+}
+
 /** Stop admissions, then wait for the current session and any failure requeue. */
 export async function drainMetaLoop(): Promise<void> {
   stopMetaLoop();

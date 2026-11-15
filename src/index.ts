@@ -7,7 +7,7 @@ import { env, getProviders } from './env.js';
 import { registerOutboundSecrets } from './shared/outbound-privacy.js';
 import { getConfig } from './shared/config.js';
 import { getRedis, closeRedis } from './db/redis.js';
-import { runMigrations, closeDb } from './db/sqlite.js';
+import { runMigrations, closeDb, getDb } from './db/sqlite.js';
 import { createBot, stopBot, stopBotIngress } from './bot/bot.js';
 import { startWorker, closeWorker } from './queue/worker.js';
 import { startTaskWorker, closeTaskWorker } from './queue/task-worker.js';
@@ -20,7 +20,7 @@ import { registerMessageHandlers } from './bot/handlers/message.js';
 import { registerFeedbackHandler } from './bot/handlers/feedback.js';
 import { createAdminApi } from './admin/api.js';
 import { createMonitorApi } from './admin/monitor.js';
-import { startCronJobs, stopCronJobs } from './cron/scheduler.js';
+import { startCronJobs, stopCronJobs, isStarted as isCronRunning } from './cron/scheduler.js';
 import { initBotTracker } from './tracking/interaction.js';
 import { isMemoryAvailable, warmEmbedder } from './memory/chroma.js';
 import { callAllowlistReviewModel } from './allowlist/ai-call.js';
@@ -29,13 +29,14 @@ import type { AllowlistConfig } from './allowlist/types.js';
 import { getStartupOwnership, ownsMetaLoop, assertIngressHttpOwnership } from './startup/ownership.js';
 import { clearShutdownCheckpoint, writeShutdownCheckpoint } from './startup/shutdown-checkpoint.js';
 import { closeHttpServer } from './startup/close-http.js';
+import { StartupReadiness, registerReadinessRoute, registerReadinessLifecycle } from './startup/readiness.js';
 import { getIngressMode, installPollHeartbeat, startIngressWatchdog } from './ingress/failover.js';
 import {
   shouldRegisterBotCommands,
   shouldWarmMemory,
 } from './startup/side-effects.js';
 import { preloadSkills } from './pipeline/tools/registry.js';
-import { startMetaLoop, stopMetaLoop, drainMetaLoop } from './meta/index.js';
+import { startMetaLoop, stopMetaLoop, drainMetaLoop, isMetaLoopRunning } from './meta/index.js';
 import { startCodeActWorker, closeCodeActWorker } from './subagent/index.js';
 import { getSandboxCapability } from './sandbox/terminal.js';
 import { assertMetaIsolationReady } from './startup/meta-isolation.js';
@@ -44,6 +45,7 @@ import { durableTelegramMiddleware, IngressNotAcceptedError, startInboxRecovery 
 import type { Update } from 'grammy/types';
 import { startQqHeartBatchRecovery } from './meta/qq-heart-batch.js';
 import { processQqHeartBatch } from './meta/qq-heart-processor.js';
+import type { NyatDbHandle } from './nyatdb/index.js';
 
 import { installGlobalFetchProxy } from './shared/fetch-proxy.js';
 import { startDynamicLogLevel } from './shared/logger.js';
@@ -94,6 +96,24 @@ async function main(): Promise<void> {
   // 2. Connect Redis
   const redis = getRedis();
   await redis.connect();
+  let nyatDbForReadiness: NyatDbHandle | null = null;
+  const readiness = config.READINESS_ENABLED ? new StartupReadiness({
+    ownership, cronEnabled: config.CRON_ENABLED, metaEnabled: config.META_SUBAGENT_ENABLED,
+    tasksEnabled: config.TASK_EXECUTOR_ENABLED, oneBotEnabled: config.ONEBOT_ENABLED,
+    nyatDbEnabled: config.NYATDB_ENABLED,
+    releaseId: config.NYAT_RELEASE_ID, pid: process.pid, processStartedAt,
+  }, {
+    redis,
+    querySqlite: () => { getDb().prepare('SELECT name FROM _migrations LIMIT 1').get(); },
+    queryNyatDb: () => {
+      // Observe the boot-opened handle, never reopen storage from a health probe.
+      if (!nyatDbForReadiness) throw new Error('nyatdb_not_open');
+      nyatDbForReadiness.stats();
+    },
+    cronRunning: isCronRunning,
+    metaRunning: isMetaLoopRunning,
+    oneBotReady: () => getOneBotRuntimeStatus().state === 'ready',
+  }) : undefined;
 
   // 3. Run SQLite migrations
   const appConfig = getConfig();
@@ -122,7 +142,7 @@ async function main(): Promise<void> {
   // 3.1 NyatDB (optional embedded engine; default off)
   try {
     const { getNyatDb } = await import('./nyatdb/index.js');
-    getNyatDb();
+    nyatDbForReadiness = getNyatDb();
   } catch (err) {
     logger.warn({ err }, 'NyatDB open failed');
   }
@@ -185,10 +205,13 @@ async function main(): Promise<void> {
 
   // 8. Start BullMQ worker
   if (ownership.worker) {
-    startWorker();
-    startTaskWorker();
+    const messageWorker = startWorker();
+    const taskWorker = startTaskWorker();
+    readiness?.watchWorker('messages', messageWorker);
+    readiness?.watchWorker('tasks', taskWorker);
     if (config.META_SUBAGENT_ENABLED) {
-      startCodeActWorker();
+      const codeActWorker = startCodeActWorker();
+      readiness?.watchWorker('codeact', codeActWorker);
     }
   } else {
     logger.info({ ownership }, 'Skipping worker startup in non-owner process');
@@ -219,6 +242,7 @@ async function main(): Promise<void> {
         await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
       }
       logger.info({ url: config.WEBHOOK_URL }, 'Webhook set (failover mode)');
+      readiness?.webhookRegistered();
       (globalThis as { __markBootReady?: () => void }).__markBootReady?.();
       startIngressWatchdog(redis, 'webhook');
       // Smart Group: 同 polling 分支,webhook 模式也恢复历史健康数据
@@ -235,7 +259,8 @@ async function main(): Promise<void> {
       } catch (err) {
         logger.warn({ err }, 'deleteWebhook before polling failed (continuing)');
       }
-      installPollHeartbeat(bot, redis);
+      readiness?.usePolling();
+      installPollHeartbeat(bot, redis, () => readiness?.pollSucceeded());
       // Smart Group: 从 Redis 恢复历史健康数据(重启不丢,auto-assign 首日就有据可依)。
       // 内部 SMART_GROUP_ENABLED=false 时 no-op。
       await initSmartGroup();
@@ -311,6 +336,7 @@ async function main(): Promise<void> {
 
   const app = new Hono();
   app.get('/health', (c) => c.json({ status: 'ok', uptime: process.uptime() }));
+  registerReadinessRoute(app, readiness);
   // Prometheus metrics(借鉴 CGM:LLM token/缓存/延迟按用途可见)— flag-gated。
   if (config.METRICS_ENABLED) {
     const { initLlmMetrics } = await import('./metrics/llm-collector.js');
@@ -494,6 +520,7 @@ async function main(): Promise<void> {
       await closeRedis();
       closeDb();
       const { closeNyatDb } = await import('./nyatdb/index.js');
+      nyatDbForReadiness = null;
       closeNyatDb();
       freeEncoder();
       writeShutdownCheckpoint(config.SQLITE_PATH, processStartedAt);
@@ -526,8 +553,7 @@ async function main(): Promise<void> {
     logger.error({ err }, 'Uncaught exception (non-fatal)');
   });
 
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
+  registerReadinessLifecycle(readiness, shutdown);
 }
 
 main().catch((err) => {
