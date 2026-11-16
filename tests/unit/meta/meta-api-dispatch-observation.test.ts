@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchTask } from '../../../src/meta/types.js';
 
+const assignment = vi.hoisted(() => ({ bind: vi.fn(async (_task: DispatchTask, _trigger?: number, _id?: string): Promise<void> => undefined) }));
+vi.mock('../../../src/meta/qq-assignment-binding.js', () => ({ bindQQParticipationTask: assignment.bind }));
+
 const { state, recordMetaDispatchObservation, recordMissionProposal, recordAffectEpisode, recordActionCircuitProposal, dispatchCodeActTaskViaAgency, enqueueCodeActJob, isCodeActBusy, tryClaimQuote, tryMarkCodeActActive, allQuotesAnswered } = vi.hoisted(() => ({
   state: {
     listTasks: vi.fn(),
@@ -46,6 +49,8 @@ vi.mock('../../../src/subagent/queue.js', () => ({ enqueueCodeActJob }));
 import { buildMetaApiContext } from '../../../src/meta/meta-api.js';
 
 beforeEach(() => {
+  assignment.bind.mockReset();
+  assignment.bind.mockResolvedValue(undefined);
   state.listTasks.mockReset();
   state.listTasks.mockReturnValue([]);
   state.putTask.mockReset();
@@ -73,6 +78,41 @@ beforeEach(() => {
 });
 
 describe('Meta dispatch observation wiring', () => {
+  it('carries host-captured assignment provenance through the actual dispatch path', async () => {
+    const chatId = -(2 ** 52 + 1), messageId = 2 ** 52 + 20;
+    assignment.bind.mockImplementation(async (task, trigger, id) => {
+      expect(trigger).toBe(messageId); expect(id).toBe('grant'); task.qqAssignmentId = id;
+    });
+    const context = buildMetaApiContext({ scopeChatId: chatId, chatLayer: new Map([[chatId, 'L0']]),
+      defaultQuotes: new Map([[chatId, messageId]]), defaultQQAssignmentIds: new Map([[messageId, 'grant']]) });
+    const dispatch = context.dispatch as { taskToGroup: (id: number, args: { contentDirection: string }) => Promise<unknown> };
+    await dispatch.taskToGroup(chatId, { contentDirection: 'Same-group message' });
+    expect(enqueueCodeActJob).toHaveBeenCalledWith(expect.objectContaining({ chatId, qqAssignmentId: 'grant' }));
+  });
+
+  it('does not enqueue an ordinary task when a captured assignment is stopped before binding', async () => {
+    const chatId = -(2 ** 52 + 1), messageId = 2 ** 52 + 20;
+    assignment.bind.mockRejectedValue(new Error('stopped'));
+    const context = buildMetaApiContext({ scopeChatId: chatId, chatLayer: new Map([[chatId, 'L0']]),
+      defaultQuotes: new Map([[chatId, messageId]]), defaultQQAssignmentIds: new Map([[messageId, 'grant']]) });
+    const dispatch = context.dispatch as { taskToGroup: (id: number, args: { contentDirection: string }) => Promise<unknown> };
+    await expect(dispatch.taskToGroup(chatId, { contentDirection: 'Same-group message' }))
+      .resolves.toEqual({ taskId: 'qq_assignment_binding_unavailable' });
+    expect(enqueueCodeActJob).not.toHaveBeenCalled();
+    expect(state.putTask).not.toHaveBeenCalled();
+  });
+
+  it('preserves a grant from an older attention item when a newer ordinary message becomes the default', async () => {
+    const chatId = -(2 ** 52 + 1), older = 2 ** 52 + 20, newer = older + 1;
+    assignment.bind.mockRejectedValue(new Error('stopped'));
+    const context = buildMetaApiContext({ scopeChatId: chatId, chatLayer: new Map([[chatId, 'L0']]),
+      defaultQuotes: new Map([[chatId, newer]]), defaultQQAssignmentIds: new Map([[older, 'stopped-grant']]) });
+    const dispatch = context.dispatch as { taskToGroup: (id: number, args: { contentDirection: string; quotes: number[] }) => Promise<unknown> };
+    await expect(dispatch.taskToGroup(chatId, { contentDirection: 'Mixed attention', quotes: [older, newer] }))
+      .resolves.toEqual({ taskId: 'qq_assignment_binding_unavailable' });
+    expect(assignment.bind).toHaveBeenCalledWith(expect.any(Object), newer, 'stopped-grant');
+    expect(enqueueCodeActJob).not.toHaveBeenCalled();
+  });
   it('persists a bounded mission proposal without dispatching it', async () => {
     const context = buildMetaApiContext({ defaultChatId: -100 });
     const cognition = context.cognition as {

@@ -9,6 +9,7 @@ import { dispatchCodeActTaskViaAgency } from "../agent/agency-codeact-dispatch.j
 import { recordMetaDispatchObservation } from "../agent/agency-meta-observation.js";
 import { recordMetaActionObservation } from "../agent/agency-meta-actions.js";
 import { env } from "../env.js";
+import { bindQQParticipationTask } from './qq-assignment-binding.js';
 import { isKernelShadowChat, kernelShadowConfig } from "../agent/cognitive-kernel.js";
 import {
   cognitiveTurnRuntime,
@@ -56,6 +57,7 @@ export function buildMetaApiContext(opts?: {
   /** Default durable message event per chat (from Attention). */
   defaultCognitiveAnchorEventIds?: Map<number, string>;
   defaultPendingIntents?: Map<number, PendingIntentRef>;
+  defaultQQAssignmentIds?: Map<number, string>;
 }): Record<string, unknown> {
   const state = getGlobalState();
   const inferredCandidates = new Set([
@@ -113,6 +115,11 @@ export function buildMetaApiContext(opts?: {
         throw new Error("contentDirection required");
 
       const layer = opts?.chatLayer?.get(cid) ?? "L2";
+      // The whole host-scoped attention batch may have influenced this dispatch.
+      // Model quote selection cannot remove its captured authorization provenance.
+      const assignmentIds = new Set(opts?.defaultQQAssignmentIds?.values() ?? []);
+      if (assignmentIds.size > 1) return { taskId: 'qq_assignment_conflicting_provenance' };
+      const capturedAssignmentId = [...assignmentIds][0];
       const observationQuotes = (args.quotes ?? [])
         .map((q) =>
           typeof q === "string" ? Number(q.replace(/^msg:/, "")) : Number(q),
@@ -358,6 +365,7 @@ export function buildMetaApiContext(opts?: {
             chatId: cid,
             layer,
             reason: "meta_llm_dispatch",
+            assignmentDriven: !!capturedAssignmentId,
             messageId: quotes[0],
             pendingIntent: quotes[0] ? opts?.defaultPendingIntents?.get(quotes[0]) : undefined,
             userId: args.targetUserId,
@@ -425,6 +433,15 @@ export function buildMetaApiContext(opts?: {
           args.cognitiveAnchorEventId ??
           opts?.defaultCognitiveAnchorEventIds?.get(cid),
       };
+
+      try {
+        const trigger = opts?.defaultQuotes?.get(cid);
+        await bindQQParticipationTask(task, trigger, capturedAssignmentId);
+      } catch {
+        unclaim();
+        observeDecision("blocked", "qq_assignment_binding_unavailable", task.quoteMessageIds ?? [], task.id);
+        return { taskId: "qq_assignment_binding_unavailable" };
+      }
 
       // Persist the structured Meta decision before queueing. This is an
       // observe-only Agency run; legacy queue behavior remains authoritative.

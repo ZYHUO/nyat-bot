@@ -131,6 +131,7 @@ async function interceptDiaryAttention(
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    defaultQQAssignmentIds?: Map<number, string>;
   },
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
@@ -142,6 +143,7 @@ async function interceptDiaryAttention(
     defaultTargetUserIds: opts.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: opts.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: opts.defaultPendingIntents,
+    defaultQQAssignmentIds: opts.defaultQQAssignmentIds,
   });
   const journal = api['journal'] as {
     tryWrite: (args?: {
@@ -387,6 +389,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   defaultTargetUserIds: Map<number, number>;
   defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    defaultQQAssignmentIds?: Map<number, string>;
 } {
   const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
   const chatLayer = new Map<number, AttentionLayer>();
@@ -395,7 +398,9 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   const defaultCognitiveAnchorEventIds = new Map<number, string>();
   const anchorOrder = new Map<number, number>();
   const defaultPendingIntents = new Map<number, PendingIntentRef>();
+  const defaultQQAssignmentIds = new Map<number, string>();
   for (const a of attention) {
+    if (a.messageId && a.qqAssignmentId) defaultQQAssignmentIds.set(a.messageId, a.qqAssignmentId);
     if (a.pendingIntent && a.messageId) {
       // Completion order is not source order: an older Heart can finish after
       // an edit. Only the current generation may supply a task's fixed fence.
@@ -427,7 +432,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
       }
     }
   }
-  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents };
+  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents, defaultQQAssignmentIds };
 }
 
 async function runMetaCode(
@@ -441,6 +446,7 @@ async function runMetaCode(
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    defaultQQAssignmentIds?: Map<number, string>;
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
@@ -458,6 +464,7 @@ async function autoDispatchL0(
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    defaultQQAssignmentIds?: Map<number, string>;
   },
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
@@ -469,6 +476,7 @@ async function autoDispatchL0(
     defaultTargetUserIds: maps?.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps?.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: maps?.defaultPendingIntents,
+    defaultQQAssignmentIds: maps?.defaultQQAssignmentIds,
   });
   const d = api['dispatch'] as {
     taskToGroup: (
@@ -735,6 +743,7 @@ async function autoDispatchL0(
           chatId,
           layer: latest.layer,
           reason: latest.reason,
+          assignmentDriven: siblings.some(item => !!item.qqAssignmentId),
           messageId: latest.messageId,
           pendingIntent: latest.pendingIntent,
           userId: latest.userId,
@@ -957,6 +966,7 @@ async function runScopedMetaSession(
     defaultTargetUserIds: maps.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: maps.defaultPendingIntents,
+    defaultQQAssignmentIds: maps.defaultQQAssignmentIds,
   });
   let codeRan = dispatchedChatIds.size > 0;
 
@@ -1151,6 +1161,7 @@ async function runScopedMetaSession(
         defaultTargetUserIds: metaMaps.defaultTargetUserIds,
         defaultCognitiveAnchorEventIds: metaMaps.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: metaMaps.defaultPendingIntents,
+    defaultQQAssignmentIds: metaMaps.defaultQQAssignmentIds,
       });
       codeRan = true;
     } catch (err) {

@@ -6,6 +6,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const GROUP = -1002450361141;
 
 const drawArtworkMock = vi.fn();
+// This ordinary-task fixture has no owner assignment; durable grant behavior
+// is exercised separately with the real assignment store and its migrations.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: () => null,
+}));
 vi.mock('../../../src/agent/artist.js', () => ({
   drawArtwork: (...args: unknown[]) => drawArtworkMock(...args),
 }));

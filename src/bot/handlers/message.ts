@@ -44,6 +44,7 @@ import { trackIngressTask } from '../../ingress/background.js';
 import { observePendingIntent, pendingIntentForEvent, pendingIntentEnabled, inspectPendingIntent } from '../../meta/pending-intent.js';
 import { tryHandleUpdateCommand } from '../../admin/update-requests.js';
 import { tryHandleJournalConfigCommand } from '../../admin/business-config.js';
+import { isCorrectionCooling } from '../../pipeline/correction-cooldown.js';
 
 /** Shared ingress after each platform has authenticated, filtered and mapped its event. */
 export async function ingestChatUpdate(update: Update): Promise<void> {
@@ -266,6 +267,16 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
 
         runMetaBookkeepingHooks(chatId, fm);
 
+        // A directly addressed stop must reach the durable grant revocation
+        // before mute, pending-input holds, sleeping or a queued Heart batch.
+        if (chatId < 0 && isDirect && !fm.isBot && !fm.isAnonymous) {
+          const { tryCorrectionIntercept } = await import('../../pipeline/stages/intercepts.js');
+          if (await tryCorrectionIntercept(chatId, fm, { addressedRule: 'direct' })) return 'done';
+        }
+        // Do not feed a cancelled participation through the earlier post-task
+        // follow-up window or pending-intent/direct dispatch shortcuts either.
+        if (chatId < 0 && await isCorrectionCooling(chatId)) return 'done';
+
         if (pendingIntentEnabled() && fm.role === 'user' && !fm.isBot && !fm.pendingIntent) {
           logger.warn({ chatId, messageId }, 'Meta input has no authenticated pending-intent source; reply held');
           return 'done';
@@ -358,6 +369,11 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         if (intercept === 'legacy') {
           noteLiveOutcome('legacy');
           return 'legacy';
+        }
+
+        if (chatId < 0 && await isCorrectionCooling(chatId)) {
+          noteLiveOutcome('silent');
+          return 'done';
         }
 
         const textPreview = (fm.textContent || rawText).slice(0, 200);
@@ -602,6 +618,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
                   const message = item.formatted;
                   await getAttentionAccumulator().ingestAsync({ pendingIntent: message.pendingIntent,
                     chatId,
+                    ...(heart.qqAssignmentId ? { qqAssignmentId: heart.qqAssignmentId } : {}),
                     layer: elevLayer,
                     reason: elevReason,
                     messageId: message.messageId,

@@ -30,6 +30,8 @@ function variants(pattern: string): string[] {
 }
 
 const CHECKS: Array<[string, string]> = [
+  ['QQ 主人指派入口', 'tryHandleOneBotAssignmentCommand'],
+  ['QQ 指派发送围栏', 'assertOneBotAssignmentReservation'],
   ['日记配置版本与审计', 'business_config_revision_conflict'],
   ['主人配置命令入口', 'tryHandleJournalConfigCommand'],
   ['受限版本更新请求', 'tryHandleUpdateCommand'],

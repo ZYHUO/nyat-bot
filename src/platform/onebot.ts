@@ -151,10 +151,16 @@ export function createOneBotCodec(accountId: string): PlatformAdapterCodec<OneBo
       const sender: UserRef = { ...account, id: senderId };
       const senderInfo = source['sender'] ? record(source['sender'], 'sender') : {};
       const senderName = senderInfo['card'] || senderInfo['nickname'];
+      const marked = (fields: string[]) => fields.some(field => source[field] !== undefined
+        && source[field] !== null && source[field] !== false && source[field] !== 0);
+      const authorityIneligible = marked(['edited', 'edited_at', 'edit_time', 'edit_date', 'is_edited']) ? 'edited' as const
+        : marked(['forward_origin', 'forward_from', 'forward_from_chat', 'forward_id', 'is_forward', 'forwarded'])
+          ? 'forwarded' as const : undefined;
       return {
         ref: { conversation, id: numericId(source['message_id'], 'message_id', false) },
         sender, ...(typeof senderName === 'string' ? { senderName } : {}),
         timestampMs: Math.floor(timestamp * 1000),
+        ...(authorityIneligible ? { authorityIneligible } : {}),
         segments: parts.map(part => normalizeSegment(part, conversation)),
       };
     },

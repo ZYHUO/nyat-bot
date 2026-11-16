@@ -34,7 +34,7 @@ describe('isolated CodeAct runtime prompt', () => {
     };
     visit(tree);
     expect(selections).toHaveLength(2);
-    for (const call of selections) expect(call.arguments.map(arg => arg.getText(tree))).toEqual(['task.chatId', 'background']);
+    for (const call of selections) expect(call.arguments.map(arg => arg.getText(tree))).toEqual(['task.chatId', 'background', '!!qqAssignment']);
     expect(selections.some(call => ts.isCallExpression(call.parent) && call.parent.expression.getText(tree) === 'buildCodeActSystemPrompt')).toBe(true);
     expect(selections.some(call => ts.isPropertyAssignment(call.parent) && call.parent.name.getText(tree) === 'methods')).toBe(true);
     expect(executor).toContain('selectCodeActCapabilities(host, opts.methods ?? CODEACT_CAPABILITY_METHODS)');
@@ -84,4 +84,17 @@ describe('isolated CodeAct runtime prompt', () => {
     expect(buildCodeActSystemPrompt('', methods, -100123)).not.toContain('QQ 接话');
     expect(buildCodeActSystemPrompt('', methods)).not.toContain('QQ 接话');
   });
+});
+
+
+it('keeps assignment workers scoped and explains previews without fabricating QQ permission or mention requirements', () => {
+  const methods = codeActMethodsForChat(2 ** 52 + 1, false, true);
+  expect(methods).toContain('telegram.sendFinal');
+  for (const method of ['telegram.react', 'telegram.sendVoice', 'runtime.scheduleSelfWake', 'goals.add', 'meta.request', 'chats.previewAssignment']) expect(methods).not.toContain(method);
+  const prompt = buildCodeActSystemPrompt('', ['chats.previewAssignment', 'chats.assignmentStatus']);
+  expect(prompt).toContain('不会授权或发送');
+  expect(prompt).toContain('亲自提交');
+  expect(prompt).toContain('不说明 QQ 群里没有发言权限');
+  expect(prompt).toContain('回复、等待或略过');
+  for (const method of prompt.match(methodPattern) ?? []) expect(['chats.previewAssignment', 'chats.assignmentStatus']).toContain(method);
 });

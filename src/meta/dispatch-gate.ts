@@ -58,6 +58,8 @@ function safeBotNicknames(chatId: number): string[] {
 }
 
 export async function evaluateDispatchGate(opts: {
+  /** Host provenance: bounded participation waits for new input, never untagged replay. */
+  assignmentDriven?: boolean;
   pendingIntent?: PendingIntentRef;
   chatId: number;
   layer: AttentionLayer;
@@ -169,6 +171,10 @@ export async function evaluateDispatchGate(opts: {
       return { verdict: 'allow', reason: decision.reason };
     }
 
+    if (opts.assignmentDriven) {
+      return { verdict: 'suppress', reason: 'qq_assignment_wait_for_new_input' };
+    }
+
     if (decision.action === 'wait') {
       const waitSec = decision.waitSec ?? e.TIMING_WAIT_MIN_SEC;
       try {
@@ -275,6 +281,10 @@ export async function evaluateDispatchGate(opts: {
     logger.info({ chatId, layer, reason: decision.reason }, 'dispatch gate: no_action');
     return { verdict: 'suppress', reason: `no_action:${decision.reason}` };
   } catch (err) {
+    if (opts.assignmentDriven) {
+      logger.warn({ chatId: opts.chatId }, 'Assignment timing state unavailable; suppressing this attempt');
+      return { verdict: 'suppress', reason: 'qq_assignment_timing_unavailable' };
+    }
     logger.warn({ err, chatId: opts.chatId }, 'dispatch gate failed — fail-open allow');
     return { verdict: 'allow', reason: 'gate_error_failopen' };
   }

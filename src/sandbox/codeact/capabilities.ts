@@ -7,7 +7,7 @@ export const CODEACT_CAPABILITY_METHODS = [
   'telegram.sendText', 'telegram.sendFinal', 'telegram.sendSticker', 'telegram.sendVoice', 'telegram.react', 'telegram.sendPoll',
   'memory.search', 'memory.recallPerson', 'memory.recentContext', 'memory.searchDigests',
   'stickers.pick', 'web.search', 'web.feed', 'meta.request',
-  'chats.find', 'chats.recentMessages', 'members.find', 'goals.add',
+  'chats.find', 'chats.recentMessages', 'chats.previewAssignment', 'chats.assignmentStatus', 'members.find', 'goals.add',
   'allowlist.apply', 'allowlist.approve', 'allowlist.reject', 'allowlist.list',
   'linuxsb.latest', 'linuxsb.topic', 'linuxsb.search', 'pixiv.search',
   'runtime.endTask', 'runtime.setAcceptance', 'runtime.verifyAcceptance', 'runtime.waitForUser',

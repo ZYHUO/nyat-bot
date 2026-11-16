@@ -30,6 +30,8 @@ import { nextSelfWake, renderPendingWake } from '../agent/cognitive-clock.js';
 import { findUnrepairedActs, renderUnrepairedActs } from '../tracking/repair.js';
 import { incrCounter } from '../metrics/registry.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
+import { isCorrectionCooling } from '../pipeline/correction-cooldown.js';
+import type { HeartInput } from '../pipeline/heart/decision.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
@@ -40,6 +42,8 @@ export interface MetaHeartResult {
   reason: string;
   pressureBoost?: number;
   path?: 'chat' | 'lookup';
+  /** Host provenance survives Attention until the final assignment send fence. */
+  qqAssignmentId?: string;
 }
 
 function waitAnchorKey(chatId: number): string {
@@ -69,6 +73,9 @@ export async function evaluateMetaHeart(opts: {
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
   try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
   catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
+  if (chatId < 0 && await isCorrectionCooling(chatId)) {
+    return { verdict: 'silence', layer, reason: 'heart_correction_cooling' };
+  }
 
   if (!e.HEART_ENABLED) {
     // No Heart: preserve prior Meta policy (L2 drop handled by caller).
@@ -219,6 +226,27 @@ export async function evaluateMetaHeart(opts: {
     } catch { /* non-critical: history is an aid, never a gate */ }
   }
 
+  let ownerParticipation: HeartInput['ownerParticipation'];
+  let assignmentId: string | undefined;
+  if (e.QQ_ASSIGNMENTS_ENABLED && isPlatformInternalId(chatId)
+    && formatted.role === 'user' && !formatted.isBot && !formatted.isAnonymous) {
+    try {
+      const { activeOneBotAssignment } = await import('../platform/onebot-assignment-store.js');
+      const assignment = activeOneBotAssignment(chatId);
+      const receivedAt = formatted.timestamp * 1000;
+      const remainingMessages = assignment ? assignment.maxMessages - assignment.reservedMessages : 0;
+      if (assignment && assignment.expiresAt > Date.now() && remainingMessages > 0
+        && receivedAt >= assignment.createdAt && receivedAt <= Date.now() + 300_000 && Date.now() - receivedAt <= 300_000) {
+        assignmentId = assignment.id;
+        ownerParticipation = { expiresAt: assignment.expiresAt, remainingMessages, minIntervalMs: assignment.minIntervalMs,
+          ...(assignment.publicText ? { publicTopic: assignment.publicText.slice(0, 300) } : {}) };
+      }
+    } catch {
+      // No grant facts on a failed lookup. The normal scoped Heart path remains;
+      // task binding and the send boundary independently check any assignment.
+    }
+  }
+
   const heart = await heartDecision({
     chatId,
     message: formatted,
@@ -231,6 +259,7 @@ export async function evaluateMetaHeart(opts: {
     signal: opts.signal,
     lastSpokeSecAgo,
     cognitiveWorkspaceHint,
+    ...(ownerParticipation ? { ownerParticipation } : {}),
     ...(selfHistory ? { selfHistory } : {}),
     burstNote: [
       opts.batchMessages && opts.batchMessages.length > 1
@@ -245,6 +274,17 @@ export async function evaluateMetaHeart(opts: {
     ].filter(Boolean).join('\n') || undefined,
   });
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
+  if (await isCorrectionCooling(chatId)) {
+    return { verdict: 'silence', layer, reason: 'heart_correction_cooling' };
+  }
+  if (assignmentId) {
+    try {
+      const { activeOneBotAssignment } = await import('../platform/onebot-assignment-store.js');
+      if (activeOneBotAssignment(chatId)?.id !== assignmentId) {
+        return { verdict: 'silence', layer, reason: 'heart_assignment_changed' };
+      }
+    } catch { return { verdict: 'silence', layer, reason: 'heart_assignment_unavailable' }; }
+  }
   if (isPlatformInternalId(chatId)) {
     const { isOneBotMessageRecalled } = await import('../platform/onebot-notices.js');
     if ((opts.batchMessages ?? [formatted]).some(message => isOneBotMessageRecalled(chatId, message.messageId))) {
@@ -253,6 +293,13 @@ export async function evaluateMetaHeart(opts: {
   }
   try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
   catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
+
+  // The extra authorization is message-driven and text-budgeted. It must not
+  // escape through reactions, missed-message wakes or unbound wait replays.
+  // A later genuine group message can ask Heart again with a fresh grant read.
+  if (assignmentId && heart.act !== 'reply') {
+    return { verdict: 'silence', layer, reason: `heart_assignment_${heart.act}` };
+  }
 
   void import('../pipeline/heart/mind.js')
     .then(({ noteThought }) => noteThought(chatId, heart.why))
@@ -381,7 +428,8 @@ export async function evaluateMetaHeart(opts: {
       // Attention so Meta/CodeAct can still handle it, rather than being
       // silently dropped. The orphaned anchor expires via TTL on its own.
       logger.warn({ err, chatId }, 'Meta heart wait setup failed — fail-open allow');
-      return { verdict: 'allow', layer: 'L1', reason: 'heart_wait_setup_failed' };
+      return { verdict: 'allow', layer: 'L1', reason: 'heart_wait_setup_failed',
+        ...(assignmentId ? { qqAssignmentId: assignmentId } : {}) };
     }
     logger.info({ chatId, why: heart.why, waitSec, messageId: formatted.messageId }, 'Meta heart: wait');
     return { verdict: 'silence', layer: 'L1', reason: `heart_wait:${heart.why}` };
@@ -421,7 +469,8 @@ export async function evaluateMetaHeart(opts: {
 
   // Addressed QQ questions have already been judged by Heart. Preserve their
   // direct priority through Attention instead of running a second passive gate.
-  if (addressed) return { verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`, path: heart.path };
+  if (addressed) return { verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`, path: heart.path,
+    ...(assignmentId ? { qqAssignmentId: assignmentId } : {}) };
 
   // reply — NX arm so only one parallel Heart elevate wins; losers silence.
   try {
@@ -454,6 +503,7 @@ export async function evaluateMetaHeart(opts: {
   );
   return {
     verdict: 'allow',
+    ...(assignmentId ? { qqAssignmentId: assignmentId } : {}),
     layer: 'L1',
     reason: `heart:${heart.why || 'reply'}`,
     pressureBoost: heart.path === 'lookup' ? 25 : 15,

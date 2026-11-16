@@ -10,6 +10,14 @@ vi.mock('../../../src/env.js', () => ({ env: () => f.cfg }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ hsetnx: f.holdWrite, eval: f.compareDelete }) }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { throw new Error('unexpected DB access'); } }));
+// This fixture exercises ordinary QQ delivery, outside owner assignments.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: () => null,
+}));
+vi.mock('../../../src/pipeline/correction-cooldown.js', () => ({
+  isCorrectionCooling: async () => false, isLocallyCorrectionCooling: () => false,
+}));
 vi.mock('../../../src/platform/onebot-notices.js', () => ({ isOneBotMessageRecalled: f.recalled }));
 vi.mock('../../../src/platform/onebot-media.js', () => ({ resolveOneBotMedia: f.resolve }));
 vi.mock('../../../src/platform/outbound.js', () => ({

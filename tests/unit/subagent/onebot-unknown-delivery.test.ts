@@ -8,7 +8,7 @@ import { createMessageEventIdentity } from '../../../src/shared/event-identity.j
 import { observePendingIntent } from '../../../src/meta/pending-intent.js';
 
 const f = vi.hoisted(() => ({
-  db: null as Database.Database | null,
+  db: null as Database.Database | null, assignment: vi.fn(), assignmentReserve: vi.fn(), assignmentAck: vi.fn(), assignmentFence: vi.fn(), assignmentFail: vi.fn(),
   sends: vi.fn(), detailed: vi.fn(), llm: vi.fn(), isolated: vi.fn(), persist: vi.fn(async () => {}), debug: vi.fn(),
   callbacks: vi.fn(async () => {}), putTask: vi.fn(), checkpoint: vi.fn(), resume: vi.fn(),
   answered: vi.fn(async () => {}), contextWrite: vi.fn(), memoryAck: vi.fn(), finalEvidence: vi.fn(), createDebt: vi.fn(),
@@ -29,6 +29,17 @@ vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({
   hsetnx: f.holdWrite, eval: f.compareDelete,
 }) }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { if (f.db) return f.db; throw new Error('unexpected DB access'); } }));
+// This fixture exercises ordinary QQ delivery, outside owner assignments.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: f.assignment, reserveOneBotAssignmentSend: f.assignmentReserve,
+  assertOneBotAssignmentReservation: f.assignmentFence, acknowledgeOneBotAssignmentSend: f.assignmentAck, failOneBotAssignmentSend: f.assignmentFail,
+}));
+vi.mock('../../../src/tracking/sleep.js', () => ({ isAsleepStrict: async () => false }));
+vi.mock('../../../src/tracking/user-profile.js', () => ({ getMuteState: () => ({ level: 0, temporary: false }) }));
+vi.mock('../../../src/pipeline/correction-cooldown.js', () => ({
+  isCorrectionCooling: async () => false, isLocallyCorrectionCooling: () => false,
+}));
 vi.mock('../../../src/platform/onebot-notices.js', () => ({ isOneBotMessageRecalled: () => false,
   filterRecalledOneBotMessages: (_chatId: number, messages: unknown[]) => messages }));
 vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: f.llm }));
@@ -86,6 +97,7 @@ vi.mock('../../../src/subagent/prompt-inputs.js', () => ({ collectPromptInputs: 
   workspaceBlock: '', learnedBlock: '',
 }) }));
 
+import { OneBotAssignmentError } from '../../../src/platform/onebot-assignment-store.js';
 import { createHostApi } from '../../../src/subagent/host-api.js';
 import { runCodeActTask } from '../../../src/subagent/executor.js';
 import { DELIVERY_HOLD_KEY, DELIVERY_UNKNOWN_SUMMARY, holdUnknownCodeActDelivery, withCodeActDeliveryIntent } from '../../../src/subagent/delivery-hold.js';
@@ -101,6 +113,8 @@ beforeEach(() => {
   f.db?.close(); f.db = null; f.cfg.META_PENDING_INTENT_ENABLED = false; f.cfg.BACKGROUND_PUBLICATION_ENABLED=false;
   vi.clearAllMocks();
   f.held.clear();
+  f.assignment.mockReset().mockReturnValue(null); f.assignmentReserve.mockReset().mockReturnValue({ id: 'assigned-reservation' });
+  f.assignmentAck.mockReset(); f.assignmentFence.mockReset().mockReturnValue({ controllerChatId: 2 ** 52 + 999 }); f.assignmentFail.mockReset();
   f.holdWrite.mockReset().mockImplementation(async (_key: string, id: string, record: string) => {
     if (f.held.has(id)) return 0;
     f.held.set(id, record); return 1;
@@ -531,5 +545,56 @@ describe('QQ unknown delivery closes the actual host and executor', () => {
     await runCodeActTask(current);
     expect(f.sends).not.toHaveBeenCalled();
     expect(current).toMatchObject({ status: 'failed', resultSummary: 'failed_silent' });
+  });
+});
+
+
+describe('assignment workers use the real executor and target host', () => {
+  function assignedTask(mode: 'once' | 'participate' = 'once'): DispatchTask {
+    f.assignment.mockReturnValue({ id: 'grant', targetChatId: chatId, mode });
+    return { ...task(), qqAssignmentId: 'grant', quoteMessageIds: [] };
+  }
+  it('settles a confirmed final bubble without callbacks, new debts or continuation', async () => {
+    const current = assignedTask(); f.sends.mockResolvedValue(2 ** 52 + 123);
+    f.assignmentAck.mockImplementation(() => {
+      f.assignment.mockImplementation(() => { throw new OneBotAssignmentError('exhausted'); });
+    });
+    f.isolated.mockImplementation(async (_code: string, capabilities: CodeActCapabilities) => {
+      for (const name of ['goals.add', 'meta.request', 'runtime.scheduleSelfWake', 'telegram.react']) expect(capabilities.has(name)).toBe(false);
+      await capabilities.get('telegram.sendFinal')!('只在目标群说这一句');
+      await capabilities.get('runtime.endTask')!('done'); return { value: undefined, logs: [] };
+    });
+    await runCodeActTask(current);
+    expect(current).toMatchObject({ status: 'done', resultSummary: 'qq_assignment_delivered', sendsUsed: 1 });
+    expect(f.assignmentAck).toHaveBeenCalledWith('assigned-reservation', 0, 2 ** 52 + 123);
+    for (const action of [f.callbacks, f.createDebt, f.checkpoint, f.resume]) expect(action).not.toHaveBeenCalled();
+  });
+  it('does not treat a model endTask claim as a delivered one-off message', async () => {
+    const current = assignedTask();
+    f.isolated.mockImplementation(async (_code: string, capabilities: CodeActCapabilities) => {
+      await capabilities.get('runtime.endTask')!('已发出'); return { value: undefined, logs: [] };
+    });
+    await runCodeActTask(current);
+    expect(current).toMatchObject({ status: 'failed', resultSummary: 'failed_qq_assignment_no_delivery' });
+    for (const action of [f.sends, f.callbacks, f.createDebt, f.checkpoint, f.resume]) expect(action).not.toHaveBeenCalled();
+  });
+  it('honors a stop received during model work without executing its draft', async () => {
+    const current = assignedTask('participate');
+    f.llm.mockImplementation(async () => {
+      f.assignment.mockImplementation(() => { throw new OneBotAssignmentError('stopped'); });
+      return { content: '```js\nawait telegram.sendFinal("stale draft");\n```' };
+    });
+    await runCodeActTask(current);
+    expect(current).toMatchObject({ status: 'failed', resultSummary: 'failed_qq_assignment_stopped' });
+    for (const action of [f.sends, f.isolated, f.callbacks, f.createDebt, f.checkpoint, f.resume]) expect(action).not.toHaveBeenCalled();
+  });
+  it('can pass a group message silently without a fallback or completion callback', async () => {
+    const current = assignedTask('participate');
+    f.isolated.mockImplementation(async (_code: string, capabilities: CodeActCapabilities) => {
+      await capabilities.get('runtime.endTask')!('no_update'); return { value: undefined, logs: [] };
+    });
+    await runCodeActTask(current);
+    expect(current).toMatchObject({ status: 'done', resultSummary: 'no_update' });
+    for (const action of [f.sends, f.callbacks, f.createDebt, f.checkpoint, f.resume]) expect(action).not.toHaveBeenCalled();
   });
 });

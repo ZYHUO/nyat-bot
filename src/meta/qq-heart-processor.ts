@@ -36,6 +36,7 @@ export async function processQqHeartBatch(batch: QqHeartCandidate[], signal: Abo
     if (signal.aborted) throw new Error('heart_batch_aborted');
     const message = item.formatted;
     await getAttentionAccumulator().ingestAsync({ pendingIntent: message.pendingIntent, chatId, layer: heart.layer, reason: heart.reason,
+      ...(heart.qqAssignmentId ? { qqAssignmentId: heart.qqAssignmentId } : {}),
       messageId: message.messageId, userId: message.uid, textPreview: (message.textContent || '').slice(0, 200),
       pressure, messageThreadId: message.messageThreadId, cognitiveAnchorEventId: item.cognitiveAnchorEventId,
       payload: { username: message.username || undefined, fullName: message.fullName || undefined, heartPath: heart.path,

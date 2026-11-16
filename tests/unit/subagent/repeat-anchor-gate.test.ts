@@ -68,7 +68,7 @@ describe('重复锚点闸', () => {
     const gateIdx = body.indexOf('answeredTimestamps(chatId, firstReplyTo)');
     // Match the actual send call inside this sendText body, not a wrapper's
     // definition or a comment elsewhere in the module.
-    const sends = [...body.matchAll(/^\s*returnedId = await sendWithDeliveryGuard\(\(\) => sendMessage\(chatId, part, replyTo, opts\.messageThreadId,\s*$/gm)];
+    const sends = [...body.matchAll(/^\s*const messageId = await sendMessage\(chatId, part, replyTo, opts\.messageThreadId,\s*$/gm)];
     expect(sends).toHaveLength(1);
     const sendIdx = sends[0]!.index;
     expect(gateIdx).toBeGreaterThan(-1);

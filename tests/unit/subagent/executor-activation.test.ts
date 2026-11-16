@@ -4,7 +4,7 @@ import type { DispatchTask } from '../../../src/meta/types.js';
 const f = vi.hoisted(() => ({
   config: { BOT_TOKEN: '12345:test-only', META_SUBAGENT_ENABLED: true, CODEACT_ISOLATION_ENABLED: true, META_SUBAGENT_CHAT_IDS: [42], META_ACTIVATED_AT_SEC: 100 },
   archive: vi.fn(async () => 1), state: vi.fn(), persist: vi.fn(), send: vi.fn(), collect: vi.fn(),
-  get: vi.fn(), hget: vi.fn(async () => null),
+  get: vi.fn(), hget: vi.fn(async () => null), assignment: vi.fn(),
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.config }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ hsetnx: f.archive, get: f.get, hget: f.hget }) }));
@@ -14,6 +14,11 @@ vi.mock('../../../src/subagent/task-store.js', () => ({ persistCodeActTask: f.pe
 vi.mock('../../../src/subagent/prompt-inputs.js', () => ({ collectPromptInputs: f.collect }));
 vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendChatAction: f.send, sendMessage: f.send, sendSticker: f.send, reactToMessage: f.send }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() } }));
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>();
+  return { ...original, assertOneBotAssignmentTask: f.assignment };
+});
+import { OneBotAssignmentError } from '../../../src/platform/onebot-assignment-store.js';
 import { runCodeActTask } from '../../../src/subagent/executor.js';
 
 beforeEach(() => {
@@ -22,6 +27,7 @@ beforeEach(() => {
   f.config.META_ACTIVATED_AT_SEC = 100;
   f.get.mockResolvedValue(null);
   f.state.mockReset();
+  f.assignment.mockReset().mockReturnValue(null);
 });
 describe('executor activation boundary on local and resumed tasks', () => {
   it.each([0, 4])('holds old segment %i before state, persistence, prompt collection or typing', async (segment) => {
@@ -67,5 +73,35 @@ describe('executor activation boundary on local and resumed tasks', () => {
     expect(task.totalTurns).toBe(30);
     expect(f.archive).not.toHaveBeenCalled();
     expect(f.send).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('assignment execution and resume fence', () => {
+  it.each([0, 2])('checks persistent grant before executing segment %s, including checkpoint reads', async segment => {
+    const task: DispatchTask = { id: 'assigned', chatId: 42, createdAt: 101000, status: 'queued', segment,
+      contentDirection: 'group task', qqAssignmentId: 'grant', ...(segment ? { checkpointKey: 'checkpoint' } : {}) };
+    f.assignment.mockImplementation(() => { throw new OneBotAssignmentError('expired'); });
+    await runCodeActTask(task);
+    expect(f.assignment).toHaveBeenCalledWith(task, { executionStart: true });
+    expect(task).toMatchObject({ status: 'failed', resultSummary: 'failed_qq_assignment_expired' });
+    expect(f.persist).toHaveBeenCalledWith(task);
+    for (const effect of [f.get, f.state, f.send, f.collect]) expect(effect).not.toHaveBeenCalled();
+  });
+  it.each(['held', 'pending_reservation'])('retains an explicit unknown-delivery hold for %s', async code => {
+    const task: DispatchTask = { id: 'reserved', chatId: 42, createdAt: 101000, status: 'queued', contentDirection: 'do not resend', qqAssignmentId: 'grant' };
+    f.assignment.mockImplementation(() => { throw new OneBotAssignmentError(code); });
+    await runCodeActTask(task);
+    expect(task.resultSummary).toBe('failed_delivery_unknown_no_retry');
+    expect(f.archive).toHaveBeenCalledWith('xxb:codeact:delivery-unknown', task.id, expect.any(String));
+    expect(f.send).not.toHaveBeenCalled(); expect(f.collect).not.toHaveBeenCalled();
+  });
+  it('rejects copied private pending input before prompt collection', async () => {
+    const task: DispatchTask = { id: 'injected', chatId: 42, createdAt: 101000, status: 'queued',
+      contentDirection: 'target task', qqAssignmentId: 'grant', pendingUserInput: [{ text: 'PRIVATE_DM_CANARY' }] };
+    f.assignment.mockReturnValue({ id: 'grant', targetChatId: 42, mode: 'once' });
+    await runCodeActTask(task);
+    expect(task.resultSummary).toBe('failed_qq_assignment_foreign_context');
+    expect(f.collect).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
   });
 });

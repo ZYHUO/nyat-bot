@@ -12,6 +12,12 @@ const f = vi.hoisted(() => ({ db: null as unknown as Database.Database,
     PROMISE_LOOP_ENABLED: true, PROMISE_CHECK_USAGE: 'synthetic', GOAL_MAX_ACTIVE: 20,
     CODEACT_BANNED_WORDS: [], MEMORY_SENSITIVE_CHAT_IDS: [], ONEBOT_MEDIA_ENABLED: false } }));
 const redis = createDeliveryIntentRedis();
+// This ordinary-task fixture has no owner assignment; durable grant behavior
+// is exercised separately with the real assignment store and its migrations.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: () => null,
+}));
 vi.mock('../../../src/env.js', () => ({ env: () => f.cfg }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => f.db }));

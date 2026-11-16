@@ -47,6 +47,8 @@ export function inspectMetaAttention(input: AttentionItem): MetaScopeResult<Atte
     || !positiveId(input.createdAt) || (input.textPreview !== undefined && typeof input.textPreview !== 'string')) {
     return invalid('invalid_attention_shape');
   }
+  if (input.qqAssignmentId !== undefined && (typeof input.qqAssignmentId !== 'string'
+    || !/^[a-zA-Z0-9_-]{1,128}$/.test(input.qqAssignmentId))) return invalid('invalid_assignment_provenance');
   try {
     if (input.messageId !== undefined && !messageInChat(input.chatId, input.messageId)) return invalid('message_scope_mismatch');
     if (input.userId !== undefined && !userInChatAccount(input.chatId, input.userId, true)) return invalid('user_scope_mismatch');

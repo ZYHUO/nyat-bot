@@ -7,6 +7,7 @@ import { ingestOneBotMessage, parseOneBotIds } from './onebot-ingress.js';
 import { clearOneBotSender, registerOneBotSender, sendPlatformText } from './outbound.js';
 import { PlatformBoundaryError } from './types.js';
 import { OneBotRequestService } from './onebot-requests.js';
+import { tryHandleOneBotAssignmentCommand } from './onebot-assignments.js';
 import { getOrCreateConversationId } from './identity-store.js';
 import { setOneBotMediaTransport } from './onebot-media.js';
 import { ingestOneBotNotice } from './onebot-notices.js';
@@ -46,6 +47,7 @@ export function validateOneBotConfig(config: Env): void {
   }
   parseOneBotIds(config.ONEBOT_ALLOWED_GROUP_IDS);
   parseOneBotIds(config.ONEBOT_ALLOWED_USER_IDS);
+  parseOneBotIds(config.QQ_ASSIGNMENT_GROUP_IDS ?? '');
 }
 
 /** Each worker needs a sender; only the ingress owner consumes incoming events. */
@@ -68,7 +70,8 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
     },
     onMessage: async (message, context) => {
       if (acceptingMessages || drainingMessages) await ingestOneBotMessage(message, context, async (event, scope) => {
-        const result = await requests.handleCommand(event, scope);
+        const assignment = await tryHandleOneBotAssignmentCommand(event, scope);
+        const result = assignment.handled ? assignment : await requests.handleCommand(event, scope);
         if (result.reply && !scope.signal.aborted) {
           await sendPlatformText(getOrCreateConversationId(event.ref.conversation), result.reply);
         }
@@ -88,7 +91,8 @@ export function startOneBotRuntime(acceptMessages: boolean): void {
     enabled: config.ONEBOT_ENABLED, activatedAtMs: config.META_ACTIVATED_AT_SEC * 1000, transport: next });
   if (acceptMessages) stopRecovery = startInboxRecovery('onebot', async entry => {
     await ingestOneBotMessage(entry.payload as NormalizedMessage, { signal: new AbortController().signal }, async (event, scope) => {
-      const result = await requests.handleCommand(event, scope);
+      const assignment = await tryHandleOneBotAssignmentCommand(event, scope);
+      const result = assignment.handled ? assignment : await requests.handleCommand(event, scope);
       if (result.reply && !scope.signal.aborted) await sendPlatformText(getOrCreateConversationId(event.ref.conversation), result.reply);
       return result.handled;
     });
