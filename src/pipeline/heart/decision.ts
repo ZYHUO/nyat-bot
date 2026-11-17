@@ -239,6 +239,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const e = env();
 
   let systemPrompt: string;
+  let systemCachePrefix: string;
   try {
     let personaCore = '';
     try {
@@ -268,11 +269,17 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
         }
       } catch { /* non-critical */ }
     }
-    systemPrompt = loadCachedPrompt('task/heart.md')
-      .replace(/\{bot_name\}/g, input.botName)
-      .replace(/\{persona_core\}/g, personaCore || `${input.botName} 是群聊里的猫娘成员`)
-      .replace(/\{self_state\}/g, input.selfState.narration)
-      .replace(/\{learned_rules\}/g, learnedRules);
+    const template = loadCachedPrompt('task/heart.md')
+      .replace(/\{bot_name\}/g, () => input.botName)
+      .replace(/\{persona_core\}/g, () => personaCore || `${input.botName} 是群聊里的猫娘成员`);
+    // Fixed rules precede the state/learned-rule slots in the shipped template.
+    // Derive the boundary from the actual template, so a reordered or customized
+    // prompt can only shorten the cache prefix, never cache dynamic state.
+    const dynamicStart = template.search(/\{self_state\}|\{learned_rules\}/);
+    systemCachePrefix = dynamicStart < 0 ? template : template.slice(0, dynamicStart);
+    systemPrompt = template
+      .replace(/\{self_state\}/g, () => input.selfState.narration)
+      .replace(/\{learned_rules\}/g, () => learnedRules);
     if (e.META_QQ_MENTION_HEART_ENABLED && input.chatId < 0 && isPlatformInternalId(input.chatId)) {
       systemPrompt += '\n\n[当前QQ群回应规则——覆盖前文的点名必回约束]\n被 @、被引用或被叫名字表示对方在叫你本人，但不构成必须文字回复的命令。对真实提问、请求和需要确认的指令优先 reply；需要等后文时 wait；招呼、玩笑、已经回应过或无需文字的接话可以 react 或 pass。不得仅因被点名就机械生成文字。以上规则替代前文与之冲突的点名禁令；其他安全、隐私与身份规则继续适用。';
     }
@@ -340,6 +347,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
       jsonMode: true,
       chatId: input.chatId,
       usage: 'judge',
+      systemCachePrefix,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
@@ -381,6 +389,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
       jsonMode: true,
         chatId: input.chatId,
         usage: 'judge',
+        systemCachePrefix,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMsg },

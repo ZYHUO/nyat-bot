@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AttentionItem, DispatchTask, SubagentCallback } from '../../../src/meta/types.js';
+import { getContextEngine, _resetContextEngines } from '../../../packages/context-engine/src/index.js';
 
 const f = vi.hoisted(() => ({
   config: {
@@ -27,12 +28,9 @@ vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ lpush: f.lpush, 
 vi.mock('../../../src/bot/bot.js', () => ({ getBotIdentity: () => ({ uid: 123 }) }));
 vi.mock('../../../src/metrics/registry.js', () => ({ incrCounter: vi.fn() }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn() } }));
-vi.mock('../../../src/context-engine/index.js', () => ({
+vi.mock('../../../src/context-engine/index.js', async () => ({
+  ...await import('../../../packages/context-engine/src/index.js'),
   getContextEngine: f.engine,
-  staticText: (_id: string, text: string) => text,
-  deltaText: (_id: string, text: string) => text,
-  ephemeralText: (_id: string, text: string) => text,
-  volatileText: (_id: string, text: string) => text,
 }));
 import { runMetaSession } from '../../../src/meta/session.js';
 
@@ -45,6 +43,7 @@ function callback(chatId: number, summary: string, createdAt = 101000): Subagent
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  _resetContextEngines();
   f.tasks.clear();
   f.config.META_SUBAGENT_ENABLED = true;
   f.config.DIGEST_PERSIST_ENABLED = true;
@@ -52,7 +51,7 @@ beforeEach(() => {
   f.api.mockReturnValue({ journal: {}, dispatch: {} });
   f.recent.mockImplementation((_limit, opts) => [{ createdAt: 100, text: `digest-${opts.sourceChatId}` }]);
   f.memoryRecent.mockImplementation((_limit, opts) => [{ at: 100000, text: `memory-${opts.sourceChatId}` }]);
-  f.engine.mockReturnValue({ assemble: async (parts: string[]) => ({ prompt: parts.join('\n'), manifest: { cacheHitRatio: 0, totalChars: 100 } }) });
+  f.engine.mockImplementation((name: string) => getContextEngine(name));
 });
 
 describe('Meta session source partition and activation', () => {
@@ -82,6 +81,24 @@ describe('Meta session source partition and activation', () => {
     expect(f.persist).toHaveBeenCalledWith({ kind: 'meta', text: 'scoped output', sourceChatId: -100 });
     expect(f.lpush.mock.calls.map((args) => JSON.parse((args as unknown as [string, string])[1]).sourceChatId)).toEqual([42, -100]);
     expect(result.digest).toBe('scoped_sessions:2');
+    for (const [call] of f.call.mock.calls as unknown as Array<[{ systemCachePrefix: string; messages: Array<{ content: string }> }]>) {
+      expect(call.systemCachePrefix.length).toBeGreaterThan(0);
+      expect(call.messages[0]!.content.startsWith(call.systemCachePrefix)).toBe(true);
+      expect(call.systemCachePrefix).not.toMatch(/PRIVATE_MARKER|GROUP_MARKER|PRIVATE_CALLBACK|GROUP_CALLBACK/);
+    }
+  });
+  it('keeps the exact static prefix while replacing the scoped Attention and digest tail', async () => {
+    await runMetaSession([attention(-100, 'FIRST_CONTEXT')], []);
+    f.recent.mockImplementation(() => [{ createdAt: 102, text: 'NEW_SCOPED_DIGEST' }]);
+    await runMetaSession([attention(-100, 'SECOND_CONTEXT')], []);
+    const calls = f.call.mock.calls as unknown as Array<[{ systemCachePrefix: string; messages: Array<{ content: string }> }]>;
+    expect(calls).toHaveLength(2);
+    expect(calls[1]![0].systemCachePrefix).toBe(calls[0]![0].systemCachePrefix);
+    const second = calls[1]![0].messages[0]!.content;
+    expect(second).toContain('SECOND_CONTEXT');
+    expect(second).toContain('NEW_SCOPED_DIGEST');
+    expect(second).not.toContain('FIRST_CONTEXT');
+    expect(second.startsWith(calls[1]![0].systemCachePrefix)).toBe(true);
   });
   it('filters old/disabled/out-of-scope events before diary interception or any read', async () => {
     await runMetaSession([attention(42, '写日记', 99000), attention(43, '写日记')], [callback(42, 'PRIVATE_OLD', 99000)]);

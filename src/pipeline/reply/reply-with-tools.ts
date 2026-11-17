@@ -16,6 +16,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { getUsage, getLabel } from '../../ai/labels.js';
 import { acquireConcurrency, AI_MAX_CONCURRENCY_PER_ACCOUNT } from '../../ai/concurrency.js';
 import { CooldownTracker } from '../../ai/cooldown.js';
+import { createSdkUsageObserver } from '../../ai/sdk-usage-observer.js';
 import { getRedis } from '../../db/redis.js';
 import { buildToolSet } from '../tools/registry.js';
 import { mergeAbortSignals, isCallerAbort } from '../../shared/abort.js';
@@ -121,6 +122,7 @@ export async function generateReplyWithTools(input: ReplyWithToolsInput): Promis
           ? undefined
           : (label.temperature ?? input.temperature ?? usage.temperature ?? 0.8),
         abortSignal: mergeAbortSignals(usage.timeout, input.signal),
+        onStepFinish: createSdkUsageObserver(input.usage, labelName, label.model, input.chatId),
       });
 
       const toolsUsed: string[] = [];

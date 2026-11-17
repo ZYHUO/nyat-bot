@@ -173,6 +173,7 @@ async function callWithFallbackInner(options: AICallOptions): Promise<AICallResu
     // H4.2: usage 级 jsonMode 默认（judge/summarize 已开）——调用方显式值优先，
     // 未传时跟 usage 走。根治 stepfun 系脏 JSON（gate 529/norms 6-9/tick 同因）。
     jsonMode: options.jsonMode ?? usage.jsonMode,
+    systemCachePrefix: options.systemCachePrefix,
     ...(options.beforeProviderRequest ? { beforeProviderRequest: options.beforeProviderRequest } : {}),
   };
 

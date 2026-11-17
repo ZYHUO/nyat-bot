@@ -396,7 +396,8 @@ export function startCronJobs(deps?: CronDeps): void {
       for (const d of [yday, now.toISOString().slice(0, 10)]) {
         const r = getTokenReport(d);
         logger.info(
-          { date: r.date, total: r.total.total, byLabel: r.byLabel.map((x) => ({ label: x.label, total: x.total, cached: x.cached })) },
+          { date: r.date, total: r.total.total, summary: r.total, byLabel: r.byLabel, byRoute: r.byRoute,
+            readFailed: r.readFailed, cacheRatioBasis: 'cacheReadTokens / coveredInputTokens; observed result events only' },
           'token ledger daily report',
         );
       }

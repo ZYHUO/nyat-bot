@@ -95,6 +95,9 @@ export type ContentPart =
 export interface AICallOptions {
   usage: string;
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }>;
+  /** Exact, nonempty prefix of the first system message. A cache boundary only:
+   * it must never replace or alter prompt text. Unsupported transports ignore it. */
+  systemCachePrefix?: string;
   stream?: boolean;
   maxTokens?: number;
   temperature?: number;
@@ -177,11 +180,27 @@ export interface AICallOptions {
 }
 
 export type AIProviderOptions = Pick<AICallOptions,
-  'maxTokens' | 'temperature' | 'signal' | 'jsonMode' | 'beforeProviderRequest'> & { timeout?: number };
+  'maxTokens' | 'temperature' | 'signal' | 'jsonMode' | 'beforeProviderRequest' | 'systemCachePrefix'> & { timeout?: number };
+
+export interface AITokenUsage {
+  prompt: number;
+  completion: number;
+  total: number;
+  /** Reported cache-read input tokens; absent means unknown, not a cache miss. */
+  cached?: number;
+  /** Reported cache-write input tokens; absent means unknown. */
+  cacheWrite?: number;
+  /** True only when the transport supplied a complete input-token total. */
+  inputKnown?: boolean;
+}
 
 export interface AICallResult {
   content: string;
-  tokenUsage: { prompt: number; completion: number; total: number; cached?: number };
+  tokenUsage: AITokenUsage;
+  /** Actual wire path, independent of configured format or provider aliases. */
+  transportPath?: 'anthropic_json' | 'openai_json' | 'openai_stream' | 'openai_sdk';
+  /** Explicit count for a returned result aggregating internal provider attempts. */
+  providerRequests?: number;
   model: string;
   label: string;
   latencyMs: number;

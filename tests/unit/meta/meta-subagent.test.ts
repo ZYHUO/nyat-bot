@@ -80,7 +80,7 @@ import {
 describe('ContextEngine', () => {
   beforeEach(() => _resetContextEngines());
 
-  it('orders tiers and reports cache hits on second assemble', async () => {
+  it('orders tiers and reports local unchanged characters on second assemble', async () => {
     const eng = new ContextEngine('test');
     const providers = [
       ephemeralText('e', 'ephemeral-1'),
@@ -89,11 +89,11 @@ describe('ContextEngine', () => {
     ];
     const a = await eng.assemble(providers);
     expect(a.prompt.indexOf('static-hello')).toBeLessThan(a.prompt.indexOf('delta-1'));
-    expect(a.manifest.cacheHitRatio).toBe(0);
+    expect(a.manifest.unchangedContextRatio).toBe(0);
 
     const b = await eng.assemble(providers);
-    expect(b.manifest.cacheHitChars).toBeGreaterThan(0);
-    expect(b.manifest.cacheHitRatio).toBeGreaterThan(0.5);
+    expect(b.manifest.unchangedChars).toBeGreaterThan(0);
+    expect(b.manifest.unchangedContextRatio).toBeGreaterThan(0.5);
   });
 });
 

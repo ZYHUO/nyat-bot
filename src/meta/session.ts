@@ -1069,7 +1069,7 @@ async function runScopedMetaSession(
     .map((d) => `- ${formatBeijingNowLine(new Date(d.at))} ${d.text.slice(0, 160)}`)
     .join('\n');
 
-  const { prompt, manifest } = await engine.assemble([
+  const { prompt, cachePrefix, manifest } = await engine.assemble([
     staticText('meta-system', META_SYSTEM),
     staticText('meta-persona-direction', dreaming || '（无人设方向文件）'),
     ephemeralText('meta-master', buildMasterIdentityBlock(scopeChatId)),
@@ -1097,7 +1097,7 @@ async function runScopedMetaSession(
       autoDispatched: dispatchedChatIds.size,
       intercepted: attention.length - workAttention.length,
       callbacks: callbacks.length,
-      cacheHitRatio: Number(manifest.cacheHitRatio.toFixed(3)),
+      unchangedContextRatio: Number(manifest.unchangedContextRatio.toFixed(3)),
       totalChars: manifest.totalChars,
     },
     'Meta session start',
@@ -1109,6 +1109,7 @@ async function runScopedMetaSession(
   try {
     result = await callWithFallback({
       usage: env().META_USAGE,
+      systemCachePrefix: cachePrefix || undefined,
       messages: [
         { role: 'system', content: prompt },
         {

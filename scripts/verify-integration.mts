@@ -6,6 +6,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 export const OFFLINE_SUITES = [
+  'tests/integration/prompt-cache.test.ts',
+  'tests/integration/sdk-tool-cache.test.ts',
+  'tests/unit/ai/usage-normalization.test.ts',
+  'tests/unit/ai/provider-cache.test.ts',
+  'tests/unit/ai/openai-stream.test.ts',
+  'tests/unit/pipeline/heart/cache-prefix.test.ts',
+  'tests/unit/metrics/llm-events.test.ts',
+  'tests/unit/metrics/token-ledger.test.ts',
   'tests/unit/admin/business-config.test.ts',
   'tests/unit/admin/update-requests.test.ts',
   'tests/unit/startup/readiness.test.ts',

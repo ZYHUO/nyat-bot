@@ -5,9 +5,18 @@ prefix for prompt cache):
 
 `static` → `delta` → `ephemeral` → `volatile`
 
-Returns `{ prompt, manifest }` with per-part equality fingerprints (SHA-256, no
-retained prompt plaintext). `cacheHitRatio` means unchanged text since the previous
-assembly, **not** measured provider token-cache savings. Every call renders current
+Returns `{ prompt, cachePrefix, manifest }`. `cachePrefix` is the exact contiguous
+static-tier prefix of the fully rendered prompt. It does not include the separator
+before the next tier; concatenating it with `prompt.slice(cachePrefix.length)`
+recovers the full original prompt. Static parts can contain scoped identity or
+permissions, so they are rendered anew and may change. This boundary permits a
+provider cache hint without changing prompt order, authority or session scope.
+
+Per-part equality fingerprints use SHA-256 and retain no prompt plaintext.
+`unchangedContextRatio` means unchanged part characters since the previous local
+assembly, **not** continuous-prefix reuse or measured provider token-cache savings.
+`unchangedChars` excludes separators, matching the `totalChars` denominator.
+Every call renders current
 providers; omitted parts are never reused. Disabled mode clears equality history.
 The process keeps at most 256 recently used engines, so idle conversations do not
 retain unbounded metadata. Name engines by the trusted conversation scope.
@@ -26,7 +35,7 @@ import {
 
 setContextEngineOptions({ enabled: true });
 
-const { prompt, manifest } = await getContextEngine('meta').assemble([
+const { prompt, cachePrefix, manifest } = await getContextEngine('meta').assemble([
   staticText('persona', '…'),
   deltaText('task', '…'),
   ephemeralText('banned', '…'),

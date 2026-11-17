@@ -5,12 +5,15 @@
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { Agent } from 'undici';
-import type { AILabel, AICallResult, ContentPart, AIProviderOptions } from './types.js';
+import type { AILabel, AICallResult, AITokenUsage, ContentPart, AIProviderOptions } from './types.js';
 import { AIError } from '../shared/errors.js';
 import { acquireConcurrency, AI_MAX_CONCURRENCY_PER_ACCOUNT } from './concurrency.js';
 import { mergeAbortSignals, isCallerAbort } from '../shared/abort.js';
 import { logger } from '../shared/logger.js';
 import { assertBudgetAlive, budgetedProviderFetch, strictBudgetError, strictMaxTokens } from './request-budget.js';
+import { buildClaudeSystem } from './system-cache.js';
+import { readOpenAIStream, supportsOpenAIStreamUsage } from './openai-stream.js';
+import { normalizeAnthropicUsage, normalizeOpenAIUsage, normalizeSdkUsage } from './usage-normalization.js';
 
 // 仅供**显式标记 insecureTLS 的供应商**(如自签证书的自建端点)使用的 dispatcher:
 // 跳过证书校验。绝不设为全局 dispatcher —— 其它端点(Claude/StepFun 等)照常
@@ -45,7 +48,7 @@ interface ClaudeResponse {
   model: string;
   /** 'end_turn' | 'max_tokens' | … —— 空正文时区分"截断"和"模型没话说"就靠它。 */
   stop_reason?: string;
-  usage: {
+  usage?: {
     input_tokens: number;
     output_tokens: number;
     cache_creation_input_tokens?: number;
@@ -133,11 +136,29 @@ function isReasoningModel(label: AILabel): boolean {
   return /^step-/i.test(label.model);
 }
 
+/** Aggregate observed retry usage without treating an unreported attempt as zero. */
+function combineRetryUsage(first: AITokenUsage, second?: AITokenUsage): AITokenUsage {
+  const add = (a: number | undefined, b: number | undefined): number | undefined =>
+    a !== undefined && b !== undefined && a <= Number.MAX_SAFE_INTEGER - b ? a + b : undefined;
+  const prompt = add(first.prompt, second?.prompt ?? 0);
+  const completion = add(first.completion, second?.completion ?? 0);
+  const total = add(prompt, completion);
+  const cached = add(first.cached, second?.cached);
+  const cacheWrite = add(first.cacheWrite, second?.cacheWrite);
+  return {
+    prompt: prompt ?? 0, completion: completion ?? 0, total: total ?? 0,
+    inputKnown: first.inputKnown === true && second?.inputKnown === true && total !== undefined,
+    ...(cached === undefined ? {} : { cached }),
+    ...(cacheWrite === undefined ? {} : { cacheWrite }),
+  };
+}
+
 async function callClaude(
   label: AILabel,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   opts: AIProviderOptions,
 ): Promise<AICallResult> {
+  const start = performance.now();
   // round 75：一行排查用的观测点（debug 级，只在 LOG_LEVEL=debug 时出）。
   //
   // 起因是 round 73/74 一个排不光的现象：`claude: 空正文` warn 打了
@@ -190,11 +211,22 @@ async function callClaude(
     );
     try {
       const second = await callClaudeOnce(label, messages, { ...opts, maxTokens: retryBudget });
-      if (!second.truncated) return second.result;
+      return {
+        ...(second.truncated ? first.result : second.result),
+        tokenUsage: combineRetryUsage(first.result.tokenUsage, second.result.tokenUsage),
+        providerRequests: 2,
+        latencyMs: Math.round(performance.now() - start),
+      };
     } catch {
       // 重试失败就交回第一次的错误形状，别吞。
       // 只区分"调用方打断"（要上抛给 actor 重规划）和"重试也挂了"（用第一次的结果）。
       throwIfExternallyAborted(label, opts.signal);
+      return {
+        ...first.result,
+        tokenUsage: combineRetryUsage(first.result.tokenUsage),
+        providerRequests: 2,
+        latencyMs: Math.round(performance.now() - start),
+      };
     }
   }
   return first.result;
@@ -210,8 +242,8 @@ async function callClaudeOnce(
   const apiKey = label.apiKeys[0];
   if (!apiKey) throw new AIError('No API key configured', label.name, label.model, 'AI_NO_KEY');
 
-  // Extract system prompt — wrap in array with cache_control to enable prompt caching
-  const systemMsg = messages.find(m => m.role === 'system');
+  const system = buildClaudeSystem(messages.filter(m => m.role === 'system').map(m => m.content), opts.systemCachePrefix);
+  if (system.invalidPrefix) logger.warn({ label: label.name }, 'Invalid system cache prefix ignored');
   let chatMessages: ClaudeMessage[] = messages
     .filter(m => m.role !== 'system')
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }));
@@ -247,19 +279,9 @@ async function callClaudeOnce(
   };
 
 
-  // Wrap system prompt as a content block with cache_control. The 5-layer
-  // system prompt (persona + guardrails + schema + tone + task) is reused
-  // across nearly every request, so ephemeral caching cuts that token
-  // weight to ~10% of the regular cost on cache hits.
-  if (systemMsg) {
-    body['system'] = [
-      {
-        type: 'text',
-        text: systemMsg.content,
-        cache_control: { type: 'ephemeral' },
-      },
-    ];
-  }
+  // Cache only the caller's verified stable prefix when supplied. Subsequent
+  // system messages and the dynamic suffix remain present and unmodified.
+  if (system.blocks.length) body['system'] = system.blocks;
 
   const claudeTemp = resolveTemperature(label.temperature, opts.temperature);
   if (claudeTemp !== undefined) body['temperature'] = claudeTemp;
@@ -323,7 +345,7 @@ async function callClaudeOnce(
         model: label.model,
         stopReason: data.stop_reason,
         blocks: data.content.map((c) => c.type),
-        outputTokens: usage.output_tokens,
+        outputTokens: usage?.output_tokens,
         maxTokens: body['max_tokens'],
       },
       data.stop_reason === 'max_tokens'
@@ -333,11 +355,10 @@ async function callClaudeOnce(
   }
   const truncated = !finalText && data.stop_reason === 'max_tokens';
 
-  const cacheRead = usage.cache_read_input_tokens ?? 0;
-  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-  if (cacheRead > 0 || cacheWrite > 0) {
+  const tokenUsage = normalizeAnthropicUsage(usage);
+  if (tokenUsage.cached !== undefined || tokenUsage.cacheWrite !== undefined) {
     logger.debug(
-      { label: label.name, cacheRead, cacheWrite, fresh: usage.input_tokens },
+      { label: label.name, cacheRead: tokenUsage.cached, cacheWrite: tokenUsage.cacheWrite, fresh: usage?.input_tokens },
       'Anthropic prompt cache stats',
     );
   }
@@ -345,12 +366,8 @@ async function callClaudeOnce(
   return {
     result: {
       content: finalText,
-      tokenUsage: {
-        prompt: usage.input_tokens + cacheRead + cacheWrite,
-        completion: usage.output_tokens,
-        total: usage.input_tokens + cacheRead + cacheWrite + usage.output_tokens,
-        cached: cacheRead,
-      },
+      tokenUsage,
+      transportPath: 'anthropic_json',
       model: label.model,
       label: label.name,
       latencyMs,
@@ -432,7 +449,10 @@ async function callOpenAIRaw(
   if (opts.maxTokens != null) body['max_tokens'] = opts.maxTokens;
   const rawTemp = resolveTemperature(label.temperature, opts.temperature);
   if (rawTemp != null) body['temperature'] = rawTemp;
-  if (opts.stream) body['stream'] = true;
+  if (opts.stream) {
+    body['stream'] = true;
+    if (supportsOpenAIStreamUsage(label.endpoint)) body['stream_options'] = { include_usage: true };
+  }
   if (label.reasoningEffort) body['reasoning_effort'] = label.reasoningEffort;
   if (label.disableThinking) body['thinking'] = { type: 'disabled' };
   // 强制合法 JSON(DeepSeek/OpenAI json_object)——根治单引号/Python-dict 之类的脏输出。
@@ -468,39 +488,13 @@ async function callOpenAIRaw(
   }
 
   let fullText = '';
+  let streamUsage: unknown;
 
   if (opts.stream) {
     if (!res.body) throw new AIError('Stream body missing', label.name, label.model);
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() ?? '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') break;
-        try {
-          const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
-          fullText += chunk.choices?.[0]?.delta?.content ?? '';
-        } catch { /* ignore */ }
-      }
-    }
-    buf += decoder.decode();
-    if (buf.trim().startsWith('data:')) {
-      const data = buf.trim().slice(5).trim();
-      if (data !== '[DONE]') {
-        try {
-          const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
-          fullText += chunk.choices?.[0]?.delta?.content ?? '';
-        } catch { /* ignore */ }
-      }
-    }
+    const streamed = await readOpenAIStream(res.body);
+    fullText = streamed.text;
+    streamUsage = streamed.usage;
   } else {
     const json = await res.json() as {
       choices?: Array<{
@@ -544,19 +538,13 @@ async function callOpenAIRaw(
     const latencyMs = Math.round(performance.now() - start);
     // Prompt-cache visibility (DeepSeek auto prefix-cache / OpenAI cached_tokens).
     // Lets us confirm the stable-system-prefix design is actually paying off.
-    const u = json.usage;
-    const cacheHit = u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0;
-    if (cacheHit > 0 || u?.prompt_cache_miss_tokens !== undefined) {
-      const prompt = u?.prompt_tokens ?? 0;
-      const cacheMiss = u?.prompt_cache_miss_tokens ?? Math.max(0, prompt - cacheHit);
-      const hitRate = prompt ? +(cacheHit / prompt).toFixed(2) : 0;
-      const payload = { label: label.name, cacheHit, cacheMiss, prompt, hitRate };
-      // 高频观测默认走 debug；只有大 prompt 且命中率差时才升到 info，便于排查真正浪费。
-      if (prompt >= 4000 && hitRate < 0.2) {
-        logger.info(payload, 'prompt cache');
-      } else {
-        logger.debug(payload, 'prompt cache');
-      }
+    const tokenUsage = normalizeOpenAIUsage(json.usage);
+    if (tokenUsage.cached !== undefined && tokenUsage.inputKnown) {
+      const prompt = tokenUsage.prompt;
+      const hitRate = prompt > 0 ? tokenUsage.cached / prompt : null;
+      // Keep the same sampling level for hits and misses; logs are not a
+      // preferential sample of low-cache calls. Metrics own aggregation.
+      logger.debug({ label: label.name, cacheHit: tokenUsage.cached, prompt, hitRate }, 'prompt cache');
     }
     const text = stripThinkingBlocks(fullText);
     if (!text) {
@@ -564,12 +552,8 @@ async function callOpenAIRaw(
     }
     return {
       content: text,
-      tokenUsage: {
-        prompt: json.usage?.prompt_tokens ?? 0,
-        completion: json.usage?.completion_tokens ?? 0,
-        total: json.usage?.total_tokens ?? 0,
-        cached: cacheHit,
-      },
+      tokenUsage,
+      transportPath: 'openai_json',
       model: label.model,
       label: label.name,
       latencyMs,
@@ -585,7 +569,8 @@ async function callOpenAIRaw(
 
   return {
     content: text,
-    tokenUsage: { prompt: 0, completion: 0, total: 0 },
+    tokenUsage: normalizeOpenAIUsage(streamUsage),
+    transportPath: 'openai_stream',
     model: label.model,
     label: label.name,
     latencyMs,
@@ -757,11 +742,8 @@ async function callModelInner(
 
     return {
       content: text,
-      tokenUsage: {
-        prompt: result.usage?.promptTokens ?? 0,
-        completion: result.usage?.completionTokens ?? 0,
-        total: (result.usage?.promptTokens ?? 0) + (result.usage?.completionTokens ?? 0),
-      },
+      tokenUsage: normalizeSdkUsage(result.usage, result.providerMetadata, result.response?.body),
+      transportPath: 'openai_sdk',
       model: label.model,
       label: label.name,
       latencyMs,

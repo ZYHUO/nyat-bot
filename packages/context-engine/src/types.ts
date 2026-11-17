@@ -1,5 +1,5 @@
 // ────────────────────────────────────────
-// Context Engine — typed prompt assembly for cache + observability
+// Context Engine — typed prompt assembly with explicit prefix boundaries
 // Inspired by CyberGroupmate Context Engine (static/delta/ephemeral/volatile).
 // ────────────────────────────────────────
 
@@ -19,8 +19,8 @@ export interface ContextManifestEntry {
   id: string;
   tier: ContextTier;
   chars: number;
-  /** true if identical to previous render of same id. */
-  cacheHit: boolean;
+  /** Same fingerprint as the previous local render; not a provider cache hit. */
+  unchanged: boolean;
 }
 
 export interface ContextManifest {
@@ -30,8 +30,10 @@ export interface ContextManifest {
   deltaChars: number;
   ephemeralChars: number;
   volatileChars: number;
-  cacheHitChars: number;
-  cacheHitRatio: number;
+  /** Sum of unchanged part characters; excludes the separators between parts. */
+  unchangedChars: number;
+  /** Local per-part equality ratio, not continuous-prefix or provider token reuse. */
+  unchangedContextRatio: number;
   parts: ContextManifestEntry[];
 }
 
@@ -43,5 +45,11 @@ export interface ContextProvider {
 
 export interface AssembleResult {
   prompt: string;
+  /**
+   * Exact contiguous static-tier prefix of prompt, without the following separator.
+   * This is a cache boundary hint, not a promise that static content never changes:
+   * scoped identity, permissions or experience may change the prefix itself.
+   */
+  cachePrefix: string;
   manifest: ContextManifest;
 }

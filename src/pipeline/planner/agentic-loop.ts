@@ -15,6 +15,7 @@ import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { getUsage, getLabel } from '../../ai/labels.js';
 import { CooldownTracker } from '../../ai/cooldown.js';
+import { createSdkUsageObserver } from '../../ai/sdk-usage-observer.js';
 import { getRedis } from '../../db/redis.js';
 import { buildToolSet } from '../tools/registry.js';
 import { loadPrompt, getConfig } from '../../shared/config.js';
@@ -93,6 +94,7 @@ export async function runAgenticPlanner(input: AgenticPlanInput): Promise<Agenti
         maxSteps: input.maxStepsOverride ?? e.PLANNER_MAX_STEPS,
         temperature: 0,
         abortSignal: mergeAbortSignals(usage.timeout, input.signal),
+        onStepFinish: createSdkUsageObserver('judge', labelName, label.model, input.chatId),
       });
 
       const toolsUsed: string[] = [];

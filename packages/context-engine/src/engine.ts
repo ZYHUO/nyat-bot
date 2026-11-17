@@ -16,7 +16,7 @@ export type ContextEngineLogger = {
 };
 
 export type ContextEngineOptions = {
-  /** When false, still assembles but does not update fingerprints (always cache miss). */
+  /** When false, still assembles but clears local equality history. */
   enabled?: boolean;
   logger?: ContextEngineLogger;
 };
@@ -87,23 +87,23 @@ export class ContextEngine {
     let deltaChars = 0;
     let ephemeralChars = 0;
     let volatileChars = 0;
-    let cacheHitChars = 0;
+    let unchangedChars = 0;
     const texts: string[] = [];
 
     for (const part of collected) {
       // Equality metadata must not retain the chat/prompt plaintext indefinitely.
       const fp = createHash('sha256').update(part.fingerprint ?? part.text).digest('hex');
       const prev = this.lastFingerprints.get(part.id);
-      const cacheHit = enabled && prev !== undefined && prev === fp;
+      const unchanged = enabled && prev !== undefined && prev === fp;
       if (enabled) this.lastFingerprints.set(part.id, fp);
 
       const chars = part.text.length;
-      entries.push({ id: part.id, tier: part.tier, chars, cacheHit });
+      entries.push({ id: part.id, tier: part.tier, chars, unchanged });
       if (part.tier === 'static') staticChars += chars;
       else if (part.tier === 'delta') deltaChars += chars;
       else if (part.tier === 'ephemeral') ephemeralChars += chars;
       else volatileChars += chars;
-      if (cacheHit) cacheHitChars += chars;
+      if (unchanged) unchangedChars += chars;
       texts.push(part.text);
     }
     const present = new Set(collected.map(part => part.id));
@@ -117,8 +117,8 @@ export class ContextEngine {
       deltaChars,
       ephemeralChars,
       volatileChars,
-      cacheHitChars,
-      cacheHitRatio: totalChars > 0 ? cacheHitChars / totalChars : 0,
+      unchangedChars,
+      unchangedContextRatio: totalChars > 0 ? unchangedChars / totalChars : 0,
       parts: entries,
     };
     this.lastManifest = manifest;
@@ -127,14 +127,22 @@ export class ContextEngine {
       {
         engine: this.name,
         totalChars,
-        cacheHitRatio: Number(manifest.cacheHitRatio.toFixed(3)),
+        unchangedContextRatio: Number(manifest.unchangedContextRatio.toFixed(3)),
         parts: entries.length,
       },
       'Context assembled',
     );
 
+    // Keep the established prompt ordering and bytes. The provider may mark
+    // this boundary without moving, omitting or borrowing any scoped content.
+    const staticPrefix: string[] = [];
+    for (const part of collected) {
+      if (part.tier !== 'static') break;
+      staticPrefix.push(part.text);
+    }
     return {
       prompt: texts.join('\n\n'),
+      cachePrefix: staticPrefix.join('\n\n'),
       manifest,
     };
   }

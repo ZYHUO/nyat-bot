@@ -21,7 +21,7 @@
 
 import { env } from '../env.js';
 import { callWithFallback } from './fallback.js';
-import { llmEvents } from './events.js';
+import { emitLlmError, emitLlmResult, validTokenCount } from './events.js';
 import { logger } from '../shared/logger.js';
 import { createHash } from 'node:crypto';
 
@@ -130,7 +130,7 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
       signal: controller.signal,
     });
     if (!res.ok) {
-      emitTokens('judgment', 'typesafe', started, 0, 0);
+      emitTokens('judgment', 'typesafe', started, undefined, undefined, 'error');
       _lastTypesafeStatus = res.status;
       _lastTypesafeErr = (await res.text().catch(() => '')).slice(0, 200);
       return null;
@@ -142,7 +142,7 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
       }>;
       usage?: { input_tokens?: number; output_tokens?: number };
     };
-    emitTokens('judgment', 'typesafe', started, data.usage?.input_tokens ?? 0, data.usage?.output_tokens ?? 0);
+    emitTokens('judgment', 'typesafe', started, data.usage?.input_tokens, data.usage?.output_tokens);
     const answers = data.answers;
     if (!answers) { _lastTypesafeErr = 'no_answers_in_response'; return null; }
 
@@ -173,7 +173,7 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
     }
     return out;
   } catch (err) {
-    emitTokens('judgment', 'typesafe', started, 0, 0);
+    emitTokens('judgment', 'typesafe', started, undefined, undefined, 'error');
     // 超时（AbortError）与网络错在这一层看不出区别，带上 message 才分得清。
     _lastTypesafeStatus = 'exception';
     _lastTypesafeErr = err instanceof Error ? err.message.slice(0, 200) : String(err);
@@ -183,14 +183,15 @@ async function askTypesafe(b: JudgmentBatch): Promise<Record<string, JudgmentAns
   }
 }
 
-function emitTokens(usage: string, label: string, startedMs: number, prompt: number, completion: number): void {
-  try {
-    llmEvents.emit('result', {
-      usage, label, model: label, outcome: 'ok',
-      latencyMs: Date.now() - startedMs,
-      promptTokens: prompt, completionTokens: completion, cachedTokens: 0,
-    });
-  } catch { /* telemetry never breaks a judgment */ }
+function emitTokens(usage: string, label: string, startedMs: number, prompt?: number, completion?: number,
+  outcome: 'ok' | 'error' = 'ok'): void {
+  if (outcome === 'error') { emitLlmError(usage, label, label); return; }
+  const input = validTokenCount(prompt) ? prompt : 0;
+  const output = validTokenCount(completion) ? completion : 0;
+  emitLlmResult(usage, {
+    content: '', label, model: label, latencyMs: Date.now() - startedMs,
+    tokenUsage: { prompt: input, completion: output, total: input + output, inputKnown: validTokenCount(prompt) },
+  });
 }
 
 // ── 后端 B：既有 chat LLM + JSON 兜底 ───────────────────────────────

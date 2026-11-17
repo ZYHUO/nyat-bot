@@ -7,7 +7,7 @@
 //   llm_tokens_total{usage,kind}           — prompt / completion / cached token 累计(回答「钱花在哪」+「缓存有没有命中」)
 //   llm_latency_ms_sum{usage} / llm_latency_count{usage} — 平均延迟 = sum/count
 
-import { llmEvents, type LlmResultEvent } from '../ai/events.js';
+import { cacheDimensions, cacheObservation, llmEvents, validTokenCount, type LlmResultEvent } from '../ai/events.js';
 import { incrCounter } from './registry.js';
 
 let inited = false;
@@ -20,8 +20,26 @@ export function initLlmMetrics(): void {
     if (e.outcome === 'error') return; // failed attempt: only the request counter, no tokens/latency
     incrCounter('llm_tokens_total', { usage: e.usage, kind: 'prompt' }, e.promptTokens);
     incrCounter('llm_tokens_total', { usage: e.usage, kind: 'completion' }, e.completionTokens);
-    if (e.cachedTokens > 0) incrCounter('llm_tokens_total', { usage: e.usage, kind: 'cached' }, e.cachedTokens);
+    if (validTokenCount(e.cachedTokens) && e.cachedTokens > 0) incrCounter('llm_tokens_total', { usage: e.usage, kind: 'cached' }, e.cachedTokens);
     incrCounter('llm_latency_ms_sum', { usage: e.usage }, e.latencyMs);
     incrCounter('llm_latency_count', { usage: e.usage });
+
+    // Separate from legacy aggregates: ratio = read / covered_input on the
+    // identical dimensions and time window. Missing usage never means a miss.
+    const dimensions = cacheDimensions(e);
+    const observation = cacheObservation(e);
+    incrCounter('llm_cache_observations_total', { ...dimensions, coverage: observation.coverage });
+    if (observation.input !== undefined) {
+      incrCounter('llm_cache_tokens_total', { ...dimensions, kind: 'observed_input' }, observation.input);
+    }
+    if (observation.read !== undefined) {
+      incrCounter('llm_cache_tokens_total', { ...dimensions, kind: 'covered_input' }, observation.input!);
+      incrCounter('llm_cache_tokens_total', { ...dimensions, kind: 'read' }, observation.read);
+    }
+    incrCounter('llm_cache_write_observations_total', { ...dimensions,
+      coverage: observation.write === undefined ? 'unknown' : 'known' });
+    if (observation.write !== undefined) {
+      incrCounter('llm_cache_tokens_total', { ...dimensions, kind: 'write' }, observation.write);
+    }
   });
 }

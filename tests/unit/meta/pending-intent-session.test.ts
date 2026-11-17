@@ -66,7 +66,7 @@ vi.mock('../../../src/shared/master-identity.js', () => ({
   buildMasterIdentityBlock: () => 'synthetic owner identity', masterShortHint: () => 'synthetic owner',
 }));
 vi.mock('../../../src/context-engine/index.js', () => ({
-  getContextEngine: () => ({ assemble: async () => ({ prompt: 'synthetic scoped context', manifest: { cacheHitRatio: 0 } }) }),
+  getContextEngine: () => ({ assemble: async () => ({ prompt: 'synthetic scoped context', cachePrefix: '', manifest: { unchangedContextRatio: 0 } }) }),
   staticText: vi.fn(), ephemeralText: vi.fn(), volatileText: vi.fn(), deltaText: vi.fn(),
 }));
 vi.mock('../../../src/env.js', () => ({

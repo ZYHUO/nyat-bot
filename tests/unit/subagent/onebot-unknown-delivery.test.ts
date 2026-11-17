@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchTask } from '../../../src/meta/types.js';
 import type { CodeActCapabilities } from '../../../src/sandbox/codeact/capabilities.js';
+import type { AgentCheckpoint } from '../../../src/agent/checkpoint.js';
 import { DeliveryError } from '../../../src/shared/delivery-result.js';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
@@ -11,6 +12,7 @@ const f = vi.hoisted(() => ({
   db: null as Database.Database | null,
   sends: vi.fn(), detailed: vi.fn(), llm: vi.fn(), isolated: vi.fn(), persist: vi.fn(async () => {}), debug: vi.fn(),
   callbacks: vi.fn(async () => {}), putTask: vi.fn(), checkpoint: vi.fn(), resume: vi.fn(),
+  loadCheckpoint: vi.fn<() => Promise<AgentCheckpoint | null>>(async () => null),
   answered: vi.fn(async () => {}), contextWrite: vi.fn(), memoryAck: vi.fn(), finalEvidence: vi.fn(), createDebt: vi.fn(),
   held: new Map<string, string>(), holdWrite: vi.fn(), compareDelete: vi.fn(), end: vi.fn(),
   cfg: {
@@ -46,12 +48,12 @@ vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ p
 vi.mock('../../../src/meta/session-digest.js', () => ({ persistDigest: vi.fn(), searchDigests: vi.fn(() => []) }));
 vi.mock('../../../src/meta/answered.js', () => ({ markMessageAnswered: f.answered, answeredTimestamps: vi.fn(async () => []) }));
 vi.mock('../../../src/meta/speaker-burst.js', () => ({ clearSpeakerBurst: vi.fn(async () => {}) }));
-vi.mock('../../../src/agent/checkpoint.js', () => ({ loadCheckpoint: vi.fn(async () => null), saveCheckpoint: f.checkpoint,
+vi.mock('../../../src/agent/checkpoint.js', () => ({ loadCheckpoint: f.loadCheckpoint, saveCheckpoint: f.checkpoint,
   registerAgentChat: vi.fn(async () => {}), unregisterAgentChat: vi.fn(async () => {}), clearCheckpoint: vi.fn(async () => {}) }));
 vi.mock('../../../src/agent/interrupts.js', () => ({ drainInterrupts: vi.fn(async () => []), isHardStop: () => false }));
 vi.mock('../../../src/agent/compaction.js', async (original) => ({
   ...await original<typeof import('../../../src/agent/compaction.js')>(),
-  compactHistory: vi.fn(), restoreMessagesFromCompacted: vi.fn(),
+  compactHistory: vi.fn(),
 }));
 vi.mock('../../../src/agent/task-runtime-events.js', () => ({ emitTaskRuntimeEvent: vi.fn(() => 'synthetic-event') }));
 vi.mock('../../../src/agent/task-evidence-store.js', () => ({ saveTaskEvidence: f.finalEvidence }));
@@ -76,7 +78,7 @@ vi.mock('../../../src/sandbox/paths.js', () => ({ resolveSandboxRoot: () => '/sa
 vi.mock('../../../src/bot/bot.js', () => ({ getBotUid: () => 2 ** 52 + 1, getBotDisplayName: () => 'Bot' }));
 vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage: f.sends, sendMessageDetailed:f.detailed, sendChatAction: vi.fn(async () => {}), sendSticker: vi.fn(), reactToMessage: vi.fn() }));
 vi.mock('../../../src/context-engine/index.js', () => ({
-  getContextEngine: () => ({ assemble: async () => ({ prompt: 'synthetic prompt', manifest: { cacheHitRatio: 0 } }) }),
+  getContextEngine: () => ({ assemble: async () => ({ prompt: 'synthetic prefix\n\nsynthetic task', cachePrefix: 'synthetic prefix', manifest: { unchangedContextRatio: 0 } }) }),
   staticText: vi.fn(), ephemeralText: vi.fn(), volatileText: vi.fn(), deltaText: vi.fn(),
 }));
 vi.mock('../../../src/subagent/prompt-inputs.js', () => ({ collectPromptInputs: async () => ({
@@ -100,6 +102,7 @@ function task(): DispatchTask {
 beforeEach(() => {
   f.db?.close(); f.db = null; f.cfg.META_PENDING_INTENT_ENABLED = false; f.cfg.BACKGROUND_PUBLICATION_ENABLED=false;
   vi.clearAllMocks();
+  f.loadCheckpoint.mockReset().mockResolvedValue(null);
   f.held.clear();
   f.holdWrite.mockReset().mockImplementation(async (_key: string, id: string, record: string) => {
     if (f.held.has(id)) return 0;
@@ -177,6 +180,66 @@ describe('real background executor separates checking from publishing',()=>{
     expect(f.llm).toHaveBeenCalledOnce();expect(f.isolated).not.toHaveBeenCalled();
     expect(f.detailed).not.toHaveBeenCalled();expect(f.callbacks).not.toHaveBeenCalled();expect(f.createDebt).not.toHaveBeenCalled();
     expect(current).toMatchObject({status:'failed',resultSummary:'failed_background_cancelled'});
+  });
+});
+
+describe('CodeAct exact cache boundary wiring', () => {
+  it('restores checkpoint context under the current system and cache boundary', async () => {
+    const current = { ...task(), checkpointKey: 'synthetic-checkpoint', segment: 1 };
+    f.loadCheckpoint.mockResolvedValue({
+      version: 2, taskId: current.id, contentDirection: current.contentDirection,
+      source: { platform: 'qq', accountId: 'synthetic', chatId, conversationKind: 'private', threadId: 0 },
+      history: [
+        { role: 'system', content: 'obsolete synthetic system and permissions' },
+        { role: 'user', content: 'retained synthetic task observation' },
+      ],
+      progressSummary: 'synthetic progress', artifacts: [], segment: 1, totalTurns: 2, updatedAt: Date.now(),
+    });
+    f.isolated.mockImplementation(async (_code: string, capabilities: CodeActCapabilities) => {
+      await capabilities.get('runtime.endTask')!('synthetic resumed completion');
+      return { value: undefined, logs: [] };
+    });
+
+    await runCodeActTask(current);
+
+    expect(f.llm).toHaveBeenCalledOnce();
+    const [call] = f.llm.mock.calls[0] as unknown as [{ systemCachePrefix: string; messages: Array<{ role: string; content: string }> }];
+    expect(call.systemCachePrefix).toBe('synthetic prefix');
+    expect(call.messages.filter(message => message.role === 'system')).toEqual([
+      { role: 'system', content: 'synthetic prefix\n\nsynthetic task' },
+    ]);
+    expect(call.messages.some(message => message.content.includes('obsolete synthetic system'))).toBe(false);
+    expect(call.messages.some(message => message.content.includes('synthetic progress'))).toBe(true);
+    expect(call.messages.some(message => message.content === 'retained synthetic task observation')).toBe(true);
+    expect(f.sends).not.toHaveBeenCalled();
+  });
+
+  it('forwards the assembled boundary on every append-only model turn', async () => {
+    let turns = 0;
+    f.isolated.mockImplementation(async (_code: string, capabilities: CodeActCapabilities) => {
+      turns += 1;
+      if (turns === 2) await capabilities.get('runtime.endTask')!('synthetic completion');
+      return { value: 'synthetic observation', logs: [] };
+    });
+    await runCodeActTask(task());
+    expect(f.llm).toHaveBeenCalledTimes(2);
+    for (const [call] of f.llm.mock.calls as unknown as Array<[{ systemCachePrefix: string; messages: Array<{ role: string; content: string }> }]>) {
+      expect(call.systemCachePrefix).toBe('synthetic prefix');
+      expect(call.messages[0]).toEqual({ role: 'system', content: 'synthetic prefix\n\nsynthetic task' });
+    }
+    expect(f.sends).not.toHaveBeenCalled();
+  });
+
+  it('uses the failsafe system’s own boundary instead of the main task boundary', async () => {
+    f.llm.mockRejectedValueOnce(new Error('synthetic model failure')).mockResolvedValueOnce({ content: '' });
+    await runCodeActTask({ ...task(), chatId: 20 });
+    expect(f.llm).toHaveBeenCalledTimes(2);
+    const [call] = f.llm.mock.calls[1] as unknown as [{ systemCachePrefix: string; messages: Array<{ content: string }> }];
+    expect(call.systemCachePrefix).toBe(call.messages[0]!.content);
+    expect(call.systemCachePrefix).toContain('synthetic identity');
+    expect(call.systemCachePrefix).toContain('诚实说明没搞定');
+    expect(call.systemCachePrefix).not.toContain('synthetic task');
+    expect(f.sends).not.toHaveBeenCalled();
   });
 });
 

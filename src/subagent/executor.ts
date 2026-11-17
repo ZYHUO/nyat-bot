@@ -478,7 +478,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // 长时间 Agent 循环：段号 + checkpoint 恢复 + 用户 interrupt 注入。
   const loopEnabled = env().AGENT_LOOP_ENABLED;
 
-  const { prompt, manifest } = await engine.assemble([
+  const { prompt, cachePrefix, manifest } = await engine.assemble([
     staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId,background), task.chatId)),
     staticText('sub-identity', identity),
     ephemeralText('sub-master', masterBlock),
@@ -537,7 +537,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     {
       taskId: task.id,
       chatId: task.chatId,
-      cacheHitRatio: Number(manifest.cacheHitRatio.toFixed(3)),
+      unchangedContextRatio: Number(manifest.unchangedContextRatio.toFixed(3)),
     },
     'CodeAct task start',
   );
@@ -755,6 +755,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       try {
         const result = await callWithFallback({
           usage: env().CODEACT_USAGE,
+          systemCachePrefix: cachePrefix || undefined,
           messages: history,
           maxTokens: 4000,
           temperature: 0.7,
@@ -975,14 +976,16 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         // Failsafe: bot didn't produce anything — generate an honest report
         try {
           const ctx = await host.memory.recentContext(8);
+          const fallbackSystem =
+            (await import('../pipeline/reply/prompt-builder.js')).buildCodeActIdentityPrompt(undefined, task.chatId) +
+            '\n\n现在只输出一句纯文本回复，不要 JSON，不要代码。诚实说明没搞定，别假装完成了。';
           const fallback = await callWithFallback({
             usage: env().CODEACT_USAGE,
+            systemCachePrefix: fallbackSystem || undefined,
             messages: [
               {
                 role: 'system',
-                content:
-                  (await import('../pipeline/reply/prompt-builder.js')).buildCodeActIdentityPrompt(undefined, task.chatId) +
-                  '\n\n现在只输出一句纯文本回复，不要 JSON，不要代码。诚实说明没搞定，别假装完成了。',
+                content: fallbackSystem,
               },
               {
                 role: 'user',

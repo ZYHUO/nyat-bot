@@ -1,7 +1,7 @@
 {
   "name": "@nyat/context-engine",
   "version": "0.1.0",
-  "description": "Tiered prompt assembly (static|delta|ephemeral|volatile) with cache-hit manifest",
+  "description": "Tiered prompt assembly with explicit cache boundaries and local equality diagnostics",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

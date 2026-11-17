@@ -76,8 +76,8 @@ QQ 内部 ID 必须能反查到当前账号，消息、发送者和引用也必�
 
 ## Context Engine
 
-`src/context-engine/`：`static|delta|ephemeral|volatile` 组装 + Manifest（`cacheHitRatio` 打日志）。  
-缓存命中率取决于上游模型/中转是否支持 prompt cache；架构上前缀已稳定。
+`src/context-engine/`：按 `static|delta|ephemeral|volatile` 组装，并返回当前静态前缀边界。Manifest 的 `unchangedContextRatio` 只是本进程前后两次组装中未变化的字符占比，不是供应商缓存命中率。
+Meta/CodeAct 将边界传入调用层；Claude 格式会在实际 system 的对应位置设置缓存断点。是否命中仍取决于实际供应商、模型、前缀长度和保留规则，见[缓存计量与验证](../prompt-cache.md)。
 
 ## 日记
 

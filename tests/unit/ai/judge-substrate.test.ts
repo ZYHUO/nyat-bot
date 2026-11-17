@@ -83,11 +83,26 @@ describe('judge — typesafe backend', () => {
     await judge({ key: 'k4', state: 's', questions: NOUL });
     llmEvents.removeAllListeners('result');
     const ev = seen.find((e) => (e as { usage: string }).usage === 'judgment') as
-      | { promptTokens: number; completionTokens: number; label: string }
+      | { promptTokens: number; completionTokens: number; label: string; inputKnown: boolean; cachedTokens?: number }
       | undefined;
     expect(ev).toBeTruthy();
     expect(ev?.promptTokens).toBe(300);
     expect(ev?.completionTokens).toBe(20);
+    expect(ev?.inputKnown).toBe(true);
+    expect(ev?.cachedTokens).toBeUndefined(); // this backend does not report cache usage
+  });
+
+  it('does not turn a failed external judgment into a zero-token successful cache observation', async () => {
+    vi.stubGlobal('fetch', stubTypesafe(null));
+    fallbackMock.mockResolvedValue({ content: '{"same":{"value":0.9}}' });
+    const events: Array<{ outcome: string; inputKnown?: boolean; cachedTokens?: number }> = [];
+    const listener = (event: typeof events[number]) => events.push(event);
+    llmEvents.on('result', listener);
+    try { await judge({ key: 'failed-telemetry', state: 'synthetic', questions: NOUL }); }
+    finally { llmEvents.off('result', listener); }
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ outcome: 'error', inputKnown: false });
+    expect(events[0]?.cachedTokens).toBeUndefined();
   });
 });
 
