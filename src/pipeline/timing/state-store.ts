@@ -139,12 +139,13 @@ function parseUidList(raw: string): number[] {
  * Side effect: if state=WAIT but waitUntil already in the past, returns RUNNING
  * (does NOT auto-write the cleanup; caller may use `enterRunning` if needed).
  */
-export async function getChatState(chatId: number): Promise<ChatTimingState> {
+export async function getChatState(chatId: number, strict = false): Promise<ChatTimingState> {
   const redis = getRedis();
   let raw: Record<string, string>;
   try {
     raw = await redis.hgetall(key(chatId));
   } catch (err) {
+    if (strict) throw err;
     logger.warn({ err, chatId }, 'getChatState read failed, defaulting to RUNNING');
     return { state: 'RUNNING' };
   }
@@ -153,6 +154,9 @@ export async function getChatState(chatId: number): Promise<ChatTimingState> {
     return { state: 'RUNNING' };
   }
 
+  if (strict && raw['state'] !== undefined && !['RUNNING', 'STOP', 'WAIT'].includes(raw['state'])) {
+    throw new Error('timing_state_invalid');
+  }
   const parsed = parseState(raw);
 
   // Auto-expire WAIT if waitUntil already passed (lazy cleanup).

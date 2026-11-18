@@ -49,6 +49,22 @@ describe('Heart batch context and target contract', () => {
     expect(prompt).toContain('对整批消息做一次决定');
   });
 
+  it.each([
+    { act: 'wait', selection: undefined, expected: [2, 3] },
+    { act: 'wait', selection: [2], expected: [2] },
+    { act: 'wait', selection: [99], expected: null },
+    { act: 'wait', selection: ['2'], expected: null },
+    { act: 'react', selection: [2], expected: null },
+    { act: 'react', selection: undefined, expected: [3] },
+  ])('binds $act with $selection to the reconsidered source set', async ({ act, selection, expected }) => {
+    const value = input();
+    value.reconsideringMessageIds = [2];
+    f.call.mockResolvedValue({ content: JSON.stringify({ act, path: 'chat', why: '看看后续', targetMessageIds: selection }) });
+    const decision = await heartDecision(value);
+    expect(decision).toMatchObject(expected ? { act, targetMessageIds: expected } : { act: 'pass', why: 'batch_targets_invalid' });
+    expect(f.call.mock.calls[0]![0].messages.at(-1).content).toContain('现在重评的消息 ID：[2]');
+  });
+
   it.each(['chat', 'topic', 'account'] as const)('rejects a mixed %s batch before any model call', async mismatch => {
     const value = input(), wrong = value.batchMessages![0]!;
     if (mismatch === 'chat') wrong.eventIdentity!.ref.conversation.id = '-999';

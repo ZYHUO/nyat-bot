@@ -3,12 +3,16 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Update } from 'grammy/types';
 import type { FormattedMessage } from '../../../src/shared/types.js';
+import type { MessageJobData } from '../../../src/queue/jobs.js';
+import type { HeartInput } from '../../../src/pipeline/heart/decision.js';
+import { createMessageEventIdentity } from '../../../src/shared/event-identity.js';
 import { MetaRedisFixture } from '../../helpers/meta-redis.js';
+import { timingWaitEval } from '../../helpers/timing-wait-redis.js';
 
 const f = vi.hoisted(() => ({
-  db: vi.fn(), redis: vi.fn(), heart: vi.fn(), gate: vi.fn(), dispatch: vi.fn(), legacy: vi.fn(),
-  getRecent: vi.fn(), addMessage: vi.fn(), noAction: vi.fn(), wait: vi.fn(), tick: vi.fn(),
-  sleep: vi.fn(), muted: vi.fn(), react: vi.fn(), busy: vi.fn(), runtime: vi.fn(), suppressed: vi.fn(), running: vi.fn(),
+  db: vi.fn(), redis: vi.fn(), heart: vi.fn(), gate: vi.fn(), model: vi.fn(), queueAdd: vi.fn(), enqueueCodeAct: vi.fn(), legacy: vi.fn(),
+  getRecent: vi.fn(), addMessage: vi.fn(), noAction: vi.fn(), tick: vi.fn(),
+  sleep: vi.fn(), muted: vi.fn(), react: vi.fn(), busy: vi.fn(),
   warning: vi.fn(), counter: vi.fn(), postTask: vi.fn(), speaker: vi.fn(), taskId: vi.fn(), loadTask: vi.fn(), interrupt: vi.fn(), config: {
     DURABLE_INGRESS_ENABLED: false,
     META_PENDING_INTENT_ENABLED: true,
@@ -24,8 +28,9 @@ const f = vi.hoisted(() => ({
     META_HEART_BYPASS_CHAT_IDS: [] as number[], META_HEART_REFRACTORY_MS: 20_000,
     META_QQ_HEART_REFRACTORY_MS: 0,
     META_QQ_GROUP_COALESCE_MS: 0, META_QQ_GROUP_COALESCE_MAX_MS: 4000, META_QQ_MENTION_HEART_ENABLED: false,
-    HEART_DECIDES_TIMING: false, TIMING_GATE_ENABLED: true, META_DISPATCH_GATE_ENABLED: true,
-    TIMING_WAIT_MIN_SEC: 8, BOT_USERNAME: 'fixture_bot', BOT_NICKNAMES: ['fixture-nyat'],
+    HEART_DECIDES_TIMING: false, TIMING_GATE_ENABLED: true, META_DISPATCH_GATE_ENABLED: true, TIMING_GATE_PRECHECK_ENABLED: false,
+    TIMING_WAIT_MIN_SEC: 8, TIMING_WAIT_MAX_SEC: 120, TIMING_STATE_TTL_SEC: 86400, TIMING_GATE_COOLDOWN_SEC: 0,
+    QUEUE_CONCURRENCY: 4, CODEACT_TIMEOUT_MS: 5000, CODEACT_BANNED_WORDS: [], BOT_USERNAME: 'fixture_bot', BOT_NICKNAMES: ['fixture-nyat'],
     RATE_LIMIT_PER_MIN: 100, NYATOS_SHADOW_ENABLED: false, TRENCH_DEBT_ATTENTION_ENABLED: false,
   },
 }));
@@ -39,7 +44,9 @@ vi.mock('../../../src/db/sqlite.js', () => ({ getDb: f.db }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: f.redis }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: f.warning, error: vi.fn() } }));
 vi.mock('../../../src/shared/config.js', () => ({ loadCachedPrompt: () => '' }));
-vi.mock('../../../src/queue/producer.js', () => ({ enqueue: f.legacy }));
+vi.mock('bullmq', async original => ({ ...await original<typeof import('bullmq')>(),
+  Queue: class { add = f.queueAdd; } }));
+vi.mock('../../../src/queue/producer.js', async original => ({ ...await original<typeof import('../../../src/queue/producer.js')>(), enqueue: f.legacy }));
 vi.mock('../../../src/agent/cognitive-events.js', () => ({ appendTelegramMessageEvent: () => 'fixture:event' }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ addMessage: f.addMessage, getRecent: f.getRecent }));
 vi.mock('../../../src/platform/onebot-media.js', () => ({
@@ -87,25 +94,21 @@ vi.mock('../../../src/pipeline/heart/decision.js', () => ({ heartDecision: f.hea
 vi.mock('../../../src/pipeline/heart/self-state.js', () => ({ composeSelfState: async () => ({}) }));
 vi.mock('../../../src/pipeline/heart/mind.js', () => ({ noteThought: vi.fn() }));
 vi.mock('../../../src/pipeline/timing/gate.js', () => ({ runTimingGate: f.gate }));
-vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
-  getChatState: f.runtime, getGateCooldownRemainingMs: async () => 0,
-  isInContinuation: () => false, isChatSuppressed: f.suppressed,
-  cancelWaitForScope: vi.fn(async () => {}), transitionToWait: f.wait, transitionToRunning: f.running, recordGateContinue: vi.fn(async () => {}),
-  recordBotReply: vi.fn(), recordUserMessage: vi.fn(async () => {}),
+vi.mock('../../../src/pipeline/timing/state-store.js', async original => ({
+  ...await original<typeof import('../../../src/pipeline/timing/state-store.js')>(),
+  recordGateNoAction: f.noAction, recordUserMessage: vi.fn(), recordContinue: vi.fn(),
 }));
-vi.mock('../../../src/pipeline/timing/state-store.js', () => ({ recordGateNoAction: f.noAction }));
 vi.mock('../../../src/agent/agency-wait-dispatch.js', () => ({
   dispatchWaitViaAgency: async () => ({ attempted: false }), isAgencyWaitTransportEnabled: () => false,
 }));
 vi.mock('../../../src/meta/defer.js', () => ({ scheduleMetaDeferReeval: async () => false }));
-vi.mock('../../../src/subagent/task-store.js', () => ({ isCodeActBusy: f.busy, loadCodeActTask: f.loadTask }));
+vi.mock('../../../src/subagent/task-store.js', async original => ({
+  ...await original<typeof import('../../../src/subagent/task-store.js')>(), isCodeActBusy: f.busy, loadCodeActTask: f.loadTask }));
 vi.mock('../../../src/agent/checkpoint.js', () => ({ getAgentTaskIdForChat: f.taskId }));
 vi.mock('../../../src/agent/interrupts.js', async original => ({
   ...await original<typeof import('../../../src/agent/interrupts.js')>(), pushInterrupt: f.interrupt }));
-// The real session groups a chat's batch into one dispatch. Capture that final
-// boundary, without creating a CodeAct worker, running model code or sending.
-vi.mock('../../../src/meta/meta-api.js', () => ({ buildMetaApiContext: () => ({ dispatch: { taskToGroup: f.dispatch }, journal: {} }) }));
-vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: vi.fn(() => { throw new Error('Unexpected model call'); }) }));
+vi.mock('../../../src/subagent/queue.js', () => ({ enqueueCodeActJob: f.enqueueCodeAct }));
+vi.mock('../../../src/ai/fallback.js', () => ({ callWithFallback: f.model }));
 vi.mock('../../../src/context-engine/index.js', () => ({
   getContextEngine: vi.fn(() => { throw new Error('Unexpected Meta LLM'); }),
   staticText: vi.fn(), deltaText: vi.fn(), ephemeralText: vi.fn(), volatileText: vi.fn(),
@@ -117,8 +120,11 @@ vi.mock('../../../src/sandbox/codeact/runner.js', () => ({ executeIsolatedCode: 
 
 import { ingestChatUpdate } from '../../../src/bot/handlers/message.js';
 import { getAttentionAccumulator, _resetAttentionAccumulator } from '../../../src/meta/attention.js';
-import { _resetTelegramHeartBatches, drainTelegramHeartBatches } from '../../../src/meta/telegram-heart-batch.js';
+import { _resetTelegramHeartBatches, drainTelegramHeartBatches, startTelegramHeartBatchRecovery } from '../../../src/meta/telegram-heart-batch.js';
+import { processTelegramHeartBatch } from '../../../src/meta/telegram-heart-processor.js';
 import { _resetGlobalState, getGlobalState } from '../../../src/meta/global-state.js';
+import { handleWaitResume } from '../../../src/pipeline/timing/chat-runtime.js';
+import { runMetaSession } from '../../../src/meta/session.js';
 
 const context = new Map<number, FormattedMessage[]>();
 let db: Database.Database;
@@ -134,18 +140,27 @@ async function advance(ms = 100): Promise<void> { await vi.advanceTimersByTimeAs
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-14T12:00:00Z')); vi.clearAllMocks();
   db = new Database(':memory:'); db.pragma('foreign_keys = ON');
-  for (const migration of ['0118_platform_identity', '0120_onebot_notices', '0125_durable_ingress', '0129_pending_reply_intents', '0134_telegram_heart_batches']) {
+  for (const migration of ['0118_platform_identity', '0120_onebot_notices', '0125_durable_ingress', '0129_pending_reply_intents', '0134_telegram_heart_batches', '0135_telegram_heart_source_wait']) {
     db.exec(readFileSync(`migrations/${migration}.sql`, 'utf8'));
   }
   redis = new MetaRedisFixture(); f.db.mockReturnValue(db); f.redis.mockReturnValue(redis); context.clear();
+  const timingHashes = new Map<string, Record<string, string>>();
+  const timingEval = timingWaitEval(timingHashes), metaEval = redis.eval.bind(redis);
+  Object.assign(redis, {
+    hgetall: async (key: string) => ({ ...timingHashes.get(key) }),
+    eval: (script: string, n: number, key: string, ...args: Array<string | number>) => script.startsWith('-- timing-wait')
+      ? timingEval(script, n, key, ...args) : metaEval(script, n, key),
+  });
   _resetAttentionAccumulator(); _resetGlobalState(); _resetTelegramHeartBatches();
   Object.assign(f.config, { NYATOS_SHADOW_ENABLED: false, META_PENDING_INTENT_ENABLED: true, META_TG_GROUP_COALESCE_MS: 100,
+    HEART_DECIDES_TIMING: false, TIMING_GATE_PRECHECK_ENABLED: false,
     META_TG_GROUP_COALESCE_CHAT_IDS: [-123, -456], META_HEART_REFRACTORY_MS: 0,
     ALLOWLIST_ENABLED: false, META_ACTIVATED_AT_SEC: Math.floor(Date.now() / 1000) - 60 });
   f.sleep.mockResolvedValue('awake'); f.muted.mockReturnValue(false); f.react.mockResolvedValue(true);
   f.busy.mockResolvedValue(false); f.speaker.mockResolvedValue(false); f.postTask.mockResolvedValue(false);
   f.taskId.mockResolvedValue(null); f.loadTask.mockResolvedValue(null);
-  f.runtime.mockResolvedValue({ state: 'RUNNING', lastBotReplyAt: 0 }); f.suppressed.mockResolvedValue(false);
+  f.model.mockReset().mockImplementation(() => { throw new Error('Unexpected model call'); });
+  f.queueAdd.mockImplementation(async (_name, _data, options) => ({ id: options.jobId }));
   f.heart.mockReset().mockImplementation(async (input: { targetMessageIds?: number[] }) => ({ act: 'reply', why: '可自然接话', path: 'chat', latencyMs: 1,
     ...(input.targetMessageIds ? { targetMessageIds: input.targetMessageIds } : {}) }));
   f.gate.mockResolvedValue({ action: 'continue', reason: '合适', shortCircuited: false, latencyMs: 1 });
@@ -153,9 +168,285 @@ beforeEach(() => {
   f.addMessage.mockImplementation(async (chatId: number, message: FormattedMessage) => {
     context.set(chatId, [...(context.get(chatId) ?? []), structuredClone(message)]);
   });
-  f.getRecent.mockImplementation(async (chatId: number) => context.get(chatId) ?? []);
+  f.getRecent.mockImplementation(async (chatId: number, count: number, threadId?: number) =>
+    (context.get(chatId) ?? []).filter(message => (message.messageThreadId ?? 0) === (threadId ?? 0)).slice(-count));
 });
 afterEach(async () => { await drainTelegramHeartBatches(); _resetAttentionAccumulator(); vi.clearAllTimers(); vi.useRealTimers(); db.close(); });
+
+// Replay the production legacy queue payload at its actual deadline. The
+// rollout's source-specific timers run through the production batch recovery
+// scan. Both transports therefore get an opportunity to settle the same input.
+function startWaitReplay(): void {
+  f.config.HEART_DECIDES_TIMING = true;
+  f.queueAdd.mockImplementation(async (name: string, job: MessageJobData, opts: { jobId: string; delay: number }) => {
+    if (name !== 'wait_resume') throw new Error('Unexpected queue job');
+    setTimeout(() => handleWaitResume({ chatId: job.chatId, waitResume: job.waitResume, jobId: opts.jobId }), opts.delay);
+    return { id: opts.jobId };
+  });
+  startTelegramHeartBatchRecovery(processTelegramHeartBatch);
+}
+
+function quoted(update: Update, source: Update): Update {
+  update.message!.reply_to_message = source.message!;
+  return update;
+}
+
+type ScriptedDecision = { act: string; why: string; targetMessageIds?: readonly number[] };
+
+async function scriptHeart(decide: (input: HeartInput) => ScriptedDecision | Promise<ScriptedDecision>): Promise<void> {
+  const { heartDecision } = await vi.importActual<typeof import('../../../src/pipeline/heart/decision.js')>(
+    '../../../src/pipeline/heart/decision.js');
+  f.heart.mockImplementation((input: HeartInput) => {
+    f.model.mockImplementationOnce(async () => ({ content: JSON.stringify(await decide(input)) }));
+    return heartDecision(input);
+  });
+}
+
+describe('overlapping WAIT replay through Telegram ingress, deadlines and CodeAct dispatch', () => {
+  it.each([
+    { order: 'unresolved first', together: false, answerAt: 2_000, maxCalls: 4 },
+    { order: 'self-answered first', together: false, answerAt: 8_200, maxCalls: 5 },
+    { order: 'same initial batch', together: true, answerAt: 2_000, maxCalls: 3 },
+    { order: 'isolated unresolved control', together: false, answerAt: 0, maxCalls: 2 },
+    { order: 'downstream gate declines', together: true, answerAt: 2_000, maxCalls: 3, gateDeclines: true },
+  ])('keeps the unresolved physical source and respects the final dispatch gate ($order)', async ({ order, together, answerAt, gateDeclines, maxCalls }) => {
+    startWaitReplay();
+    const started = Date.now(), group = -123, topic = 7, authorA = 11, authorB = 22;
+    // Telegram IDs follow arrival order, including in the reversed case.
+    const bId = order === 'unresolved first' || !answerAt ? 501 : 502;
+    const aId = bId === 501 ? 502 : 501;
+    const a = quoted(incoming(aId, authorA, '哪一站换车？', group, topic),
+      incoming(470, 33, '路线图', group, topic));
+    const b = quoted(incoming(bId, authorB, '明天从哪个门进场？', group, topic),
+      incoming(480, 44, '场馆通知', group, topic));
+
+    // Only the provider response is scripted. The production Heart parser,
+    // scoped source selector, WAIT store, Attention flush, Meta session and
+    // quote/author fences all decide whether a queue handoff can actually occur.
+    if (gateDeclines) {
+      f.config.HEART_DECIDES_TIMING = false;
+      f.config.TIMING_GATE_PRECHECK_ENABLED = true;
+      const { runTimingGate } = await vi.importActual<typeof import('../../../src/pipeline/timing/gate.js')>(
+        '../../../src/pipeline/timing/gate.js');
+      f.gate.mockImplementation(runTimingGate);
+    }
+    let firstB: number | undefined;
+    const bRechecks: HeartInput[] = [];
+    await scriptHeart(input => {
+      const ids = input.targetMessageIds ?? [];
+      const answerSeen = input.recentMessages.some(message => message.uid === authorA
+        && message.messageId === 503 && message.replyTo?.messageId === aId);
+      let act = 'wait', targetMessageIds: number[] | undefined;
+      if (ids.includes(bId)) {
+        firstB ??= Date.now();
+        if (Date.now() >= firstB + 8_000) {
+          bRechecks.push(input); act = 'reply'; targetMessageIds = [bId];
+        } else if (answerSeen) targetMessageIds = [bId];
+      } else if (answerSeen) act = 'pass';
+      return { act, why: '回放裁决', targetMessageIds };
+    });
+    if (!answerAt) await ingestChatUpdate(b);
+    else {
+      const [first, second] = aId < bId ? [a, b] : [b, a];
+      await ingestChatUpdate(first!); await advance(together ? 35 : 400);
+      await ingestChatUpdate(second!);
+    }
+    await advance(100);
+    expect(f.heart.mock.calls.flatMap(([input]: [HeartInput]) => input.targetMessageIds)).toContain(bId);
+    expect(f.model).toHaveBeenCalledTimes(f.heart.mock.calls.length);
+    expect(await getAttentionAccumulator().peek()).toEqual([]);
+    if (answerAt) {
+      await advance(started + answerAt - Date.now());
+      const answer = quoted(incoming(503, authorA, '我找到路线了，在南站换车。', group, topic), a);
+      await ingestChatUpdate(answer);
+      await ingestChatUpdate(answer); // Telegram redelivery.
+    }
+    await advance(started + 12_000 - Date.now());
+    await advance(f.config.META_L0_COALESCE_MS + 1);
+    const pending = await getAttentionAccumulator().flush();
+    expect(pending.map(item => ({ message: item.messageId, author: item.userId, topic: item.messageThreadId,
+      quote: (item.payload?.['replyTo'] as { messageId?: number } | undefined)?.messageId }))).toEqual([
+      { message: bId, author: authorB, topic, quote: 480 },
+    ]);
+    expect(bRechecks).toHaveLength(1);
+    if (answerAt) expect(bRechecks[0]!.recentMessages).toContainEqual(expect.objectContaining({
+      messageId: 503, uid: authorA, replyTo: expect.objectContaining({ messageId: aId, uid: authorA }),
+    }));
+    expect(bRechecks[0]!.batchMessages).toContainEqual(expect.objectContaining({
+      messageId: bId, uid: authorB, replyTo: expect.objectContaining({ messageId: 480, uid: 44 }),
+    }));
+    await runMetaSession(pending, []);
+    if (gateDeclines) {
+      expect(f.gate).toHaveBeenCalledOnce();
+      await expect(f.gate.mock.results[0]!.value).resolves.toMatchObject({ action: 'no_action', reason: 'precheck_human_to_human' });
+    } else {
+      expect(f.gate).not.toHaveBeenCalled();
+      expect(f.enqueueCodeAct).toHaveBeenCalledOnce();
+      expect(f.enqueueCodeAct.mock.calls[0]![0]).toMatchObject({ chatId: group, messageThreadId: topic,
+        targetUserId: authorB, quoteMessageIds: [bId], contentDirection: expect.stringContaining('#480'),
+        pendingIntent: { senderId: authorB, threadId: topic, accountId: '12345' } });
+      expect(f.enqueueCodeAct.mock.calls[0]![0].relatedQuoteIds).toBeUndefined();
+    }
+
+    // Duplicate wake-up, duplicate ingress and a restarted scheduler cannot
+    // enqueue the same action again or speak on the self-answered question.
+    for (const [name, data, opts] of f.queueAdd.mock.calls) {
+      if (name === 'wait_resume') await handleWaitResume({ chatId: group, waitResume: data.waitResume, jobId: opts.jobId });
+    }
+    const callsBeforeDuplicate = f.model.mock.calls.length;
+    expect(callsBeforeDuplicate).toBeLessThanOrEqual(maxCalls);
+    await drainTelegramHeartBatches(); _resetTelegramHeartBatches();
+    startTelegramHeartBatchRecovery(processTelegramHeartBatch);
+    await ingestChatUpdate(b); await advance(10_000);
+    expect(await getAttentionAccumulator().flush()).toEqual([]);
+    expect(f.model).toHaveBeenCalledTimes(callsBeforeDuplicate);
+    expect(f.enqueueCodeAct).toHaveBeenCalledTimes(gateDeclines ? 0 : 1); expect(f.react).not.toHaveBeenCalled();
+  });
+
+  it('reconsiders B exactly once when A self-answers during B’s in-flight deadline decision', async () => {
+    startWaitReplay();
+    const started = Date.now(), group = -123, topic = 7;
+    const b = quoted(incoming(601, 22, '明天从哪个门进场？', group, topic), incoming(580, 44, '场馆通知', group, topic));
+    const a = quoted(incoming(602, 11, '哪一站换车？', group, topic), incoming(570, 33, '路线图', group, topic));
+    let releaseStale: (() => void) | undefined;
+    const reviewsOfB: HeartInput[] = [];
+    await scriptHeart(async input => {
+      const canAnswerB = input.targetMessageIds?.includes(601) && Date.now() >= started + 8_100;
+      const hasAnswer = input.recentMessages.some(message => message.messageId === 603 && message.uid === 11
+        && message.replyTo?.messageId === 602);
+      if (canAnswerB) reviewsOfB.push(input);
+      if (canAnswerB && !hasAnswer && reviewsOfB.length === 1) {
+        // Deliberately finish with a reply even if aborted. Storage and the
+        // adapter must refuse an obsolete result from an uncooperative provider.
+        await new Promise<void>(resolve => { releaseStale = resolve; });
+        return { act: 'reply', why: '过时的群况', targetMessageIds: [601] };
+      }
+      if (canAnswerB) return { act: 'reply', why: '已经看过换车人的自答', targetMessageIds: [601] };
+      return { act: hasAnswer ? 'pass' : 'wait', why: '等群友补充' };
+    });
+    await ingestChatUpdate(b); await advance(1_200);
+    await ingestChatUpdate(a); await advance(100);
+    expect(f.heart.mock.calls.map(([input]) => input.targetMessageIds)).toEqual([[601], [602]]);
+    await advance(started + 8_300 - Date.now());
+    const answer = quoted(incoming(603, 11, '路线我找到了，在南站换车。', group, topic), a);
+    try {
+      expect(releaseStale).toBeTypeOf('function');
+      expect(reviewsOfB[0]!.targetMessageIds).toEqual([601]); // A's own WAIT has not expired.
+      await ingestChatUpdate(answer); await advance(120);
+      expect(reviewsOfB).toHaveLength(1);
+      expect(await getAttentionAccumulator().peek()).toEqual([]);
+    } finally {
+      releaseStale?.();
+    }
+    await settle(); await advance(2_500); await advance(f.config.META_L0_COALESCE_MS + 1);
+    expect(reviewsOfB).toHaveLength(2);
+    expect(reviewsOfB[1]!.recentMessages).toContainEqual(expect.objectContaining({
+      messageId: 603, uid: 11, replyTo: expect.objectContaining({ messageId: 602 }),
+    }));
+    const ready = await getAttentionAccumulator().flush();
+    expect(ready).toHaveLength(1);
+    expect(ready[0]).toMatchObject({ messageId: 601, userId: 22, messageThreadId: topic,
+      reason: expect.stringContaining('已经看过换车人的自答'), payload: { replyTo: { messageId: 580, uid: 44 } } });
+    await runMetaSession(ready, []);
+    await ingestChatUpdate(answer); await advance(12_000);
+    expect(await getAttentionAccumulator().flush()).toEqual([]);
+    expect(f.enqueueCodeAct).toHaveBeenCalledOnce();
+    expect(f.enqueueCodeAct.mock.calls[0]![0]).toMatchObject({ chatId: group, messageThreadId: topic,
+      targetUserId: 22, quoteMessageIds: [601] });
+    expect(f.model.mock.calls.length).toBeLessThanOrEqual(5);
+    expect(f.react).not.toHaveBeenCalled();
+  });
+
+  it.each(['outside the 40-message window', 'changed body', 'changed author', 'changed revision', 'changed photo', 'photo changed during Heart'])(
+    'reconsiders only verified sources from a shared WAIT when A is %s', async mismatch => {
+      startWaitReplay();
+      const started = Date.now(), group = -123, topic = 7;
+      const reconsidered: HeartInput[] = [];
+      await scriptHeart(input => {
+        const ids = input.targetMessageIds ?? [];
+        const atDeadline = Date.now() >= started + 8_100;
+        if (atDeadline) {
+          reconsidered.push(input);
+          if (mismatch === 'photo changed during Heart' && ids.includes(701)) {
+            context.get(group)!.find(message => message.messageId === 701)!.imageFileId = 'new-photo-while-deciding';
+          }
+        }
+        const decision = atDeadline ? { act: 'reply', targetMessageIds: ids }
+          : { act: ids.includes(701) && ids.includes(702) ? 'wait' : 'pass' };
+        return { ...decision, why: '检查当前话题里仍能核对的问题' };
+      });
+      await ingestChatUpdate(incoming(701, 11, '哪个站换车？', group, topic));
+      await ingestChatUpdate(quoted(incoming(702, 22, '哪个门进场？', group, topic), incoming(680, 44, '场馆通知', group, topic)));
+      await advance(100);
+      expect(f.heart).toHaveBeenCalledOnce();
+      expect(f.heart.mock.calls[0]![0].targetMessageIds).toEqual([701, 702]);
+      if (mismatch === 'outside the 40-message window') {
+        for (let id = 703; id <= 741; id++) await ingestChatUpdate(incoming(id, 33, '持续讨论', group, topic));
+        await advance(1_000);
+        expect((await f.getRecent(group, 40, topic)).map((message: FormattedMessage) => message.messageId))
+          .toEqual(Array.from({ length: 40 }, (_, i) => 702 + i));
+      } else if (mismatch !== 'photo changed during Heart') {
+        // Simulate a divergent stored projection independently of edit ingress:
+        // a physical ID alone cannot authenticate the retained source.
+        const copy = context.get(group)!.find(message => message.messageId === 701)!;
+        if (mismatch === 'changed body') copy.textContent = '修订后的另一句话';
+        else if (mismatch === 'changed photo') copy.imageFileId = 'different-photo-on-the-same-source';
+        else if (mismatch === 'changed author') copy.uid = 55;
+        else copy.eventIdentity = createMessageEventIdentity({ ref: copy.eventIdentity!.ref,
+          occurredAt: copy.eventIdentity!.occurredAt, editedAt: Date.now(), edit: true, updateId: 799, content: copy.textContent });
+      }
+      await advance(started + 12_000 - Date.now()); await advance(f.config.META_L0_COALESCE_MS + 1);
+      expect(reconsidered.map(input => input.targetMessageIds)).toEqual(mismatch === 'photo changed during Heart'
+        ? [[701, 702], [702]] : [[702]]);
+      const ready = await getAttentionAccumulator().flush();
+      expect(ready.map(item => [item.messageId, item.userId])).toEqual([[702, 22]]);
+      await runMetaSession(ready, []);
+      expect(f.enqueueCodeAct).toHaveBeenCalledOnce();
+      expect(f.enqueueCodeAct.mock.calls[0]![0]).toMatchObject({ targetUserId: 22, quoteMessageIds: [702], messageThreadId: topic });
+      expect(f.react).not.toHaveBeenCalled();
+    });
+
+  it('rechecks an unresolved question when a self-answer arrives after Attention admission but before dispatch', async () => {
+    startWaitReplay();
+    const started = Date.now(), group = -123, topic = 7;
+    const b = quoted(incoming(801, 22, '几点进场？', group, topic), incoming(780, 44, '场馆通知', group, topic));
+    const a = incoming(802, 11, '哪一站换车？', group, topic);
+    const bDecisions: boolean[] = [];
+    await scriptHeart(input => {
+      const hasAnswer = input.recentMessages.some(message => message.messageId === 803 && message.replyTo?.messageId === 802);
+      const bDue = Date.now() >= started + 8_100 && input.targetMessageIds?.includes(801);
+      if (bDue) bDecisions.push(hasAnswer);
+      return bDue ? { act: 'reply', targetMessageIds: [801], why: hasAnswer ? '甲已自答仍可接乙' : '甲还没自答' }
+        : { act: hasAnswer ? 'pass' : 'wait', why: '等两位各自补充' };
+    });
+    await ingestChatUpdate(b); await advance(1_200);
+    await ingestChatUpdate(a); await advance(started + 8_300 - Date.now());
+    const [original] = await getAttentionAccumulator().peek();
+    expect(original).toMatchObject({ messageId: 801, userId: 22, reason: expect.stringContaining('甲还没自答') });
+    expect(f.enqueueCodeAct).not.toHaveBeenCalled();
+
+    await ingestChatUpdate(quoted(incoming(803, 11, '我找到了，在南站换车。', group, topic), a));
+    // The old decision must be dropped before the session sees it. Only a
+    // fresh model verdict may cross the boundary after a source was revised.
+    expect(await getAttentionAccumulator().flush()).toEqual([]);
+    expect(f.enqueueCodeAct).not.toHaveBeenCalled();
+    await advance(3_000); await advance(f.config.META_L0_COALESCE_MS + 1);
+    const ready = await getAttentionAccumulator().flush();
+    expect(bDecisions).toEqual([false, true]);
+    expect(ready).toHaveLength(1);
+    expect(ready[0]).toMatchObject({ chatId: group, messageThreadId: topic, messageId: 801, userId: 22,
+      reason: expect.stringContaining('甲已自答仍可接乙'), payload: { replyTo: { messageId: 780, uid: 44 } } });
+    expect(ready[0]!.id).not.toBe(original!.id);
+    expect(ready[0]!.waitRecovery?.generation).not.toBe(original!.waitRecovery?.generation);
+    await runMetaSession(ready, []);
+    await advance(12_000);
+    expect(await getAttentionAccumulator().flush()).toEqual([]);
+    expect(f.enqueueCodeAct).toHaveBeenCalledOnce();
+    expect(f.enqueueCodeAct.mock.calls[0]![0]).toMatchObject({ chatId: group, messageThreadId: topic,
+      targetUserId: 22, quoteMessageIds: [801], waitRecovery: ready[0]!.waitRecovery });
+    expect(f.react).not.toHaveBeenCalled();
+  });
+});
 
 describe('Telegram pre-Heart batching through the real message handler', () => {
   it('makes one logical Heart call for three passive messages and preserves independent author anchors', async () => {

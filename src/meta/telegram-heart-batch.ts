@@ -4,13 +4,17 @@ import { incrCounter } from '../metrics/registry.js';
 import { canonicalJson, eventHash } from '../shared/event-identity.js';
 import { resolveConversationScope } from '../shared/privacy-scope.js';
 import { isTelegramHeartBatchChat } from './flags.js';
-import { acceptTelegramHeartCandidate, checkTelegramHeartClaim, claimTelegramHeartBatch, finishTelegramHeartBatch,
-  getTelegramHeartEntry, holdTelegramHeartCandidate, interruptTelegramHeartScope, listPendingTelegramHeart,
-  renewTelegramHeartClaimOwnership, telegramHeartScope } from './telegram-heart-store.js';
+import { acceptTelegramHeartCandidate, checkTelegramHeartClaim, claimTelegramHeartBatch, deferTelegramHeartSources, finishTelegramHeartBatch,
+  getTelegramHeartEntry, holdTelegramHeartCandidate, interruptTelegramHeartScope, listDueTelegramHeartWaits, listPendingTelegramHeart, nextTelegramHeartWait,
+  renewTelegramHeartClaimOwnership, telegramHeartScope, telegramHeartScopeKey, TELEGRAM_HEART_BATCH_LIMIT } from './telegram-heart-store.js';
 import type { TelegramHeartCandidate, TelegramHeartClaim, TelegramHeartEntry, TelegramHeartScope } from './telegram-heart-store.js';
 export type { TelegramHeartCandidate } from './telegram-heart-store.js';
 
 export interface TelegramHeartBatchControl {
+  /** Snapshot taken with the SQLite claim. */
+  scopeVersion?: number;
+  /** Durable, source-specific WAIT before any external effect. */
+  defer?(messageIds: readonly number[], waitSec: number): boolean;
   isCurrent(): Promise<boolean>;
   /** Call before reactions, WAIT publication and Attention ingestion, not before model evaluation. */
   beginEffects(): Promise<boolean>;
@@ -19,11 +23,10 @@ export type TelegramHeartBatchProcess = (items: TelegramHeartCandidate[], signal
 interface Settings { quietMs: number; maxMs: number; concurrency: number; timeoutMs: number }
 interface PendingScope {
   key: string; scope: TelegramHeartScope; entries: TelegramHeartEntry[]; process: TelegramHeartBatchProcess;
-  timer?: ReturnType<typeof setTimeout>; ready: boolean;
+  timer?: ReturnType<typeof setTimeout>; ready: boolean; waiting: boolean;
 }
 interface Active { scope: TelegramHeartScope; claim: TelegramHeartClaim; controller: AbortController }
 const MAX_SCOPES = 64;
-const MAX_BATCH = 32;
 
 /** SQLite owns accepted candidates and execution claims. Timers and this ready
  * ring are disposable scheduling hints, never the sole copy of accepted work. */
@@ -62,6 +65,7 @@ export class TelegramHeartBatcher {
   }
 
   private due(state: PendingScope): number {
+    if (state.waiting) return Math.min(...state.entries.map(entry => entry.item!.waitUntilMs!));
     const times = state.entries.map(entry => entry.item!.formatted.eventIdentity!.receivedAt);
     const { quietMs, maxMs } = this.settings();
     return Math.min(Math.max(...times) + quietMs, Math.min(...times) + maxMs);
@@ -71,15 +75,31 @@ export class TelegramHeartBatcher {
     if (this.closed || !entry.item) return;
     // After a mixed cohort was invalidated, separate its authors. A continuously
     // revised speaker can no longer repeatedly abort the other speakers' work.
-    const key = entry.scope.key + (entry.attempts > 0
+    const waiting = entry.item.waitUntilMs !== undefined;
+    const key = entry.scope.key + (waiting ? ':source-wait' : entry.attempts > 0
       ? ':' + eventHash(entry.item.formatted.pendingIntent?.laneKey ?? String(entry.item.formatted.uid)) : '');
     let state = this.pending.get(key);
     if (!state) {
-      if (this.pending.size >= MAX_SCOPES) return; // Persisted pending: a later recovery page will revisit it.
-      state = { key, scope: entry.scope, entries: [], process, ready: false };
+      if (this.pending.size >= MAX_SCOPES) {
+        const sameClass = [...this.pending.values()].filter(hint => hint.waiting === waiting);
+        if (sameClass.length >= MAX_SCOPES) {
+          if (!waiting) return; // Fresh work remains durable until the next recovery page.
+          const latest = sameClass.filter(hint => !hint.ready).sort((a, b) => this.due(b) - this.due(a))[0];
+          if (!latest || this.due(latest) <= entry.item.waitUntilMs!) return;
+          if (latest.timer) clearTimeout(latest.timer);
+          this.pending.delete(latest.key); // Keep the nearest deadlines; recovery retains every source.
+        }
+      }
+      state = { key, scope: entry.scope, entries: [], process, ready: false, waiting };
       this.pending.set(key, state);
     }
-    if (state.entries.some(old => old.eventId === entry.eventId) || state.entries.length >= MAX_BATCH) return;
+    if (state.entries.some(old => old.eventId === entry.eventId)) return;
+    if (waiting) {
+      // One hint per scope suffices; the store claims all ready deadlines in
+      // that scope. Future rows are reloaded after each successful claim.
+      if (state.entries.length && this.due(state) <= entry.item.waitUntilMs!) return;
+      state.entries = [];
+    } else if (state.entries.length >= TELEGRAM_HEART_BATCH_LIMIT) return;
     if (state.entries.length && entry.item.formatted.eventIdentity!.receivedAt > this.due(state)) {
       this.makeReady(state); return; // Do not combine separate historical bursts during recovery.
     }
@@ -108,13 +128,21 @@ export class TelegramHeartBatcher {
       if (!state?.ready) continue;
       if (this.active.has(state.scope.chatKey)) { this.ready.push(key); this.readySet.add(key); continue; }
       // Another process may already have handled a scheduling hint.
-      state.entries = state.entries.map(entry => getTelegramHeartEntry(entry.eventId)).filter((entry): entry is TelegramHeartEntry => entry?.state === 'pending');
-      if (!state.entries.length) { this.pending.delete(key); continue; }
+      state.entries = state.entries.map(entry => getTelegramHeartEntry(entry.eventId)).filter((entry): entry is TelegramHeartEntry =>
+        entry?.state === 'pending' && (entry.item?.waitUntilMs !== undefined) === state.waiting);
+      if (!state.entries.length) {
+        this.pending.delete(key);
+        if (state.waiting) {
+          const next = nextTelegramHeartWait(state.scope);
+          if (next) this.load(next, state.process);
+        }
+        continue;
+      }
       if (!this.currentScope(state.scope)) {
         for (const entry of state.entries) holdTelegramHeartCandidate(entry.eventId, 'account_or_rollout_changed');
         this.pending.delete(key); continue;
       }
-      const claim = claimTelegramHeartBatch(state.entries);
+      const claim = claimTelegramHeartBatch(state.entries, state.waiting);
       if (!claim) {
         this.ready.push(key); this.readySet.add(key);
         if (!this.retry) {
@@ -122,6 +150,7 @@ export class TelegramHeartBatcher {
         }
         continue;
       }
+      state.entries = claim.entries;
       this.pending.delete(key);
       const active: Active = { scope: state.scope, claim, controller: new AbortController() };
       this.active.set(state.scope.chatKey, active);
@@ -153,7 +182,15 @@ export class TelegramHeartBatcher {
       } catch { /* Unknown ownership never authorizes effects. */ }
       controller.abort(); return false;
     };
-    const control: TelegramHeartBatchControl = { isCurrent: async () => check(), beginEffects: async () => check(true) };
+    const control: TelegramHeartBatchControl = {
+      scopeVersion: claim.scopeVersion,
+      isCurrent: async () => check(), beginEffects: async () => check(true),
+      defer: (ids, seconds) => {
+        if (!check() || !deferTelegramHeartSources(claim, ids, seconds)) return false;
+        incrCounter('telegram_heart_wait_decisions_persisted_total', {});
+        return true;
+      },
+    };
     const heartbeat = setInterval(() => {
       try {
         if (!renewTelegramHeartClaimOwnership(claim) || !check()) controller.abort();
@@ -165,6 +202,8 @@ export class TelegramHeartBatcher {
       if (check()) {
         incrCounter('telegram_heart_batches_started_total', {});
         incrCounter('telegram_heart_batch_candidates_total', {}, state.entries.length);
+        const waiting = state.entries.filter(entry => entry.item!.waitUntilMs !== undefined);
+        if (waiting.length) incrCounter('telegram_heart_source_reviews_total', { trigger: state.waiting ? 'deadline' : 'fresh' }, waiting.length);
         await state.process(state.entries.map(entry => entry.item!), controller.signal, control);
         outcome = controller.signal.aborted ? 'aborted' : 'settled';
       } else outcome = 'aborted';
@@ -178,7 +217,10 @@ export class TelegramHeartBatcher {
       catch { logger.warn('Telegram Heart completion storage unavailable; lease recovery owns the result'); }
       this.active.delete(state.scope.chatKey);
       if (!this.closed) {
-        // Recovered pure evaluations keep their original intake time and join the ready tail.
+        // The waiting timer keeps one hint per scope. Refind the next deadline
+        // even if an early review consumed the previous minimum in another batch.
+        try { const next = nextTelegramHeartWait(state.scope); if (next) this.load(next, state.process); }
+        catch { /* Recovery will restore the timer. */ }
         for (const entry of state.entries) {
           try { const fresh = getTelegramHeartEntry(entry.eventId); if (fresh?.state === 'pending') this.load(fresh, state.process); }
           catch { /* The recovery scan can retry after storage returns. */ }
@@ -191,7 +233,7 @@ export class TelegramHeartBatcher {
     const current = resolveConversationScope(chatId);
     if (!current?.accountId || current.platform !== 'telegram' || chatId >= 0
       || !Number.isSafeInteger(threadId) || threadId < 0) return;
-    const scope: TelegramHeartScope = { key: eventHash(canonicalJson([current.accountId, chatId, threadId])),
+    const scope: TelegramHeartScope = { key: telegramHeartScopeKey(current.accountId, chatId, threadId),
       chatKey: eventHash(canonicalJson([current.accountId, chatId])), chatId, threadId, accountId: current.accountId };
     // Leave not-yet-started candidates queued: an explicit input cannot cancel
     // independent authors. Only the old evaluation's permission is invalidated.
@@ -203,9 +245,8 @@ export class TelegramHeartBatcher {
   recover(process: TelegramHeartBatchProcess): void {
     if (this.closed) return;
     const page = listPendingTelegramHeart(this.cursor);
-    if (!page.length) { this.cursor = 0; return; }
-    for (const entry of page) {
-      this.cursor = entry.sequence;
+    this.cursor = page.at(-1)?.sequence ?? 0;
+    for (const entry of [...listDueTelegramHeartWaits(), ...page]) {
       if (!this.currentScope(entry.scope)) { holdTelegramHeartCandidate(entry.eventId, 'account_or_rollout_changed'); continue; }
       this.load(entry, process);
     }

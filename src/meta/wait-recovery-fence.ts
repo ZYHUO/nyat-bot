@@ -19,17 +19,19 @@ export function selectWaitRecovery(sources: readonly WaitRecoverySource[] | unde
       const fence = source.waitRecovery;
       if (!fence) continue;
       if (fence.chatId !== chatId || fence.threadId !== threadId
-        || selected && (selected.generation !== fence.generation || selected.accountId !== fence.accountId || selected.platform !== fence.platform)) {
+        || selected && (selected.generation !== fence.generation || selected.accountId !== fence.accountId
+          || selected.platform !== fence.platform || selected.authority !== fence.authority
+          || selected.authority === 'telegram_source' && fence.authority === 'telegram_source' && selected.activationEpoch !== fence.activationEpoch)) {
         throw new Error('wait_recovery_source_mismatch');
       }
-      selected = { ...fence };
+      selected = selected?.authority === 'telegram_source' && fence.authority === 'telegram_source'
+        ? { ...fence, expiresAt: Math.min(selected.expiresAt, fence.expiresAt) } : { ...fence };
     }
   }
   return selected;
 }
 
-/** Always re-read Redis at the final boundary; a previous successful check is
- * not permission to send after another WAIT, stop, new input or account switch. */
+/** Recheck the authority that issued the approval at the final send boundary. */
 export async function isTaskWaitRecoveryCurrent(task: { chatId: number; messageThreadId?: number; waitRecovery?: WaitRecoveryFence }): Promise<boolean> {
   const fence = task.waitRecovery;
   if (!fence) return true;
@@ -38,6 +40,11 @@ export async function isTaskWaitRecoveryCurrent(task: { chatId: number; messageT
     if (!scope || !scope.accountId || scope.platform !== fence.platform || scope.accountId !== fence.accountId
       || scope.conversationKind !== 'group' || fence.chatId !== task.chatId
       || fence.threadId !== (task.messageThreadId ?? 0) || !/^[A-Za-z0-9_-]{1,128}$/.test(fence.generation)) return false;
+    if (fence.authority === 'telegram_source') {
+      const { isTelegramHeartWaitFenceCurrent } = await import('./telegram-heart-wait-fence.js');
+      return await isTelegramHeartWaitFenceCurrent(fence);
+    }
+    if (fence.authority !== undefined) return false;
     return await isWaitRecoveryCurrent(task.chatId, { isWaitReplay: true, waitGeneration: fence.generation });
   } catch { return false; }
 }

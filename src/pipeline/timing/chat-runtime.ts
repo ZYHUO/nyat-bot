@@ -38,11 +38,11 @@ export type { ChatTimingState, RuntimeState };
 export { cancelWaitForScope } from './state-store.js';
 
 /** Read current timing state. Returns RUNNING when state machine disabled. */
-export async function getChatState(chatId: number): Promise<ChatTimingState> {
+export async function getChatState(chatId: number, strict = false): Promise<ChatTimingState> {
   if (!env().TIMING_GATE_ENABLED) {
     return { state: 'RUNNING' };
   }
-  return storeGetChatState(chatId);
+  return storeGetChatState(chatId, strict);
 }
 
 /** True when feature flag is on AND chat is currently in a "do not act" state. */

@@ -3,15 +3,18 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const f = vi.hoisted(() => ({ db: undefined as unknown as Database.Database, account: '123', enabled: true }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => f.db }));
-vi.mock('../../../src/env.js', () => ({ env: () => ({ META_TG_GROUP_COALESCE_MS: 100, META_TG_GROUP_COALESCE_MAX_MS: 300 }) }));
+vi.mock('../../../src/env.js', () => ({ env: () => ({ META_TG_GROUP_COALESCE_MS: 100, META_TG_GROUP_COALESCE_MAX_MS: 300,
+  TIMING_GATE_ENABLED: true, META_SUBAGENT_ENABLED: true, CODEACT_ISOLATION_ENABLED: true, META_ACTIVATED_AT_SEC: 1 }) }));
+vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: async () => ({ state: 'RUNNING' }) }));
 vi.mock('../../../src/meta/flags.js', () => ({ isTelegramHeartBatchChat: () => f.enabled }));
 vi.mock('../../../src/shared/privacy-scope.js', () => ({ resolveConversationScope: (chatId: number) => ({
   chatId, accountId: f.account, platform: 'telegram', conversationKind: chatId < 0 ? 'group' : 'private',
 }) }));
 vi.mock('../../../src/shared/logger.js', () => ({ logger: { warn: vi.fn(), info: vi.fn() } }));
+import { captureTelegramHeartWaitFence, isTelegramHeartWaitFenceCurrent } from '../../../src/meta/telegram-heart-wait-fence.js';
 import { TelegramHeartBatcher } from '../../../src/meta/telegram-heart-batch.js';
 import type { TelegramHeartBatchProcess, TelegramHeartBatchControl, TelegramHeartCandidate } from '../../../src/meta/telegram-heart-batch.js';
-import { acceptTelegramHeartCandidate, checkTelegramHeartClaim, claimTelegramHeartBatch, finishTelegramHeartBatch,
+import { acceptTelegramHeartCandidate, checkTelegramHeartClaim, claimTelegramHeartBatch, deferTelegramHeartSources, finishTelegramHeartBatch,
   claimTelegramHeartRecheck, getTelegramHeartEntry, interruptTelegramHeartScope, listPendingTelegramHeart,
   renewTelegramHeartClaimOwnership, telegramHeartScope } from '../../../src/meta/telegram-heart-store.js';
 import { createMessageEventIdentity } from '../../../src/shared/event-identity.js';
@@ -38,6 +41,7 @@ function withIntent(value: TelegramHeartCandidate, revision: number): TelegramHe
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(100_000); f.account = '123'; f.enabled = true;
   f.db = new Database(':memory:'); f.db.exec(readFileSync('migrations/0134_telegram_heart_batches.sql', 'utf8'));
+  f.db.exec(readFileSync('migrations/0135_telegram_heart_source_wait.sql', 'utf8'));
 });
 afterEach(async () => {
   await Promise.all(instances.splice(0).map(value => value.drain()));
@@ -45,6 +49,169 @@ afterEach(async () => {
 });
 
 describe('Telegram pre-Heart scheduling with the real SQLite store', () => {
+  it('retains independent deadlines over restart and merges only an eligible early supplement or quote', async () => {
+    const first = batcher();
+    const process = vi.fn<TelegramHeartBatchProcess>(async (items, _signal, guard) => {
+      switch (ids(items).join(',')) {
+        case '1,2':
+          expect(guard.defer!([1], 3)).toBe(true);
+          expect(guard.defer!([2], 5)).toBe(true);
+          break;
+        case '1,3': expect(guard.defer!([1], 30)).toBe(true); break;
+        case '2,5': break; // A participant's explicit answer closes B's question.
+        case '1': expect(guard.defer!([1], 30)).toBe(false); break; // expired
+      }
+    });
+    const a = item(1), b = item(2, -1, 0, 20);
+    first.enqueue(a, process); first.enqueue(b, process);
+    await vi.advanceTimersByTimeAsync(100); const firstDue = Date.now() + 3000;
+    expect(getTelegramHeartEntry(eventId(a))?.item?.waitUntilMs).toBe(firstDue);
+    expect(getTelegramHeartEntry(eventId(b))?.item?.waitUntilMs).toBe(firstDue + 2000);
+    await first.drain();
+    const resumed = batcher(); resumed.recover(process);
+    resumed.enqueue(item(3), process); await vi.advanceTimersByTimeAsync(100);
+    expect(getTelegramHeartEntry(eventId(a))?.item?.waitUntilMs).toBe(firstDue);
+    resumed.enqueue(item(4), process); await vi.advanceTimersByTimeAsync(100);
+    const quote = item(5, -1, 0, 30);
+    quote.formatted.replyTo = { messageId: 2, uid: 20, fullName: 'B', textSnippet: 'fixture 2' };
+    resumed.enqueue(quote, process); await vi.advanceTimersByTimeAsync(100);
+    expect(state(b)).toBe('settled'); expect(state(a)).toBe('pending');
+    await vi.advanceTimersByTimeAsync(firstDue - Date.now() - 1);
+    expect(process.mock.calls.map(call => ids(call[0]))).toEqual([[1, 2], [1, 3], [4], [2, 5]]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(process.mock.calls.map(call => ids(call[0]))).toEqual([[1, 2], [1, 3], [4], [2, 5], [1]]);
+    expect(state(a)).toBe('settled');
+  });
+
+  it('fires the second deadline after the first without relying on a periodic recovery scan', async () => {
+    const queue = batcher();
+    const process = vi.fn<TelegramHeartBatchProcess>(async (items, _signal, control) => {
+      if (items.length === 2) { control.defer!([1], 2); control.defer!([2], 3); }
+    });
+    queue.enqueue(item(1), process); queue.enqueue(item(2, -1, 0, 20), process);
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(process.mock.calls.map(call => ids(call[0]))).toEqual([[1, 2], [1]]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(process.mock.calls.map(call => ids(call[0]))).toEqual([[1, 2], [1], [2]]);
+  });
+
+  it('uses authenticated store deadlines, atomically checks every requested id, and rejects a late deferral', () => {
+    const source = item(1), reply = item(2);
+    source.waitUntilMs = 1; // A caller cannot fabricate a previously reviewed source.
+    const a = acceptTelegramHeartCandidate(source)!, b = acceptTelegramHeartCandidate(reply)!;
+    expect(a.item?.waitUntilMs).toBeUndefined();
+    const claim = claimTelegramHeartBatch([a, b])!;
+    expect(claim.scopeVersion).toBe(2);
+    expect(deferTelegramHeartSources(claim, [1, 99], 2)).toBe(false);
+    expect(state(source)).toBe('evaluating');
+    expect(deferTelegramHeartSources(claim, [1, 1], 2)).toBe(false);
+    expect(checkTelegramHeartClaim(claim, true)).toBe(true);
+    expect(deferTelegramHeartSources(claim, [1], 2)).toBe(false);
+    finishTelegramHeartBatch(claim, 'failed');
+    expect(state(source)).toBe('unknown'); expect(state(reply)).toBe('unknown');
+    expect(deferTelegramHeartSources(claim, [1], 2)).toBe(false);
+  });
+
+  it('upgrades unprocessed 0134 rows with a valid generation and recovers a WAIT left by a vanished owner', () => {
+    f.db.close(); f.db = new Database(':memory:');
+    f.db.exec(readFileSync('migrations/0134_telegram_heart_batches.sql', 'utf8'));
+    const candidate = item(99, -2, 4), scope = telegramHeartScope(candidate);
+    f.db.prepare(`INSERT INTO telegram_heart_candidates(event_id,scope_key,chat_key,chat_id,account_id,thread_id,received_at_ms,payload_json)
+      VALUES(?,?,?,?,?,?,?,?)`).run(eventId(candidate), scope.key, scope.chatKey, scope.chatId, scope.accountId, scope.threadId, Date.now(), JSON.stringify(candidate));
+    f.db.exec(readFileSync('migrations/0135_telegram_heart_source_wait.sql', 'utf8'));
+    const old = listPendingTelegramHeart()[0]!;
+    const claim = claimTelegramHeartBatch([old])!;
+    expect(claim.scopeVersion).toBeGreaterThan(0);
+    expect(deferTelegramHeartSources(claim, [99], 5)).toBe(true);
+    const dueAt = Date.now() + 5000;
+    vi.setSystemTime(Date.now() + 90_001);
+    // The previous process died after persisting WAIT, before closing its claim.
+    expect(listPendingTelegramHeart()[0]?.item?.waitUntilMs).toBe(dueAt);
+    expect(checkTelegramHeartClaim(claim, true)).toBe(false);
+    expect(acceptTelegramHeartCandidate(candidate)?.item?.waitUntilMs).toBe(dueAt);
+    const foreign = acceptTelegramHeartCandidate(item(100, -2, 5))!; // another topic
+    expect(claimTelegramHeartBatch([old], true)).toBeNull(); // first ready fresh turn
+    const other = claimTelegramHeartBatch([foreign])!; finishTelegramHeartBatch(other, 'settled');
+    const due = claimTelegramHeartBatch([old], true)!;
+    expect(due.scopeVersion).toBe(claim.scopeVersion);
+    expect(deferTelegramHeartSources(due, [99], 1)).toBe(false);
+    interruptTelegramHeartScope(scope);
+    expect(checkTelegramHeartClaim(due, true)).toBe(false);
+    finishTelegramHeartBatch(due, 'aborted');
+    const next = claimTelegramHeartBatch([old], true)!;
+    expect(next.scopeVersion).toBe(due.scopeVersion + 1);
+  });
+
+  it('preserves an independent fresh WAIT if an older selected source expires just before the write', () => {
+    const source = acceptTelegramHeartCandidate(item(1))!;
+    const first = claimTelegramHeartBatch([source])!;
+    expect(deferTelegramHeartSources(first, [1], 2)).toBe(true);
+    finishTelegramHeartBatch(first, 'settled');
+    vi.setSystemTime(Date.now() + 1900);
+    const fresh = acceptTelegramHeartCandidate(item(2))!;
+    const mixed = claimTelegramHeartBatch([fresh])!;
+    expect(ids(mixed.entries.map(entry => entry.item!))).toEqual([1, 2]);
+    vi.setSystemTime(Date.now() + 100);
+    expect(deferTelegramHeartSources(mixed, [1, 2], 5)).toBe(true);
+    finishTelegramHeartBatch(mixed, 'settled');
+    expect(state(source.item!)).toBe('settled');
+    expect(getTelegramHeartEntry(fresh.eventId)?.item?.waitUntilMs).toBe(Date.now() + 5000);
+  });
+
+  it('admits fresh work despite many idle WAIT scopes and restores the nearest due timer first', async () => {
+    for (let i = 1; i <= 65; i++) {
+      const entry = acceptTelegramHeartCandidate(item(i, -i))!;
+      const first = claimTelegramHeartBatch([entry])!;
+      expect(deferTelegramHeartSources(first, [i], i === 65 ? 1 : 120)).toBe(true);
+      finishTelegramHeartBatch(first, 'settled');
+    }
+    const queue = batcher(), process = vi.fn<TelegramHeartBatchProcess>(async () => {});
+    queue.recover(process); queue.recover(process);
+    queue.enqueue(item(80, -80), process);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(process.mock.calls.map(call => ids(call[0]))).toEqual([[80], [65]]);
+  });
+
+  it('fences a due review when an unrelated speaker writes in-flight, then recovers the due source', async () => {
+    const queue = batcher();
+    const process = vi.fn<TelegramHeartBatchProcess>(async (items, signal, control) => {
+      if (process.mock.calls.length === 1) { expect(control.defer!([2], 1)).toBe(true); return; }
+      if (process.mock.calls.length === 2) {
+        await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+        expect(await control.beginEffects()).toBe(false);
+        expect(control.defer!([2], 10)).toBe(false);
+      }
+      if (process.mock.calls.length === 3) {
+        expect(ids(items)).toEqual([2,3]); // new evidence and the original due source
+        expect(await control.beginEffects()).toBe(true);
+      }
+    });
+    const source = item(2, -1, 9, 20);
+    queue.enqueue(source, process); await vi.advanceTimersByTimeAsync(1100);
+    expect(process).toHaveBeenCalledTimes(2);
+    queue.enqueue(item(3, -1, 9, 30), process);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(process).toHaveBeenCalledTimes(3); expect(state(source)).toBe('settled');
+  });
+
+  it('shares the WAIT class budget with transport timers and leaves space for fresh work', () => {
+    const delayed = [-1, -2, -3].map(chat => {
+      const entry = acceptTelegramHeartCandidate(item(1, chat))!;
+      const owner = claimTelegramHeartBatch([entry])!;
+      expect(deferTelegramHeartSources(owner, [1], 1)).toBe(true);
+      finishTelegramHeartBatch(owner, 'settled'); return entry;
+    });
+    vi.setSystemTime(Date.now() + 1000);
+    const wake = claimTelegramHeartRecheck({ scope: telegramHeartScope(item(9, -9)), token: 'legacy' }, false);
+    expect(wake.status).toBe('claimed');
+    const first = claimTelegramHeartBatch([delayed[0]!], true)!;
+    expect(first.entries).toHaveLength(1);
+    expect(claimTelegramHeartBatch([delayed[1]!], true)).toBeNull();
+    expect(claimTelegramHeartBatch([acceptTelegramHeartCandidate(item(7, -7))!])).not.toBeNull();
+    finishTelegramHeartBatch(first, 'settled');
+    expect(claimTelegramHeartBatch([delayed[1]!], true)).not.toBeNull();
+  });
+
   it('bounds passive re-evaluation under repeated direct interruptions', () => {
     const candidate = item(1, -1, 7);
     const entry = acceptTelegramHeartCandidate(candidate)!;
@@ -235,12 +402,31 @@ describe('Telegram pre-Heart scheduling with the real SQLite store', () => {
   it('bounds each batch while overflow remains durably pending and rejects storage overcapacity', async () => {
     const queue = batcher(), process = vi.fn<TelegramHeartBatchProcess>(async () => {});
     for (let id = 1; id <= 128; id++) expect(queue.enqueue(item(id), process)).toBe(true);
-    expect(queue.enqueue(item(129), process)).toBe(false);
+    const approval = captureTelegramHeartWaitFence(-1, 0, 128)!;
+    // A known retransmission cannot revoke this approval, even at capacity.
+    expect(queue.enqueue(item(128), process)).toBe(true);
+    expect(await isTelegramHeartWaitFenceCurrent(approval)).toBe(true);
+    const rejected = item(129);
+    expect(queue.enqueue(rejected, process)).toBe(false);
+    expect(await isTelegramHeartWaitFenceCurrent(approval)).toBe(false);
+    expect(getTelegramHeartEntry(eventId(rejected))).toBeNull();
+    expect(process).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(100); expect(process.mock.calls[0]![0]).toHaveLength(32);
     expect(listPendingTelegramHeart(0, 256)).toHaveLength(96);
     for (let page = 0; page < 8; page++) { queue.recover(process); await vi.advanceTimersByTimeAsync(1); }
     expect(process.mock.calls.flatMap(call => ids(call[0]))).toHaveLength(128);
     expect(new Set(process.mock.calls.flatMap(call => ids(call[0]))).size).toBe(128);
+  });
+
+  it('creates no scope or model work for a previously unseen topic during global overload', () => {
+    // 32 synthetic scopes at 128 rows each; this path only reads row counts.
+    f.db.exec(`WITH RECURSIVE n(id) AS (VALUES(0) UNION ALL SELECT id+1 FROM n WHERE id<4095)
+      INSERT INTO telegram_heart_candidates(event_id,scope_key,chat_key,chat_id,account_id,thread_id,received_at_ms,payload_json)
+      SELECT 'fixture-'||id, 'scope-'||(id%32), 'fixture-chat', -1,'123',id%32,100000,'{}' FROM n`);
+    const queue = batcher(), process = vi.fn<TelegramHeartBatchProcess>(async () => {});
+    expect(queue.enqueue(item(42, -99), process)).toBe(false);
+    expect(f.db.prepare('SELECT COUNT(*) AS n FROM telegram_heart_scope_versions').get()).toEqual({ n: 0 });
+    expect(process).not.toHaveBeenCalled();
   });
 
   it('holds old-account recovery and stops startup recovery from publishing into a new account', () => {

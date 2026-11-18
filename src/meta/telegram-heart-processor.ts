@@ -1,16 +1,16 @@
+import { telegramHeartBatchPolicyCurrent } from './telegram-heart-policy.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
-import { getRedis } from '../db/redis.js';
-import { isGroupAllowed } from '../allowlist/allowlist.js';
-import { configFromEnv } from '../allowlist/bot-flow.js';
-import { getSleepPhase } from '../tracking/sleep.js';
+import { incrCounter } from '../metrics/registry.js';
 import { cancelWaitForScope } from '../pipeline/timing/chat-runtime.js';
+import { checkCodeActActivation } from '../subagent/activation-policy.js';
 import { resolveConversationScope } from '../shared/privacy-scope.js';
 import { batchMessagesAnswered } from './answered.js';
-import { isTelegramHeartBatchChat } from './flags.js';
-import { heartRoute, hasTimedBypass } from './heart-route.js';
 import { evaluateMetaHeart } from './heart-adapter.js';
 import { selectHeartTargets } from './heart-targets.js';
+import { telegramHeartPhysicalBodyHash, telegramHeartWaitContext } from './heart-source-fingerprint.js';
+import { captureTelegramHeartWaitFence, isTelegramHeartWaitFenceCurrent } from './telegram-heart-wait-fence.js';
+import { registerTelegramWaitAttention } from './telegram-heart-wait-handoff.js';
 import { getAttentionAccumulator } from './index.js';
 import { metaMuteBlocksReply } from './ingress-intercepts.js';
 import { assertInputBatchCurrent, hasUnansweredIntentRevision, inspectPendingIntent } from './pending-intent.js';
@@ -54,7 +54,9 @@ async function currentCandidates(batch: TelegramHeartCandidate[]): Promise<Teleg
     const message = item.formatted, ref = message.pendingIntent;
     if (!ref || !fresh(item) || !valid.has(ref.laneKey) || latest.get(ref.laneKey)?.intentId !== ref.intentId
       || metaMuteBlocksReply(item.chatId, message, false)) continue;
-    if (!hasUnansweredIntentRevision(ref)) receiptChecks.push({ chatId: item.chatId, messageId: message.messageId });
+    if (message.eventIdentity?.revision === 'original' || !hasUnansweredIntentRevision(ref)) {
+      receiptChecks.push({ chatId: item.chatId, messageId: message.messageId });
+    }
     result.push(item);
   }
   const answered = await batchMessagesAnswered(receiptChecks, true);
@@ -86,22 +88,40 @@ export async function processTelegramHeartBatch(batch: TelegramHeartCandidate[],
   if (!batch.length || signal.aborted) return;
   assertBatchScope(batch);
   const chatId = batch[0]!.chatId;
-  const policyCurrent = async (): Promise<boolean> => {
-    const config = env();
-    if (!isTelegramHeartBatchChat(chatId) || heartRoute(config, chatId) !== 'heart') return false;
-    const redis = getRedis();
-    return await isGroupAllowed(redis, configFromEnv(config), chatId)
-      && !await hasTimedBypass(chatId, true) && await getSleepPhase(undefined, true, true) === 'awake';
-  };
-  if (!await policyCurrent()) return;
-  const live = await currentCandidates(batch);
+  const threadId = batch[0]!.formatted.messageThreadId ?? 0;
+  if (!await telegramHeartBatchPolicyCurrent(chatId)) return;
+  // A waiting row is a pointer to a decision, not proof that the old body is
+  // still present. Do not reject an unrelated author when one source vanishes.
+  const hasWait = env().TIMING_GATE_ENABLED && env().CODEACT_ISOLATION_ENABLED && batch.some(item => item.waitUntilMs !== undefined);
+  const recent = hasWait ? await telegramHeartWaitContext(chatId, threadId) : undefined;
+  const observed = new Map(recent?.map(message => [message.messageId, message]));
+  const present = batch.filter(item => {
+    if (item.waitUntilMs === undefined) return true;
+    if (!hasWait || !checkCodeActActivation({ chatId, createdAt: item.formatted.eventIdentity?.receivedAt }).allowed) return false;
+    const source = observed.get(item.formatted.messageId);
+    if (source && !source.isBot && !source.isAnonymous
+      && telegramHeartPhysicalBodyHash(source) === telegramHeartPhysicalBodyHash(item.formatted)) return true;
+    incrCounter('telegram_heart_wait_source_skipped_total', { reason: source ? 'changed' : 'not_in_recent' });
+    return false;
+  });
+  const live = await currentCandidates(present);
   const anchor = live[live.length - 1];
   if (!anchor || signal.aborted || !await control.isCurrent()) return;
   const messages = live.map(item => item.formatted);
+  const waiting = live.filter(item => item.waitUntilMs !== undefined);
+  const waitRecovery = waiting.length ? captureTelegramHeartWaitFence(chatId, threadId, control.scopeVersion) : undefined;
+  if (waiting.length && !waitRecovery) throw new Error('telegram_heart_wait_generation_changed');
+  const contextHashes = waitRecovery && recent ? recent.map(telegramHeartPhysicalBodyHash) : undefined;
   const isCurrent = async (): Promise<boolean> => {
-    if (signal.aborted || !await policyCurrent()
+    if (signal.aborted || !await telegramHeartBatchPolicyCurrent(chatId)
       || !await control.isCurrent()) return false;
     assertBatchScope(live);
+    if (waitRecovery && !await isTelegramHeartWaitFenceCurrent(waitRecovery)) {
+      // A direct input/stop or policy can withdraw the decision. An independent
+      // arrival may change just the snapshot. Retry pure work against the new one.
+      if (!captureTelegramHeartWaitFence(chatId, threadId, control.scopeVersion)) throw new Error('telegram_heart_wait_generation_changed');
+      return false;
+    }
     assertInputBatchCurrent(messages);
     // Re-evaluate remaining valid authors when one source changes. Throwing
     // keeps this pure attempt eligible for bounded retry; once effects started
@@ -109,17 +129,49 @@ export async function processTelegramHeartBatch(batch: TelegramHeartCandidate[],
     if ((await currentCandidates(live)).length !== live.length) throw new Error('telegram_heart_inputs_changed');
     return !signal.aborted;
   };
-  const beforeEffect = async (): Promise<boolean> => await isCurrent() && await control.beginEffects() && await isCurrent();
+  const currentForEffect = async (): Promise<boolean> => {
+    if (contextHashes) {
+      const current = await telegramHeartWaitContext(chatId, threadId);
+      if (current.length !== contextHashes.length || current.some((source, i) => telegramHeartPhysicalBodyHash(source) !== contextHashes[i])) {
+        throw new Error('telegram_heart_wait_context_changed');
+      }
+    }
+    return isCurrent();
+  };
+  const beforeEffect = async (): Promise<boolean> => await currentForEffect() && await control.beginEffects() && await isCurrent();
   // Idempotent local cleanup, deliberately before effect-started: cancelling
   // the obsolete WAIT for this exact topic does not publish a reply or a new job.
-  await cancelWaitForScope(chatId, anchor.formatted.messageThreadId ?? 0);
+  if (!waiting.length) await cancelWaitForScope(chatId, threadId);
   if (!await isCurrent()) return;
   // Every distinct current source stays selectable, including unquoted
   // independent questions, with the frozen current revision of that author.
   const { anchors, currentRefs } = selectHeartTargets(live, item => item.formatted);
   const allowedTargets = anchors.map(item => item.formatted.messageId);
+  const onDecision = async (act: 'wait' | 'reply' | 'react', ids: readonly number[], waitSec: number): Promise<boolean> => {
+    if (act !== 'wait' && !waiting.length) return true;
+    if (!await currentForEffect()) return false;
+    const selected = new Set(ids);
+    // Even one speaker can have two independent questions. Only a selected
+    // source or its explicit parent identifies an old question as addressed.
+    // Other early WAITs retain their first deadline, without forcing a reply.
+    const quoted = new Set(live.filter(item => selected.has(item.formatted.messageId))
+      .map(item => item.formatted.replyTo?.messageId));
+    const keep = live.filter(item => {
+      if (item.waitUntilMs !== undefined && item.waitUntilMs <= Date.now()) return false;
+      if (act === 'wait') return selected.has(item.formatted.messageId);
+      return item.waitUntilMs !== undefined && !selected.has(item.formatted.messageId) && !quoted.has(item.formatted.messageId);
+    });
+    if (!keep.length) return act !== 'wait';
+    if (!control.defer) throw new Error('telegram_heart_wait_storage_unavailable');
+    if (control.defer(keep.map(item => item.formatted.messageId), waitSec)) return true;
+    // A source can become due between the host read and the SQLite transaction.
+    // Its deadline may end that WAIT but cannot veto a separate valid reply.
+    if (keep.every(item => item.waitUntilMs !== undefined && item.waitUntilMs <= Date.now())) return act !== 'wait';
+    throw new Error('telegram_heart_wait_storage_changed');
+  };
   const heart = await evaluateMetaHeart({ chatId, formatted: anchor.formatted, layer: anchor.layer,
     cognitiveAnchorEventId: anchor.cognitiveAnchorEventId, batchMessages: messages, targetMessageIds: allowedTargets,
+    telegramBatchWait: { reconsidering: waiting.map(item => item.formatted.messageId), recentMessages: recent, onDecision },
     addressed: false, signal, isCurrent, beforeEffect });
   if (!await isCurrent()) return;
   if (heart.verdict !== 'allow') return;
@@ -133,12 +185,14 @@ export async function processTelegramHeartBatch(batch: TelegramHeartCandidate[],
     const message = item.formatted;
     const attention = await getAttentionAccumulator().ingestAsync({ chatId, layer: heart.layer, reason: heart.reason,
       pressure, pendingIntent: currentRefs.get(message.pendingIntent!.laneKey), messageId: message.messageId, userId: message.uid,
+      ...(item.waitUntilMs !== undefined ? { waitRecovery, telegramWaitSourceEventId: message.eventIdentity!.eventId } : {}),
       textPreview: (message.textContent || '').slice(0, 200), messageThreadId: message.messageThreadId,
       cognitiveAnchorEventId: item.cognitiveAnchorEventId,
       payload: { username: message.username || undefined, fullName: message.fullName || undefined, heartPath: heart.path, heartBatchTarget: true,
         ...(message.replyTo ? { replyTo: { messageId: message.replyTo.messageId, uid: message.replyTo.uid,
           fullName: message.replyTo.fullName, textSnippet: (message.replyTo.textSnippet ?? '').slice(0, 200) } } : {}) },
-    }, { requireDurable: true, beforePersist: isCurrent });
+    }, { requireDurable: true, beforePersist: async attention => await currentForEffect()
+      && (item.waitUntilMs === undefined || registerTelegramWaitAttention(attention, message)) });
     if (attention) dispatched++;
   }
   logger.info({ chatId, messageId: anchor.formatted.messageId, count: live.length, anchors: dispatched }, 'Telegram Heart batch evaluated');

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const settings = vi.hoisted(() => ({ timingEnabled: true }));
+const settings = vi.hoisted(() => ({ timingEnabled: true, waitMaxSec: 120 }));
 const {
   heartDecision,
   composeSelfState,
@@ -34,6 +34,7 @@ vi.mock('../../../src/env.js', () => ({
     HEART_ENABLED: true,
     TIMING_GATE_ENABLED: settings.timingEnabled,
     TIMING_WAIT_MIN_SEC: 8,
+    TIMING_WAIT_MAX_SEC: settings.waitMaxSec,
     TIMING_GATE_TIMEOUT_MS: 8000,
     META_HEART_REFRACTORY_MS: 45_000,
   }),
@@ -77,6 +78,7 @@ vi.mock('../../../src/subagent/task-store.js', () => ({
 }));
 
 import { evaluateMetaHeart } from '../../../src/meta/heart-adapter.js';
+import { reactToMessage } from '../../../src/bot/sender/telegram.js';
 
 const fm = {
   role: 'user' as const,
@@ -93,6 +95,7 @@ describe('evaluateMetaHeart', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     settings.timingEnabled = true;
+    settings.waitMaxSec = 120;
     computeEngagement.mockReturnValue({ budget: 0.8, note: null, factors: [] });
     isBotMonologueTrail.mockReturnValue(false);
     getGateCooldownRemainingMs.mockResolvedValue(0);
@@ -205,6 +208,29 @@ describe('evaluateMetaHeart', () => {
     const result = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L1', waitResume: true });
     expect(result.reason).toBe('heart_wait_expired_still_waiting');
     expect(transitionToWait).not.toHaveBeenCalled();
+  });
+  it.each([[120, 8], [4, 4]])('schedules one source-scoped WAIT with max %d seconds', async (maxSec, expectedSec) => {
+    settings.waitMaxSec = maxSec;
+    const onDecision = vi.fn(async () => true);
+    heartDecision.mockResolvedValue({ act: 'wait', why: '等补充', targetMessageIds: [98] });
+    const first = { ...fm, messageId: 98 };
+    const result = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L1',
+      batchMessages: [first, fm], targetMessageIds: [98, 99], telegramBatchWait: { reconsidering: [98], onDecision } });
+    expect(onDecision).toHaveBeenCalledWith('wait', [98], expectedSec);
+    expect(result.verdict).toBe('silence');
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(transitionToWait).not.toHaveBeenCalled();
+  });
+  it('keeps an undelivered batch reaction on its selected message without authorizing text', async () => {
+    heartDecision.mockResolvedValue({ act: 'react', emoji: '👍', targetMessageIds: [fm.messageId] });
+    vi.mocked(reactToMessage).mockResolvedValueOnce(false);
+    const result = await evaluateMetaHeart({ chatId: -1001, formatted: fm, layer: 'L1',
+      batchMessages: [fm], targetMessageIds: [fm.messageId], telegramBatchWait: {
+        reconsidering: [fm.messageId], onDecision: async () => true,
+      } });
+    expect(reactToMessage).toHaveBeenCalledExactlyOnceWith(-1001, fm.messageId, '👍');
+    expect(result).toMatchObject({ verdict: 'silence', reason: 'heart_react_undelivered' });
+    expect(redisSet).not.toHaveBeenCalled();
   });
   it('rejects a reply invalidated during the model call before any arm', async () => {
     let current = true;

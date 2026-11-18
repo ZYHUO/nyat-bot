@@ -970,7 +970,13 @@ async function runScopedMetaSession(
   attention: AttentionItem[],
   callbacks: SubagentCallback[],
 ): Promise<{ digest: string | null; codeRan: boolean }> {
-  attention = (await Promise.all(attention.map(async item => await isTaskWaitRecoveryCurrent(item) ? item : null)))
+  attention = (await Promise.all(attention.map(async item => {
+    if (item.waitRecovery?.authority === 'telegram_source') {
+      const { checkTelegramWaitAttention } = await import('./telegram-heart-wait-handoff.js');
+      return await checkTelegramWaitAttention(item, true) ? item : null;
+    }
+    return await isTaskWaitRecoveryCurrent(item) ? item : null;
+  })))
     .filter((item): item is AttentionItem => item !== null);
   if (attention.length === 0 && callbacks.length === 0) {
     return { digest: null, codeRan: false };

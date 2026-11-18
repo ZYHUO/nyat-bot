@@ -89,6 +89,8 @@ vi.mock('../../../../src/nyatdb/index.js', async () => {
 import { addMessage, getRecent, _resetNyatCatchUpStateForTests } from '../../../../src/pipeline/context/manager.js';
 import { contextRedisKey, contextStorageId, resolveStorageScope } from '../../../../src/pipeline/context/storage-scope.js';
 import { createMessageEventIdentity } from '../../../../src/shared/event-identity.js';
+import { formatMessage } from '../../../../src/pipeline/formatter.js';
+import { telegramHeartPhysicalBodyHash, telegramHeartWaitContext } from '../../../../src/meta/heart-source-fingerprint.js';
 import { fromTelegramChatId } from '../../../../src/platform/identity.js';
 import { findConversationRef, findMessageRef, getOrCreateConversationId, getOrCreateMessageId, getOrCreateUserId, PLATFORM_INTERNAL_ID_BASE } from '../../../../src/platform/identity-store.js';
 
@@ -148,6 +150,79 @@ describe('context manager NyatDB-primary', () => {
     const recent = await getRecent(CHAT, 10);
     expect(recent.map((m) => m.textContent)).toEqual(['小鱼干', '收到']);
     expect(recent[1]!.role).toBe('assistant');
+  });
+
+  it('verifies the exact sender, quote and gateway revision after a NyatDB-only restart', async () => {
+    const topic = 7;
+    const original = msg(22, 'Which gate?', 'user', CHAT, topic);
+    const gateway = {
+      message_id: original.messageId, message_thread_id: topic, date: original.timestamp,
+      chat: { id: CHAT, type: 'supergroup' }, from: { id: 22, first_name: 'Bo', is_bot: false },
+      text: original.textContent,
+      reply_to_message: { message_id: 10, from: { id: 33, first_name: 'Kai' }, text: 'Doors open at six' },
+    };
+    const source = formatMessage({ message: gateway, __nyatEventIdentity: original.eventIdentity })!;
+    source.pendingIntent = { laneKey: 'synthetic-lane', intentId: 'synthetic-intent', revision: 1,
+      platform: 'telegram', chatId: CHAT, accountId: '123', threadId: topic, senderId: source.uid };
+    await addMessage(CHAT, source);
+    const storageId = contextStorageId(resolveStorageScope(CHAT, topic)!)!;
+    const body = db!.chatRecent(storageId, 1)[0]!.text;
+    expect(body).not.toContain('synthetic-lane');
+    expect(body).not.toContain(String(envValues.BOT_TOKEN));
+    db!.close();
+    db = NyatDb.open({ path: dir, syncEvery: 1, chatRingMax: 100 });
+    _resetNyatCatchUpStateForTests();
+    const first = await telegramHeartWaitContext(CHAT, topic);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ isBot: false, uid: 22, messageId: 22,
+      replyTo: { messageId: 10, uid: 33, textSnippet: 'Doors open at six' }, eventIdentity: source.eventIdentity });
+    expect(first[0]!.pendingIntent).toBeUndefined();
+    expect(telegramHeartPhysicalBodyHash(first[0]!)).toBe(telegramHeartPhysicalBodyHash(source));
+
+    // Identical visible text, author and physical ID still cannot bless the old revision.
+    const editedIdentity = createMessageEventIdentity({ ref: original.eventIdentity.ref, edit: true,
+      occurredAt: original.eventIdentity.occurredAt, editedAt: (original.timestamp + 1) * 1000, updateId: 881, content: gateway.text });
+    const edited = formatMessage({ edited_message: { ...gateway, edit_date: original.timestamp + 1 },
+      __nyatEventIdentity: editedIdentity })!;
+    await addMessage(CHAT, edited);
+    const latest = await telegramHeartWaitContext(CHAT, topic);
+    expect(latest).toHaveLength(1);
+    expect(latest[0]!.eventIdentity).toEqual(editedIdentity);
+    expect(telegramHeartPhysicalBodyHash(latest[0]!)).not.toBe(telegramHeartPhysicalBodyHash(source));
+    expect(telegramHeartPhysicalBodyHash(latest[0]!)).toBe(telegramHeartPhysicalBodyHash(edited));
+    expect(redisMock.eval).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy scoped bodies readable without inferring the missing revision', async () => {
+    const source = msg(9, 'Which entrance?', 'user', CHAT, 2);
+    const legacyPayload = { ...source, eventIdentity: undefined };
+    const old = { messageId: source.messageId, uid: source.uid, role: source.role,
+      ts: source.timestamp, bodyFormat: 'json' as const, text: JSON.stringify(legacyPayload) };
+    const storageId = contextStorageId(resolveStorageScope(CHAT, 2)!, true)!;
+    db!.chatAppend(storageId, old);
+    const latest = await telegramHeartWaitContext(CHAT, 2);
+    expect(latest).toHaveLength(1);
+    expect(latest[0]!.textContent).toBe(source.textContent);
+    expect(latest[0]!.eventIdentity).toBeUndefined();
+    expect(telegramHeartPhysicalBodyHash(latest[0]!)).not.toBe(telegramHeartPhysicalBodyHash(source));
+    expect(db!.chatRecent(storageId, 1)[0]!.text).toBe(old.text);
+  });
+
+  it('keeps the existing body budget when evidence does not fit and declines lossy quotes', async () => {
+    const source = msg(11, 'x'.repeat(2180), 'user', CHAT, 2);
+    const legacyPayload = { ...source, eventIdentity: undefined };
+    expect(packChatLogBody(source)).toBe(packChatLogBody(legacyPayload));
+    await addMessage(CHAT, source);
+    const quoted = { ...msg(12, 'Same question?', 'user', CHAT, 2),
+      replyTo: { uid: 8, messageId: 5, fullName: 'B', textSnippet: 'x'.repeat(200) } };
+    await addMessage(CHAT, quoted);
+    const latest = await telegramHeartWaitContext(CHAT, 2);
+    expect(latest).toHaveLength(2);
+    expect(latest[0]!.textContent).toBe(source.textContent);
+    expect(latest[0]!.eventIdentity).toBeUndefined();
+    expect(telegramHeartPhysicalBodyHash(latest[0]!)).not.toBe(telegramHeartPhysicalBodyHash(source));
+    expect(latest[1]!.replyTo?.textSnippet).not.toBe(quoted.replyTo.textSnippet);
+    expect(telegramHeartPhysicalBodyHash(latest[1]!)).not.toBe(telegramHeartPhysicalBodyHash(quoted));
   });
 
   it('skips Redis LRANGE on getRecent after a clean merge', async () => {
@@ -323,6 +398,8 @@ describe('context manager NyatDB-primary', () => {
     const scope = resolveStorageScope(CHAT, 2)!;
     const wrong = msg(5, 'wrong-topic-canary', 'user', CHAT, 3);
     db!.chatAppend(contextStorageId(scope, true)!, chatAppendFromFormatted(wrong));
+    // Even a correct-looking storage label cannot override the original gateway ref.
+    db!.chatAppend(contextStorageId(scope)!, chatAppendFromFormatted({ ...wrong, contextScope: scope, messageThreadId: 2 }));
     lists.set(contextRedisKey(scope), [JSON.stringify(wrong)]);
     expect(await getRecent(CHAT, 10, 2)).toEqual([]);
   });
@@ -356,8 +433,8 @@ describe('context manager NyatDB-primary', () => {
 
   it('retains provable old Redis history but refuses unknown and contradictory provenance', async () => {
     const safe = msg(20, 'proven-old-history');
-    const { contextScope: _scope, ...identityOnly } = safe;
-    const { eventIdentity: _identity, ...unknown } = identityOnly;
+    const identityOnly = { ...safe, contextScope: undefined };
+    const unknown = { ...identityOnly, eventIdentity: undefined };
     const foreign = { ...safe, contextScope: { ...safe.contextScope, accountId: '999' } };
     const legacy = [JSON.stringify(identityOnly), JSON.stringify({ ...unknown, messageId: 21, textContent: 'unknown-canary' }), JSON.stringify({ ...foreign, messageId: 22 })];
     lists.set(`xxb:ctx:${CHAT}`, legacy);
@@ -379,7 +456,7 @@ describe('context manager NyatDB-primary', () => {
   });
 
   it('refuses an unidentified user message or a conflicting explicit topic before writing', async () => {
-    const { contextScope: _scope, eventIdentity: _identity, ...unknown } = msg(7, 'unproven');
+    const unknown = { ...msg(7, 'unproven'), contextScope: undefined, eventIdentity: undefined };
     await expect(addMessage(CHAT, unknown)).rejects.toThrow('context_source_unproven');
     await expect(addMessage(CHAT, msg(7, 'two', 'user', CHAT, 2), 3)).rejects.toThrow('context_source_unproven');
     expect(redisMock.eval).not.toHaveBeenCalled();

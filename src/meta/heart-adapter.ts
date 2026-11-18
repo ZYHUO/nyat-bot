@@ -29,6 +29,7 @@ import { nextSelfWake, renderPendingWake } from '../agent/cognitive-clock.js';
 import { findUnrepairedActs, renderUnrepairedActs } from '../tracking/repair.js';
 import { incrCounter } from '../metrics/registry.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
+import { resolveBatchTargets } from './heart-targets.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
@@ -58,6 +59,12 @@ export async function evaluateMetaHeart(opts: {
   ongoingFollowup?: boolean;
   batchMessages?: FormattedMessage[];
   targetMessageIds?: readonly number[];
+  /** Only the passive Telegram microbatch owner can persist a source-scoped WAIT. */
+  telegramBatchWait?: {
+    reconsidering: number[];
+    recentMessages?: FormattedMessage[];
+    onDecision: (action: 'reply' | 'wait' | 'react', selected: readonly number[], waitSec: number) => Promise<boolean>;
+  };
   signal?: AbortSignal;
   /** Host-owned generation/revision fence, checked again after model work. */
   isCurrent?: () => Promise<boolean>;
@@ -114,12 +121,14 @@ export async function evaluateMetaHeart(opts: {
     /* fail-open */
   }
 
-  let recentMessages: FormattedMessage[] = [];
-  try {
-    const { getRecent } = await import('../pipeline/context/manager.js');
-    recentMessages = await getRecent(chatId, 40, formatted.messageThreadId);
-  } catch {
-    recentMessages = [formatted];
+  let recentMessages = opts.telegramBatchWait?.recentMessages;
+  if (!recentMessages) {
+    try {
+      const { getRecent } = await import('../pipeline/context/manager.js');
+      recentMessages = await getRecent(chatId, 40, formatted.messageThreadId);
+    } catch {
+      recentMessages = [formatted];
+    }
   }
 
   const botUid = getBotUid(chatId) || 0;
@@ -242,6 +251,7 @@ export async function evaluateMetaHeart(opts: {
     recentMessages,
     batchMessages: opts.batchMessages,
     targetMessageIds: opts.targetMessageIds,
+    reconsideringMessageIds: opts.telegramBatchWait?.reconsidering,
     botUid,
     botName: getBotDisplayName(chatId),
     selfState,
@@ -252,7 +262,7 @@ export async function evaluateMetaHeart(opts: {
     cognitiveWorkspaceHint,
     ...(selfHistory ? { selfHistory } : {}),
     burstNote: [
-      opts.batchMessages && opts.batchMessages.length > 1
+      opts.batchMessages && opts.batchMessages.length > 1 && !opts.telegramBatchWait?.reconsidering.length
         ? `(同一会话刚连续收到 ${opts.batchMessages.length} 条消息，★ 是这批最后一句；结合整批内容做一次决定，不要只答第一句。)` : undefined,
       engagementNote,
       // The fact the dispatch gate used to act on. Handing it to the model here
@@ -275,6 +285,19 @@ export async function evaluateMetaHeart(opts: {
   void import('../pipeline/heart/mind.js')
     .then(({ noteThought }) => noteThought(chatId, heart.why))
     .catch(() => {});
+
+  if (opts.telegramBatchWait && heart.act !== 'pass') {
+    const selected = resolveBatchTargets(heart.act, opts.targetMessageIds ?? [], heart.targetMessageIds, formatted.messageId);
+    if (!selected) return { verdict: 'silence', layer, reason: 'heart_batch_targets_invalid' };
+    if (heart.act === 'wait' && !e.TIMING_GATE_ENABLED) return { verdict: 'silence', layer, reason: 'heart_wait_transport_unavailable' };
+    const waitSec = Math.min(Math.max(8, e.TIMING_WAIT_MIN_SEC), e.TIMING_WAIT_MAX_SEC);
+    if (!await opts.telegramBatchWait.onDecision(heart.act, selected, waitSec)) {
+      return { verdict: 'silence', layer, reason: 'heart_batch_wait_not_scheduled' };
+    }
+    // A passive Telegram wait uses the existing candidate rows and claim. It
+    // must not install a second Redis/Agency wake for the same source.
+    if (heart.act === 'wait') return { verdict: 'silence', layer, reason: `heart_wait:${heart.why}` };
+  }
 
   // round 54（新 goal）：**Meta 路径补上 act=react**。
   //
@@ -310,9 +333,9 @@ export async function evaluateMetaHeart(opts: {
       // react 是出口：副作用已做完，让 Meta 当成静默。
       return { verdict: 'silence', layer: 'L1', reason: `heart_react:${heart.why}` };
     }
-    if (isPlatformInternalId(chatId)) {
-      // A QQ reaction decision is not permission to send a different message.
-      // In particular, a timeout can mean the reaction already reached QQ.
+    if (isPlatformInternalId(chatId) || opts.telegramBatchWait) {
+      // A source-scoped reaction never authorizes text on the same question.
+      // A timeout can mean the platform already received the reaction.
       // End this event without retry, text fallback, or a text refractory arm;
       // subsequent independent messages can ask Heart again normally.
       const reason = deliveryUnknown ? 'heart_react_unknown' : 'heart_react_undelivered';

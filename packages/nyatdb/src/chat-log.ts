@@ -7,6 +7,31 @@ import { encodeChatTuple } from './format/codec.js';
 
 export const CHAT_JSON_MAX_BYTES = 2800;
 
+/** Host ingress fields only. The package has no dependency on the bot's identity store. */
+interface ChatLogEventIdentity {
+  eventId: string;
+  revision: string;
+  messageKey: string;
+  ref: {
+    id: string;
+    conversation: {
+      platform: 'telegram' | 'qq'; idNamespace: 'telegram' | 'qq-number' | 'qq-openid';
+      accountId: string; conversationKind: 'private' | 'group'; id: string; threadId?: string;
+    };
+  };
+  occurredAt: number | null;
+  editedAt: number | null;
+  receivedAt: number;
+  processedAt: number | null;
+}
+
+function copySourceEvent(identity: ChatLogEventIdentity): ChatLogEventIdentity {
+  const { eventId, revision, messageKey, occurredAt, editedAt, receivedAt, processedAt } = identity;
+  const { platform, accountId, conversationKind, idNamespace, id, threadId } = identity.ref.conversation;
+  return { eventId, revision, messageKey, occurredAt, editedAt, receivedAt, processedAt,
+    ref: { id: identity.ref.id, conversation: { platform, accountId, conversationKind, idNamespace, id, threadId } } };
+}
+
 /** Truncate a JS string so its UTF-8 encoding fits `maxBytes`. */
 export function utf8ByteSlice(s: string, maxBytes: number): string {
   if (maxBytes <= 0) return '';
@@ -27,6 +52,7 @@ export type ChatLogLikeMessage = {
   timestamp: number;
   messageId: number;
   messageThreadId?: number;
+  eventIdentity?: ChatLogEventIdentity;
   /** Host-established storage provenance; never infer it from a legacy bucket. */
   contextScope?: {
     platform: 'telegram' | 'qq';
@@ -88,7 +114,7 @@ export type ChatLogPayload = Pick<
       | 'messageThreadId'
       | 'contextScope'
     >
-  >;
+  > & { sourceEvent?: ChatLogEventIdentity };
 
 /** Alias for callers that still say FormattedMessage-shaped. */
 export type ChatLogRowLike = ChatLogLikeMessage;
@@ -139,6 +165,16 @@ export function toChatLogPayload(message: ChatLogLikeMessage): ChatLogPayload {
   if (message.botClass) payload.botClass = message.botClass;
   if (message.messageThreadId !== undefined) payload.messageThreadId = message.messageThreadId;
   if (message.contextScope !== undefined) payload.contextScope = { ...message.contextScope };
+  // Source WAIT must identify the exact gateway revision even when this is the sole
+  // history store. Only copy fields from a host-bound group row. No intent/ACL,
+  // raw update or model input is part of the storage evidence.
+  const identity = message.eventIdentity;
+  if (message.role === 'user' && message.contextScope?.platform === 'telegram'
+    && message.contextScope.conversationKind === 'group' && identity) {
+    payload.sourceEvent = copySourceEvent(identity);
+    // Telegram's formatter explicitly records false on human messages.
+    if (message.isBot === false) payload.isBot = false;
+  }
   return payload;
 }
 
@@ -148,6 +184,16 @@ export function packChatLogBody(message: ChatLogLikeMessage): string {
   let json = JSON.stringify(payload);
   let bytes = Buffer.byteLength(json, 'utf8');
   if (bytes <= CHAT_JSON_MAX_BYTES) return json;
+
+  // Keep the existing prompt body budget. Incomplete rows can still serve as
+  // history, but cannot attest a WAIT source.
+  if (payload.sourceEvent) {
+    delete payload.sourceEvent;
+    if (payload.isBot === false) delete payload.isBot;
+    json = JSON.stringify(payload);
+    bytes = Buffer.byteLength(json, 'utf8');
+    if (bytes <= CHAT_JSON_MAX_BYTES) return json;
+  }
 
   // Shrink text until UTF-8 JSON fits.
   let text = payload.textContent ?? '';
@@ -231,6 +277,8 @@ export function unpackChatLogRow(row: ChatLogRow): ChatLogLikeMessage {
         botClass: p.botClass,
         messageThreadId: p.messageThreadId,
         contextScope: p.contextScope,
+        ...(p.contextScope?.platform === 'telegram' && p.contextScope.conversationKind === 'group'
+          && p.role === 'user' && p.sourceEvent ? { eventIdentity: copySourceEvent(p.sourceEvent) } : {}),
       };
     } catch {
       // fall through to plain text

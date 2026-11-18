@@ -118,17 +118,17 @@ export class AttentionAccumulator {
 
   async ingestAsync(
     partial: Omit<AttentionItem, 'id' | 'createdAt' | 'pressure'> & { pressure?: number },
-    options?: { requireDurable?: boolean; beforePersist?: () => Promise<boolean> },
+    options?: { requireDurable?: boolean; beforePersist?: (item: AttentionItem) => Promise<boolean> },
   ): Promise<AttentionItem | null> {
     const original = buildItem(partial);
     if (!await isTaskWaitRecoveryCurrent(original)) return null;
     const scope = inspectMetaAttention(original);
     if (scope.status !== 'valid') {
-      if (options?.beforePersist && !await options.beforePersist()) return null;
+      if (options?.beforePersist && !await options.beforePersist(original)) return null;
       const held = scope.status === 'invalid' && await holdMetaScopeInput('attention', original, scope.reason);
       if (!held && options?.requireDurable) throw new Error('attention_scope_not_persisted');
       if (!held) {
-        if (options?.beforePersist && !await options.beforePersist()) return null;
+        if (options?.beforePersist && !await options.beforePersist(original)) return null;
         this.local.push(original); scheduleCoalesceWake(1000);
       }
       return null;
@@ -150,12 +150,12 @@ export class AttentionAccumulator {
       }
     }
     const item = scope.value;
-    if (options?.beforePersist && !await options.beforePersist()) return null;
+    if (options?.beforePersist && !await options.beforePersist(item)) return null;
     try {
       await this.persistPush(item, options?.requireDurable);
     } catch (err) {
       if (options?.requireDurable) throw err;
-      if (options?.beforePersist && !await options.beforePersist()) return null;
+      if (options?.beforePersist && !await options.beforePersist(item)) return null;
       logger.warn({ err }, 'Attention Redis push failed — keeping local only');
       this.local.push(item);
       if (this.local.length > MAX) this.local.splice(0, this.local.length - MAX);
@@ -263,7 +263,10 @@ export class AttentionAccumulator {
     }
     for (const candidate of notStale) {
       let it = candidate;
-      if (!await isTaskWaitRecoveryCurrent(it)) continue;
+      if (it.waitRecovery?.authority === 'telegram_source') {
+        const { checkTelegramWaitAttention } = await import('./telegram-heart-wait-handoff.js');
+        if (!await checkTelegramWaitAttention(it, false)) continue;
+      } else if (!await isTaskWaitRecoveryCurrent(it)) continue;
       if (pendingIntentEnabled() && it.pendingIntent) {
         try {
           if (it.pendingIntent.chatId !== it.chatId || it.pendingIntent.senderId !== it.userId

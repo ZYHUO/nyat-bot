@@ -33,6 +33,7 @@ async function settle() { await vi.dynamicImportSettled(); for (let n = 0; n < 1
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(100_000); f.enabled = true; f.concurrency = 8; f.metric.mockClear();
   f.db = new Database(':memory:'); f.db.exec(readFileSync('migrations/0134_telegram_heart_batches.sql', 'utf8'));
+  f.db.exec(readFileSync('migrations/0135_telegram_heart_source_wait.sql', 'utf8'));
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); f.db.close(); });
 describe('Meta WAIT shares the real Telegram Heart chat claim', () => {
@@ -109,6 +110,7 @@ describe('Meta WAIT shares the real Telegram Heart chat claim', () => {
     try {
       f.db = db; db.pragma('journal_mode=WAL'); db.pragma('busy_timeout=3000');
       db.exec(readFileSync('migrations/0134_telegram_heart_batches.sql', 'utf8'));
+      db.exec(readFileSync('migrations/0135_telegram_heart_source_wait.sql', 'utf8'));
       const active = claimTelegramHeartBatch([pendingEntry(1, 7)])!;
       const source = item(2, 8); const ticket = { scope: telegramHeartScope(source), token: 'waiting-worker' };
       const next = pendingEntry(3, 9);

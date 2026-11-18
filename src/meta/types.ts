@@ -4,13 +4,16 @@ export type AttentionLayer = 'L0' | 'L1' | 'L1_CALLBACK' | 'L2';
 import type { PendingIntentRef } from './pending-intent.js';
 
 /** Host-established WAIT recovery authority; never accepted from guest arguments. */
-export interface WaitRecoveryFence {
+export type WaitRecoveryFence = {
   generation: string;
   chatId: number;
   threadId: number;
   accountId: string;
   platform: 'telegram' | 'qq';
-}
+} & (
+  | { authority?: undefined }
+  | { authority: 'telegram_source'; expiresAt: number; activationEpoch: number }
+);
 
 export interface AttentionItem {
   id: string;
@@ -26,6 +29,8 @@ export interface AttentionItem {
   payload?: Record<string, unknown>;
   pendingIntent?: PendingIntentRef;
   waitRecovery?: WaitRecoveryFence;
+  /** Physical Telegram input bound to this pre-session WAIT handoff. */
+  telegramWaitSourceEventId?: string;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
   /** Durable Telegram event used to anchor workspace/replay reads. */

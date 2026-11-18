@@ -8,6 +8,10 @@ import { spawnSync } from 'node:child_process';
 export const OFFLINE_SUITES = [
   'tests/unit/meta/telegram-heart-ingress.test.ts',
   'tests/unit/meta/telegram-heart-batch.test.ts',
+  'tests/unit/meta/telegram-heart-wait-fence.test.ts',
+  'tests/unit/meta/telegram-heart-wait-handoff.test.ts',
+  'tests/unit/db/migration-concurrency.test.ts',
+  'tests/unit/pipeline/context/manager-nyatdb.test.ts',
   'tests/unit/pipeline/heart/batch-context.test.ts',
   'tests/unit/meta/wait-recheck.test.ts',
   'tests/unit/meta/wait-recheck-slot.test.ts',

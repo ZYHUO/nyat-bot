@@ -29,6 +29,7 @@ import { getBotIdentity } from '../../bot/bot.js';
 import type { SelfState } from './self-state.js';
 import { isPlatformInternalId } from '../../platform/identity-store.js';
 import { isTelegramHeartBatchChat } from '../../meta/flags.js';
+import { resolveBatchTargets } from '../../meta/heart-targets.js';
 
 export type HeartAct = 'reply' | 'wait' | 'pass' | 'react';
 
@@ -54,6 +55,8 @@ export interface HeartInput {
   batchMessages?: FormattedMessage[];
   /** Current dispatchable anchors, supplied only by the Telegram batch host. */
   targetMessageIds?: readonly number[];
+  /** Present only for source-scoped Telegram WAIT. These anchors are being reconsidered. */
+  reconsideringMessageIds?: readonly number[];
   botUid: number;
   botName: string;
   selfState: SelfState;
@@ -265,7 +268,8 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   if (input.targetMessageIds && (!batch?.length || batch.length > 32 || !anchorSource
     || anchorSource.platform !== 'telegram' || anchorSource.conversationKind !== 'group' || anchorSource.id !== String(input.chatId)
     || batch.some(message => !sameScope(message) || message.eventIdentity?.ref.id !== String(message.messageId))
-    || input.targetMessageIds.some(id => !batch.some(message => message.messageId === id)))) {
+    || input.targetMessageIds.some(id => !batch.some(message => message.messageId === id))
+    || input.reconsideringMessageIds?.some(id => !input.targetMessageIds!.includes(id)))) {
     return { act: 'pass', path: 'chat', why: 'batch_scope_invalid', latencyMs: 0, judgeResult: toJudgeResult('pass', 'chat', 0) };
   }
 
@@ -327,8 +331,12 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const ctxStr = slimContextForAI(history, input.message, input.botUid);
   const batchLine = batch?.length ? `\n\n[本次待判断消息，按真实发送者和引用区分]\n${slimContextForAI(batch, input.message, input.botUid)}`
     + '\n前面的补充仍是上下文；不要把不同人的问题合成同一个人的指令，不要仅因时间相邻就逐人回复。' : '';
-  const targetsLine = input.targetMessageIds
+  let targetsLine = input.targetMessageIds
     ? `\n[宿主允许的当前回复锚点] ${JSON.stringify(input.targetMessageIds)}。reply 必须额外输出 targetMessageIds 数组，只选择确实要接的消息 ID。同一问题的连续补充合并选择一个锚点；独立问题即使来自同一人、没有原生引用，也可各选一个真实消息 ID，不要默认只选最后一条。react 只对 ★ 标记的最后一条消息反应，不能用 targetMessageIds 改选反应对象。无法确定归属时 pass 或 wait。` : '';
+  if (input.reconsideringMessageIds) {
+    targetsLine += '\n同群其余历史只作上下文。先看后续是否有人已经解答、撤回或补充了问题。wait 可在 targetMessageIds 中只列出仍需等后文的锚点，省略表示整批等待。'
+      + (input.reconsideringMessageIds.length ? `先前选择等待、现在重评的消息 ID：${JSON.stringify(input.reconsideringMessageIds)}。时间经过不要求发言；仍无必要可以 pass。` : '');
+  }
   const presence = input.lastSpokeSecAgo !== undefined && input.lastSpokeSecAgo < 180
     ? `\n(你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,正处于对话中)`
     : '';
@@ -460,9 +468,9 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     logger.warn({ chatId: input.chatId, rawSummary: summarizeHeartRaw(raw) }, 'heart parse failed, hybrid fallback');
     return { act: 'pass', path: 'chat', why: 'parse_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
-  if (parsed.act === 'reply' && input.targetMessageIds) {
-    const selected = parsed.targetMessageIds ?? (input.targetMessageIds.length === 1 ? [...input.targetMessageIds] : []);
-    if (!selected.length || selected.some(id => !input.targetMessageIds!.includes(id))) {
+  if (input.targetMessageIds && parsed.act !== 'pass' && (parsed.act === 'reply' || input.reconsideringMessageIds)) {
+    const selected = resolveBatchTargets(parsed.act, input.targetMessageIds, parsed.targetMessageIds, input.message.messageId);
+    if (!selected) {
       return { act: 'pass', path: 'chat', why: 'batch_targets_invalid', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
     }
     parsed = { ...parsed, targetMessageIds: selected };
