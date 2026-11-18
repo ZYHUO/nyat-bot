@@ -3,6 +3,7 @@
 // 一颗心代替三个过滤器。Extracted from pipeline.ts (pure extraction, no logic changes).
 // ────────────────────────────────────────
 
+import { randomUUID } from "node:crypto";
 import type { ChatJob, FormattedMessage, JudgeResult } from "../../shared/types.js";
 import { l0Rule, judge } from "../judge/judge.js";
 import { getRecent } from "../context/manager.js";
@@ -19,6 +20,7 @@ import { composeSelfState } from "./self-state.js";
 import { heartDecision } from "./decision.js";
 import { getBotDisplayName } from "../../bot/bot.js";
 import { setWaitAnchor } from "../turn/buffer.js";
+import { isWaitRecoveryCurrent } from "../turn/wait-replay.js";
 import { recordGateNoAction } from "../timing/state-store.js";
 import { needsLookup } from "./path-heuristic.js";
 import { logger } from "../../shared/logger.js";
@@ -330,6 +332,7 @@ export async function runHeartBranch(ctx: {
       if (emoji) {
         try {
           const { reactToMessage } = await import('../../bot/sender/telegram.js');
+          if (!await isWaitRecoveryCurrent(job.chatId, job.turnContext)) return { shouldReturn: true };
           await reactToMessage(job.chatId, formatted.messageId, emoji);
           logger.info({ chatId: job.chatId, emoji, why: heart.why }, 'heart: reacted');
           // 记在 social-ledger 而不是直接 incrCounter：decision_react 已经进了
@@ -346,12 +349,17 @@ export async function runHeartBranch(ctx: {
       }
     }
     if (heart.act === 'wait') {
+      if (job.turnContext.isWaitReplay && !job.turnContext.sleepCatchup) {
+        logger.info({ chatId: job.chatId, why: heart.why }, 'Heart wait replay remains quiet (no further timer)');
+        return { shouldReturn: true };
+      }
       // 心流说"等TA说完" —— 复用 wait 基建(锚点暂存 + 真回访)。
       // review R3(被 verifier 误判 refuted,经代码对比确认真实):必须与
       // gate=wait 路径(:setWaitAnchor/:transitionToWait)一样保留
       // obligation 字段 + waitStartedAt,否则非 @ 问句的强债务在心流 wait
       // 回访时判不出保护性 wait,债务被静默丢弃(与 R2#3/#7 同 bug 类)。
       const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
+      const waitGeneration = randomUUID();
       if (e.TURN_WAIT_RESUME_ENABLED) {
         try {
           await setWaitAnchor(job.chatId, {
@@ -364,7 +372,7 @@ export async function runHeartBranch(ctx: {
             obligationId: job.turnContext.obligationId,
             obligationTargetUid: job.turnContext.obligationTargetUid,
             obligationStrong: job.turnContext.obligationStrong,
-          }, waitSec + 120);
+          }, waitSec + 120, waitGeneration);
         } catch { /* non-critical */ }
       }
       const agencyWait = await dispatchWaitViaAgency({
@@ -372,6 +380,8 @@ export async function runHeartBranch(ctx: {
         triggerMessageId: formatted.messageId,
         ...(formatted.uid > 0 ? { triggerUserId: formatted.uid } : {}),
         waitSec,
+        waitGeneration,
+        messageThreadId: formatted.messageThreadId,
         reason: `heart:${heart.why || 'wait'}`,
         source: 'heart',
         ...(job.turnContext.obligationId ? { obligationId: job.turnContext.obligationId } : {}),
@@ -389,6 +399,7 @@ export async function runHeartBranch(ctx: {
         await transitionToWait(
           job.chatId, waitSec, formatted.messageId, formatted.uid,
           job.turnContext.obligationId,
+          { waitGeneration, messageThreadId: formatted.messageThreadId },
         );
       }
       logger.info({ chatId: job.chatId, why: heart.why, triggerUid: formatted.uid }, "Pipeline complete (heart=wait)");

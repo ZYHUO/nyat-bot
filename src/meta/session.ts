@@ -1,5 +1,7 @@
 import { pendingIntentEnabled, isTaskInputAuthor, hasUnansweredIntentRevision, inspectPendingIntent } from './pending-intent.js';
 import type { PendingIntentRef } from './pending-intent.js';
+import type { WaitRecoverySource } from './wait-recovery-fence.js';
+import { isTaskWaitRecoveryCurrent } from './wait-recovery-fence.js';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { callWithFallback } from '../ai/fallback.js';
@@ -131,6 +133,7 @@ async function interceptDiaryAttention(
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    waitRecoverySources?: readonly WaitRecoverySource[];
   },
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
@@ -142,6 +145,7 @@ async function interceptDiaryAttention(
     defaultTargetUserIds: opts.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: opts.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: opts.defaultPendingIntents,
+    waitRecoverySources: opts.waitRecoverySources,
   });
   const journal = api['journal'] as {
     tryWrite: (args?: {
@@ -387,6 +391,7 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   defaultTargetUserIds: Map<number, number>;
   defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+  waitRecoverySources: readonly WaitRecoverySource[];
 } {
   const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
   const chatLayer = new Map<number, AttentionLayer>();
@@ -427,7 +432,9 @@ function buildAttentionMaps(attention: AttentionItem[]): {
       }
     }
   }
-  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents };
+  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents,
+    waitRecoverySources: attention.map(({ chatId, messageId, messageThreadId, waitRecovery }) => ({ chatId, messageId, messageThreadId,
+      ...(waitRecovery ? { waitRecovery: { ...waitRecovery } } : {}) })) };
 }
 
 async function runMetaCode(
@@ -441,6 +448,7 @@ async function runMetaCode(
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    waitRecoverySources?: readonly WaitRecoverySource[];
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
@@ -458,6 +466,7 @@ async function autoDispatchL0(
     defaultTargetUserIds: Map<number, number>;
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
+    waitRecoverySources?: readonly WaitRecoverySource[];
   },
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
@@ -469,6 +478,7 @@ async function autoDispatchL0(
     defaultTargetUserIds: maps?.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps?.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: maps?.defaultPendingIntents,
+    waitRecoverySources: maps?.waitRecoverySources,
   });
   const d = api['dispatch'] as {
     taskToGroup: (
@@ -492,8 +502,9 @@ async function autoDispatchL0(
     const heartForce = a.reason.includes('heart:');
     if (a.layer !== 'L0' && !heartForce) continue;
     if (!isMetaSubagentChat(a.chatId)) continue;
-    if (skipChatIds?.has(a.chatId)) continue;
-    const key = pendingIntentEnabled() ? a.pendingIntent?.laneKey ?? `${a.chatId}:${a.userId}:${a.messageThreadId ?? 0}` : String(a.chatId);
+    if (skipChatIds?.has(a.chatId)) { if (a.waitRecovery) busyChatIds.add(a.chatId); continue; }
+    const key = a.waitRecovery ? `wait:${a.chatId}:${a.messageThreadId ?? 0}:${a.waitRecovery.generation}:${a.pendingIntent?.laneKey ?? a.userId ?? a.messageId ?? a.id}`
+      : pendingIntentEnabled() ? a.pendingIntent?.laneKey ?? `${a.chatId}:${a.userId}:${a.messageThreadId ?? 0}` : String(a.chatId);
     const list = l0ByChat.get(key);
     if (list) list.push(a);
     else l0ByChat.set(key, [a]);
@@ -501,7 +512,7 @@ async function autoDispatchL0(
 
   for (const siblings of l0ByChat.values()) {
     const chatId = siblings[0]!.chatId;
-    if (pendingIntentEnabled() && skipChatIds?.has(chatId)) { busyChatIds.add(chatId); continue; }
+    if ((pendingIntentEnabled() || siblings.some(item => item.waitRecovery)) && skipChatIds?.has(chatId)) { busyChatIds.add(chatId); continue; }
     let withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
     const qqChat = isPlatformInternalId(chatId);
     if (qqChat) withIds.sort((a, b) => a.createdAt - b.createdAt || (a.messageId ?? 0) - (b.messageId ?? 0));
@@ -509,7 +520,7 @@ async function autoDispatchL0(
     // 每轮开头排入 history，模型实时响应；硬停词立即终止），不重复 dispatch，
     // 避免同 chat 并发/重复回复。P1 起不再依赖 AGENT_LOOP_ENABLED —— 单段任务
     // 的 30 轮/120s 里用户消息同样该进 interrupt 而不是再派一个 CodeAct。
-    {
+    if (!siblings.some(item => item.waitRecovery)) {
       try {
         const { getAgentTaskIdForChat } = await import('../agent/checkpoint.js');
         const { pushInterrupt } = await import('../agent/interrupts.js');
@@ -655,6 +666,9 @@ async function autoDispatchL0(
     // L0/@ siblings still dispatch normally.
     const heartOnly = siblings.every((s) => s.layer !== 'L0' && s.reason.includes('heart:'));
     if (heartOnly && (await shouldSuppressHeartAutoDispatch(chatId))) {
+      // WAIT selected real reply targets. Busy/refractory is not an ACK; retain
+      // each author's outstanding input instead of marking someone else's turn answered.
+      if (siblings.some(item => item.waitRecovery)) { busyChatIds.add(chatId); continue; }
       try {
         const { markMessageAnswered } = await import('./answered.js');
         for (const s of withIds) {
@@ -684,10 +698,24 @@ async function autoDispatchL0(
       latest.userId && isConversationOwner(chatId, latest.userId)
         ? '对方是本会话已核验的主人：亲近但不跪，在本会话能力与权限内执行，蠢了照样嫌弃。'
         : '';
-    const burstHint =
-      withIds.length > 1
-        ? `对方连发了 ${withIds.length} 条，只回最后一条 #${latest.messageId}，前面当上下文。`
-        : '';
+    // Separately selected questions from one author can share a single reply.
+    // Keep each original quote addressable, independent of the truncated direction.
+    const selectedTargets = latest.payload?.['heartBatchTarget'] === true && latest.pendingIntent
+      ? currentIds.filter(item => item.payload?.['heartBatchTarget'] === true
+        && item.userId === latest.userId && item.messageThreadId === latest.messageThreadId
+        && item.pendingIntent?.intentId === latest.pendingIntent!.intentId
+        && item.pendingIntent.revision === latest.pendingIntent!.revision)
+      : [];
+    let burstHint = '';
+    if (selectedTargets.length > 1) {
+      const sources = selectedTargets.map(item => {
+        const reply = replyToFromPayload(item.payload);
+        return reply ? `#${item.messageId} 引用 #${reply.messageId}` : `#${item.messageId}`;
+      });
+      burstHint = `这次一起处理同一人选中的几条问题（${sources.join('、')}），可以合成一条答复。`;
+    } else if (withIds.length > 1) {
+      burstHint = `对方连发了 ${withIds.length} 条，只回最后一条 #${latest.messageId}，前面当上下文。`;
+    }
     const heartHint =
       latest.reason.includes('heart:')
         ? '这是心流决定插话的旁观消息（未必 @你）：自然接一句，别空问候。'
@@ -777,7 +805,9 @@ async function autoDispatchL0(
     const r = await d.taskToGroup(chatId, {
       contentDirection,
       toneGuidance: '自然接话或干活，根据用户消息自行决定。',
-      quotes: latest.messageId ? [latest.messageId] : undefined,
+      quotes: latest.messageId
+        ? [latest.messageId, ...selectedTargets.map(item => item.messageId!).filter(id => id !== latest.messageId)]
+        : undefined,
       relatedQuotes: relatedQuotes.length ? relatedQuotes : undefined,
       targetUserId: latest.userId && latest.userId > 0 ? latest.userId : undefined,
       messageThreadId: latest.messageThreadId,
@@ -940,6 +970,8 @@ async function runScopedMetaSession(
   attention: AttentionItem[],
   callbacks: SubagentCallback[],
 ): Promise<{ digest: string | null; codeRan: boolean }> {
+  attention = (await Promise.all(attention.map(async item => await isTaskWaitRecoveryCurrent(item) ? item : null)))
+    .filter((item): item is AttentionItem => item !== null);
   if (attention.length === 0 && callbacks.length === 0) {
     return { digest: null, codeRan: false };
   }
@@ -957,6 +989,7 @@ async function runScopedMetaSession(
     defaultTargetUserIds: maps.defaultTargetUserIds,
     defaultCognitiveAnchorEventIds: maps.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: maps.defaultPendingIntents,
+    waitRecoverySources: maps.waitRecoverySources,
   });
   let codeRan = dispatchedChatIds.size > 0;
 
@@ -1152,6 +1185,7 @@ async function runScopedMetaSession(
         defaultTargetUserIds: metaMaps.defaultTargetUserIds,
         defaultCognitiveAnchorEventIds: metaMaps.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: metaMaps.defaultPendingIntents,
+        waitRecoverySources: metaMaps.waitRecoverySources,
       });
       codeRan = true;
     } catch (err) {

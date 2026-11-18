@@ -30,6 +30,8 @@ function variants(pattern: string): string[] {
 }
 
 const CHECKS: Array<[string, string]> = [
+  ['Telegram 群消息前置合并', 'telegram_heart_batch_candidates_total'],
+  ['WAIT 到期按代次领取', 'wait_resume_failed_after_claim_total'],
   ['实际请求缓存前缀断点', 'buildClaudeSystem'],
   ['缓存输入与读取规范化', 'normalizeAnthropicUsage'],
   ['缓存统计覆盖分母', 'llm_cache_observations_total'],

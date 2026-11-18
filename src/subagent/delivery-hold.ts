@@ -2,6 +2,8 @@ import { getRedis } from '../db/redis.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
 import { isUnknownDelivery } from '../shared/delivery-result.js';
 import { randomUUID } from 'node:crypto';
+import { requireTaskWaitRecovery } from '../meta/wait-recovery-fence.js';
+import type { WaitRecoveryFence } from '../meta/types.js';
 
 export const DELIVERY_UNKNOWN_SUMMARY = 'failed_delivery_unknown_no_retry';
 export const DELIVERY_HOLD_KEY = 'xxb:codeact:delivery-unknown';
@@ -24,7 +26,9 @@ export async function withCodeActDeliveryIntent<T>(
   taskId: string | undefined,
   chatId: number,
   operation: () => Promise<T>,
+  wait?: { waitRecovery?: WaitRecoveryFence; messageThreadId?: number },
 ): Promise<T> {
+  if (wait?.waitRecovery) await requireTaskWaitRecovery({ chatId, ...wait });
   if (!taskId) {
     if (isPlatformInternalId(chatId)) throw new CodeActDeliveryError('qq_delivery_task_required', 'not_sent');
     return operation(); // Legacy non-task callers have no replayable CodeAct identity.
@@ -43,7 +47,12 @@ export async function withCodeActDeliveryIntent<T>(
   };
 
   let result: T;
-  try { result = await operation(); }
+  try {
+    // The delivery hold itself awaits Redis. Recheck after that await, directly
+    // before the logical operation; never cache a previous generation verdict.
+    if (wait?.waitRecovery) await requireTaskWaitRecovery({ chatId, ...wait });
+    result = await operation();
+  }
   catch (error) {
     const delivery = error && typeof error === 'object' && 'delivery' in error ? error.delivery : undefined;
     if (delivery === 'not_sent' || delivery === 'rejected') {

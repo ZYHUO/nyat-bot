@@ -2,7 +2,7 @@
 // BullMQ Worker — message 处理流水线
 // ────────────────────────────────────────
 
-import { Worker, UnrecoverableError } from "bullmq";
+import { Worker, UnrecoverableError, DelayedError } from "bullmq";
 import type { Job } from "bullmq";
 import { QUEUE_NAME } from "./jobs.js";
 import type { MessageJobData } from "./jobs.js";
@@ -20,7 +20,7 @@ const KNOWN_JOB_TYPES = new Set<MessageJobData['type']>([
   'message', 'allowlist_review', 'wait_resume', 'chat_turn', 'defer_resume',
 ]);
 
-async function processMessage(job: Job<MessageJobData>): Promise<void> {
+async function processMessage(job: Job<MessageJobData>, token?: string): Promise<void> {
   // 畸形 job(未知 type)直接 UnrecoverableError:重试无意义,也不会让它带着
   // 缺字段的载荷摔进 processPipeline(review finding:无类型校验)。
   if (!job.data || !KNOWN_JOB_TYPES.has(job.data.type)) {
@@ -37,10 +37,15 @@ async function processMessage(job: Job<MessageJobData>): Promise<void> {
 
   // Phase 4: wait-resume jobs are routed to chat-runtime, not the regular pipeline
   if (job.data.type === 'wait_resume') {
-    await handleWaitResume({
+    const result = await handleWaitResume({
       chatId: job.data.chatId,
       waitResume: job.data.waitResume,
+      jobId: job.id,
     });
+    if (result?.status === 'early') {
+      await job.moveToDelayed(result.waitUntil, token);
+      throw new DelayedError();
+    }
     return;
   }
 

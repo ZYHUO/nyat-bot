@@ -96,7 +96,7 @@ export async function answeredTimestamps(chatId: number, messageId: number): Pro
   }
 }
 
-export async function isMessageAnswered(chatId: number, messageId: number): Promise<boolean> {
+export async function isMessageAnswered(chatId: number, messageId: number, strict = false): Promise<boolean> {
   const mid = Math.floor(Number(messageId));
   if (!Number.isFinite(chatId) || !Number.isFinite(mid) || mid <= 0) return false;
   try {
@@ -106,7 +106,8 @@ export async function isMessageAnswered(chatId: number, messageId: number): Prom
     // 判据放宽成"有值就算回过了"：'1'（旧格式）和时间戳列表都算。
     const raw = await getRedis().get(key(chatId, mid));
     return hasAnsweredMarker(raw);
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return false;
   }
 }
@@ -128,6 +129,7 @@ export async function allQuotesAnswered(chatId: number, quotes: number[]): Promi
  */
 export async function batchMessagesAnswered(
   entries: ReadonlyArray<{ chatId: number; messageId: number }>,
+  strict = false,
 ): Promise<Set<string>> {
   const valid = entries
     .map((e) => ({ chatId: e.chatId, mid: Math.floor(Number(e.messageId)) }))
@@ -142,7 +144,8 @@ export async function batchMessagesAnswered(
       if (entry && hasAnsweredMarker(vals[i])) answered.add(`${entry.chatId}:${entry.mid}`);
     }
     return answered;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return new Set();
   }
 }

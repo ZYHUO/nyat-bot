@@ -41,6 +41,7 @@ const mockApplyChatPathPolicy = vi.fn();
 const mockReflectChatPathPolicy = vi.fn();
 const mockAcquireChatLock = vi.fn();
 const mockTransitionToStop = vi.fn();
+const mockGetChatState = vi.fn(async (): Promise<{ state: string; waitGeneration?: string }> => ({ state: 'RUNNING' }));
 const mockMarkAnswered = vi.fn(async () => {});
 const mockUpdateObligation = vi.fn(async () => {});
 vi.mock('../../../src/pipeline/turn/answered-store.js', () => ({
@@ -190,7 +191,7 @@ vi.mock("../../../src/queue/chat-lock.js", () => ({
 }));
 
 vi.mock("../../../src/pipeline/timing/chat-runtime.js", () => ({
-  getChatState: vi.fn(async () => ({ state: 'RUNNING' })),
+  getChatState: (...args: unknown[]) => mockGetChatState(...args as []),
   isInGateCooldown: vi.fn(async () => false),
   transitionToWait: vi.fn(async () => {}),
   transitionToStop: (...args: unknown[]) => mockTransitionToStop(...args),
@@ -286,6 +287,7 @@ describe("processPipeline path branching", () => {
     mockReflectChatPathPolicy.mockResolvedValue(undefined);
     mockAcquireChatLock.mockResolvedValue(vi.fn().mockResolvedValue(undefined));
     mockTransitionToStop.mockReset();
+    mockGetChatState.mockResolvedValue({ state: 'RUNNING' });
     mockEnv.mockReturnValue({
       BOT_USERNAME: "xxb_bot",
       BOT_NICKNAMES: ["xxb"],
@@ -317,6 +319,59 @@ describe("processPipeline path branching", () => {
 
   // NL 软禁言(别理我/闭嘴)的关键词拦截已下线 —— 改由 directive.ts(回复前 LLM 分类)
   // 静默执行,不再产生 mute_soft_request 规则。
+
+  it('wait replay runs judge again and can remain silent', async () => {
+    mockJudge.mockResolvedValue({ action: 'IGNORE', level: 'L1_MICRO', latencyMs: 1 });
+    const job = makeJob();
+    job.turnContext = { isWaitReplay: true, gateBypass: false };
+    await processPipeline(job);
+    expect(mockJudge).toHaveBeenCalledOnce();
+    expect(mockGenerateReply).not.toHaveBeenCalled();
+    expect(sendDirect).not.toHaveBeenCalled();
+    expect(mockAddMessage).not.toHaveBeenCalled();
+  });
+
+  it('sleep catchup keeps the prior reply decision', async () => {
+    const job = makeJob();
+    job.turnContext = { isWaitReplay: true, sleepCatchup: true, gateBypass: true };
+    await processPipeline(job);
+    expect(mockJudge).not.toHaveBeenCalled();
+    expect(mockGenerateReply).toHaveBeenCalledOnce();
+    expect(sendDirect).toHaveBeenCalled();
+  });
+
+  it('cancellation during wait recovery generation blocks delivery and fallback messages', async () => {
+    mockGetChatState.mockResolvedValue({ state: 'RUNNING', waitGeneration: 'current' });
+    mockJudge.mockResolvedValue({ action: 'REPLY', level: 'L1_MICRO', replyPath: 'direct', latencyMs: 0 });
+    mockGenerateReply.mockImplementationOnce(async () => {
+      mockGetChatState.mockResolvedValue({ state: 'RUNNING' });
+      return { replies: [{ replyContent: 'stale', targetMessageId: 42 }], toolsUsed: [], toolExecutionFailed: false };
+    });
+    const job = makeJob();
+    job.turnContext = { isWaitReplay: true, waitGeneration: 'current', gateBypass: false };
+    await processPipeline(job);
+    expect(mockGenerateReply).toHaveBeenCalledOnce();
+    expect(sendDirect).not.toHaveBeenCalled();
+    expect(mockAddAssistant).not.toHaveBeenCalled();
+  });
+
+  it('checks a wait recovery again before its next logical message', async () => {
+    mockGetChatState.mockResolvedValue({ state: 'RUNNING', waitGeneration: 'current' });
+    mockJudge.mockResolvedValue({ action: 'REPLY', level: 'L0_RULE', rule: 'reply_to_self', replyPath: 'direct', latencyMs: 0 });
+    mockGenerateReply.mockResolvedValueOnce({ replies: [
+      { replyContent: 'first', targetMessageId: 42, delayMs: 0 },
+      { replyContent: 'second', targetMessageId: 99, delayMs: 0 },
+    ], toolsUsed: [], toolExecutionFailed: false });
+    sendDirect.mockImplementationOnce(async () => {
+      mockGetChatState.mockResolvedValue({ state: 'RUNNING', waitGeneration: 'replacement' });
+      return { messageId: 500, parts: [{ messageId: 500, text: 'first', partIndex: 0 }] };
+    });
+    const job = makeJob();
+    job.turnContext = { isWaitReplay: true, waitGeneration: 'current', gateBypass: false };
+    await processPipeline(job);
+    expect(sendDirect).toHaveBeenCalledOnce();
+    expect(mockAddAssistant).toHaveBeenCalledWith(-100123, { messageId: 500, textContent: 'first' });
+  }, 15000);
 
   it("clears temporary mute on next direct mention before continuing reply flow", async () => {
     mockJudge.mockResolvedValue({

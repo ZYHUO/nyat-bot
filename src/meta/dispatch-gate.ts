@@ -19,11 +19,11 @@ import type { PendingIntentRef } from './pending-intent.js';
 //   continue    → allow（非 continuation 短路才 recordGateContinue —— 免检不续窗）
 //   wait(N)     → meta wait-anchor + transitionToWait → suppress
 //                 （wait-resume 链路 handleWaitResume → resumeMetaWaitAttention 到点
-//                 重新 ingest，不丢消息）
+//                 重新检查当前来源与 Heart/时机，允许继续沉默）
 //   no_action + deferOnly（冷却/talk-value/llm-failed）→ scheduleMetaDeferReeval
 //                 → suppress；预算耗尽/ZADD 失败 → fail-open allow（宁可多说不吞）
 //   no_action（真）→ recordGateNoAction + markMessageAnswered → suppress
-//   任何基础设施异常 → fail-open allow
+//   WAIT 持久化/排队异常 → suppress；其它旧有基础设施兜底保持不变
 
 import type { FormattedMessage, JudgeResult } from '../shared/types.js';
 import { env } from '../env.js';
@@ -172,7 +172,7 @@ export async function evaluateDispatchGate(opts: {
     if (decision.action === 'wait') {
       const waitSec = decision.waitSec ?? e.TIMING_WAIT_MIN_SEC;
       try {
-        await setMetaWaitAnchor(
+        const waitGeneration = await setMetaWaitAnchor(
           {
             chatId,
             layer,
@@ -187,6 +187,7 @@ export async function evaluateDispatchGate(opts: {
             createdAt: Date.now(),
             cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
             payload: opts.payload,
+            heartMessages: [{ ...trigger, pendingIntent: opts.pendingIntent }],
           },
           waitSec + 120,
         );
@@ -199,6 +200,8 @@ export async function evaluateDispatchGate(opts: {
                 waitSec,
                 reason: `dispatch_gate:${opts.reason}`,
                 source: 'dispatch_gate',
+                waitGeneration,
+                messageThreadId: opts.messageThreadId,
                 ...(opts.cognitiveAnchorEventId ? { cognitiveAnchorEventId: opts.cognitiveAnchorEventId } : {}),
               })
             : { attempted: true, accepted: false, reason: 'trigger_message_id_required' }
@@ -212,11 +215,12 @@ export async function evaluateDispatchGate(opts: {
             return { verdict: 'suppress', reason: 'wait_transport_failed' };
           }
         } else {
-          await transitionToWait(chatId, waitSec, opts.messageId, opts.userId);
+          await transitionToWait(chatId, waitSec, opts.messageId, opts.userId, undefined,
+            { waitGeneration, messageThreadId: opts.messageThreadId });
         }
       } catch (err) {
-        logger.warn({ err, chatId }, 'dispatch gate wait setup failed — fail-open allow');
-        return { verdict: 'allow', reason: 'wait_setup_failed' };
+        logger.warn({ err, chatId }, 'dispatch gate wait setup failed; kept suppressed');
+        return { verdict: 'suppress', reason: 'wait_setup_failed' };
       }
       logger.info({ chatId, layer, waitSec, reason: decision.reason }, 'dispatch gate: wait');
       return { verdict: 'suppress', reason: `wait:${decision.reason}` };

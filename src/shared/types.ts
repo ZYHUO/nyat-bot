@@ -200,11 +200,12 @@ export interface ChatJob {
     /**
      * G5: wait-resume replay — the anchor entry already went through all
      * bookkeeping stages on first processing; skip context-save/tracking
-     * side-effects **and** skip judge (gate already established REPLY was
-     * warranted when it chose WAIT over NO_ACTION — only the rhythm was in
-     * question). Do NOT set this for defer replays — see isDeferReplay.
+     * side-effects; judge/Heart and timing decide again whether to reply.
+     * Sleep catchup has its own explicit bypass. Do NOT set this for defer replays.
      */
     isWaitReplay?: boolean;
+    /** Host WAIT generation checked again immediately before recovery delivery. */
+    waitGeneration?: string;
     /**
      * review #10 (critical): defer replay — bookkeeping already ran on the
      * first pass (skip it, same as isWaitReplay), but **nothing has ever

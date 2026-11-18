@@ -3,7 +3,7 @@ import type { PendingIntentRef } from './pending-intent.js';
 // L0 (incl. nickname): allow into Attention immediately — burst batching is
 // META_L0_COALESCE_MS in Attention.flush (quiet window), NOT TIMING_TALK_VALUE
 // / gate wait. Gate wait would drop mid-burst messages from Attention.
-// L1/L2: continue → Attention; wait → WAIT + delayed re-ingest; no_action → silence.
+// L1/L2: continue → Attention; wait → WAIT + delayed reconsideration; no_action → silence.
 //
 // META_DEFER_ENABLED 开启后，canDefer=true 传给 runTimingGate，让 gate 的
 // 冷却/talk-value 短路层产出 deferOnly 决策。deferOnly 由 scheduleMetaDeferReeval
@@ -22,16 +22,17 @@ import {
   recordBotReply,
   recordUserMessage,
   transitionToWait,
-  transitionToRunning,
+  cancelWaitForScope,
 } from '../pipeline/timing/chat-runtime.js';
 import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import type { AttentionLayer } from './types.js';
 import { getRedis } from '../db/redis.js';
 import { scheduleMetaDeferReeval } from './defer.js';
 import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { checkCodeActActivation } from '../subagent/activation-policy.js';
-import { findMessageRef, isPlatformInternalId } from '../platform/identity-store.js';
+import type { ContextScope } from '../context-engine/scope.js';
+import { resolveContextScope } from '../context-engine/scope.js';
 
 export type MetaTimingVerdict = 'allow' | 'silence';
 
@@ -49,10 +50,18 @@ export interface MetaWaitAnchor {
   payload?: Record<string, unknown>;
   /** Durable Telegram event used to anchor workspace/replay reads. */
   cognitiveAnchorEventId?: string;
+  waitGeneration?: string;
+  contextScope?: ContextScope;
+  /** Original host inputs, never reconstructed from a model's wait prose. */
+  heartMessages?: FormattedMessage[];
+  addressed?: boolean;
+  ongoingFollowup?: boolean;
+  targetMessageIds?: number[];
 }
 
-function waitAnchorKey(chatId: number): string {
-  return `xxb:meta:wait-anchor:${chatId}`;
+function waitAnchorKey(chatId: number, generation?: string): string {
+  if (generation !== undefined && !/^[A-Za-z0-9_-]{1,100}$/.test(generation)) throw Error('invalid_wait_generation');
+  return `xxb:meta:wait-anchor:${chatId}${generation === undefined ? '' : `:${generation}`}`;
 }
 
 // A temporary Redis failure must not turn held work back into runnable input.
@@ -68,15 +77,19 @@ async function flushHeldAnchors(): Promise<void> {
   }
 }
 
-export async function setMetaWaitAnchor(anchor: MetaWaitAnchor, ttlSec: number): Promise<void> {
+export async function setMetaWaitAnchor(anchor: MetaWaitAnchor, ttlSec: number): Promise<string> {
   const redis = getRedis();
-  await redis.set(waitAnchorKey(anchor.chatId), JSON.stringify(anchor), 'EX', Math.max(60, ttlSec));
+  const waitGeneration = anchor.waitGeneration ?? randomUUID();
+  const stored = { ...anchor, waitGeneration,
+    contextScope: anchor.contextScope ?? resolveContextScope(anchor.chatId, anchor.messageThreadId) ?? undefined };
+  await redis.set(waitAnchorKey(anchor.chatId, waitGeneration), JSON.stringify(stored), 'EX', Math.max(60, ttlSec));
+  return waitGeneration;
 }
 
-export async function takeMetaWaitAnchor(chatId: number): Promise<MetaWaitAnchor | null> {
+export async function takeMetaWaitAnchor(chatId: number, generation?: string): Promise<MetaWaitAnchor | null> {
   try {
     const redis = getRedis();
-    const key = waitAnchorKey(chatId);
+    const key = waitAnchorKey(chatId, generation);
     // Atomic get-and-delete (Redis 6.2+ GETDEL): avoids the non-atomic
     // GET → DEL → JSON.parse race where a parse failure after DEL would
     // permanently lose the anchor. If parse fails the data is already
@@ -94,15 +107,23 @@ export async function takeMetaWaitAnchor(chatId: number): Promise<MetaWaitAnchor
   }
 }
 
-/** After timing wait-resume: re-feed Attention so Meta can reconsider. */
-export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> {
+export interface MetaWaitResume {
+  waitGeneration?: string;
+  anchorMessageId?: number;
+  scheduledAt?: number;
+  waitSec?: number;
+}
+
+/** A claimed timer permits reconsideration, never an unconditional reply. */
+export async function resumeMetaWaitAttention(chatId: number, resume: MetaWaitResume = {}): Promise<boolean> {
   if (!env().META_SUBAGENT_ENABLED || !env().TIMING_GATE_ENABLED) return false;
   await flushHeldAnchors();
-  const anchor = await takeMetaWaitAnchor(chatId);
+  const anchor = await takeMetaWaitAnchor(chatId, resume.waitGeneration);
   if (!anchor) return false;
   const decision = checkCodeActActivation(anchor);
-  if (!decision.allowed || anchor.chatId !== chatId) {
-    const reason = !decision.allowed ? decision.reason : 'anchor_chat_mismatch';
+  if (!decision.allowed || anchor.chatId !== chatId || !resume.waitGeneration
+    || anchor.waitGeneration !== resume.waitGeneration || anchor.messageId !== resume.anchorMessageId) {
+    const reason = !decision.allowed ? decision.reason : anchor.chatId !== chatId ? 'anchor_chat_mismatch' : 'wait_identity_unproven';
     const id = `wait:${createHash('sha256').update(JSON.stringify(anchor)).digest('hex')}`;
     pendingHeldAnchors.set(id, JSON.stringify({ kind: 'wait', reason, heldAt: Date.now(), input: anchor }));
     await flushHeldAnchors();
@@ -112,52 +133,12 @@ export async function resumeMetaWaitAttention(chatId: number): Promise<boolean> 
     return true;
   }
   try {
-    const { getAttentionAccumulator } = await import('./attention.js');
-    const rawBatch = anchor.payload?.['qqBatch'];
-    if (isPlatformInternalId(chatId) && Array.isArray(rawBatch)) {
-      // This is host-written metadata, but never trust it to change scope or
-      // invent quote identities after a delayed replay.
-      for (const entry of rawBatch.slice(0, 32)) {
-        if (!entry || typeof entry !== 'object') continue;
-        const item = entry as Record<string, unknown>;
-        if (typeof item.messageId !== 'number' || !Number.isSafeInteger(item.messageId)
-          || !findMessageRef(chatId, item.messageId)) continue;
-        const quote = item.replyTo && typeof item.replyTo === 'object' ? item.replyTo as Record<string, unknown> : undefined;
-        const replyTo = quote && typeof quote.messageId === 'number' && Number.isSafeInteger(quote.messageId)
-          && findMessageRef(chatId, quote.messageId) ? {
-            messageId: quote.messageId, uid: typeof quote.uid === 'number' ? quote.uid : 0,
-            fullName: typeof quote.fullName === 'string' ? quote.fullName : undefined,
-            textSnippet: typeof quote.textSnippet === 'string' ? quote.textSnippet.slice(0, 200) : undefined,
-          } : undefined;
-        await getAttentionAccumulator().ingestAsync({
-          chatId, layer: anchor.layer, reason: `wait_resume:${anchor.reason}`,
-          messageId: item.messageId,
-          pendingIntent: item.pendingIntent as PendingIntentRef | undefined, messageThreadId: typeof item.messageThreadId === "number" ? item.messageThreadId : undefined,
-          userId: typeof item.userId === 'number' && Number.isSafeInteger(item.userId) ? item.userId : undefined,
-          textPreview: typeof item.textPreview === 'string' ? item.textPreview.slice(0, 200) : undefined,
-          pressure: anchor.pressure, cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
-          payload: { ...anchor.payload, qqBatch: undefined, replyTo, username: item.username, fullName: item.fullName },
-        });
-      }
-      return true;
-    }
-    await getAttentionAccumulator().ingestAsync({
-      chatId: anchor.chatId,
-      layer: anchor.layer,
-      reason: `wait_resume:${anchor.reason}`,
-      messageId: anchor.messageId,
-      pendingIntent: anchor.pendingIntent, messageThreadId: anchor.messageThreadId,
-      userId: anchor.userId,
-      textPreview: anchor.textPreview,
-      pressure: anchor.pressure,
-      payload: anchor.payload,
-      cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
-    });
-    logger.info({ chatId, messageId: anchor.messageId }, 'Meta timing wait-resume → Attention');
+    const { recheckMetaWaitAnchor } = await import('./wait-recheck.js');
+    await recheckMetaWaitAnchor(anchor, resume);
     return true;
   } catch (err) {
-    logger.warn({ err, chatId }, 'Meta timing wait-resume ingest failed');
-    return false;
+    logger.warn({ err, chatId }, 'Meta wait reconsideration unavailable; kept silent');
+    return true;
   }
 }
 
@@ -186,6 +167,9 @@ export async function evaluateMetaTiming(opts: {
   /** 本条消息已被 defer 的次数（来自 Attention payload，首次为 0/undefined）。 */
   deferCount?: number;
   cognitiveAnchorEventId?: string;
+  /** One expiry evaluation; a second wait means silence until fresh input. */
+  waitResume?: boolean;
+  isCurrent?: () => Promise<boolean>;
 }): Promise<{ verdict: MetaTimingVerdict; reason: string }> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) {
@@ -196,15 +180,13 @@ export async function evaluateMetaTiming(opts: {
   const deferEnabled = !!e.META_DEFER_ENABLED;
   const deferCount = opts.deferCount ?? 0;
 
-  void recordUserMessage(chatId).catch(() => {});
+  if (!opts.waitResume) void recordUserMessage(chatId).catch(() => {});
 
   // L0 / hard-direct: ingest now. Multi-msg → one reply is Attention coalesce, not gate wait
   // (gate wait would drop mid-burst messages from the Attention queue).
-  if (isDirect || layer === 'L0') {
+  if (!opts.waitResume && (isDirect || layer === 'L0')) {
     try {
-      if (await isChatSuppressed(chatId)) {
-        await transitionToRunning(chatId);
-      }
+      await cancelWaitForScope(chatId, formatted.messageThreadId);
     } catch {
       /* non-critical */
     }
@@ -270,6 +252,8 @@ export async function evaluateMetaTiming(opts: {
     deferCount,
   });
 
+  if (opts.isCurrent && !await opts.isCurrent()) return { verdict: 'silence', reason: 'wait_input_changed' };
+
   if (decision.action === 'continue') {
     if (!decision.continuation) {
       void recordGateContinue(chatId).catch(() => {});
@@ -282,9 +266,10 @@ export async function evaluateMetaTiming(opts: {
   }
 
   if (decision.action === 'wait') {
+    if (opts.waitResume) return { verdict: 'silence', reason: 'wait_expired_still_waiting' };
     const waitSec = decision.waitSec ?? e.TIMING_WAIT_MIN_SEC;
     try {
-      await setMetaWaitAnchor(
+      const waitGeneration = await setMetaWaitAnchor(
         {
           chatId,
           layer,
@@ -296,6 +281,7 @@ export async function evaluateMetaTiming(opts: {
           pressure: layer === 'L1' ? 60 : 30,
           createdAt: Date.now(),
           cognitiveAnchorEventId: opts.cognitiveAnchorEventId,
+          heartMessages: [formatted],
         },
         waitSec + 120,
       );
@@ -306,6 +292,8 @@ export async function evaluateMetaTiming(opts: {
         waitSec,
         reason: `meta_timing:${decision.reason}`,
         source: 'meta_timing',
+        waitGeneration,
+        messageThreadId: formatted.messageThreadId,
         ...(opts.cognitiveAnchorEventId ? { cognitiveAnchorEventId: opts.cognitiveAnchorEventId } : {}),
       });
       if (agencyWait.attempted) {
@@ -317,18 +305,19 @@ export async function evaluateMetaTiming(opts: {
           return { verdict: 'silence', reason: 'wait_transport_failed' };
         }
       } else {
-        await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
+        await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid, undefined,
+          { waitGeneration, messageThreadId: formatted.messageThreadId });
       }
     } catch (err) {
-      logger.warn({ err, chatId }, 'Meta timing wait setup failed — fail-open allow');
-      return { verdict: 'allow', reason: 'wait_setup_failed' };
+      logger.warn({ err, chatId }, 'Meta timing wait setup failed; kept silent');
+      return { verdict: 'silence', reason: 'wait_setup_failed' };
     }
     logger.info({ chatId, layer, waitSec, reason: decision.reason }, 'Meta timing: wait');
     return { verdict: 'silence', reason: `wait:${decision.reason}` };
   }
 
   // no_action — 可能是 deferOnly（冷却/talk-value/llm-failed），也可能是真正的 no_action
-  if (decision.deferOnly && deferEnabled) {
+  if (decision.deferOnly && deferEnabled && !opts.waitResume) {
     const retryAfterMs = decision.retryAfterMs ?? 45_000;
     const scheduled = await scheduleMetaDeferReeval({
       chatId,

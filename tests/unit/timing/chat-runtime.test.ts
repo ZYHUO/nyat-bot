@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { timingWaitEval } from '../../helpers/timing-wait-redis.js';
 
 // Mock Redis with an in-memory hash store
 const store = new Map<string, Record<string, string>>();
 
 const redisMock = {
+  eval: vi.fn(timingWaitEval(store)),
   hgetall: vi.fn(async (k: string) => store.get(k) ?? {}),
   hset: vi.fn(async (k: string, ...args: string[]) => {
     const h = store.get(k) ?? {};
@@ -63,12 +65,11 @@ vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-const enqueueWaitResumeMock = vi.fn(async () => 'wait-job-id');
+const enqueueWaitResumeMock = vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'wait-job-id');
 
 vi.mock('../../../src/queue/producer.js', () => ({
   enqueue: vi.fn(),
-  enqueueWaitResume: (chatId: number, sec: number, anchor?: number) =>
-    enqueueWaitResumeMock(chatId, sec, anchor),
+  enqueueWaitResume: (...args: unknown[]) => enqueueWaitResumeMock(...args),
 }));
 
 const envValues: Record<string, unknown> = {
@@ -96,6 +97,15 @@ vi.mock('../../../src/pipeline/turn/buffer.js', () => ({
   appendPending: appendPendingMock,
   takeWaitAnchor: takeWaitAnchorMock,
 }));
+
+afterEach(() => vi.restoreAllMocks());
+
+function queuedWait() {
+  const args = enqueueWaitResumeMock.mock.calls.at(-1)!;
+  return { ...(args[4] as { waitGeneration: string; scheduledAt: number; waitUntil: number }),
+    waitSec: args[1] as number, anchorMessageId: args[2] as number | undefined,
+    obligationId: args[3] as string | undefined };
+}
 
 describe('chat-runtime state machine', () => {
   let runtime: typeof import('../../../src/pipeline/timing/chat-runtime.js');
@@ -139,12 +149,12 @@ describe('chat-runtime state machine', () => {
     expect(s.state).toBe('WAIT');
     expect(s.waitAnchorMid).toBe(555);
     // Wait timer scheduled with min sec
-    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 5, 555);
+    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 5, 555, undefined, expect.objectContaining({ waitUntil: expect.any(Number) }));
   });
 
   it('transitionToWait clamps above WAIT_MAX_SEC', async () => {
     await runtime.transitionToWait(-100, 99999);
-    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 120, undefined);
+    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 120, undefined, undefined, expect.objectContaining({ waitGeneration: expect.any(String) }));
   });
 
   it('expired WAIT auto-resolves to RUNNING on read', async () => {
@@ -198,7 +208,7 @@ describe('chat-runtime state machine', () => {
 
     // count=4 → 15 * 2^2 = 60s 窗口;35s 前的 no_action 仍在冷却
     for (let i = 0; i < 4; i++) await ss.recordGateNoAction(-100);
-    let h = store.get(k)!;
+    const h = store.get(k)!;
     expect(h['noActionCount']).toBe('4');
     h['lastGateAt'] = String(Date.now() - 35_000);
     expect(await runtime.isInGateCooldown(-100)).toBe(true);
@@ -231,14 +241,13 @@ describe('chat-runtime state machine', () => {
   });
 
   it('handleWaitResume transitions WAIT → RUNNING', async () => {
-    await runtime.transitionToWait(-100, 5);
+    await runtime.transitionToWait(-100, 5, 1);
     const before = await runtime.getChatState(-100);
     expect(before.state).toBe('WAIT');
 
-    await runtime.handleWaitResume({
-      chatId: -100,
-      waitResume: { scheduledAt: Date.now(), waitSec: 5, anchorMessageId: 1 },
-    });
+    const waitResume = queuedWait();
+    vi.spyOn(Date, 'now').mockReturnValue(waitResume.waitUntil);
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
 
     const after = await runtime.getChatState(-100);
     expect(after.state).toBe('RUNNING');
@@ -261,11 +270,10 @@ describe('chat-runtime state machine', () => {
     takeWaitAnchorMock.mockResolvedValueOnce(anchor);
 
     await runtime.transitionToWait(-100, 5, 42);
-    const scheduledAt = Date.now();
-    await runtime.handleWaitResume({
-      chatId: -100,
-      waitResume: { scheduledAt, waitSec: 5, anchorMessageId: 42 },
-    });
+    const waitResume = queuedWait();
+    const scheduledAt = waitResume.scheduledAt;
+    vi.spyOn(Date, 'now').mockReturnValue(waitResume.waitUntil);
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
     // 复位必须在断言之前:断言一挂,后置复位不执行,旗标泄漏进下一个用例
     envValues['TURN_WAIT_RESUME_ENABLED'] = false;
     envValues['TURN_ACTOR_ENABLED'] = false;
@@ -274,7 +282,7 @@ describe('chat-runtime state machine', () => {
     // P2-F:回放条目盖上实际等待秒数 + 开始时刻(写手 [等待结束] 提示 +
     // actor 对照 activity 判断窗口期有无新消息)
     expect(appendPendingMock).toHaveBeenCalledWith({
-      ...anchor, obligationId: undefined, waitSec: 5, waitStartedAt: scheduledAt,
+      ...anchor, waitGeneration: waitResume.waitGeneration, obligationId: undefined, waitSec: 5, waitStartedAt: scheduledAt,
     });
     expect(scheduleTurnMock).toHaveBeenCalledWith(-100, {
       trigger: 'wait_timeout',
@@ -286,10 +294,9 @@ describe('chat-runtime state machine', () => {
 
   it('G5: legacy path (flag off) only unblocks, no replay', async () => {
     await runtime.transitionToWait(-100, 5, 42);
-    await runtime.handleWaitResume({
-      chatId: -100,
-      waitResume: { scheduledAt: Date.now(), waitSec: 5, anchorMessageId: 42 },
-    });
+    const waitResume = queuedWait();
+    vi.spyOn(Date, 'now').mockReturnValue(waitResume.waitUntil);
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
 
     expect((await runtime.getChatState(-100)).state).toBe('RUNNING');
     expect(scheduleTurnMock).not.toHaveBeenCalled();
@@ -371,5 +378,158 @@ describe('P0-A isInContinuation 真值表', () => {
 
   it('无任何信号 → false', () => {
     expect(runtime.isInContinuation({ state: 'RUNNING' }, NOW)).toBe(false);
+  });
+});
+
+describe('fenced wait recovery', () => {
+  const start = 1_800_000_000_000;
+  let now = start;
+  let runtime: typeof import('../../../src/pipeline/timing/chat-runtime.js');
+  beforeEach(async () => {
+    store.clear(); vi.resetModules(); vi.clearAllMocks(); now = start;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    envValues['TIMING_GATE_ENABLED'] = true;
+    envValues['TURN_WAIT_RESUME_ENABLED'] = true;
+    envValues['TURN_ACTOR_ENABLED'] = true;
+    enqueueWaitResumeMock.mockReset().mockResolvedValue('wait-job-id');
+    redisMock.eval.mockReset().mockImplementation(timingWaitEval(store));
+    takeWaitAnchorMock.mockReset().mockResolvedValue({ update: {}, chatId: -100, messageId: 42, enqueuedAt: start, waitReplay: true });
+    runtime = await import('../../../src/pipeline/timing/chat-runtime.js');
+  });
+  afterEach(() => {
+    envValues['TURN_WAIT_RESUME_ENABLED'] = false;
+    envValues['TURN_ACTOR_ENABLED'] = false;
+  });
+
+  it.each([5000, 6000])('claims raw WAIT at +%i ms despite the expired suppression view', async offset => {
+    await runtime.transitionToWait(-100, 5, 42);
+    const waitResume = queuedWait(); now += offset;
+    expect((await runtime.getChatState(-100)).state).toBe('RUNNING');
+    expect(store.get('xxb:timing:state:-100')?.state).toBe('WAIT');
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
+    expect(appendPendingMock).toHaveBeenCalledOnce();
+    expect(scheduleTurnMock).toHaveBeenCalledOnce();
+    expect(store.get('xxb:timing:state:-100')).toMatchObject({ state: 'RUNNING', waitGeneration: waitResume.waitGeneration });
+  });
+
+  it('returns the exact deadline for an early job without consuming it', async () => {
+    await runtime.transitionToWait(-100, 5, 42);
+    const waitResume = queuedWait(); now += 4999;
+    expect(await runtime.handleWaitResume({ chatId: -100, waitResume })).toEqual({ status: 'early', waitUntil: start + 5000 });
+    expect(takeWaitAnchorMock).not.toHaveBeenCalled();
+    now++;
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
+    expect(appendPendingMock).toHaveBeenCalledOnce();
+  });
+
+  it('two workers and repeated delivery can claim only once', async () => {
+    await runtime.transitionToWait(-100, 5, 42);
+    const waitResume = queuedWait(); now += 5000;
+    await Promise.all([runtime.handleWaitResume({ chatId: -100, waitResume }), runtime.handleWaitResume({ chatId: -100, waitResume })]);
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
+    expect(appendPendingMock).toHaveBeenCalledOnce();
+    expect(takeWaitAnchorMock).toHaveBeenCalledWith(-100, waitResume.waitGeneration);
+  });
+
+  it('a new wait with the same anchor and deadline fences the old generation', async () => {
+    await runtime.transitionToWait(-100, 5, 42); const older = queuedWait();
+    await runtime.transitionToWait(-100, 5, 42); const newer = queuedWait();
+    expect(newer.waitGeneration).not.toBe(older.waitGeneration); now += 5000;
+    await runtime.handleWaitResume({ chatId: -100, waitResume: older });
+    expect(appendPendingMock).not.toHaveBeenCalled();
+    await runtime.handleWaitResume({ chatId: -100, waitResume: newer });
+    expect(appendPendingMock).toHaveBeenCalledOnce();
+  });
+
+  it('a copied generation with the wrong job identity or deadline cannot claim', async () => {
+    await runtime.transitionToWait(-100, 5, 42); const waitResume = queuedWait(); now += 5000;
+    await runtime.handleWaitResume({ chatId: -100, jobId: 'wrong-job', waitResume });
+    await runtime.handleWaitResume({ chatId: -100, waitResume: { ...waitResume, waitUntil: waitResume.waitUntil + 1 } });
+    expect(appendPendingMock).not.toHaveBeenCalled();
+    await runtime.handleWaitResume({ chatId: -100, jobId: 'wait-job-id', waitResume });
+    expect(appendPendingMock).toHaveBeenCalledOnce();
+  });
+
+  it('cancels an expired raw wait only within its topic', async () => {
+    await runtime.transitionToWait(-100, 5, 42, 7, undefined, { messageThreadId: 19 });
+    const waitResume = queuedWait(); now += 5000;
+    await runtime.cancelWaitForScope(-100, 20);
+    expect(store.get('xxb:timing:state:-100')?.waitGeneration).toBe(waitResume.waitGeneration);
+    await runtime.cancelWaitForScope(-100, 19);
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
+    expect(appendPendingMock).not.toHaveBeenCalled();
+  });
+
+  it('normalizes General topic and omitted thread to the same cancellation scope', async () => {
+    await runtime.transitionToWait(-100, 5, 42, 7, undefined,
+      { waitGeneration: 'general-topic', messageThreadId: 1 });
+    expect((await runtime.getChatState(-100)).waitThreadId).toBe(0);
+    await runtime.cancelWaitForScope(-100);
+    expect((await runtime.getChatState(-100)).waitGeneration).toBeUndefined();
+    await runtime.transitionToWait(-100, 5, 42, 7, undefined,
+      { waitGeneration: 'omitted-thread' });
+    await runtime.cancelWaitForScope(-100, 1);
+    expect((await runtime.getChatState(-100)).waitGeneration).toBeUndefined();
+  });
+
+  it('scope cancellation also invalidates a generation already claimed by a worker', async () => {
+    await runtime.transitionToWait(-100, 5, 42, 7, undefined,
+      { waitGeneration: 'claimed-generation', messageThreadId: 19 });
+    now += 5000;
+    await runtime.handleWaitResume({ chatId: -100, waitResume: queuedWait() });
+    await runtime.cancelWaitForScope(-100, 20);
+    expect((await runtime.getChatState(-100)).waitGeneration).toBe('claimed-generation');
+    await runtime.cancelWaitForScope(-100, 19);
+    expect((await runtime.getChatState(-100)).waitGeneration).toBeUndefined();
+  });
+
+  it('late queue acknowledgement cannot restore a cancelled generation', async () => {
+    enqueueWaitResumeMock.mockImplementation(async () => {
+      await runtime.cancelWaitForScope(-100);
+      return 'late-job';
+    });
+    await runtime.transitionToWait(-100, 5, 42);
+    now += 5000;
+    await runtime.handleWaitResume({ chatId: -100, waitResume: queuedWait() });
+    expect(appendPendingMock).not.toHaveBeenCalled();
+    expect(store.get('xxb:timing:state:-100')).not.toHaveProperty('waitGeneration');
+  });
+
+  it('retries scheduling with one identity and cancels only that identity on failure', async () => {
+    enqueueWaitResumeMock.mockRejectedValue(new Error('synthetic queue unavailable'));
+    await expect(runtime.transitionToWait(-100, 5, 42)).rejects.toThrow('synthetic queue unavailable');
+    expect(enqueueWaitResumeMock).toHaveBeenCalledTimes(2);
+    expect(enqueueWaitResumeMock.mock.calls[0]![4]).toEqual(enqueueWaitResumeMock.mock.calls[1]![4]);
+    expect(store.get('xxb:timing:state:-100')).toMatchObject({ state: 'RUNNING' });
+    expect(store.get('xxb:timing:state:-100')).not.toHaveProperty('waitGeneration');
+  });
+
+  it('Redis claim failure propagates without replaying or consuming the wait', async () => {
+    await runtime.transitionToWait(-100, 5, 42); const waitResume = queuedWait(); now += 5000;
+    redisMock.eval.mockRejectedValueOnce(new Error('synthetic redis unavailable'));
+    await expect(runtime.handleWaitResume({ chatId: -100, waitResume })).rejects.toThrow('synthetic redis unavailable');
+    expect(appendPendingMock).not.toHaveBeenCalled();
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
+    expect(appendPendingMock).toHaveBeenCalledOnce();
+  });
+
+  it('new work during anchor retrieval prevents the claimed replay', async () => {
+    await runtime.transitionToWait(-100, 5, 42); const waitResume = queuedWait(); now += 5000;
+    takeWaitAnchorMock.mockImplementationOnce(async () => {
+      await runtime.cancelWaitForScope(-100);
+      return { update: {}, chatId: -100, messageId: 42, enqueuedAt: start, waitReplay: true };
+    });
+    await runtime.handleWaitResume({ chatId: -100, waitResume });
+    expect(appendPendingMock).not.toHaveBeenCalled();
+  });
+
+  it('safely concludes only the exact old job without replaying an unversioned anchor', async () => {
+    store.set('xxb:timing:state:-100', { state: 'WAIT', waitUntil: String(start), waitJobId: 'old-job', waitAnchorMid: '42' });
+    const waitResume = { scheduledAt: start - 5000, waitSec: 5, anchorMessageId: 42 };
+    await runtime.handleWaitResume({ chatId: -100, jobId: 'other-job', waitResume });
+    expect(store.get('xxb:timing:state:-100')?.state).toBe('WAIT');
+    await runtime.handleWaitResume({ chatId: -100, jobId: 'old-job', waitResume });
+    expect(store.get('xxb:timing:state:-100')?.state).toBe('RUNNING');
+    expect(takeWaitAnchorMock).not.toHaveBeenCalled();
   });
 });

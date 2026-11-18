@@ -154,11 +154,13 @@ four seconds from the first pending message), Heart sees the complete context
 once. A text decision enters Attention with the original batch references, so
 the task uses the last bubble as its anchor and retains the others as related
 messages. The final response may omit a visible quote.
-The default quiet window is `0` (off). The queue permits at most 64 chats, 32
-pending messages per chat and four judgments in flight; excess candidates stay
-in stored context and emit a capacity diagnostic. Shutdown cancels pending
-judgments and prevents late dispatch. Pending input is not automatically replayed
-after restart.
+The default quiet window is `0` (off). The QQ queue permits up to 64 chats,
+32 pending messages per chat and four judgments in flight per ingress process.
+With durable ingress off, excess candidates stay in context and emit a capacity
+diagnostic. A restart also discards queued judgments. With
+`DURABLE_INGRESS_ENABLED=true`, the ingress owner revisits never-started QQ
+candidates in the shared inbox after a restart or when capacity returns.
+Interrupted judgments with an uncertain outcome are held for review.
 
 With `META_QQ_MENTION_HEART_ENABLED=true` (default false), QQ group mentions,
 name calls and replies to the bot retain priority but ask Heart which response
@@ -273,6 +275,45 @@ state, pending requests, queued events and heartbeat time, without endpoint or
 token. `ready` requires a matching `get_login_info` identity. The application's
 general health endpoint only proves process liveness. QQ connection failure does
 not stop Telegram; the disconnected QQ sender explicitly fails.
+
+### When the owner reports a quiet group
+
+1. Identify the running build and the intended QQ account and group. An owner
+   DM and the group's own incoming conversation have separate task scopes.
+   Check which assignment tools the running build exposes before interpreting
+   an answer in the DM as evidence about the group.
+2. On the ingress owner, inspect the authenticated OneBot monitor for `ready`,
+   heartbeat time and `cadence.groupQuietMs`. Check the raw QQ number against
+   `ONEBOT_ALLOWED_GROUP_IDS` and its mapped conversation ID against
+   `META_SUBAGENT_CHAT_IDS`. An eligible member's ordinary post can reach
+   Heart with `META_QQ_MENTION_HEART_ENABLED=false`. That flag controls
+   how **addressed** posts are judged. Telegram batching uses separate settings.
+3. For a known time window and the mapped group ID, inspect the local log's
+   event names and counts. With QQ batching enabled, `QQ Heart batch flushed`
+   and `addressedCount=0` show an unaddressed batch reached the processor.
+   Look for `Meta path: asleep`, `Meta heart: suppress silence`,
+   `Meta heart: wait` or `Meta heart: pass`. Mute, a busy task, a recent
+   reply, or a timing gate can also keep the bot quiet. With durable ingress
+   enabled, bind the mapped ID and time bounds (Unix milliseconds) in a
+   read-only SQLite session to count intake and QQ Heart candidates.
+
+   ```sql
+   SELECT lane, state, COUNT(*) AS events
+   FROM ingress_inbox
+   WHERE chat_id = :chat_id AND received_at_ms >= :from_ms AND received_at_ms < :until_ms
+     AND lane IN ('onebot', 'qq_heart')
+   GROUP BY lane, state;
+   ```
+
+   These rows count input events. One Heart batch may cover several events.
+   The query returns no message bodies or sender IDs.
+4. To explain a claimed inability to speak, check the result of an actual
+   `send_group_msg` for that group if one was attempted. A successful receipt
+   includes a message ID. `api_rejected` records an explicit API rejection.
+   Attributing it to a mute or missing permission requires a corresponding
+   upstream reason for that request. A disconnect or timeout after submission
+   leaves delivery unknown. Preserve the delivery hold and check the chat
+   before considering another send.
 
 Protocol tests use real loopback WebSocket frames, SQLite migrations, and the
 shared ingress. They cover mentions/replies, duplicate events, namespace

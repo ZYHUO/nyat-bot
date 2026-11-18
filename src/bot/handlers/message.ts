@@ -41,9 +41,14 @@ import { resolveConversationScope } from '../../shared/privacy-scope.js';
 import type { UpdateLike } from '../../shared/types.js';
 import { processQqHeartBatch } from '../../meta/qq-heart-processor.js';
 import { trackIngressTask } from '../../ingress/background.js';
-import { observePendingIntent, pendingIntentForEvent, pendingIntentEnabled, inspectPendingIntent } from '../../meta/pending-intent.js';
+import { observePendingIntent, pendingIntentForEvent, pendingIntentEnabled, inspectPendingIntent, pendingInputControl } from '../../meta/pending-intent.js';
 import { tryHandleUpdateCommand } from '../../admin/update-requests.js';
 import { tryHandleJournalConfigCommand } from '../../admin/business-config.js';
+import { isTelegramHeartBatchChat } from '../../meta/flags.js';
+import { enqueueTelegramHeartBatch, interruptTelegramHeartBatch } from '../../meta/telegram-heart-batch.js';
+import { processTelegramHeartBatch } from '../../meta/telegram-heart-processor.js';
+import { cancelWaitForScope } from '../../pipeline/timing/chat-runtime.js';
+import type { LiveIngressOutcome } from '../../nyatos/shadow.js';
 
 /** Shared ingress after each platform has authenticated, filtered and mapped its event. */
 export async function ingestChatUpdate(update: Update): Promise<void> {
@@ -83,6 +88,20 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
     if (await isDuplicate(chatId, messageId, isEdit, msg.edit_date, hostUpdate.__nyatEventIdentity?.eventId)) return;
   } catch (err) {
     logger.warn({ err, chatId, messageId }, 'Dedup check failed, proceeding');
+  }
+
+  const telegramBatchChat = (msg.chat.type === 'group' || msg.chat.type === 'supergroup')
+    && !isPlatformInternalId(chatId) && isTelegramHeartBatchChat(chatId) && heartRoute(env(), chatId) === 'heart';
+  if (telegramBatchChat) {
+    const identity = getBotIdentity(chatId);
+    const direct = detectDirectInteraction(update, { botUid: identity.uid, botUsername: identity.username,
+      botNicknames: identity.nicknames, editByContentOnly: true });
+    // Cancel the old passive decision before command handlers can return early.
+    // An unrelated forum topic retains its own input and decision authority.
+    if (direct !== null || pendingInputControl(msg.text ?? msg.caption ?? '') !== null) {
+      interruptTelegramHeartBatch(chatId, msg.message_thread_id ?? 0);
+      await cancelWaitForScope(chatId, msg.message_thread_id ?? 0);
+    }
   }
 
   // Deterministic owner commands precede both Meta and legacy model routing.
@@ -285,7 +304,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
 
         // Post-task 发酵窗口:人类群消息额外缓冲进窗口(附加式,不影响下方任何闸门)。
         // 放在 mute/sleep/heart 之前——被这些闸门丢掉的非 direct 消息恰恰是窗口要捞的。
-        if (fm.role === 'user' && !fm.isBot && !qqBatchEnabled) {
+        if (fm.role === 'user' && !fm.isBot && !qqBatchEnabled && !telegramBatchChat) {
           try {
             const { ingestIncomingPostTask } = await import('../../subagent/post-task-window.js');
             ingestIncomingPostTask(chatId, {
@@ -306,7 +325,7 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
         // saw 3 of 12 messages, because coalesce/cooldown/engagement had already
         // dropped the rest. Those dropped messages are exactly what the rewrite
         // must be judged on. Fire-and-forget: never delays or blocks the reply.
-        const noteLiveOutcome = (outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted' | 'asleep'): void => {
+        const noteLiveOutcome = (outcome: LiveIngressOutcome): void => {
           if (!env().NYATOS_SHADOW_ENABLED) return;
           // Only record for chats the shadow actually observed; otherwise the
           // ledger fills with outcomes that have no matching shadow verdict and
@@ -427,7 +446,18 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
             const { shouldForceSameSpeakerL0, markSpeakerBurst } = await import(
               '../../meta/speaker-burst.js'
             );
-            if (await shouldForceSameSpeakerL0(chatId, userId)) {
+            const scopedFollowup = !telegramBatchChat || !!fm.pendingIntent && (await import('../../meta/global-state.js')).getGlobalState()
+              .listTasks(chatId).some(task => task.targetUserId === userId
+                && !!task.pendingIntent
+                && (task.messageThreadId ?? 0) === (fm.messageThreadId ?? 0)
+                && task.pendingIntent?.laneKey === fm.pendingIntent?.laneKey
+                && task.pendingIntent?.intentId === fm.pendingIntent?.intentId
+                && ['queued', 'running', 'waiting_user'].includes(task.status) && Date.now() - task.createdAt < 180_000);
+            if (scopedFollowup && await shouldForceSameSpeakerL0(chatId, userId)) {
+              if (telegramBatchChat) {
+                interruptTelegramHeartBatch(chatId, fm.messageThreadId ?? 0);
+                await cancelWaitForScope(chatId, fm.messageThreadId ?? 0);
+              }
               await getAttentionAccumulator().ingestAsync({ pendingIntent: fm.pendingIntent,
                 chatId,
                 layer: 'L0',
@@ -554,6 +584,13 @@ export async function ingestChatUpdate(update: Update): Promise<void> {
           }
 
           if (heartPath === 'heart') {
+            if (telegramBatchChat && fm.role === 'user' && !fm.isBot) {
+              const accepted = enqueueTelegramHeartBatch({ chatId, formatted: fm, layer: layerDec.layer,
+                addressed: false, cognitiveAnchorEventId }, processTelegramHeartBatch);
+              noteLiveOutcome(accepted ? 'batch_accepted' : 'batch_rejected');
+              if (!accepted) logger.warn({ chatId, messageId, reason: 'capacity_or_scope_changed' }, 'Telegram Heart candidate not accepted at ingress');
+              return 'done';
+            }
             const processHeartBatch = async (batch: QqHeartCandidate[], signal: AbortSignal): Promise<void> => {
               const anchor = batch[batch.length - 1]!;
               const directlyAddressed = batch.some(item => item.addressed);

@@ -6,6 +6,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 export const OFFLINE_SUITES = [
+  'tests/unit/meta/telegram-heart-ingress.test.ts',
+  'tests/unit/meta/telegram-heart-batch.test.ts',
+  'tests/unit/pipeline/heart/batch-context.test.ts',
+  'tests/unit/meta/wait-recheck.test.ts',
+  'tests/unit/meta/wait-recheck-slot.test.ts',
+  'tests/unit/subagent/wait-recovery-fence.test.ts',
+  'tests/unit/queue/wait-worker.test.ts',
   'tests/integration/prompt-cache.test.ts',
   'tests/integration/sdk-tool-cache.test.ts',
   'tests/unit/ai/usage-normalization.test.ts',

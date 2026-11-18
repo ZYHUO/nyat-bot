@@ -13,6 +13,16 @@ import { _resetAttentionAccumulator, getAttentionAccumulator } from '../../../sr
 beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); _resetAttentionAccumulator(); });
 afterEach(() => { _resetAttentionAccumulator(); vi.useRealTimers(); });
 describe('strict Attention durable handoff', () => {
+  it('does not queue or wake a decision invalidated before the Redis write', async () => {
+    const accumulator = getAttentionAccumulator();
+    const result = await accumulator.ingestAsync({ chatId: -9, messageId: 1, layer: 'L0', reason: 'heart:reply' },
+      { requireDurable: true, beforePersist: async () => false });
+    expect(result).toBeNull();
+    expect(f.exec).not.toHaveBeenCalled();
+    expect(accumulator.localSize()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(f.tick).not.toHaveBeenCalled();
+  });
   it.each([null, [[new Error('synthetic Redis transaction failure'), null]]])('rejects transaction failure instead of claiming a local fallback is durable', async result => {
     f.exec.mockResolvedValue(result);
     await expect(getAttentionAccumulator().ingestAsync({ chatId: 9, messageId: 1, layer: 'L0', reason: 'dm' }, { requireDurable: true }))

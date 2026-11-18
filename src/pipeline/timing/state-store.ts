@@ -17,8 +17,8 @@
 //
 // TTL 默认 24 小时，长时间无消息的 chat 自然清掉，重启时按"未知 → 默认 RUNNING"处理。
 //
-// 注意：所有写入用 ioredis 直接 HMSET / HSET 操作；并发由 acquireChatLock 协调。
-// 这里不再加细粒度锁，依赖 chat-runtime.ts 的调用约束 + chat-lock。
+// 普通统计写入沿用 ioredis pipeline；WAIT 的安装、领取、取消使用原子 Lua，
+// 以独立代次保护跨进程队列回调，不依赖回调持有 chat-lock。
 
 import { getRedis } from '../../db/redis.js';
 import { env } from '../../env.js';
@@ -28,6 +28,9 @@ export type RuntimeState = 'RUNNING' | 'WAIT' | 'STOP';
 
 export interface ChatTimingState {
   state: RuntimeState;
+  /** Opaque wait identity, retained after claim until cancellation/new work. */
+  waitGeneration?: string;
+  waitThreadId?: number;
   waitUntil?: number;
   waitJobId?: string;
   waitAnchorMid?: number;
@@ -62,6 +65,8 @@ function parseState(raw: Record<string, string>): ChatTimingState {
     stateStr === 'WAIT' || stateStr === 'STOP' ? stateStr : 'RUNNING';
 
   const out: ChatTimingState = { state };
+  if (raw['waitGeneration']) out.waitGeneration = raw['waitGeneration'];
+  if (raw['waitThreadId']) out.waitThreadId = Number(raw['waitThreadId']);
   if (raw['waitUntil']) {
     const n = Number(raw['waitUntil']);
     if (Number.isFinite(n)) out.waitUntil = n;
@@ -204,7 +209,7 @@ export async function enterRunning(chatId: number): Promise<void> {
   await persist(
     chatId,
     { state: 'RUNNING' },
-    ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids'],
+    ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids', 'waitGeneration', 'waitScheduledAt', 'waitThreadId'],
   );
 }
 
@@ -219,7 +224,7 @@ export async function enterStop(chatId: number, triggerUid?: number, ttlSec?: nu
       ...GATE_PENDING_RESET,
       gatePendingSince: Date.now(),
     },
-    ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids'],
+    ['waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids', 'waitGeneration', 'waitScheduledAt', 'waitThreadId'],
     ttlSec,
   );
 }
@@ -258,6 +263,111 @@ export async function enterWait(
     patch['waitTriggerUids'] = [...set].join(',');
   }
   await persist(chatId, patch);
+}
+
+// A wait's durable identity is installed before queue I/O. Every follow-up
+// mutation compares this identity, so a slow enqueue cannot restore cancelled
+// work or overwrite a newer wait. These operations must propagate Redis errors.
+export const WAIT_BEGIN_SCRIPT = `-- timing-wait-begin-v1
+local previousUids = redis.call('HGET', KEYS[1], 'waitTriggerUids') or ''
+if redis.call('HGET', KEYS[1], 'state') ~= 'WAIT'
+  or (redis.call('HGET', KEYS[1], 'waitThreadId') or '0') ~= ARGV[7] then previousUids = '' end
+redis.call('HDEL', KEYS[1], 'waitJobId', 'waitAnchorMid', 'waitTriggerUids', 'waitTopicKey')
+redis.call('HSET', KEYS[1], 'state', 'WAIT', 'waitGeneration', ARGV[1],
+  'waitScheduledAt', ARGV[2], 'waitUntil', ARGV[3], 'lastGateAt', ARGV[2],
+  'lastGateAction', 'wait', 'gatePendingCount', '0', 'gatePendingSince', ARGV[2], 'waitThreadId', ARGV[7])
+if ARGV[4] ~= '' then redis.call('HSET', KEYS[1], 'waitAnchorMid', ARGV[4]) end
+if ARGV[5] ~= '' then
+  local uids = previousUids
+  if not string.find(',' .. uids .. ',', ',' .. ARGV[5] .. ',', 1, true) then
+    uids = uids == '' and ARGV[5] or uids .. ',' .. ARGV[5]
+  end
+  redis.call('HSET', KEYS[1], 'lastGateUid', ARGV[5], 'waitTriggerUids', uids)
+end
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return 1`;
+
+export const WAIT_ATTACH_SCRIPT = `-- timing-wait-attach-v1
+if redis.call('HGET', KEYS[1], 'state') ~= 'WAIT'
+  or redis.call('HGET', KEYS[1], 'waitGeneration') ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'waitJobId', ARGV[2])
+return 1`;
+
+export const WAIT_CANCEL_SCRIPT = `-- timing-wait-cancel-v1
+if redis.call('HGET', KEYS[1], 'waitGeneration') ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'state', 'RUNNING')
+redis.call('HDEL', KEYS[1], 'waitGeneration', 'waitScheduledAt', 'waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids', 'waitTopicKey', 'waitThreadId')
+return 1`;
+
+export const WAIT_CANCEL_SCOPE_SCRIPT = `-- timing-wait-cancel-scope-v1
+if not redis.call('HGET', KEYS[1], 'state') then return 0 end
+if (redis.call('HGET', KEYS[1], 'waitThreadId') or '0') ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'state', 'RUNNING')
+redis.call('HDEL', KEYS[1], 'waitGeneration', 'waitScheduledAt', 'waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids', 'waitTopicKey', 'waitThreadId')
+return 1`;
+
+export const WAIT_CLAIM_SCRIPT = `-- timing-wait-claim-v1
+if redis.call('HGET', KEYS[1], 'state') ~= 'WAIT' then return {'stale', '0'} end
+local generation = redis.call('HGET', KEYS[1], 'waitGeneration')
+local deadline = tonumber(redis.call('HGET', KEYS[1], 'waitUntil'))
+if not deadline then return {'invalid', '0'} end
+if generation then
+  if generation ~= ARGV[1] or deadline ~= tonumber(ARGV[2]) then return {'stale', '0'} end
+  local job = redis.call('HGET', KEYS[1], 'waitJobId')
+  if job and ARGV[3] ~= '' and job ~= ARGV[3] then return {'stale', '0'} end
+else
+  local job = redis.call('HGET', KEYS[1], 'waitJobId')
+  if ARGV[1] ~= '' or ARGV[3] == '' or not job or job ~= ARGV[3] then return {'stale', '0'} end
+end
+local anchor = redis.call('HGET', KEYS[1], 'waitAnchorMid') or ''
+if anchor ~= ARGV[4] then return {'stale', '0'} end
+if tonumber(ARGV[5]) < deadline then return {'early', tostring(deadline)} end
+redis.call('HSET', KEYS[1], 'state', 'RUNNING')
+redis.call('HDEL', KEYS[1], 'waitScheduledAt', 'waitUntil', 'waitJobId', 'waitAnchorMid', 'waitTriggerUids', 'waitTopicKey')
+return {'claimed', tostring(deadline)}`;
+
+export async function beginScheduledWait(chatId: number, input: {
+  waitGeneration: string; scheduledAt: number; waitUntil: number;
+  anchorMessageId?: number; triggerUid?: number; messageThreadId?: number;
+}): Promise<void> {
+  await getRedis().eval(WAIT_BEGIN_SCRIPT, 1, key(chatId), input.waitGeneration,
+    String(input.scheduledAt), String(input.waitUntil), String(input.anchorMessageId ?? ''),
+    String(input.triggerUid ?? ''), String(env().TIMING_STATE_TTL_SEC), String(normalizedWaitThread(input.messageThreadId)));
+}
+
+export async function attachWaitJob(chatId: number, generation: string, jobId: string): Promise<boolean> {
+  return Number(await getRedis().eval(WAIT_ATTACH_SCRIPT, 1, key(chatId), generation, jobId)) === 1;
+}
+
+export async function cancelWaitGeneration(chatId: number, generation: string): Promise<void> {
+  await getRedis().eval(WAIT_CANCEL_SCRIPT, 1, key(chatId), generation);
+}
+
+/** Telegram General topic 1 and an omitted thread share the context scope 0. */
+function normalizedWaitThread(messageThreadId = 0): number {
+  return messageThreadId > 1 ? messageThreadId : 0;
+}
+
+export async function cancelWaitForScope(chatId: number, messageThreadId = 0): Promise<void> {
+  await getRedis().eval(WAIT_CANCEL_SCOPE_SCRIPT, 1, key(chatId), String(normalizedWaitThread(messageThreadId)));
+}
+
+export type WaitClaim = { status: 'claimed' | 'early'; waitUntil: number } | { status: 'stale' | 'invalid' };
+
+/** Recovery reads raw state atomically, never the lazy-expired suppression view. */
+export async function claimWaitResume(chatId: number, input: {
+  waitGeneration?: string; waitUntil?: number; jobId?: string; anchorMessageId?: number;
+}, now = Date.now()): Promise<WaitClaim> {
+  const raw = await getRedis().eval(WAIT_CLAIM_SCRIPT, 1, key(chatId), input.waitGeneration ?? '',
+    String(input.waitUntil ?? ''), input.jobId ?? '', String(input.anchorMessageId ?? ''), String(now));
+  if (!Array.isArray(raw)) throw new Error('invalid_wait_claim_receipt');
+  const status = String(raw[0]);
+  if (status === 'stale' || status === 'invalid') return { status };
+  const waitUntil = Number(raw[1]);
+  if ((status !== 'claimed' && status !== 'early') || !Number.isSafeInteger(waitUntil)) {
+    throw new Error('invalid_wait_claim_receipt');
+  }
+  return { status, waitUntil };
 }
 
 export async function recordContinue(chatId: number): Promise<void> {

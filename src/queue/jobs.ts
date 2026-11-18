@@ -39,6 +39,9 @@ export interface MessageJobData {
   skipReply?: boolean;
   /** Phase 4: wait-resume payload (only for type='wait_resume') */
   waitResume?: {
+    /** Exact identity/deadline for jobs created by the fenced wait transport. */
+    waitGeneration?: string;
+    waitUntil?: number;
     /** When this wait was scheduled (epoch ms) */
     scheduledAt: number;
     /** Original wait duration in seconds */

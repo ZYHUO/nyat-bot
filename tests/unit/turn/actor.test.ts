@@ -18,10 +18,11 @@ const envState = {
   TURN_GATE_DEFER_MAX_REPLAYS: 1,
 };
 
-const { processPipelineMock, scheduleTurnMock, transitionToRunningMock, appendPendingMock, acquireLockMock, renewLockMock, releaseLockMock } = vi.hoisted(() => ({
+const { processPipelineMock, scheduleTurnMock, transitionToRunningMock, cancelWaitForScopeMock, appendPendingMock, acquireLockMock, renewLockMock, releaseLockMock } = vi.hoisted(() => ({
   processPipelineMock: vi.fn(async () => {}),
   scheduleTurnMock: vi.fn(async () => {}),
   transitionToRunningMock: vi.fn(async () => {}),
+  cancelWaitForScopeMock: vi.fn(async () => true),
   appendPendingMock: vi.fn(async () => ({ count: 1, firstPendingAt: 0 })),
   acquireLockMock: vi.fn(async () => true),
   renewLockMock: vi.fn(async () => true),
@@ -42,7 +43,7 @@ const bufferState: {
   postDrainPendingCount: number;
 } = { pending: [], dirty: false, epoch: 0, clearedJobs: [], postDrainPendingCount: 0 };
 
-let chatState: { state: 'RUNNING' | 'WAIT' | 'STOP'; waitTriggerUids?: number[]; waitTopicKey?: string } = { state: 'RUNNING' };
+let chatState: { state: 'RUNNING' | 'WAIT' | 'STOP'; waitGeneration?: string; waitTriggerUids?: number[]; waitTopicKey?: string } = { state: 'RUNNING' };
 
 vi.mock('../../../src/env.js', () => ({ env: () => envState }));
 vi.mock('../../../src/shared/logger.js', () => ({
@@ -53,6 +54,7 @@ vi.mock('../../../src/queue/turn-scheduler.js', () => ({ scheduleTurn: scheduleT
 vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
   getChatState: vi.fn(async () => chatState),
   transitionToRunning: transitionToRunningMock,
+  cancelWaitForScope: cancelWaitForScopeMock,
 }));
 // P2-F:wait 回访对照 activity 时间线判断窗口期有无新消息
 const { getRecentTimestampsMock } = vi.hoisted(() => ({
@@ -92,6 +94,7 @@ function entry(messageId: number, direct = false): PendingEntry {
     messageId,
     enqueuedAt: Date.now(),
     direct,
+    waitGeneration: 'current-wait',
   };
 }
 
@@ -119,12 +122,13 @@ beforeEach(() => {
   processPipelineMock.mockClear();
   scheduleTurnMock.mockClear();
   transitionToRunningMock.mockClear();
+  cancelWaitForScopeMock.mockClear();
   bufferState.pending = [];
   bufferState.dirty = false;
   bufferState.epoch = 0;
   bufferState.clearedJobs = [];
   bufferState.postDrainPendingCount = 0;
-  chatState = { state: 'RUNNING' };
+  chatState = { state: 'RUNNING', waitGeneration: 'current-wait' };
   envState.TURN_ACTOR_ENABLED = true;
   envState.TURN_ACTOR_CHAT_IDS = [];
   envState.TIMING_GATE_ENABLED = false;
@@ -309,10 +313,22 @@ describe('runChatTurn', () => {
 
     await runChatTurn(turnJob('direct'), 'turn-1');
 
-    expect(transitionToRunningMock).toHaveBeenCalledTimes(1);
+    expect(cancelWaitForScopeMock).toHaveBeenCalledExactlyOnceWith(CHAT, undefined);
+    expect(transitionToRunningMock).not.toHaveBeenCalled();
     const last = processPipelineMock.mock.calls.at(-1)![0] as { skipReply?: boolean; coalesce: { isLastInBatch: boolean } };
     expect(last.skipReply).toBeUndefined();
     expect(last.coalesce.isLastInBatch).toBe(true);
+  });
+
+  it('cancels direct input only in its forum topic even after wait suppression expires', async () => {
+    envState.TIMING_GATE_ENABLED = true;
+    chatState = { state: 'RUNNING', waitGeneration: 'current-wait' };
+    const direct = cmdEntry(2, 'hello');
+    (direct.update as { message: { message_thread_id?: number } }).message.message_thread_id = 77;
+    bufferState.pending = [direct];
+    await runChatTurn(turnJob('direct'), 'turn-1');
+    expect(cancelWaitForScopeMock).toHaveBeenCalledExactlyOnceWith(CHAT, 77);
+    expect(transitionToRunningMock).not.toHaveBeenCalled();
   });
 
   it('reschedules itself when messages landed mid-turn (dirty flag) — forceNew', async () => {
@@ -529,7 +545,7 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     expect(judged.turnContext?.burstMessageIds).toBeUndefined();
   });
 
-  it('G5: a lone wait-replay anchor is judged with isWaitReplay + gateBypass', async () => {
+  it('G5: a lone wait-replay anchor is judged again without gateBypass', async () => {
     bufferState.pending = [{ ...entry(42), waitReplay: true }];
     await runChatTurn(turnJob(), 'turn-1');
 
@@ -542,7 +558,22 @@ describe('runChatTurn — G3 interrupt/replan', () => {
     expect(job.messageId).toBe(42);
     expect(job.coalesce.isLastInBatch).toBe(true);
     expect(job.turnContext?.isWaitReplay).toBe(true);
-    expect(job.turnContext?.gateBypass).toBe(true);
+    expect(job.turnContext?.gateBypass).toBe(false);
+  });
+
+  it.each([undefined, 'cancelled-wait'])('drops wait recovery with stale generation %s', async (generation) => {
+    bufferState.pending = [{ ...entry(42), waitReplay: true, waitGeneration: generation }];
+    await runChatTurn(turnJob('wait_timeout'), 'turn-1');
+    expect(processPipelineMock).not.toHaveBeenCalled();
+  });
+
+  it('sleep catchup keeps its existing bypass without a wait generation', async () => {
+    bufferState.pending = [{ ...entry(42), waitReplay: true, sleepCatchup: true, waitGeneration: undefined }];
+    await runChatTurn(turnJob('wait_timeout'), 'turn-1');
+    expect(processPipelineMock).toHaveBeenCalledTimes(1);
+    expect(processPipelineMock.mock.calls[0]![0]).toMatchObject({
+      turnContext: { isWaitReplay: true, sleepCatchup: true, gateBypass: true },
+    });
   });
 
   it('G5: fresher messages displace the wait-replay anchor (re-anchor to newest)', async () => {
@@ -622,7 +653,7 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
     expect(judged.turnContext?.deferCount).toBeUndefined();
   });
 
-  it('wait 回放(期间彻底沉默)→ waitResume={waitSec, hadNewMessages:false} + gateBypass', async () => {
+  it('wait 回放(期间彻底沉默)重新检查时机并携带 hadNewMessages:false', async () => {
     getRecentTimestampsMock.mockResolvedValue([]);
     bufferState.pending = [{ ...entry(1), waitReplay: true, waitSec: 30, waitStartedAt: Date.now() - 30_000 }];
 
@@ -632,7 +663,7 @@ describe('runChatTurn — P0-B deferReplay / P2-F waitResume', () => {
       turnContext?: { waitResume?: { waitSec?: number; hadNewMessages: boolean }; gateBypass?: boolean };
     };
     expect(judged.turnContext?.waitResume).toEqual({ waitSec: 30, hadNewMessages: false });
-    expect(judged.turnContext?.gateBypass).toBe(true);
+    expect(judged.turnContext?.gateBypass).toBe(false);
   });
 
   it('review #7:窗口期消息被中间回合消化 → activity 时间线仍能判出 hadNewMessages:true', async () => {

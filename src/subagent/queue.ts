@@ -6,6 +6,7 @@ import { getRedis } from '../db/redis.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import type { DispatchTask } from '../meta/types.js';
+import { requireTaskWaitRecovery } from '../meta/wait-recovery-fence.js';
 import { getGlobalState } from '../meta/global-state.js';
 import {
   tryMarkCodeActActive,
@@ -45,6 +46,7 @@ export function enqueueCodeActJob(task: DispatchTask): Promise<void> {
 
 async function enqueueCodeActJobInner(task: DispatchTask): Promise<void> {
   await requireCodeActActivation(task);
+  await requireTaskWaitRecovery(task);
   const state = getGlobalState();
   if (task.status !== 'running') task.status = 'queued';
   state.putTask(task);
@@ -79,6 +81,7 @@ export function enqueueResumeCodeActJob(task: DispatchTask): Promise<void> {
 
 async function enqueueResumeCodeActJobInner(task: DispatchTask): Promise<void> {
   await requireCodeActActivation(task);
+  await requireTaskWaitRecovery(task);
   const state = getGlobalState();
   task.status = 'queued';
   state.putTask(task);

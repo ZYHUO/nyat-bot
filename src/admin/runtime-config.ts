@@ -73,7 +73,7 @@ export interface RuntimeOverride {
   };
 }
 
-export async function loadOverride(redis: Redis): Promise<RuntimeOverride | null> {
+export async function loadOverride(redis: Redis, strict = false): Promise<RuntimeOverride | null> {
   const raw = await redis.get(OVERRIDE_KEY);
   if (!raw) return null;
   try {
@@ -86,7 +86,8 @@ export async function loadOverride(redis: Redis): Promise<RuntimeOverride | null
     if (parsed['humanizer']) result.humanizer = parsed['humanizer'] as RuntimeOverride['humanizer'];
     if (parsed['sleep_schedule']) result.sleep_schedule = parsed['sleep_schedule'] as RuntimeOverride['sleep_schedule'];
     return result;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     logger.warn('Failed to parse runtime override from Redis');
     return null;
   }

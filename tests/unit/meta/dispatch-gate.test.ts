@@ -5,7 +5,7 @@ const recordGateContinue = vi.fn(async () => undefined);
 const transitionToWait = vi.fn(async () => undefined);
 const recordGateNoAction = vi.fn(async () => undefined);
 const scheduleMetaDeferReeval = vi.fn(async () => true);
-const setMetaWaitAnchor = vi.fn(async () => undefined);
+const setMetaWaitAnchor = vi.fn(async () => 'test-generation');
 const markMessageAnswered = vi.fn(async () => undefined);
 
 vi.mock('../../../src/pipeline/timing/gate.js', () => ({
@@ -140,7 +140,7 @@ describe('evaluateDispatchGate', () => {
     expect(r.verdict).toBe('suppress');
     expect(r.reason).toBe('wait:二人密聊');
     expect(setMetaWaitAnchor).toHaveBeenCalled();
-    expect(transitionToWait).toHaveBeenCalledWith(-1001, 20, 9, 42);
+    expect(transitionToWait).toHaveBeenCalledWith(-1001, 20, 9, 42, undefined, { waitGeneration: 'test-generation', messageThreadId: undefined });
     expect(markMessageAnswered).not.toHaveBeenCalled();
   });
 

@@ -63,8 +63,9 @@ describe('env schema 拆段', () => {
     // Parsed default objects omit 19 optional keys and are not this denominator.
     // Five isolated video replica controls; standalone server settings are not bot keys.
     // Recounted 559 unique keys: two business settings gates and six release/readiness controls.
-    expect(all.length).toBe(559);
-    expect(new Set(all).size).toBe(559);
+    // Three Telegram Heart rollout controls (group list, quiet and maximum windows).
+    expect(all.length).toBe(562);
+    expect(new Set(all).size).toBe(562);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -120,6 +121,17 @@ describe('env schema 拆段', () => {
       expect(() => parseEnv({ ...required, META_DIRECT_COALESCE_MS: value })).toThrow();
     }
     expect(() => parseEnv({ ...required, META_DIRECT_COALESCE_MAX_MS: '0' })).toThrow();
+  });
+
+  it('opts Telegram pre-Heart batching into explicit groups with bounded windows', async () => {
+    const { parseEnv } = await import('../../../src/env.js');
+    const required = { BOT_TOKEN: 'x', REDIS_URL: 'redis://127.0.0.1:6379/5' };
+    expect(parseEnv(required)).toMatchObject({ META_TG_GROUP_COALESCE_CHAT_IDS: [], META_TG_GROUP_COALESCE_MS: 0 });
+    const rollout = parseEnv({ ...required, META_TG_GROUP_COALESCE_CHAT_IDS: '-10, -20', META_TG_GROUP_COALESCE_MS: '800' });
+    expect(rollout.META_TG_GROUP_COALESCE_CHAT_IDS).toEqual([-10, -20]);
+    expect(rollout.META_TG_GROUP_COALESCE_MAX_MS).toBe(2400);
+    for (const ids of ['-10,', 'someone', '12']) expect(() => parseEnv({ ...required, META_TG_GROUP_COALESCE_CHAT_IDS: ids })).toThrow();
+    expect(() => parseEnv({ ...required, META_TG_GROUP_COALESCE_MAX_MS: '0' })).toThrow();
   });
 
   it('group files select exactly one representation, never an ambiguous both mode', async () => {

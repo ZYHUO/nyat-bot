@@ -204,19 +204,23 @@ export async function getLastMsgAt(chatId: number): Promise<number | undefined> 
   return raw ? Number(raw) : undefined;
 }
 
-const WAIT_ANCHOR_KEY = (chatId: number) => `xxb:turn:waitanchor:${chatId}`;
-
-export async function setWaitAnchor(chatId: number, entry: PendingEntry, ttlSec: number): Promise<void> {
-  await getRedis().set(WAIT_ANCHOR_KEY(chatId), JSON.stringify(entry), 'EX', Math.max(ttlSec, 30));
+function waitAnchorKey(chatId: number, waitGeneration?: string): string {
+  if (waitGeneration !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(waitGeneration)) {
+    throw new Error('invalid wait anchor generation');
+  }
+  return `xxb:turn:waitanchor:${chatId}${waitGeneration === undefined ? '' : `:${waitGeneration}`}`;
 }
 
-export async function takeWaitAnchor(chatId: number): Promise<PendingEntry | null> {
+export async function setWaitAnchor(chatId: number, entry: PendingEntry, ttlSec: number, waitGeneration?: string): Promise<void> {
+  const anchor = waitGeneration === undefined ? entry : { ...entry, waitGeneration };
+  await getRedis().set(waitAnchorKey(chatId, waitGeneration), JSON.stringify(anchor), 'EX', Math.max(ttlSec, 30));
+}
+
+export async function takeWaitAnchor(chatId: number, waitGeneration?: string): Promise<PendingEntry | null> {
   const redis = getRedis();
-  const raw = await redis.getdel(WAIT_ANCHOR_KEY(chatId)).catch(async () => {
-    const v = await redis.get(WAIT_ANCHOR_KEY(chatId));
-    if (v) await redis.del(WAIT_ANCHOR_KEY(chatId));
-    return v;
-  });
+  // A resume may only consume its own generation. GET + DEL fallback could
+  // deliver one anchor twice to concurrent workers after a transient failure.
+  const raw = await redis.getdel(waitAnchorKey(chatId, waitGeneration));
   if (!raw) return null;
   try {
     return JSON.parse(raw) as PendingEntry;

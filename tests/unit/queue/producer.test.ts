@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 const addMock = vi.fn();
 
@@ -7,7 +7,7 @@ vi.mock('../../../src/db/redis.js', () => ({
 }));
 
 vi.mock('../../../src/shared/logger.js', () => ({
-  logger: { info: vi.fn() },
+  logger: { info: vi.fn(), debug: vi.fn() },
 }));
 
 vi.mock('bullmq', () => ({
@@ -18,6 +18,7 @@ vi.mock('bullmq', () => ({
 }));
 
 describe('queue producer job ids', () => {
+  afterEach(() => vi.restoreAllMocks());
   beforeEach(() => {
     addMock.mockReset();
     addMock.mockImplementation(async (_name: string, _data: unknown, opts: { jobId: string }) => ({
@@ -45,5 +46,18 @@ describe('queue producer job ids', () => {
       jobId: id,
     }));
     expect(id).not.toContain(':');
+  });
+
+  it('wait enqueue retries preserve generation, payload and the original deadline', async () => {
+    const { enqueueWaitResume } = await import('../../../src/queue/producer.js');
+    vi.spyOn(Date, 'now').mockReturnValue(103000);
+    const timing = { waitGeneration: 'synthetic-generation', scheduledAt: 100000, waitUntil: 105000 };
+    const first = await enqueueWaitResume(-100, 5, 42, 'obligation-1', timing);
+    const retry = await enqueueWaitResume(-100, 5, 42, 'obligation-1', timing);
+    expect(first).toBe('wait--100-synthetic-generation');
+    expect(retry).toBe(first);
+    expect(addMock).toHaveBeenCalledWith('wait_resume', expect.objectContaining({
+      enqueuedAt: 100000, waitResume: { ...timing, waitSec: 5, anchorMessageId: 42, obligationId: 'obligation-1' },
+    }), expect.objectContaining({ jobId: first, delay: 2000, attempts: 3 }));
   });
 });

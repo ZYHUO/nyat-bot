@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const runTimingGate = vi.fn();
 const isChatSuppressed = vi.fn(async () => false);
 const transitionToWait = vi.fn(async () => undefined);
-const transitionToRunning = vi.fn(async () => undefined);
+const cancelWaitForScope = vi.fn(async () => undefined);
 const recordGateContinue = vi.fn(async () => undefined);
 const recordUserMessage = vi.fn(async () => undefined);
 const recordGateNoAction = vi.fn(async () => undefined);
@@ -19,7 +19,7 @@ vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
   recordBotReply: vi.fn(async () => undefined),
   recordUserMessage: (...args: unknown[]) => recordUserMessage(...args),
   transitionToWait: (...args: unknown[]) => transitionToWait(...args),
-  transitionToRunning: (...args: unknown[]) => transitionToRunning(...args),
+  cancelWaitForScope: (...args: unknown[]) => cancelWaitForScope(...args),
 }));
 vi.mock('../../../src/pipeline/timing/state-store.js', () => ({
   recordGateNoAction: (...args: unknown[]) => recordGateNoAction(...args),
@@ -185,4 +185,20 @@ describe('evaluateMetaTiming', () => {
     expect(r.verdict).toBe('allow');
     expect(r.reason).toContain('defer_exhausted:');
   });
+  it('expired L0 wait rechecks timing and does not use the direct bypass', async () => {
+    runTimingGate.mockResolvedValueOnce({ action: 'wait', reason: 'still busy', waitSec: 8 });
+    const { evaluateMetaTiming } = await import('../../../src/meta/timing-adapter.js');
+    const result = await evaluateMetaTiming({ chatId: -1001, formatted: fm, isDirect: true, layer: 'L0', waitResume: true });
+    expect(runTimingGate).toHaveBeenCalledOnce();
+    expect(result).toEqual({ verdict: 'silence', reason: 'wait_expired_still_waiting' });
+    expect(transitionToWait).not.toHaveBeenCalled(); expect(cancelWaitForScope).not.toHaveBeenCalled();
+    expect(recordUserMessage).not.toHaveBeenCalled();
+  });
+  it('expired defer-only wait remains silent without another scheduled replay', async () => {
+    runTimingGate.mockResolvedValueOnce({ action: 'no_action', reason: 'cooldown', deferOnly: true });
+    const { evaluateMetaTiming } = await import('../../../src/meta/timing-adapter.js');
+    const result = await evaluateMetaTiming({ chatId: -1001, formatted: fm, isDirect: false, layer: 'L1', waitResume: true });
+    expect(result.verdict).toBe('silence'); expect(scheduleMetaDeferReeval).not.toHaveBeenCalled();
+  });
+
 });

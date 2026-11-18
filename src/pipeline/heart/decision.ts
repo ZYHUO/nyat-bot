@@ -28,6 +28,7 @@ import { isMentioningSelf } from '../judge/rules.js';
 import { getBotIdentity } from '../../bot/bot.js';
 import type { SelfState } from './self-state.js';
 import { isPlatformInternalId } from '../../platform/identity-store.js';
+import { isTelegramHeartBatchChat } from '../../meta/flags.js';
 
 export type HeartAct = 'reply' | 'wait' | 'pass' | 'react';
 
@@ -41,12 +42,18 @@ export interface HeartDecision {
   emoji?: string;
   /** 折算出的 JudgeResult(供下游 mute/intercept/telemetry 沿用既有形状) */
   judgeResult: JudgeResult;
+  /** Host-validated recipients of a batched Telegram reply decision. */
+  targetMessageIds?: number[];
 }
 
 export interface HeartInput {
   chatId: number;
   message: FormattedMessage;
   recentMessages: FormattedMessage[];
+  /** Authenticated messages in this decision, independent of history truncation. */
+  batchMessages?: FormattedMessage[];
+  /** Current dispatchable anchors, supplied only by the Telegram batch host. */
+  targetMessageIds?: readonly number[];
   botUid: number;
   botName: string;
   selfState: SelfState;
@@ -170,7 +177,7 @@ function cleanWhy(raw: string): string {
   return t.slice(0, 40);
 }
 
-function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why: string } | null {
+function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why: string; targetMessageIds?: number[] } | null {
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
   const m = cleaned.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -190,6 +197,9 @@ function parseHeart(raw: string): { act: HeartAct; path: 'chat' | 'lookup'; why:
       path: pathRaw === 'lookup' ? 'lookup' : 'chat',
       why: cleanWhy(String(obj['why'] ?? '')),
       ...(act === 'react' ? { emoji } : {}),
+      ...(Object.hasOwn(obj, 'targetMessageIds') ? { targetMessageIds:
+        Array.isArray(obj['targetMessageIds']) && obj['targetMessageIds'].every(id => Number.isSafeInteger(id) && id > 0)
+          ? [...new Set(obj['targetMessageIds'] as number[])] : [] } : {}),
     };
   } catch {
     return null;
@@ -237,6 +247,27 @@ export async function heartDecision(input: HeartInput): Promise<HeartDecision> {
 async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   const start = performance.now();
   const e = env();
+  const batch = input.batchMessages;
+  const anchorSource = input.message.eventIdentity?.ref.conversation;
+  const telegramBatchMetrics = !!input.targetMessageIds && anchorSource?.platform === 'telegram'
+    && isTelegramHeartBatchChat(input.chatId);
+  const threadId = input.message.messageThreadId ?? 0;
+  const sameScope = (message: FormattedMessage): boolean => {
+    const source = message.eventIdentity?.ref.conversation;
+    const stored = message.contextScope;
+    if ((message.messageThreadId ?? 0) !== threadId) return false;
+    if (source) return !!anchorSource && source.platform === anchorSource.platform && source.accountId === anchorSource.accountId
+      && source.conversationKind === anchorSource.conversationKind && source.idNamespace === anchorSource.idNamespace
+      && source.id === anchorSource.id && Number(source.threadId ?? 0) === threadId;
+    return !!stored && !!anchorSource && stored.platform === anchorSource.platform && stored.accountId === anchorSource.accountId
+      && stored.chatId === input.chatId && stored.threadId === threadId;
+  };
+  if (input.targetMessageIds && (!batch?.length || batch.length > 32 || !anchorSource
+    || anchorSource.platform !== 'telegram' || anchorSource.conversationKind !== 'group' || anchorSource.id !== String(input.chatId)
+    || batch.some(message => !sameScope(message) || message.eventIdentity?.ref.id !== String(message.messageId))
+    || input.targetMessageIds.some(id => !batch.some(message => message.messageId === id)))) {
+    return { act: 'pass', path: 'chat', why: 'batch_scope_invalid', latencyMs: 0, judgeResult: toJudgeResult('pass', 'chat', 0) };
+  }
 
   let systemPrompt: string;
   let systemCachePrefix: string;
@@ -290,7 +321,14 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     return { act: 'pass', path: 'chat', why: 'prompt_load_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
 
-  const ctxStr = slimContextForAI(input.recentMessages, input.message, input.botUid);
+  const batchIds = new Set(batch?.map(message => message.messageId));
+  const history = input.targetMessageIds
+    ? input.recentMessages.filter(message => sameScope(message) && !batchIds.has(message.messageId)) : input.recentMessages;
+  const ctxStr = slimContextForAI(history, input.message, input.botUid);
+  const batchLine = batch?.length ? `\n\n[本次待判断消息，按真实发送者和引用区分]\n${slimContextForAI(batch, input.message, input.botUid)}`
+    + '\n前面的补充仍是上下文；不要把不同人的问题合成同一个人的指令，不要仅因时间相邻就逐人回复。' : '';
+  const targetsLine = input.targetMessageIds
+    ? `\n[宿主允许的当前回复锚点] ${JSON.stringify(input.targetMessageIds)}。reply 必须额外输出 targetMessageIds 数组，只选择确实要接的消息 ID。同一问题的连续补充合并选择一个锚点；独立问题即使来自同一人、没有原生引用，也可各选一个真实消息 ID，不要默认只选最后一条。react 只对 ★ 标记的最后一条消息反应，不能用 targetMessageIds 改选反应对象。无法确定归属时 pass 或 wait。` : '';
   const presence = input.lastSpokeSecAgo !== undefined && input.lastSpokeSecAgo < 180
     ? `\n(你 ${Math.round(input.lastSpokeSecAgo)} 秒前刚在这个群说过话,正处于对话中)`
     : '';
@@ -335,10 +373,11 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
       ? '\n[宿主事实] 这批中至少一条来自本会话正在处理任务的发送者，也可能混有其他群友的消息。按各条的发送者判断哪些内容补充或修正当前任务，相关内容优先 reply 交回现有任务，需要等后文时 wait；无关闲聊仍可 react/pass。不要把最新一句的发送者自动当成任务发起者，不要重复启动同一个任务。'
       : '\n[协议事实] 这批消息里有人直接 @ 你、叫你的名字或引用你的消息，是在叫你本人。结合整批内容判断：真实提问、请求和需要确认的指令优先 reply，需等后文时 wait；招呼、玩笑或无需文字的接话可以 react/pass。被提及不等于必须发一条文字。'
     : '';
-  const userMsg = `[群聊上下文]\n${ctxStr}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}${answeredLine}${addressedLine}\n\n对 ★ 标记的最新消息做出你的决定,输出 JSON。`;
+  const userMsg = `[群聊上下文]\n${ctxStr}${batchLine}${presence}${selfHistoryBlock}${burstLine}${workspaceLine}${answeredLine}${addressedLine}${targetsLine}\n\n${input.targetMessageIds ? '对整批消息做一次决定，保留每个选中锚点的真实归属' : '对 ★ 标记的最新消息做出你的决定'},输出 JSON。`;
 
   let raw: string;
   try {
+    if (telegramBatchMetrics) incrCounter('telegram_heart_model_calls_total', { phase: 'primary' });
     const result = await callWithFallback({
       // stepfun 这类中文小模型吐脏 JSON(单引号 / Python dict / markdown 围栏)不算罕见,
       // 而 parseHeart 失败会把**整份** prompt(heart.md + persona core + 群聊上下文)重发
@@ -381,6 +420,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
   let parsed = parseHeart(raw);
   if ((!parsed || !raw.trim()) && !input.signal?.aborted) {
     try {
+      if (telegramBatchMetrics) incrCounter('telegram_heart_model_calls_total', { phase: 'repair' });
       const retry = await callWithFallback({
       // stepfun 这类中文小模型吐脏 JSON(单引号 / Python dict / markdown 围栏)不算罕见,
       // 而 parseHeart 失败会把**整份** prompt(heart.md + persona core + 群聊上下文)重发
@@ -394,7 +434,7 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMsg },
           { role: 'assistant', content: raw.slice(0, 300) },
-          { role: 'user', content: '上面的输出为空或不是合法 JSON。只输出一个非空 JSON 对象，字段必须只有 act/path/why。act 只能是 reply/wait/pass。' },
+          { role: 'user', content: '上面的输出为空或不是合法 JSON。只输出一个非空 JSON 对象，字段必须只有 act/path/why' + (input.targetMessageIds ? '/targetMessageIds' : '') + '。act 只能是 reply/wait/pass。' },
         ],
         temperature: 0,
         rejectEmpty: true,
@@ -420,12 +460,20 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
     logger.warn({ chatId: input.chatId, rawSummary: summarizeHeartRaw(raw) }, 'heart parse failed, hybrid fallback');
     return { act: 'pass', path: 'chat', why: 'parse_failed', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
   }
+  if (parsed.act === 'reply' && input.targetMessageIds) {
+    const selected = parsed.targetMessageIds ?? (input.targetMessageIds.length === 1 ? [...input.targetMessageIds] : []);
+    if (!selected.length || selected.some(id => !input.targetMessageIds!.includes(id))) {
+      return { act: 'pass', path: 'chat', why: 'batch_targets_invalid', latencyMs, judgeResult: toJudgeResult('pass', 'chat', latencyMs) };
+    }
+    parsed = { ...parsed, targetMessageIds: selected };
+  }
 
   // 心流反思(默认关):只在决定 reply 时,用同一个 heart 模型把「念头」再磨一遍——
   // 不改决策(act/path 不动)、不换模型,只让流给写手的 [你的念头] 更抓重点。
   // 只在 reply 轮加这一次调用;失败/空/超时/打断一律保底用原念头(fail-safe)。
   if (parsed.act === 'reply' && e.HEART_REFLECT_ENABLED && !input.signal?.aborted) {
     try {
+      if (telegramBatchMetrics) incrCounter('telegram_heart_model_calls_total', { phase: 'reflect' });
       const rr = await callWithFallback({
         // 念头磨光走 summarize（原 heart_reflect 已并入）
         usage: 'summarize',
@@ -433,11 +481,13 @@ async function _heartDecision(input: HeartInput): Promise<HeartDecision> {
           {
             role: 'system',
             content:
-              `你是${input.botName}。你刚决定接下面 ★ 那条消息,当前念头是「${parsed.why}」。` +
+              `你是${input.botName}。你刚决定接${input.targetMessageIds ? `消息 ${JSON.stringify(parsed.targetMessageIds)}` : '下面 ★ 那条消息'},当前念头是「${parsed.why}」。` +
               `再想半秒:这念头抓到点子了吗?会不会太笼统、没接到重点、或跟你刚说过的重复?` +
               `给一句**更利落、更抓重点**的念头(≤30字,是你想说话的方向/切入点,不是回复原文)。只输出这一句。`,
           },
-          { role: 'user', content: `[群聊上下文]\n${ctxStr}\n\n★ 就是你要接的那条。` },
+          { role: 'user', content: input.targetMessageIds
+            ? `[群聊上下文]\n${ctxStr}${batchLine}\n\n已选中的真实锚点是 ${JSON.stringify(parsed.targetMessageIds)}，保持这些对象及其引用归属。`
+            : `[群聊上下文]\n${ctxStr}\n\n★ 就是你要接的那条。` },
         ],
         temperature: 0.3,
         rejectEmpty: true,

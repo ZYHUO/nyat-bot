@@ -5,6 +5,7 @@ import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
 import { getGlobalState } from '../meta/global-state.js';
 import type { DispatchTask } from '../meta/types.js';
+import { isTaskWaitRecoveryCurrent } from '../meta/wait-recovery-fence.js';
 import { createHostApi, type HostApi } from './host-api.js';
 import { collectPromptInputs } from './prompt-inputs.js';
 import { sendChatAction } from '../bot/sender/telegram.js';
@@ -237,6 +238,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await holdCodeActTask(task, activation.reason);
     return;
   }
+  if (!await isTaskWaitRecoveryCurrent(task)) {
+    task.status = 'failed'; task.resultSummary = 'failed_input_superseded'; task.waitingForUser = false;
+    getGlobalState().putTask(task); await persistCodeActTask(task);
+    return;
+  }
   let checkpointReason: CheckpointRejectionReason = 'checkpoint_invalid';
   const checkpoint = task.checkpointKey
     ? await loadCheckpoint(task.checkpointKey, task, reason => { checkpointReason = reason; }) : null;
@@ -399,6 +405,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const host = createHostApi(task.chatId, {
     backgroundRun,
     pendingIntent: task.pendingIntent,
+    waitRecovery: task.waitRecovery,
     taskId: task.id,
     targetUserId: task.targetUserId,
     acceptance: task.acceptance,
@@ -638,6 +645,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     let postSendTurns = 0;
     const postSendGrace = isGoalCheck || isSelfPlay ? 0 : 5;
     for (let turn = 0; turn < maxTurns && !ended && !closed; turn++) {
+      if (!await isTaskWaitRecoveryCurrent(task)) {
+        ended = true; endSummary = 'failed_input_superseded'; task.waitingForUser = false; break;
+      }
       if (!checkInputRevision()) break;
       task.totalTurns++;
 
@@ -853,6 +863,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       const maxSegments = env().AGENT_MAX_SEGMENTS;
       const canResume =
         loopEnabled &&
+        !task.waitRecovery &&
         !background &&
         !isGoalCheck &&
         !isSelfPlay &&
@@ -1068,7 +1079,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             resolutionEventId: terminalEventId,
           });
         }
-      } else if (!background && endSummary !== 'failed_user_stopped' && endSummary !== 'failed_input_superseded' && !deliveryUnknown) {
+      } else if (!background && endSummary !== 'failed_user_stopped' && endSummary !== 'failed_input_superseded' && !deliveryUnknown
+        && await isTaskWaitRecoveryCurrent(task)) {
         // 任务失败 = 一笔未完成认知，后续可主动修复或向用户说明。
         createDebt({
           chatId: task.chatId,
@@ -1188,9 +1200,11 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
           .then((r) => {
             if (r?.followUpGoal) {
               // P4-B 钩子：复盘发现值得持续关注的事 → 立 goal（常驻）。
-              void import('../agent/goals.js').then(({ createGoal }) =>
-                createGoal({ topic: r.followUpGoal!, origin: `episode:${task.id}`, chatId: task.chatId }, env().GOAL_MAX_ACTIVE),
-              );
+              void import('../agent/goals.js').then(async ({ createGoal }) => {
+                if (await isTaskWaitRecoveryCurrent(task)) {
+                  createGoal({ topic: r.followUpGoal!, origin: `episode:${task.id}`, chatId: task.chatId }, env().GOAL_MAX_ACTIVE);
+                }
+              });
             }
           })
           .catch((err) => logger.warn({ err, taskId: task.id }, 'episode distill failed'));

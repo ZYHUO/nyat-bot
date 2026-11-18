@@ -6,6 +6,7 @@ import type { Update } from 'grammy/types';
 
 const fixture = vi.hoisted(() => ({ config: {} as Record<string, unknown>, results: '', resultUid: 0,
   send: vi.fn(async () => 1), conversation: null as unknown, user: null as unknown,
+  beforeLink: vi.fn<() => Promise<void> | void>(),
   downstream: vi.fn(() => { throw new Error('owner_command_reached_model_pipeline'); }) }));
 vi.mock('../../../src/env.js', () => ({ env: () => fixture.config }));
 vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendMessage: fixture.send }));
@@ -42,11 +43,14 @@ vi.mock('../../../src/meta/qq-heart-processor.js', () => ({}));
 vi.mock('../../../src/ingress/background.js', () => ({ trackIngressTask: fixture.downstream }));
 vi.mock('../../../src/meta/pending-intent.js', () => ({ pendingIntentEnabled: fixture.downstream }));
 vi.mock('../../../src/admin/business-config.js', () => ({ tryHandleJournalConfigCommand: fixture.downstream }));
-// Real filesystem operations, with only ownership metadata for the designated
-// supervisor fixture overlaid so this suite also runs as an unprivileged CI user.
+// Real filesystem operations, with a synchronization point before publication
+// and synthetic supervisor ownership for unprivileged CI.
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+  return { ...fs, link: async (...args: Parameters<typeof fs.link>) => {
+    await fixture.beforeLink();
+    return fs.link(...args);
+  }, open: async (...args: Parameters<typeof fs.open>) => {
     const file = await fs.open(...args);
     const path = await fs.realpath(args[0]);
     if (fixture.results && (path === fixture.results || path.startsWith(fixture.results + '/'))) {
@@ -117,11 +121,22 @@ describe('bounded owner update request bridge', () => {
   });
 
   it('preserves the existing request when concurrent commands arrive', async () => {
-    await Promise.all([tryHandleUpdateCommand(update('/update rollback')),
+    // Race the real link operations after both handlers have loaded the sender.
+    // Vitest 3 can bypass a factory mock during overlapping dynamic imports.
+    const firstAtLink = Promise.withResolvers<void>();
+    const secondAtLink = Promise.withResolvers<void>();
+    fixture.beforeLink.mockImplementationOnce(() => {
+      firstAtLink.resolve();
+      return secondAtLink.promise;
+    }).mockImplementationOnce(secondAtLink.resolve);
+    const first = tryHandleUpdateCommand(update('/update rollback'));
+    await firstAtLink.promise;
+    await Promise.all([first,
       tryHandleUpdateCommand(update(`/update activate ${release}`, { message_id: 21 }))]);
     expect(await readdir(requests)).toEqual(['request.json']);
     expect(['rollback', 'activate']).toContain((await contents()).action);
     expect(fixture.send.mock.calls.filter(call => (call[1] as string).includes('已排队')).length).toBe(1);
+    expect(fixture.send.mock.calls.filter(call => (call[1] as string).includes('本次未覆盖')).length).toBe(1);
   });
 
   it('is default-off and needs an explicit control chat allowlist', async () => {

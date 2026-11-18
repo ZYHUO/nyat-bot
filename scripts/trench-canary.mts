@@ -311,6 +311,8 @@ try {
       legacy: 'legacy 路径',
       intercepted: '被拦截（绕过心流）',
       asleep: '在睡（作息，不是心流决定）',
+      batch_accepted: '批处理已接收，此处仅记录入队',
+      batch_rejected: '批处理入口拒收',
     };
     console.log(`  ${String(r.o).padEnd(12)} ${String(r.n).padStart(6)}  ${(Number(r.n) / Math.max(tot, 1) * 100).toFixed(0).padStart(3)}%  ${label[String(r.o)] ?? ''}`);
   }

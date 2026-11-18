@@ -29,7 +29,8 @@ import { hasDeferBudget } from '../timing/defer.js';
 import { registerGeneration, clearGeneration, isShuttingDown } from './abort-registry.js';
 import { waitForMessageQuiet } from './quiet-period.js';
 import { scheduleTurn } from '../../queue/turn-scheduler.js';
-import { getChatState, transitionToRunning } from '../timing/chat-runtime.js';
+import { getChatState, transitionToRunning, cancelWaitForScope } from '../timing/chat-runtime.js';
+import { isWaitRecoveryCurrent } from './wait-replay.js';
 import type { PendingEntry } from './types.js';
 import { AIError } from '../../shared/errors.js';
 import { selectActiveObligation } from './obligation-select.js';
@@ -46,6 +47,15 @@ import { formatMessage } from '../formatter.js';
 import { deriveTopicKey } from './obligation-detect.js';
 
 export { isTurnActorChat } from './flags.js';
+
+/** A queued recovery must not revive a wait cancelled or replaced after claim. */
+async function isCurrentWaitReplay(entry: PendingEntry): Promise<boolean> {
+  if (await isWaitRecoveryCurrent(entry.chatId, {
+    isWaitReplay: entry.waitReplay, sleepCatchup: entry.sleepCatchup, waitGeneration: entry.waitGeneration,
+  })) return true;
+  logger.info({ chatId: entry.chatId, messageId: entry.messageId }, 'Turn: stale wait recovery dropped');
+  return false;
+}
 
 /**
  * 单个 judged entry 的重规划上限,从回合内部轮次预算导出:
@@ -163,6 +173,7 @@ async function trackEntry(chatId: number, entry: PendingEntry, batchSize: number
       turnContext: isReplay
         ? {
             isWaitReplay: entry.waitReplay === true,
+            waitGeneration: entry.waitGeneration,
             isDeferReplay: entry.deferReplay === true,
             cognitiveAnchorEventId: entry.cognitiveAnchorEventId,
           }
@@ -215,6 +226,8 @@ async function runCommandEntry(
         obligationStrong: obligationCtx?.obligationStrong ?? entry.obligationStrong,
         gateBypass: true,
         isReplan: false,
+        isWaitReplay: entry.waitReplay === true,
+        waitGeneration: entry.waitGeneration,
         sleepCatchup: entry.sleepCatchup === true,
         burstMessageIds: burstMessageIds.length > 1 ? burstMessageIds : undefined,
       },
@@ -264,6 +277,7 @@ async function runJudgedEntry(
 
    
   while (true) {
+    if (!await isCurrentWaitReplay(current)) return;
     const controller = registerGeneration(chatId, epoch);
     let interrupted = false;
     try {
@@ -286,13 +300,12 @@ async function runJudgedEntry(
           obligationId: opts?.obligationCtx?.obligationId ?? current.obligationId,
           obligationTargetUid: opts?.obligationCtx?.obligationTargetUid ?? current.obligationTargetUid,
           obligationStrong: opts?.obligationCtx?.obligationStrong ?? current.obligationStrong,
-          // wait 回访跳过 gate:刚因 wait 沉默过,再问 gate 多半又是沉默。
-          // P0-B 注意:deferReplay **不**跳过 gate —— defer 的意义就是到点重评。
-          gateBypass: gateBypass || current.waitReplay === true,
+          // WAIT 到期重新判断是否参与及发言时机；睡眠补回保留既有放行语义。
+          gateBypass: gateBypass || current.sleepCatchup === true,
           isReplan: replans > 0,
-          // isWaitReplay 只跳过 bookkeeping**和 judge**(gate 选 WAIT 而非
-          // NO_ACTION 时已经隐含 REPLY 成立,只是节奏未到)。
+          // isWaitReplay 只跳过已完成的 bookkeeping，不继承上一轮的回复决定。
           isWaitReplay: current.waitReplay === true,
+          waitGeneration: current.waitGeneration,
           // review #10(critical):defer 曾误共用 isWaitReplay,导致强制
           // REPLY(rule=turn_replan∈DIRECT_INTERACTION_RULES)→ isDirectInteraction
           // → gate 在 cooldown 检查前就 short-circuit,heart/judge 全被跳过——
@@ -489,7 +502,10 @@ async function runChatTurnInner(data: MessageJobData, jobId?: string): Promise<v
   // turn job → 同群双回合并发(codex review #1)。job 完成后由
   // removeOnComplete 移除,后续 getJob 落空自然走新建路径。
 
-  const drained = await drainPending(chatId);
+  const drained: PendingEntry[] = [];
+  for (const entry of await drainPending(chatId)) {
+    if (await isCurrentWaitReplay(entry)) drained.push(entry);
+  }
   if (drained.length === 0) {
     // Raced duplicate turn, or a wait/proactive trigger with nothing buffered.
     logger.debug({ chatId, trigger: turnPayload?.trigger }, 'Turn fired with empty buffer, exiting');
@@ -598,9 +614,14 @@ async function runChatTurnInner(data: MessageJobData, jobId?: string): Promise<v
     try {
       const chatState = await getChatState(chatId);
       timingSnapshot = chatState;
+      // Cancel a raw/claimed WAIT even after its suppression view expired,
+      // but never clear another forum topic's wait or cancel this replay itself.
+      for (const entry of entries.filter((item) => item.direct && !item.waitReplay)) {
+        await cancelWaitForScope(chatId, formatMessage(entry.update)?.messageThreadId);
+      }
       if (chatState.state === 'WAIT' || chatState.state === 'STOP') {
         if (hasDirect) {
-          await transitionToRunning(chatId);
+          if (chatState.state === 'STOP') await transitionToRunning(chatId);
         } else if (chatState.state === 'WAIT' && e.TURN_WAIT_PER_PERSON && chatState.waitTriggerUids !== undefined) {
           suppressedUidSet = new Set(chatState.waitTriggerUids);
           waitTopicKey = chatState.waitTopicKey;

@@ -17,6 +17,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 // 可控的 runtime override
 let overrideValue: Record<string, unknown> | null = null;
 vi.mock('../../../src/admin/runtime-config.js', () => ({
+  loadOverride: vi.fn(async () => overrideValue),
   loadOverrideCached: vi.fn(async () => overrideValue),
 }));
 
@@ -65,6 +66,13 @@ beforeEach(() => {
 });
 
 describe('getSleepPhase / isAsleep', () => {
+  it('blocks deferred work when the current sleep override cannot be checked', async () => {
+    const { loadOverride } = await import('../../../src/admin/runtime-config.js');
+    vi.mocked(loadOverride).mockRejectedValueOnce(new Error('override unavailable'));
+    await expect(getSleepPhase(bj('2026-06-08', 17, 0), true, true)).rejects.toThrow('override unavailable');
+    overrideValue = { sleep_schedule: { force: 'asleep' } };
+    expect(await getSleepPhase(bj('2026-06-08', 17, 0), true, true)).toBe('night');
+  });
   it('flag off → 永远 awake(即使凌晨 3 点)', async () => {
     envValues['SLEEP_SCHEDULE_ENABLED'] = false;
     expect(await getSleepPhase(bj('2026-06-08', 3, 0))).toBe('awake');

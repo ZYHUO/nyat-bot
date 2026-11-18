@@ -53,10 +53,11 @@ export async function enqueueWaitResume(
   waitSec: number,
   anchorMessageId?: number,
   obligationId?: string,
+  timing?: { waitGeneration: string; scheduledAt: number; waitUntil: number },
 ): Promise<string | undefined> {
   const queue = getQueue();
-  const scheduledAt = Date.now();
-  const jobId = `wait-${chatId}-${scheduledAt}-${_waitSeq++}`;
+  const scheduledAt = timing?.scheduledAt ?? Date.now();
+  const jobId = timing ? `wait-${chatId}-${timing.waitGeneration}` : `wait-${chatId}-${scheduledAt}-${_waitSeq++}`;
   const data: MessageJobData = {
     type: 'wait_resume',
     chatId,
@@ -67,11 +68,16 @@ export async function enqueueWaitResume(
       waitSec,
       anchorMessageId,
       obligationId,
+      ...(timing ? { waitGeneration: timing.waitGeneration, waitUntil: timing.waitUntil } : {}),
     },
   };
   const job = await queue.add('wait_resume', data, {
     jobId,
-    delay: waitSec * 1000,
+    delay: Math.max(0, (timing?.waitUntil ?? scheduledAt + waitSec * 1000) - Date.now()),
+    // Redis claim failures can retry safely. A claimed generation is never
+    // retried after ambiguous downstream work; the handler reports that case.
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 1000 },
   });
   logger.debug(
     { chatId, waitSec, jobId: job.id, anchorMessageId, obligationId },

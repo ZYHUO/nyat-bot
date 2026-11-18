@@ -3,6 +3,15 @@
 export type AttentionLayer = 'L0' | 'L1' | 'L1_CALLBACK' | 'L2';
 import type { PendingIntentRef } from './pending-intent.js';
 
+/** Host-established WAIT recovery authority; never accepted from guest arguments. */
+export interface WaitRecoveryFence {
+  generation: string;
+  chatId: number;
+  threadId: number;
+  accountId: string;
+  platform: 'telegram' | 'qq';
+}
+
 export interface AttentionItem {
   id: string;
   chatId: number;
@@ -16,6 +25,7 @@ export interface AttentionItem {
   createdAt: number;
   payload?: Record<string, unknown>;
   pendingIntent?: PendingIntentRef;
+  waitRecovery?: WaitRecoveryFence;
   /** Telegram forum topic (supergroup thread) id; absent for non-forum / General topic. */
   messageThreadId?: number;
   /** Durable Telegram event used to anchor workspace/replay reads. */
@@ -46,6 +56,7 @@ export interface DispatchTask {
   /** 要回的那个人（用于分人设 persona/{uid}.md）；来自 Attention.userId */
   targetUserId?: number;
   pendingIntent?: PendingIntentRef;
+  waitRecovery?: WaitRecoveryFence;
   trackingKey?: string;
   createdAt: number;
   status: 'queued' | 'running' | 'waiting_user' | 'done' | 'failed';

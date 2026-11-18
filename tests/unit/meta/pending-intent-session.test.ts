@@ -9,6 +9,8 @@ import { createMessageEventIdentity } from '../../../src/shared/event-identity.j
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const runtime = vi.hoisted(() => ({ db: null as unknown as Database.Database, redis: null as unknown as MetaRedisFixture, active: null as import('../../../src/meta/types.js').DispatchTask | null, resume: vi.fn(), interrupt: vi.fn() }));
+const waitRuntime = vi.hoisted(() => ({ pending: true, state: { state: 'RUNNING', waitGeneration: 'current' } }));
+vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: async () => waitRuntime.state }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => runtime.db }));
 vi.mock('../../../src/agent/checkpoint.js', () => ({ getAgentTaskIdForChat: async () => runtime.active?.id,
   clearCheckpoint: vi.fn(async () => {}), unregisterAgentChat: vi.fn(async () => {}) }));
@@ -71,7 +73,7 @@ vi.mock('../../../src/context-engine/index.js', () => ({
 }));
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
-    MASTER_UID: 6251541967, BOT_TOKEN: "12345:synthetic", META_PENDING_INTENT_ENABLED: true,
+    MASTER_UID: 6251541967, BOT_TOKEN: "12345:synthetic", META_PENDING_INTENT_ENABLED: waitRuntime.pending,
     META_DIRECT_COALESCE_MS: 0, META_DIRECT_COALESCE_MAX_MS: 2000, META_L0_COALESCE_MS: 0, META_ATTENTION_TOP_N: 30,
     META_USAGE: 'judge',
     CODEACT_TIMEOUT_MS: 5000,
@@ -84,7 +86,7 @@ vi.mock('../../../src/env.js', () => ({
 }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => runtime.redis }));
 
-import { _resetGlobalState } from '../../../src/meta/global-state.js';
+import { _resetGlobalState, getGlobalState } from '../../../src/meta/global-state.js';
 import { runMetaSession } from '../../../src/meta/session.js';
 import type { AttentionItem } from '../../../src/meta/types.js';
 
@@ -97,6 +99,7 @@ function input(id: number, uid = 20, thread = 0, edit = false, text?: string): A
  return { id: 'input-'+id+'-'+edit, chatId: -100, userId: uid, messageId: id, messageThreadId: thread || undefined, createdAt: Date.now(), layer: 'L0', pressure:100, reason:'direct', textPreview: edit ? '修正约束' : '帮我看下', pendingIntent };
 }
 beforeEach(() => {
+ waitRuntime.pending=true; waitRuntime.state={state:'RUNNING',waitGeneration:'current'};
  vi.clearAllMocks(); _resetGlobalState(); _resetAttentionAccumulator(); runtime.active=null;
  runtime.db = new Database(':memory:'); runtime.db.exec(readFileSync('migrations/0129_pending_reply_intents.sql','utf8'));
  runtime.redis=new MetaRedisFixture(); callWithFallback.mockResolvedValue({content:'chat'}); isCodeActBusy.mockResolvedValue(false);
@@ -104,6 +107,62 @@ beforeEach(() => {
 });
 afterEach(() => { _resetAttentionAccumulator(); runtime.db.close(); });
 describe('real Meta session preserves the pending input owner', () => {
+ it.each([false, true])('keeps both WAIT-selected authors independent and requeues the second (pending-intent=%s)', async enabled => {
+  waitRuntime.pending=enabled;
+  if(enabled) input(700,20,7); // Revisions from separate author lanes are deliberately unequal.
+  const selected=[input(701,20,7),input(702,21,7)].map(a=>({...a,layer:'L1' as const,reason:'wait_resume:heart:reply',
+   payload:{heartBatchTarget:true},waitRecovery:{generation:'current',chatId:-100,threadId:7,accountId:'12345',platform:'telegram' as const}}));
+  await runMetaSession(selected,[]);
+  expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+  const first=enqueueCodeActJob.mock.calls[0]![0];
+  expect(first).toMatchObject({targetUserId:20,quoteMessageIds:[701],waitRecovery:selected[0]!.waitRecovery});
+  expect(first.relatedQuoteIds).toBeUndefined();
+  const pending=await getAttentionAccumulator().peek();
+  expect(pending.map(a=>a.messageId)).toEqual([702]); expect(markMessageAnswered).not.toHaveBeenCalled();
+  getGlobalState().putTask({...first,status:'done'});
+  await runMetaSession(pending,[]);
+  expect(enqueueCodeActJob).toHaveBeenCalledTimes(2);
+  expect(enqueueCodeActJob.mock.calls[1]![0]).toMatchObject({targetUserId:21,quoteMessageIds:[702],waitRecovery:selected[1]!.waitRecovery});
+  expect(enqueueCodeActJob.mock.calls[1]![0].relatedQuoteIds).toBeUndefined(); expect(markMessageAnswered).not.toHaveBeenCalled();
+ });
+ it('retains a busy WAIT-selected Heart target without fabricating an answered stamp', async () => {
+  waitRuntime.pending=false; suppressHeartDispatch.mockResolvedValue(true);
+  const a=input(703,20,7); a.layer='L1'; a.reason='wait_resume:heart:reply';
+  a.waitRecovery={generation:'current',chatId:-100,threadId:7,accountId:'12345',platform:'telegram'};
+  await runMetaSession([a],[]);
+  expect(enqueueCodeActJob).not.toHaveBeenCalled(); expect(markMessageAnswered).not.toHaveBeenCalled();
+  expect((await getAttentionAccumulator().peek()).map(item=>item.messageId)).toEqual([703]);
+ });
+ it('propagates a trusted WAIT fence through real session maps when pending-intent is disabled', async () => {
+  waitRuntime.pending=false;
+  const a=input(901,20,7); a.reason='wait_resume:heart:reply';
+  a.waitRecovery={generation:'current',chatId:-100,threadId:7,accountId:'12345',platform:'telegram'};
+  await runMetaSession([a],[]);
+  expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+  expect(enqueueCodeActJob.mock.calls[0]![0]).toMatchObject({quoteMessageIds:[901],messageThreadId:7,waitRecovery:a.waitRecovery});
+  expect(runtime.interrupt).not.toHaveBeenCalled(); expect(runtime.resume).not.toHaveBeenCalled();
+ });
+ it('drops a recovered Attention after cancellation even with pending-intent disabled', async () => {
+  waitRuntime.pending=false;
+  const a=input(902); a.reason='wait_resume:heart:reply';
+  a.waitRecovery={generation:'current',chatId:-100,threadId:0,accountId:'12345',platform:'telegram'};
+  waitRuntime.state={state:'STOP',waitGeneration:'current'};
+  await runMetaSession([a],[]); expect(enqueueCodeActJob).not.toHaveBeenCalled(); expect(callWithFallback).not.toHaveBeenCalled();
+ });
+ it('keeps two selected questions from the same author as real quote targets in one task', async () => {
+  const first = input(101, 20, 7), second = input(102, 20, 7);
+  // The batch was judged after both arrived, under this one fixed revision.
+  const selected = [first, second].map((item, index) => ({
+   ...item, layer: 'L1' as const, reason: 'heart:reply', pendingIntent: second.pendingIntent,
+   payload: { heartBatchTarget: true, replyTo: { messageId: 91 + index } },
+  }));
+  await runMetaSession(selected, []);
+  expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+  expect(enqueueCodeActJob.mock.calls[0]![0]).toMatchObject({
+   chatId: -100, messageThreadId: 7, targetUserId: 20, quoteMessageIds: [102, 101], pendingIntent: second.pendingIntent,
+  });
+  expect(callWithFallback).not.toHaveBeenCalled();
+ });
  it('separates interleaved authors and retains the second lane instead of swallowing it', async () => {
   const a=input(1),b=input(2,21),c=input(3);
   await runMetaSession([a,b,c],[]);

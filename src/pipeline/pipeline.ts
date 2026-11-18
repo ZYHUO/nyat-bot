@@ -148,9 +148,8 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     // bookkeeping stage on first processing; skip context-save + tracking
     // side-effects and go straight to judge→reply.
     const isWaitReplay = job.turnContext?.isWaitReplay === true;
-    // review #10: defer replay also skips bookkeeping(已在首轮记过账),但
-    // **不**跳 judge/heart —— 与 isWaitReplay 分开变量,防止再被合流进
-    // "跳过 judge、强制 REPLY" 那条分支(那正是 #10 的根因)。
+    // Defer and WAIT replay both skip bookkeeping already completed on ingress;
+    // each reevaluates judge/Heart instead of inheriting permission to reply.
     const isDeferReplay = job.turnContext?.isDeferReplay === true;
 
     if (!isWaitReplay && !isDeferReplay) {
@@ -444,7 +443,7 @@ export async function processPipeline(job: ChatJob): Promise<void> {
     }
 
     let judgeResult: JudgeResult;
-    if (job.turnContext?.isReplan || job.turnContext?.isWaitReplay) {
+    if (job.turnContext?.isReplan || job.turnContext?.sleepCatchup) {
       // 用 L0 规则(0ms,无 LLM)恢复锚点的自然 rule:拦截器(mute 命令/
       // NL 命令/remember/DM relay 等)按 rule 分发,全用 'turn_replan' 会
       // 让它们失配。engagement 仍然强制 REPLY(除非 L0 明确 REJECT)。

@@ -45,6 +45,9 @@ import { durableTelegramMiddleware, IngressNotAcceptedError, startInboxRecovery 
 import type { Update } from 'grammy/types';
 import { startQqHeartBatchRecovery } from './meta/qq-heart-batch.js';
 import { processQqHeartBatch } from './meta/qq-heart-processor.js';
+import { closeTelegramHeartBatches, drainTelegramHeartBatches, startTelegramHeartBatchRecovery } from './meta/telegram-heart-batch.js';
+import { processTelegramHeartBatch } from './meta/telegram-heart-processor.js';
+import { isTelegramHeartBatchChat } from './meta/flags.js';
 import type { NyatDbHandle } from './nyatdb/index.js';
 
 import { installGlobalFetchProxy } from './shared/fetch-proxy.js';
@@ -195,6 +198,9 @@ async function main(): Promise<void> {
 
   const stopTelegramRecovery = ownership.botIngress
     ? startInboxRecovery('telegram', entry => bot.handleUpdate(entry.payload as Update)) : () => {};
+  if (ownership.botIngress && config.META_TG_GROUP_COALESCE_CHAT_IDS.some(isTelegramHeartBatchChat)) {
+    startTelegramHeartBatchRecovery(processTelegramHeartBatch, () => bot.isInited());
+  }
   if (ownership.botIngress) startQqHeartBatchRecovery(processQqHeartBatch, async () => {
     if (!env().META_SUBAGENT_ENABLED || !env().HEART_ENABLED || !env().META_HEART_ENABLED || getOneBotRuntimeStatus().state !== 'ready') return false;
     const { getSleepPhase } = await import('./tracking/sleep.js');
@@ -465,6 +471,7 @@ async function main(): Promise<void> {
       // 在飞生成,最后才等 worker —— 旧顺序 closeWorker 在前,关机窗口内
       // 新消息持续打断→replan→起新 LLM 生成,30s 必然等不完。
       step('cron');
+      closeTelegramHeartBatches();
       pauseOneBotIngress();
       await stopTelegramRecovery();
       await drainOneBotRecovery();
@@ -493,6 +500,7 @@ async function main(): Promise<void> {
       await closeHttpServer(server);
       const { drainIngressTasks } = await import('./ingress/background.js');
       await drainIngressTasks();
+      await drainTelegramHeartBatches();
       const { drainQqHeartBatches } = await import('./meta/qq-heart-batch.js');
       await drainQqHeartBatches();
       // Flush user-profile write buffers before closing DB

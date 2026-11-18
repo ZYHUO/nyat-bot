@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+const waitState = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: waitState }));
+vi.mock('../../../src/shared/privacy-scope.js', () => ({ resolveConversationScope: () => ({
+  chatId: -100, accountId: '123', platform: 'telegram', conversationKind: 'group',
+}) }));
 
 const {
   queueAddMock,
@@ -49,6 +54,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 import { enqueueCodeActJob, enqueueResumeCodeActJob } from '../../../src/subagent/queue.js';
 
 beforeEach(() => {
+  waitState.mockResolvedValue({ state: 'RUNNING', waitGeneration: 'current' });
   queueAddMock.mockClear();
   emitTaskRuntimeEventMock.mockClear();
   putTaskMock.mockClear();
@@ -57,6 +63,13 @@ beforeEach(() => {
 });
 
 describe('CodeAct queue durable lifecycle events', () => {
+  it('rejects a stale WAIT task before normal or resumed admission without local fallback', async () => {
+    const task = { id: 'wait', chatId: -100, contentDirection: 'bounded recovery', createdAt: Date.now(), status: 'queued' as const,
+      waitRecovery: { generation: 'old', threadId: 0, chatId: -100, accountId: '123', platform: 'telegram' as const } };
+    await expect(enqueueCodeActJob(task)).rejects.toThrow('wait_recovery_stale');
+    await expect(enqueueResumeCodeActJob(task)).rejects.toThrow('wait_recovery_stale');
+    expect(queueAddMock).not.toHaveBeenCalled(); expect(enqueueLocalMock).not.toHaveBeenCalled(); expect(putTaskMock).not.toHaveBeenCalled();
+  });
   it('records task_queued only after normal queue acceptance', async () => {
     const task = {
       id: 'task-queued-1',

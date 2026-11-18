@@ -23,7 +23,7 @@
 | `core` | [`src/env-sections/core.ts`](../src/env-sections/core.ts) | 38 | 24 | 5 | Core v2 Phase 0（Belief View + 黑板 ACL + L2 permission gate）+ 小模型增强 |
 | `self` | [`src/env-sections/self.ts`](../src/env-sections/self.ts) | 28 | 12 | 0 | 好奇心目标、自我模型、统一唤醒循环、StepFun 配额消费引擎、Mundo 难题攻坚 |
 | `turn` | [`src/env-sections/turn.ts`](../src/env-sections/turn.ts) | 33 | 20 | 3 | Turn Actor + Agentic planner + 中期记忆 |
-| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 58 | 23 | 3 | Meta + Subagent 编排层 |
+| `meta` | [`src/env-sections/meta.ts`](../src/env-sections/meta.ts) | 61 | 23 | 3 | Meta + Subagent 编排层 |
 | `features` | [`src/env-sections/features.ts`](../src/env-sections/features.ts) | 61 | 25 | 9 | StepFun 全网搜索、反广告行为气压、Silence Alert、Computer-use sandbox、Learner |
 | `social` | [`src/env-sections/social.ts`](../src/env-sections/social.ts) | 57 | 27 | 12 | 主动搭话、RSS 监控、天气感知、其他 bot 命令学习、Multi-Agent 协调 |
 | `life` | [`src/env-sections/life.ts`](../src/env-sections/life.ts) | 41 | 16 | 0 | 硬作息门、DM 好感私聊、上学日程、心情漂移、自我叙事、NyatOS 影子、发言额度、关系叙事、TTS |
@@ -32,10 +32,10 @@
 
 | | |
 |---|---|
-| total_keys | 559 |
+| total_keys | 562 |
 | bool_flags | 240 |
 | on_in_source | 41 |
-| set_in_source | 102 |
+| set_in_source | 105 |
 | dead_no_reader | 6 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 1 |
@@ -313,7 +313,7 @@
 | turn | `TURN_UNANSWERED_REVISIT_ENABLED` | false | — | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | — | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 |
 
-## 非布尔参数（319 个）
+## 非布尔参数（322 个）
 
 | 段 | key | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -555,6 +555,9 @@
 | meta | `META_QQ_GROUP_COALESCE_MS` | 0 | 0 |  |
 | meta | `META_QQ_HEART_REFRACTORY_MS` | 0 | 0 |  |
 | meta | `META_SUBAGENT_CHAT_IDS` |  | — | 灰度 chatId 列表(逗号分隔)。空 = META_SUBAGENT_ENABLED 时对所有 chat 生效。 |
+| meta | `META_TG_GROUP_COALESCE_CHAT_IDS` | '' | — | Passive Telegram Heart decisions only. An empty rollout list and a zero quiet window both disable batching. |
+| meta | `META_TG_GROUP_COALESCE_MAX_MS` | 2400 | 2400 |  |
+| meta | `META_TG_GROUP_COALESCE_MS` | 0 | 0 |  |
 | meta | `META_TICK_MS` | 5000 | — | Meta tick 间隔(ms)。对齐 CGM Attention flush 窗口量级。 |
 | meta | `META_USAGE` | 'judge' | — | Meta / CodeAct 用的 AI usage 名(走现有 AI_USAGE_* 路由)。 |
 | meta | `POST_TASK_FOLLOWUP_USAGE` | 'judge' | — | follow-up 判定用的 AI usage 名（便宜快模型）。 |

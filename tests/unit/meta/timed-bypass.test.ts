@@ -16,6 +16,10 @@ const m = await import('../../../src/meta/heart-route.js');
 beforeEach(() => { store.clear(); redisMock.get.mockClear(); redisMock.set.mockClear(); redisMock.del.mockClear(); });
 
 describe('timed bypass', () => {
+  it('leaves a failed read visible to a delayed decision', async () => {
+    redisMock.get.mockRejectedValueOnce(new Error('bypass unavailable'));
+    await expect(m.hasTimedBypass(-5001, true)).rejects.toThrow('bypass unavailable');
+  });
   it('grant 之后 has 为真，revoke 之后为假', async () => {
     await m.grantTimedBypass(-5001, 30);
     expect(await m.hasTimedBypass(-5001)).toBe(true);

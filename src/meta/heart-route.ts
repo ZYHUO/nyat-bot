@@ -47,11 +47,12 @@ export async function revokeTimedBypass(chatId: number): Promise<void> {
 }
 
 /** 该群当前是否处于时限旁路中。 */
-export async function hasTimedBypass(chatId: number): Promise<boolean> {
+export async function hasTimedBypass(chatId: number, strict = false): Promise<boolean> {
   try {
     const redis = (await import('../db/redis.js')).getRedis();
     return (await redis.get(BYPASS_TTL_KEY(chatId))) !== null;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return false;   // 读失败按未开启处理——宁可不开，不要误开
   }
 }

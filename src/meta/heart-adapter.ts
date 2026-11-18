@@ -23,7 +23,6 @@ import {
 } from '../pipeline/timing/chat-runtime.js';
 import { recordGateNoAction } from '../pipeline/timing/state-store.js';
 import type { AttentionLayer } from './types.js';
-import { getRedis } from '../db/redis.js';
 import { dispatchWaitViaAgency } from '../agent/agency-wait-dispatch.js';
 import { getSelfActSummary, renderSelfActSummary } from '../tracking/self-history.js';
 import { nextSelfWake, renderPendingWake } from '../agent/cognitive-clock.js';
@@ -40,16 +39,13 @@ export interface MetaHeartResult {
   reason: string;
   pressureBoost?: number;
   path?: 'chat' | 'lookup';
-}
-
-function waitAnchorKey(chatId: number): string {
-  return `xxb:meta:wait-anchor:${chatId}`;
+  targetMessageIds?: number[];
 }
 
 /**
  * Heart decision for passive or explicitly opted-in addressed QQ group input.
  * - reply → L1 for passive input, L0 for addressed QQ input (reason heart:…)
- * - wait → Meta wait-anchor + silence (resume re-ingests)
+ * - wait → Meta wait-anchor + silence (expiry reconsiders)
  * - pass / budget / cooldown → silence
  */
 export async function evaluateMetaHeart(opts: {
@@ -61,14 +57,34 @@ export async function evaluateMetaHeart(opts: {
   addressed?: boolean;
   ongoingFollowup?: boolean;
   batchMessages?: FormattedMessage[];
+  targetMessageIds?: readonly number[];
   signal?: AbortSignal;
+  /** Host-owned generation/revision fence, checked again after model work. */
+  isCurrent?: () => Promise<boolean>;
+  beforeEffect?: () => Promise<boolean>;
+  /** Expiry is one reconsideration, never an indefinitely recurring timer. */
+  waitResume?: boolean;
 }): Promise<MetaHeartResult> {
   const e = env();
   const { chatId, formatted, layer } = opts;
   const addressed = !!opts.addressed && chatId < 0 && isPlatformInternalId(chatId);
+  const current = async (): Promise<boolean> => {
+    if (opts.signal?.aborted) return false;
+    try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
+    catch (error) {
+      if (error instanceof Error && (error.message === 'pending_intent_changed' || error.message === 'pending_intent_recalled')) return false;
+      throw error;
+    }
+    // Host callbacks distinguish known invalidation (false) from an unavailable
+    // authority (throw); the durable batch owner handles the latter outcome.
+    return !opts.isCurrent || await opts.isCurrent();
+  };
+  const beforeEffect = async (): Promise<boolean> => {
+    if (!await current()) return false;
+    return (!opts.beforeEffect || await opts.beforeEffect()) && await current();
+  };
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
-  try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
-  catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
+  if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
 
   if (!e.HEART_ENABLED) {
     // No Heart: preserve prior Meta policy (L2 drop handled by caller).
@@ -219,10 +235,13 @@ export async function evaluateMetaHeart(opts: {
     } catch { /* non-critical: history is an aid, never a gate */ }
   }
 
+  if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
   const heart = await heartDecision({
     chatId,
     message: formatted,
     recentMessages,
+    batchMessages: opts.batchMessages,
+    targetMessageIds: opts.targetMessageIds,
     botUid,
     botName: getBotDisplayName(chatId),
     selfState,
@@ -245,14 +264,13 @@ export async function evaluateMetaHeart(opts: {
     ].filter(Boolean).join('\n') || undefined,
   });
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
+  if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
   if (isPlatformInternalId(chatId)) {
     const { isOneBotMessageRecalled } = await import('../platform/onebot-notices.js');
     if ((opts.batchMessages ?? [formatted]).some(message => isOneBotMessageRecalled(chatId, message.messageId))) {
       return { verdict: 'silence', layer, reason: 'heart_anchor_recalled' };
     }
   }
-  try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
-  catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
 
   void import('../pipeline/heart/mind.js')
     .then(({ noteThought }) => noteThought(chatId, heart.why))
@@ -275,10 +293,9 @@ export async function evaluateMetaHeart(opts: {
     let sent = false;
     let deliveryUnknown = false;
     if (emoji) {
+      const { reactToMessage } = await import('../bot/sender/telegram.js');
+      if (!await beforeEffect()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
       try {
-        const { reactToMessage } = await import('../bot/sender/telegram.js');
-        try { assertInputBatchCurrent(opts.batchMessages ?? [formatted]); }
-        catch { return { verdict: 'silence', layer, reason: 'heart_input_changed' }; }
         sent = await reactToMessage(chatId, formatted.messageId, emoji);
       } catch (err) {
         deliveryUnknown = !!err && typeof err === 'object' && 'delivery' in err && err.delivery === 'unknown';
@@ -315,11 +332,13 @@ export async function evaluateMetaHeart(opts: {
     incrCounter('meta_react_undelivered_total', { chat: chatId });
   }
   if (heart.act === 'wait') {
+    if (opts.waitResume) return { verdict: 'silence', layer, reason: 'heart_wait_expired_still_waiting' };
+    if (!e.TIMING_GATE_ENABLED) return { verdict: 'silence', layer, reason: 'heart_wait_transport_unavailable' };
     const waitSec = Math.max(e.TIMING_WAIT_MIN_SEC, 8);
+    const { setMetaWaitAnchor } = await import('./timing-adapter.js');
+    if (!await beforeEffect()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
     try {
-      await getRedis().set(
-        waitAnchorKey(chatId),
-        JSON.stringify({
+      const waitGeneration = await setMetaWaitAnchor({
           chatId,
           layer: addressed ? 'L0' : 'L1',
           reason: `heart:${heart.why || 'wait'}`,
@@ -330,6 +349,10 @@ export async function evaluateMetaHeart(opts: {
           textPreview: (formatted.textContent || '').slice(0, 200),
           pressure: 70,
           createdAt: Date.now(),
+          heartMessages: opts.batchMessages ?? [formatted],
+          addressed,
+          ongoingFollowup: opts.ongoingFollowup,
+          targetMessageIds: opts.targetMessageIds ? [...opts.targetMessageIds] : undefined,
           payload: {
             ...(opts.batchMessages && opts.batchMessages.length > 1 ? { qqBatch: opts.batchMessages.map(message => ({
               messageId: message.messageId, pendingIntent: message.pendingIntent, messageThreadId: message.messageThreadId, userId: message.uid, textPreview: (message.textContent || '').slice(0, 200),
@@ -351,10 +374,10 @@ export async function evaluateMetaHeart(opts: {
                 }
               : {}),
           },
-        }),
-        'EX',
+        },
         waitSec + 120,
       );
+      if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
       const agencyWait = await dispatchWaitViaAgency({
         chatId,
         triggerMessageId: formatted.messageId,
@@ -362,6 +385,8 @@ export async function evaluateMetaHeart(opts: {
         waitSec,
         reason: `heart:${heart.why || 'wait'}`,
         source: 'meta_heart',
+        waitGeneration,
+        messageThreadId: formatted.messageThreadId,
         ...(opts.cognitiveAnchorEventId ? { cognitiveAnchorEventId: opts.cognitiveAnchorEventId } : {}),
       });
       if (agencyWait.attempted) {
@@ -373,15 +398,13 @@ export async function evaluateMetaHeart(opts: {
           return { verdict: 'silence', layer: 'L1', reason: 'heart_wait_transport_failed' };
         }
       } else {
-        await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid);
+        await transitionToWait(chatId, waitSec, formatted.messageId, formatted.uid, undefined,
+          { waitGeneration, messageThreadId: formatted.messageThreadId });
       }
     } catch (err) {
-      // Wait setup failed (anchor written but WAIT transition/enqueue failed).
-      // Fail-open to allow (like timing-adapter does) — the message enters
-      // Attention so Meta/CodeAct can still handle it, rather than being
-      // silently dropped. The orphaned anchor expires via TTL on its own.
-      logger.warn({ err, chatId }, 'Meta heart wait setup failed — fail-open allow');
-      return { verdict: 'allow', layer: 'L1', reason: 'heart_wait_setup_failed' };
+      // A failed wake-up transport cannot turn a decision to wait into speech.
+      logger.warn({ err, chatId }, 'Meta heart wait setup failed; kept silent');
+      return { verdict: 'silence', layer: 'L1', reason: 'heart_wait_setup_failed' };
     }
     logger.info({ chatId, why: heart.why, waitSec, messageId: formatted.messageId }, 'Meta heart: wait');
     return { verdict: 'silence', layer: 'L1', reason: `heart_wait:${heart.why}` };
@@ -421,17 +444,23 @@ export async function evaluateMetaHeart(opts: {
 
   // Addressed QQ questions have already been judged by Heart. Preserve their
   // direct priority through Attention instead of running a second passive gate.
-  if (addressed) return { verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`, path: heart.path };
+  if (addressed) {
+    if (!await beforeEffect()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
+    return { verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`, path: heart.path, targetMessageIds: heart.targetMessageIds };
+  }
 
   // reply — NX arm so only one parallel Heart elevate wins; losers silence.
+  const { armMetaHeartRefractory, shouldSuppressMetaHeartDispatch } = await import('./heart-refractory.js');
   try {
-    const { armMetaHeartRefractory, shouldSuppressMetaHeartDispatch } = await import('./heart-refractory.js');
     // A QQ Heart call can outlive the shorter arm window. Recheck live work and
     // confirmed replies after the model returns, before claiming a new arm.
     if (isPlatformInternalId(chatId) && await shouldSuppressMetaHeartDispatch(chatId)) {
       logger.info({ chatId, messageId: formatted.messageId, reason: 'heart_refractory' }, 'Meta heart: late reply suppressed');
       return { verdict: 'silence', layer: 'L1', reason: 'heart_refractory' };
     }
+  } catch { /* Preserve the existing optional refractory read fallback. */ }
+  if (!await beforeEffect()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
+  try {
     if (!(await armMetaHeartRefractory(chatId))) {
       logger.info(
         { chatId, messageId: formatted.messageId },
@@ -442,6 +471,7 @@ export async function evaluateMetaHeart(opts: {
   } catch {
     /* non-critical */
   }
+  if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
   logger.info(
     {
       chatId,
@@ -456,6 +486,7 @@ export async function evaluateMetaHeart(opts: {
     verdict: 'allow',
     layer: 'L1',
     reason: `heart:${heart.why || 'reply'}`,
+    targetMessageIds: heart.targetMessageIds,
     pressureBoost: heart.path === 'lookup' ? 25 : 15,
     path: heart.path,
   };

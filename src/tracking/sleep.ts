@@ -23,7 +23,7 @@
 import { getRedis } from '../db/redis.js';
 import { getLifeState } from './life-state.js';
 import { bjDateStr } from './speech-meter.js';
-import { loadOverrideCached } from '../admin/runtime-config.js';
+import { loadOverride, loadOverrideCached } from '../admin/runtime-config.js';
 import { isMaster } from '../admin/auth.js';
 import { env } from '../env.js';
 import { logger } from '../shared/logger.js';
@@ -64,15 +64,16 @@ export type SleepPhase = 'awake' | 'night' | 'nap';
  * 当前睡眠相位。flag 关 → 永远 awake;运行时 override 的 force 优先于
  * 作息表(force asleep 按夜睡处理);override 读取失败 fail-soft 按表走。
  */
-export async function getSleepPhase(now: Date = new Date(), respectGlobalWake = true): Promise<SleepPhase> {
+export async function getSleepPhase(now: Date = new Date(), respectGlobalWake = true, strict = false): Promise<SleepPhase> {
   if (!env().SLEEP_SCHEDULE_ENABLED) return 'awake';
   try {
-    const ov = await loadOverrideCached(getRedis());
+    const ov = strict ? await loadOverride(getRedis(), true) : await loadOverrideCached(getRedis());
     const ss = ov?.sleep_schedule;
     if (ss?.enabled === false) return 'awake'; // 运行时临时关门(不动 env)
     if (ss?.force === 'awake') return 'awake';
     if (ss?.force === 'asleep') return 'night';
   } catch (err) {
+    if (strict) throw err;
     logger.debug({ err }, 'sleep: override read failed, falling back to schedule');
   }
   const ls = getLifeState(now);
@@ -87,12 +88,14 @@ export async function getSleepPhase(now: Date = new Date(), respectGlobalWake = 
     try {
       if (await getRedis().get(BEDTIME_HOLD_KEY)) return 'awake';
     } catch (err) {
+      if (strict) throw err;
       logger.debug({ err }, 'sleep: bedtime-hold read failed, falling back to schedule');
     }
     if (env().SLEEP_WAKE_ON_DM_ENABLED) {
       try {
         if (await getRedis().get(GLOBAL_WAKE_KEY)) return 'awake'; // DM 唤醒窗口内 → 收消息路径当醒
       } catch (err) {
+        if (strict) throw err;
         logger.debug({ err }, 'sleep: global-wake read failed, falling back to schedule');
       }
     }

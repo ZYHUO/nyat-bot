@@ -11,13 +11,17 @@
 //   worker 调用：handleWaitResume（delayed job 回调）
 //   cron/idle 调用：getChatState（屏蔽 WAIT 状态）
 
+import { randomUUID } from 'node:crypto';
 import { env } from '../../env.js';
 import { logger } from '../../shared/logger.js';
 import {
   getChatState as storeGetChatState,
   enterRunning,
   enterStop,
-  enterWait,
+  beginScheduledWait,
+  attachWaitJob,
+  cancelWaitGeneration,
+  claimWaitResume,
   recordContinue,
   recordBotReply as storeRecordBotReply,
   recordUserMessage as storeRecordUserMessage,
@@ -31,6 +35,7 @@ import { isTurnActorChat } from '../turn/flags.js';
 import { incrCounter } from '../../metrics/registry.js';
 
 export type { ChatTimingState, RuntimeState };
+export { cancelWaitForScope } from './state-store.js';
 
 /** Read current timing state. Returns RUNNING when state machine disabled. */
 export async function getChatState(chatId: number): Promise<ChatTimingState> {
@@ -127,56 +132,43 @@ export async function transitionToStop(chatId: number, triggerUid?: number, ttlS
   logger.info({ chatId, triggerUid, ttlSec }, 'Chat transitioned to STOP (gate=no_action)');
 }
 
-/**
- * Transition to WAIT. Schedules a BullMQ delayed wait-resume job that will
- * fire after `waitSec` seconds. Bounds waitSec into [WAIT_MIN_SEC, WAIT_MAX_SEC].
- */
-/** enqueueWaitResume 双失败时 WAIT 的硬上限(lazy-expire 兜底窗口)。 */
-const WAIT_RESUME_FALLBACK_MS = 60_000;
-
+/** Install one wait identity before enqueueing; retries reuse its exact deadline. */
 export async function transitionToWait(
   chatId: number,
   waitSec: number,
   anchorMessageId?: number,
   triggerUid?: number,
   obligationId?: string,
+  options?: { waitGeneration?: string; messageThreadId?: number },
 ): Promise<void> {
   const e = env();
   if (!e.TIMING_GATE_ENABLED) return;
-
-  const bounded = Math.min(
-    Math.max(waitSec, e.TIMING_WAIT_MIN_SEC),
-    e.TIMING_WAIT_MAX_SEC,
-  );
-
-  // Schedule resume job first so we can persist its id; if scheduling fails we
-  // still mark the state but the chat will sit in WAIT until the next manual
-  // wakeup (direct interaction).
-  let waitJobId: string | undefined;
-  let waitUntilOverrideMs: number | undefined;
+  if (!Number.isFinite(waitSec)) throw new Error('invalid_wait_duration');
+  const bounded = Math.min(Math.max(waitSec, e.TIMING_WAIT_MIN_SEC), e.TIMING_WAIT_MAX_SEC);
+  const waitGeneration = options?.waitGeneration ?? randomUUID();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(waitGeneration)) throw new Error('invalid_wait_generation');
+  const scheduledAt = Date.now();
+  const waitUntil = scheduledAt + Math.ceil(bounded * 1000);
+  const timing = { waitGeneration, scheduledAt, waitUntil };
+  await beginScheduledWait(chatId, { ...timing, anchorMessageId, triggerUid, messageThreadId: options?.messageThreadId });
   try {
-    waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
-  } catch (err) {
-    // 瞬时 Redis/BullMQ 故障 → 重试一次(codex #2:入队失败会让 chat 裸进 WAIT、
-    // 锚点直到 direct 唤醒才replay;重试能救回大部分瞬时故障)。仍失败则退化为
-    // silence-only WAIT(靠 direct 唤醒自愈),提到 error 级好盯。
-    logger.warn({ err, chatId, bounded }, 'enqueueWaitResume failed, retrying once');
+    let waitJobId: string | undefined;
     try {
-      waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId);
-    } catch (err2) {
-      // 双失败后把 waitUntil 钳到 1 分钟硬上限(P1 fix 2026-08-22 审查): 否则 chat 裸进
-      // WAIT 且非 direct 消息被 waitTriggerUids 整人抑制——触发者若不再发 direct,
-      // 要等 TIMING_STATE_TTL(24h)才自愈。钳短后 state-store 的 lazy-expire 分钟级兜底。
-      logger.error({ err: err2, chatId, bounded }, 'enqueueWaitResume failed twice; entering WAIT clamped to 60s (lazy-expire fallback)');
-      waitUntilOverrideMs = Date.now() + WAIT_RESUME_FALLBACK_MS;
+      waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId, timing);
+    } catch (err) {
+      logger.warn({ err, chatId }, 'enqueueWaitResume failed, retrying same generation');
+      waitJobId = await enqueueWaitResume(chatId, bounded, anchorMessageId, obligationId, timing);
     }
+    if (!waitJobId) throw new Error('wait_queue_receipt_missing');
+    const current = await attachWaitJob(chatId, waitGeneration, waitJobId);
+    logger.info({ chatId, waitSec: bounded, anchorMessageId, waitJobId, waitGeneration, current },
+      current ? 'Chat transitioned to WAIT (gate=wait)' : 'Wait scheduled after cancellation or replacement; job fenced');
+  } catch (err) {
+    // A newer wait/cancellation must never be overwritten by this failed enqueue.
+    await cancelWaitGeneration(chatId, waitGeneration);
+    logger.error({ err, chatId, waitGeneration }, 'Wait scheduling failed; generation cancelled');
+    throw err;
   }
-
-  await enterWait(chatId, bounded, anchorMessageId, waitJobId, triggerUid, waitUntilOverrideMs);
-  logger.info(
-    { chatId, waitSec: bounded, anchorMessageId, waitJobId, triggerUid },
-    'Chat transitioned to WAIT (gate=wait)',
-  );
 }
 
 export async function recordGateContinue(chatId: number): Promise<void> {
@@ -194,118 +186,62 @@ export async function recordUserMessage(chatId: number): Promise<void> {
   await storeRecordUserMessage(chatId);
 }
 
-/**
- * Phase 4: handle a wait-resume job firing.
- *
- * Logic:
- *   1. Read current chat state.
- *   2. If state is no longer WAIT (e.g., direct interaction already woke it),
- *      this resume is stale — drop silently.
- *   3. If still WAIT, transition to RUNNING.
- *   4. We do NOT replay any specific message here. The next user message will
- *      flow through the normal pipeline; chat is just unblocked.
- *      If WAIT_RESUME_REPLAY behaviour is desired we can re-enqueue the
- *      anchor message later — kept simple for now to match MaiBot's
- *      "等待结束后接收新消息再思考"语义.
- */
+/** Atomically claim the raw WAIT; expiry of the suppression view is not cancellation. */
 export async function handleWaitResume(args: {
   chatId: number;
-  waitResume?: { scheduledAt: number; waitSec: number; anchorMessageId?: number; obligationId?: string };
-}): Promise<void> {
+  jobId?: string;
+  waitResume?: { scheduledAt: number; waitSec: number; anchorMessageId?: number; obligationId?: string;
+    waitGeneration?: string; waitUntil?: number };
+}): Promise<{ status: 'early'; waitUntil: number } | void> {
   if (!env().TIMING_GATE_ENABLED) return;
-
   const { chatId, waitResume } = args;
-  const state = await storeGetChatState(chatId);
-
-  // Stale resume: state is no longer WAIT (woken up by direct interaction)
-  if (state.state !== 'WAIT') {
-    logger.debug(
-      { chatId, currentState: state.state },
-      'wait-resume fired but chat no longer in WAIT, dropping',
-    );
+  if (!waitResume || !Number.isSafeInteger(waitResume.scheduledAt) || !Number.isFinite(waitResume.waitSec)
+    || waitResume.waitSec < 0) {
+    logger.warn({ chatId }, 'Wait resume rejected: invalid payload');
     return;
   }
-
-  // Newer wait scheduled: this resume's job id doesn't match
-  if (waitResume?.scheduledAt && state.waitUntil) {
-    const expectedFireAt = waitResume.scheduledAt + waitResume.waitSec * 1000;
-    if (Math.abs(expectedFireAt - state.waitUntil) > 2000) {
-      // round 10（新 goal）：debug → info + 计数器。
-      //
-      // 2026-09-22 实测：心流今天 `Meta heart: wait` 21 次（waitSec 全是 8 秒），
-      // 而 `wait-resume → Meta Attention` 只有 1 次、`defer-resume fired` 11 次。
-      // 也就是说 **wait 承诺了"等 TA 说完我回来接"，20 次没兑现**。
-      //
-      // 最像的嫌疑人就是这个分支（只打 debug，生产 LOG_LEVEL=info 完全看不见），
-      // 但我**没有证据**——看不见的东西没法归因。把它提到 info 并计数，
-      // 下一轮 awake 就能回答"那 20 次是不是都死在这儿"。
-      //
-      // 这正是这个会话吃亏最多次的形状：机制在丢东西，而丢的地方不亮。
-      logger.info(
-        { chatId, expectedFireAt, currentWaitUntil: state.waitUntil },
-        'wait-resume dropped: waitUntil mismatch (newer wait active)',
-      );
-      incrCounter('wait_resume_dropped_total', { chat: chatId });
-      return;
-    }
+  const claim = await claimWaitResume(chatId, { ...waitResume, jobId: args.jobId });
+  if (claim.status === 'early') return { status: 'early', waitUntil: claim.waitUntil };
+  if (claim.status !== 'claimed') {
+    incrCounter('wait_resume_dropped_total', { chat: chatId });
+    logger.info({ chatId, reason: claim.status }, 'Wait resume not current; no replay');
+    return;
   }
-
-  await enterRunning(chatId);
-
-  // Meta path: re-ingest Attention so orchestrator can revisit after wait.
-  if (env().META_SUBAGENT_ENABLED) {
-    try {
+  const generation = waitResume.waitGeneration;
+  if (!generation) {
+    // Old jobs can safely release their exact stored job id, but their shared
+    // unversioned anchor cannot prove it belongs to this claim. Leave it to TTL.
+    logger.warn({ chatId, jobId: args.jobId }, 'Legacy wait completed without replay: anchor generation unavailable');
+    return;
+  }
+  try {
+    if (env().META_SUBAGENT_ENABLED) {
       const { resumeMetaWaitAttention } = await import('../../meta/timing-adapter.js');
-      const resumed = await resumeMetaWaitAttention(chatId);
-      if (resumed) {
-        logger.info({ chatId, anchorMessageId: waitResume?.anchorMessageId }, 'wait-resume handled by Meta');
+      if (await resumeMetaWaitAttention(chatId, { ...waitResume, waitGeneration: generation })) {
+        logger.info({ chatId, waitGeneration: generation }, 'wait-resume handled by Meta');
         return;
       }
-    } catch (err) {
-      logger.debug({ err, chatId }, 'Meta wait-resume hook failed');
     }
-  }
-
-  // G5: 真正的 wait 回访 — 把 wait 时暂存的锚点条目重注入 pending,
-  // 立即排程一个 wait_timeout 回合,带着完整语境重新决策(judge 仍可
-  // 选择沉默;若期间话题已翻篇,actor 会让位给更新的消息重新锚定)。
-  // 旧行为(flag off):只解除屏蔽,等下一条消息——"等一下"变成永久沉默。
-  if (env().TURN_WAIT_RESUME_ENABLED && isTurnActorChat(chatId)) {
-    try {
-      const anchor = await takeWaitAnchor(chatId);
-      if (anchor) {
-        await appendPending({
-          ...anchor,
-          obligationId: waitResume?.obligationId ?? anchor.obligationId,
-          // P2-F:把实际等待秒数与开始时刻盖到回放条目上 —— 写手侧提示
-          // "你刚等了 N 秒";开始时刻供 actor 对照 activity 判断窗口期
-          // 有没有人说话(review #7)。
-          waitSec: waitResume?.waitSec ?? anchor.waitSec,
-          waitStartedAt: waitResume?.scheduledAt ?? anchor.waitStartedAt,
-        });
-      }
-      await scheduleTurn(chatId, {
-        trigger: 'wait_timeout',
-        delayMsOverride: 0,
-        anchorMessageId: waitResume?.anchorMessageId,
-        obligationId: waitResume?.obligationId,
+    if (env().TURN_WAIT_RESUME_ENABLED && isTurnActorChat(chatId)) {
+      const anchor = await takeWaitAnchor(chatId, generation);
+      if (!anchor) return;
+      // Cancellation/new input can race the anchor read. The actor and final
+      // sender also fence this token before using the replayed input.
+      const state = await storeGetChatState(chatId);
+      if (state.state !== 'RUNNING' || state.waitGeneration !== generation) return;
+      await appendPending({
+        ...anchor, waitGeneration: generation,
+        obligationId: waitResume.obligationId ?? anchor.obligationId,
+        waitSec: waitResume.waitSec, waitStartedAt: waitResume.scheduledAt,
       });
-      logger.info(
-        { chatId, anchorMessageId: waitResume?.anchorMessageId, replayed: !!anchor },
-        'wait-resume → RUNNING + wait_timeout turn scheduled',
-      );
-      return;
-    } catch (err) {
-      logger.warn({ err, chatId }, 'wait-resume replay failed, chat unblocked only');
+      await scheduleTurn(chatId, { trigger: 'wait_timeout', delayMsOverride: 0,
+        anchorMessageId: waitResume.anchorMessageId, obligationId: waitResume.obligationId });
+      logger.info({ chatId, waitGeneration: generation }, 'wait-resume scheduled a fresh decision');
     }
+  } catch (err) {
+    // Claim is at-most-once. After downstream work starts its outcome may be
+    // ambiguous, so automatic replay would risk duplicate reactions/replies.
+    logger.error({ err, chatId, waitGeneration: generation }, 'Wait resume failed after claim; no automatic replay');
+    incrCounter('wait_resume_failed_after_claim_total', { chat: chatId });
   }
-
-  logger.info(
-    {
-      chatId,
-      anchorMessageId: waitResume?.anchorMessageId,
-      waitSec: waitResume?.waitSec,
-    },
-    'wait-resume completed → chat transitioned to RUNNING',
-  );
 }

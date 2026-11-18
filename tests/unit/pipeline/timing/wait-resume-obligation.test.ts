@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { timingWaitEval } from '../../../helpers/timing-wait-redis.js';
 
 const store = new Map<string, Record<string, string>>();
 const stringStore = new Map<string, string>();
 
 const redisMock = {
+  eval: vi.fn(timingWaitEval(store)),
   hgetall: vi.fn(async (k: string) => store.get(k) ?? {}),
   hset: vi.fn(async (k: string, ...args: string[]) => {
     const h = store.get(k) ?? {};
@@ -37,7 +39,7 @@ const redisMock = {
 
 vi.mock('../../../../src/db/redis.js', () => ({ getRedis: () => redisMock }));
 vi.mock('../../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
-const enqueueWaitResumeMock = vi.fn(async () => 'wait-job-id');
+const enqueueWaitResumeMock = vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'wait-job-id');
 vi.mock('../../../../src/queue/producer.js', () => ({ enqueueWaitResume: (...args: unknown[]) => enqueueWaitResumeMock(...args) }));
 const scheduleTurnMock = vi.fn(async () => {});
 const appendPendingMock = vi.fn(async () => ({ count: 1, firstPendingAt: 0 }));
@@ -50,6 +52,7 @@ vi.mock('../../../../src/env.js', () => ({ env: () => envValues }));
 
 import * as runtime from '../../../../src/pipeline/timing/chat-runtime.js';
 
+afterEach(() => vi.restoreAllMocks());
 describe('wait resume obligation propagation', () => {
   beforeEach(() => {
     store.clear();
@@ -61,11 +64,13 @@ describe('wait resume obligation propagation', () => {
 
   it('passes obligationId into wait resume scheduling and replay', async () => {
     await runtime.transitionToWait(-100, 10, 42, 7, 'obl-1');
-    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 10, 42, 'obl-1');
+    expect(enqueueWaitResumeMock).toHaveBeenCalledWith(-100, 10, 42, 'obl-1', expect.objectContaining({ waitGeneration: expect.any(String) }));
+    const timing = enqueueWaitResumeMock.mock.calls[0]![4] as {waitGeneration:string;scheduledAt:number;waitUntil:number};
+    vi.spyOn(Date, 'now').mockReturnValue(timing.waitUntil);
 
     await runtime.handleWaitResume({
       chatId: -100,
-      waitResume: { scheduledAt: Date.now(), waitSec: 10, anchorMessageId: 42, obligationId: 'obl-1' },
+      waitResume: { ...timing, waitSec: 10, anchorMessageId: 42, obligationId: 'obl-1' },
     });
     expect(scheduleTurnMock).toHaveBeenCalled();
   });

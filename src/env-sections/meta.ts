@@ -61,6 +61,12 @@ export const metaSection = {
   /** QQ 群在 Heart 判断前合并输入；0 关闭。独立于 Telegram 的 Attention 窗口。 */
   META_QQ_GROUP_COALESCE_MS: z.coerce.number().int().nonnegative().max(30_000).default(0),
   META_QQ_GROUP_COALESCE_MAX_MS: z.coerce.number().int().positive().max(30_000).default(4000),
+  // Passive Telegram Heart decisions only. An empty rollout list and a zero quiet window both disable batching.
+  META_TG_GROUP_COALESCE_CHAT_IDS: z.string().default('').transform(value =>
+    value.trim() ? value.split(',').map(id => Number(id.trim())) : []
+  ).pipe(z.array(z.number().int().safe().negative())),
+  META_TG_GROUP_COALESCE_MS: z.coerce.number().int().nonnegative().max(30_000).default(0),
+  META_TG_GROUP_COALESCE_MAX_MS: z.coerce.number().int().positive().max(30_000).default(2400),
   /** QQ 群定向招呼也让 Heart 选择文字/表情/等待；命令与私聊保持原入口。 */
   META_QQ_MENTION_HEART_ENABLED: booleanFromEnv.default(false),
   /**

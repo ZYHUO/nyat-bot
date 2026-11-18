@@ -369,6 +369,12 @@ export async function runIngressShadow(input: {
   }
 }
 
+// Batch handoffs describe the individual ingress event. Only the later group
+// evaluation knows the collective verdict and which messages it selected.
+export type LiveIngressOutcome =
+  | 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted' | 'asleep'
+  | 'batch_accepted' | 'batch_rejected';
+
 /**
  * Record what the live path actually did with a message the ingress shadow saw.
  *
@@ -381,7 +387,7 @@ export function recordLiveOutcome(input: {
   messageId: number;
   // 'asleep' 与 'silent' 分开：2026-09-19 实测睡眠占 silent 的 15%，
   // 把它混进"心流否决"会让"心流到底否决了多少"这个数虚高。
-  outcome: 'spoke' | 'silent' | 'wait' | 'legacy' | 'intercepted' | 'asleep';
+  outcome: LiveIngressOutcome;
 }): void {
   try {
     appendCognitiveEvent({

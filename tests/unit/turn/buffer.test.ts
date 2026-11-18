@@ -4,8 +4,15 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const lists = new Map<string, string[]>();
 const hashes = new Map<string, Record<string, string>>();
 const sets = new Map<string, Set<string>>();
+const strings = new Map<string, string>();
 
 const redisMock = {
+  set: vi.fn(async (key: string, value: string) => { strings.set(key, value); return 'OK'; }),
+  getdel: vi.fn(async (key: string) => {
+    const value = strings.get(key) ?? null;
+    strings.delete(key);
+    return value;
+  }),
   rpush: vi.fn(async (k: string, v: string) => {
     const l = lists.get(k) ?? [];
     l.push(v);
@@ -138,6 +145,8 @@ import {
   getHighWatermark,
   hasPendingDirect,
   reinjectDeferEntries,
+  setWaitAnchor,
+  takeWaitAnchor,
 } from '../../../src/pipeline/turn/buffer.js';
 
 const CHAT = -100500;
@@ -156,9 +165,32 @@ beforeEach(() => {
   lists.clear();
   hashes.clear();
   sets.clear();
+  strings.clear();
 });
 
 describe('turn pending buffer', () => {
+  it('consumes only the requested wait generation, keeping later and legacy anchors independent', async () => {
+    await setWaitAnchor(CHAT, entry(1), 60, 'old');
+    await setWaitAnchor(CHAT, entry(2), 60, 'new');
+    await setWaitAnchor(CHAT, entry(3), 60);
+    expect(await takeWaitAnchor(CHAT, 'old')).toMatchObject({ messageId: 1, waitGeneration: 'old' });
+    expect(await takeWaitAnchor(CHAT, 'old')).toBeNull();
+    expect(await takeWaitAnchor(CHAT)).toMatchObject({ messageId: 3 });
+    expect(await takeWaitAnchor(CHAT, 'new')).toMatchObject({ messageId: 2, waitGeneration: 'new' });
+  });
+
+  it('does not turn a failed atomic take into a destructive GET/DEL fallback', async () => {
+    await setWaitAnchor(CHAT, entry(1), 60, 'current');
+    redisMock.getdel.mockRejectedValueOnce(new Error('redis unavailable'));
+    await expect(takeWaitAnchor(CHAT, 'current')).rejects.toThrow('redis unavailable');
+    expect(await takeWaitAnchor(CHAT, 'current')).toMatchObject({ messageId: 1 });
+  });
+
+  it('rejects malformed wait generations before touching another key', async () => {
+    await expect(setWaitAnchor(CHAT, entry(1), 60, '../other')).rejects.toThrow('invalid wait anchor generation');
+    expect(strings.size).toBe(0);
+  });
+
   it('appends entries and drains them in order', async () => {
     await appendPending(entry(1));
     await appendPending(entry(2));

@@ -150,4 +150,15 @@ describe('Agency wait authority transport bridge', () => {
       reason: 'invalid wait receipt',
     });
   });
+  it('keeps distinct wait generations distinct while passing the exact topic token', async () => {
+    envState.AGENCY_RUNTIME_MODE = 'authority'; envState.AGENCY_WAIT_TRANSPORT_ENABLED = true;
+    createAgencyEnvelope.mockReturnValue({ ok: true, envelope: { id: 'run-gen' } });
+    createAgencyRun.mockReturnValue({ ok: true, run: { id: 'run-gen', status: 'pending', result: null } });
+    dispatchAgencyRun.mockResolvedValue({ ok: true, run: { status: 'succeeded', result: { waitUntil: 1_900_000_000_000, waitJobId: 'job' } } });
+    await dispatchWaitViaAgency({ ...input, waitGeneration: 'gen-1', messageThreadId: 9 });
+    await dispatchWaitViaAgency({ ...input, waitGeneration: 'gen-2', messageThreadId: 9 });
+    expect(createAgencyEnvelope.mock.calls.map(call => call[0].idempotencyKey)).toEqual(['agency-wait:heart:-100:42:gen-1', 'agency-wait:heart:-100:42:gen-2']);
+    expect(createTimingAgencyWaitAdapters).toHaveBeenLastCalledWith(expect.objectContaining({ waitGeneration: 'gen-2', messageThreadId: 9, anchorMessageId: 42 }));
+  });
+
 });

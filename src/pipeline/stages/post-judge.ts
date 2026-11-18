@@ -4,6 +4,7 @@
 // Extracted from pipeline.ts (pure extraction, no logic changes).
 // ────────────────────────────────────────
 
+import { randomUUID } from "node:crypto";
 import type { ChatJob, FormattedMessage, JudgeResult, ReplyPath } from "../../shared/types.js";
 import { resolveReplyPath } from "../../shared/types.js";
 import { applyChatPathPolicy } from "../path-policy.js";
@@ -313,6 +314,12 @@ export async function runPostJudge(ctx: {
     }
 
     if (gateDecision.action === 'wait') {
+      if (job.turnContext?.isWaitReplay && !job.turnContext.sleepCatchup) {
+        logger.info({ chatId: job.chatId, reason: gateDecision.reason }, 'Timing wait replay remains quiet (no further timer)');
+        closeKernel("completed", "timing_wait_replay_quiet");
+        return { completed: true };
+      }
+      const waitGeneration = randomUUID();
       if (e.TURN_FOCUS_ENABLED && job.chatId < 0) {
         import("../turn/focus.js").then(({ bumpFocus }) => bumpFocus(job.chatId, 'gate_wait')).catch((err) => logger.debug({ err, chatId: job.chatId }, 'bumpFocus failed (non-critical)'));
       }
@@ -335,6 +342,7 @@ export async function runPostJudge(ctx: {
               obligationStrong: job.turnContext?.obligationStrong,
             },
             waitSecBounded + 120,
+            waitGeneration,
           );
         } catch (err) {
           logger.warn({ err, chatId: job.chatId }, "setWaitAnchor failed (wait will be silence-only)");
@@ -345,6 +353,8 @@ export async function runPostJudge(ctx: {
         triggerMessageId: formatted.messageId,
         ...(formatted.uid > 0 ? { triggerUserId: formatted.uid } : {}),
         waitSec: waitSecBounded,
+        waitGeneration,
+        messageThreadId: formatted.messageThreadId,
         reason: `pipeline_gate:${gateDecision.reason}`,
         source: 'pipeline_gate',
         ...(job.turnContext?.obligationId ? { obligationId: job.turnContext.obligationId } : {}),
@@ -366,6 +376,7 @@ export async function runPostJudge(ctx: {
           formatted.messageId,
           formatted.uid,
           job.turnContext?.obligationId,
+          { waitGeneration, messageThreadId: formatted.messageThreadId },
         );
       }
       const totalMs = Math.round(performance.now() - start);
@@ -460,7 +471,7 @@ export async function runPostJudge(ctx: {
     // H1.2 silence 收敛(无 gate 时的确定性沉默层):gate LLM 关着的群,
     // 用 0ms 本地三律代替 —— self_chase/hot_lurk/dead_chat 直接落库返回,
     // 不烧 judge/reply。点名(@/回复bot/私聊)永不沉默;to_me 强义务豁免。
-    // replan/waitReplay 不走这里(上面 G3 分支已跳过 judge)。
+    // replan/sleepCatchup 不走这里(上面 G3 分支已跳过 judge)。
     const isDirect = !!(judgeResult.rule && DIRECT_INTERACTION_RULES.has(judgeResult.rule));
     if (!isDirect && judgeResult.action === "REPLY" && job.chatId < 0) {
       try {

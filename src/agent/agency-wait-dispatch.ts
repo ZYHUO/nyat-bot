@@ -11,6 +11,8 @@ export type AgencyWaitSource =
   "heart" | "meta_heart" | "meta_timing" | "dispatch_gate" | "pipeline_gate";
 
 export interface AgencyWaitDispatchInput {
+  waitGeneration?: string;
+  messageThreadId?: number;
   chatId: number;
   triggerMessageId: number;
   triggerUserId?: number;
@@ -88,6 +90,8 @@ function acceptedWait(
 
 function validateInput(input: AgencyWaitDispatchInput): string | undefined {
   if (!input || typeof input !== "object") return "invalid_wait_input";
+  if (input.waitGeneration !== undefined && !/^[A-Za-z0-9_-]{1,100}$/.test(input.waitGeneration)) return 'invalid_wait_generation';
+  if (input.messageThreadId !== undefined && (!Number.isSafeInteger(input.messageThreadId) || input.messageThreadId < 0)) return 'invalid_wait_thread';
   if (!Number.isSafeInteger(input.chatId) || input.chatId === 0)
     return "scoped_chat_required";
   if (
@@ -153,7 +157,7 @@ export async function dispatchWaitViaAgency(
 
   const waitSec = Math.floor(input.waitSec);
   const reason = input.reason.trim();
-  const idempotencyKey = `agency-wait:${input.source}:${input.chatId}:${input.triggerMessageId}`;
+  const idempotencyKey = `agency-wait:${input.source}:${input.chatId}:${input.triggerMessageId}${input.waitGeneration ? `:${input.waitGeneration}` : ''}`;
   const envelope = createAnchoredAgencyEnvelope({
     action: { type: "wait", reason, waitSec },
     scope: { visibility: "chat", chatId: input.chatId },
@@ -197,6 +201,8 @@ export async function dispatchWaitViaAgency(
     dispatched = await dispatchAgencyRun(
       created.run.id,
       createTimingAgencyWaitAdapters({
+        waitGeneration: input.waitGeneration,
+        messageThreadId: input.messageThreadId,
         anchorMessageId: input.triggerMessageId,
         ...(input.triggerUserId !== undefined
           ? { triggerUserId: input.triggerUserId }

@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchTask } from '../../../src/meta/types.js';
+const waitState = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: waitState }));
+vi.mock('../../../src/shared/privacy-scope.js', () => ({ resolveConversationScope: () => ({
+  chatId: -100, platform: 'telegram', accountId: '123', conversationKind: 'group',
+}) }));
 
 const { state, recordMetaDispatchObservation, recordMissionProposal, recordAffectEpisode, recordActionCircuitProposal, dispatchCodeActTaskViaAgency, enqueueCodeActJob, isCodeActBusy, tryClaimQuote, tryMarkCodeActActive, allQuotesAnswered } = vi.hoisted(() => ({
   state: {
@@ -46,6 +51,7 @@ vi.mock('../../../src/subagent/queue.js', () => ({ enqueueCodeActJob }));
 import { buildMetaApiContext } from '../../../src/meta/meta-api.js';
 
 beforeEach(() => {
+  waitState.mockReset().mockResolvedValue({ state: 'RUNNING', waitGeneration: 'current' });
   state.listTasks.mockReset();
   state.listTasks.mockReturnValue([]);
   state.putTask.mockReset();
@@ -73,6 +79,27 @@ beforeEach(() => {
 });
 
 describe('Meta dispatch observation wiring', () => {
+  it('copies only the host WAIT fence for the actual selected quote/topic', async () => {
+    const waitRecovery = { generation: 'current', chatId: -100, threadId: 7, accountId: '123', platform: 'telegram' as const };
+    const api = buildMetaApiContext({ scopeChatId: -100, chatLayer: new Map([[-100, 'L0']]),
+      waitRecoverySources: [{ chatId: -100, messageId: 101, messageThreadId: 7, waitRecovery }] });
+    const dispatch = (api.dispatch as { taskToGroup: (chatId: number, args: Record<string, unknown>) => Promise<{ taskId: string }> }).taskToGroup;
+    await dispatch(-100, { contentDirection: 'bounded reply', quotes: [101], messageThreadId: 7,
+      waitRecovery: { ...waitRecovery, generation: 'guest_override' } });
+    expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+    expect(enqueueCodeActJob.mock.calls[0]![0]).toMatchObject({ waitRecovery, messageThreadId: 7, quoteMessageIds: [101] });
+  });
+  it.each(['wrong-topic', 'invented-quote', 'stale-before-dispatch', 'cancel-during-claim'])('does not dispatch WAIT input after %s', async scenario => {
+    const waitRecovery = { generation: 'current', chatId: -100, threadId: 7, accountId: '123', platform: 'telegram' as const };
+    const api = buildMetaApiContext({ scopeChatId: -100, chatLayer: new Map([[-100, 'L0']]),
+      waitRecoverySources: [{ chatId: -100, messageId: 101, messageThreadId: 7, waitRecovery }] });
+    const dispatch = (api.dispatch as { taskToGroup: (chatId: number, args: Record<string, unknown>) => Promise<{ taskId: string }> }).taskToGroup;
+    if (scenario === 'stale-before-dispatch') waitState.mockResolvedValue({ state: 'STOP' });
+    if (scenario === 'cancel-during-claim') tryMarkCodeActActive.mockImplementation(async () => { waitState.mockResolvedValue({ state: 'STOP' }); return true; });
+    const result = await dispatch(-100, { contentDirection: 'bounded reply', quotes: [scenario === 'invented-quote' ? 999 : 101],
+      messageThreadId: scenario === 'wrong-topic' ? 8 : 7 });
+    expect(result.taskId).toMatch(/^wait_recovery_/); expect(enqueueCodeActJob).not.toHaveBeenCalled();
+  });
   it('persists a bounded mission proposal without dispatching it', async () => {
     const context = buildMetaApiContext({ defaultChatId: -100 });
     const cognition = context.cognition as {

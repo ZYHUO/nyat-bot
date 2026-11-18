@@ -29,12 +29,13 @@ import { sender, DIRECT_INTERACTION_RULES, ADDRESSED_RULES } from "../shared.js"
 import { sleepWithAbort, mergeAbortSignals } from "../../shared/abort.js";
 import { getShutdownSignal } from "../turn/abort-registry.js";
 import { scheduleDeferredTypoFix, shouldSuppressStaleReply } from "./stale-reply.js";
+import { isWaitRecoveryCurrent } from "../turn/wait-replay.js";
 import {
-  sendChatAction,
-  sendSticker,
+  sendChatAction as rawSendChatAction,
+  sendSticker as rawSendSticker,
   deleteMessage,
-  editMessage,
-  reactToMessage,
+  editMessage as rawEditMessage,
+  reactToMessage as rawReactToMessage,
 } from "../../bot/sender/telegram.js";
 import { recordReply } from "../../tracking/outcome.js";
 import {
@@ -136,6 +137,24 @@ export async function generateAndSendReplies(args: {
     e, start, timings, lockState, releaseHeldChatLock, useCognitiveWorkspace, cognitiveRoute,
     kernelTurn, kernelActionEnvelopeId,
   } = args;
+  const waitRecovery = job.turnContext?.isWaitReplay === true && !job.turnContext.sleepCatchup;
+  const assertWaitRecoveryCurrent = async (): Promise<void> => {
+    if (await isWaitRecoveryCurrent(job.chatId, job.turnContext)) return;
+    throw new DeliveryError({ status: 'suppressed', intentId: 'legacy-wait-recovery', revision: 0,
+      chatId: job.chatId, parts: [], plannedPartCount: 0, reason: 'stale_wait_recovery' });
+  };
+  // Check after humanizer delays and again for every logical outgoing action.
+  // A request already submitted to the transport cannot be revoked here.
+  const withWaitFence = <A extends unknown[], R>(send: (...sendArgs: A) => Promise<R>) =>
+    async (...sendArgs: A): Promise<R> => {
+      await assertWaitRecoveryCurrent();
+      return send(...sendArgs);
+    };
+  const sendDirect = withWaitFence((...sendArgs: Parameters<typeof sender.sendDirect>) => sender.sendDirect(...sendArgs));
+  const sendChatAction = (...sendArgs: Parameters<typeof rawSendChatAction>) => rawSendChatAction(...sendArgs);
+  const sendSticker = withWaitFence((...sendArgs: Parameters<typeof rawSendSticker>) => rawSendSticker(...sendArgs));
+  const editMessage = withWaitFence((...sendArgs: Parameters<typeof rawEditMessage>) => rawEditMessage(...sendArgs));
+  const reactToMessage = withWaitFence((...sendArgs: Parameters<typeof rawReactToMessage>) => rawReactToMessage(...sendArgs));
   const finishRouteObservation = (telemetry: DeliveryTelemetry): DeliveryTelemetry => {
     if (args.cognitiveRouteObservationId !== undefined) {
       completeCognitiveRouteObservation({
@@ -507,6 +526,7 @@ export async function generateAndSendReplies(args: {
       },
       isMultiAgentChat(job.chatId),
     );
+    await assertWaitRecoveryCurrent();
     const replies = replyResult.replies;
     socialPlannedBubbleCount = replies.length;
     socialPlannedReactions = replyResult.reactions?.length ?? 0;
@@ -535,6 +555,7 @@ export async function generateAndSendReplies(args: {
         const { sendPoll } = await import("../../bot/sender/telegram.js");
         const { addAssistant } = await import("../context/manager.js");
         for (const p of result.polls.slice(0, 1)) {
+          await assertWaitRecoveryCurrent();
           const messageId = await sendPoll(j.chatId, p.question, p.options, fmt.messageThreadId);
           if (messageId > 0) {
             socialPollCount += 1;
@@ -868,7 +889,7 @@ export async function generateAndSendReplies(args: {
           : 1.0;
         await new Promise((resolve) => setTimeout(resolve, ackDelay * 1000));
         try {
-          recordSent(await sender.sendDirect(job.chatId, ackPrefix.prefix), ackPrefix.prefix);
+          recordSent(await sendDirect(job.chatId, ackPrefix.prefix), ackPrefix.prefix);
         } catch (error) {
           if (error instanceof DeliveryError) recordParts(error.result.parts);
           if (deliveryFailureStatus(error, true) === 'unknown') {
@@ -1081,7 +1102,7 @@ export async function generateAndSendReplies(args: {
                 const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
                 await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
                 await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
-                const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
+                const appendSent = await sendDirect(job.chatId, typoResult.correctChar);
                 if (appendSent.messageId) {
                   recordSent(appendSent, typoResult.correctChar);
                 }
@@ -1100,6 +1121,7 @@ export async function generateAndSendReplies(args: {
                 const ogg = await synthesizeVoice(effectiveText.slice(0, 500));
                 if (ogg) {
                   voiceAttempted = true;
+                  await assertWaitRecoveryCurrent();
                   const voice = await sendVoice(job.chatId, ogg, { replyToId });
                   recordSent(voice, `[voice] ${effectiveText.slice(0, 500)}`, reply.targetMessageId);
                   completedReplies.add(replyIdx);
@@ -1114,6 +1136,7 @@ export async function generateAndSendReplies(args: {
             }
             const sent = agencyReplyTransport
               ? await (async () => {
+                  await assertWaitRecoveryCurrent();
                   const agency = await dispatchReplyViaAgency({
                     chatId: job.chatId,
                     triggerMessageId: formatted.messageId,
@@ -1127,7 +1150,7 @@ export async function generateAndSendReplies(args: {
                   }
                   return { messageId: agency.messageId };
                 })()
-              : await sender.sendDirect(job.chatId, effectiveText, replyToId, { markAnswered: false });
+              : await sendDirect(job.chatId, effectiveText, replyToId, { markAnswered: false });
             recordSent(sent, effectiveText, reply.targetMessageId);
             completedReplies.add(replyIdx);
             // Mark this target quoted only after a real text reply went out with the quote.
@@ -1143,7 +1166,7 @@ export async function generateAndSendReplies(args: {
               await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               const resendDelay = Math.min(calculateTypingDelay(deleteResend.modifiedText, segmenterConfig), 1.5);
               await new Promise((resolve) => setTimeout(resolve, resendDelay * 1000));
-              const resent = await sender.sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
+              const resent = await sendDirect(job.chatId, deleteResend.modifiedText, replyToId);
               recordSent(resent, deleteResend.modifiedText, reply.targetMessageId);
               logger.debug({ chatId: job.chatId, original: effectiveText, modified: deleteResend.modifiedText }, 'Humanizer: delete-and-resend');
               currentMessageId = resent.messageId;
@@ -1152,7 +1175,7 @@ export async function generateAndSendReplies(args: {
 
             // ── Humanizer: typo correction via edit ──
             if (!agencyReplyTransport && typoResult && typoResult.correction === 'edit' && currentMessageId) {
-              if (Math.random() < 0.4) {
+              if (!waitRecovery && Math.random() < 0.4) {
                 // #9 四成概率拖到几分钟后才想起来改(被打断就忘了)
                 scheduleDeferredTypoFix(job.chatId, currentMessageId, typoResult.originalText, Math.floor(Date.now() / 1000));
               } else {
@@ -1170,7 +1193,7 @@ export async function generateAndSendReplies(args: {
               const appendDelay = humanizerConfig?.typoCorrectionDelay ?? DEFAULT_HUMANIZER_CONFIG.typoCorrectionDelay;
               await sendChatAction(job.chatId, 'typing', formatted.messageThreadId);
               await new Promise((resolve) => setTimeout(resolve, appendDelay * 1000));
-              const appendSent = await sender.sendDirect(job.chatId, typoResult.correctChar);
+              const appendSent = await sendDirect(job.chatId, typoResult.correctChar);
               if (appendSent.messageId) {
                 recordSent(appendSent, typoResult.correctChar);
               }
@@ -1251,6 +1274,10 @@ export async function generateAndSendReplies(args: {
         if (err instanceof DeliveryError) {
           recordParts(err.result.parts, reply.targetMessageId);
           unconfirmedDelivery = err.result.status === 'sent' ? 'failed' : err.result.status;
+          if (err.result.reason === 'stale_wait_recovery') {
+            logger.info({ chatId: job.chatId }, 'Wait recovery cancelled before next send');
+            break;
+          }
         } else if (deliveryFailureStatus(err, true) === 'unknown') {
           unconfirmedDelivery = 'unknown';
         }
@@ -1551,6 +1578,10 @@ export async function generateAndSendReplies(args: {
     if (maxPlaceholderMsgId) {
       await deleteMessage(job.chatId, maxPlaceholderMsgId).catch(() => {});
     }
+    if (err instanceof DeliveryError && err.result.reason === 'stale_wait_recovery') {
+      recordSocialActDeliveryOutcome('blocked', { reason: 'stale_wait_recovery' });
+      return finishRouteObservation({ status: 'blocked', deliveryStatus: 'suppressed', replyCount: 0 });
+    }
 
     // Turn interrupt (G3): not a failure — propagate to the actor, which
     // waits the quiet period and replans with the new messages. No fallback
@@ -1606,7 +1637,7 @@ export async function generateAndSendReplies(args: {
     }
 
     try {
-      await sender.sendDirect(job.chatId, "喵呜...本喵出了点小故障，稍后再试试吧 >_<");
+      await sendDirect(job.chatId, "喵呜...本喵出了点小故障，稍后再试试吧 >_<");
     } catch {
       logger.warn({ chatId: job.chatId }, "Fallback message also failed");
     }

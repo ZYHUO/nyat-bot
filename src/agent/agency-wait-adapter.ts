@@ -99,6 +99,8 @@ export function createAgencyWaitAdapters(schedule: AgencyWaitSchedule): Pick<Age
  * explicit opt-in binding; callers still need an authority/canary dispatch.
  */
 export interface TimingAgencyWaitMetadata {
+  waitGeneration?: string;
+  messageThreadId?: number;
   anchorMessageId?: number;
   triggerUserId?: number;
   obligationId?: string;
@@ -112,7 +114,10 @@ export function createTimingAgencyWaitAdapters(metadata?: TimingAgencyWaitMetada
 
     const effectiveWaitSec = waitSec ?? timingEnv.TIMING_WAIT_MIN_SEC;
     const { getChatState, transitionToWait } = await import('../pipeline/timing/chat-runtime.js');
-    if (metadata && (metadata.anchorMessageId !== undefined || metadata.triggerUserId !== undefined || metadata.obligationId !== undefined)) {
+    if (metadata?.waitGeneration !== undefined || metadata?.messageThreadId !== undefined) {
+      await transitionToWait(chatId, effectiveWaitSec, metadata.anchorMessageId, metadata.triggerUserId, metadata.obligationId,
+        { waitGeneration: metadata.waitGeneration, messageThreadId: metadata.messageThreadId });
+    } else if (metadata && (metadata.anchorMessageId !== undefined || metadata.triggerUserId !== undefined || metadata.obligationId !== undefined)) {
       await transitionToWait(chatId, effectiveWaitSec, metadata.anchorMessageId, metadata.triggerUserId, metadata.obligationId);
     } else {
       await transitionToWait(chatId, effectiveWaitSec);
@@ -120,6 +125,9 @@ export function createTimingAgencyWaitAdapters(metadata?: TimingAgencyWaitMetada
     const state = await getChatState(chatId);
     if (state.state !== 'WAIT' || !state.waitUntil || !Number.isSafeInteger(state.waitUntil)) {
       throw new Error('timing wait did not enter WAIT');
+    }
+    if (metadata?.waitGeneration && (state.waitGeneration !== metadata.waitGeneration || !state.waitJobId)) {
+      throw new Error('timing wait receipt replaced or unscheduled');
     }
     return {
       waitUntil: state.waitUntil,

@@ -6,6 +6,8 @@ const f = vi.hoisted(() => ({
   archive: vi.fn(async () => 1), state: vi.fn(), persist: vi.fn(), send: vi.fn(), collect: vi.fn(),
   get: vi.fn(), hget: vi.fn(async () => null),
 }));
+const waitState = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: waitState }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.config }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => ({ hsetnx: f.archive, get: f.get, hget: f.hget }) }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { throw new Error('unexpected_database_access'); } }));
@@ -20,10 +22,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   f.config.META_SUBAGENT_ENABLED = true;
   f.config.META_ACTIVATED_AT_SEC = 100;
+  f.config.META_SUBAGENT_CHAT_IDS = [42];
+  waitState.mockResolvedValue({ state: 'RUNNING', waitGeneration: 'new' });
   f.get.mockResolvedValue(null);
   f.state.mockReset();
 });
 describe('executor activation boundary on local and resumed tasks', () => {
+  it('retires a stale queued WAIT task before prompt collection or any platform operation', async () => {
+    f.config.META_SUBAGENT_CHAT_IDS = [-100];
+    const putTask = vi.fn(); f.state.mockReturnValue({ putTask });
+    const task: DispatchTask = { id: 'stale-wait', chatId: -100, createdAt: 101000, status: 'queued', contentDirection: 'old decision',
+      waitRecovery: { generation: 'old', chatId: -100, threadId: 0, accountId: '12345', platform: 'telegram' } };
+    await runCodeActTask(task);
+    expect(task).toMatchObject({ status: 'failed', resultSummary: 'failed_input_superseded', waitingForUser: false });
+    expect(putTask).toHaveBeenCalledWith(task); expect(f.persist).toHaveBeenCalledWith(task);
+    expect(f.collect).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
+  });
   it.each([0, 4])('holds old segment %i before state, persistence, prompt collection or typing', async (segment) => {
     const task: DispatchTask = { id: 'synthetic-held', chatId: 42, createdAt: 99000, status: 'queued', segment, contentDirection: 'old synthetic task' };
     const before = structuredClone(task);

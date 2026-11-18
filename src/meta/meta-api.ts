@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { logger } from "../shared/logger.js";
 import { getGlobalState } from "./global-state.js";
 import type { DispatchTask, AttentionLayer } from "./types.js";
+import { isTaskWaitRecoveryCurrent, selectWaitRecovery } from './wait-recovery-fence.js';
+import type { WaitRecoverySource } from './wait-recovery-fence.js';
 import { isMetaSubagentChat } from "./flags.js";
 import { dispatchCodeActTaskViaAgency } from "../agent/agency-codeact-dispatch.js";
 import { recordMetaDispatchObservation } from "../agent/agency-meta-observation.js";
@@ -56,6 +58,7 @@ export function buildMetaApiContext(opts?: {
   /** Default durable message event per chat (from Attention). */
   defaultCognitiveAnchorEventIds?: Map<number, string>;
   defaultPendingIntents?: Map<number, PendingIntentRef>;
+  waitRecoverySources?: readonly WaitRecoverySource[];
 }): Record<string, unknown> {
   const state = getGlobalState();
   const inferredCandidates = new Set([
@@ -395,6 +398,12 @@ export function buildMetaApiContext(opts?: {
         .filter((n) => Number.isFinite(n) && n > 0 && !quotes.includes(n));
 
       const pendingIntent = quoteId ? opts?.defaultPendingIntents?.get(quoteId) : undefined;
+      let waitRecovery: DispatchTask['waitRecovery'];
+      try { waitRecovery = selectWaitRecovery(opts?.waitRecoverySources, cid, args.messageThreadId ?? 0, [...quotes, ...relatedQuoteIds]); }
+      catch { unclaim(); return { taskId: 'wait_recovery_source_mismatch' }; }
+      if (!await isTaskWaitRecoveryCurrent({ chatId: cid, messageThreadId: args.messageThreadId, waitRecovery })) {
+        unclaim(); return { taskId: 'wait_recovery_stale' };
+      }
       if (pendingIntentEnabled() && quotes.length && !pendingIntent) { unclaim(); return { taskId: 'pending_intent_missing' }; }
       if (pendingIntentEnabled() && pendingIntent) {
         if (pendingIntent.chatId !== cid || (args.targetUserId !== undefined && pendingIntent.senderId !== args.targetUserId)
@@ -404,6 +413,7 @@ export function buildMetaApiContext(opts?: {
       }
       const task: DispatchTask = {
         pendingIntent,
+        waitRecovery,
         id: randomUUID(),
         chatId: cid,
         contentDirection: sanitizeContentDirection(
@@ -488,6 +498,11 @@ export function buildMetaApiContext(opts?: {
         );
       }
 
+      if (!await isTaskWaitRecoveryCurrent(task)) {
+        await releaseQuoteClaim();
+        try { const { clearCodeActActive } = await import('../subagent/task-store.js'); await clearCodeActActive(cid, task.id); } catch { /* no dispatch */ }
+        unclaim(); return { taskId: 'wait_recovery_stale' };
+      }
       state.putTask(task);
       logger.info(
         {

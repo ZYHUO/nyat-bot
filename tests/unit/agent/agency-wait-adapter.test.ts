@@ -21,7 +21,7 @@ vi.mock('../../../src/shared/logger.js', () => ({
 
 const { transitionToWaitMock, getChatStateMock } = vi.hoisted(() => ({
   transitionToWaitMock: vi.fn(async () => undefined),
-  getChatStateMock: vi.fn(async () => ({ state: 'WAIT', waitUntil: 1_900_000_000_000, waitJobId: 'timing-job-1' })),
+  getChatStateMock: vi.fn(async (): Promise<{state: string; waitUntil: number; waitJobId?: string; waitGeneration?: string}> => ({ state: 'WAIT', waitUntil: 1_900_000_000_000, waitJobId: 'timing-job-1' })),
 }));
 vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
   transitionToWait: (...args: unknown[]) => transitionToWaitMock(...args),
@@ -169,4 +169,22 @@ describe('explicit Agency wait adapter', () => {
     expect(transitionToWaitMock).not.toHaveBeenCalled();
     expect(getChatStateMock).not.toHaveBeenCalled();
   });
+  it('threads a generation and topic through the real Agency dispatcher', async () => {
+    const { createTimingAgencyWaitAdapters } = await import('../../../src/agent/agency-wait-adapter.js');
+    const run = createRun({ type: 'wait', reason: 'bounded wait' }, 'wait:generation');
+    getChatStateMock.mockResolvedValueOnce({ state: 'WAIT', waitUntil: 1_900_000_000_000, waitJobId: 'job-2', waitGeneration: 'gen-2' });
+    const result = await dispatchAgencyRun(run.id, createTimingAgencyWaitAdapters({ waitGeneration: 'gen-2', messageThreadId: 9, anchorMessageId: 42, triggerUserId: 7 }));
+    expect(result.ok).toBe(true);
+    expect(transitionToWaitMock).toHaveBeenCalledWith(-100, 5, 42, 7, undefined, { waitGeneration: 'gen-2', messageThreadId: 9 });
+  });
+  it.each(['replaced', 'unscheduled'])('rejects a %s generation receipt', async kind => {
+    const { createTimingAgencyWaitAdapters } = await import('../../../src/agent/agency-wait-adapter.js');
+    const run = createRun({ type: 'wait', reason: 'bounded wait' }, 'wait:' + kind);
+    getChatStateMock.mockResolvedValueOnce({ state: 'WAIT', waitUntil: 1_900_000_000_000,
+      waitJobId: kind === 'unscheduled' ? undefined : 'job-3', waitGeneration: kind === 'replaced' ? 'gen-3' : 'gen-2' });
+    const result = await dispatchAgencyRun(run.id, createTimingAgencyWaitAdapters({ waitGeneration: 'gen-2', messageThreadId: 9 }));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('timing wait receipt replaced or unscheduled');
+  });
+
 });

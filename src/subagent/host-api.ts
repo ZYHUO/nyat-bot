@@ -20,6 +20,8 @@ import { isEchoOf } from '../shared/echo-text.js';
 import { findTopicRepeat } from './topic-repeat.js';
 import { markMessageAnswered, answeredTimestamps } from '../meta/answered.js';
 import { isUnknownPlatformDelivery, withCodeActDeliveryIntent } from './delivery-hold.js';
+import type { WaitRecoveryFence } from '../meta/types.js';
+import { isTaskWaitRecoveryCurrent, requireTaskWaitRecovery } from '../meta/wait-recovery-fence.js';
 import { DeliveryError, type DeliveryResult } from '../shared/delivery-result.js';
 import { createQQAttachmentApi } from './qq-attachments.js';
 import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
@@ -642,6 +644,7 @@ export function createHostApi(
     taskId?: string;
     backgroundRun?: BackgroundRun;
     pendingIntent?: PendingIntentRef;
+    waitRecovery?: WaitRecoveryFence;
     /** User target used for prediction calibration dimensions. */
     targetUserId?: number;
     /** Max sendText calls (default 2; work mode may pass 5). */
@@ -681,6 +684,7 @@ export function createHostApi(
   let textSent = 0;
   let finalSent = false;
   let deliveryUnknown = false;
+  let waitRecoveryClosed = false;
   let deliveryTail: Promise<void> = Promise.resolve();
   let intermediateSent = false;
   let lastDeliveryKind: DeliveryKind | undefined;
@@ -719,6 +723,7 @@ export function createHostApi(
       if (!env().PROMISE_LOOP_ENABLED || opts.backgroundRun) return;
       if (goalAdded || crossSends > 0) return;
       if (sentTexts.length === 0) return;
+      if (opts.waitRecovery) await requireTaskWaitRecovery({ chatId, ...opts });
       assertPendingIntentCurrent(opts.pendingIntent);
       const said = sentTexts.map((t) => t.slice(0, 200)).join('\n');
       const { callWithFallback } = await import('../ai/fallback.js');
@@ -753,6 +758,7 @@ export function createHostApi(
       ]);
       // A cancelled or superseded promise must not come back as autonomous work.
       // Both imports finish before this final synchronous source fence/write.
+      if (opts.waitRecovery) await requireTaskWaitRecovery({ chatId, ...opts });
       assertPendingIntentCurrent(opts.pendingIntent);
       if (goalAdded || crossSends > 0) return;
       const id = createGoal({
@@ -796,6 +802,7 @@ export function createHostApi(
   const blockedByGate: string[] = [];
 
   const assertOpen = () => {
+    if (waitRecoveryClosed) throw new Error('wait_recovery_task_closed');
     if (opts.pendingIntent && (opts.pendingIntent.chatId !== chatId || opts.pendingIntent.senderId !== opts.targetUserId
       || opts.pendingIntent.threadId !== (opts.messageThreadId ?? 0))) throw new Error('pending_intent_mismatch');
     assertPendingIntentCurrent(opts.pendingIntent);
@@ -821,8 +828,12 @@ export function createHostApi(
             });
           }
           return operation();
-        });
+        }, { waitRecovery: opts.waitRecovery, messageThreadId: opts.messageThreadId });
       } catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'wait_recovery_stale') {
+          waitRecoveryClosed = true; waitingForUser = false; ended = true;
+          opts.onEnd('failed_input_superseded');
+        }
         if (isUnknownPlatformDelivery(chatId, error)) {
           deliveryUnknown = true;
           waitingForUser = false;
@@ -837,6 +848,10 @@ export function createHostApi(
     deliveryTail = pending.then(() => undefined, () => undefined);
     return pending;
   };
+  // Keep ordinary legacy transports unchanged; recovered WAIT tasks use the
+  // same final logical-send fence for every delivery form.
+  const guardWaitDelivery = <T>(operation: () => Promise<T>): Promise<T> =>
+    opts.waitRecovery ? sendWithDeliveryGuard(operation) : operation();
 
   const trackInflight = <T>(p: Promise<T>): Promise<T> => {
     inflightOps.add(p);
@@ -1785,7 +1800,7 @@ export function createHostApi(
             }
             await sendChatAction(chatId, 'typing', opts.messageThreadId);
             try {
-              const messageId = await sendSticker(chatId, id, { beforeSend: assertOpen });
+              const messageId = await guardWaitDelivery(() => sendSticker(chatId, id, { beforeSend: assertOpen }));
               if (messageId > 0) {
                 await track(
                   import('../pipeline/context/manager.js')
@@ -1842,7 +1857,7 @@ export function createHostApi(
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
-              const { messageId } = await tgSendFile(chatId, target, { beforeSend: assertOpen,
+              const { messageId } = await guardWaitDelivery(() => tgSendFile(chatId, target, { beforeSend: assertOpen,
                 // A caption is user-visible text; strip tool scaffolding like any
                 // other send path.
                 caption: caption
@@ -1863,7 +1878,7 @@ export function createHostApi(
                   : undefined,
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
-              });
+              }));
               if (messageId > 0) {
                 fileSent++;
                 await track(
@@ -1915,11 +1930,11 @@ export function createHostApi(
               const target = resolveInsideSandbox(raw); // throws on path escape
               const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
               await sendChatAction(chatId, 'upload_photo', opts.messageThreadId);
-              const { messageId } = await tgSendPhoto(chatId, target, { beforeSend: assertOpen,
+              const { messageId } = await guardWaitDelivery(() => tgSendPhoto(chatId, target, { beforeSend: assertOpen,
                 caption: caption ? String(caption).slice(0, 1000) : undefined,
                 replyToId: opts.defaultReplyTo,
                 messageThreadId: opts.messageThreadId,
-              });
+              }));
               if (messageId > 0) {
                 fileSent++;
                 await track(
@@ -2038,7 +2053,7 @@ export function createHostApi(
             }
             const { sendPoll } = await import('../bot/sender/telegram.js');
             assertOpen();
-            const messageId = await sendPoll(chatId, q, pollOpts, opts.messageThreadId);
+            const messageId = await guardWaitDelivery(() => sendPoll(chatId, q, pollOpts, opts.messageThreadId));
             if (messageId > 0) {
               pollSent = true;
               try {
@@ -2083,7 +2098,7 @@ export function createHostApi(
             }
             const { forwardMessage } = await import('../bot/sender/telegram.js');
             assertOpen();
-            const outMessageId = await forwardMessage(tid, fid, mid);
+            const outMessageId = await guardWaitDelivery(() => forwardMessage(tid, fid, mid));
             if (outMessageId > 0) {
               forwardsSent++;
               try {
@@ -2153,11 +2168,11 @@ export function createHostApi(
               const target = resolveInsideSandbox(rawPath); // throws on path escape
               const { sendFile: tgSendFile } = await import('../bot/sender/telegram.js');
               await sendChatAction(tid, 'upload_document', opts.messageThreadId);
-              const r = await tgSendFile(tid, target, { beforeSend: assertOpen, caption: clean.slice(0, 1000) });
+              const r = await guardWaitDelivery(() => tgSendFile(tid, target, { beforeSend: assertOpen, caption: clean.slice(0, 1000) }));
               messageId = r.messageId;
               deliveredDesc = `[file] ${basename(target)}: ${clean}`;
             } else {
-              messageId = await sendMessage(tid, clean.slice(0, 500), undefined, undefined, { beforeSend: assertOpen });
+              messageId = await guardWaitDelivery(() => sendMessage(tid, clean.slice(0, 500), undefined, undefined, { beforeSend: assertOpen }));
             }
             crossSends++;
             // 目标群上下文/记忆/时间线全跟上——说过的话自己得记得。
@@ -2550,23 +2565,23 @@ export function createHostApi(
               logger.warn({ chatId, err: r.error }, 'host art.draw(async) failed');
               // 办不到要老实收场（翻车说明也走完整发送链，让上下文知道 bot 说过）。
               const { sendMessage: tgSendMessage } = await import('../bot/sender/telegram.js');
-              await tgSendMessage(
+              await guardWaitDelivery(() => tgSendMessage(
                 chatId,
                 '呜……画摊子翻车了，这张图没画成。换个说法再让我试一次？',
                 opts.defaultReplyTo,
                 opts.messageThreadId,
                 { beforeSend: assertOpen },
-              ).catch(() => 0);
+              )).catch(() => 0);
               return;
             }
             const { resolveInsideSandbox } = await import('../sandbox/paths.js');
             const { sendPhoto: tgSendPhoto } = await import('../bot/sender/telegram.js');
             const target = resolveInsideSandbox(r.pngPath);
-            const { messageId } = await tgSendPhoto(chatId, target, { beforeSend: assertOpen,
+            const { messageId } = await guardWaitDelivery(() => tgSendPhoto(chatId, target, { beforeSend: assertOpen,
               caption: caption || undefined,
               replyToId: opts.defaultReplyTo,
               messageThreadId: opts.messageThreadId,
-            });
+            }));
             if (messageId > 0) {
               fileSent++;
               try {
@@ -2603,6 +2618,7 @@ export function createHostApi(
     goals: {
       async add(topic: string, targetChatId?: number, checkInMinutes?: number) {
         assertOpen();
+        if (opts.waitRecovery) await requireTaskWaitRecovery({ chatId, ...opts });
         if (!env().PROMISE_LOOP_ENABLED) return { goalId: null, reason: 'promise_loop_disabled' };
         const t = String(topic ?? '').trim().slice(0, 100);
         if (!t) return { goalId: null, reason: 'empty_topic' };
@@ -2616,6 +2632,7 @@ export function createHostApi(
         const minutes = Number(checkInMinutes);
         const intervalSec = Math.min(Math.max(Number.isFinite(minutes) && minutes > 0 ? minutes : 15, 5), 1440) * 60;
         const { createGoal } = await import('../agent/goals.js');
+        if (opts.waitRecovery) await requireTaskWaitRecovery({ chatId, ...opts });
         const id = createGoal({
           topic: t,
           origin: `promise:${opts.taskId ?? 'chat'}`.slice(0, 64),
@@ -3042,6 +3059,7 @@ export function createHostApi(
     meta: {
       async request(args: { action: string; detail?: string }) {
         assertOpen();
+        if (opts.waitRecovery) await requireTaskWaitRecovery({ chatId, ...opts });
         if (metaRequested) {
           return { queued: false, action: String(args?.action ?? '').slice(0, 64) || 'dup' };
         }
@@ -3063,8 +3081,10 @@ export function createHostApi(
         }
         const detail = String(args?.detail ?? '').trim().slice(0, 500);
         const { getAttentionAccumulator } = await import('../meta/attention.js');
-        await getAttentionAccumulator().ingestAsync({
+        const accepted = await getAttentionAccumulator().ingestAsync({
           chatId,
+          messageThreadId: opts.messageThreadId,
+          waitRecovery: opts.waitRecovery,
           layer: 'L0',
           pressure: 95,
           reason: `subagent_request:${action}`,
@@ -3076,7 +3096,8 @@ export function createHostApi(
             source: 'subagent',
             taskId: opts.taskId ?? null,
           },
-        });
+        }, opts.waitRecovery ? { beforePersist: () => isTaskWaitRecoveryCurrent({ chatId, ...opts }) } : undefined);
+        if (opts.waitRecovery && !accepted) return { queued: false, action };
         metaRequested = true;
         logger.info({ chatId, action, taskId: opts.taskId }, 'host meta.request');
         return { queued: true, action };
@@ -3122,6 +3143,7 @@ export function createHostApi(
         return lastDeliveryKind;
       },
       waitForUser(reason?: string) {
+        if (opts.waitRecovery) throw new Error('wait_recovery_cannot_suspend');
         if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
         waitingForUser = true;
         waitingReason = String(reason ?? '').slice(0, 240);

@@ -27,6 +27,7 @@ const f = vi.hoisted(() => ({
     META_HEART_BYPASS_CHAT_IDS: [] as number[], META_HEART_REFRACTORY_MS: 20_000,
     META_QQ_HEART_REFRACTORY_MS: 0,
     META_QQ_GROUP_COALESCE_MS: 0, META_QQ_GROUP_COALESCE_MAX_MS: 4000, META_QQ_MENTION_HEART_ENABLED: false,
+    META_TG_GROUP_COALESCE_MS: 0, META_TG_GROUP_COALESCE_CHAT_IDS: [] as number[],
     HEART_DECIDES_TIMING: false, TIMING_GATE_ENABLED: true, META_DISPATCH_GATE_ENABLED: true,
     TIMING_WAIT_MIN_SEC: 8, BOT_USERNAME: 'fixture_bot', BOT_NICKNAMES: ['fixture-nyat'],
     RATE_LIMIT_PER_MIN: 100, NYATOS_SHADOW_ENABLED: false, TRENCH_DEBT_ATTENTION_ENABLED: false,
@@ -52,7 +53,7 @@ vi.mock('../../../src/memory/chroma.js', () => ({ memorizeMessage: vi.fn() }));
 vi.mock('../../../src/tracking/activity.js', () => ({ recordMessage: vi.fn() }));
 vi.mock('../../../src/tracking/user-profile.js', () => ({ recordUserMessage: vi.fn() }));
 vi.mock('../../../src/tracking/reply-activity.js', () => ({ recordHumanMessage: vi.fn() }));
-vi.mock('../../../src/tracking/sleep.js', () => ({ isAsleep: async () => false }));
+vi.mock('../../../src/tracking/sleep.js', () => ({ isAsleep: async () => false, getSleepPhase: f.sleep }));
 vi.mock('../../../src/tracking/life-state.js', () => ({ getLifeState: () => ({ energy: 1 }) }));
 vi.mock('../../../src/tracking/self-history.js', () => ({ getSelfActSummary: vi.fn(), renderSelfActSummary: vi.fn() }));
 vi.mock('../../../src/agent/cognitive-clock.js', () => ({ nextSelfWake: vi.fn(), renderPendingWake: vi.fn() }));
@@ -93,7 +94,7 @@ vi.mock('../../../src/pipeline/timing/gate.js', () => ({ runTimingGate: f.gate }
 vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({
   getChatState: f.runtime, getGateCooldownRemainingMs: async () => 0,
   isInContinuation: () => false, isChatSuppressed: f.suppressed,
-  transitionToWait: f.wait, transitionToRunning: f.running, recordGateContinue: vi.fn(async () => {}),
+  transitionToWait: f.wait, transitionToRunning: f.running, cancelWaitForScope: f.running, recordGateContinue: vi.fn(async () => {}),
   recordBotReply: vi.fn(), recordUserMessage: vi.fn(async () => {}),
 }));
 vi.mock('../../../src/pipeline/timing/state-store.js', () => ({ recordGateNoAction: f.noAction }));
@@ -167,6 +168,7 @@ beforeEach(() => {
   Object.assign(f.config, { NYATOS_SHADOW_ENABLED: false, META_DEFER_ENABLED: false, DURABLE_INGRESS_ENABLED: false, META_PENDING_INTENT_ENABLED: false, HEART_ENABLED: true, HEART_DECIDES_TIMING: false, META_L0_COALESCE_MS: 2800,
     META_HEART_REFRACTORY_MS: 20_000, META_QQ_HEART_REFRACTORY_MS: 0,
     META_QQ_GROUP_COALESCE_MS: 0, META_QQ_GROUP_COALESCE_MAX_MS: 4000, META_QQ_MENTION_HEART_ENABLED: false,
+    META_TG_GROUP_COALESCE_MS: 0, META_TG_GROUP_COALESCE_CHAT_IDS: [], ONEBOT_ALLOWED_GROUP_IDS: '',
     META_DIRECT_COALESCE_MS: 0, META_DIRECT_COALESCE_MAX_MS: 2000,
     META_SUBAGENT_CHAT_IDS: [], META_ACTIVATED_AT_SEC: Math.floor(Date.now() / 1000) - 60 });
   f.sleep.mockResolvedValue('awake'); f.muted.mockReturnValue(false);
@@ -243,15 +245,20 @@ describe.each(['qq', 'telegram'] as const)('%s shared participation and timing',
     f.heart.mockResolvedValue({ act: 'wait', why: '等大家说完', path: 'chat', latencyMs: 1 });
     const message = incoming(platform, 102);
     await message.ingest(); await settleIngress(); await flushSession();
-    expect(f.wait).toHaveBeenCalledWith(message.chatId, 8, message.messageId, expect.any(Number));
+    expect(f.wait).toHaveBeenCalledWith(message.chatId, 8, message.messageId, expect.any(Number), undefined, expect.objectContaining({ waitGeneration: expect.any(String) }));
     expect(await redis.get(`xxb:meta:heart_arm:${message.chatId}`)).toBeNull();
     expect(f.dispatch).not.toHaveBeenCalled();
-    expect(JSON.parse((await redis.get(`xxb:meta:wait-anchor:${message.chatId}`))!)).toMatchObject({
+    const waitGeneration = f.wait.mock.calls[0]![5].waitGeneration as string;
+    expect(JSON.parse((await redis.get(`xxb:meta:wait-anchor:${message.chatId}:${waitGeneration}`))!)).toMatchObject({
       chatId: message.chatId, messageId: message.messageId, reason: 'heart:等大家说完',
     });
     await vi.advanceTimersByTimeAsync(8000);
-    expect(await resumeMetaWaitAttention(message.chatId)).toBe(true);
-    expect(await resumeMetaWaitAttention(message.chatId)).toBe(false);
+    f.runtime.mockResolvedValue({ state: 'RUNNING', waitGeneration, lastBotReplyAt: 0 });
+    f.heart.mockResolvedValue({ act: 'reply', why: '现在可以接话', path: 'chat', latencyMs: 1 });
+    const claim = { waitGeneration, anchorMessageId: message.messageId };
+    expect(await resumeMetaWaitAttention(message.chatId, claim)).toBe(true);
+    expect(await resumeMetaWaitAttention(message.chatId, claim)).toBe(false);
+    expect(f.heart).toHaveBeenCalledTimes(2);
     await flushSession(); await vi.advanceTimersByTimeAsync(2830); await settleIngress();
     expect(f.dispatch).toHaveBeenCalledOnce();
     expect(f.dispatch).toHaveBeenCalledWith(message.chatId, expect.objectContaining({ quotes: [message.messageId] }));
@@ -263,7 +270,7 @@ describe.each(['qq', 'telegram'] as const)('%s shared participation and timing',
     await message.ingest(); await settleIngress(); await flushSession();
     await vi.advanceTimersByTimeAsync(2830); await settleIngress();
     expect(f.gate).toHaveBeenCalledOnce(); expect(f.dispatch).not.toHaveBeenCalled();
-    if (action === 'wait') expect(f.wait).toHaveBeenCalledWith(message.chatId, 12, message.messageId, expect.any(Number));
+    if (action === 'wait') expect(f.wait).toHaveBeenCalledWith(message.chatId, 12, message.messageId, expect.any(Number), undefined, expect.objectContaining({ waitGeneration: expect.any(String) }));
     else expect(f.noAction).toHaveBeenCalledWith(message.chatId, expect.any(Number));
   });
 
@@ -402,7 +409,7 @@ it('QQ direct follow-up interrupts a wait and bypasses a recent passive reply', 
   f.runtime.mockResolvedValue({ state: 'WAIT', lastBotReplyAt: Date.now() });
   const followup = incoming('qq', 194, 'group', true); await followup.ingest(); await settleIngress();
   await vi.advanceTimersByTimeAsync(50); await settleIngress();
-  expect(f.running).toHaveBeenCalledWith(first.chatId);
+  expect(f.running).toHaveBeenCalledWith(first.chatId, undefined);
   expect(f.heart).toHaveBeenCalledOnce(); expect(f.dispatch).toHaveBeenCalledOnce();
   expect(f.dispatch).toHaveBeenCalledWith(first.chatId, expect.objectContaining({ quotes: [followup.messageId] }));
 });
@@ -411,6 +418,35 @@ function enableQqBatch(): void {
   f.config.META_QQ_GROUP_COALESCE_MS = 1500;
   f.config.META_QQ_MENTION_HEART_ENABLED = true;
 }
+
+it('keeps unmentioned QQ members on their native allowlist and QQ clock during a Telegram canary', async () => {
+  const first = incoming('qq', 811, 'group', false, 101, '明天从哪个门进？');
+  const second = incoming('qq', 812, 'group', false, 102, '闭馆前还来得及取书吗？');
+  Object.assign(f.config, {
+    ONEBOT_ALLOWED_GROUP_IDS: '321', META_SUBAGENT_CHAT_IDS: [first.chatId],
+    META_PENDING_INTENT_ENABLED: true, META_QQ_GROUP_COALESCE_MS: 1500,
+    // Even a mis-scoped Telegram canary must leave mapped QQ IDs to the QQ route.
+    META_TG_GROUP_COALESCE_MS: 5, META_TG_GROUP_COALESCE_CHAT_IDS: [first.chatId],
+  });
+  f.heart.mockResolvedValue({ act: 'pass', why: '继续听', latencyMs: 1 });
+  await first.ingest(); await settleIngress();
+  expect(f.addMessage).not.toHaveBeenCalled();
+
+  f.config.ONEBOT_ALLOWED_GROUP_IDS = '123';
+  await first.ingest(); await vi.advanceTimersByTimeAsync(200);
+  await second.ingest(); await second.ingest();
+  await vi.advanceTimersByTimeAsync(1499); await settleIngress();
+  expect(f.heart).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); await settleIngress();
+  expect(f.heart).toHaveBeenCalledTimes(1);
+  expect(f.heart.mock.calls[0]![0]).toMatchObject({
+    chatId: first.chatId, addressed: false,
+    batchMessages: [first, second].map(item => ({ messageId: item.messageId, uid: item.userId })),
+  });
+  await flushSession(); await vi.advanceTimersByTimeAsync(2830); await settleIngress();
+  expect(f.dispatch).not.toHaveBeenCalled();
+  expect(f.react).not.toHaveBeenCalled();
+});
 
 it.each([false, true])('real OneBot WebSocket intake collects three one-second bubbles before one slow Heart decision (durable=%s)', async durable => {
   const now = Date.now(); vi.useRealTimers();
@@ -544,10 +580,14 @@ it.each(['pass', 'react', 'reply', 'wait'] as const)('an earlier QQ mention stay
   if (act === 'wait') {
     expect(f.wait).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(8000);
-    expect(await resumeMetaWaitAttention(messages[0]!.chatId)).toBe(true);
+    const waitGeneration = f.wait.mock.calls[0]![5].waitGeneration as string;
+    f.runtime.mockResolvedValue({ state: 'RUNNING', waitGeneration, lastBotReplyAt: 0 });
+    f.heart.mockResolvedValue({ act: 'pass', why: '继续观察', path: 'chat', latencyMs: 1 });
+    expect(await resumeMetaWaitAttention(messages[0]!.chatId, { waitGeneration, anchorMessageId: messages[2]!.messageId })).toBe(true);
+    expect(f.heart).toHaveBeenCalledTimes(2);
   }
   await flushSession(); await vi.advanceTimersByTimeAsync(60); await settleIngress();
-  if (act === 'reply' || act === 'wait') {
+  if (act === 'reply') {
     expect(f.dispatch).toHaveBeenCalledOnce(); expect(f.gate).not.toHaveBeenCalled();
     expect(f.dispatch.mock.calls[0]![1].quotes).toEqual([messages[2]!.messageId]);
     expect(f.dispatch.mock.calls[0]![1].relatedQuotes).toHaveLength(2);
@@ -601,7 +641,7 @@ it.each([true, false])('only the active task sender gets grouped follow-up prior
   }
 });
 
-it('wait replay restores each QQ message quote independently instead of cloning the last anchor quote', async () => {
+it('holds legacy QQ batch previews without granting them replay or quote authority', async () => {
   const first = incoming('qq', 260); const second = incoming('qq', 261); const quote = incoming('qq', 262);
   const replyTo = { messageId: quote.messageId, uid: quote.userId, textSnippet: '合成被引用消息' };
   await redis.set(`xxb:meta:wait-anchor:${first.chatId}`, JSON.stringify({ chatId: first.chatId, layer: 'L0',
@@ -610,8 +650,8 @@ it('wait replay restores each QQ message quote independently instead of cloning 
       { messageId: second.messageId, userId: second.userId, textPreview: '引用另一条', replyTo }] } }));
   expect(await resumeMetaWaitAttention(first.chatId)).toBe(true);
   const pending = await getAttentionAccumulator().peek();
-  expect(pending.find(item => item.messageId === first.messageId)?.payload?.replyTo).toBeUndefined();
-  expect(pending.find(item => item.messageId === second.messageId)?.payload?.replyTo).toMatchObject(replyTo);
+  expect(pending).toEqual([]);
+  expect(redis.hashes.get('xxb:meta:activation-held')?.size).toBe(1);
 });
 
 it('a delayed QQ wait cannot cross activation or change its conversation scope', async () => {

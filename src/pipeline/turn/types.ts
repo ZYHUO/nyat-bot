@@ -20,6 +20,8 @@ export interface PendingEntry {
   direct?: boolean;
   isEdit?: boolean;
   waitReplay?: boolean;
+  /** Host-owned WAIT generation; only its current claimed recovery may run. */
+  waitGeneration?: string;
   sleepCatchup?: boolean;
   obligationId?: string;
   obligationTargetUid?: number;
