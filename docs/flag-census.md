@@ -15,7 +15,7 @@
 | 段 | 文件 | 键数 | 布尔 | 来源启用 | 管什么 |
 |---|---|---|---|---|---|
 | `ai` | [`src/env-sections/ai.ts`](../src/env-sections/ai.ts) | 11 | 2 | 0 | TypeSafe System One (Jev) 结构化判断 + round 198 的每 model 在飞上限 |
-| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 101 | 27 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
+| `infra` | [`src/env-sections/infra.ts`](../src/env-sections/infra.ts) | 103 | 28 | 5 | Telegram / Redis / SQLite / Qdrant / NyatDB / Server / 工具与密钥 / 跟踪 / 主人与身份 / 知识库 / 媒体开关 |
 | `memory` | [`src/env-sections/memory.ts`](../src/env-sections/memory.ts) | 37 | 19 | 1 | 主动参与、DM↔群记忆连结、长期记忆嵌入与相关性、CodeAct 长期记忆注入 |
 | `timing` | [`src/env-sections/timing.ts`](../src/env-sections/timing.ts) | 37 | 23 | 3 | Timing Gate（去抖 + 状态机 + LLM gate + talk-value + continuation） |
 | `judge` | [`src/env-sections/judge.ts`](../src/env-sections/judge.ts) | 24 | 3 | 0 | 定型判断基座 + 深度反思 |
@@ -32,15 +32,15 @@
 
 | | |
 |---|---|
-| total_keys | 562 |
-| bool_flags | 240 |
+| total_keys | 564 |
+| bool_flags | 241 |
 | on_in_source | 41 |
-| set_in_source | 105 |
+| set_in_source | 107 |
 | dead_no_reader | 6 |
 | dead_and_on | 0 |
 | phantom_only_in_tests | 1 |
 
-**240 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
+**241 个布尔旗标里，来源文件与 schema 默认值合计启用 41 个。** 这是可重复生成的静态清单，不能证明运行中的服务已启用这些功能。
 
 `readers` 列 = src/ 里 `env().<FLAG>` 出现的文件。`解构` 列 = 只在那里以 `const { FLAG } = env()` 之类形式出现的位置。**空 = 没人读**（要么是给脚本/外部进程读的 `process.env` 旗标，要么是死旗标）。
 
@@ -109,7 +109,7 @@
 | turn | `TURN_MULTI_ANCHOR_ENABLED` | true | None | 多锚点:burst 按"发送者"分组,每组各自 judge→reply(flat 群里"线程"≈"人")。 治"只回最后一条→像回错人":每人各自回,reply_to 自然指向那个人。单人 burst(groups.size===1)走原单锚点逻辑,零回归。 | pipeline/turn/actor.ts |
 | turn | `TURN_WAIT_PER_PERSON` | true | None | per-person WAIT 抑制:wait 只抑制触发者集合(waitTriggerUids)的后续,别人 照常进多锚点 judge。心流 wait 本意就是"等TA说完",抑制整群是过度抑制。 同回合多人触发 wait → 都进集合,都被抑制(L1)。 | pipeline/turn/actor.ts |
 
-## 关着的布尔旗标（199 个）
+## 关着的布尔旗标（200 个）
 
 | 段 | flag | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -188,6 +188,7 @@
 | infra | `ONEBOT_MEDIA_ENABLED` | false | false |  |
 | infra | `OUTCOME_TRACKING_ENABLED` | false | false | Tracking |
 | infra | `PDF_VISION_ENABLED` | false | — | PDF 识别:同理默认关。当前 vision 路由实际落到 GPT(sub2gpt54mini), 读不了 PDF base64,这通调用必败。gemini/PDF-capable vision 恢复后置 true。 |
+| infra | `QQ_ASSIGNMENTS_ENABLED` | false | false | Explicit owner-confirmed group work is off until its migration and rollout are reviewed. |
 | infra | `READINESS_ENABLED` | false | false | Host-level observation (no chat action); opt in when using the A/B controller. |
 | infra | `UPDATE_REQUESTS_ENABLED` | false | false | Opt-in host mailbox; only the independent controller may activate a release. |
 | infra | `VERIFY_ENABLED` | false | — | Join verification |
@@ -313,7 +314,7 @@
 | turn | `TURN_UNANSWERED_REVISIT_ENABLED` | false | — | G7: 回访最近未回应的消息（注入 ≤2 条候选目标）。 |
 | turn | `TURN_WAIT_RESUME_ENABLED` | false | — | G5: wait 到期后带锚点重入回复路径（而非只解除屏蔽）。 |
 
-## 非布尔参数（322 个）
+## 非布尔参数（323 个）
 
 | 段 | key | 默认 | 来源值 | 是什么（注释摘要） |
 |---|---|---|---|---|
@@ -444,6 +445,7 @@
 | infra | `PORT` | 3000 | 3000 | Server |
 | infra | `QDRANT_HOST` | '127.0.0.1' | — | Qdrant (vector memory) — zod-coerced; a non-numeric QDRANT_PORT now fails validation at startup instead of producing `po |
 | infra | `QDRANT_PORT` | 6333 | — |  |
+| infra | `QQ_ASSIGNMENT_GROUP_IDS` | '' | — |  |
 | infra | `QUEUE_CONCURRENCY` | 8 | 20 | Queue |
 | infra | `RATE_LIMIT_PER_MIN` | 30 | 30 | Rate limiting |
 | infra | `REDIS_URL` | 'redis://127.0.0.1:6379/0' | &lt;redacted&gt; | Redis |

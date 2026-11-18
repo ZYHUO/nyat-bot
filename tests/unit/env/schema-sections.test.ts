@@ -62,10 +62,9 @@ describe('env schema 拆段', () => {
     // including pending intent, life-project (two) and background publication.
     // Parsed default objects omit 19 optional keys and are not this denominator.
     // Five isolated video replica controls; standalone server settings are not bot keys.
-    // Recounted 559 unique keys: two business settings gates and six release/readiness controls.
-    // Three Telegram Heart rollout controls (group list, quiet and maximum windows).
-    expect(all.length).toBe(562);
-    expect(new Set(all).size).toBe(562);
+    // The 559-key baseline gained three Telegram batching and two QQ assignment controls.
+    expect(all.length).toBe(564);
+    expect(new Set(all).size).toBe(564);
     // 键名必须是合法 env 变量名（否则 .env 里设了也读不到）
     for (const k of all) expect(k).toMatch(/^[A-Z][A-Z0-9_]+$/);
   });
@@ -78,6 +77,8 @@ describe('env schema 拆段', () => {
     expect(parsed.BUSINESS_CONFIG_ENABLED).toBe(false);
     expect(parsed.BUSINESS_CONFIG_CHAT_IDS).toEqual([]);
     expect(parsed.READINESS_ENABLED).toBe(false);
+    expect(parsed.QQ_ASSIGNMENTS_ENABLED).toBe(false);
+    expect(parsed.QQ_ASSIGNMENT_GROUP_IDS).toBe('');
     expect(parsed.NYAT_RELEASE_ID).toBe('');
     expect(parsed.UPDATE_REQUESTS_ENABLED).toBe(false);
     expect(parsed.UPDATE_CONTROL_CHAT_IDS).toEqual([]);

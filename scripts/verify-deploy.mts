@@ -36,6 +36,8 @@ const CHECKS: Array<[string, string]> = [
   ['缓存输入与读取规范化', 'normalizeAnthropicUsage'],
   ['缓存统计覆盖分母', 'llm_cache_observations_total'],
   ['SDK 工具逐步缓存计量', 'createSdkUsageObserver'],
+  ['QQ 主人指派入口', 'tryHandleOneBotAssignmentCommand'],
+  ['QQ 指派发送围栏', 'assertOneBotAssignmentReservation'],
   ['日记配置版本与审计', 'business_config_revision_conflict'],
   ['主人配置命令入口', 'tryHandleJournalConfigCommand'],
   ['受限版本更新请求', 'tryHandleUpdateCommand'],

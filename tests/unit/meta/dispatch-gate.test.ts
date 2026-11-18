@@ -66,6 +66,24 @@ describe('evaluateDispatchGate', () => {
     textPreview: '群里在聊猫',
   };
 
+  it.each(['wait', 'defer'] as const)('does not create unbounded %s replay for assigned participation', async action => {
+    runTimingGate.mockResolvedValueOnce(action === 'wait'
+      ? { action: 'wait', waitSec: 30, reason: 'paced' }
+      : { action: 'no_action', deferOnly: true, reason: 'paced', retryAfterMs: 30_000 });
+    const { evaluateDispatchGate } = await import('../../../src/meta/dispatch-gate.js');
+    expect(await evaluateDispatchGate({ ...base, assignmentDriven: true }))
+      .toEqual({ verdict: 'suppress', reason: 'qq_assignment_wait_for_new_input' });
+    expect(setMetaWaitAnchor).not.toHaveBeenCalled(); expect(transitionToWait).not.toHaveBeenCalled();
+    expect(scheduleMetaDeferReeval).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for unavailable assignment timing while ordinary gate behavior stays unchanged', async () => {
+    runTimingGate.mockRejectedValueOnce(new Error('synthetic unavailable'));
+    const { evaluateDispatchGate } = await import('../../../src/meta/dispatch-gate.js');
+    expect(await evaluateDispatchGate({ ...base, assignmentDriven: true }))
+      .toEqual({ verdict: 'suppress', reason: 'qq_assignment_timing_unavailable' });
+  });
+
   it('passes the QQ conversation identity to timing instead of Telegram identity', async () => {
     runTimingGate.mockResolvedValueOnce({ action: 'continue', reason: 'ok', shortCircuited: false, latencyMs: 1 });
     const { evaluateDispatchGate } = await import('../../../src/meta/dispatch-gate.js');

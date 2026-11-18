@@ -7,6 +7,12 @@ const intentRedis = createDeliveryIntentRedis();
 // 这个测试锁死新行为：**发送前**、主动发言、deprived 时一定不出去。
 
 const sendMessage = vi.fn(async (_c: number, _t: string, _r?: number) => 4242);
+// This ordinary-task fixture has no owner assignment; durable grant behavior
+// is exercised separately with the real assignment store and its migrations.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: () => null,
+}));
 vi.mock('../../../src/bot/sender/telegram.js', () => ({
   sendMessage: (...a: unknown[]) => sendMessage(...(a as [number, string, number?])),
   sendSticker: vi.fn(async () => 1),

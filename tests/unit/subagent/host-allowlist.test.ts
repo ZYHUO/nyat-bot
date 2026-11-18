@@ -21,6 +21,12 @@ const envBase: Record<string, unknown> = {
   MEMORY_VISIBILITY_ENABLED: false,
 };
 
+// This ordinary-task fixture has no owner assignment; durable grant behavior
+// is exercised separately with the real assignment store and its migrations.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: () => null,
+}));
 vi.mock('../../../src/env.js', () => ({ env: () => envBase }));
 vi.mock('../../../src/shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

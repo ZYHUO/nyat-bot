@@ -23,7 +23,8 @@ import { executeIsolatedCode } from '../sandbox/codeact/runner.js';
 import { CODEACT_CAPABILITY_METHODS, selectCodeActCapabilities } from '../sandbox/codeact/capabilities.js';
 import { buildCodeActSystemPrompt, buildJournalCapabilityNote, codeActMethodsForChat } from './capability-prompt.js';
 import { checkCodeActTaskActivation, holdCodeActTask } from './activation-policy.js';
-import { isPlatformInternalId } from '../platform/identity-store.js';
+import { findMessageRef, isPlatformInternalId } from '../platform/identity-store.js';
+import { assertOneBotAssignmentTask, OneBotAssignmentError, type OneBotAssignment } from '../platform/onebot-assignment-store.js';
 import { DELIVERY_UNKNOWN_SUMMARY, holdUnknownCodeActDelivery, isCodeActDeliveryHeld, isUnknownPlatformDelivery } from './delivery-hold.js';
 import { beginBackgroundTask, finishBackgroundTask, isBackgroundTask, assertBackgroundTaskCurrent, type BackgroundRun } from '../agent/background-publication.js';
 import { LocalCodeActQueue } from './local-queue.js';
@@ -238,6 +239,35 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await holdCodeActTask(task, activation.reason);
     return;
   }
+  let qqAssignment: OneBotAssignment | null = null;
+  try {
+    qqAssignment = assertOneBotAssignmentTask(task, { executionStart: true });
+    if (qqAssignment) {
+      // An assignment starts in the destination's context. A copied controller
+      // quote, pending input, checkpoint or private intent is never its authority.
+      if ((task.pendingIntent && (task.pendingIntent.chatId !== task.chatId
+        || task.pendingIntent.senderId !== task.targetUserId || task.pendingIntent.threadId !== 0))
+        || task.pendingUserInput?.length || task.messageThreadId !== undefined
+        || [...(task.quoteMessageIds ?? []), ...(task.relatedQuoteIds ?? [])].some(id => !findMessageRef(task.chatId, id))) {
+        throw new OneBotAssignmentError('foreign_context');
+      }
+    }
+  } catch (error) {
+    const code = error instanceof OneBotAssignmentError ? error.code : 'store_unavailable';
+    if (code === 'store_unavailable' || code === 'task_binding_mismatch') {
+      // A queued copy whose binding cannot be verified has no authority over
+      // the durable task with the same ID, even if it claims a Telegram chat.
+      try { await holdCodeActTask(task, code === 'store_unavailable' ? 'task_scope_unavailable' : 'task_scope_invalid'); }
+      catch { logger.warn({ taskId: task.id, chatId: task.chatId, code }, 'Assignment scope hold deferred; no task executed'); }
+      return;
+    }
+    task.status = 'failed'; task.waitingForUser = false;
+    task.resultSummary = code === 'held' || code === 'pending_reservation'
+      ? DELIVERY_UNKNOWN_SUMMARY : `failed_qq_assignment_${code}`;
+    if (task.resultSummary === DELIVERY_UNKNOWN_SUMMARY) await holdUnknownCodeActDelivery(task.id, task.chatId, code);
+    await persistCodeActTask(task);
+    return;
+  }
   if (!await isTaskWaitRecoveryCurrent(task)) {
     task.status = 'failed'; task.resultSummary = 'failed_input_superseded'; task.waitingForUser = false;
     getGlobalState().putTask(task); await persistCodeActTask(task);
@@ -334,6 +364,15 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   let deliveryUnknown = false;
   const checkInputRevision = (): boolean => {
     if (deliveryUnknown) return false; // Unknown receipts retain their stricter hold.
+    if (qqAssignment) try { assertOneBotAssignmentTask(task); }
+    catch (error) {
+      const code = error instanceof OneBotAssignmentError ? error.code : 'store_unavailable';
+      ended = true;
+      endSummary = code === 'exhausted' && host.runtime.didSendText() && !endSummary.startsWith('failed_qq_assignment_')
+        ? 'qq_assignment_delivered' : `failed_qq_assignment_${code}`;
+      task.waitingForUser = false; task.waitingReason = undefined;
+      return false;
+    }
     try {
       assertPendingIntentCurrent(task.pendingIntent);
       if (backgroundRun) assertBackgroundTaskCurrent(backgroundRun);
@@ -365,7 +404,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
   // Ensure we always have a reply anchor in groups: quotes → parse from direction → none.
   let replyAnchor = task.quoteMessageIds?.[0];
-  if (!replyAnchor || replyAnchor <= 0) {
+  if ((!replyAnchor || replyAnchor <= 0) && !qqAssignment) {
     const m = task.contentDirection.match(/#(\d{1,12})/);
     if (m?.[1]) replyAnchor = Number(m[1]);
   }
@@ -384,7 +423,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // 长任务实时干预(P1):任务**一开始**就注册 chat→task 索引 —— 原来只在续跑时
   // 注册,首段 30 轮/120s 内用户消息会重复 dispatch 新任务,喊停/问进度永远到不了。
   // self-play/goal-check 不注册:后台任务不该劫持该 chat 的正常消息流。
-  const interruptible = !background && !isSelfPlay && !isGoalCheck;
+  const interruptible = !background && !qqAssignment && !isSelfPlay && !isGoalCheck;
   if (interruptible) {
     await registerAgentChat(task.chatId, task.id);
   }
@@ -399,7 +438,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   // AGENT_MAX_SEGMENTS 默认 10，所以真实上限是 60 条/任务。
   //
   // 修法：sendsUsed 记在 task 上跨段累计，每段只发"剩余的额度"。
-  const sendBudget = background ? 0 : isSelfPlay || isGoalCheck ? 1 : Math.min(env().AGENT_TASK_SEND_BUDGET, isPlatformInternalId(task.chatId) ? 3 : Number.POSITIVE_INFINITY);
+  const sendBudget = background ? 0 : isSelfPlay || isGoalCheck ? 1
+    : Math.min(env().AGENT_TASK_SEND_BUDGET, qqAssignment?.mode === 'once' ? 1 : isPlatformInternalId(task.chatId) ? 3 : Number.POSITIVE_INFINITY);
   const sendLeft = (): number => Math.max(0, sendBudget - (task.sendsUsed ?? 0));
 
   const host = createHostApi(task.chatId, {
@@ -407,6 +447,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     pendingIntent: task.pendingIntent,
     waitRecovery: task.waitRecovery,
     taskId: task.id,
+    qqAssignmentId: task.qqAssignmentId,
     targetUserId: task.targetUserId,
     acceptance: task.acceptance,
     priorAudit: task.audit,
@@ -415,8 +456,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     relatedQuoteIds: task.relatedQuoteIds,
     isClosed: () => closed,
     onDeliveryUnknown: closeUnknownDelivery,
+    onAssignmentDenied: (code) => { ended = true; endSummary = `failed_qq_assignment_${code}`; },
     onEnd: (summary) => {
-      if (deliveryUnknown) return;
+      if (deliveryUnknown || endSummary.startsWith('failed_qq_assignment_')) return;
       ended = true;
       endSummary = summary;
     },
@@ -486,7 +528,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
   const loopEnabled = env().AGENT_LOOP_ENABLED;
 
   const { prompt, cachePrefix, manifest } = await engine.assemble([
-    staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId,background), task.chatId)),
+    staticText('sub-system', buildCodeActSystemPrompt(systemPrompt, codeActMethodsForChat(task.chatId,background,!!qqAssignment), task.chatId)
+      + (qqAssignment ? '\n这是宿主绑定的 QQ 群内指派，只使用当前群的上下文。主人私聊不是群内消息来源，禁止复制私聊、借用私聊引用或另建长期跟进。可以安静结束；参与授权不要求每条消息都回应。' : '')),
     staticText('sub-identity', identity),
     ephemeralText('sub-master', masterBlock),
     ephemeralText('sub-permanent', permanent ? `## 永久知识\n${permanent}` : ''),
@@ -814,7 +857,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       }
 
       const exec = await runHostCode(code, host, {
-        methods: codeActMethodsForChat(task.chatId,background),
+        methods: codeActMethodsForChat(task.chatId,background,!!qqAssignment),
         isClosed: () => closed,
         onTimeout: () => {
           // Soft mark - do not flip closed yet so in-flight sendText can finish.
@@ -865,6 +908,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         loopEnabled &&
         !task.waitRecovery &&
         !background &&
+        !qqAssignment &&
         !isGoalCheck &&
         !isSelfPlay &&
         segment + 1 < maxSegments &&
@@ -979,6 +1023,8 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
         if (!checkInputRevision()) break checkpointWaiting;
         await registerAgentChat(task.chatId, task.id);
         checkInputRevision();
+      } else if (qqAssignment) {
+        host.runtime.endTask(qqAssignment.mode === 'once' ? 'failed_qq_assignment_no_delivery' : 'qq_assignment_no_delivery');
       } else if (isSelfPlay || background) {
         // Self-play is private practice — never bypass maxTextSends with a failsafe DM.
         host.runtime.endTask(background ? 'no_update' : 'selfplay_silent');
@@ -1042,6 +1088,9 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
     await host.runtime.flushBookkeeping();
     checkInputRevision();
     if (deliveryUnknown) endSummary = DELIVERY_UNKNOWN_SUMMARY;
+    if (qqAssignment?.mode === 'once' && !host.runtime.didSendText() && !deliveryUnknown && !endSummary.startsWith('failed')) {
+      endSummary = 'failed_qq_assignment_no_delivery';
+    }
 
     // 续跑任务不进入终态：保持 queued，等下一段完成/超限后再收尾。
     const resumed = endSummary.startsWith('resumed_seg') || endSummary === 'waiting_user';
@@ -1079,7 +1128,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
             resolutionEventId: terminalEventId,
           });
         }
-      } else if (!background && endSummary !== 'failed_user_stopped' && endSummary !== 'failed_input_superseded' && !deliveryUnknown
+      } else if (!background && !qqAssignment && endSummary !== 'failed_user_stopped' && endSummary !== 'failed_input_superseded' && !deliveryUnknown
         && await isTaskWaitRecoveryCurrent(task)) {
         // 任务失败 = 一笔未完成认知，后续可主动修复或向用户说明。
         createDebt({
@@ -1183,7 +1232,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       // AGI Level 4 P4-A: 终态复盘蒸馏 —— 只留下过痕迹的任务才复盘（常驻）
       // （纯闲聊 sendText 一句就结束的也蒸，成本极低；失败任务重点挖 pitfall）。
       // fire-and-forget：复盘失败静默 warn，不阻塞 callback、不烧重试。
-      if (!background && !deliveryUnknown && endSummary !== 'failed_input_superseded' && host.runtime.didProduce()) {
+      if (!background && !qqAssignment && !deliveryUnknown && endSummary !== 'failed_input_superseded' && host.runtime.didProduce()) {
         const tailText = history
           .slice(-12)
           .map((m) => `${m.role}: ${m.content.slice(0, 250)}`)
@@ -1214,7 +1263,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
       // 模型按 contentDirection 要求输出 "found: …" / "no_update" / "无法完成: …"。
       {
         const goalMatch = task.contentDirection.match(/\[goal:(\d+)\]/);
-        if (goalMatch && !deliveryUnknown) {
+        if (goalMatch && !qqAssignment && !deliveryUnknown) {
           const goalId = Number(goalMatch[1]);
           const found = endSummary.match(/^found:\s*(.+)$/im)?.[1]?.trim();
           const achieved = endSummary.match(/^已完成[:：]\s*(.+)$/im)?.[1]?.trim();
@@ -1300,7 +1349,7 @@ export async function runCodeActTask(task: DispatchTask): Promise<void> {
 
       // Unknown delivery needs human reconciliation, not a Meta callback that
       // automatically dispatches the same intended message in a fresh task.
-      if (!background && !deliveryUnknown && endSummary !== 'failed_input_superseded') await state.enqueueCallbackAsync({
+      if (!background && !qqAssignment && !deliveryUnknown && endSummary !== 'failed_input_superseded') await state.enqueueCallbackAsync({
         id: randomUUID(),
         taskId: task.id,
         chatId: task.chatId,

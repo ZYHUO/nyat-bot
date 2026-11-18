@@ -124,7 +124,9 @@ export async function recheckMetaWaitAnchor(anchor: MetaWaitAnchor, resume: Meta
       : { ...await evaluateMetaTiming({ chatId, formatted: source, isDirect: false,
         layer: anchor.layer, cognitiveAnchorEventId: anchor.cognitiveAnchorEventId,
         waitResume: true, isCurrent: stillClaimed }), layer: anchor.layer, targetMessageIds: [source.messageId] };
-    if (verdict.verdict !== 'allow' || !await current()) return;
+    // Only fresh target-group input can drive a QQ participation grant. Do
+    // not downgrade an unexpectedly grant-driven reply to ordinary attention.
+    if (verdict.verdict !== 'allow' || ('qqAssignmentId' in verdict && verdict.qqAssignmentId) || !await current()) return;
     const selected = verdict.targetMessageIds ?? (targetMessageIds.length === 1 ? targetMessageIds : []);
     if (!selected.length || selected.some(id => !targetMessageIds.includes(id))) return;
     for (const message of candidates) {

@@ -143,18 +143,24 @@ describe('claimed Meta WAIT reconsideration', () => {
     await run(); expect(f.heart).not.toHaveBeenCalled(); expect(f.ingest).not.toHaveBeenCalled();
   });
 
-  it('QQ reconsideration keeps its latest anchor contract without a Telegram-only selector', async () => {
+  it.each([undefined, 'later-grant'])('QQ reconsideration keeps the original anchor and rejects unexpected grant %s', async qqAssignmentId => {
     f.scope.platform = 'qq';
     f.recent = [makeMessage(6, 4), makeMessage(7, 5)].map(message => ({ ...message,
       eventIdentity: createMessageEventIdentity({ ref: { conversation: { platform: 'qq', accountId: 'bot-1',
         conversationKind: 'group', idNamespace: 'qq-number', id: 'group-123', threadId: '9' }, id: String(message.messageId) },
         occurredAt: 101_000, receivedAt: 101_000 }) }));
     anchor.contextScope = { ...f.scope } as MetaWaitAnchor['contextScope']; anchor.heartMessages = structuredClone(f.recent);
-    f.heart.mockResolvedValue({ verdict: 'allow', layer: 'L1', reason: 'heart:reply' });
+    f.heart.mockResolvedValue({ verdict: 'allow', layer: 'L1', reason: 'heart:reply', qqAssignmentId });
     await run();
     expect(f.heart).toHaveBeenCalledWith(expect.objectContaining({ targetMessageIds: undefined, batchMessages: anchor.heartMessages }));
+    if (qqAssignmentId) {
+      expect(f.ingest).not.toHaveBeenCalled();
+      return;
+    }
     expect(f.ingest).toHaveBeenCalledOnce();
-    expect(f.ingest).toHaveBeenCalledWith(expect.objectContaining({ messageId: 7, userId: 5 }), expect.anything());
+    expect(f.ingest).toHaveBeenCalledWith(expect.objectContaining({ messageId: 7, userId: 5,
+      waitRecovery: expect.objectContaining({ platform: 'qq', generation: 'generation-1' }) }), expect.anything());
+    expect(f.ingest.mock.calls[0]![0]).not.toHaveProperty('qqAssignmentId');
   });
 
 });

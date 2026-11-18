@@ -36,6 +36,8 @@ export type MessageSegment =
   | { type: 'unsupported'; platformType: string };
 
 export interface NormalizedMessage {
+  /** Preserve explicit edit/forward provenance for host-only command authorization. */
+  authorityIneligible?: 'edited' | 'forwarded';
   ref: MessageRef;
   sender: UserRef;
   senderName?: string;

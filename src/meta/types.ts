@@ -16,6 +16,8 @@ export type WaitRecoveryFence = {
 );
 
 export interface AttentionItem {
+  /** Host-captured participation grant; must survive a later stop/expiry without downgrade. */
+  qqAssignmentId?: string;
   id: string;
   chatId: number;
   layer: AttentionLayer;
@@ -51,6 +53,8 @@ export interface DispatchTask {
   id: string;
   chatId: number;
   contentDirection: string;
+  /** Host-issued QQ target grant; valid only with its durable task binding. */
+  qqAssignmentId?: string;
   toneGuidance?: string;
   quoteMessageIds?: number[];
   /**

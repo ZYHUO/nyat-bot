@@ -36,6 +36,9 @@ export const infraSection = {
   ONEBOT_OWNER_ID: z.string().default(''),
   ONEBOT_ALLOWED_GROUP_IDS: z.string().default(''),
   ONEBOT_ALLOWED_USER_IDS: z.string().default(''),
+  // Explicit owner-confirmed group work is off until its migration and rollout are reviewed.
+  QQ_ASSIGNMENTS_ENABLED: booleanFromEnv.default(false),
+  QQ_ASSIGNMENT_GROUP_IDS: z.string().default(''),
   ONEBOT_ACTION_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
   ONEBOT_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
   ONEBOT_RECONNECT_DELAY_MS: z.coerce.number().int().min(100).max(60000).default(5000),

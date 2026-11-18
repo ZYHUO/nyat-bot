@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WaitRecoveryFence } from '../../../src/meta/types.js';
 const f = vi.hoisted(() => ({ state: vi.fn(), hold: vi.fn(), release: vi.fn(), react: vi.fn(), sticker: vi.fn(), action: vi.fn(), forward: vi.fn(), rate: vi.fn(), account: '123' }));
+const assignment = vi.hoisted(() => vi.fn(() => null));
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: assignment,
+}));
 vi.mock('../../../src/env.js', () => ({ env: () => ({ CODEACT_BANNED_WORDS: [], META_PENDING_INTENT_ENABLED: false }) }));
 vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: f.state }));
 vi.mock('../../../src/shared/privacy-scope.js', () => ({ resolveConversationScope: (chatId: number) => ({ chatId,
@@ -64,6 +69,13 @@ describe('host WAIT recovery authority with pending-intent disabled', () => {
     await expect(host.telegram.react(10, '👍')).rejects.toThrow('wait_recovery_stale');
     expect(onEnd).toHaveBeenCalledWith('failed_input_superseded'); expect(f.react).toHaveBeenCalledOnce();
     expect(() => host.runtime.waitForUser('later')).toThrow('wait_recovery_cannot_suspend');
+  });
+  it('keeps the QQ binding check on a current Telegram WAIT task even when the grant tag is absent', async () => {
+    const host = createHostApi(-100, { onEnd: vi.fn(), taskId: 'reused-task', quoteIds: [10], messageThreadId: 7, waitRecovery: fence });
+    assignment.mockImplementationOnce(() => { throw new Error('task_binding_mismatch'); });
+    await expect(host.telegram.react(10, '👍')).rejects.toThrow('task_binding_mismatch');
+    expect(assignment).toHaveBeenCalledWith({ id: 'reused-task', chatId: -100, qqAssignmentId: undefined });
+    expect(f.react).not.toHaveBeenCalled(); expect(f.hold).not.toHaveBeenCalled();
   });
   it('does not turn an expired recovery into a new autonomous goal or Meta request', async () => {
     const host = createHostApi(-100, { onEnd: vi.fn(), taskId: 'expired', quoteIds: [10], messageThreadId: 7, waitRecovery: fence });

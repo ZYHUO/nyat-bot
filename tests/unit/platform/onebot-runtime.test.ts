@@ -7,12 +7,15 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { MetaRedisFixture } from '../../helpers/meta-redis.js';
 
 const f = vi.hoisted(() => ({ db: vi.fn(), redis: vi.fn(), core: vi.fn(), media: vi.fn(), clearMedia: vi.fn(),
+  enqueue: vi.fn(async (_task: unknown) => undefined),
   config: {
     ONEBOT_ENABLED: true, ONEBOT_MEDIA_ENABLED: false, ONEBOT_ACCOUNT_ID: '42', ONEBOT_OWNER_ID: '99',
     ONEBOT_WS_URL: '', ONEBOT_ACCESS_TOKEN: 'synthetic-runtime-token',
     ONEBOT_ALLOWED_GROUP_IDS: '', ONEBOT_ALLOWED_USER_IDS: '', ONEBOT_ACTION_TIMEOUT_MS: 300,
     ONEBOT_HEARTBEAT_INTERVAL_MS: 30_000, ONEBOT_RECONNECT_DELAY_MS: 10,
     META_ACTIVATED_AT_SEC: 1, META_DIRECT_COALESCE_MS: 800, META_DIRECT_COALESCE_MAX_MS: 2000,
+    QQ_ASSIGNMENTS_ENABLED: false, QQ_ASSIGNMENT_GROUP_IDS: '',
+    META_SUBAGENT_ENABLED: true, CODEACT_ISOLATION_ENABLED: true, META_SUBAGENT_CHAT_IDS: [] as number[],
   },
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.config }));
@@ -23,6 +26,7 @@ vi.mock('../../../src/shared/logger.js', () => ({ logger: { info: vi.fn(), warn:
 // SQLite identity mapping and outbound receipts. Stop at cognition, so no model
 // worker or external service can run during this loopback integration test.
 vi.mock('../../../src/bot/handlers/message.js', () => ({ ingestChatUpdate: f.core }));
+vi.mock('../../../src/subagent/queue.js', () => ({ enqueueCodeActJob: f.enqueue }));
 vi.mock('../../../src/pipeline/context/manager.js', () => ({ getRecent: async () => [] }));
 vi.mock('../../../src/platform/onebot-media.js', () => ({
   setOneBotMediaTransport: f.media, registerOneBotMedia: vi.fn(() => { throw new Error('No media fixture'); }),
@@ -33,7 +37,7 @@ import { getOrCreateConversationId } from '../../../src/platform/identity-store.
 import { sendPlatformText } from '../../../src/platform/outbound.js';
 
 interface Request { action: string; echo: string; params: Record<string, unknown>; }
-const migrations = ['0118_platform_identity.sql', '0119_onebot_requests.sql', '0120_onebot_notices.sql']
+const migrations = ['0118_platform_identity.sql', '0119_onebot_requests.sql', '0120_onebot_notices.sql', '0136_onebot_assignments.sql']
   .map(name => readFileSync(`migrations/${name}`, 'utf8'));
 let db: Database.Database;
 let wss: WebSocketServer;
@@ -61,7 +65,8 @@ async function ready(acceptMessages = true): Promise<void> {
 beforeEach(async () => {
   vi.clearAllMocks(); sockets.length = 0; requests.length = 0; omitDecisionAck = false;
   Object.assign(f.config, { ONEBOT_ENABLED: true, ONEBOT_MEDIA_ENABLED: false,
-    ONEBOT_ALLOWED_USER_IDS: '', META_ACTIVATED_AT_SEC: Math.floor(Date.now() / 1000) - 60 });
+    ONEBOT_ALLOWED_USER_IDS: '', ONEBOT_ALLOWED_GROUP_IDS: '', QQ_ASSIGNMENTS_ENABLED: false,
+    QQ_ASSIGNMENT_GROUP_IDS: '', META_SUBAGENT_CHAT_IDS: [], META_ACTIVATED_AT_SEC: Math.floor(Date.now() / 1000) - 60 });
   db = new Database(':memory:'); db.pragma('foreign_keys = ON'); migrations.forEach(sql => db.exec(sql));
   f.db.mockReturnValue(db); f.redis.mockReturnValue(new MetaRedisFixture());
   f.media.mockReturnValue(f.clearMedia);
@@ -87,6 +92,33 @@ afterEach(async () => {
 });
 
 describe('OneBot runtime request and ingress integration', () => {
+  it('routes a real owner assignment through the authenticated socket to a separate target task once', async () => {
+    Object.assign(f.config, { QQ_ASSIGNMENTS_ENABLED: true, QQ_ASSIGNMENT_GROUP_IDS: '123', ONEBOT_ALLOWED_GROUP_IDS: '123' });
+    await ready();
+    const command = '/qq_assign {"target":"123","mode":"once","text":"合成公开问候"}';
+    emit(messageEvent(401, command));
+    await vi.waitFor(() => expect(f.enqueue).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sent()).toHaveLength(1));
+    const task = f.enqueue.mock.calls[0]![0] as Record<string, unknown>;
+    const target = getOrCreateConversationId({ platform: 'qq', accountId: '42', idNamespace: 'qq-number', conversationKind: 'group', id: '123' });
+    expect(task).toMatchObject({ chatId: target, status: 'queued', qqAssignmentId: expect.any(String) });
+    for (const field of ['targetUserId', 'quoteMessageIds', 'pendingUserInput', 'checkpointKey']) expect(task[field]).toBeUndefined();
+    expect(f.core).not.toHaveBeenCalled();
+    emit(messageEvent(401, command));
+    emit(messageEvent(402, 'ordinary DM after command'));
+    await vi.waitFor(() => expect(f.core).toHaveBeenCalledTimes(1));
+    expect(f.enqueue).toHaveBeenCalledTimes(1);
+    expect(requests.some(request => request.action === 'send_group_msg')).toBe(false);
+  });
+
+  it('consumes marked edited commands without queueing work or treating them as model authorization', async () => {
+    Object.assign(f.config, { QQ_ASSIGNMENTS_ENABLED: true, QQ_ASSIGNMENT_GROUP_IDS: '123', ONEBOT_ALLOWED_GROUP_IDS: '123' });
+    await ready();
+    emit(messageEvent(410, '/qq_assign {"target":"123","mode":"once"}', 99, { edited_at: 1 }));
+    await vi.waitFor(() => expect(sent()).toHaveLength(1));
+    expect(f.enqueue).not.toHaveBeenCalled(); expect(f.core).not.toHaveBeenCalled();
+  });
+
   it('joins admitted runtime messages before clearing ingress while leaving sender usable', async () => {
     let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
     f.core.mockImplementationOnce(async () => { await blocked; });

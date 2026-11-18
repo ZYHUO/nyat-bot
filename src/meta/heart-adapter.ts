@@ -7,7 +7,7 @@ import { env } from '../env.js';
 import { assertInputBatchCurrent } from './pending-intent.js';
 import { logger } from '../shared/logger.js';
 import { getBotDisplayName, getBotUid } from '../bot/bot.js';
-import { heartDecision } from '../pipeline/heart/decision.js';
+import { heartDecision, type HeartInput } from '../pipeline/heart/decision.js';
 import { composeSelfState } from '../pipeline/heart/self-state.js';
 import {
   computeEngagement,
@@ -30,6 +30,7 @@ import { findUnrepairedActs, renderUnrepairedActs } from '../tracking/repair.js'
 import { incrCounter } from '../metrics/registry.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
 import { resolveBatchTargets } from './heart-targets.js';
+import { isCorrectionCooling } from '../pipeline/correction-cooldown.js';
 
 export type MetaHeartVerdict = 'allow' | 'silence';
 
@@ -41,6 +42,8 @@ export interface MetaHeartResult {
   pressureBoost?: number;
   path?: 'chat' | 'lookup';
   targetMessageIds?: number[];
+  /** Host provenance survives Attention until the final assignment send fence. */
+  qqAssignmentId?: string;
 }
 
 /**
@@ -92,6 +95,9 @@ export async function evaluateMetaHeart(opts: {
   };
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
   if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
+  if (chatId < 0 && await isCorrectionCooling(chatId)) {
+    return { verdict: 'silence', layer, reason: 'heart_correction_cooling' };
+  }
 
   if (!e.HEART_ENABLED) {
     // No Heart: preserve prior Meta policy (L2 drop handled by caller).
@@ -244,6 +250,29 @@ export async function evaluateMetaHeart(opts: {
     } catch { /* non-critical: history is an aid, never a gate */ }
   }
 
+  let ownerParticipation: HeartInput['ownerParticipation'];
+  let assignmentId: string | undefined;
+  // A timer reconsidering an old question is not a fresh group event. It
+  // retains its ordinary Heart path without consuming a new owner's grant.
+  if (!opts.waitResume && e.QQ_ASSIGNMENTS_ENABLED && isPlatformInternalId(chatId)
+    && formatted.role === 'user' && !formatted.isBot && !formatted.isAnonymous) {
+    try {
+      const { activeOneBotAssignment } = await import('../platform/onebot-assignment-store.js');
+      const assignment = activeOneBotAssignment(chatId);
+      const receivedAt = formatted.timestamp * 1000;
+      const remainingMessages = assignment ? assignment.maxMessages - assignment.reservedMessages : 0;
+      if (assignment && assignment.expiresAt > Date.now() && remainingMessages > 0
+        && receivedAt >= assignment.createdAt && receivedAt <= Date.now() + 300_000 && Date.now() - receivedAt <= 300_000) {
+        assignmentId = assignment.id;
+        ownerParticipation = { expiresAt: assignment.expiresAt, remainingMessages, minIntervalMs: assignment.minIntervalMs,
+          ...(assignment.publicText ? { publicTopic: assignment.publicText.slice(0, 300) } : {}) };
+      }
+    } catch {
+      // No grant facts on a failed lookup. The normal scoped Heart path remains;
+      // task binding and the send boundary independently check any assignment.
+    }
+  }
+
   if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
   const heart = await heartDecision({
     chatId,
@@ -260,6 +289,7 @@ export async function evaluateMetaHeart(opts: {
     signal: opts.signal,
     lastSpokeSecAgo,
     cognitiveWorkspaceHint,
+    ...(ownerParticipation ? { ownerParticipation } : {}),
     ...(selfHistory ? { selfHistory } : {}),
     burstNote: [
       opts.batchMessages && opts.batchMessages.length > 1 && !opts.telegramBatchWait?.reconsidering.length
@@ -275,11 +305,29 @@ export async function evaluateMetaHeart(opts: {
   });
   if (opts.signal?.aborted) return { verdict: 'silence', layer, reason: 'heart_aborted' };
   if (!await current()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
+  if (await isCorrectionCooling(chatId)) {
+    return { verdict: 'silence', layer, reason: 'heart_correction_cooling' };
+  }
+  if (assignmentId) {
+    try {
+      const { activeOneBotAssignment } = await import('../platform/onebot-assignment-store.js');
+      if (activeOneBotAssignment(chatId)?.id !== assignmentId) {
+        return { verdict: 'silence', layer, reason: 'heart_assignment_changed' };
+      }
+    } catch { return { verdict: 'silence', layer, reason: 'heart_assignment_unavailable' }; }
+  }
   if (isPlatformInternalId(chatId)) {
     const { isOneBotMessageRecalled } = await import('../platform/onebot-notices.js');
     if ((opts.batchMessages ?? [formatted]).some(message => isOneBotMessageRecalled(chatId, message.messageId))) {
       return { verdict: 'silence', layer, reason: 'heart_anchor_recalled' };
     }
+  }
+
+  // The extra authorization is message-driven and text-budgeted. It must not
+  // escape through reactions, missed-message wakes or unbound wait replays.
+  // A later genuine group message can ask Heart again with a fresh grant read.
+  if (assignmentId && heart.act !== 'reply') {
+    return { verdict: 'silence', layer, reason: `heart_assignment_${heart.act}` };
   }
 
   void import('../pipeline/heart/mind.js')
@@ -469,7 +517,11 @@ export async function evaluateMetaHeart(opts: {
   // direct priority through Attention instead of running a second passive gate.
   if (addressed) {
     if (!await beforeEffect()) return { verdict: 'silence', layer, reason: 'heart_input_changed' };
-    return { verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`, path: heart.path, targetMessageIds: heart.targetMessageIds };
+    return {
+      verdict: 'allow', layer: 'L0', reason: `heart:${heart.why || 'addressed_reply'}`,
+      path: heart.path, targetMessageIds: heart.targetMessageIds,
+      ...(assignmentId ? { qqAssignmentId: assignmentId } : {}),
+    };
   }
 
   // reply — NX arm so only one parallel Heart elevate wins; losers silence.
@@ -507,6 +559,7 @@ export async function evaluateMetaHeart(opts: {
   );
   return {
     verdict: 'allow',
+    ...(assignmentId ? { qqAssignmentId: assignmentId } : {}),
     layer: 'L1',
     reason: `heart:${heart.why || 'reply'}`,
     targetMessageIds: heart.targetMessageIds,

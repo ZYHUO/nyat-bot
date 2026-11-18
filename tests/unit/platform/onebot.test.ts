@@ -56,6 +56,14 @@ describe('OneBot minimal codec', () => {
     expect(codec.normalize({ ...groupEvent, user_id: 80001 })).toBeNull();
   });
 
+  it('preserves explicit edit and forward provenance for command authorization', () => {
+    expect(codec.normalize({ ...privateEvent, edited_at: privateEvent.time })).toMatchObject({ authorityIneligible: 'edited' });
+    expect(codec.normalize({ ...privateEvent, forward_origin: { type: 'synthetic' } })).toMatchObject({ authorityIneligible: 'forwarded' });
+    expect(codec.normalize({ ...privateEvent, is_edited: false, is_forward: false })?.authorityIneligible).toBeUndefined();
+    expect(codec.normalize({ ...privateEvent, message: [{ type: 'forward', data: { id: 'synthetic-forward' } }] })?.segments)
+      .toEqual([{ type: 'unsupported', platformType: 'forward' }]);
+  });
+
   it('rejects another account, malformed timestamps and lossy numeric IDs', () => {
     expect(() => codec.normalize({ ...groupEvent, self_id: 80002 })).toThrow('another OneBot account');
     expect(() => codec.normalize({ ...groupEvent, time: Infinity })).toThrow();

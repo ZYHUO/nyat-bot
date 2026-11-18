@@ -129,6 +129,43 @@ export async function isAsleep(now: Date = new Date()): Promise<boolean> {
   return (await getSleepPhase(now, false)) !== 'awake';
 }
 
+/**
+ * Assignment sends require a fresh, verifiable state. Ordinary ingress keeps
+ * its existing fail-soft and wake behaviour above. This read never wakes the
+ * bot, queues work, or lets a private conversation open proactive group sends.
+ */
+export async function isAsleepStrict(now: Date = new Date()): Promise<boolean> {
+  if (!env().SLEEP_SCHEDULE_ENABLED) return false;
+  if (!Number.isFinite(now.getTime())) throw new Error('sleep_time_invalid');
+  let raw: string | null;
+  try {
+    // The same host-owned key as admin/runtime-config.ts; bypass its cache and
+    // parser because that parser treats malformed JSON as a missing override.
+    raw = await getRedis().get('xxb:admin:model_routing:override');
+  } catch {
+    throw new Error('sleep_state_unavailable');
+  }
+  if (raw !== null) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); }
+    catch { throw new Error('sleep_override_invalid'); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('sleep_override_invalid');
+    const sleep = (parsed as Record<string, unknown>)['sleep_schedule'];
+    if (sleep !== undefined) {
+      if (!sleep || typeof sleep !== 'object' || Array.isArray(sleep)) throw new Error('sleep_override_invalid');
+      const schedule = sleep as Record<string, unknown>;
+      if (Object.keys(schedule).some(key => key !== 'enabled' && key !== 'force')
+        || schedule['enabled'] !== undefined && typeof schedule['enabled'] !== 'boolean'
+        || schedule['force'] !== undefined && schedule['force'] !== 'awake' && schedule['force'] !== 'asleep') {
+        throw new Error('sleep_override_invalid');
+      }
+      if (schedule['enabled'] === false || schedule['force'] === 'awake') return false;
+      if (schedule['force'] === 'asleep') return true;
+    }
+  }
+  return getLifeState(now).state === 'sleeping';
+}
+
 /** "这一晚"归属的北京日期:中午 12 点前算昨晚(与 prevSched 投影一致) */
 export function nightDateStr(now: Date = new Date()): string {
   const bj = new Date(now.getTime() + 8 * 3600_000);

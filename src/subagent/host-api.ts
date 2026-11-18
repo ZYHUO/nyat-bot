@@ -1,6 +1,6 @@
 import { assertPendingIntentCurrent, confirmPendingIntent } from '../meta/pending-intent.js';
 import { readBackgroundEvidence, proposeBackgroundPublication, type BackgroundRun } from '../agent/background-publication.js';
-import { BACKGROUND_CAPABILITY_METHODS } from './capability-prompt.js';
+import { BACKGROUND_CAPABILITY_METHODS, QQ_ASSIGNMENT_CAPABILITY_METHODS } from './capability-prompt.js';
 import type { PendingIntentRef } from '../meta/pending-intent.js';
 import { incrCounter } from '../metrics/registry.js';
 import { assertOutboundText, assertPublicSearchQuery } from '../shared/outbound-privacy.js';
@@ -25,6 +25,10 @@ import { isTaskWaitRecoveryCurrent, requireTaskWaitRecovery } from '../meta/wait
 import { DeliveryError, type DeliveryResult } from '../shared/delivery-result.js';
 import { createQQAttachmentApi } from './qq-attachments.js';
 import { isOneBotMessageRecalled } from '../platform/onebot-notices.js';
+import { assertOneBotAssignmentTask, assertOneBotAssignmentReservation, reserveOneBotAssignmentSend,
+  acknowledgeOneBotAssignmentSend, failOneBotAssignmentSend } from '../platform/onebot-assignment-store.js';
+import { isCorrectionCooling, isLocallyCorrectionCooling } from '../pipeline/correction-cooldown.js';
+import { getMuteState } from '../tracking/user-profile.js';
 import { isPlatformInternalId } from '../platform/identity-store.js';
 import { createQQBubbleBudget, planQQTextBubbles, resolveQQReplyAnchor } from './qq-delivery-policy.js';
 
@@ -385,6 +389,8 @@ export interface HostApi {
   /** 群目录元数据与正文读取分别授权；查找结果包含范围、来源和不确定性。 */
   chats: {
     find: (query: string) => Promise<ChatDirectoryResult>;
+    previewAssignment: (input: unknown) => ReturnType<typeof import('../platform/onebot-assignments.js').previewOneBotAssignment>;
+    assignmentStatus: (id: string) => Promise<ReturnType<typeof import('../platform/onebot-assignments.js').getOneBotAssignmentStatus>>;
     /** 读另一个群的最近消息（本 bot 自己的上下文库，只读）。查「ta 回话了吗」用。 */
     recentMessages: (chatId: number, limit?: number) => Promise<string>;
   };
@@ -642,6 +648,8 @@ export function createHostApi(
     relatedQuoteIds?: number[];
     isClosed?: () => boolean;
     taskId?: string;
+    /** Host-bound only; checked against the durable task/target binding. */
+    qqAssignmentId?: string;
     backgroundRun?: BackgroundRun;
     pendingIntent?: PendingIntentRef;
     waitRecovery?: WaitRecoveryFence;
@@ -657,6 +665,7 @@ export function createHostApi(
     onSend?: () => void;
     /** Called before returning an unknown delivery error to the guest. */
     onDeliveryUnknown?: (code: string) => void | Promise<void>;
+    onAssignmentDenied?: (code: string) => void;
     /** Max sendFile calls (default unlimited; self-play passes 1). */
     maxFileSends?: number;
     /** Telegram forum topic (supergroup thread) id; routes replies into the correct topic. */
@@ -720,7 +729,7 @@ export function createHostApi(
    */
   const promiseBackstop = async (): Promise<void> => {
     try {
-      if (!env().PROMISE_LOOP_ENABLED || opts.backgroundRun) return;
+      if (!env().PROMISE_LOOP_ENABLED || opts.backgroundRun || opts.qqAssignmentId) return;
       if (goalAdded || crossSends > 0) return;
       if (sentTexts.length === 0) return;
       if (opts.waitRecovery) await requireTaskWaitRecovery({ chatId, ...opts });
@@ -808,20 +817,46 @@ export function createHostApi(
     assertPendingIntentCurrent(opts.pendingIntent);
     if (deliveryUnknown) throw new Error('delivery_unknown_task_closed');
     if (opts.isClosed?.()) throw new Error('host_closed');
+    if (opts.taskId || opts.qqAssignmentId) try {
+      assertOneBotAssignmentTask({ id: opts.taskId ?? '', chatId, qqAssignmentId: opts.qqAssignmentId });
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'store_unavailable';
+      opts.onAssignmentDenied?.(code);
+      throw error;
+    }
+    if (isPlatformInternalId(chatId) && isLocallyCorrectionCooling(chatId)) throw new Error('qq_correction_cooldown');
     if (isPlatformInternalId(chatId) && [opts.defaultReplyTo, ...(opts.quoteIds ?? []), ...(opts.relatedQuoteIds ?? [])]
       .some(id => id !== undefined && isOneBotMessageRecalled(chatId, id))) throw new Error('qq_message_recalled');
   };
 
-  const sendWithDeliveryGuard = <T>(operation: () => Promise<T>): Promise<T> => {
+  const assertAssignmentSendPreferences = (reservationId: string): void => {
+    const grant = assertOneBotAssignmentReservation(reservationId);
+    for (const uid of new Set([grant.controllerChatId, opts.targetUserId].filter((value): value is number => value !== undefined))) {
+      if (getMuteState(chatId, uid).level !== 0) throw new Error('qq_assignment_muted');
+    }
+  };
+
+  const sendWithDeliveryGuard = <T>(operation: () => Promise<T>, assignmentReservationId?: string): Promise<T> => {
     // Already-entered parallel guest calls wait here, then observe the closure
     // from the first uncertain receipt before another external send can begin.
     const pending = deliveryTail.then(async () => {
       assertOpen();
       try {
-        return await withCodeActDeliveryIntent(opts.taskId, chatId, () => {
+        return await withCodeActDeliveryIntent(opts.taskId, chatId, async () => {
           // The durable claim awaits Redis. Input may change while it is being
           // persisted, including for reactions without a sender callback.
-          try { assertOpen(); }
+          try {
+            if (opts.qqAssignmentId) {
+              const { isAsleepStrict } = await import('../tracking/sleep.js');
+              if (await isAsleepStrict()) throw new Error('qq_assignment_sleeping');
+            }
+            if (isPlatformInternalId(chatId) && await isCorrectionCooling(chatId)) throw new Error('qq_correction_cooldown');
+            assertOpen();
+            if (opts.qqAssignmentId) {
+              if (!assignmentReservationId) throw new Error('qq_assignment_text_only');
+              assertAssignmentSendPreferences(assignmentReservationId);
+            }
+          }
           catch (cause) {
             throw Object.assign(new Error('delivery_fence_changed', { cause }), {
               code: 'delivery_fence_changed', delivery: 'not_sent' as const,
@@ -1233,7 +1268,12 @@ export function createHostApi(
             // Reserve all planned bubbles before any transport call. Concurrent
             // guest calls cannot each spend the same remaining task allowance.
             const qqReservation = qqTextBudget?.reserve(parts.length);
+            let assignmentReservation: { id: string } | undefined;
             try {
+            if (opts.qqAssignmentId) {
+              assertOpen();
+              assignmentReservation = reserveOneBotAssignmentSend(opts.taskId!, chatId, parts.length);
+            }
 
             // Past gate: finish even if task closes (model often skips await before endTask).
             let lastMessageId = 0;
@@ -1490,10 +1530,23 @@ export function createHostApi(
               let sendError: unknown;
               let returnedId = 0;
               try {
-                returnedId = await sendWithDeliveryGuard(() => sendMessage(chatId, part, replyTo, opts.messageThreadId,
-                  { ...(opts.taskId ? { intentId: `${opts.taskId}:text:${textSent}:${i}`, revision: opts.pendingIntent?.revision ?? 0 } : {}),
-                    beforeSend: assertOpen,
-                    markAnswered: false, onReceipt: result => { receipt = result; } }));
+                returnedId = await sendWithDeliveryGuard(async () => {
+                  const messageId = await sendMessage(chatId, part, replyTo, opts.messageThreadId,
+                    { ...(opts.taskId ? { intentId: `${opts.taskId}:text:${textSent}:${i}`, revision: opts.pendingIntent?.revision ?? 0 } : {}),
+                      beforeSend: () => {
+                        assertOpen();
+                        if (assignmentReservation) assertAssignmentSendPreferences(assignmentReservation.id);
+                      },
+                      markAnswered: false, onReceipt: result => { receipt = result; } });
+                  if (qqTextBudget && (!Number.isSafeInteger(messageId) || messageId <= 0
+                    || (receipt && (receipt.status !== 'sent' || receipt.chatId !== chatId || receipt.parts.length !== 1
+                      || receipt.parts[0]?.messageId !== messageId)))) {
+                    receipt = undefined;
+                    throw Object.assign(new Error('qq_invalid_delivery_receipt'), { delivery: 'unknown', code: 'qq_invalid_delivery_receipt' });
+                  }
+                  if (assignmentReservation) acknowledgeOneBotAssignmentSend(assignmentReservation.id, i, messageId);
+                  return messageId;
+                }, assignmentReservation?.id);
               } catch (error) {
                 if (!(error instanceof DeliveryError) && !receipt) throw error;
                 if (error instanceof DeliveryError) receipt = error.result;
@@ -1765,7 +1818,7 @@ export function createHostApi(
             );
 
             // Post-task 发酵窗口:bot 发言成功 → 开窗/顺延(内部 fail-soft,绝不影响发送)。
-            try {
+            if (!opts.qqAssignmentId) try {
               const { noteBotSpoke } = await import('./post-task-window.js');
               noteBotSpoke(chatId, {
                 messageId: lastMessageId,
@@ -1782,6 +1835,20 @@ export function createHostApi(
             const pacingSuffix =
               env().SEND_PACING_FACT_ENABLED && gapSec !== null ? buildPacingAckSuffix(gapSec) : '';
             return makeSendAck(`text_sent#${lastMessageId}${pacingSuffix}`, lastMessageId);
+            } catch (error) {
+              if (opts.qqAssignmentId && !deliveryUnknown) {
+                const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'send_failed';
+                opts.onAssignmentDenied?.(code);
+              }
+              if (assignmentReservation) {
+                try { failOneBotAssignmentSend(assignmentReservation.id, deliveryUnknown || isUnknownPlatformDelivery(chatId, error)); }
+                catch {
+                  deliveryUnknown = true;
+                  try { await opts.onDeliveryUnknown?.('qq_assignment_receipt_store_unavailable'); }
+                  catch { /* The durable reservation still prevents a retry. */ }
+                }
+              }
+              throw error;
             } finally { qqReservation?.release(); }
           })(),
         );
@@ -2413,6 +2480,20 @@ export function createHostApi(
       },
     },
     chats: {
+      async previewAssignment(input: unknown) {
+        assertOpen();
+        const { previewOneBotAssignment } = await import('../platform/onebot-assignments.js');
+        const result = await previewOneBotAssignment(chatId, input);
+        noteUnviewed('chats.previewAssignment', result);
+        return result;
+      },
+      async assignmentStatus(id: string) {
+        assertOpen();
+        const { getOneBotAssignmentStatus } = await import('../platform/onebot-assignments.js');
+        const result = await getOneBotAssignmentStatus(chatId, id);
+        noteUnviewed('chats.assignmentStatus', result);
+        return result;
+      },
       async find(query: string) {
         assertOpen();
         const { findBotGroups } = await import('./chat-directory.js');
@@ -2423,7 +2504,9 @@ export function createHostApi(
         return result;
       },
       async recentMessages(targetChatId: number, limit = 12) {
+        assertOpen();
         const tid = Number(targetChatId);
+        if (opts.qqAssignmentId && tid !== chatId) throw new Error('qq_assignment_context_mismatch');
         if (!Number.isSafeInteger(tid) || tid === 0) return '(invalid chatId)';
         if (isCrossContextPrivate({ sourceChatId: tid }, chatId)) return '(private context unavailable)';
         const n = Math.min(Math.max(Number(limit) || 12, 1), 30);
@@ -3076,7 +3159,7 @@ export function createHostApi(
         if (!VALID.has(action)) {
           throw new Error(
             `unknown_action:${action} — meta.request 只支持 ${[...VALID].join('/')}。` +
-              `找群用 chats.find(群名片段)，跨群发送用 telegram.sendToChat(chatId, text)，别编 action。`,
+              `找群用 chats.find(群名片段)。QQ 主人跨群指派用 chats.previewAssignment 预览，再由主人提交返回的确认命令；预览不发送。工具未开放不代表目标群禁言，也不表示必须在群里 @。`,
           );
         }
         const detail = String(args?.detail ?? '').trim().slice(0, 500);
@@ -3323,6 +3406,20 @@ export function createHostApi(
         if ((namespace === 'runtime' ? blockedRuntime.has(name) : !allowed.has(`${namespace}.${name}`))
           && typeof (object as Record<string,unknown>)[name] === 'function') {
           Object.defineProperty(object,name,{configurable:true,enumerable:true,value:() => { throw new Error('background_direct_effect_forbidden'); }});
+        }
+      }
+    }
+  }
+  if (opts.qqAssignmentId) {
+    const allowed = new Set<string>(QQ_ASSIGNMENT_CAPABILITY_METHODS);
+    const blockedRuntime = new Set(['waitForUser', 'predict', 'setScratch', 'clearScratch', 'rememberThread',
+      'scheduleSelfWake', 'setAcceptance', 'proposePublication', 'readPublicationEvidence']);
+    for (const [namespace, object] of Object.entries(api)) {
+      for (const name of Object.keys(object)) {
+        if ((namespace === 'runtime' ? blockedRuntime.has(name) : !allowed.has(`${namespace}.${name}`))
+          && typeof (object as Record<string, unknown>)[name] === 'function') {
+          Object.defineProperty(object, name, { configurable: true, enumerable: true,
+            value: () => { throw new Error('qq_assignment_capability_forbidden'); } });
         }
       }
     }

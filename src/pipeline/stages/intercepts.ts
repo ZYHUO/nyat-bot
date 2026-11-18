@@ -19,9 +19,13 @@ import { logger } from "../../shared/logger.js";
 import { applyMoodEvent } from "../../tracking/mood.js";
 import { startGame, stopGame } from "../games/manager.js";
 import { createGuessNumberGame } from "../games/guess-number.js";
-import { getRedis } from '../../db/redis.js';
 import { incrCounter } from '../../metrics/registry.js';
 import { isConversationOwner } from '../../platform/owner-context.js';
+import { isPlatformInternalId } from '../../platform/identity-store.js';
+import { getBotIdentity } from '../../bot/bot.js';
+import { isHardStop } from '../../agent/interrupts.js';
+import { startCorrectionCooldown } from '../correction-cooldown.js';
+export { isCorrectionCooling } from '../correction-cooldown.js';
 
 // ── Extracted helper 2: Mute command intercepts ─────────────────────
 
@@ -199,7 +203,26 @@ export async function dispatchCommand(
  */
 const CORRECTION_RE = /(?:别说了?|烦死|烦不烦|闭嘴|安静点|别吵|再说一次|不是说了|讲过了?|有完没完|停一下|打住|你好吵|太吵了)/i;
 const CORRECTION_COOLDOWN_SEC = 600;
-const CORRECTION_KEY = (chatId: number): string => `xxb:corrected:${chatId}`;
+
+/** Addressing alone is not a stop: strip only leading bot call names, then
+ * require a short imperative rather than a quoted/negated word in a story. */
+function isParticipationStop(chatId: number, text: string): boolean {
+  let body = text.trim();
+  try {
+    const identity = getBotIdentity(chatId);
+    const names = [identity.username, ...identity.nicknames].filter(Boolean).sort((a, b) => b.length - a.length);
+    for (let n = 0; n < 3; n++) {
+      body = body.replace(/^[\s，,:：]+/u, '');
+      const name = names.find(candidate => body.toLowerCase().startsWith(`@${candidate.toLowerCase()}`)
+        || body.toLowerCase().startsWith(candidate.toLowerCase()));
+      if (!name) break;
+      body = body.slice(name.length + (body.startsWith('@') ? 1 : 0));
+    }
+  } catch { /* A reply to the bot needs no textual call name. */ }
+  body = body.replace(/^[\s，,:：]+/u, '').replace(/^(?:请|麻烦你|你能不能|能不能|你)\s*/u, '');
+  return isHardStop(body)
+    || /^(?:先|暂时)?(?:停止参与|停止聊天|停止发言|停止接话|别参与了|别接话了|别说话了|安静(?:点|一会儿?)?|闭嘴|别吵了?)[!！~～。.，,吧啊呀呢]*$/u.test(body);
+}
 
 export async function tryCorrectionIntercept(
   chatId: number,
@@ -207,9 +230,9 @@ export async function tryCorrectionIntercept(
   judgeOrOpts: JudgeResult | { addressedRule: string },
 ): Promise<boolean> {
   if (chatId >= 0) return false;                 // 群聊 only
-  if (formatted.isBot || formatted.isAnonymous) return false;
+  if (formatted.role !== 'user' || formatted.uid <= 0 || formatted.isBot || formatted.isAnonymous) return false;
   const text = (formatted.textContent || formatted.captionContent || '').trim();
-  if (text.length < 2) return false;
+  if (!text) return false;
 
   // 只认"冲着 bot 来"的——ADDRESSED_RULES 是既有判据。
   // 群友之间互呛不该让 bot 闭嘴。
@@ -229,30 +252,38 @@ export async function tryCorrectionIntercept(
     : ((judgeOrOpts as { addressedRule?: string }).addressedRule === 'direct' ? 'mention_self' : '');
   if (!ADDRESSED_RULES.has(rule)) return false;
 
-  if (!CORRECTION_RE.test(text)) return false;
+  const stopParticipation = isParticipationStop(chatId, text);
+  if (!stopParticipation && !CORRECTION_RE.test(text)) return false;
 
+  // Any authenticated group member may ask the bot to stop this additional
+  // participation. This only narrows authority; it never grants a new scope.
+  if (stopParticipation && isPlatformInternalId(chatId) && env().QQ_ASSIGNMENTS_ENABLED) {
+    try {
+      const { stopOneBotAssignmentsForChat } = await import('../../platform/onebot-assignment-store.js');
+      stopOneBotAssignmentsForChat(chatId);
+    } catch {
+      // The independent cooling fence must still run if durable revocation
+      // fails. The acknowledgement below promises only this temporary quiet.
+      logger.error({ chatId }, 'QQ participation stop persistence unavailable; applying correction cooling');
+    }
+  }
+
+  let firstStop: boolean;
   try {
-    await getRedis().set(CORRECTION_KEY(chatId), '1', 'EX', CORRECTION_COOLDOWN_SEC);
+    firstStop = await startCorrectionCooldown(chatId);
   } catch {
-    return false;                                 // Redis 挂了不拦截
+    logger.error({ chatId }, 'Correction cooling persistence unavailable; local stop fence remains active');
+    return true;
   }
   logger.info(
     { chatId, uid: formatted.uid, rule, text: text.slice(0, 60), cooldownSec: CORRECTION_COOLDOWN_SEC },
     'correction: 人在纠正/生气 → 群冷却',
   );
   incrCounter('correction_cooldown_total', { chat: chatId });
-  await sender.sendDirect(chatId, '…知道了。本喵安静会儿。', formatted.messageId);
+  if (firstStop) await sender.sendDirect(chatId, '…知道了。本喵安静会儿。', formatted.messageId);
   return true;
 }
 
-/** round 61：这个群当前是不是处在"被纠正"冷却中。*/
-export async function isCorrectionCooling(chatId: number): Promise<boolean> {
-  try {
-    return (await getRedis().get(CORRECTION_KEY(chatId))) === '1';
-  } catch {
-    return false;
-  }
-}
 export async function tryPreMuteIntercepts(
   chatId: number,
   formatted: FormattedMessage,

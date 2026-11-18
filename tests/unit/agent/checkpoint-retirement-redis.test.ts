@@ -1,20 +1,22 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import Redis from 'ioredis';
+import Database from 'better-sqlite3';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchTask } from '../../../src/meta/types.js';
 
 const f = vi.hoisted(() => ({
   redis: null as unknown, tasks: new Map<string, DispatchTask>(), send: vi.fn(), collect: vi.fn(),
+  getDb: vi.fn<() => Database.Database>(),
   config: { BOT_TOKEN: '12345:test-only', META_SUBAGENT_ENABLED: true, CODEACT_ISOLATION_ENABLED: true, META_SUBAGENT_CHAT_IDS: [] as number[], META_ACTIVATED_AT_SEC: 100 },
 }));
 vi.mock('../../../src/env.js', () => ({ env: () => f.config }));
 vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => f.redis }));
-vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => { throw new Error('unexpected_database_access'); } }));
+vi.mock('../../../src/db/sqlite.js', () => ({ getDb: f.getDb }));
 vi.mock('../../../src/meta/global-state.js', () => ({ getGlobalState: () => ({ getTask: (id: string) => f.tasks.get(id), putTask: (task: DispatchTask) => f.tasks.set(task.id, task) }) }));
 vi.mock('../../../src/subagent/prompt-inputs.js', () => ({ collectPromptInputs: f.collect }));
 vi.mock('../../../src/bot/sender/telegram.js', () => ({ sendChatAction: f.send, sendMessage: f.send, sendSticker: f.send, reactToMessage: f.send }));
@@ -28,6 +30,7 @@ const serverPath = process.env['NYATBOT_TEST_REDIS_SERVER'];
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 describe.skipIf(!serverPath)('checkpoint hold retirement against isolated Redis and real executor', () => {
   let child: ChildProcess | undefined, dir: string | undefined, redis: Redis;
+  let db: Database.Database;
   const task = (): DispatchTask => ({ id: 'resumed', chatId: 42, createdAt: 101000, status: 'waiting_user', segment: 2,
     contentDirection: 'synthetic unfinished task', checkpointKey: 'xxb:agent:checkpoint:resumed', waitingForUser: true });
   const key = 'xxb:agent:active-chat:42', active = 'xxb:codeact:active:42';
@@ -41,6 +44,8 @@ describe.skipIf(!serverPath)('checkpoint hold retirement against isolated Redis 
   }
   beforeAll(async () => {
     if (!serverPath || !isAbsolute(serverPath)) throw new Error('Test Redis path must be absolute');
+    db = new Database(':memory:');
+    db.exec(readFileSync('migrations/0136_onebot_assignments.sql', 'utf8'));
     dir = await mkdtemp(join(tmpdir(), 'nyat-cp-retire-'));
     const socket = join(dir, 'redis.sock');
     let startupError: Error | undefined;
@@ -59,10 +64,12 @@ describe.skipIf(!serverPath)('checkpoint hold retirement against isolated Redis 
   }, 5000);
   beforeEach(async () => {
     vi.restoreAllMocks(); vi.clearAllMocks();
+    f.getDb.mockReset().mockReturnValue(db);
     f.redis = redis; f.tasks.clear(); f.config.META_SUBAGENT_ENABLED = true;
     await redis.flushdb();
   });
   afterAll(async () => {
+    db?.close();
     redis?.disconnect();
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM');
@@ -100,6 +107,20 @@ describe.skipIf(!serverPath)('checkpoint hold retirement against isolated Redis 
       expect(f.tasks.get(original.id)).toEqual(original);
       expect(await redis.hlen('xxb:codeact:checkpoint-held')).toBe(0);
     }
+  });
+
+  it.each(['unavailable', 'binding_mismatch'])('holds an unverified resume on assignment %s without replacing its durable namesake', async reason => {
+    const original = { ...task(), chatId: 99 }, raw = await seed(original);
+    const queued = task();
+    if (reason === 'unavailable') f.getDb.mockImplementationOnce(() => { throw new Error('sqlite_unavailable'); });
+    else queued.qqAssignmentId = 'unbound-grant';
+    await runCodeActTask(queued);
+    expect(await redis.hget('xxb:codeact:tasks', original.id)).toBe(raw);
+    expect(f.tasks.get(original.id)).toEqual(original);
+    expect(await redis.get(key)).toBe(original.id); expect(await redis.get(active)).toBe(original.id);
+    const held = await redis.hget('xxb:codeact:activation-held', queued.id);
+    expect(JSON.parse(held!)).toMatchObject({ reason: reason === 'unavailable' ? 'task_scope_unavailable' : 'task_scope_invalid', task: queued });
+    expect(f.send).not.toHaveBeenCalled(); expect(f.collect).not.toHaveBeenCalled();
   });
 
   it('preserves a different task already installed in either index or in the local cache', async () => {

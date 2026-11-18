@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { isolatedRunner } = vi.hoisted(() => ({ isolatedRunner: vi.fn() }));
+// This ordinary-task fixture has no owner assignment; durable grant behavior
+// is exercised separately with the real assignment store and its migrations.
+vi.mock('../../../src/platform/onebot-assignment-store.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/platform/onebot-assignment-store.js')>(),
+  assertOneBotAssignmentTask: () => null,
+}));
 vi.mock('../../../src/sandbox/codeact/runner.js', () => ({ executeIsolatedCode: isolatedRunner }));
 
 // 2026-08-21 goal_2 事故回归：web.search 明明返回 1247 字，模型没 return →

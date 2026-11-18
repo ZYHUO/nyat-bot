@@ -13,7 +13,7 @@ import { formatBeijingNowLine } from '../shared/beijing-time.js';
 import { buildMasterIdentityBlock, masterShortHint } from '../shared/master-identity.js';
 import { getGlobalState } from './global-state.js';
 import { getJournalChannelInfo } from '../cron/dream-journal.js';
-import { buildMetaApiContext } from './meta-api.js';
+import { buildMetaApiContext, type DispatchArgs } from './meta-api.js';
 import type { AttentionItem, AttentionLayer, SubagentCallback } from './types.js';
 import { isMetaSubagentChat } from './flags.js';
 import { persistDigest, recentDigests as recentPersistedDigests } from './session-digest.js';
@@ -134,6 +134,7 @@ async function interceptDiaryAttention(
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
     waitRecoverySources?: readonly WaitRecoverySource[];
+    defaultQQAssignmentIds?: Map<number, string>;
   },
 ): Promise<AttentionItem[]> {
   const remaining: AttentionItem[] = [];
@@ -146,6 +147,7 @@ async function interceptDiaryAttention(
     defaultCognitiveAnchorEventIds: opts.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: opts.defaultPendingIntents,
     waitRecoverySources: opts.waitRecoverySources,
+    defaultQQAssignmentIds: opts.defaultQQAssignmentIds,
   });
   const journal = api['journal'] as {
     tryWrite: (args?: {
@@ -245,7 +247,7 @@ async function interceptDiaryAttention(
   for (const a of attention) {
     // Callbacks / diary_ack leftovers must not be re-parsed as user diary asks
     // (summary text often contains「写日记」and used to cascade another CodeAct).
-    if (a.layer === 'L1_CALLBACK' || a.reason.startsWith('callback:')) {
+    if (a.qqAssignmentId || a.layer === 'L1_CALLBACK' || a.reason.startsWith('callback:')) {
       remaining.push(a);
       continue;
     }
@@ -352,7 +354,7 @@ async function interceptDiaryAttention(
   // L1 questions) must still reach autoDispatchL0 / Meta LLM even if a diary was
   // processed for the same chat in this batch.
   return remaining.filter((a) => {
-    if (!handledChats.has(a.chatId)) return true;
+    if (a.qqAssignmentId || !handledChats.has(a.chatId)) return true;
     // If the chat had a diary handled, only drop diary-type items
     const text = a.textPreview ?? '';
     const ackOnly = a.reason.startsWith('diary_ack:');
@@ -390,8 +392,9 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   defaultQuotes: Map<number, number>;
   defaultTargetUserIds: Map<number, number>;
   defaultCognitiveAnchorEventIds: Map<number, string>;
-    defaultPendingIntents?: Map<number, PendingIntentRef>;
+  defaultPendingIntents: Map<number, PendingIntentRef>;
   waitRecoverySources: readonly WaitRecoverySource[];
+  defaultQQAssignmentIds: Map<number, string>;
 } {
   const rank: Record<string, number> = { L0: 3, L1_CALLBACK: 2, L1: 2, L2: 1 };
   const chatLayer = new Map<number, AttentionLayer>();
@@ -400,7 +403,9 @@ function buildAttentionMaps(attention: AttentionItem[]): {
   const defaultCognitiveAnchorEventIds = new Map<number, string>();
   const anchorOrder = new Map<number, number>();
   const defaultPendingIntents = new Map<number, PendingIntentRef>();
+  const defaultQQAssignmentIds = new Map<number, string>();
   for (const a of attention) {
+    if (a.messageId && a.qqAssignmentId) defaultQQAssignmentIds.set(a.messageId, a.qqAssignmentId);
     if (a.pendingIntent && a.messageId) {
       // Completion order is not source order: an older Heart can finish after
       // an edit. Only the current generation may supply a task's fixed fence.
@@ -432,9 +437,12 @@ function buildAttentionMaps(attention: AttentionItem[]): {
       }
     }
   }
-  return { chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents,
-    waitRecoverySources: attention.map(({ chatId, messageId, messageThreadId, waitRecovery }) => ({ chatId, messageId, messageThreadId,
-      ...(waitRecovery ? { waitRecovery: { ...waitRecovery } } : {}) })) };
+  return {
+    chatLayer, defaultQuotes, defaultTargetUserIds, defaultCognitiveAnchorEventIds, defaultPendingIntents, defaultQQAssignmentIds,
+    waitRecoverySources: attention.map(({ chatId, messageId, messageThreadId, waitRecovery }) => ({
+      chatId, messageId, messageThreadId, ...(waitRecovery ? { waitRecovery: { ...waitRecovery } } : {}),
+    })),
+  };
 }
 
 async function runMetaCode(
@@ -449,6 +457,7 @@ async function runMetaCode(
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
     waitRecoverySources?: readonly WaitRecoverySource[];
+    defaultQQAssignmentIds?: Map<number, string>;
   },
 ): Promise<void> {
   const api = buildMetaApiContext(opts);
@@ -467,34 +476,12 @@ async function autoDispatchL0(
     defaultCognitiveAnchorEventIds: Map<number, string>;
     defaultPendingIntents?: Map<number, PendingIntentRef>;
     waitRecoverySources?: readonly WaitRecoverySource[];
+    defaultQQAssignmentIds?: Map<number, string>;
   },
 ): Promise<Set<number>> {
   const busyChatIds = new Set<number>();
-  const api = buildMetaApiContext({
-    scopeChatId: attention[0]?.chatId,
-    dispatchedChatIds: skipChatIds,
-    chatLayer: maps?.chatLayer,
-    defaultQuotes: maps?.defaultQuotes,
-    defaultTargetUserIds: maps?.defaultTargetUserIds,
-    defaultCognitiveAnchorEventIds: maps?.defaultCognitiveAnchorEventIds,
-    defaultPendingIntents: maps?.defaultPendingIntents,
-    waitRecoverySources: maps?.waitRecoverySources,
-  });
-  const d = api['dispatch'] as {
-    taskToGroup: (
-      chatId: number,
-      args: {
-        contentDirection: string;
-        toneGuidance?: string;
-        quotes?: number[];
-        relatedQuotes?: number[];
-        targetUserId?: number;
-        messageThreadId?: number;
-        cognitiveAnchorEventId?: string;
-        skipDispatchGate?: boolean;
-      },
-    ) => Promise<{ taskId: string }>;
-  };
+  const hasMixedQQOrigins = !!maps?.defaultQQAssignmentIds?.size
+    && maps.waitRecoverySources?.some(source => source.waitRecovery?.platform === 'qq');
 
   // One CodeAct per chat — L0 + Heart-elevated L1 (reason heart:… / wait_resume:heart:…).
   const l0ByChat = new Map<string, AttentionItem[]>();
@@ -502,7 +489,7 @@ async function autoDispatchL0(
     const heartForce = a.reason.includes('heart:');
     if (a.layer !== 'L0' && !heartForce) continue;
     if (!isMetaSubagentChat(a.chatId)) continue;
-    if (skipChatIds?.has(a.chatId)) { if (a.waitRecovery) busyChatIds.add(a.chatId); continue; }
+    if (skipChatIds?.has(a.chatId)) { if (a.waitRecovery || a.qqAssignmentId) busyChatIds.add(a.chatId); continue; }
     const key = a.waitRecovery ? `wait:${a.chatId}:${a.messageThreadId ?? 0}:${a.waitRecovery.generation}:${a.pendingIntent?.laneKey ?? a.userId ?? a.messageId ?? a.id}`
       : pendingIntentEnabled() ? a.pendingIntent?.laneKey ?? `${a.chatId}:${a.userId}:${a.messageThreadId ?? 0}` : String(a.chatId);
     const list = l0ByChat.get(key);
@@ -512,7 +499,9 @@ async function autoDispatchL0(
 
   for (const siblings of l0ByChat.values()) {
     const chatId = siblings[0]!.chatId;
-    if ((pendingIntentEnabled() || siblings.some(item => item.waitRecovery)) && skipChatIds?.has(chatId)) { busyChatIds.add(chatId); continue; }
+    const assignmentDriven = siblings.some(item => !!item.qqAssignmentId);
+    const hasWaitRecovery = siblings.some(item => !!item.waitRecovery);
+    if ((pendingIntentEnabled() || hasWaitRecovery || assignmentDriven) && skipChatIds?.has(chatId)) { busyChatIds.add(chatId); continue; }
     let withIds = siblings.filter((x) => (x.messageId ?? 0) > 0);
     const qqChat = isPlatformInternalId(chatId);
     if (qqChat) withIds.sort((a, b) => a.createdAt - b.createdAt || (a.messageId ?? 0) - (b.messageId ?? 0));
@@ -520,7 +509,9 @@ async function autoDispatchL0(
     // 每轮开头排入 history，模型实时响应；硬停词立即终止），不重复 dispatch，
     // 避免同 chat 并发/重复回复。P1 起不再依赖 AGENT_LOOP_ENABLED —— 单段任务
     // 的 30 轮/120s 里用户消息同样该进 interrupt 而不是再派一个 CodeAct。
-    if (!siblings.some(item => item.waitRecovery)) {
+    // Existing tasks have their own grants. Recovered or assigned inputs must
+    // go through dispatch binding before they can cause a reply.
+    if (!hasWaitRecovery && !assignmentDriven) {
       try {
         const { getAgentTaskIdForChat } = await import('../agent/checkpoint.js');
         const { pushInterrupt } = await import('../agent/interrupts.js');
@@ -668,7 +659,7 @@ async function autoDispatchL0(
     if (heartOnly && (await shouldSuppressHeartAutoDispatch(chatId))) {
       // WAIT selected real reply targets. Busy/refractory is not an ACK; retain
       // each author's outstanding input instead of marking someone else's turn answered.
-      if (siblings.some(item => item.waitRecovery)) { busyChatIds.add(chatId); continue; }
+      if (hasWaitRecovery) { busyChatIds.add(chatId); continue; }
       try {
         const { markMessageAnswered } = await import('./answered.js');
         for (const s of withIds) {
@@ -763,6 +754,7 @@ async function autoDispatchL0(
           chatId,
           layer: latest.layer,
           reason: latest.reason,
+          assignmentDriven,
           messageId: latest.messageId,
           pendingIntent: latest.pendingIntent,
           userId: latest.userId,
@@ -789,7 +781,7 @@ async function autoDispatchL0(
     // Grounding 并行核查（GROUNDING_ENABLED 门控）：事实/问题类消息在派发的同时
     // 后台起联网搜索，digest 存 Redis 由 executor 任务开头自取。fire-and-forget，
     // 绝不阻塞/失败影响 dispatch。
-    if (env().GROUNDING_ENABLED && latest.messageId) {
+    if (!assignmentDriven && env().GROUNDING_ENABLED && latest.messageId) {
       try {
         const { maybeStartGrounding } = await import('./grounding.js');
         void maybeStartGrounding({
@@ -802,7 +794,12 @@ async function autoDispatchL0(
       }
     }
 
-    const r = await d.taskToGroup(chatId, {
+    // Unlike guest code, autoDispatch only receives this lane. A recovered
+    // question and a separate fresh QQ grant must keep their own provenance.
+    const api = buildMetaApiContext({ ...(hasMixedQQOrigins ? buildAttentionMaps(siblings) : maps),
+      scopeChatId: chatId, dispatchedChatIds: skipChatIds });
+    const dispatch = api['dispatch'] as { taskToGroup(chatId: number, args: DispatchArgs): Promise<{ taskId: string }> };
+    const r = await dispatch.taskToGroup(chatId, {
       contentDirection,
       toneGuidance: '自然接话或干活，根据用户消息自行决定。',
       quotes: latest.messageId
@@ -996,6 +993,7 @@ async function runScopedMetaSession(
     defaultCognitiveAnchorEventIds: maps.defaultCognitiveAnchorEventIds,
     defaultPendingIntents: maps.defaultPendingIntents,
     waitRecoverySources: maps.waitRecoverySources,
+    defaultQQAssignmentIds: maps.defaultQQAssignmentIds,
   });
   let codeRan = dispatchedChatIds.size > 0;
 
@@ -1190,8 +1188,9 @@ async function runScopedMetaSession(
         defaultQuotes: metaMaps.defaultQuotes,
         defaultTargetUserIds: metaMaps.defaultTargetUserIds,
         defaultCognitiveAnchorEventIds: metaMaps.defaultCognitiveAnchorEventIds,
-    defaultPendingIntents: metaMaps.defaultPendingIntents,
+        defaultPendingIntents: metaMaps.defaultPendingIntents,
         waitRecoverySources: metaMaps.waitRecoverySources,
+        defaultQQAssignmentIds: metaMaps.defaultQQAssignmentIds,
       });
       codeRan = true;
     } catch (err) {

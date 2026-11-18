@@ -9,7 +9,7 @@ import { createMessageEventIdentity } from '../../../src/shared/event-identity.j
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const runtime = vi.hoisted(() => ({ db: null as unknown as Database.Database, redis: null as unknown as MetaRedisFixture, active: null as import('../../../src/meta/types.js').DispatchTask | null, resume: vi.fn(), interrupt: vi.fn() }));
-const waitRuntime = vi.hoisted(() => ({ pending: true, state: { state: 'RUNNING', waitGeneration: 'current' } }));
+const waitRuntime = vi.hoisted(() => ({ pending: true, groundingEnabled: false, state: { state: 'RUNNING', waitGeneration: 'current' } }));
 vi.mock('../../../src/pipeline/timing/chat-runtime.js', () => ({ getChatState: async () => waitRuntime.state }));
 vi.mock('../../../src/db/sqlite.js', () => ({ getDb: () => runtime.db }));
 vi.mock('../../../src/agent/checkpoint.js', () => ({ getAgentTaskIdForChat: async () => runtime.active?.id,
@@ -74,6 +74,7 @@ vi.mock('../../../src/context-engine/index.js', () => ({
 vi.mock('../../../src/env.js', () => ({
   env: () => ({
     MASTER_UID: 6251541967, BOT_TOKEN: "12345:synthetic", META_PENDING_INTENT_ENABLED: waitRuntime.pending,
+    GROUNDING_ENABLED: waitRuntime.groundingEnabled,
     META_DIRECT_COALESCE_MS: 0, META_DIRECT_COALESCE_MAX_MS: 2000, META_L0_COALESCE_MS: 0, META_ATTENTION_TOP_N: 30,
     META_USAGE: 'judge',
     CODEACT_TIMEOUT_MS: 5000,
@@ -89,6 +90,10 @@ vi.mock('../../../src/db/redis.js', () => ({ getRedis: () => runtime.redis }));
 import { _resetGlobalState, getGlobalState } from '../../../src/meta/global-state.js';
 import { runMetaSession } from '../../../src/meta/session.js';
 import type { AttentionItem } from '../../../src/meta/types.js';
+import { getOrCreateConversationId, getOrCreateMessageId, getOrCreateUserId } from '../../../src/platform/identity-store.js';
+import * as assignmentBinding from '../../../src/meta/qq-assignment-binding.js';
+import * as businessConfig from '../../../src/admin/business-config.js';
+import * as grounding from '../../../src/meta/grounding.js';
 
 
 import { observePendingIntent, settlePendingIntent } from '../../../src/meta/pending-intent.js';
@@ -99,13 +104,13 @@ function input(id: number, uid = 20, thread = 0, edit = false, text?: string): A
  return { id: 'input-'+id+'-'+edit, chatId: -100, userId: uid, messageId: id, messageThreadId: thread || undefined, createdAt: Date.now(), layer: 'L0', pressure:100, reason:'direct', textPreview: edit ? '修正约束' : '帮我看下', pendingIntent };
 }
 beforeEach(() => {
- waitRuntime.pending=true; waitRuntime.state={state:'RUNNING',waitGeneration:'current'};
+ waitRuntime.pending=true; waitRuntime.groundingEnabled=false; waitRuntime.state={state:'RUNNING',waitGeneration:'current'};
  vi.clearAllMocks(); _resetGlobalState(); _resetAttentionAccumulator(); runtime.active=null;
  runtime.db = new Database(':memory:'); runtime.db.exec(readFileSync('migrations/0129_pending_reply_intents.sql','utf8'));
  runtime.redis=new MetaRedisFixture(); callWithFallback.mockResolvedValue({content:'chat'}); isCodeActBusy.mockResolvedValue(false);
  tryClaimQuote.mockResolvedValue(true); tryMarkCodeActActive.mockResolvedValue(true); allQuotesAnswered.mockResolvedValue(false); suppressHeartDispatch.mockResolvedValue(false);
 });
-afterEach(() => { _resetAttentionAccumulator(); runtime.db.close(); });
+afterEach(() => { vi.restoreAllMocks(); _resetAttentionAccumulator(); runtime.db.close(); });
 describe('real Meta session preserves the pending input owner', () => {
  it.each([false, true])('keeps both WAIT-selected authors independent and requeues the second (pending-intent=%s)', async enabled => {
   waitRuntime.pending=enabled;
@@ -175,6 +180,55 @@ describe('real Meta session preserves the pending input owner', () => {
   const b=input(2,21); await runMetaSession([b],[]);
   expect(runtime.resume).not.toHaveBeenCalled(); expect(runtime.interrupt).not.toHaveBeenCalled();
   expect(runtime.active.status).toBe('waiting_user'); expect((await getAttentionAccumulator().peek()).map(x=>x.messageId)).toEqual([2]);
+ });
+ it.each(['running', 'waiting_user'] as const)('a grant-driven QQ message cannot enter an unbound %s task', async status => {
+  waitRuntime.pending = false;
+  const chatId = -(2 ** 52 + 10), userId = 2 ** 52 + 12, messageId = 2 ** 52 + 100;
+  runtime.active = { id: 'other-task', chatId, targetUserId: userId, createdAt: Date.now(), status,
+    contentDirection: 'ordinary task', waitingForUser: status === 'waiting_user' };
+  isCodeActBusy.mockResolvedValue(true);
+  const item: AttentionItem = { id: 'fresh-input', chatId, userId, messageId, createdAt: Date.now(),
+    layer: 'L0', reason: 'heart:reply', pressure: 100, textPreview: 'same group', qqAssignmentId: 'bounded-grant' };
+  await runMetaSession([item], []);
+  expect(runtime.interrupt).not.toHaveBeenCalled(); expect(runtime.resume).not.toHaveBeenCalled();
+  expect(enqueueCodeActJob).not.toHaveBeenCalled();
+  expect(await getAttentionAccumulator().peek()).toEqual([expect.objectContaining({ messageId, qqAssignmentId: 'bounded-grant' })]);
+ });
+ it.each([true, false])('dispatches a QQ WAIT and a separate grant with their own sources, WAIT first=%s', async waitFirst => {
+  waitRuntime.pending = false; waitRuntime.groundingEnabled = true;
+  runtime.db.exec(readFileSync('migrations/0118_platform_identity.sql', 'utf8'));
+  const conversation = { platform: 'qq', accountId: '123', idNamespace: 'qq-number', conversationKind: 'group', id: '500' } as const;
+  const chatId = getOrCreateConversationId(conversation);
+  const userId = getOrCreateUserId({ ...conversation, id: '901' });
+  const waitId = getOrCreateMessageId({ conversation, id: '77' });
+  const grantId = getOrCreateMessageId({ conversation, id: '78' });
+  const wait: AttentionItem = { id: 'ordinary', chatId, userId, messageId: waitId, createdAt: Date.now(),
+    layer: 'L0', reason: 'wait_resume:heart:reply', pressure: 100, textPreview: 'ordinary question',
+    waitRecovery: { generation: 'current', threadId: 0, chatId, platform: 'qq', accountId: '123' } };
+  const fresh: AttentionItem = { id: 'fresh', chatId, userId, messageId: grantId, createdAt: Date.now(),
+    layer: 'L0', reason: 'heart:reply', pressure: 100, textPreview: '为什么想写日记？', qqAssignmentId: 'grant' };
+  const diary = vi.spyOn(businessConfig, 'effectiveJournalConfig');
+  const search = vi.spyOn(grounding, 'maybeStartGrounding').mockResolvedValue(undefined);
+  const bind = vi.spyOn(assignmentBinding, 'bindQQParticipationTask').mockImplementation(async (task, trigger, expectedGrant) => {
+    if (trigger === grantId && expectedGrant === 'grant' && !task.waitRecovery) { task.qqAssignmentId = expectedGrant; return; }
+    if (trigger !== waitId || expectedGrant || !task.waitRecovery) throw new Error('wrong_source');
+  });
+  const [first, second] = waitFirst ? [wait, fresh] : [fresh, wait];
+  await runMetaSession([first, second], []);
+  expect(enqueueCodeActJob).toHaveBeenCalledOnce();
+  const firstTask = enqueueCodeActJob.mock.calls[0]![0];
+  expect(firstTask).toMatchObject({ chatId, quoteMessageIds: [first.messageId] });
+  expect(firstTask.qqAssignmentId).toBe(first.qqAssignmentId); expect(firstTask.waitRecovery).toEqual(first.waitRecovery);
+  const pending = await getAttentionAccumulator().peek();
+  expect(pending.map(item => item.messageId)).toEqual([second.messageId]);
+  getGlobalState().putTask({ ...firstTask, status: 'done' });
+  await runMetaSession(pending, []);
+  expect(enqueueCodeActJob).toHaveBeenCalledTimes(2);
+  const secondTask = enqueueCodeActJob.mock.calls[1]![0];
+  expect(secondTask).toMatchObject({ chatId, quoteMessageIds: [second.messageId] });
+  expect(secondTask.qqAssignmentId).toBe(second.qqAssignmentId); expect(secondTask.waitRecovery).toEqual(second.waitRecovery);
+  expect(bind).toHaveBeenCalledTimes(2); expect(diary).not.toHaveBeenCalled();
+  expect(search).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: grantId }));
  });
  it('the original author resumes with only their own same-topic input and exact new revision', async () => {
   const original=input(1); runtime.active={id:'waiting',chatId:-100,targetUserId:20,createdAt:Date.now(),status:'waiting_user',waitingForUser:true,contentDirection:'synthetic',quoteMessageIds:[1],pendingIntent:original.pendingIntent};

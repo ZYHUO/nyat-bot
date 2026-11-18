@@ -143,6 +143,9 @@ every historical vector memory, audit record, backup, or already-delivered reply
 
 ## Reply timing
 
+Owner-directed work in another group uses the [bounded assignment flow](qq-owner-assignments.md).
+The current task's send scope and the group's actual platform permissions are separate checks.
+
 QQ and Telegram share the same reply timing pipeline. Ordinary group messages can reach
 Heart without mentioning the bot: Heart may reply, wait, or pass. Existing mute,
 sleep, Meta activation and conversation-scope restrictions still apply.

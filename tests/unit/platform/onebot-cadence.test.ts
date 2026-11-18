@@ -14,7 +14,9 @@ const f = vi.hoisted(() => ({
   db: vi.fn(), redis: vi.fn(), heart: vi.fn(), gate: vi.fn(), dispatch: vi.fn(), legacy: vi.fn(),
   getRecent: vi.fn(), addMessage: vi.fn(), noAction: vi.fn(), wait: vi.fn(), tick: vi.fn(),
   sleep: vi.fn(), muted: vi.fn(), react: vi.fn(), busy: vi.fn(), runtime: vi.fn(), suppressed: vi.fn(), running: vi.fn(),
-  warning: vi.fn(), counter: vi.fn(), postTask: vi.fn(), speaker: vi.fn(), taskId: vi.fn(), loadTask: vi.fn(), interrupt: vi.fn(), config: {
+  warning: vi.fn(), counter: vi.fn(), postTask: vi.fn(), speaker: vi.fn(), taskId: vi.fn(), loadTask: vi.fn(), interrupt: vi.fn(),
+  assignment: vi.fn(), stopAssignment: vi.fn(), correctionAck: vi.fn(), config: {
+    QQ_ASSIGNMENTS_ENABLED: false,
     DURABLE_INGRESS_ENABLED: false,
     META_PENDING_INTENT_ENABLED: false,
     BOT_TOKEN: '12345:synthetic',
@@ -49,6 +51,10 @@ vi.mock('../../../src/pipeline/context/manager.js', () => ({ addMessage: f.addMe
 vi.mock('../../../src/platform/onebot-media.js', () => ({
   registerOneBotMedia: vi.fn(() => { throw new Error('Cadence fixtures contain no media'); }),
 }));
+vi.mock('../../../src/platform/onebot-assignment-store.js', () => ({
+  activeOneBotAssignment: f.assignment, stopOneBotAssignmentsForChat: f.stopAssignment,
+}));
+vi.mock('../../../src/bot/sender/streaming.js', () => ({ StreamingSender: class { sendDirect = f.correctionAck; } }));
 vi.mock('../../../src/memory/chroma.js', () => ({ memorizeMessage: vi.fn() }));
 vi.mock('../../../src/tracking/activity.js', () => ({ recordMessage: vi.fn() }));
 vi.mock('../../../src/tracking/user-profile.js', () => ({ recordUserMessage: vi.fn() }));
@@ -130,6 +136,7 @@ import { runMetaSession } from '../../../src/meta/session.js';
 import { _resetGlobalState, getGlobalState } from '../../../src/meta/global-state.js';
 import { confirmPendingIntent, settlePendingIntent } from '../../../src/meta/pending-intent.js';
 import { markMessageAnswered } from '../../../src/meta/answered.js';
+import { isCorrectionCooling } from '../../../src/pipeline/correction-cooldown.js';
 
 const codec = createOneBotCodec('42');
 const migration = readFileSync('migrations/0118_platform_identity.sql', 'utf8');
@@ -165,13 +172,14 @@ beforeEach(() => {
   redis = new MetaRedisFixture(); f.db.mockReturnValue(db); f.redis.mockReturnValue(redis); context.clear();
   _resetAttentionAccumulator(); _resetGlobalState();
   _resetQqHeartBatches();
-  Object.assign(f.config, { NYATOS_SHADOW_ENABLED: false, META_DEFER_ENABLED: false, DURABLE_INGRESS_ENABLED: false, META_PENDING_INTENT_ENABLED: false, HEART_ENABLED: true, HEART_DECIDES_TIMING: false, META_L0_COALESCE_MS: 2800,
+  Object.assign(f.config, { QQ_ASSIGNMENTS_ENABLED: false, NYATOS_SHADOW_ENABLED: false, META_DEFER_ENABLED: false, DURABLE_INGRESS_ENABLED: false, META_PENDING_INTENT_ENABLED: false, HEART_ENABLED: true, HEART_DECIDES_TIMING: false, META_L0_COALESCE_MS: 2800,
     META_HEART_REFRACTORY_MS: 20_000, META_QQ_HEART_REFRACTORY_MS: 0,
     META_QQ_GROUP_COALESCE_MS: 0, META_QQ_GROUP_COALESCE_MAX_MS: 4000, META_QQ_MENTION_HEART_ENABLED: false,
     META_TG_GROUP_COALESCE_MS: 0, META_TG_GROUP_COALESCE_CHAT_IDS: [], ONEBOT_ALLOWED_GROUP_IDS: '',
     META_DIRECT_COALESCE_MS: 0, META_DIRECT_COALESCE_MAX_MS: 2000,
     META_SUBAGENT_CHAT_IDS: [], META_ACTIVATED_AT_SEC: Math.floor(Date.now() / 1000) - 60 });
   f.sleep.mockResolvedValue('awake'); f.muted.mockReturnValue(false);
+  f.assignment.mockReturnValue(null); f.stopAssignment.mockReturnValue(0); f.correctionAck.mockResolvedValue(1);
   f.react.mockResolvedValue(true); f.busy.mockResolvedValue(false);
   f.speaker.mockResolvedValue(false);
   f.taskId.mockResolvedValue(null); f.loadTask.mockResolvedValue(null);
@@ -681,6 +689,45 @@ it('removes recalled QQ anchors and copied quote text before a batched task star
   expect(f.dispatch).toHaveBeenCalledWith(first.chatId, expect.objectContaining({ quotes: [second.messageId] }));
   expect(JSON.stringify(f.dispatch.mock.calls)).not.toContain('已经撤回的私密内容');
   expect(await getAttentionAccumulator().size()).toBe(0);
+});
+
+describe('owner participation through real QQ group ingress', () => {
+  it('an unmentioned fresh group message receives participation facts through the ordinary Heart route', async () => {
+    f.config.QQ_ASSIGNMENTS_ENABLED = true;
+    const message = incoming('qq', 2001, 'group', false, 77, '刚才的风景确实不错');
+    f.assignment.mockReturnValue({ id: 'assignment-fixture', createdAt: Date.now() - 1000,
+      expiresAt: Date.now() + 60_000, maxMessages: 3, reservedMessages: 1, minIntervalMs: 30_000 });
+    await message.ingest(); await settleIngress();
+    expect(f.heart).toHaveBeenCalledOnce();
+    expect(f.heart.mock.calls[0]![0]).toMatchObject({ chatId: message.chatId, addressed: false,
+      ownerParticipation: { remainingMessages: 2, minIntervalMs: 30_000 } });
+    expect(f.stopAssignment).not.toHaveBeenCalled();
+    expect((await getAttentionAccumulator().peek()).some(item => item.qqAssignmentId === 'assignment-fixture')).toBe(true);
+    await vi.advanceTimersByTimeAsync(3000); await flushSession();
+    expect(f.dispatch).toHaveBeenCalledOnce();
+    expect(f.dispatch.mock.calls[0]![0]).toBe(message.chatId);
+  });
+
+  it('directed stop precedes muted-user and post-task paths; other people saying stop does not revoke', async () => {
+    f.config.QQ_ASSIGNMENTS_ENABLED = true;
+    const ordinary = incoming('qq', 2010, 'group', false, 77, '他说停一下再看风景');
+    await ordinary.ingest(); await settleIngress();
+    expect(f.stopAssignment).not.toHaveBeenCalled();
+    expect(f.postTask).toHaveBeenCalledOnce();
+    f.heart.mockClear(); f.postTask.mockClear();
+    f.muted.mockReturnValue(true);
+    const stop = incoming('qq', 2011, 'group', true, 77, ' 停');
+    await stop.ingest(); await settleIngress();
+    expect(f.stopAssignment).toHaveBeenCalledExactlyOnceWith(stop.chatId);
+    expect(f.correctionAck).toHaveBeenCalledOnce();
+    expect(f.heart).not.toHaveBeenCalled(); expect(f.postTask).not.toHaveBeenCalled();
+    f.muted.mockReturnValue(false);
+    await incoming('qq', 2012, 'group', true, 99, ' 这是什么风景').ingest(); await settleIngress();
+    expect(f.heart).not.toHaveBeenCalled(); expect(f.postTask).not.toHaveBeenCalled();
+    expect(await isCorrectionCooling(stop.chatId)).toBe(true);
+    await vi.advanceTimersByTimeAsync(600_001);
+    expect(await isCorrectionCooling(stop.chatId)).toBe(false);
+  });
 });
 
 it('holds QQ Attention through recall-store failure without losing it or delaying Telegram', async () => {
